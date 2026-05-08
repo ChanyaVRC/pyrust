@@ -2,6 +2,9 @@
 enum IterState {
     Materialized(Vec<Value>, usize),
     Range { cur: i64, stop: i64, step: i64 },
+    /// Lazy: reads directly from the source register on each ForIter call.
+    /// Avoids the O(n) upfront clone that Materialized would require for List/Tuple.
+    Indexed { reg: u8, pos: usize },
 }
 
 impl Interpreter {
@@ -194,13 +197,26 @@ impl Interpreter {
 
                 // ── Iterator ─────────────────────────────────────────────
                 Insn::GetIter(slot, src) => {
-                    let src_val = vm_read(regs, *src, num_locals)?;
-                    // Range is kept lazy: no Vec allocation until elements are needed.
-                    let state = match src_val {
-                        Value::Range { start, stop, step } => {
-                            IterState::Range { cur: start, stop, step }
+                    // Range: lazy counter — no Vec needed.
+                    // List/Tuple in a LOCAL register: lazy index — avoids the O(n)
+                    //   upfront clone; the local slot is stable for the function lifetime.
+                    // Temp register or other type: materialise immediately, because
+                    //   a temp reg is freed and may be overwritten by the loop body.
+                    let state = match regs[*src as usize].as_ref() {
+                        Some(Value::List(_)) | Some(Value::Tuple(_))
+                            if *src < num_locals =>
+                        {
+                            IterState::Indexed { reg: *src, pos: 0 }
                         }
-                        other => IterState::Materialized(iter_values(other)?, 0),
+                        _ => {
+                            let src_val = vm_read(regs, *src, num_locals)?;
+                            match src_val {
+                                Value::Range { start, stop, step } => {
+                                    IterState::Range { cur: start, stop, step }
+                                }
+                                other => IterState::Materialized(iter_values(other)?, 0),
+                            }
+                        }
                     };
                     iters[*slot as usize] = Some(state);
                 }
@@ -242,6 +258,25 @@ impl Interpreter {
                                 let v = Value::Int(*cur);
                                 *cur += *step;
                                 regs[*dst as usize] = Some(v);
+                            }
+                        }
+                        Some(IterState::Indexed { reg, pos }) => {
+                            let src = *reg as usize;
+                            let cur_pos = *pos;
+                            let v_opt = match regs[src].as_ref() {
+                                Some(Value::List(items)) if cur_pos < items.len() => {
+                                    Some(items[cur_pos].clone())
+                                }
+                                Some(Value::Tuple(items)) if cur_pos < items.len() => {
+                                    Some(items[cur_pos].clone())
+                                }
+                                _ => None,
+                            };
+                            if let Some(v) = v_opt {
+                                *pos += 1;
+                                regs[*dst as usize] = Some(v);
+                            } else {
+                                pc = (pc as i32 + offset) as usize;
                             }
                         }
                         None => {
