@@ -248,7 +248,7 @@ impl Interpreter {
     }
 
     fn add(&self, left: Value, right: Value) -> Result<Value> {
-        match (left, right) {
+        match (coerce_numeric(left), coerce_numeric(right)) {
             (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
             (Value::Int(a), Value::Float(b)) => Ok(Value::Float((a as f64) + b)),
             (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a + (b as f64))),
@@ -263,7 +263,7 @@ impl Interpreter {
     }
 
     fn mul(&self, left: Value, right: Value) -> Result<Value> {
-        match (left, right) {
+        match (coerce_numeric(left), coerce_numeric(right)) {
             (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a * b)),
             (Value::Int(a), Value::Float(b)) => Ok(Value::Float((a as f64) * b)),
             (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a * (b as f64))),
@@ -335,7 +335,7 @@ impl Interpreter {
         int_op: impl Fn(i64, i64) -> i64,
         float_op: impl Fn(f64, f64) -> f64,
     ) -> Result<Value> {
-        match (left, right) {
+        match (coerce_numeric(left), coerce_numeric(right)) {
             (Value::Int(a), Value::Int(b)) => Ok(Value::Int(int_op(a, b))),
             (Value::Int(a), Value::Float(b)) => Ok(Value::Float(float_op(a as f64, b))),
             (Value::Float(a), Value::Int(b)) => Ok(Value::Float(float_op(a, b as f64))),
@@ -484,6 +484,13 @@ impl Interpreter {
         }
     }
 
+}
+
+fn coerce_numeric(v: Value) -> Value {
+    match v {
+        Value::Bool(b) => Value::Int(b as i64),
+        other => other,
+    }
 }
 
 fn py_ordering(left: &Value, right: &Value) -> Result<std::cmp::Ordering> {
