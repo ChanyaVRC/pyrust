@@ -8,7 +8,7 @@ import statistics
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -56,6 +56,11 @@ class ScriptStats:
     category: str
     py_samples: list[float]
     rs_samples: list[float]
+    base_samples: list[float] = field(default_factory=list)
+
+    @property
+    def has_base(self) -> bool:
+        return bool(self.base_samples)
 
     @property
     def py_avg_ms(self) -> float:
@@ -64,6 +69,10 @@ class ScriptStats:
     @property
     def rs_avg_ms(self) -> float:
         return statistics.fmean(self.rs_samples) * 1000.0
+
+    @property
+    def base_avg_ms(self) -> float:
+        return statistics.fmean(self.base_samples) * 1000.0
 
     @property
     def py_min_ms(self) -> float:
@@ -110,6 +119,17 @@ class ScriptStats:
             return math.inf
         return (self.ratio - 1.0) * 100.0
 
+    @property
+    def pr_change_ms(self) -> float:
+        return self.rs_avg_ms - self.base_avg_ms
+
+    @property
+    def pr_change_pct(self) -> float:
+        base = self.base_avg_ms
+        if base <= 0:
+            return math.inf
+        return (self.rs_avg_ms / base - 1.0) * 100.0
+
 
 def get_category(root: Path, script: Path) -> str:
     rel = script.relative_to(root).parts
@@ -125,6 +145,7 @@ def benchmark(
     scripts: list[Path],
     iterations: int,
     warmup: bool,
+    base_bin: "Path | None" = None,
 ) -> list[ScriptStats]:
     stats: dict[Path, ScriptStats] = {}
 
@@ -141,22 +162,35 @@ def benchmark(
         for script in scripts:
             run_once(python_bin, script)
             run_once(pyrust_bin, script)
+            if base_bin:
+                run_once(base_bin, script)
 
     for _ in range(iterations):
         for script in scripts:
             stats[script].py_samples.append(run_once(python_bin, script))
             stats[script].rs_samples.append(run_once(pyrust_bin, script))
+            if base_bin:
+                stats[script].base_samples.append(run_once(base_bin, script))
 
     rows = [stats[script] for script in scripts]
     rows.sort(key=lambda row: row.rs_avg_ms, reverse=True)
     return rows
 
 
-def print_environment(python_bin: Path, pyrust_bin: Path, rows: list[ScriptStats], iterations: int, warmup: bool):
+def print_environment(
+    python_bin: Path,
+    pyrust_bin: Path,
+    base_bin: "Path | None",
+    rows: list[ScriptStats],
+    iterations: int,
+    warmup: bool,
+):
     print("Speed Comparison: Python vs PyRust")
     print(f"Python executable: {python_bin}")
     print(f"Python version:    {platform.python_version()}")
     print(f"PyRust binary:     {pyrust_bin}")
+    if base_bin:
+        print(f"Base binary:       {base_bin}")
     print(f"Platform:          {platform.platform()}")
     print(f"CPU count:         {os.cpu_count()}")
     print(f"Scripts:           {len(rows)}")
@@ -225,6 +259,48 @@ def print_winners(rows: list[ScriptStats], top: int) -> None:
     print("")
 
 
+def print_pr_vs_base(rows: list[ScriptStats], top: int) -> None:
+    base_rows = [row for row in rows if row.has_base]
+    if not base_rows:
+        return
+
+    total_base = sum(row.base_avg_ms for row in base_rows)
+    total_pr = sum(row.rs_avg_ms for row in base_rows)
+    overall_change_pct = (total_pr / total_base - 1.0) * 100.0 if total_base > 0 else math.inf
+
+    print("PR vs Base")
+    print(f"  Base total avg: {total_base:.3f} ms")
+    print(f"  PR total avg:   {total_pr:.3f} ms")
+    print(f"  Overall change: {overall_change_pct:+.2f}%")
+    print("")
+
+    print(f"Top {min(top, len(base_rows))} by PR avg time")
+    print(
+        f"{'script':60} {'base_avg':>10} {'pr_avg':>10} {'change_ms':>10} {'change_%':>9}"
+    )
+    print("-" * 108)
+    for row in base_rows[:top]:
+        print(
+            f"{row.path[:60]:60} "
+            f"{row.base_avg_ms:10.3f} {row.rs_avg_ms:10.3f} "
+            f"{row.pr_change_ms:+10.3f} {row.pr_change_pct:+8.2f}%"
+        )
+    print("")
+
+    regressions = sorted(base_rows, key=lambda r: r.pr_change_pct, reverse=True)
+    improvements = sorted(base_rows, key=lambda r: r.pr_change_pct)
+
+    print(f"Top {min(top, len(base_rows))} regressions (PR vs Base)")
+    for row in regressions[:top]:
+        print(f"  {row.path} -> {row.pr_change_pct:+.2f}% ({row.pr_change_ms:+.3f} ms)")
+    print("")
+
+    print(f"Top {min(top, len(base_rows))} improvements (PR vs Base)")
+    for row in improvements[:top]:
+        print(f"  {row.path} -> {row.pr_change_pct:+.2f}% ({row.pr_change_ms:+.3f} ms)")
+    print("")
+
+
 def print_category_summary(rows: list[ScriptStats]) -> None:
     grouped: dict[str, list[ScriptStats]] = {}
     for row in rows:
@@ -242,16 +318,49 @@ def print_category_summary(rows: list[ScriptStats]) -> None:
     print("")
 
 
+def _change_indicator(pct: float) -> str:
+    if pct < -0.5:
+        return "✅"
+    if pct > 2.0:
+        return "⚠️"
+    return "➡️"
+
+
 def write_github_step_summary(rows: list[ScriptStats]) -> None:
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     if not summary_path:
         return
 
+    lines: list[str] = []
+    base_rows = [row for row in rows if row.has_base]
+
+    if base_rows:
+        total_base = sum(row.base_avg_ms for row in base_rows)
+        total_pr = sum(row.rs_avg_ms for row in base_rows)
+        overall_change = (total_pr / total_base - 1.0) * 100.0 if total_base > 0 else math.inf
+        indicator = _change_indicator(overall_change)
+        lines += [
+            "## Benchmark: PR vs Base",
+            "",
+            f"- Base total avg: {total_base:.3f} ms",
+            f"- PR total avg:   {total_pr:.3f} ms",
+            f"- Overall change: {overall_change:+.2f}% {indicator}",
+            "",
+            "| Script | Base (ms) | PR (ms) | Change |",
+            "|---|---:|---:|---:|",
+        ]
+        for row in base_rows[:20]:
+            ind = _change_indicator(row.pr_change_pct)
+            lines.append(
+                f"| {row.path} | {row.base_avg_ms:.3f} | {row.rs_avg_ms:.3f}"
+                f" | {row.pr_change_pct:+.2f}% {ind} |"
+            )
+        lines += ["", "---", ""]
+
     total_py = sum(row.py_avg_ms for row in rows)
     total_rs = sum(row.rs_avg_ms for row in rows)
     overall_ratio = (total_rs / total_py) if total_py > 0 else math.inf
-
-    lines = [
+    lines += [
         "## Speed Comparison (Python vs PyRust)",
         "",
         f"- Scripts: {len(rows)}",
@@ -262,7 +371,6 @@ def write_github_step_summary(rows: list[ScriptStats]) -> None:
         "| Script | Python avg (ms) | PyRust avg (ms) | Ratio |",
         "|---|---:|---:|---:|",
     ]
-
     for row in rows[:20]:
         lines.append(
             f"| {row.path} | {row.py_avg_ms:.3f} | {row.rs_avg_ms:.3f} | {row.ratio:.2f}x |"
@@ -427,6 +535,12 @@ def main() -> int:
         default="",
         help="optional output path for svg snapshot",
     )
+    parser.add_argument(
+        "--base-bin",
+        type=str,
+        default="",
+        help="path to the base branch PyRust binary for PR vs base comparison",
+    )
     args = parser.parse_args()
 
     if args.iterations <= 0:
@@ -442,6 +556,13 @@ def main() -> int:
         print("Build first: cargo build", file=sys.stderr)
         return 2
 
+    base_bin: "Path | None" = None
+    if args.base_bin:
+        base_bin = Path(args.base_bin)
+        if not base_bin.exists():
+            print(f"Base binary not found: {base_bin}", file=sys.stderr)
+            return 2
+
     scripts = collect_scripts(root)
     benchmark_start = time.perf_counter()
     rows = benchmark(
@@ -451,14 +572,16 @@ def main() -> int:
         scripts=scripts,
         iterations=args.iterations,
         warmup=not args.no_warmup,
+        base_bin=base_bin,
     )
     benchmark_elapsed = (time.perf_counter() - benchmark_start) * 1000.0
 
-    print_environment(python_bin, pyrust_bin, rows, args.iterations, warmup=not args.no_warmup)
+    print_environment(python_bin, pyrust_bin, base_bin, rows, args.iterations, warmup=not args.no_warmup)
     print_overall_summary(rows)
     print_per_script(rows, args.top)
     print_variability(rows, args.top)
     print_winners(rows, args.top)
+    print_pr_vs_base(rows, args.top)
     print_category_summary(rows)
     print(f"Benchmark wall-clock: {benchmark_elapsed:.3f} ms")
 
