@@ -94,8 +94,36 @@ impl Interpreter {
                 self.get_attr(target_value, name)
             }
             Expr::Index { target, index } => {
-                let target_value = self.eval_expr(target)?;
                 let index_value = self.eval_expr(index)?;
+                if let Expr::Var(name) = target.as_ref() {
+                    if let Some(env) = self.resolve_name_env(name) {
+                        let result: Option<Result<Value>> = {
+                            let borrowed = env.borrow();
+                            borrowed.values.get(name).map(|col| match col {
+                                Value::List(items) | Value::Tuple(items) => {
+                                    let idx = normalize_index(&index_value, items.len())?;
+                                    Ok(items[idx].clone())
+                                }
+                                Value::Dict(items) => {
+                                    let key = index_value.to_key().ok_or_else(|| {
+                                        PyError::Runtime("unhashable key type".to_string())
+                                    })?;
+                                    items
+                                        .get(&key)
+                                        .cloned()
+                                        .ok_or_else(|| PyError::Runtime("key error".to_string()))
+                                }
+                                _ => Err(PyError::Runtime(
+                                    "object is not subscriptable".to_string(),
+                                )),
+                            })
+                        };
+                        if let Some(r) = result {
+                            return r;
+                        }
+                    }
+                }
+                let target_value = self.eval_expr(target)?;
                 self.eval_index(target_value, index_value)
             }
             Expr::Slice { target, lower, upper, step } => {

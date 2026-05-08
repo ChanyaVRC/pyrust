@@ -241,6 +241,32 @@ fn lookup_name_in_enclosing_local_env(env: &EnvRef, name: &str) -> Result<Option
     lookup_name_in_env(&target_env, name)
 }
 
+// Walk the env chain and return the `EnvRef` that owns `name`, without cloning
+// the value. Returns `None` if the name is unresolvable (not found or unbound local).
+fn find_env_for_name(env: &EnvRef, name: &str) -> Option<EnvRef> {
+    let mut current = Rc::clone(env);
+    loop {
+        let (has_value, is_local_name, parent) = {
+            let borrowed = current.borrow();
+            (
+                borrowed.values.contains_key(name),
+                borrowed.local_names.contains(name),
+                borrowed.parent.clone(),
+            )
+        };
+        if has_value {
+            return Some(current);
+        }
+        if is_local_name {
+            return None;
+        }
+        match parent {
+            Some(p) => current = p,
+            None => return None,
+        }
+    }
+}
+
 fn lookup_name_in_env(env: &EnvRef, name: &str) -> Result<Option<Value>> {
     let (value, is_local_name, parent) = {
         let borrowed = env.borrow();
