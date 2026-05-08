@@ -93,6 +93,16 @@ fn collect_cell_vars_in(
                 // Free variable references: names read in the nested body that are
                 // not the nested function's own locals or globals.
                 let inner_globals = crate::interpreter::collect_global_names(nested_body);
+                // Names declared `global` in the nested function reference the
+                // enclosing module env directly.  If those names are fastlocals
+                // in the current scope, promote them to cell vars so they live
+                // in the env rather than registers — otherwise nested writes via
+                // `global` and register write-back at script end would conflict.
+                for name in &inner_globals {
+                    if local_index.contains_key(name) {
+                        cells.insert(name.clone());
+                    }
+                }
                 let inner_locals = crate::interpreter::collect_local_names(
                     params,
                     nested_body,
@@ -122,6 +132,11 @@ fn collect_cell_vars_in(
                         cells.insert(name.clone());
                     }
                 }
+                // Methods inside a class access the enclosing scope directly
+                // (Python class scope is not a closure scope for methods).
+                // Find names that class methods read as free variables and
+                // promote them to cell vars so they live in the env.
+                collect_class_method_outer_refs(nested_body, local_index, cells);
             }
             Stmt::If {
                 branches,
@@ -169,6 +184,70 @@ fn collect_cell_vars_in(
             }
             Stmt::With { body, .. } => {
                 collect_cell_vars_in(body, local_index, cells);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// For a class body, collect names that the class's methods read as free
+/// variables from the enclosing scope.  Python class scope is not a closure
+/// scope for methods: `def method(self): return x` reads the outer `x`, not
+/// any `x` defined at class level.  Promote those names to cell vars so they
+/// live in the env (not registers) and are accessible via `LoadGlobal`.
+fn collect_class_method_outer_refs(
+    class_body: &[Stmt],
+    local_index: &HashMap<String, usize>,
+    cells: &mut HashSet<String>,
+) {
+    // Collect names assigned at class level (they shadow outer names for the
+    // class scope itself, though not for methods — but we're conservative here).
+    let empty_set: HashSet<String> = HashSet::new();
+    let class_locals =
+        crate::interpreter::collect_local_names(&[], class_body, &empty_set, &empty_set);
+
+    for stmt in class_body {
+        match stmt {
+            Stmt::Def {
+                params,
+                body: method_body,
+                ..
+            } => {
+                let inner_globals = crate::interpreter::collect_global_names(method_body);
+                // Promote global declarations in methods (same as for top-level defs).
+                for name in &inner_globals {
+                    if local_index.contains_key(name) {
+                        cells.insert(name.clone());
+                    }
+                }
+                let inner_nonlocals = crate::interpreter::collect_nonlocal_names(method_body);
+                let inner_locals = crate::interpreter::collect_local_names(
+                    params,
+                    method_body,
+                    &inner_globals,
+                    &inner_nonlocals,
+                );
+                let mut uses: HashSet<String> = HashSet::new();
+                collect_free_var_reads_in_stmts(method_body, &mut uses);
+                for name in uses {
+                    if !inner_locals.contains(&name)
+                        && !inner_globals.contains(&name)
+                        && !inner_nonlocals.contains(&name)
+                        && !class_locals.contains(&name)
+                        && local_index.contains_key(&name)
+                    {
+                        cells.insert(name);
+                    }
+                }
+            }
+            // Recursively handle class-level control flow.
+            Stmt::If { branches, else_branch } => {
+                for (_, b) in branches {
+                    collect_class_method_outer_refs(b, local_index, cells);
+                }
+                if let Some(b) = else_branch {
+                    collect_class_method_outer_refs(b, local_index, cells);
+                }
             }
             _ => {}
         }
@@ -1621,8 +1700,7 @@ impl Compiler {
             let bound = alias
                 .as_deref()
                 .unwrap_or_else(|| module_name.split('.').next().unwrap_or(module_name));
-            let bound_idx = self.intern_name(bound);
-            self.emit(Insn::StoreGlobal(bound_idx, dst));
+            self.compile_store_name(bound, dst);
             self.free_temp(dst);
         }
     }
@@ -1632,8 +1710,7 @@ impl Compiler {
         let mod_reg = self.alloc_temp();
         self.emit(Insn::ImportModule(mod_reg, mod_idx));
         if names.len() == 1 && names[0].0 == "*" {
-            // Star import: handled at runtime by a special path in ImportModule
-            // We pass the module reg and a star marker.
+            // Star import: handled at runtime by a special path in ImportModule.
             // Use StoreGlobal with a sentinel name to trigger star import.
             let star_idx = self.intern_name("*");
             self.emit(Insn::StoreGlobal(star_idx, mod_reg));
@@ -1643,8 +1720,7 @@ impl Compiler {
                 let val_reg = self.alloc_temp();
                 self.emit(Insn::GetAttr(val_reg, mod_reg, attr_idx));
                 let bound = alias.as_deref().unwrap_or(attr_name);
-                let bound_idx = self.intern_name(bound);
-                self.emit(Insn::StoreGlobal(bound_idx, val_reg));
+                self.compile_store_name(bound, val_reg);
                 self.free_temp(val_reg);
             }
         }

@@ -114,14 +114,35 @@ impl Interpreter {
                 Insn::BinOpInPlace(dst, lhs, op, rhs) => {
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = vm_try!(vm_read(regs, *rhs, num_locals));
-                    let result = if *op == BinaryOp::MatMul {
-                        if let Some(v) = vm_try!(self.try_inplace_matmul(l.clone(), r.clone())) {
-                            v
-                        } else {
-                            vm_try!(self.eval_binary(l, BinaryOp::MatMul, r))
+                    let result = match (&l, op, &r) {
+                        (Value::Int(a), BinaryOp::Add, Value::Int(b)) => {
+                            Value::Int(a.wrapping_add(*b))
                         }
-                    } else {
-                        vm_try!(self.eval_binary(l, *op, r))
+                        (Value::Int(a), BinaryOp::Sub, Value::Int(b)) => {
+                            Value::Int(a.wrapping_sub(*b))
+                        }
+                        (Value::Int(a), BinaryOp::Mul, Value::Int(b)) => {
+                            Value::Int(a.wrapping_mul(*b))
+                        }
+                        (Value::Int(a), BinaryOp::Eq, Value::Int(b)) => Value::Bool(a == b),
+                        (Value::Int(a), BinaryOp::Ne, Value::Int(b)) => Value::Bool(a != b),
+                        (Value::Int(a), BinaryOp::Lt, Value::Int(b)) => Value::Bool(a < b),
+                        (Value::Int(a), BinaryOp::Le, Value::Int(b)) => Value::Bool(a <= b),
+                        (Value::Int(a), BinaryOp::Gt, Value::Int(b)) => Value::Bool(a > b),
+                        (Value::Int(a), BinaryOp::Ge, Value::Int(b)) => Value::Bool(a >= b),
+                        _ => {
+                            if *op == BinaryOp::MatMul {
+                                if let Some(v) =
+                                    vm_try!(self.try_inplace_matmul(l.clone(), r.clone()))
+                                {
+                                    v
+                                } else {
+                                    vm_try!(self.eval_binary(l, BinaryOp::MatMul, r))
+                                }
+                            } else {
+                                vm_try!(self.eval_binary(l, *op, r))
+                            }
+                        }
                     };
                     regs[*dst as usize] = Some(result);
                 }
