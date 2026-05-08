@@ -136,27 +136,6 @@ fn is_const_false(expr: &Expr) -> bool {
     }
 }
 
-enum BlockOutcome {
-    Signal(ExecSignal),
-    Error(PyError),
-}
-
-impl BlockOutcome {
-    fn from_result(result: Result<ExecSignal>) -> Self {
-        match result {
-            Ok(signal) => Self::Signal(signal),
-            Err(error) => Self::Error(error),
-        }
-    }
-
-    fn into_result(self) -> Result<ExecSignal> {
-        match self {
-            Self::Signal(signal) => Ok(signal),
-            Self::Error(error) => Err(error),
-        }
-    }
-}
-
 fn lookup_class_attr(class: &Rc<RefCell<PyClass>>, name: &str) -> Option<Value> {
     let (value, base) = {
         let borrowed = class.borrow();
@@ -539,7 +518,7 @@ fn lookup_name_in_env(env: &EnvRef, name: &str) -> Result<Option<Value>> {
     }
 }
 
-fn collect_local_names(
+pub(crate) fn collect_local_names(
     params: &[crate::ast::FunctionParam],
     body: &[Stmt],
     global_names: &HashSet<String>,
@@ -680,13 +659,13 @@ fn collect_local_names_from_block(
     }
 }
 
-fn collect_global_names(body: &[Stmt]) -> HashSet<String> {
+pub(crate) fn collect_global_names(body: &[Stmt]) -> HashSet<String> {
     collect_declared_names(body, |s| {
         if let Stmt::Global(names) = s { Some(names) } else { None }
     })
 }
 
-fn collect_nonlocal_names(body: &[Stmt]) -> HashSet<String> {
+pub(crate) fn collect_nonlocal_names(body: &[Stmt]) -> HashSet<String> {
     collect_declared_names(body, |s| {
         if let Stmt::Nonlocal(names) = s { Some(names) } else { None }
     })

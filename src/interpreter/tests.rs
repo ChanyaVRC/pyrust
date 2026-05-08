@@ -791,6 +791,42 @@ result = fact(10)
     }
 
     #[test]
+    fn variadic_args_packed_into_tuple() {
+        let interpreter = run_program(
+            "def f(*args): return args\nresult = f(1, 2, 3)\n",
+        );
+        assert_eq!(
+            interpreter.lookup_name("result").unwrap(),
+            Some(Value::Tuple(vec![Value::Int(1), Value::Int(2), Value::Int(3)]))
+        );
+    }
+
+    #[test]
+    fn variadic_kwargs_packed_into_dict() {
+        let interpreter = run_program(
+            "def f(**kw): return kw['x']\nresult = f(x=42)\n",
+        );
+        assert_eq!(
+            interpreter.lookup_name("result").unwrap(),
+            Some(Value::Int(42))
+        );
+    }
+
+    #[test]
+    fn closure_over_two_cell_vars_correct_base_temp() {
+        // Regression: when a function has N cell vars, base_temp was computed as
+        // (total_locals - cell_var_count), causing temp regs to overlap with local
+        // slots and clobbering captured variables.
+        let interpreter = run_program(
+            "def outer():\n    x = 10\n    y = 20\n    def inner(): return x + y\n    x = 3\n    y = 4\n    return inner()\nresult = outer()\n",
+        );
+        assert_eq!(
+            interpreter.lookup_name("result").unwrap(),
+            Some(Value::Int(7))
+        );
+    }
+
+    #[test]
     fn vm_unbound_local_after_lambda_drop() {
         // Regression: bytecode_cache stale-ptr bug — a lambda dropped after its
         // first call must not pollute the cache for a later function allocated at

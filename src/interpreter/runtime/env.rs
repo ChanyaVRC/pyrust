@@ -246,48 +246,4 @@ impl Interpreter {
         }
     }
 
-    fn build_class(
-        &mut self,
-        name: &str,
-        bases: &[Expr],
-        body: &[Stmt],
-    ) -> Result<Rc<RefCell<PyClass>>> {
-        let outer_env = Rc::clone(&self.env);
-        let class_env = Environment::new(Some(Rc::clone(&outer_env)));
-
-        let previous_env = std::mem::replace(&mut self.env, Rc::clone(&class_env));
-        let previous_class_closure = self.class_closure_env.replace(outer_env);
-        let signal = self.exec_block(body);
-        self.class_closure_env = previous_class_closure;
-        self.env = previous_env;
-
-        match signal? {
-            ExecSignal::None => {}
-            ExecSignal::Break | ExecSignal::Continue => {
-                return Err(PyError::Runtime(
-                    "break/continue is only valid inside loops".to_string(),
-                ));
-            }
-            ExecSignal::Return(_) => {
-                return Err(PyError::Runtime(
-                    "return is only valid inside functions".to_string(),
-                ));
-            }
-        }
-
-        let base = if let Some(base_expr) = bases.first() {
-            match self.eval_expr(base_expr)? {
-                Value::Class(class) => Some(class),
-                _ => return Err(PyError::Runtime("class base must be a class".to_string())),
-            }
-        } else { None };
-
-        let attrs = class_env.borrow().values.clone();
-        Ok(Rc::new(RefCell::new(PyClass {
-            name: name.to_string(),
-            base,
-            attrs,
-        })))
-    }
-
 }

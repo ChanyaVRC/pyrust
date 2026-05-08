@@ -204,6 +204,7 @@ impl Interpreter {
                     nonlocal_names: Rc::new(std::collections::HashSet::new()),
                     env: closure,
                     def_bound_mask,
+                    precompiled_code: None,
                 });
                 Ok(Value::Function(func))
             }
@@ -679,6 +680,7 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
         "int" => Some(Value::Builtin("int")),
         "float" => Some(Value::Builtin("float")),
         "bool" => Some(Value::Builtin("bool")),
+        "__vcall__" => Some(Value::Builtin("__vcall__")),
         _ => None,
     }
 }
