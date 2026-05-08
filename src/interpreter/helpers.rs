@@ -542,33 +542,28 @@ fn make_math_module() -> Value {
     attrs.insert("tau".to_string(), Value::Float(std::f64::consts::TAU));
     attrs.insert("inf".to_string(), Value::Float(f64::INFINITY));
     attrs.insert("nan".to_string(), Value::Float(f64::NAN));
-    for fname in &[
-        "floor", "ceil", "sqrt", "fabs", "sin", "cos", "tan", "asin", "acos", "atan", "exp",
-        "log2", "log10", "isnan", "isinf", "pow", "atan2", "log",
-    ] {
-        // Static string slices for the builtin names
-        let builtin: &'static str = match *fname {
-            "floor" => "math.floor",
-            "ceil" => "math.ceil",
-            "sqrt" => "math.sqrt",
-            "fabs" => "math.fabs",
-            "sin" => "math.sin",
-            "cos" => "math.cos",
-            "tan" => "math.tan",
-            "asin" => "math.asin",
-            "acos" => "math.acos",
-            "atan" => "math.atan",
-            "exp" => "math.exp",
-            "log2" => "math.log2",
-            "log10" => "math.log10",
-            "isnan" => "math.isnan",
-            "isinf" => "math.isinf",
-            "pow" => "math.pow",
-            "atan2" => "math.atan2",
-            "log" => "math.log",
-            _ => unreachable!(),
-        };
-        attrs.insert(fname.to_string(), Value::Builtin(builtin));
+    const MATH_FUNS: &[(&str, &str)] = &[
+        ("floor", "math.floor"),
+        ("ceil", "math.ceil"),
+        ("sqrt", "math.sqrt"),
+        ("fabs", "math.fabs"),
+        ("sin", "math.sin"),
+        ("cos", "math.cos"),
+        ("tan", "math.tan"),
+        ("asin", "math.asin"),
+        ("acos", "math.acos"),
+        ("atan", "math.atan"),
+        ("exp", "math.exp"),
+        ("log2", "math.log2"),
+        ("log10", "math.log10"),
+        ("isnan", "math.isnan"),
+        ("isinf", "math.isinf"),
+        ("pow", "math.pow"),
+        ("atan2", "math.atan2"),
+        ("log", "math.log"),
+    ];
+    for (name, builtin) in MATH_FUNS {
+        attrs.insert(name.to_string(), Value::Builtin(builtin));
     }
     Value::Module(Rc::new(RefCell::new(PyModule {
         name: "math".to_string(),
