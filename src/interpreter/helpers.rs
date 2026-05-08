@@ -396,6 +396,7 @@ fn read_local(env: &EnvRef, name: &str) -> Option<Value> {
 }
 
 // Write `value` into `env` for `name`, using fastlocals slot when available.
+#[inline]
 fn env_assign_local(env: &EnvRef, name: &str, value: Value) {
     let mut borrowed = env.borrow_mut();
     if let Some(fl) = &mut borrowed.fastlocals {

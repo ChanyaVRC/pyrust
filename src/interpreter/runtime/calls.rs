@@ -721,7 +721,7 @@ impl Interpreter {
 
                     let result = match signal? {
                         ExecSignal::None => Value::None,
-                        ExecSignal::Return(value) => value,
+                        ExecSignal::Return(value) => *value,
                         ExecSignal::Break | ExecSignal::Continue => {
                             return Err(PyError::Runtime(
                                 "break/continue is only valid inside loops".to_string(),
@@ -778,7 +778,7 @@ impl Interpreter {
             self.free_env(local_env);
             let result = match signal? {
                 ExecSignal::None => Value::None,
-                ExecSignal::Return(value) => value,
+                ExecSignal::Return(value) => *value,
                 ExecSignal::Break | ExecSignal::Continue => {
                     return Err(PyError::Runtime(
                         "break/continue is only valid inside loops".to_string(),
@@ -898,7 +898,7 @@ impl Interpreter {
 
         match signal? {
             ExecSignal::None => Ok(Value::None),
-            ExecSignal::Return(value) => Ok(value),
+            ExecSignal::Return(value) => Ok(*value),
             ExecSignal::Break | ExecSignal::Continue => Err(PyError::Runtime(
                 "break/continue is only valid inside loops".to_string(),
             )),

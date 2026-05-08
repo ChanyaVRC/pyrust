@@ -19,7 +19,7 @@ enum ExecSignal {
     None,
     Break,
     Continue,
-    Return(Value),
+    Return(Box<Value>),
 }
 
 type ModuleCache = Rc<RefCell<HashMap<String, Value>>>;
