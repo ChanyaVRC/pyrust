@@ -512,12 +512,17 @@ impl Interpreter {
             )));
         }
 
+        let local_names = collect_local_names(params, body, &global_names, &nonlocal_names);
+        let local_index = Rc::new(
+            local_names.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect::<HashMap<String, usize>>()
+        );
         Ok(Rc::new(UserFunction {
             name: name.to_string(),
             params: evaluated_params,
             is_pure: is_pure_body(body),
             body: body.to_vec(),
-            local_names: Rc::new(collect_local_names(params, body, &global_names, &nonlocal_names)),
+            local_names: Rc::new(local_names),
+            local_index,
             global_names: Rc::new(global_names),
             nonlocal_names: Rc::new(nonlocal_names),
             env: closure_env,
@@ -639,9 +644,24 @@ impl Interpreter {
                 local_env_ref.local_names = Rc::clone(&function.local_names);
                 local_env_ref.global_names = Rc::clone(&function.global_names);
                 local_env_ref.nonlocal_names = Rc::clone(&function.nonlocal_names);
-                local_env_ref.values.insert(function.name.clone(), Value::Function(Rc::clone(&function)));
+                if !function.local_index.is_empty() {
+                    local_env_ref.fastlocals = Some(FunctionLocals {
+                        slots: vec![None; function.local_index.len()],
+                        index: Rc::clone(&function.local_index),
+                    });
+                }
+                let fn_val = Value::Function(Rc::clone(&function));
+                let fn_name = &function.name;
+                match local_env_ref.fastlocals.as_mut().and_then(|fl| fl.index.get(fn_name).copied()) {
+                    Some(idx) => local_env_ref.fastlocals.as_mut().unwrap().slots[idx] = Some(fn_val),
+                    None => { local_env_ref.values.insert(fn_name.clone(), fn_val); }
+                }
                 for (param, value) in function.params.iter().zip(param_vals) {
-                    local_env_ref.values.insert(param.name.clone(), value);
+                    let fl_idx = local_env_ref.fastlocals.as_ref().and_then(|fl| fl.index.get(&param.name).copied());
+                    match fl_idx {
+                        Some(slot) => local_env_ref.fastlocals.as_mut().unwrap().slots[slot] = Some(value),
+                        None => { local_env_ref.values.insert(param.name.clone(), value); }
+                    }
                 }
             }
             self.call_depth += 1;
@@ -692,7 +712,18 @@ impl Interpreter {
             local_env_ref.local_names = Rc::clone(&function.local_names);
             local_env_ref.global_names = Rc::clone(&function.global_names);
             local_env_ref.nonlocal_names = Rc::clone(&function.nonlocal_names);
-            local_env_ref.values.insert(function.name.clone(), Value::Function(Rc::clone(&function)));
+            if !function.local_index.is_empty() {
+                local_env_ref.fastlocals = Some(FunctionLocals {
+                    slots: vec![None; function.local_index.len()],
+                    index: Rc::clone(&function.local_index),
+                });
+            }
+            let fn_val = Value::Function(Rc::clone(&function));
+            let fn_name = &function.name;
+            match local_env_ref.fastlocals.as_mut().and_then(|fl| fl.index.get(fn_name).copied()) {
+                Some(idx) => local_env_ref.fastlocals.as_mut().unwrap().slots[idx] = Some(fn_val),
+                None => { local_env_ref.values.insert(fn_name.clone(), fn_val); }
+            }
         }
 
         let mut pos_idx = 0;
@@ -702,23 +733,20 @@ impl Interpreter {
         let mut consumed_keywords = std::collections::HashSet::new();
 
         for param in function.params.iter() {
-            if param.is_args {
-                // Collect remaining positional args
+            let value = if param.is_args {
                 let rest: Vec<Value> = positional_vals[pos_idx..].to_vec();
                 pos_idx = positional_vals.len();
-                local_env.borrow_mut().values.insert(param.name.clone(), Value::Tuple(rest));
+                Value::Tuple(rest)
             } else if param.is_kwargs {
-                // Collect remaining keyword args
                 for (k, v) in &keyword_vals {
                     if let Some(key) = Value::Str(k.clone()).to_key() {
                         kwargs_dict.insert(key, v.clone());
                     }
                 }
-                local_env.borrow_mut().values.insert(param.name.clone(), Value::Dict(kwargs_dict.clone()));
+                Value::Dict(kwargs_dict.clone())
             } else {
-                // Check if provided by keyword
                 let kw_pos = keyword_vals.iter().position(|(k, _)| k == &param.name);
-                let value = if let Some(ki) = kw_pos {
+                if let Some(ki) = kw_pos {
                     consumed_keywords.insert(keyword_vals[ki].0.clone());
                     keyword_vals[ki].1.clone()
                 } else if pos_idx < positional_vals.len() {
@@ -732,8 +760,13 @@ impl Interpreter {
                         "{}() missing required argument: '{}'",
                         function.name, param.name
                     )));
-                };
-                local_env.borrow_mut().values.insert(param.name.clone(), value);
+                }
+            };
+            let mut env = local_env.borrow_mut();
+            let fl_idx = env.fastlocals.as_ref().and_then(|fl| fl.index.get(&param.name).copied());
+            match fl_idx {
+                Some(slot) => env.fastlocals.as_mut().unwrap().slots[slot] = Some(value),
+                None => { env.values.insert(param.name.clone(), value); }
             }
         }
 

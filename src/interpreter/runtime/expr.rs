@@ -113,7 +113,16 @@ impl Interpreter {
                     if let Some(env) = self.resolve_name_env(name) {
                         let result: Option<Result<Value>> = {
                             let borrowed = env.borrow();
-                            borrowed.values.get(name).map(|col| match col {
+                            let col = if let Some(fl) = &borrowed.fastlocals {
+                                if let Some(&idx) = fl.index.get(name.as_str()) {
+                                    fl.slots[idx].as_ref()
+                                } else {
+                                    borrowed.values.get(name.as_str())
+                                }
+                            } else {
+                                borrowed.values.get(name.as_str())
+                            };
+                            col.map(|col| match col {
                                 Value::List(items) | Value::Tuple(items) => {
                                     let idx = normalize_index(&index_value, items.len())?;
                                     Ok(items[idx].clone())
@@ -182,6 +191,11 @@ impl Interpreter {
             }
             Expr::Lambda { params, body } => {
                 let closure = Rc::clone(&self.env);
+                let local_names: std::collections::HashSet<String> =
+                    params.iter().cloned().collect();
+                let local_index = Rc::new(
+                    local_names.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect::<HashMap<String, usize>>()
+                );
                 let lambda_body = vec![crate::ast::Stmt::Return(Some(*body.clone()))];
                 let func = Rc::new(crate::value::UserFunction {
                     name: "<lambda>".to_string(),
@@ -190,7 +204,8 @@ impl Interpreter {
                     }).collect(),
                     is_pure: is_pure_body(&lambda_body),
                     body: lambda_body,
-                    local_names: Rc::new(std::collections::HashSet::new()),
+                    local_names: Rc::new(local_names),
+                    local_index,
                     global_names: Rc::new(std::collections::HashSet::new()),
                     nonlocal_names: Rc::new(std::collections::HashSet::new()),
                     env: closure,

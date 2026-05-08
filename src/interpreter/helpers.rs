@@ -287,20 +287,59 @@ fn lookup_name_in_enclosing_local_env(env: &EnvRef, name: &str) -> Result<Option
     lookup_name_in_env(&target_env, name)
 }
 
+// Write `value` into `env` for `name`, using fastlocals slot when available.
+fn env_assign_local(env: &EnvRef, name: &str, value: Value) {
+    let mut borrowed = env.borrow_mut();
+    if let Some(fl) = &mut borrowed.fastlocals {
+        if let Some(&idx) = fl.index.get(name) {
+            fl.slots[idx] = Some(value);
+            return;
+        }
+    }
+    borrowed.values.insert(name.to_string(), value);
+}
+
+// Swap `value` into `env` for `name`, returning the previous value (like HashMap::insert).
+fn env_replace_local(env: &EnvRef, name: &str, value: Value) -> Option<Value> {
+    let mut borrowed = env.borrow_mut();
+    if let Some(fl) = &mut borrowed.fastlocals {
+        if let Some(&idx) = fl.index.get(name) {
+            return fl.slots[idx].replace(value);
+        }
+    }
+    borrowed.values.insert(name.to_string(), value)
+}
+
+// Remove `name` from `env`, returning the previous value.
+fn env_remove_local(env: &EnvRef, name: &str) -> Option<Value> {
+    let mut borrowed = env.borrow_mut();
+    if let Some(fl) = &mut borrowed.fastlocals {
+        if let Some(&idx) = fl.index.get(name) {
+            return fl.slots[idx].take();
+        }
+    }
+    borrowed.values.remove(name)
+}
+
 // Walk the env chain and return the `EnvRef` that owns `name`, without cloning
 // the value. Returns `None` if the name is unresolvable (not found or unbound local).
 fn find_env_for_name(env: &EnvRef, name: &str) -> Option<EnvRef> {
     let mut current = Rc::clone(env);
     loop {
-        let (has_value, is_local_name, parent) = {
+        let (found, is_local_name, parent) = {
             let borrowed = current.borrow();
-            (
-                borrowed.values.contains_key(name),
-                borrowed.local_names.contains(name),
-                borrowed.parent.clone(),
-            )
+            let found = if let Some(fl) = &borrowed.fastlocals {
+                if let Some(&idx) = fl.index.get(name) {
+                    fl.slots[idx].is_some()
+                } else {
+                    borrowed.values.contains_key(name)
+                }
+            } else {
+                borrowed.values.contains_key(name)
+            };
+            (found, borrowed.local_names.contains(name), borrowed.parent.clone())
         };
-        if has_value {
+        if found {
             return Some(current);
         }
         if is_local_name {
@@ -314,14 +353,22 @@ fn find_env_for_name(env: &EnvRef, name: &str) -> Option<EnvRef> {
 }
 
 fn lookup_name_in_env(env: &EnvRef, name: &str) -> Result<Option<Value>> {
-    let (value, is_local_name, parent) = {
-        let borrowed = env.borrow();
-        (
-            borrowed.values.get(name).cloned(),
-            borrowed.local_names.contains(name),
-            borrowed.parent.clone(),
-        )
-    };
+    let borrowed = env.borrow();
+    if let Some(fl) = &borrowed.fastlocals {
+        if let Some(&idx) = fl.index.get(name) {
+            return match &fl.slots[idx] {
+                Some(v) => Ok(Some(v.clone())),
+                None => Err(PyError::Runtime(format!(
+                    "cannot access local variable '{}' where it is not associated with a value",
+                    name
+                ))),
+            };
+        }
+    }
+    let value = borrowed.values.get(name).cloned();
+    let is_local_name = borrowed.local_names.contains(name);
+    let parent = borrowed.parent.clone();
+    drop(borrowed);
     if value.is_some() {
         return Ok(value);
     }

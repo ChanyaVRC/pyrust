@@ -138,11 +138,11 @@ impl Interpreter {
         }
         if is_nonlocal {
             if let Some(env) = find_enclosing_local_env_for_name(&self.env, &name) {
-                env.borrow_mut().values.insert(name, value);
+                env_assign_local(&env, &name, value);
                 return;
             }
         }
-        self.env.borrow_mut().values.insert(name, value);
+        env_assign_local(&self.env, &name, value);
     }
 
     fn lookup_name(&self, name: &str) -> Result<Option<Value>> {
