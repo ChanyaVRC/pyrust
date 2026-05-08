@@ -376,7 +376,7 @@ fn escape_str(s: &str) -> String {
         .replace('\'', "\\'")
 }
 
-fn range_len(start: i64, stop: i64, step: i64) -> i64 {
+pub(crate) fn range_len(start: i64, stop: i64, step: i64) -> i64 {
     if step == 0 {
         return 0;
     }

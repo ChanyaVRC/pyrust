@@ -10,8 +10,8 @@ use crate::error::{PyError, Result};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::value::{
-    EnvRef, Environment, PyClass, PyInstance, PyKey, PyModule, UserFunction, UserFunctionParam,
-    Value,
+    range_len, EnvRef, Environment, PyClass, PyInstance, PyKey, PyModule, UserFunction,
+    UserFunctionParam, Value,
 };
 
 #[derive(Debug, Clone, PartialEq)]

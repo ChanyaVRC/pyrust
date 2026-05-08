@@ -596,20 +596,4 @@ fn make_sys_module() -> Value {
     })))
 }
 
-fn range_len(start: i64, stop: i64, step: i64) -> i64 {
-    if step == 0 {
-        return 0;
-    }
-    if step > 0 {
-        if start >= stop {
-            0
-        } else {
-            ((stop - start - 1) / step) + 1
-        }
-    } else if start <= stop {
-        0
-    } else {
-        ((start - stop - 1) / (-step)) + 1
-    }
-}
 
