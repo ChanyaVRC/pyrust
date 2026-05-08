@@ -2,7 +2,7 @@ impl Interpreter {
     /// Execute compiled bytecode for a user function.
     ///
     /// `regs` must be pre-sized to `code.num_regs` with parameter slots already filled.
-    pub(crate) fn run_bytecode(
+    fn run_bytecode(
         &mut self,
         code: &crate::bytecode::FnCode,
         regs: &mut Vec<Option<Value>>,
@@ -31,7 +31,7 @@ impl Interpreter {
                     let val = if let Some(v) = self.lookup_name(name)? {
                         v
                     } else {
-                        vm_lookup_builtin(name).ok_or_else(|| {
+                        resolve_builtin(name).ok_or_else(|| {
                             PyError::Runtime(format!("name '{}' is not defined", name))
                         })?
                     };
@@ -115,7 +115,7 @@ impl Interpreter {
                 }
 
                 // ── Calls ────────────────────────────────────────────────
-                Insn::Call(dst, func_reg, argc) => {
+                Insn::Call(func_reg, argc) => {
                     let func_val = vm_read(regs, *func_reg, num_locals)?;
                     let mut args: Vec<ExpandedCallArg> = Vec::with_capacity(*argc as usize);
                     for i in 0..*argc as usize {
@@ -125,7 +125,7 @@ impl Interpreter {
                         });
                     }
                     let result = self.call_function_expanded(func_val, &args)?;
-                    regs[*dst as usize] = Some(result);
+                    regs[*func_reg as usize] = Some(result);
                 }
 
                 // ── Returns ──────────────────────────────────────────────
@@ -138,23 +138,22 @@ impl Interpreter {
 
                 // ── Collection builders ──────────────────────────────────
                 Insn::BuildList(dst, base, n) => {
-                    let items: Vec<Value> = (0..*n as usize)
-                        .map(|i| regs[*base as usize + i].clone().unwrap_or(Value::None))
-                        .collect();
+                    let items = (0..*n as usize)
+                        .map(|i| vm_read(regs, *base + i as u8, num_locals))
+                        .collect::<Result<Vec<_>>>()?;
                     regs[*dst as usize] = Some(Value::List(items));
                 }
                 Insn::BuildTuple(dst, base, n) => {
-                    let items: Vec<Value> = (0..*n as usize)
-                        .map(|i| regs[*base as usize + i].clone().unwrap_or(Value::None))
-                        .collect();
+                    let items = (0..*n as usize)
+                        .map(|i| vm_read(regs, *base + i as u8, num_locals))
+                        .collect::<Result<Vec<_>>>()?;
                     regs[*dst as usize] = Some(Value::Tuple(items));
                 }
                 Insn::BuildDict(dst, base, n) => {
                     let mut dict = indexmap::IndexMap::new();
                     for i in 0..*n as usize {
-                        let k_val = regs[*base as usize + i * 2].clone().unwrap_or(Value::None);
-                        let v_val =
-                            regs[*base as usize + i * 2 + 1].clone().unwrap_or(Value::None);
+                        let k_val = vm_read(regs, *base + (i * 2) as u8, num_locals)?;
+                        let v_val = vm_read(regs, *base + (i * 2 + 1) as u8, num_locals)?;
                         let key = k_val.to_key().ok_or_else(|| {
                             PyError::Runtime("unhashable type in dict key".to_string())
                         })?;
@@ -165,7 +164,7 @@ impl Interpreter {
 
                 // ── Unpack ───────────────────────────────────────────────
                 Insn::Unpack(base, src, n) => {
-                    let src_val = regs[*src as usize].clone().unwrap_or(Value::None);
+                    let src_val = vm_read(regs, *src, num_locals)?;
                     let items = iter_values(src_val)?;
                     if items.len() != *n as usize {
                         return Err(PyError::Runtime(format!(
@@ -181,7 +180,7 @@ impl Interpreter {
 
                 // ── Iterator ─────────────────────────────────────────────
                 Insn::GetIter(slot, src) => {
-                    let src_val = regs[*src as usize].clone().unwrap_or(Value::None);
+                    let src_val = vm_read(regs, *src, num_locals)?;
                     let items = iter_values(src_val)?;
                     iters[*slot as usize] = Some((items, 0));
                 }
@@ -227,29 +226,6 @@ fn vm_read(regs: &[Option<Value>], reg: u8, num_locals: u8) -> crate::interprete
                 ))
             }
         }
-    }
-}
-
-fn vm_lookup_builtin(name: &str) -> Option<Value> {
-    match name {
-        "print" => Some(Value::Builtin("print")),
-        "len" => Some(Value::Builtin("len")),
-        "range" => Some(Value::Builtin("range")),
-        "enumerate" => Some(Value::Builtin("enumerate")),
-        "zip" => Some(Value::Builtin("zip")),
-        "reversed" => Some(Value::Builtin("reversed")),
-        "sorted" => Some(Value::Builtin("sorted")),
-        "abs" => Some(Value::Builtin("abs")),
-        "min" => Some(Value::Builtin("min")),
-        "max" => Some(Value::Builtin("max")),
-        "sum" => Some(Value::Builtin("sum")),
-        "list" => Some(Value::Builtin("list")),
-        "tuple" => Some(Value::Builtin("tuple")),
-        "str" => Some(Value::Builtin("str")),
-        "int" => Some(Value::Builtin("int")),
-        "float" => Some(Value::Builtin("float")),
-        "bool" => Some(Value::Builtin("bool")),
-        _ => None,
     }
 }
 

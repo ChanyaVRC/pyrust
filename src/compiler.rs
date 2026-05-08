@@ -17,7 +17,7 @@ pub fn compile_fn(func: &UserFunction) -> Option<FnCode> {
         return None;
     }
     let mut c = Compiler::new(func);
-    c.compile_block(&func.body.clone());
+    c.compile_block(&func.body);
     c.finish()
 }
 
@@ -36,7 +36,11 @@ fn stmt_unsupported(s: &Stmt) -> bool {
         | Stmt::Delete(_)
         | Stmt::Global(_)
         | Stmt::Nonlocal(_)
-        | Stmt::Def { .. } => true,
+        | Stmt::Def { .. }
+        // Assert failures require the tree-walker; bail out early instead of mid-compile.
+        | Stmt::Assert { .. } => true,
+        // AugAssign on attribute/index targets isn't compiled; reject upfront.
+        Stmt::AugAssign { target, .. } => !matches!(target, AssignTarget::Name(_)),
         Stmt::If {
             branches,
             else_branch,
@@ -135,6 +139,10 @@ impl<'a> Compiler<'a> {
         if let Some(&idx) = self.name_map.get(name) {
             return idx;
         }
+        if self.names.len() >= u16::MAX as usize {
+            self.failed = true;
+            return 0;
+        }
         let idx = self.names.len() as u16;
         self.names.push(name.to_string());
         self.name_map.insert(name.to_string(), idx);
@@ -146,6 +154,10 @@ impl<'a> Compiler<'a> {
             if const_eq(v, &val) {
                 return i as u16;
             }
+        }
+        if self.consts.len() >= u16::MAX as usize {
+            self.failed = true;
+            return 0;
         }
         let idx = self.consts.len() as u16;
         self.consts.push(val);
@@ -290,18 +302,9 @@ impl<'a> Compiler<'a> {
                 self.free_temp(idx);
                 self.free_temp(obj);
             }
-            Stmt::Assert { test, msg: _ } => {
-                // Compile the test; if truthy skip the error path.
-                // For false assertions we fall back by marking failed — the tree-walker
-                // will handle the actual AssertionError message.
-                let r = self.compile_expr(test);
-                let jmp = self.emit(Insn::JumpIfTrue(r, 0));
-                self.free_temp(r);
-                // Emit a failing sentinel: use an impossible Call that the VM will never
-                // reach under correct behavior. We mark failed here so this function
-                // body exits compile-time — the VM won't handle assert failures.
+            Stmt::Assert { .. } => {
+                // Caught by has_unsupported; should not be reached.
                 self.failed = true;
-                let _ = jmp;
             }
             Stmt::If {
                 branches,
@@ -465,15 +468,21 @@ impl<'a> Compiler<'a> {
         let back_offset = loop_start as i32 - back_from;
         self.emit(Insn::Jump(back_offset));
 
+        // Condition false → falls through to else block (or post-loop if no else).
         self.patch_jump(exit_jmp);
 
         let ctx = self.loops.pop().unwrap();
-        for idx in ctx.break_patches {
-            self.patch_jump(idx);
-        }
 
         if let Some(else_stmts) = else_branch {
+            // Natural condition-false exit falls through; compile else first.
             self.compile_block(else_stmts);
+            if self.failed {
+                return;
+            }
+        }
+        // Breaks (and no-else natural exit) land here, past the else block.
+        for idx in ctx.break_patches {
+            self.patch_jump(idx);
         }
     }
 
@@ -509,7 +518,8 @@ impl<'a> Compiler<'a> {
             }
             AssignTarget::Tuple(targets) => {
                 let n = targets.len() as u8;
-                let base = self.next_temp;
+                // Unpack slots sit immediately above item_reg.
+                let base = item_reg + 1;
                 if base as usize + n as usize > 256 {
                     self.failed = true;
                     return;
@@ -519,7 +529,6 @@ impl<'a> Compiler<'a> {
                     self.max_reg = self.next_temp - 1;
                 }
                 self.emit(Insn::Unpack(base, item_reg, n));
-                self.free_temp(item_reg);
                 for (i, t) in targets.iter().enumerate() {
                     match t {
                         AssignTarget::Name(name) => {
@@ -536,7 +545,8 @@ impl<'a> Compiler<'a> {
                         }
                     }
                 }
-                self.next_temp = base;
+                // Free item_reg and all unpack slots together.
+                self.next_temp = item_reg;
             }
             _ => {
                 self.failed = true;
@@ -558,17 +568,22 @@ impl<'a> Compiler<'a> {
         let back_offset = loop_start as i32 - back_from;
         self.emit(Insn::Jump(back_offset));
 
+        // Iterator exhausted → falls through to else block (or post-loop if no else).
         self.patch_jump(exit_jmp);
 
         let ctx = self.loops.pop().unwrap();
-        for idx in ctx.break_patches {
-            self.patch_jump(idx);
-        }
-
         self.free_iter();
 
         if let Some(else_stmts) = else_branch {
+            // Natural exhaustion falls through here; compile else first.
             self.compile_block(else_stmts);
+            if self.failed {
+                return;
+            }
+        }
+        // Breaks (and no-else exhaustion) land here, past the else block.
+        for idx in ctx.break_patches {
+            self.patch_jump(idx);
         }
     }
 
@@ -728,7 +743,7 @@ impl<'a> Compiler<'a> {
                     self.next_temp = saved;
                 }
 
-                self.emit(Insn::Call(func_reg, func_reg, argc));
+                self.emit(Insn::Call(func_reg, argc));
                 self.next_temp = func_reg + 1;
                 func_reg
             }

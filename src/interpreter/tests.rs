@@ -732,6 +732,65 @@ result = fact(10)
     }
 
     #[test]
+    fn vm_and_returns_operand_not_bool() {
+        // Python `and` returns the actual operand, not a coerced bool.
+        let interpreter = run_program(
+            "def f(a, b): return a and b\nresult = f(1, 42)\n",
+        );
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(42)));
+    }
+
+    #[test]
+    fn vm_or_returns_operand_not_bool() {
+        let interpreter = run_program(
+            "def f(a, b): return a or b\nresult = f(0, 99)\n",
+        );
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(99)));
+    }
+
+    #[test]
+    fn vm_and_short_circuits_on_falsy_lhs() {
+        let interpreter = run_program(
+            "def f(a, b): return a and b\nresult = f(0, 42)\n",
+        );
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(0)));
+    }
+
+    #[test]
+    fn vm_for_else_runs_when_not_broken() {
+        let interpreter = run_program(
+            "def f(lst):\n    for x in lst:\n        if x > 10: return x\n    else:\n        return -1\n    return 0\nresult = f([1, 2, 3])\n",
+        );
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(-1)));
+    }
+
+    #[test]
+    fn vm_for_else_skipped_on_break() {
+        let interpreter = run_program(
+            "def f(lst):\n    for x in lst:\n        if x > 1: break\n    else:\n        return -1\n    return x\nresult = f([1, 5, 3])\n",
+        );
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(5)));
+    }
+
+    #[test]
+    fn vm_while_else_runs_when_condition_false() {
+        let interpreter = run_program(
+            "def f(n):\n    i = 0\n    while i < n:\n        i += 1\n    else:\n        return i\n    return -1\nresult = f(3)\n",
+        );
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(3)));
+    }
+
+    #[test]
+    fn vm_assert_falls_back_correctly() {
+        // Functions containing `assert` must fall back to the tree-walker, which handles
+        // AssertionError.  Verify the successful-assert path still returns the right value.
+        let interpreter = run_program(
+            "def f(x):\n    assert x > 0\n    return x * 2\nresult = f(5)\n",
+        );
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(10)));
+    }
+
+    #[test]
     fn vm_unbound_local_after_lambda_drop() {
         // Regression: bytecode_cache stale-ptr bug — a lambda dropped after its
         // first call must not pollute the cache for a later function allocated at

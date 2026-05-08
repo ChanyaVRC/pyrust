@@ -14,26 +14,9 @@ impl Interpreter {
                 if let Some(v) = self.lookup_name(name)? {
                     return Ok(v.clone());
                 }
-                match name.as_str() {
-                    "print" => Ok(Value::Builtin("print")),
-                    "len" => Ok(Value::Builtin("len")),
-                    "range" => Ok(Value::Builtin("range")),
-                    "enumerate" => Ok(Value::Builtin("enumerate")),
-                    "zip" => Ok(Value::Builtin("zip")),
-                    "reversed" => Ok(Value::Builtin("reversed")),
-                    "sorted" => Ok(Value::Builtin("sorted")),
-                    "abs" => Ok(Value::Builtin("abs")),
-                    "min" => Ok(Value::Builtin("min")),
-                    "max" => Ok(Value::Builtin("max")),
-                    "sum" => Ok(Value::Builtin("sum")),
-                    "list" => Ok(Value::Builtin("list")),
-                    "tuple" => Ok(Value::Builtin("tuple")),
-                    "str" => Ok(Value::Builtin("str")),
-                    "int" => Ok(Value::Builtin("int")),
-                    "float" => Ok(Value::Builtin("float")),
-                    "bool" => Ok(Value::Builtin("bool")),
-                    _ => Err(PyError::Runtime(format!("name '{name}' is not defined"))),
-                }
+                resolve_builtin(name)
+                    .map(Ok)
+                    .unwrap_or_else(|| Err(PyError::Runtime(format!("name '{name}' is not defined"))))
             }
             Expr::List(items) => {
                 let mut out = Vec::with_capacity(items.len());
@@ -671,5 +654,31 @@ fn iter_values(value: Value) -> Result<Vec<Value>> {
             Ok(out)
         }
         _ => Err(PyError::Runtime("object is not iterable".to_string())),
+    }
+}
+
+/// Resolve a built-in name to its `Value::Builtin` variant.
+/// Single source of truth for both the tree-walker (`eval_expr`) and the register VM
+/// (`LoadGlobal` fallback).  Any new built-in must be added here only.
+pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
+    match name {
+        "print" => Some(Value::Builtin("print")),
+        "len" => Some(Value::Builtin("len")),
+        "range" => Some(Value::Builtin("range")),
+        "enumerate" => Some(Value::Builtin("enumerate")),
+        "zip" => Some(Value::Builtin("zip")),
+        "reversed" => Some(Value::Builtin("reversed")),
+        "sorted" => Some(Value::Builtin("sorted")),
+        "abs" => Some(Value::Builtin("abs")),
+        "min" => Some(Value::Builtin("min")),
+        "max" => Some(Value::Builtin("max")),
+        "sum" => Some(Value::Builtin("sum")),
+        "list" => Some(Value::Builtin("list")),
+        "tuple" => Some(Value::Builtin("tuple")),
+        "str" => Some(Value::Builtin("str")),
+        "int" => Some(Value::Builtin("int")),
+        "float" => Some(Value::Builtin("float")),
+        "bool" => Some(Value::Builtin("bool")),
+        _ => None,
     }
 }

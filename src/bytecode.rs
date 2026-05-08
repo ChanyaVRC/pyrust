@@ -31,8 +31,8 @@ pub enum Insn {
     JumpIfFalse(Reg, i32),
     /// if R[cond].truthy(): pc += offset
     JumpIfTrue(Reg, i32),
-    /// R[dst] = call(R[func_reg], R[func_reg+1..func_reg+1+argc])
-    Call(Reg, Reg, u8),
+    /// R[func_reg] = call(R[func_reg], R[func_reg+1..func_reg+1+argc]); result in R[func_reg]
+    Call(Reg, u8),
     /// return R[src]
     Return(Reg),
     /// return None
@@ -55,15 +55,15 @@ pub enum Insn {
 
 #[derive(Debug)]
 pub struct FnCode {
-    pub insns: Vec<Insn>,
+    pub(crate) insns: Vec<Insn>,
     /// Constant pool (literals used in the function body)
-    pub consts: Vec<Value>,
+    pub(crate) consts: Vec<Value>,
     /// Name pool (global variable names and attribute names)
-    pub names: Vec<String>,
+    pub(crate) names: Vec<String>,
     /// Number of registers needed (locals + max temporaries)
-    pub num_regs: u8,
+    pub(crate) num_regs: u8,
     /// Number of iterator slots needed
-    pub num_iters: u8,
+    pub(crate) num_iters: u8,
     /// Number of local variable slots (registers 0..num_locals are locals; the rest are temps)
-    pub num_locals: u8,
+    pub(crate) num_locals: u8,
 }
