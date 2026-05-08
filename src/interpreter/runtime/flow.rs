@@ -105,8 +105,17 @@ impl Interpreter {
                 let env = self
                     .resolve_name_env(name)
                     .ok_or_else(|| PyError::Runtime(format!("name '{}' is not defined", name)))?;
+                let fl_idx = {
+                    let borrowed = env.borrow();
+                    borrowed.fastlocals.as_ref().and_then(|fl| fl.index.get(name.as_str()).copied())
+                };
                 let mut borrowed = env.borrow_mut();
-                match borrowed.values.get_mut(name).unwrap() {
+                let col: &mut Value = if let Some(idx) = fl_idx {
+                    borrowed.fastlocals.as_mut().unwrap().slots[idx].as_mut().unwrap()
+                } else {
+                    borrowed.values.get_mut(name.as_str()).unwrap()
+                };
+                match col {
                     Value::List(items) => {
                         let idx = normalize_index(&index, items.len())?;
                         items[idx] = value;
@@ -387,7 +396,7 @@ impl Interpreter {
     fn exec_delete(&mut self, expr: &Expr) -> Result<()> {
         match expr {
             Expr::Var(name) => {
-                let removed = self.env.borrow_mut().values.remove(name);
+                let removed = env_remove_local(&self.env, name.as_str());
                 if removed.is_none() {
                     return Err(PyError::Runtime(format!("name '{}' is not defined", name)));
                 }
@@ -600,10 +609,7 @@ impl Interpreter {
 
             let previous_active = self.active_exception.replace(exception.clone());
             let previous_binding = if let Some(name) = &handler.name {
-                self.env
-                    .borrow_mut()
-                    .values
-                    .insert(name.clone(), exception.clone())
+                Some(env_replace_local(&self.env, name.as_str(), exception.clone()))
             } else {
                 None
             };
@@ -612,11 +618,10 @@ impl Interpreter {
 
             self.active_exception = previous_active;
             if let Some(name) = &handler.name {
-                let mut env = self.env.borrow_mut();
-                if let Some(value) = previous_binding {
-                    env.values.insert(name.clone(), value);
+                if let Some(prev) = previous_binding.flatten() {
+                    env_assign_local(&self.env, name.as_str(), prev);
                 } else {
-                    env.values.remove(name);
+                    env_remove_local(&self.env, name.as_str());
                 }
             }
 
