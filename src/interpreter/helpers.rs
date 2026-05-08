@@ -383,6 +383,7 @@ fn lookup_name_in_enclosing_local_env(env: &EnvRef, name: &str) -> Result<Option
     lookup_name_in_env(&target_env, name)
 }
 
+
 // Read `name` directly from an already-resolved env (fastlocals slot first,
 // then values HashMap).  Does not walk the env chain.
 fn read_local(env: &EnvRef, name: &str) -> Option<Value> {
@@ -393,6 +394,46 @@ fn read_local(env: &EnvRef, name: &str) -> Option<Value> {
         }
     }
     borrowed.values.get(name).cloned()
+}
+
+// Read the item at `index` from the List/Tuple stored under `name` in `env`.
+// Checks fastlocals first, then falls back to the values HashMap.
+// Returns None if the name does not exist, is not a List/Tuple, or `index` is
+// out of bounds (the list may have been shortened during iteration).
+fn get_item_at(env: &EnvRef, name: &str, index: usize) -> Option<Value> {
+    let borrowed = env.borrow();
+    let list_val = if let Some(fl) = &borrowed.fastlocals {
+        if let Some(&idx) = fl.index.get(name) {
+            fl.slots[idx].as_ref()
+        } else {
+            borrowed.values.get(name)
+        }
+    } else {
+        borrowed.values.get(name)
+    };
+    match list_val? {
+        Value::List(items) | Value::Tuple(items) => items.get(index).cloned(),
+        _ => None,
+    }
+}
+
+// Return the length of the List/Tuple stored under `name` in `env`, or None
+// if the name does not exist or is not a List/Tuple.
+fn get_list_len(env: &EnvRef, name: &str) -> Option<usize> {
+    let borrowed = env.borrow();
+    let list_val = if let Some(fl) = &borrowed.fastlocals {
+        if let Some(&idx) = fl.index.get(name) {
+            fl.slots[idx].as_ref()
+        } else {
+            borrowed.values.get(name)
+        }
+    } else {
+        borrowed.values.get(name)
+    };
+    match list_val? {
+        Value::List(items) | Value::Tuple(items) => Some(items.len()),
+        _ => None,
+    }
 }
 
 // Write `value` into `env` for `name`, using fastlocals slot when available.
