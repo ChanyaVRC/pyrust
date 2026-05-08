@@ -140,43 +140,7 @@ impl Interpreter {
             return Ok(ExecSignal::None);
         }
 
-        // Pre-compute iteration count (one division, done once).
-        let count = range_len(start, stop, step);
-
-        // Small-count fast path (step=1, ≤8 iterations): unroll without remaining counter.
-        if step == 1 && count <= 8 {
-            let mut broke = false;
-            if let AssignTarget::Name(loop_var) = target {
-                let target_env = self.resolve_assign_env_for(loop_var);
-                'small_name: for i in 0..count {
-                    env_assign_local(&target_env, loop_var, Value::Int(start + i));
-                    match self.exec_block(body)? {
-                        ExecSignal::None => {}
-                        ExecSignal::Break => { broke = true; break 'small_name; }
-                        ExecSignal::Continue => {}
-                        ExecSignal::Return(v) => return Ok(ExecSignal::Return(v)),
-                    }
-                }
-            } else {
-                'small_other: for i in 0..count {
-                    self.assign_target(target, Value::Int(start + i))?;
-                    match self.exec_block(body)? {
-                        ExecSignal::None => {}
-                        ExecSignal::Break => { broke = true; break 'small_other; }
-                        ExecSignal::Continue => {}
-                        ExecSignal::Return(v) => return Ok(ExecSignal::Return(v)),
-                    }
-                }
-            }
-            if !broke {
-                if let Some(branch) = else_branch {
-                    return self.exec_block(branch);
-                }
-            }
-            return Ok(ExecSignal::None);
-        }
-
-        let mut remaining = count;
+        let mut remaining = range_len(start, stop, step);
         let mut broke = false;
         if let AssignTarget::Name(loop_var) = target {
             let target_env = self.resolve_assign_env_for(loop_var);
