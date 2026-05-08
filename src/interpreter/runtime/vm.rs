@@ -58,7 +58,26 @@ impl Interpreter {
                 Insn::BinOp(dst, lhs, op, rhs) => {
                     let l = vm_read(regs, *lhs, num_locals)?;
                     let r = vm_read(regs, *rhs, num_locals)?;
-                    let result = self.eval_binary(l, *op, r)?;
+                    // Fast path: inline the most common integer operations to
+                    // avoid the eval_binary call overhead in tight loops.
+                    let result = match (&l, op, &r) {
+                        (Value::Int(a), BinaryOp::Add, Value::Int(b)) => {
+                            Value::Int(a.wrapping_add(*b))
+                        }
+                        (Value::Int(a), BinaryOp::Sub, Value::Int(b)) => {
+                            Value::Int(a.wrapping_sub(*b))
+                        }
+                        (Value::Int(a), BinaryOp::Mul, Value::Int(b)) => {
+                            Value::Int(a.wrapping_mul(*b))
+                        }
+                        (Value::Int(a), BinaryOp::Eq, Value::Int(b)) => Value::Bool(a == b),
+                        (Value::Int(a), BinaryOp::Ne, Value::Int(b)) => Value::Bool(a != b),
+                        (Value::Int(a), BinaryOp::Lt, Value::Int(b)) => Value::Bool(a < b),
+                        (Value::Int(a), BinaryOp::Le, Value::Int(b)) => Value::Bool(a <= b),
+                        (Value::Int(a), BinaryOp::Gt, Value::Int(b)) => Value::Bool(a > b),
+                        (Value::Int(a), BinaryOp::Ge, Value::Int(b)) => Value::Bool(a >= b),
+                        _ => self.eval_binary(l, *op, r)?,
+                    };
                     regs[*dst as usize] = Some(result);
                 }
                 Insn::UnaryOp(dst, op, src) => {
@@ -81,9 +100,31 @@ impl Interpreter {
                     self.assign_attr(obj_val, name, val_val)?;
                 }
                 Insn::GetItem(dst, obj, idx) => {
-                    let obj_val = vm_read(regs, *obj, num_locals)?;
                     let idx_val = vm_read(regs, *idx, num_locals)?;
-                    let result = self.eval_index(obj_val, idx_val)?;
+                    // Fast path: read directly from the register without cloning
+                    // the entire collection (avoids O(n) clone per GetItem call).
+                    let result = match regs[*obj as usize].as_ref() {
+                        Some(Value::List(items)) => {
+                            let i = normalize_index(&idx_val, items.len())?;
+                            items[i].clone()
+                        }
+                        Some(Value::Tuple(items)) => {
+                            let i = normalize_index(&idx_val, items.len())?;
+                            items[i].clone()
+                        }
+                        Some(Value::Dict(dict)) => {
+                            let key = idx_val.to_key().ok_or_else(|| {
+                                PyError::Runtime("unhashable key type".to_string())
+                            })?;
+                            dict.get(&key)
+                                .cloned()
+                                .ok_or_else(|| PyError::Runtime("key error".to_string()))?
+                        }
+                        _ => {
+                            let obj_val = vm_read(regs, *obj, num_locals)?;
+                            self.eval_index(obj_val, idx_val)?
+                        }
+                    };
                     regs[*dst as usize] = Some(result);
                 }
                 Insn::SetItem(obj, idx, val) => {

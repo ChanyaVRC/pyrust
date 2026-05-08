@@ -392,6 +392,58 @@ impl<'a> Compiler<'a> {
                 }
             }
             AssignTarget::Tuple(targets) => {
+                // Optimisation: tuple-literal RHS with matching arity → evaluate
+                // each element directly into a temp, then Move to targets.
+                // Avoids BuildTuple + Unpack + Vec allocation entirely.
+                if let Expr::Tuple(exprs) = expr {
+                    if exprs.len() == targets.len() && !targets.is_empty() {
+                        let mut target_regs: Vec<Reg> = Vec::with_capacity(targets.len());
+                        let mut ok = true;
+                        for t in targets.iter() {
+                            match t {
+                                AssignTarget::Name(name) => {
+                                    if let Some(r) = self.local_reg(name) {
+                                        target_regs.push(r);
+                                    } else {
+                                        ok = false;
+                                        break;
+                                    }
+                                }
+                                _ => {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if ok {
+                            let saved_next = self.next_temp;
+                            let mut temps: Vec<Reg> = Vec::with_capacity(exprs.len());
+                            for rhs_expr in exprs.iter() {
+                                let r = self.compile_expr(rhs_expr);
+                                // If r is a local register, copy into a temp so later
+                                // assignments can't clobber it before it's read.
+                                let tmp = if r < self.base_temp {
+                                    let t = self.alloc_temp();
+                                    self.emit(Insn::Move(t, r));
+                                    t
+                                } else {
+                                    r
+                                };
+                                temps.push(tmp);
+                            }
+                            if !self.failed {
+                                for (dst_reg, src_tmp) in target_regs.iter().zip(temps.iter()) {
+                                    if *src_tmp != *dst_reg {
+                                        self.emit(Insn::Move(*dst_reg, *src_tmp));
+                                    }
+                                }
+                            }
+                            self.next_temp = saved_next;
+                            return;
+                        }
+                    }
+                }
+
                 let src = self.compile_expr(expr);
                 let n = targets.len() as u8;
                 if n == 0 {
@@ -399,7 +451,6 @@ impl<'a> Compiler<'a> {
                     return;
                 }
                 let base = self.next_temp;
-                // Reserve unpack slots
                 if base as usize + n as usize > 256 {
                     self.failed = true;
                     return;
