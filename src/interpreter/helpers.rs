@@ -819,6 +819,74 @@ pub(crate) fn compute_def_bound_mask(
     mask
 }
 
+/// Returns the set of names directly assigned anywhere in a block (including nested loops).
+fn collect_assigned_names(body: &[Stmt]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    collect_assigned_names_in(body, &mut names);
+    names
+}
+
+fn collect_assigned_names_in(body: &[Stmt], names: &mut HashSet<String>) {
+    for stmt in body {
+        match stmt {
+            Stmt::Assign(target, _) => collect_target_names(target, names),
+            Stmt::AugAssign { target, .. } => collect_target_names(target, names),
+            Stmt::If { branches, else_branch } => {
+                for (_, b) in branches {
+                    collect_assigned_names_in(b, names);
+                }
+                if let Some(b) = else_branch {
+                    collect_assigned_names_in(b, names);
+                }
+            }
+            Stmt::While { body, .. } => collect_assigned_names_in(body, names),
+            Stmt::For { target, body, .. } => {
+                collect_target_names(target, names);
+                collect_assigned_names_in(body, names);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_target_names(target: &AssignTarget, names: &mut HashSet<String>) {
+    match target {
+        AssignTarget::Name(n) => {
+            names.insert(n.clone());
+        }
+        AssignTarget::Tuple(targets) => {
+            for t in targets {
+                collect_target_names(t, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Returns true if the expression is body-invariant for LICM purposes:
+/// no function calls, no attribute access, no index access, and every
+/// variable it reads is absent from `modified_names`.
+fn expr_is_body_invariant(expr: &Expr, modified_names: &HashSet<String>) -> bool {
+    match expr {
+        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::None => true,
+        Expr::Var(name) => !modified_names.contains(name.as_str()),
+        Expr::Binary { left, right, .. } => {
+            expr_is_body_invariant(left, modified_names)
+                && expr_is_body_invariant(right, modified_names)
+        }
+        Expr::Unary { expr, .. } => expr_is_body_invariant(expr, modified_names),
+        // Function calls or attribute / index access may have side effects or
+        // read mutable state — not invariant.
+        Expr::Call { .. } | Expr::Attr { .. } | Expr::Index { .. } => false,
+        // Tuple/List literals: check all elements.
+        Expr::Tuple(items) | Expr::List(items) => {
+            items.iter().all(|e| expr_is_body_invariant(e, modified_names))
+        }
+        // Default: not invariant (Compare, Ternary, Lambda, Slice, Dict, Set, …).
+        _ => false,
+    }
+}
+
 fn value_to_float(v: &Value, ctx: &str) -> Result<f64> {
     match v {
         Value::Float(f) => Ok(*f),

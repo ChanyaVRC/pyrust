@@ -521,6 +521,44 @@ impl Interpreter {
                 }
 
                 let mut broke = false;
+
+                // LICM: if the condition only reads names that are never
+                // assigned in the loop body, evaluate it once at loop entry.
+                // If true at entry it cannot change, so use `loop {}` instead
+                // of re-evaluating each iteration.
+                let licm_eligible = expr_is_body_invariant(cond, &collect_assigned_names(body));
+                if licm_eligible && !is_const_true(cond) && !is_const_false(cond) {
+                    // Evaluate condition once.
+                    if !self.eval_expr(cond)?.truthy() {
+                        // Condition false at entry — run else branch if present.
+                        if let Some(branch) = else_branch {
+                            return self.exec_block(branch);
+                        }
+                        return Ok(ExecSignal::None);
+                    }
+                    // Condition is true and invariant — loop until break/return.
+                    loop {
+                        match self.exec_block(body)? {
+                            ExecSignal::None => {}
+                            ExecSignal::Break => {
+                                broke = true;
+                                break;
+                            }
+                            ExecSignal::Continue => continue,
+                            ExecSignal::Return(v) => return Ok(ExecSignal::Return(v)),
+                        }
+                    }
+                    // For an invariant-true condition the only normal exit is
+                    // break; the else branch is unreachable, but include it for
+                    // safety / correctness parity.
+                    if !broke {
+                        if let Some(branch) = else_branch {
+                            return self.exec_block(branch);
+                        }
+                    }
+                    return Ok(ExecSignal::None);
+                }
+
                 // Constant-true (`while True` / `while 1`): skip the condition
                 // re-evaluation on every iteration — the condition is never
                 // going to flip.  Analogous to CPython's `JUMP_BACKWARD`
