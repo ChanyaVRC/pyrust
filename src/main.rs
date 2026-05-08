@@ -155,6 +155,123 @@ fn run_repl() -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── last_line_is_indented ────────────────────────────────────────────────
+
+    #[test]
+    fn empty_buffer_is_not_indented() {
+        assert!(!last_line_is_indented(""));
+    }
+
+    #[test]
+    fn single_unindented_line_is_not_indented() {
+        assert!(!last_line_is_indented("x = 1\n"));
+    }
+
+    #[test]
+    fn single_indented_line_is_indented() {
+        assert!(last_line_is_indented("    return 1\n"));
+    }
+
+    #[test]
+    fn last_line_indented_after_header() {
+        assert!(last_line_is_indented("for i in range(3):\n    print(i)\n"));
+    }
+
+    #[test]
+    fn last_line_unindented_means_block_is_done() {
+        assert!(!last_line_is_indented(
+            "for i in range(3):\n    print(i)\nresult = 1\n"
+        ));
+    }
+
+    #[test]
+    fn blank_trailing_line_looks_through_to_indented_line() {
+        // buffer has a trailing blank — last *non-empty* line is still indented
+        assert!(last_line_is_indented(
+            "for i in range(3):\n    print(i)\n\n"
+        ));
+    }
+
+    #[test]
+    fn tab_indentation_is_detected() {
+        assert!(last_line_is_indented("def f():\n\treturn 1\n"));
+    }
+
+    // ── is_incomplete ────────────────────────────────────────────────────────
+
+    #[test]
+    fn eof_parse_error_is_incomplete() {
+        assert!(is_incomplete(&PyError::Parse(
+            "expected X, found Eof".into()
+        )));
+    }
+
+    #[test]
+    fn expected_indent_parse_error_is_incomplete() {
+        // produced when a block header line ends with '\n' and the lexer emits
+        // an extra Newline token instead of Eof
+        assert!(is_incomplete(&PyError::Parse(
+            "expected Indent, found Some(Newline)".into()
+        )));
+    }
+
+    #[test]
+    fn eof_lex_error_is_incomplete() {
+        assert!(is_incomplete(&PyError::Lex("found Eof".into())));
+    }
+
+    #[test]
+    fn unrelated_parse_error_is_not_incomplete() {
+        assert!(!is_incomplete(&PyError::Parse(
+            "unexpected token in expression: Some(Plus)".into()
+        )));
+    }
+
+    #[test]
+    fn runtime_error_is_not_incomplete() {
+        assert!(!is_incomplete(&PyError::Runtime("name error".into())));
+    }
+
+    // ── integration: parse_source drives is_incomplete ───────────────────────
+
+    #[test]
+    fn block_header_only_is_incomplete() {
+        // "for i in range(10):\n" — no body yet
+        let err = parse_source("for i in range(10):\n").unwrap_err();
+        assert!(is_incomplete(&err));
+    }
+
+    #[test]
+    fn nested_block_header_is_incomplete() {
+        let err = parse_source("for i in range(10):\n    for j in range(20):\n").unwrap_err();
+        assert!(is_incomplete(&err));
+    }
+
+    #[test]
+    fn complete_single_line_is_not_incomplete() {
+        assert!(parse_source("x = 1 + 2\n").is_ok());
+    }
+
+    #[test]
+    fn complete_block_parses_ok_with_indented_last_line() {
+        // parse succeeds but last line is indented — REPL should wait for empty line
+        let src = "for i in range(3):\n    print(i)\n";
+        assert!(parse_source(src).is_ok());
+        assert!(last_line_is_indented(src));
+    }
+
+    #[test]
+    fn def_with_body_parses_ok_but_still_indented() {
+        let src = "def f():\n    return 42\n";
+        assert!(parse_source(src).is_ok());
+        assert!(last_line_is_indented(src));
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let result = if args.len() > 1 {
