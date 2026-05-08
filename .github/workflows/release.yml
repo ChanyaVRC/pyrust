@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: pyrust-linux-x86_64
+            artifact_path: target/release/pyrust
+          - os: windows-latest
+            artifact_name: pyrust-windows-x86_64.exe
+            artifact_path: target/release/pyrust.exe
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run unit and integration tests
+        run: cargo test --verbose
+
+      - name: Run Python parity test
+        run: cargo test --test parity_compare --verbose
+
+      - name: Build release binary
+        run: cargo build --release --verbose
+
+      - name: Prepare release artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "${{ matrix.artifact_path }}" "dist/${{ matrix.artifact_name }}"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ matrix.artifact_name }}
+          generate_release_notes: true

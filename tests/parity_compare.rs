@@ -29,13 +29,26 @@ fn run_and_capture(program: &Path, args: &[&Path]) -> Result<String, String> {
 }
 
 fn find_python_executable(root: &Path) -> PathBuf {
+    if let Some(python) = env::var_os("PYRUST_PYTHON") {
+        return PathBuf::from(python);
+    }
+
     let venv_python = root.join(".venv").join("bin").join("python");
     if venv_python.exists() {
         return venv_python;
     }
 
+    let venv_python_windows = root.join(".venv").join("Scripts").join("python.exe");
+    if venv_python_windows.exists() {
+        return venv_python_windows;
+    }
+
     // Fallback when .venv is not present.
-    PathBuf::from("python3")
+    if cfg!(windows) {
+        PathBuf::from("python")
+    } else {
+        PathBuf::from("python3")
+    }
 }
 
 fn normalize_pythonish_output(raw: &str) -> String {

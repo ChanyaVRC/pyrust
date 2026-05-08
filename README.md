@@ -74,6 +74,26 @@ cargo run
 cargo run -- examples/demo.py
 ```
 
+## Run on Windows
+
+```powershell
+cargo run
+cargo run -- examples/demo.py
+```
+
+For parity testing on Windows, install Python and run:
+
+```powershell
+cargo test --test parity_compare
+```
+
+If needed, override the Python executable path:
+
+```powershell
+$env:PYRUST_PYTHON = "C:\\Python312\\python.exe"
+cargo test --test parity_compare
+```
+
 ## Verify Python Output Parity
 
 ```bash
@@ -81,3 +101,23 @@ cargo test --test parity_compare
 ```
 
 This runs all `tests/cases/**/test_*.py` with Python and PyRust and compares outputs.
+
+## CI/CD
+
+- CI: GitHub Actions runs on push to `master`/`main` and on pull requests.
+	- OS matrix: `ubuntu-latest`, `windows-latest`
+	- `cargo fmt --all --check`
+	- `cargo build`
+	- `cargo test`
+	- `cargo test --test parity_compare`
+- CD: A GitHub Release is published automatically when a tag matching `v*` is pushed.
+	- Builds and uploads:
+		- `pyrust-linux-x86_64`
+		- `pyrust-windows-x86_64.exe`
+
+### Create a release
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
