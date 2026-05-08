@@ -6,12 +6,12 @@ mod parser;
 mod token;
 mod value;
 
-use std::io::{self, Write};
-
 use error::{PyError, Result};
 use interpreter::Interpreter;
 use lexer::Lexer;
 use parser::Parser;
+use rustyline::error::ReadlineError;
+use rustyline::DefaultEditor;
 
 fn parse_source(src: &str) -> Result<Vec<ast::Stmt>> {
     let tokens = Lexer::new(src)?.into_tokens();
@@ -54,36 +54,75 @@ fn run_file(path: &str) -> Result<()> {
     Ok(())
 }
 
+fn is_incomplete(err: &PyError) -> bool {
+    match err {
+        PyError::Parse(msg) | PyError::Lex(msg) => msg.contains("found Eof"),
+        _ => false,
+    }
+}
+
 fn run_repl() -> Result<()> {
     println!("PyRust 0.2 (Python-like subset). Type 'exit' or 'quit' to leave.");
 
-    let stdin = io::stdin();
+    let mut rl = DefaultEditor::new().map_err(|e| PyError::Runtime(e.to_string()))?;
+
     std::thread::Builder::new()
         .stack_size(INTERPRETER_STACK_SIZE)
         .spawn(move || {
             let mut interpreter = Interpreter::default();
-            loop {
-                print!(">>> ");
-                io::stdout().flush().ok();
+            let mut buf = String::new();
 
-                let mut line = String::new();
-                let n = stdin.read_line(&mut line).unwrap_or(0);
-                if n == 0 {
+            loop {
+                let prompt = if buf.is_empty() { ">>> " } else { "... " };
+                let line = match rl.readline(prompt) {
+                    Ok(l) => l,
+                    Err(ReadlineError::Eof) | Err(ReadlineError::Interrupted) => break,
+                    Err(e) => {
+                        eprintln!("{e}");
+                        break;
+                    }
+                };
+
+                let trimmed = line.trim();
+                if buf.is_empty() && (trimmed == "exit" || trimmed == "quit") {
                     break;
                 }
 
-                let src = line.trim_end();
-                if src.trim().is_empty() {
+                // Empty line while in a block flushes the buffer
+                if !buf.is_empty() && trimmed.is_empty() {
+                    let src = std::mem::take(&mut buf);
+                    rl.add_history_entry(src.trim_end()).ok();
+                    match parse_source(&src).and_then(|p| interpreter.exec_program(&p, true)) {
+                        Ok(()) => {}
+                        Err(e) => eprintln!("{e}"),
+                    }
                     continue;
                 }
-                if src.trim() == "exit" || src.trim() == "quit" {
-                    break;
+
+                if trimmed.is_empty() {
+                    continue;
                 }
 
-                let one_line = format!("{src}\n");
-                match parse_source(&one_line).and_then(|p| interpreter.exec_program(&p, true)) {
-                    Ok(()) => {}
-                    Err(e) => eprintln!("{e}"),
+                buf.push_str(&line);
+                buf.push('\n');
+
+                // Try to parse and execute; stay in continuation if incomplete
+                match parse_source(&buf) {
+                    Ok(program) => {
+                        rl.add_history_entry(buf.trim_end()).ok();
+                        buf.clear();
+                        if let Err(e) = interpreter.exec_program(&program, true) {
+                            eprintln!("{e}");
+                        }
+                    }
+                    Err(e) if is_incomplete(&e) => {
+                        // Need more input — keep buf and show "..." next iteration
+                    }
+                    Err(e) => {
+                        rl.add_history_entry(buf.trim_end()).ok();
+                        buf.clear();
+                        eprintln!("{e}");
+                    }
                 }
             }
         })
