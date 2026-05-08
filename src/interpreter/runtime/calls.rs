@@ -430,7 +430,7 @@ impl Interpreter {
                 // Collect remaining positional args
                 let rest: Vec<Value> = positional_vals[pos_idx..].to_vec();
                 pos_idx = positional_vals.len();
-                local_env.borrow_mut().values.insert(param.name.clone(), Value::List(rest));
+                local_env.borrow_mut().values.insert(param.name.clone(), Value::Tuple(rest));
             } else if param.is_kwargs {
                 // Collect remaining keyword args
                 for (k, v) in &keyword_vals {
