@@ -187,9 +187,51 @@ impl Interpreter {
                 body,
                 else_branch,
             } => {
-                let iter_value = self.eval_expr(iter)?;
                 let mut broke = false;
-                // Drive Range lazily to avoid materializing up to N elements
+
+                // Drive Range lazily to avoid materializing up to N elements.
+                // For other named variables, borrow the env directly to avoid
+                // cloning the entire collection — especially valuable for dicts
+                // where only keys are needed, not values (mirrors index-read opt).
+                if let Expr::Var(name) = iter {
+                    if let Some(env) = self.resolve_name_env(name) {
+                        let fast_items: Option<Vec<Value>> = {
+                            let borrowed = env.borrow();
+                            borrowed.values.get(name).and_then(|v| match v {
+                                Value::List(items) | Value::Tuple(items) => Some(items.clone()),
+                                Value::Dict(map) => {
+                                    Some(map.keys().map(|k| key_to_value(k.clone())).collect())
+                                }
+                                Value::Set(set) => {
+                                    Some(set.iter().map(|k| key_to_value(k.clone())).collect())
+                                }
+                                Value::Str(s) => {
+                                    Some(s.chars().map(|c| Value::Str(c.to_string())).collect())
+                                }
+                                _ => None,
+                            })
+                        };
+                        if let Some(items) = fast_items {
+                            for value in items {
+                                self.assign_target(target, value)?;
+                                match self.exec_block(body)? {
+                                    ExecSignal::None => {}
+                                    ExecSignal::Break => { broke = true; break; }
+                                    ExecSignal::Continue => continue,
+                                    ExecSignal::Return(v) => return Ok(ExecSignal::Return(v)),
+                                }
+                            }
+                            if !broke {
+                                if let Some(branch) = else_branch {
+                                    return self.exec_block(branch);
+                                }
+                            }
+                            return Ok(ExecSignal::None);
+                        }
+                    }
+                }
+
+                let iter_value = self.eval_expr(iter)?;
                 if let Value::Range { start, stop, step } = iter_value {
                     if step == 0 {
                         return Err(PyError::Runtime("range() step argument must not be zero".to_string()));
