@@ -168,12 +168,14 @@ impl Interpreter {
             }
             Expr::Lambda { params, body } => {
                 let closure = Rc::clone(&self.env);
+                let lambda_body = vec![crate::ast::Stmt::Return(Some(*body.clone()))];
                 let func = Rc::new(crate::value::UserFunction {
                     name: "<lambda>".to_string(),
                     params: params.iter().map(|n| crate::value::UserFunctionParam {
                         name: n.clone(), default: None, is_args: false, is_kwargs: false,
                     }).collect(),
-                    body: vec![crate::ast::Stmt::Return(Some(*body.clone()))],
+                    is_pure: is_pure_body(&lambda_body),
+                    body: lambda_body,
                     local_names: Rc::new(std::collections::HashSet::new()),
                     global_names: Rc::new(std::collections::HashSet::new()),
                     nonlocal_names: Rc::new(std::collections::HashSet::new()),

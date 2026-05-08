@@ -73,6 +73,9 @@ pub struct UserFunction {
     pub global_names: NameSet,
     pub nonlocal_names: NameSet,
     pub env: EnvRef,
+    /// True when static analysis found no side-effecting statements in the body.
+    /// Pure functions with all-hashable arguments are transparently memoized.
+    pub is_pure: bool,
 }
 
 #[derive(Debug, Clone)]

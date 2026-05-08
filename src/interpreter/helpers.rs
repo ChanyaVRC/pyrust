@@ -612,4 +612,110 @@ fn make_sys_module() -> Value {
     })))
 }
 
+// Names of built-in callables with side effects (I/O, process control).
+const IMPURE_BUILTINS: &[&str] = &["print", "input", "open", "exit", "quit", "exec", "eval"];
+
+/// Returns true if `expr` contains no call to a known side-effecting builtin.
+/// Does NOT attempt to verify purity of user-defined functions called within —
+/// that would require whole-program analysis.  The conservative call-site rule
+/// (only cache if `is_pure`) relies on the *body* of those callees being clean.
+fn is_pure_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::None => true,
+        Expr::Var(_) => true,
+        Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
+            items.iter().all(is_pure_expr)
+        }
+        Expr::Dict(pairs) => pairs.iter().all(|(k, v)| is_pure_expr(k) && is_pure_expr(v)),
+        Expr::Unary { expr, .. } => is_pure_expr(expr),
+        Expr::Binary { left, right, .. } => is_pure_expr(left) && is_pure_expr(right),
+        Expr::Compare { left, ops } => {
+            is_pure_expr(left) && ops.iter().all(|(_, e)| is_pure_expr(e))
+        }
+        Expr::Ternary { cond, then, else_ } => {
+            is_pure_expr(cond) && is_pure_expr(then) && is_pure_expr(else_)
+        }
+        Expr::Lambda { .. } => true,
+        Expr::Call { func, args } => {
+            // Direct call to a known side-effecting name → impure.
+            if let Expr::Var(name) = func.as_ref() {
+                if IMPURE_BUILTINS.contains(&name.as_str()) {
+                    return false;
+                }
+            }
+            is_pure_expr(func) && args.iter().all(|a| is_pure_expr(&a.value))
+        }
+        Expr::Attr { target, .. } => is_pure_expr(target),
+        Expr::Index { target, index } => is_pure_expr(target) && is_pure_expr(index),
+        Expr::Slice { target, lower, upper, step } => {
+            is_pure_expr(target)
+                && lower.as_deref().map_or(true, is_pure_expr)
+                && upper.as_deref().map_or(true, is_pure_expr)
+                && step.as_deref().map_or(true, is_pure_expr)
+        }
+    }
+}
+
+/// Returns true if every statement in `body` is free of observable side effects.
+///
+/// Conservative: attribute/index mutation, global/nonlocal declarations,
+/// import statements, and `with` blocks are treated as impure.  Calls to
+/// user-defined functions are assumed pure (the body of each callee is
+/// analysed when *that* function is defined).
+pub(crate) fn is_pure_body(body: &[Stmt]) -> bool {
+    body.iter().all(is_pure_stmt)
+}
+
+fn is_pure_stmt(stmt: &Stmt) -> bool {
+    match stmt {
+        // Explicit side effects on outer state.
+        Stmt::Global(_) | Stmt::Nonlocal(_) => false,
+        // Object / container mutation.
+        Stmt::AttrAssign { .. } | Stmt::IndexAssign { .. } | Stmt::SliceAssign { .. } => false,
+        // Deletion and imports can affect shared state.
+        Stmt::Delete(_) | Stmt::Import { .. } | Stmt::ImportFrom { .. } => false,
+        // `with` typically wraps I/O or resource-management side effects.
+        Stmt::With { .. } => false,
+
+        // Assignments and augmented assignments are local writes → pure if RHS is.
+        Stmt::Assign(_, expr) | Stmt::Expr(expr) => is_pure_expr(expr),
+        Stmt::AugAssign { expr, .. } => is_pure_expr(expr),
+        Stmt::Return(Some(expr)) => is_pure_expr(expr),
+        Stmt::Return(None) => true,
+        Stmt::Assert { test, msg } => {
+            is_pure_expr(test) && msg.as_ref().map_or(true, is_pure_expr)
+        }
+        Stmt::Raise { expr, cause } => {
+            expr.as_ref().map_or(true, is_pure_expr)
+                && cause.as_ref().map_or(true, is_pure_expr)
+        }
+
+        // Control flow: recurse into sub-blocks.
+        Stmt::If { branches, else_branch } => {
+            branches.iter().all(|(cond, blk)| is_pure_expr(cond) && is_pure_body(blk))
+                && else_branch.as_deref().map_or(true, is_pure_body)
+        }
+        Stmt::While { cond, body, else_branch } => {
+            is_pure_expr(cond)
+                && is_pure_body(body)
+                && else_branch.as_deref().map_or(true, is_pure_body)
+        }
+        Stmt::For { iter, body, else_branch, .. } => {
+            is_pure_expr(iter)
+                && is_pure_body(body)
+                && else_branch.as_deref().map_or(true, is_pure_body)
+        }
+        Stmt::Try { body, handlers, else_branch, finally_branch } => {
+            is_pure_body(body)
+                && handlers.iter().all(|h| is_pure_body(&h.body))
+                && else_branch.as_deref().map_or(true, is_pure_body)
+                && finally_branch.as_deref().map_or(true, is_pure_body)
+        }
+
+        // Nested definitions don't execute side effects at definition time.
+        Stmt::Def { .. } | Stmt::Class { .. } => true,
+        Stmt::Pass | Stmt::Break | Stmt::Continue => true,
+    }
+}
+
 
