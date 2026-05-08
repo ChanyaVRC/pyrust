@@ -45,6 +45,122 @@ impl Interpreter {
         Ok(ExecSignal::None)
     }
 
+    // Drives a range(start, stop, step) loop.
+    //
+    // Pre-computes the total number of iterations once (range_len), then
+    // counts down with a single comparison per iteration instead of two
+    // (step-sign check + value vs stop).
+    //
+    // For a simple Name target, the target env is also resolved once and the
+    // slot is updated in-place — no String key clone after the first iteration,
+    // no per-iteration global/nonlocal HashSet checks.
+    fn exec_range_loop(
+        &mut self,
+        start: i64,
+        stop: i64,
+        step: i64,
+        target: &AssignTarget,
+        body: &[Stmt],
+        else_branch: Option<&[Stmt]>,
+    ) -> Result<ExecSignal> {
+        if step == 0 {
+            return Err(PyError::Runtime(
+                "range() step argument must not be zero".to_string(),
+            ));
+        }
+        // Pre-compute iteration count (one division, done once).
+        let mut remaining = range_len(start, stop, step);
+        let mut broke = false;
+        if let AssignTarget::Name(loop_var) = target {
+            let target_env = self.resolve_assign_env_for(loop_var);
+            let mut cur = start;
+            'range_loop: loop {
+                if remaining == 0 { break; }
+                {
+                    let mut env = target_env.borrow_mut();
+                    match env.values.get_mut(loop_var.as_str()) {
+                        Some(slot) => *slot = Value::Int(cur),
+                        None => { env.values.insert(loop_var.clone(), Value::Int(cur)); }
+                    }
+                }
+                match self.exec_block(body)? {
+                    ExecSignal::None => {}
+                    ExecSignal::Break => { broke = true; break 'range_loop; }
+                    ExecSignal::Continue => {}
+                    ExecSignal::Return(v) => return Ok(ExecSignal::Return(v)),
+                }
+                cur += step;
+                remaining -= 1;
+            }
+        } else {
+            let mut cur = start;
+            'range_loop: loop {
+                if remaining == 0 { break; }
+                self.assign_target(target, Value::Int(cur))?;
+                match self.exec_block(body)? {
+                    ExecSignal::None => {}
+                    ExecSignal::Break => { broke = true; break 'range_loop; }
+                    ExecSignal::Continue => {}
+                    ExecSignal::Return(v) => return Ok(ExecSignal::Return(v)),
+                }
+                cur += step;
+                remaining -= 1;
+            }
+        }
+        if !broke {
+            if let Some(branch) = else_branch {
+                return self.exec_block(branch);
+            }
+        }
+        Ok(ExecSignal::None)
+    }
+
+    // Drives a loop over a pre-collected Vec<Value>.  Same Name-target
+    // optimization as exec_range_loop: env resolved once, slot updated in-place.
+    fn exec_items_loop(
+        &mut self,
+        items: Vec<Value>,
+        target: &AssignTarget,
+        body: &[Stmt],
+        else_branch: Option<&[Stmt]>,
+    ) -> Result<ExecSignal> {
+        let mut broke = false;
+        if let AssignTarget::Name(loop_var) = target {
+            let target_env = self.resolve_assign_env_for(loop_var);
+            for value in items {
+                {
+                    let mut env = target_env.borrow_mut();
+                    match env.values.get_mut(loop_var.as_str()) {
+                        Some(slot) => *slot = value,
+                        None => { env.values.insert(loop_var.clone(), value); }
+                    }
+                }
+                match self.exec_block(body)? {
+                    ExecSignal::None => {}
+                    ExecSignal::Break => { broke = true; break; }
+                    ExecSignal::Continue => continue,
+                    ExecSignal::Return(v) => return Ok(ExecSignal::Return(v)),
+                }
+            }
+        } else {
+            for value in items {
+                self.assign_target(target, value)?;
+                match self.exec_block(body)? {
+                    ExecSignal::None => {}
+                    ExecSignal::Break => { broke = true; break; }
+                    ExecSignal::Continue => continue,
+                    ExecSignal::Return(v) => return Ok(ExecSignal::Return(v)),
+                }
+            }
+        }
+        if !broke {
+            if let Some(branch) = else_branch {
+                return self.exec_block(branch);
+            }
+        }
+        Ok(ExecSignal::None)
+    }
+
     fn exec_stmt(&mut self, stmt: &Stmt) -> Result<ExecSignal> {
         match stmt {
             Stmt::Assign(target, expr) => {
@@ -187,44 +303,52 @@ impl Interpreter {
                 body,
                 else_branch,
             } => {
+                // Named variable fast-path: one env borrow avoids cloning the
+                // iterable Value and, for Range, prevents a second borrow.
+                if let Expr::Var(name) = iter {
+                    if let Some(env) = self.resolve_name_env(name) {
+                        let range_spec: Option<(i64, i64, i64)> = {
+                            let borrowed = env.borrow();
+                            borrowed.values.get(name).and_then(|v| {
+                                if let Value::Range { start, stop, step } = v {
+                                    Some((*start, *stop, *step))
+                                } else {
+                                    None
+                                }
+                            })
+                        };
+                        if let Some((start, stop, step)) = range_spec {
+                            return self.exec_range_loop(start, stop, step, target, body, else_branch.as_deref());
+                        }
+
+                        let fast_items: Option<Vec<Value>> = {
+                            let borrowed = env.borrow();
+                            borrowed.values.get(name).and_then(|v| match v {
+                                Value::List(items) | Value::Tuple(items) => Some(items.clone()),
+                                Value::Dict(map) => {
+                                    Some(map.keys().map(|k| key_to_value(k.clone())).collect())
+                                }
+                                Value::Set(set) => {
+                                    Some(set.iter().map(|k| key_to_value(k.clone())).collect())
+                                }
+                                Value::Str(s) => {
+                                    Some(s.chars().map(|c| Value::Str(c.to_string())).collect())
+                                }
+                                _ => None,
+                            })
+                        };
+                        if let Some(items) = fast_items {
+                            return self.exec_items_loop(items, target, body, else_branch.as_deref());
+                        }
+                    }
+                }
+
                 let iter_value = self.eval_expr(iter)?;
-                let mut broke = false;
-                // Drive Range lazily to avoid materializing up to N elements
                 if let Value::Range { start, stop, step } = iter_value {
-                    if step == 0 {
-                        return Err(PyError::Runtime("range() step argument must not be zero".to_string()));
-                    }
-                    let mut cur = start;
-                    'range_loop: loop {
-                        if step > 0 && cur >= stop { break; }
-                        if step < 0 && cur <= stop { break; }
-                        self.assign_target(target, Value::Int(cur))?;
-                        match self.exec_block(body)? {
-                            ExecSignal::None => {}
-                            ExecSignal::Break => { broke = true; break 'range_loop; }
-                            ExecSignal::Continue => {}
-                            ExecSignal::Return(v) => return Ok(ExecSignal::Return(v)),
-                        }
-                        cur += step;
-                    }
-                } else {
-                    let values = iter_values(iter_value)?;
-                    for value in values {
-                        self.assign_target(target, value)?;
-                        match self.exec_block(body)? {
-                            ExecSignal::None => {}
-                            ExecSignal::Break => { broke = true; break; }
-                            ExecSignal::Continue => continue,
-                            ExecSignal::Return(value) => return Ok(ExecSignal::Return(value)),
-                        }
-                    }
+                    return self.exec_range_loop(start, stop, step, target, body, else_branch.as_deref());
                 }
-                if !broke {
-                    if let Some(branch) = else_branch {
-                        return self.exec_block(branch);
-                    }
-                }
-                Ok(ExecSignal::None)
+                let values = iter_values(iter_value)?;
+                self.exec_items_loop(values, target, body, else_branch.as_deref())
             }
             Stmt::Try {
                 body,
