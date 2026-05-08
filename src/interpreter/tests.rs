@@ -645,4 +645,31 @@ result = fact(10)
             Some(Value::Str("world".to_string()))
         );
     }
+    #[test]
+    fn licm_invariant_flag_loop() {
+        // 'done' is never assigned in the body → condition is invariant
+        // loop exits via break
+        let interpreter = run_program(
+            "done = False\ncount = 0\nwhile not done:\n    count += 1\n    if count >= 10:\n        break\n",
+        );
+        assert_eq!(interpreter.lookup_name("count").unwrap(), Some(Value::Int(10)));
+    }
+
+    #[test]
+    fn licm_false_condition_skips_body() {
+        let interpreter = run_program(
+            "x = False\nran = False\nwhile x:\n    ran = True\n",
+        );
+        assert_eq!(interpreter.lookup_name("ran").unwrap(), Some(Value::Bool(false)));
+    }
+
+    #[test]
+    fn licm_not_applied_when_condition_name_modified() {
+        // 'i' IS modified in body → NOT invariant → normal while loop behavior
+        let interpreter = run_program(
+            "i = 0\ns = 0\nwhile i < 10:\n    s += i\n    i += 1\n",
+        );
+        assert_eq!(interpreter.lookup_name("s").unwrap(), Some(Value::Int(45)));
+        assert_eq!(interpreter.lookup_name("i").unwrap(), Some(Value::Int(10)));
+    }
 }
