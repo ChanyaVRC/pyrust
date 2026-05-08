@@ -19,6 +19,7 @@ impl Lexer {
     fn lex_source(&mut self, src: &str) -> Result<()> {
         let mut indent_stack: Vec<usize> = vec![0];
         let mut paren_depth: usize = 0; // track ( [ { for implicit line continuation
+        let mut line_continued = false; // track \ line continuation
 
         let lines: Vec<&str> = src.split('\n').collect();
         let mut i = 0;
@@ -29,16 +30,20 @@ impl Lexer {
             let content = &line[indent..];
 
             if content.trim().is_empty() || content.trim_start().starts_with('#') {
-                self.tokens.push(Token::Newline);
+                if !line_continued {
+                    self.tokens.push(Token::Newline);
+                }
                 i += 1;
                 continue;
             }
 
-            if paren_depth == 0 {
+            if paren_depth == 0 && !line_continued {
                 self.handle_indent(indent, &mut indent_stack)?;
             }
-            paren_depth = self.lex_content_tracking(content, paren_depth)?;
-            if paren_depth == 0 {
+            let (new_depth, continued) = self.lex_content_tracking(content, paren_depth)?;
+            paren_depth = new_depth;
+            line_continued = continued;
+            if paren_depth == 0 && !line_continued {
                 self.tokens.push(Token::Newline);
             }
             i += 1;
@@ -74,7 +79,7 @@ impl Lexer {
         Ok(())
     }
 
-    fn lex_content_tracking(&mut self, content: &str, mut paren_depth: usize) -> Result<usize> {
+    fn lex_content_tracking(&mut self, content: &str, mut paren_depth: usize) -> Result<(usize, bool)> {
         let chars: Vec<char> = content.chars().collect();
         let mut pos = 0;
 
@@ -305,14 +310,13 @@ impl Lexer {
                     }
                 }
                 '\\' => {
-                    // Line continuation: skip rest of line
-                    break;
+                    return Ok((paren_depth, true));
                 }
                 _ => return Err(PyError::Lex(format!("unexpected character '{c}'"))),
             }
         }
 
-        Ok(paren_depth)
+        Ok((paren_depth, false))
     }
 }
 
