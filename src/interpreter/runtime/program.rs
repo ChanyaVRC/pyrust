@@ -45,10 +45,15 @@ impl Interpreter {
         Ok(ExecSignal::None)
     }
 
-    // Drives a range(start, stop, step) loop.  When the target is a simple
-    // Name, the target env is resolved once and the slot is updated in-place
-    // on every iteration — no String key clone after the first assignment,
-    // and no per-iteration global/nonlocal HashSet checks.
+    // Drives a range(start, stop, step) loop.
+    //
+    // Pre-computes the total number of iterations once (range_len), then
+    // counts down with a single comparison per iteration instead of two
+    // (step-sign check + value vs stop).
+    //
+    // For a simple Name target, the target env is also resolved once and the
+    // slot is updated in-place — no String key clone after the first iteration,
+    // no per-iteration global/nonlocal HashSet checks.
     fn exec_range_loop(
         &mut self,
         start: i64,
@@ -63,13 +68,14 @@ impl Interpreter {
                 "range() step argument must not be zero".to_string(),
             ));
         }
+        // Pre-compute iteration count (one division, done once).
+        let mut remaining = range_len(start, stop, step);
         let mut broke = false;
         if let AssignTarget::Name(loop_var) = target {
             let target_env = self.resolve_assign_env_for(loop_var);
             let mut cur = start;
             'range_loop: loop {
-                if step > 0 && cur >= stop { break; }
-                if step < 0 && cur <= stop { break; }
+                if remaining == 0 { break; }
                 {
                     let mut env = target_env.borrow_mut();
                     match env.values.get_mut(loop_var.as_str()) {
@@ -84,12 +90,12 @@ impl Interpreter {
                     ExecSignal::Return(v) => return Ok(ExecSignal::Return(v)),
                 }
                 cur += step;
+                remaining -= 1;
             }
         } else {
             let mut cur = start;
             'range_loop: loop {
-                if step > 0 && cur >= stop { break; }
-                if step < 0 && cur <= stop { break; }
+                if remaining == 0 { break; }
                 self.assign_target(target, Value::Int(cur))?;
                 match self.exec_block(body)? {
                     ExecSignal::None => {}
@@ -98,6 +104,7 @@ impl Interpreter {
                     ExecSignal::Return(v) => return Ok(ExecSignal::Return(v)),
                 }
                 cur += step;
+                remaining -= 1;
             }
         }
         if !broke {
