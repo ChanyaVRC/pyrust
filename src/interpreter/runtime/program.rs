@@ -180,6 +180,66 @@ impl Interpreter {
                     ExecSignal::Return(v) => return Ok(ExecSignal::Return(v)),
                 }
             }
+        } else if let AssignTarget::Tuple(ref sub_targets) = *target {
+            // Fast path: all-Name tuple targets — resolve envs once outside the
+            // loop, then write each element directly per iteration.
+            let name_envs: Option<Vec<(String, EnvRef)>> =
+                if sub_targets.iter().all(|t| matches!(t, AssignTarget::Name(_))) {
+                    Some(
+                        sub_targets
+                            .iter()
+                            .map(|t| {
+                                let AssignTarget::Name(n) = t else { unreachable!() };
+                                (n.clone(), self.resolve_assign_env_for(n))
+                            })
+                            .collect(),
+                    )
+                } else {
+                    None
+                };
+
+            if let Some(ref name_envs) = name_envs {
+                for value in items {
+                    let vals = match value {
+                        Value::List(ref v) | Value::Tuple(ref v)
+                            if v.len() == name_envs.len() =>
+                        {
+                            v.clone()
+                        }
+                        _ => {
+                            // Fallback to generic assign_target for unexpected shapes.
+                            self.assign_target(target, value)?;
+                            match self.exec_block(body)? {
+                                ExecSignal::None => {}
+                                ExecSignal::Break => { broke = true; break; }
+                                ExecSignal::Continue => continue,
+                                ExecSignal::Return(v) => return Ok(ExecSignal::Return(v)),
+                            }
+                            continue;
+                        }
+                    };
+                    for ((name, env), v) in name_envs.iter().zip(vals) {
+                        env_assign_local(env, name, v);
+                    }
+                    match self.exec_block(body)? {
+                        ExecSignal::None => {}
+                        ExecSignal::Break => { broke = true; break; }
+                        ExecSignal::Continue => continue,
+                        ExecSignal::Return(v) => return Ok(ExecSignal::Return(v)),
+                    }
+                }
+            } else {
+                // Mixed sub-targets (Attr/Index among them): generic fallback.
+                for value in items {
+                    self.assign_target(target, value)?;
+                    match self.exec_block(body)? {
+                        ExecSignal::None => {}
+                        ExecSignal::Break => { broke = true; break; }
+                        ExecSignal::Continue => continue,
+                        ExecSignal::Return(v) => return Ok(ExecSignal::Return(v)),
+                    }
+                }
+            }
         } else {
             for value in items {
                 self.assign_target(target, value)?;
@@ -388,10 +448,39 @@ impl Interpreter {
                             return self.exec_range_loop(start, stop, step, target, body, else_branch.as_deref());
                         }
 
+                        // List/Tuple: use per-iteration index access (O(1) per step)
+                        // instead of an upfront O(n) clone. This also matches
+                        // CPython's lazy iteration semantics (sees mutations).
+                        if let Some(len) = get_list_len(&env, name) {
+                            let mut broke = false;
+                            let mut i = 0usize;
+                            while i < len {
+                                let item = match get_item_at(&env, name, i) {
+                                    Some(v) => v,
+                                    None => break, // list was shortened during iteration
+                                };
+                                self.assign_target(target, item)?;
+                                match self.exec_block(body)? {
+                                    ExecSignal::None => {}
+                                    ExecSignal::Break => { broke = true; break; }
+                                    ExecSignal::Continue => { i += 1; continue; }
+                                    ExecSignal::Return(v) => return Ok(ExecSignal::Return(v)),
+                                }
+                                i += 1;
+                            }
+                            if !broke {
+                                if let Some(branch) = else_branch.as_deref() {
+                                    return self.exec_block(branch);
+                                }
+                            }
+                            return Ok(ExecSignal::None);
+                        }
+
+                        // Dict/Set/Str: collect upfront (mutation semantics are
+                        // safer this way, matching CPython's snapshot-on-iteration).
                         let fast_items: Option<Vec<Value>> = {
                             let borrowed = env.borrow();
                             borrowed.values.get(name).and_then(|v| match v {
-                                Value::List(items) | Value::Tuple(items) => Some(items.clone()),
                                 Value::Dict(map) => {
                                     Some(map.keys().map(|k| key_to_value(k.clone())).collect())
                                 }

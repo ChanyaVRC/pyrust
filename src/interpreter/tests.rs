@@ -564,4 +564,32 @@ result = fact(10)
         );
         assert_eq!(interpreter.lookup_name("s").unwrap(), Some(Value::Int(45)));
     }
+
+    #[test]
+    fn for_loop_list_lazy_iter_sum() {
+        let interpreter = run_program(
+            "lst = [1, 2, 3, 4, 5]\ntotal = 0\nfor x in lst:\n    total += x\n",
+        );
+        assert_eq!(interpreter.lookup_name("total").unwrap(), Some(Value::Int(15)));
+    }
+
+    #[test]
+    fn for_loop_tuple_unpack_sum() {
+        let interpreter = run_program(
+            "pairs = [(1, 10), (2, 20), (3, 30)]\ntotal = 0\nfor a, b in pairs:\n    total += a + b\n",
+        );
+        assert_eq!(interpreter.lookup_name("total").unwrap(), Some(Value::Int(66)));
+    }
+
+    #[test]
+    fn for_loop_tuple_unpack_names() {
+        let interpreter = run_program(
+            "pairs = [('hello', 1), ('world', 2)]\nlast_k = ''\nfor k, v in pairs:\n    last_k = k\n",
+        );
+        // Just verify it runs without panic and assigned the last key
+        assert_eq!(
+            interpreter.lookup_name("last_k").unwrap(),
+            Some(Value::Str("world".to_string()))
+        );
+    }
 }
