@@ -22,12 +22,14 @@ enum ExecSignal {
     Return(Value),
 }
 
+type ModuleCache = Rc<RefCell<HashMap<String, Value>>>;
+
 pub struct Interpreter {
     env: EnvRef,
     class_closure_env: Option<EnvRef>,
     active_exception: Option<Value>,
     script_dir: Option<PathBuf>,
-    module_cache: HashMap<String, Value>,
+    module_cache: ModuleCache,
 }
 
 impl Default for Interpreter {
@@ -39,7 +41,7 @@ impl Default for Interpreter {
             class_closure_env: None,
             active_exception: None,
             script_dir: None,
-            module_cache: HashMap::new(),
+            module_cache: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 }

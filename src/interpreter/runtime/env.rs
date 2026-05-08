@@ -68,8 +68,8 @@ impl Interpreter {
     }
 
     fn load_module(&mut self, name: &str) -> Result<Value> {
-        if let Some(cached) = self.module_cache.get(name) {
-            return Ok(cached.clone());
+        if let Some(cached) = self.module_cache.borrow().get(name).cloned() {
+            return Ok(cached);
         }
         // Built-in modules
         let builtin = match name {
@@ -78,7 +78,7 @@ impl Interpreter {
             _ => None,
         };
         if let Some(val) = builtin {
-            self.module_cache.insert(name.to_string(), val.clone());
+            self.module_cache.borrow_mut().insert(name.to_string(), val.clone());
             return Ok(val);
         }
         // User .py file: look for <name>.py relative to script_dir
@@ -92,10 +92,10 @@ impl Interpreter {
                 })?;
                 let tokens = Lexer::new(&src)?;
                 let program = Parser::new(tokens.into_tokens()).parse_program()?;
-                // Run in isolated interpreter (shares no env with caller)
+                // Subinterpreter shares the same module_cache so results are visible to parent
                 let mut sub = Interpreter::default();
                 sub.script_dir = self.script_dir.clone();
-                sub.module_cache = self.module_cache.clone();
+                sub.module_cache = Rc::clone(&self.module_cache);
                 sub.exec_program(&program, false)?;
                 // Harvest all top-level bindings as module attrs
                 let attrs: HashMap<String, Value> = sub
@@ -104,7 +104,6 @@ impl Interpreter {
                     .values
                     .iter()
                     .filter(|(k, _)| {
-                        // Skip built-ins that the default env populates via install_exception_builtins
                         !matches!(
                             k.as_str(),
                             "Exception"
@@ -120,7 +119,7 @@ impl Interpreter {
                     name: name.to_string(),
                     attrs,
                 })));
-                self.module_cache.insert(name.to_string(), module.clone());
+                self.module_cache.borrow_mut().insert(name.to_string(), module.clone());
                 return Ok(module);
             }
         }
