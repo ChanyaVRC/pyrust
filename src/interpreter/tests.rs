@@ -324,4 +324,130 @@ result = fib(35)
         assert_eq!(interpreter.lookup_name("a").unwrap(), Some(Value::Int(1)));
         assert_eq!(interpreter.lookup_name("b").unwrap(), Some(Value::Int(2)));
     }
+
+    #[test]
+    fn while_true_loop_runs_until_break() {
+        let interpreter = run_program(
+            "n = 0\nwhile True:\n    n += 1\n    if n == 5:\n        break\n",
+        );
+        assert_eq!(interpreter.lookup_name("n").unwrap(), Some(Value::Int(5)));
+    }
+
+    #[test]
+    fn while_false_body_never_runs() {
+        let interpreter = run_program("x = 0\nwhile False:\n    x = 99\n");
+        assert_eq!(interpreter.lookup_name("x").unwrap(), Some(Value::Int(0)));
+    }
+
+    #[test]
+    fn while_false_else_branch_runs() {
+        let interpreter = run_program("x = 0\nwhile False:\n    x = 99\nelse:\n    x = 42\n");
+        assert_eq!(interpreter.lookup_name("x").unwrap(), Some(Value::Int(42)));
+    }
+
+    #[test]
+    fn enumerate_builtin_yields_index_value_pairs() {
+        let interpreter =
+            run_program("result = list(enumerate(['a', 'b', 'c']))\n");
+        assert_eq!(
+            interpreter.lookup_name("result").unwrap(),
+            Some(Value::List(vec![
+                Value::Tuple(vec![Value::Int(0), Value::Str("a".into())]),
+                Value::Tuple(vec![Value::Int(1), Value::Str("b".into())]),
+                Value::Tuple(vec![Value::Int(2), Value::Str("c".into())]),
+            ]))
+        );
+    }
+
+    #[test]
+    fn enumerate_with_start_offset() {
+        let interpreter = run_program(
+            "result = list(enumerate(['x', 'y'], 10))\n",
+        );
+        assert_eq!(
+            interpreter.lookup_name("result").unwrap(),
+            Some(Value::List(vec![
+                Value::Tuple(vec![Value::Int(10), Value::Str("x".into())]),
+                Value::Tuple(vec![Value::Int(11), Value::Str("y".into())]),
+            ]))
+        );
+    }
+
+    #[test]
+    fn zip_builtin_pairs_two_iterables() {
+        let interpreter = run_program("result = list(zip([1, 2, 3], ['a', 'b', 'c']))\n");
+        assert_eq!(
+            interpreter.lookup_name("result").unwrap(),
+            Some(Value::List(vec![
+                Value::Tuple(vec![Value::Int(1), Value::Str("a".into())]),
+                Value::Tuple(vec![Value::Int(2), Value::Str("b".into())]),
+                Value::Tuple(vec![Value::Int(3), Value::Str("c".into())]),
+            ]))
+        );
+    }
+
+    #[test]
+    fn zip_truncates_to_shortest() {
+        let interpreter = run_program("result = list(zip([1, 2, 3], [10, 20]))\n");
+        assert_eq!(
+            interpreter.lookup_name("result").unwrap(),
+            Some(Value::List(vec![
+                Value::Tuple(vec![Value::Int(1), Value::Int(10)]),
+                Value::Tuple(vec![Value::Int(2), Value::Int(20)]),
+            ]))
+        );
+    }
+
+    #[test]
+    fn sorted_builtin_returns_sorted_list() {
+        let interpreter = run_program("result = sorted([3, 1, 4, 1, 5, 9, 2, 6])\n");
+        assert_eq!(
+            interpreter.lookup_name("result").unwrap(),
+            Some(Value::List(vec![
+                Value::Int(1), Value::Int(1), Value::Int(2), Value::Int(3),
+                Value::Int(4), Value::Int(5), Value::Int(6), Value::Int(9),
+            ]))
+        );
+    }
+
+    #[test]
+    fn sorted_with_reverse_flag() {
+        let interpreter = run_program("result = sorted([3, 1, 2], reverse=True)\n");
+        assert_eq!(
+            interpreter.lookup_name("result").unwrap(),
+            Some(Value::List(vec![Value::Int(3), Value::Int(2), Value::Int(1)]))
+        );
+    }
+
+    #[test]
+    fn reversed_builtin_reverses_list() {
+        let interpreter = run_program("result = list(reversed([1, 2, 3]))\n");
+        assert_eq!(
+            interpreter.lookup_name("result").unwrap(),
+            Some(Value::List(vec![Value::Int(3), Value::Int(2), Value::Int(1)]))
+        );
+    }
+
+    #[test]
+    fn abs_min_max_sum_work() {
+        let interpreter = run_program(
+            "a = abs(-7)\nb = min(3, 1, 4)\nc = max([5, 2, 8])\nd = sum([1, 2, 3, 4])\n",
+        );
+        assert_eq!(interpreter.lookup_name("a").unwrap(), Some(Value::Int(7)));
+        assert_eq!(interpreter.lookup_name("b").unwrap(), Some(Value::Int(1)));
+        assert_eq!(interpreter.lookup_name("c").unwrap(), Some(Value::Int(8)));
+        assert_eq!(interpreter.lookup_name("d").unwrap(), Some(Value::Int(10)));
+    }
+
+    #[test]
+    fn int_float_str_bool_conversions() {
+        let interpreter = run_program(
+            "a = int('42')\nb = float('3.14')\nc = str(100)\nd = bool(0)\ne = bool(1)\n",
+        );
+        assert_eq!(interpreter.lookup_name("a").unwrap(), Some(Value::Int(42)));
+        assert_eq!(interpreter.lookup_name("b").unwrap(), Some(Value::Float(3.14)));
+        assert_eq!(interpreter.lookup_name("c").unwrap(), Some(Value::Str("100".into())));
+        assert_eq!(interpreter.lookup_name("d").unwrap(), Some(Value::Bool(false)));
+        assert_eq!(interpreter.lookup_name("e").unwrap(), Some(Value::Bool(true)));
+    }
 }

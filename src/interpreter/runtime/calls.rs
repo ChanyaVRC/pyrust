@@ -41,6 +41,241 @@ impl Interpreter {
                 Ok(Value::Int(size))
             }
             Value::Builtin("range") => self.call_range_expanded(args),
+
+            Value::Builtin("enumerate") => {
+                reject_keyword_args_expanded("enumerate", args)?;
+                if args.is_empty() || args.len() > 2 {
+                    return Err(PyError::Runtime(
+                        "enumerate() takes 1 or 2 arguments".to_string(),
+                    ));
+                }
+                let start = if args.len() == 2 {
+                    match &args[1].value {
+                        Value::Int(n) => *n,
+                        _ => return Err(PyError::Runtime(
+                            "enumerate() start argument must be an integer".to_string(),
+                        )),
+                    }
+                } else {
+                    0i64
+                };
+                let items = iter_values(args[0].value.clone())?;
+                Ok(Value::List(
+                    items
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, v)| Value::Tuple(vec![Value::Int(i as i64 + start), v]))
+                        .collect(),
+                ))
+            }
+
+            Value::Builtin("zip") => {
+                reject_keyword_args_expanded("zip", args)?;
+                if args.is_empty() {
+                    return Ok(Value::List(vec![]));
+                }
+                let mut iters: Vec<Vec<Value>> = Vec::with_capacity(args.len());
+                for arg in args {
+                    iters.push(iter_values(arg.value.clone())?);
+                }
+                let len = iters.iter().map(|v| v.len()).min().unwrap_or(0);
+                Ok(Value::List(
+                    (0..len)
+                        .map(|i| Value::Tuple(iters.iter().map(|it| it[i].clone()).collect()))
+                        .collect(),
+                ))
+            }
+
+            Value::Builtin("reversed") => {
+                reject_keyword_args_expanded("reversed", args)?;
+                if args.len() != 1 {
+                    return Err(PyError::Runtime(
+                        "reversed() takes exactly one argument".to_string(),
+                    ));
+                }
+                let mut items = iter_values(args[0].value.clone())?;
+                items.reverse();
+                Ok(Value::List(items))
+            }
+
+            Value::Builtin("sorted") => {
+                if args.is_empty() {
+                    return Err(PyError::Runtime(
+                        "sorted() requires at least one argument".to_string(),
+                    ));
+                }
+                let reverse = args.iter().find(|a| a.name.as_deref() == Some("reverse"))
+                    .map(|a| a.value.truthy())
+                    .unwrap_or(false);
+                let key_fn = args.iter().find(|a| a.name.as_deref() == Some("key"))
+                    .map(|a| a.value.clone());
+                let positional: Vec<&ExpandedCallArg> = args.iter()
+                    .filter(|a| a.name.is_none())
+                    .collect();
+                if positional.len() != 1 {
+                    return Err(PyError::Runtime(
+                        "sorted() takes exactly one positional argument".to_string(),
+                    ));
+                }
+                let mut items = iter_values(positional[0].value.clone())?;
+                if let Some(kfn) = key_fn {
+                    let mut keyed: Vec<(Value, Value)> = items
+                        .into_iter()
+                        .map(|v| {
+                            let k = self.call_function_expanded(
+                                kfn.clone(),
+                                &[ExpandedCallArg { name: None, value: v.clone() }],
+                            )?;
+                            Ok((k, v))
+                        })
+                        .collect::<Result<_>>()?;
+                    keyed.sort_by(|(a, _), (b, _)| compare_values(a, b));
+                    items = keyed.into_iter().map(|(_, v)| v).collect();
+                } else {
+                    items.sort_by(compare_values);
+                }
+                if reverse {
+                    items.reverse();
+                }
+                Ok(Value::List(items))
+            }
+
+            Value::Builtin("abs") => {
+                reject_keyword_args_expanded("abs", args)?;
+                if args.len() != 1 {
+                    return Err(PyError::Runtime(
+                        "abs() takes exactly one argument".to_string(),
+                    ));
+                }
+                match &args[0].value {
+                    Value::Int(v) => Ok(Value::Int(v.abs())),
+                    Value::Float(v) => Ok(Value::Float(v.abs())),
+                    Value::Bool(b) => Ok(Value::Int(if *b { 1 } else { 0 })),
+                    _ => Err(PyError::Runtime(
+                        "abs() argument must be a number".to_string(),
+                    )),
+                }
+            }
+
+            Value::Builtin("min") | Value::Builtin("max") => {
+                let is_max = matches!(function, Value::Builtin("max"));
+                let fname = if is_max { "max" } else { "min" };
+                reject_keyword_args_expanded(fname, args)?;
+                let items: Vec<Value> = if args.len() == 1 {
+                    iter_values(args[0].value.clone())?
+                } else if args.len() >= 2 {
+                    args.iter().map(|a| a.value.clone()).collect()
+                } else {
+                    return Err(PyError::Runtime(format!(
+                        "{fname}() expected at least one argument"
+                    )));
+                };
+                if items.is_empty() {
+                    return Err(PyError::Runtime(format!(
+                        "{fname}() arg is an empty sequence"
+                    )));
+                }
+                let result = items.into_iter().reduce(|acc, v| {
+                    let cmp = compare_values(&v, &acc);
+                    if is_max && cmp == std::cmp::Ordering::Greater { v } else if !is_max && cmp == std::cmp::Ordering::Less { v } else { acc }
+                }).unwrap();
+                Ok(result)
+            }
+
+            Value::Builtin("sum") => {
+                reject_keyword_args_expanded("sum", args)?;
+                if args.is_empty() || args.len() > 2 {
+                    return Err(PyError::Runtime(
+                        "sum() takes 1 or 2 arguments".to_string(),
+                    ));
+                }
+                let items = iter_values(args[0].value.clone())?;
+                let start = if args.len() == 2 { args[1].value.clone() } else { Value::Int(0) };
+                let mut acc = start;
+                for item in items {
+                    acc = self.eval_binary(acc, BinaryOp::Add, item)?;
+                }
+                Ok(acc)
+            }
+
+            Value::Builtin("list") => {
+                reject_keyword_args_expanded("list", args)?;
+                match args.len() {
+                    0 => Ok(Value::List(vec![])),
+                    1 => Ok(Value::List(iter_values(args[0].value.clone())?)),
+                    _ => Err(PyError::Runtime("list() takes at most one argument".to_string())),
+                }
+            }
+
+            Value::Builtin("tuple") => {
+                reject_keyword_args_expanded("tuple", args)?;
+                match args.len() {
+                    0 => Ok(Value::Tuple(vec![])),
+                    1 => Ok(Value::Tuple(iter_values(args[0].value.clone())?)),
+                    _ => Err(PyError::Runtime("tuple() takes at most one argument".to_string())),
+                }
+            }
+
+            Value::Builtin("str") => {
+                reject_keyword_args_expanded("str", args)?;
+                match args.len() {
+                    0 => Ok(Value::Str(String::new())),
+                    1 => Ok(Value::Str(args[0].value.to_py_str())),
+                    _ => Err(PyError::Runtime("str() takes at most one argument".to_string())),
+                }
+            }
+
+            Value::Builtin("int") => {
+                reject_keyword_args_expanded("int", args)?;
+                match args.len() {
+                    0 => Ok(Value::Int(0)),
+                    1 => match &args[0].value {
+                        Value::Int(v) => Ok(Value::Int(*v)),
+                        Value::Float(v) => Ok(Value::Int(*v as i64)),
+                        Value::Bool(b) => Ok(Value::Int(if *b { 1 } else { 0 })),
+                        Value::Str(s) => s.trim().parse::<i64>().map(Value::Int).map_err(|_| {
+                            PyError::Runtime(format!(
+                                "invalid literal for int() with base 10: '{s}'"
+                            ))
+                        }),
+                        _ => Err(PyError::Runtime(
+                            "int() argument must be a number or string".to_string(),
+                        )),
+                    },
+                    _ => Err(PyError::Runtime("int() takes at most one argument".to_string())),
+                }
+            }
+
+            Value::Builtin("float") => {
+                reject_keyword_args_expanded("float", args)?;
+                match args.len() {
+                    0 => Ok(Value::Float(0.0)),
+                    1 => match &args[0].value {
+                        Value::Float(v) => Ok(Value::Float(*v)),
+                        Value::Int(v) => Ok(Value::Float(*v as f64)),
+                        Value::Bool(b) => Ok(Value::Float(if *b { 1.0 } else { 0.0 })),
+                        Value::Str(s) => s.trim().parse::<f64>().map(Value::Float).map_err(|_| {
+                            PyError::Runtime(format!(
+                                "could not convert string to float: '{s}'"
+                            ))
+                        }),
+                        _ => Err(PyError::Runtime(
+                            "float() argument must be a number or string".to_string(),
+                        )),
+                    },
+                    _ => Err(PyError::Runtime("float() takes at most one argument".to_string())),
+                }
+            }
+
+            Value::Builtin("bool") => {
+                reject_keyword_args_expanded("bool", args)?;
+                match args.len() {
+                    0 => Ok(Value::Bool(false)),
+                    1 => Ok(Value::Bool(args[0].value.truthy())),
+                    _ => Err(PyError::Runtime("bool() takes at most one argument".to_string())),
+                }
+            }
+
             Value::Builtin("sys.exit") => {
                 let code = if args.is_empty() {
                     0i32

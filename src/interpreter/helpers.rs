@@ -1,3 +1,45 @@
+/// True for expressions that are statically always-truthy (no side effects).
+fn is_const_true(expr: &Expr) -> bool {
+    matches!(expr, Expr::Bool(true) | Expr::Int(1))
+}
+
+/// Total order for Python values used by `sorted()` / `min()` / `max()`.
+/// Mirrors CPython's `<` semantics: numbers by magnitude, strings
+/// lexicographically, bools as 0/1.  Incomparable pairs fall back to
+/// `Ordering::Equal` (same as CPython raising TypeError in that case, but we
+/// keep the sort stable rather than panicking).
+fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
+    match (a, b) {
+        (Value::Int(x), Value::Int(y)) => x.cmp(y),
+        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+        (Value::Int(x), Value::Float(y)) => (*x as f64).partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+        (Value::Float(x), Value::Int(y)) => x.partial_cmp(&(*y as f64)).unwrap_or(std::cmp::Ordering::Equal),
+        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+        (Value::Bool(x), Value::Int(y)) => (*x as i64).cmp(y),
+        (Value::Int(x), Value::Bool(y)) => x.cmp(&(*y as i64)),
+        (Value::Str(x), Value::Str(y)) => x.cmp(y),
+        (Value::Tuple(x), Value::Tuple(y)) => {
+            for (a, b) in x.iter().zip(y.iter()) {
+                let ord = compare_values(a, b);
+                if ord != std::cmp::Ordering::Equal {
+                    return ord;
+                }
+            }
+            x.len().cmp(&y.len())
+        }
+        _ => std::cmp::Ordering::Equal,
+    }
+}
+
+/// True for expressions that are statically always-falsy (no side effects).
+fn is_const_false(expr: &Expr) -> bool {
+    match expr {
+        Expr::Bool(false) | Expr::Int(0) | Expr::None => true,
+        Expr::Float(f) => *f == 0.0,
+        _ => false,
+    }
+}
+
 enum BlockOutcome {
     Signal(ExecSignal),
     Error(PyError),
