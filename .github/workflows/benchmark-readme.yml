@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -22,6 +22,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
@@ -43,36 +45,51 @@ jobs:
       - name: Set benchmark timestamp
         run: echo "BENCHMARK_TIMESTAMP_UTC=$(date -u +'%Y-%m-%d %H:%M:%S')" >> "$GITHUB_ENV"
 
-      - name: Run benchmark and export SVG
-        run: python tools/benchmark_compare.py --iterations 10 --top 12 --svg-out benchmark.svg
+      - name: Run benchmark and export snapshot
+        run: |
+          python tools/benchmark_compare.py \
+            --iterations 10 --top 12 \
+            --svg-out benchmark.svg \
+            --json-out benchmark-snapshot.json
 
-      - name: Build Pages content
+      - name: Fetch benchmark history
+        run: |
+          if git fetch origin benchmark-data; then
+            git worktree add /tmp/bench-data benchmark-data
+          else
+            # First run: create orphan branch
+            git worktree add --no-checkout /tmp/bench-data
+            cd /tmp/bench-data
+            git checkout --orphan benchmark-data
+            git rm -rf . 2>/dev/null || true
+            echo '[]' > history.json
+            git add history.json
+            git -c user.email="github-actions[bot]@users.noreply.github.com" \
+                -c user.name="github-actions[bot]" \
+                commit -m "init: benchmark-data branch"
+            git push origin benchmark-data
+          fi
+
+      - name: Build pages with updated history
         run: |
           mkdir -p dist
+          python tools/build_benchmark_pages.py \
+            --snapshot benchmark-snapshot.json \
+            --history /tmp/bench-data/history.json \
+            --svg benchmark.svg \
+            --out-html dist/index.html \
+            --max-entries 200
           cp benchmark.svg dist/benchmark.svg
-          cat > dist/index.html << 'HTML'
-          <!doctype html>
-          <html lang="en">
-          <head>
-            <meta charset="utf-8" />
-            <meta name="viewport" content="width=device-width, initial-scale=1" />
-            <title>PyRust Benchmark</title>
-            <style>
-              body { margin: 0; background: #0b1220; color: #e2e8f0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
-              .wrap { max-width: 1280px; margin: 24px auto; padding: 0 16px; }
-              img { width: 100%; height: auto; border: 1px solid #334155; border-radius: 12px; background: #0f172a; }
-              a { color: #93c5fd; }
-            </style>
-          </head>
-          <body>
-            <div class="wrap">
-              <h1>PyRust Latest Benchmark</h1>
-              <p>This image is auto-generated on every push to master.</p>
-              <img src="./benchmark.svg" alt="PyRust benchmark snapshot" />
-            </div>
-          </body>
-          </html>
-          HTML
+
+      - name: Push updated history to benchmark-data branch
+        run: |
+          cd /tmp/bench-data
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add history.json
+          git diff --cached --quiet || \
+            git commit -m "benchmark: ${GITHUB_SHA::12} $(date -u +'%Y-%m-%d')"
+          git push origin benchmark-data
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
