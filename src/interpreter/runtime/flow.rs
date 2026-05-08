@@ -88,6 +88,65 @@ impl Interpreter {
         targets
     }
 
+    /// If `key` is a 3-element tuple produced by the slice compiler, unpack it.
+    /// Returns `Some((lo, hi, step))` where each is `None` for a missing bound.
+    pub(crate) fn unpack_slice_key(key: &Value) -> Option<(Option<Value>, Option<Value>, Option<Value>)> {
+        if let Value::Tuple(elems) = key {
+            if elems.len() == 3 {
+                let opt = |v: &Value| if matches!(v, Value::None) { None } else { Some(v.clone()) };
+                return Some((opt(&elems[0]), opt(&elems[1]), opt(&elems[2])));
+            }
+        }
+        None
+    }
+
+    /// Slice-assign: `items[lo:hi:step] = new_items`.
+    pub(crate) fn slice_setitem(
+        items: &mut Vec<Value>,
+        lo: Option<&Value>,
+        hi: Option<&Value>,
+        st: Option<&Value>,
+        new_items: Vec<Value>,
+    ) -> Result<()> {
+        let len = items.len() as i64;
+        let (start, end, step) = Self::resolve_slice_bounds(len, lo, hi, st)?;
+        if step == 1 {
+            let s = start as usize;
+            let e = end as usize;
+            items.splice(s..e, new_items);
+        } else {
+            let indices = Self::slice_target_indices(len, start, end, step);
+            if indices.len() != new_items.len() {
+                return Err(PyError::Runtime(
+                    "attempt to assign sequence of wrong size".to_string(),
+                ));
+            }
+            for (ix, val) in indices.into_iter().zip(new_items) {
+                items[ix] = val;
+            }
+        }
+        Ok(())
+    }
+
+    /// Slice-delete: `del items[lo:hi:step]` (equivalent to `items[lo:hi:step] = []`).
+    pub(crate) fn slice_delitem(
+        items: &mut Vec<Value>,
+        lo: Option<&Value>,
+        hi: Option<&Value>,
+        st: Option<&Value>,
+    ) -> Result<()> {
+        let len = items.len() as i64;
+        let (start, end, step) = Self::resolve_slice_bounds(len, lo, hi, st)?;
+        let indices = Self::slice_target_indices(len, start, end, step);
+        // Remove in reverse so indices stay valid.
+        let mut sorted = indices;
+        sorted.sort_unstable_by(|a, b| b.cmp(a));
+        for ix in sorted {
+            items.remove(ix);
+        }
+        Ok(())
+    }
+
     fn coerce_to_exception(&self, value: Value) -> Result<Value> {
         match value {
             Value::Instance(instance) => {

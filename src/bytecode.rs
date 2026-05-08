@@ -46,6 +46,8 @@ pub enum Insn {
     Move(Reg, Reg),
     /// R[dst] = R[lhs] op R[rhs]
     BinOp(Reg, Reg, BinaryOp, Reg),
+    /// R[dst] = R[lhs] op= R[rhs]  (tries __i<op>__ before __<op>__)
+    BinOpInPlace(Reg, Reg, BinaryOp, Reg),
     /// R[dst] = R[lhs] op consts[const_idx]  (fuses LoadConst + BinOp)
     BinOpConst(Reg, Reg, BinaryOp, u16),
     /// R[dst] = unary_op(R[src])
@@ -94,6 +96,8 @@ pub enum Insn {
     RaiseAssert(Reg),
     /// raise R[exc]  (coerces class to instance)
     RaiseValue(Reg),
+    /// raise R[exc] from R[cause]  (sets __cause__ on the coerced instance)
+    RaiseFrom(Reg, Reg),
     /// re-raise active exception (bare `raise`)
     RaiseReRaise,
     /// R[dst] = new UserFunction(fn_protos[proto_idx], defaults R[defs_base..+defs_n], env=current)

@@ -2,6 +2,9 @@ impl Interpreter {
     fn get_attr(&self, target: Value, name: &str) -> Result<Value> {
         match target {
             Value::Instance(instance) => {
+                if name == "__class__" {
+                    return Ok(Value::Class(Rc::clone(&instance.borrow().class)));
+                }
                 if let Some(value) = instance.borrow().attrs.get(name).cloned() {
                     return Ok(value);
                 }

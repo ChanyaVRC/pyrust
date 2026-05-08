@@ -216,6 +216,25 @@ impl Interpreter {
                 }
             }
 
+            Value::Builtin("set") => {
+                reject_keyword_args_expanded("set", args)?;
+                match args.len() {
+                    0 => Ok(Value::Set(indexmap::IndexSet::new())),
+                    1 => {
+                        let items = iter_values(args[0].value.clone())?;
+                        let mut set = indexmap::IndexSet::new();
+                        for item in items {
+                            let key = item.to_key().ok_or_else(|| {
+                                PyError::Runtime("unhashable type in set".to_string())
+                            })?;
+                            set.insert(key);
+                        }
+                        Ok(Value::Set(set))
+                    }
+                    _ => Err(PyError::Runtime("set() takes at most one argument".to_string())),
+                }
+            }
+
             Value::Builtin("str") => {
                 reject_keyword_args_expanded("str", args)?;
                 match args.len() {

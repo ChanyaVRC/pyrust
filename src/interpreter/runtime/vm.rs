@@ -111,6 +111,20 @@ impl Interpreter {
                     };
                     regs[*dst as usize] = Some(result);
                 }
+                Insn::BinOpInPlace(dst, lhs, op, rhs) => {
+                    let l = vm_try!(vm_read(regs, *lhs, num_locals));
+                    let r = vm_try!(vm_read(regs, *rhs, num_locals));
+                    let result = if *op == BinaryOp::MatMul {
+                        if let Some(v) = vm_try!(self.try_inplace_matmul(l.clone(), r.clone())) {
+                            v
+                        } else {
+                            vm_try!(self.eval_binary(l, BinaryOp::MatMul, r))
+                        }
+                    } else {
+                        vm_try!(self.eval_binary(l, *op, r))
+                    };
+                    regs[*dst as usize] = Some(result);
+                }
                 Insn::BinOpConst(dst, lhs, op, const_idx) => {
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = code.consts[*const_idx as usize].clone();
@@ -169,71 +183,122 @@ impl Interpreter {
                 }
                 Insn::GetItem(dst, obj, idx) => {
                     let idx_val = vm_try!(vm_read(regs, *idx, num_locals));
-                    // Fast path: read directly from the register without cloning
-                    // the entire collection (avoids O(n) clone per GetItem call).
-                    let result = match regs[*obj as usize].as_ref() {
-                        Some(Value::List(items)) => {
-                            let i = vm_try!(normalize_index(&idx_val, items.len()));
-                            items[i].clone()
-                        }
-                        Some(Value::Tuple(items)) => {
-                            let i = vm_try!(normalize_index(&idx_val, items.len()));
-                            items[i].clone()
-                        }
-                        Some(Value::Dict(dict)) => {
-                            let key = vm_try!(idx_val.to_key().ok_or_else(|| {
-                                PyError::Runtime("unhashable key type".to_string())
-                            }));
-                            vm_try!(dict
-                                .get(&key)
-                                .cloned()
-                                .ok_or_else(|| PyError::Runtime("key error".to_string())))
-                        }
-                        _ => {
-                            let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
-                            vm_try!(self.eval_index(obj_val, idx_val))
-                        }
-                    };
-                    regs[*dst as usize] = Some(result);
+                    // Slice key: tuple of (lo, hi, step) produced by the compiler.
+                    if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
+                        let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
+                        let result = vm_try!(self.eval_slice(obj_val, lo, hi, st));
+                        regs[*dst as usize] = Some(result);
+                    } else {
+                        // Fast path: read directly from the register without cloning
+                        // the entire collection (avoids O(n) clone per GetItem call).
+                        let result = match regs[*obj as usize].as_ref() {
+                            Some(Value::List(items)) => {
+                                let i = vm_try!(normalize_index(&idx_val, items.len()));
+                                items[i].clone()
+                            }
+                            Some(Value::Tuple(items)) => {
+                                let i = vm_try!(normalize_index(&idx_val, items.len()));
+                                items[i].clone()
+                            }
+                            Some(Value::Dict(dict)) => {
+                                let key = vm_try!(idx_val.to_key().ok_or_else(|| {
+                                    PyError::Runtime("unhashable key type".to_string())
+                                }));
+                                vm_try!(dict
+                                    .get(&key)
+                                    .cloned()
+                                    .ok_or_else(|| PyError::Runtime("key error".to_string())))
+                            }
+                            _ => {
+                                let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
+                                vm_try!(self.eval_index(obj_val, idx_val))
+                            }
+                        };
+                        regs[*dst as usize] = Some(result);
+                    }
                 }
                 Insn::SetItem(obj, idx, val) => {
                     let idx_val = vm_try!(vm_read(regs, *idx, num_locals));
                     let val_val = vm_try!(vm_read(regs, *val, num_locals));
-                    match regs[*obj as usize].as_mut() {
-                        Some(Value::List(items)) => {
-                            let i = vm_try!(normalize_index(&idx_val, items.len()));
-                            items[i] = val_val;
+                    // Slice assignment: tuple key on a list.
+                    if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
+                        let new_items = match val_val {
+                            Value::List(v) => v,
+                            other => vm_try!(iter_values(other).map_err(|_| {
+                                PyError::Runtime("slice assignment requires iterable".to_string())
+                            })),
+                        };
+                        match regs[*obj as usize].as_mut() {
+                            Some(Value::List(items)) => {
+                                vm_try!(Self::slice_setitem(
+                                    items,
+                                    lo.as_ref(),
+                                    hi.as_ref(),
+                                    st.as_ref(),
+                                    new_items,
+                                ));
+                            }
+                            _ => {
+                                vm_try!(Err(PyError::Runtime(
+                                    "object does not support slice assignment".to_string(),
+                                )));
+                            }
                         }
-                        Some(Value::Dict(dict)) => {
-                            let key = vm_try!(idx_val.to_key().ok_or_else(|| {
-                                PyError::Runtime("unhashable type".to_string())
-                            }));
-                            dict.insert(key, val_val);
-                        }
-                        _ => {
-                            vm_try!(Err(PyError::Runtime(
-                                "object does not support item assignment".to_string(),
-                            )));
+                    } else {
+                        match regs[*obj as usize].as_mut() {
+                            Some(Value::List(items)) => {
+                                let i = vm_try!(normalize_index(&idx_val, items.len()));
+                                items[i] = val_val;
+                            }
+                            Some(Value::Dict(dict)) => {
+                                let key = vm_try!(idx_val.to_key().ok_or_else(|| {
+                                    PyError::Runtime("unhashable type".to_string())
+                                }));
+                                dict.insert(key, val_val);
+                            }
+                            _ => {
+                                vm_try!(Err(PyError::Runtime(
+                                    "object does not support item assignment".to_string(),
+                                )));
+                            }
                         }
                     }
                 }
                 Insn::DeleteItem(obj, idx) => {
                     let idx_val = vm_try!(vm_read(regs, *idx, num_locals));
-                    match regs[*obj as usize].as_mut() {
-                        Some(Value::List(items)) => {
-                            let i = vm_try!(normalize_index(&idx_val, items.len()));
-                            items.remove(i);
+                    if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
+                        match regs[*obj as usize].as_mut() {
+                            Some(Value::List(items)) => {
+                                vm_try!(Self::slice_delitem(
+                                    items,
+                                    lo.as_ref(),
+                                    hi.as_ref(),
+                                    st.as_ref(),
+                                ));
+                            }
+                            _ => {
+                                vm_try!(Err(PyError::Runtime(
+                                    "object does not support slice deletion".to_string(),
+                                )));
+                            }
                         }
-                        Some(Value::Dict(dict)) => {
-                            let key = vm_try!(idx_val.to_key().ok_or_else(|| {
-                                PyError::Runtime("unhashable type".to_string())
-                            }));
-                            dict.remove(&key);
-                        }
-                        _ => {
-                            vm_try!(Err(PyError::Runtime(
-                                "object does not support item deletion".to_string(),
-                            )));
+                    } else {
+                        match regs[*obj as usize].as_mut() {
+                            Some(Value::List(items)) => {
+                                let i = vm_try!(normalize_index(&idx_val, items.len()));
+                                items.remove(i);
+                            }
+                            Some(Value::Dict(dict)) => {
+                                let key = vm_try!(idx_val.to_key().ok_or_else(|| {
+                                    PyError::Runtime("unhashable type".to_string())
+                                }));
+                                dict.remove(&key);
+                            }
+                            _ => {
+                                vm_try!(Err(PyError::Runtime(
+                                    "object does not support item deletion".to_string(),
+                                )));
+                            }
                         }
                     }
                 }
@@ -293,6 +358,16 @@ impl Interpreter {
                 Insn::RaiseValue(src) => {
                     let val = vm_try!(vm_read(regs, *src, num_locals));
                     let exc = vm_try!(self.coerce_to_exception(val));
+                    vm_try!(Err::<(), _>(PyError::Raised(exc)));
+                }
+                Insn::RaiseFrom(src, cause_reg) => {
+                    let val = vm_try!(vm_read(regs, *src, num_locals));
+                    let cause = vm_try!(vm_read(regs, *cause_reg, num_locals));
+                    let exc = vm_try!(self.coerce_to_exception(val));
+                    if let Value::Instance(ref inst) = exc {
+                        inst.borrow_mut().attrs.insert("__cause__".to_string(), cause);
+                        inst.borrow_mut().attrs.insert("__suppress_context__".to_string(), Value::Bool(true));
+                    }
                     vm_try!(Err::<(), _>(PyError::Raised(exc)));
                 }
                 Insn::RaiseReRaise => {

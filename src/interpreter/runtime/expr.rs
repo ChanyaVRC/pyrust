@@ -676,6 +676,7 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
         "sum" => Some(Value::Builtin("sum")),
         "list" => Some(Value::Builtin("list")),
         "tuple" => Some(Value::Builtin("tuple")),
+        "set" => Some(Value::Builtin("set")),
         "str" => Some(Value::Builtin("str")),
         "int" => Some(Value::Builtin("int")),
         "float" => Some(Value::Builtin("float")),

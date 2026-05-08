@@ -801,6 +801,18 @@ impl Compiler {
     // ── Store helpers ─────────────────────────────────────────────────────────
 
     /// Emit the appropriate store for `name` from register `src`.
+    /// If `container_expr` is a global/cell variable name, write `obj_reg` back
+    /// to the env.  Called after SetItem/SetSlice on a container that was loaded
+    /// via LoadGlobal (which creates a copy, so the mutation must be committed).
+    fn writeback_container_if_global(&mut self, container_expr: &Expr, obj_reg: Reg) {
+        if let Expr::Var(name) = container_expr {
+            if self.local_reg(name).is_none() {
+                let name_idx = self.intern_name(name);
+                self.emit(Insn::StoreGlobal(name_idx, obj_reg));
+            }
+        }
+    }
+
     fn compile_store_name(&mut self, name: &str, src: Reg) {
         if let Some(reg) = self.local_reg(name) {
             if src != reg {
@@ -912,6 +924,7 @@ impl Compiler {
                 self.emit(Insn::SetItem(obj, idx, val));
                 self.free_temp(val);
                 self.free_temp(idx);
+                self.writeback_container_if_global(target, obj);
                 self.free_temp(obj);
             }
             Stmt::SliceAssign {
@@ -921,65 +934,14 @@ impl Compiler {
                 step,
                 expr,
             } => {
-                // Compile as: obj[lower:upper:step] = expr
-                // We don't have a dedicated slice-assign instruction; call the
-                // runtime helper via a synthetic call or just set up the slice.
-                // For now, compile the RHS and use SetItem with a slice object.
-                // This is a simplified implementation.
                 let obj = self.compile_expr(target);
+                let slice_r =
+                    self.compile_slice_key(lower.as_deref(), upper.as_deref(), step.as_deref());
                 let val = self.compile_expr(expr);
-                // Build a tuple (lower, upper, step) to represent the slice key.
-                let lower_r = if let Some(e) = lower {
-                    self.compile_expr(e)
-                } else {
-                    let r = self.alloc_temp();
-                    self.emit(Insn::LoadNone(r));
-                    r
-                };
-                let upper_r = if let Some(e) = upper {
-                    self.compile_expr(e)
-                } else {
-                    let r = self.alloc_temp();
-                    self.emit(Insn::LoadNone(r));
-                    r
-                };
-                let step_r = if let Some(e) = step {
-                    self.compile_expr(e)
-                } else {
-                    let r = self.alloc_temp();
-                    self.emit(Insn::LoadNone(r));
-                    r
-                };
-                // Build slice tuple [lower, upper, step] and use SetItem
-                // The VM's SetItem handles slice tuples specially.
-                let base = lower_r;
-                // Ensure contiguous temps
-                if upper_r != lower_r + 1 || step_r != lower_r + 2 {
-                    // Non-contiguous: emit moves
-                    let b = self.alloc_temp();
-                    let b1 = self.alloc_temp();
-                    let b2 = self.alloc_temp();
-                    self.emit(Insn::Move(b, lower_r));
-                    self.emit(Insn::Move(b1, upper_r));
-                    self.emit(Insn::Move(b2, step_r));
-                    let slice_r = self.alloc_temp();
-                    // Use BuildTuple(slice_r, b, 3) to build a slice marker
-                    self.emit(Insn::BuildTuple(slice_r, b, 3));
-                    self.emit(Insn::SetItem(obj, slice_r, val));
-                    self.free_temp(slice_r);
-                    self.free_temp(b2);
-                    self.free_temp(b1);
-                    self.free_temp(b);
-                } else {
-                    let slice_r = self.alloc_temp();
-                    self.emit(Insn::BuildTuple(slice_r, base, 3));
-                    self.emit(Insn::SetItem(obj, slice_r, val));
-                    self.free_temp(slice_r);
-                }
-                self.free_temp(step_r);
-                self.free_temp(upper_r);
-                self.free_temp(lower_r);
+                self.emit(Insn::SetItem(obj, slice_r, val));
+                self.writeback_container_if_global(target, obj);
                 self.free_temp(val);
+                self.free_temp(slice_r);
                 self.free_temp(obj);
             }
             Stmt::Assert { test, msg } => {
@@ -1215,7 +1177,7 @@ impl Compiler {
                         self.emit(Insn::BinOpConst(reg, reg, op, const_idx));
                     } else {
                         let rhs = self.compile_expr(expr);
-                        self.emit(Insn::BinOp(reg, reg, op, rhs));
+                        self.emit(Insn::BinOpInPlace(reg, reg, op, rhs));
                         self.free_temp(rhs);
                     }
                 } else {
@@ -1227,7 +1189,7 @@ impl Compiler {
                         self.emit(Insn::BinOpConst(lhs, lhs, op, const_idx));
                     } else {
                         let rhs = self.compile_expr(expr);
-                        self.emit(Insn::BinOp(lhs, lhs, op, rhs));
+                        self.emit(Insn::BinOpInPlace(lhs, lhs, op, rhs));
                         self.free_temp(rhs);
                     }
                     self.emit(Insn::StoreGlobal(name_idx, lhs));
@@ -1243,7 +1205,7 @@ impl Compiler {
                     self.emit(Insn::BinOpConst(lhs, lhs, op, const_idx));
                 } else {
                     let rhs = self.compile_expr(expr);
-                    self.emit(Insn::BinOp(lhs, lhs, op, rhs));
+                    self.emit(Insn::BinOpInPlace(lhs, lhs, op, rhs));
                     self.free_temp(rhs);
                 }
                 self.emit(Insn::SetAttr(obj, name_idx, lhs));
@@ -1259,10 +1221,11 @@ impl Compiler {
                     self.emit(Insn::BinOpConst(lhs, lhs, op, const_idx));
                 } else {
                     let rhs = self.compile_expr(expr);
-                    self.emit(Insn::BinOp(lhs, lhs, op, rhs));
+                    self.emit(Insn::BinOpInPlace(lhs, lhs, op, rhs));
                     self.free_temp(rhs);
                 }
                 self.emit(Insn::SetItem(obj, idx, lhs));
+                self.writeback_container_if_global(obj_expr, obj);
                 self.free_temp(lhs);
                 self.free_temp(idx);
                 self.free_temp(obj);
@@ -1544,17 +1507,70 @@ impl Compiler {
 
     // ── Raise / Delete / Import ───────────────────────────────────────────────
 
-    fn compile_raise(&mut self, expr: Option<&Expr>, _cause: Option<&Expr>) {
+    fn compile_raise(&mut self, expr: Option<&Expr>, cause: Option<&Expr>) {
         match expr {
             None => {
                 self.emit(Insn::RaiseReRaise);
             }
             Some(e) => {
                 let r = self.compile_expr(e);
-                self.emit(Insn::RaiseValue(r));
+                if let Some(cause_expr) = cause {
+                    let c = self.compile_expr(cause_expr);
+                    self.emit(Insn::RaiseFrom(r, c));
+                    self.free_temp(c);
+                } else {
+                    self.emit(Insn::RaiseValue(r));
+                }
                 self.free_temp(r);
             }
         }
+    }
+
+    /// Build the 3-element slice-key tuple `(lo, hi, step)` used by GetItem/SetItem/DeleteItem.
+    /// Each missing bound is represented as `None`. Returns the register holding the tuple.
+    fn compile_slice_key(
+        &mut self,
+        lower: Option<&Expr>,
+        upper: Option<&Expr>,
+        step: Option<&Expr>,
+    ) -> Reg {
+        let none_reg = |this: &mut Self| {
+            let r = this.alloc_temp();
+            this.emit(Insn::LoadNone(r));
+            r
+        };
+        let lower_r = lower
+            .map(|e| self.compile_expr(e))
+            .unwrap_or_else(|| none_reg(self));
+        let upper_r = upper
+            .map(|e| self.compile_expr(e))
+            .unwrap_or_else(|| none_reg(self));
+        let step_r = step
+            .map(|e| self.compile_expr(e))
+            .unwrap_or_else(|| none_reg(self));
+        // Arrange contiguously for BuildTuple(base, 3)
+        let base_r = lower_r;
+        if upper_r != base_r + 1 {
+            let t = base_r + 1;
+            if t > self.max_reg {
+                self.max_reg = t;
+            }
+            self.emit(Insn::Move(t, upper_r));
+            self.free_temp(upper_r);
+        }
+        let upper_slot = base_r + 1;
+        if step_r != upper_slot + 1 {
+            let t = upper_slot + 1;
+            if t > self.max_reg {
+                self.max_reg = t;
+            }
+            self.emit(Insn::Move(t, step_r));
+            self.free_temp(step_r);
+        }
+        let slice_r = self.alloc_temp();
+        self.emit(Insn::BuildTuple(slice_r, base_r, 3));
+        self.next_temp = slice_r + 1;
+        slice_r
     }
 
     fn compile_delete(&mut self, expr: &Expr) {
@@ -1573,7 +1589,22 @@ impl Compiler {
                 let obj = self.compile_expr(target);
                 let idx = self.compile_expr(index);
                 self.emit(Insn::DeleteItem(obj, idx));
+                self.writeback_container_if_global(target, obj);
                 self.free_temp(idx);
+                self.free_temp(obj);
+            }
+            Expr::Slice {
+                target,
+                lower,
+                upper,
+                step,
+            } => {
+                let obj = self.compile_expr(target);
+                let slice_reg =
+                    self.compile_slice_key(lower.as_deref(), upper.as_deref(), step.as_deref());
+                self.emit(Insn::DeleteItem(obj, slice_reg));
+                self.writeback_container_if_global(target, obj);
+                self.free_temp(slice_reg);
                 self.free_temp(obj);
             }
             _ => {
@@ -2114,10 +2145,11 @@ impl Compiler {
         if exit_frame2 + 3 > self.max_reg {
             self.max_reg = exit_frame2 + 3;
         }
+        let class_name_idx = self.intern_name("__class__");
         self.emit(Insn::GetAttr(exit_frame2, ctx_reg, exit_name_idx));
-        self.emit(Insn::LoadNone(exit_frame2 + 1)); // exc_type (simplified: None)
+        self.emit(Insn::GetAttr(exit_frame2 + 1, exc_tmp, class_name_idx)); // exc_type
         self.emit(Insn::Move(exit_frame2 + 2, exc_tmp));
-        self.emit(Insn::LoadNone(exit_frame2 + 3)); // traceback
+        self.emit(Insn::Move(exit_frame2 + 3, exc_tmp)); // traceback (non-None placeholder)
         self.emit(Insn::Call(exit_frame2, 3));
         let suppress_reg = exit_frame2;
         self.next_temp = exit_frame2 + 1;
@@ -2313,55 +2345,9 @@ impl Compiler {
                 upper,
                 step,
             } => {
-                // Compile as: target[lower:upper:step]
-                // Build a slice tuple and use GetItem with a special key.
                 let obj = self.compile_expr(target);
-                let lower_r = lower
-                    .as_ref()
-                    .map(|e| self.compile_expr(e))
-                    .unwrap_or_else(|| {
-                        let r = self.alloc_temp();
-                        self.emit(Insn::LoadNone(r));
-                        r
-                    });
-                let upper_r = upper
-                    .as_ref()
-                    .map(|e| self.compile_expr(e))
-                    .unwrap_or_else(|| {
-                        let r = self.alloc_temp();
-                        self.emit(Insn::LoadNone(r));
-                        r
-                    });
-                let step_r = step
-                    .as_ref()
-                    .map(|e| self.compile_expr(e))
-                    .unwrap_or_else(|| {
-                        let r = self.alloc_temp();
-                        self.emit(Insn::LoadNone(r));
-                        r
-                    });
-                // Arrange contiguously for BuildTuple
-                let base_r = lower_r;
-                if upper_r != lower_r + 1 {
-                    let t = base_r + 1;
-                    if t > self.max_reg {
-                        self.max_reg = t;
-                    }
-                    self.emit(Insn::Move(t, upper_r));
-                    self.free_temp(upper_r);
-                }
-                let upper_slot = base_r + 1;
-                if step_r != upper_slot + 1 {
-                    let t = upper_slot + 1;
-                    if t > self.max_reg {
-                        self.max_reg = t;
-                    }
-                    self.emit(Insn::Move(t, step_r));
-                    self.free_temp(step_r);
-                }
-                let slice_r = self.alloc_temp();
-                self.emit(Insn::BuildTuple(slice_r, base_r, 3));
-                self.next_temp = slice_r + 1;
+                let slice_r =
+                    self.compile_slice_key(lower.as_deref(), upper.as_deref(), step.as_deref());
                 let dst = self.ensure_dst(obj);
                 self.emit(Insn::GetItem(dst, obj, slice_r));
                 self.free_temp(slice_r);
