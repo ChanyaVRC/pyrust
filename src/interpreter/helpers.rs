@@ -71,15 +71,6 @@ fn py_mod_i64(a: i64, b: i64) -> i64 {
     remainder
 }
 
-fn set_dict_key(items: &mut Vec<(PyKey, Value)>, key: PyKey, value: Value) {
-    for (existing_key, existing_value) in items.iter_mut() {
-        if *existing_key == key {
-            *existing_value = value;
-            return;
-        }
-    }
-    items.push((key, value));
-}
 
 fn normalize_index(index: &Value, len: usize) -> Result<usize> {
     let mut value = match index {

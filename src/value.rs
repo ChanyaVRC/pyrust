@@ -2,17 +2,33 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
+
+use indexmap::{IndexMap, IndexSet};
 
 use crate::ast::Stmt;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PyKey {
     Int(i64),
     Float(u64),
     Str(String),
     Bool(bool),
     None,
+}
+
+impl Hash for PyKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            PyKey::Int(v) => v.hash(state),
+            PyKey::Bool(b) => b.hash(state),
+            PyKey::Float(bits) => bits.hash(state),
+            PyKey::Str(s) => s.hash(state),
+            PyKey::None => {}
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -84,7 +100,7 @@ pub enum Value {
     Bool(bool),
     None,
     List(Vec<Value>),
-    Dict(Vec<(PyKey, Value)>),
+    Dict(IndexMap<PyKey, Value>),
     Range {
         start: i64,
         stop: i64,

@@ -420,7 +420,7 @@ impl Interpreter {
         }
 
         let mut pos_idx = 0;
-        let mut kwargs_dict: Vec<(crate::value::PyKey, Value)> = Vec::new();
+        let mut kwargs_dict: indexmap::IndexMap<crate::value::PyKey, Value> = indexmap::IndexMap::new();
 
         let has_kwargs = function.params.iter().any(|p| p.is_kwargs);
         let mut consumed_keywords = std::collections::HashSet::new();
@@ -435,7 +435,7 @@ impl Interpreter {
                 // Collect remaining keyword args
                 for (k, v) in &keyword_vals {
                     if let Some(key) = Value::Str(k.clone()).to_key() {
-                        set_dict_key(&mut kwargs_dict, key, v.clone());
+                        kwargs_dict.insert(key, v.clone());
                     }
                 }
                 local_env.borrow_mut().values.insert(param.name.clone(), Value::Dict(kwargs_dict.clone()));

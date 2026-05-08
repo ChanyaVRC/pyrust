@@ -29,14 +29,14 @@ impl Interpreter {
                 Ok(Value::List(out))
             }
             Expr::Dict(items) => {
-                let mut out: Vec<(PyKey, Value)> = Vec::new();
+                let mut out = indexmap::IndexMap::new();
                 for (kexpr, vexpr) in items {
                     let key_val = self.eval_expr(kexpr)?;
                     let key = key_val.to_key().ok_or_else(|| {
                         PyError::Runtime("unhashable type in dict key".to_string())
                     })?;
                     let value = self.eval_expr(vexpr)?;
-                    set_dict_key(&mut out, key, value);
+                    out.insert(key, value);
                 }
                 Ok(Value::Dict(out))
             }
@@ -198,12 +198,7 @@ impl Interpreter {
                 let key = index
                     .to_key()
                     .ok_or_else(|| PyError::Runtime("unhashable key type".to_string()))?;
-                for (candidate, value) in items {
-                    if candidate == key {
-                        return Ok(value);
-                    }
-                }
-                Err(PyError::Runtime("key error".to_string()))
+                items.get(&key).cloned().ok_or_else(|| PyError::Runtime("key error".to_string()))
             }
             _ => Err(PyError::Runtime("object is not subscriptable".to_string())),
         }
@@ -466,7 +461,7 @@ impl Interpreter {
             }
             Value::Dict(items) => {
                 let key = item.to_key().ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
-                Ok(Value::Bool(items.iter().any(|(k, _)| k == &key)))
+                Ok(Value::Bool(items.contains_key(&key)))
             }
             Value::Range { start, stop, step } => {
                 if let Value::Int(v) = item {

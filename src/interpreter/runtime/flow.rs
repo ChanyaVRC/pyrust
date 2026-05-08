@@ -176,7 +176,7 @@ impl Interpreter {
             }
             Value::Dict(mut items) => {
                 let key = index.to_key().ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
-                set_dict_key(&mut items, key, value);
+                items.insert(key, value);
                 Ok(Value::Dict(items))
             }
             _ => Err(PyError::Runtime("object does not support item assignment".to_string())),
@@ -444,7 +444,7 @@ impl Interpreter {
                                 let key = index_val
                                     .to_key()
                                     .ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
-                                items.retain(|(k, _)| k != &key);
+                                items.shift_remove(&key);
                                 Value::Dict(items)
                             }
                             Value::List(mut items) => {
