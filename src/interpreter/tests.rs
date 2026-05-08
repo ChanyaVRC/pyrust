@@ -473,6 +473,7 @@ result = fib(35)
             interpreter.lookup_name("y").unwrap(),
             Some(Value::Str("hello world".to_string()))
         );
+    }
 
     #[test]
     fn def_bound_params_read_without_unbound_error() {
