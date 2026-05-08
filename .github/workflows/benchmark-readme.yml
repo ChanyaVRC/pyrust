@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - master
-      - main
   workflow_dispatch:
 
 permissions:
@@ -68,7 +67,7 @@ jobs:
           <body>
             <div class="wrap">
               <h1>PyRust Latest Benchmark</h1>
-              <p>This image is auto-generated on every push to main/master.</p>
+              <p>This image is auto-generated on every push to master.</p>
               <img src="./benchmark.svg" alt="PyRust benchmark snapshot" />
             </div>
           </body>
