@@ -279,9 +279,10 @@ impl Interpreter {
                 if n <= 0 {
                     return Ok(Value::List(Vec::new()));
                 }
-                let mut out = Vec::new();
+                let n = n as usize;
+                let mut out = Vec::with_capacity(items.len() * n);
                 for _ in 0..n {
-                    out.extend(items.clone());
+                    out.extend_from_slice(&items);
                 }
                 Ok(Value::List(out))
             }
