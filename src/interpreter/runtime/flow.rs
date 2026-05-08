@@ -101,9 +101,29 @@ impl Interpreter {
 
     fn exec_index_assign(&mut self, target: &Expr, index: Value, value: Value) -> Result<()> {
         match target {
-            Expr::Var(name) => self.update_named_collection(name, move |collection| {
-                Self::do_index_set(collection, index, value)
-            }),
+            Expr::Var(name) => {
+                let env = self
+                    .resolve_name_env(name)
+                    .ok_or_else(|| PyError::Runtime(format!("name '{}' is not defined", name)))?;
+                let mut borrowed = env.borrow_mut();
+                match borrowed.values.get_mut(name).unwrap() {
+                    Value::List(items) => {
+                        let idx = normalize_index(&index, items.len())?;
+                        items[idx] = value;
+                        Ok(())
+                    }
+                    Value::Dict(items) => {
+                        let key = index
+                            .to_key()
+                            .ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
+                        items.insert(key, value);
+                        Ok(())
+                    }
+                    _ => Err(PyError::Runtime(
+                        "object does not support item assignment".to_string(),
+                    )),
+                }
+            }
             Expr::Attr {
                 target: obj_expr,
                 name: attr,
