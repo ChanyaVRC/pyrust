@@ -188,7 +188,7 @@ impl Interpreter {
                 else_branch,
             } => {
                 let iter_value = self.eval_expr(iter)?;
-                let values = self.iter_values(iter_value)?;
+                let values = iter_values(iter_value)?;
                 let mut broke = false;
                 for value in values {
                     self.assign_target(target, value)?;

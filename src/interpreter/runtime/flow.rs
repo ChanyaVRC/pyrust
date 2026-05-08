@@ -40,7 +40,7 @@ impl Interpreter {
                 self.exec_index_assign(target_expr, index_val, value)
             }
             AssignTarget::Tuple(targets) => {
-                let items = self.iter_values(value)?;
+                let items = iter_values(value)?;
                 if items.len() != targets.len() {
                     return Err(PyError::Runtime(format!(
                         "not enough values to unpack (expected {}, got {})",
@@ -312,35 +312,6 @@ impl Interpreter {
         targets
     }
 
-    fn to_assignment_iterable(value: Value) -> Result<Vec<Value>> {
-        match value {
-            Value::List(v) => Ok(v),
-            Value::Tuple(v) => Ok(v),
-            Value::Str(s) => Ok(s.chars().map(|c| Value::Str(c.to_string())).collect()),
-            Value::Set(v) => Ok(v),
-            Value::Range { start, stop, step } => {
-                let mut out = Vec::new();
-                if step > 0 {
-                    let mut cur = start;
-                    while cur < stop {
-                        out.push(Value::Int(cur));
-                        cur += step;
-                    }
-                } else {
-                    let mut cur = start;
-                    while cur > stop {
-                        out.push(Value::Int(cur));
-                        cur += step;
-                    }
-                }
-                Ok(out)
-            }
-            other => Err(PyError::Runtime(format!(
-                "can only assign an iterable, got {}",
-                other.repr()
-            ))),
-        }
-    }
 
     fn do_slice_set(
         collection: Value,
@@ -358,7 +329,7 @@ impl Interpreter {
         let len = items.len() as i64;
         let (start, end, step) =
             Self::resolve_slice_bounds(len, lo.as_ref(), hi.as_ref(), st.as_ref())?;
-        let replacement = Self::to_assignment_iterable(rhs)?;
+        let replacement = iter_values(rhs)?;
 
         if step == 1 {
             let start_u = start as usize;

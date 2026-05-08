@@ -156,36 +156,6 @@ impl Interpreter {
         }
     }
 
-    fn iter_values(&self, value: Value) -> Result<Vec<Value>> {
-        match value {
-            Value::List(items) | Value::Tuple(items) => Ok(items),
-            Value::Set(items) => Ok(items),
-            Value::Str(text) => Ok(text.chars().map(|c| Value::Str(c.to_string())).collect()),
-            Value::Dict(items) => Ok(items
-                .into_iter()
-                .map(|(key, _)| key_to_value(key))
-                .collect()),
-            Value::Range { start, stop, step } => {
-                let mut out = Vec::new();
-                if step > 0 {
-                    let mut current = start;
-                    while current < stop {
-                        out.push(Value::Int(current));
-                        current += step;
-                    }
-                } else {
-                    let mut current = start;
-                    while current > stop {
-                        out.push(Value::Int(current));
-                        current += step;
-                    }
-                }
-                Ok(out)
-            }
-            _ => Err(PyError::Runtime("object is not iterable".to_string())),
-        }
-    }
-
     fn eval_index(&self, target: Value, index: Value) -> Result<Value> {
         match target {
             Value::List(items) | Value::Tuple(items) => {
@@ -522,5 +492,32 @@ fn py_ordering(left: &Value, right: &Value) -> Result<std::cmp::Ordering> {
         _ => Err(PyError::Runtime(
             "'<' not supported between instances of these types".to_string(),
         )),
+    }
+}
+
+fn iter_values(value: Value) -> Result<Vec<Value>> {
+    match value {
+        Value::List(items) | Value::Tuple(items) => Ok(items),
+        Value::Set(items) => Ok(items.into_iter().map(key_to_value).collect()),
+        Value::Str(text) => Ok(text.chars().map(|c| Value::Str(c.to_string())).collect()),
+        Value::Dict(items) => Ok(items.into_iter().map(|(key, _)| key_to_value(key)).collect()),
+        Value::Range { start, stop, step } => {
+            let mut out = Vec::new();
+            if step > 0 {
+                let mut cur = start;
+                while cur < stop {
+                    out.push(Value::Int(cur));
+                    cur += step;
+                }
+            } else {
+                let mut cur = start;
+                while cur > stop {
+                    out.push(Value::Int(cur));
+                    cur += step;
+                }
+            }
+            Ok(out)
+        }
+        _ => Err(PyError::Runtime("object is not iterable".to_string())),
     }
 }
