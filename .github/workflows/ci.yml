@@ -88,6 +88,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -100,8 +102,20 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Build
+      - name: Build PR binary
         run: cargo build --verbose
 
+      - name: Build base binary for comparison
+        if: github.event_name == 'pull_request'
+        run: |
+          git worktree add /tmp/pyrust-base ${{ github.event.pull_request.base.sha }}
+          cargo build --manifest-path /tmp/pyrust-base/Cargo.toml --target-dir /tmp/pyrust-base/target
+          echo "BASE_PYRUST_BIN=/tmp/pyrust-base/target/debug/pyrust" >> "$GITHUB_ENV"
+
       - name: Benchmark speed (Python vs PyRust)
-        run: python tools/benchmark_compare.py --iterations 2 --top 12
+        run: |
+          BASE_ARG=""
+          if [ -n "$BASE_PYRUST_BIN" ]; then
+            BASE_ARG="--base-bin $BASE_PYRUST_BIN"
+          fi
+          python tools/benchmark_compare.py --iterations 2 --top 12 $BASE_ARG
