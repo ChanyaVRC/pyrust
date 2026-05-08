@@ -423,165 +423,70 @@ fn collect_local_names_from_block(
 }
 
 fn collect_global_names(body: &[Stmt]) -> HashSet<String> {
-    let mut names = HashSet::new();
-    collect_global_names_from_block(body, &mut names);
-    names
-}
-
-fn collect_global_names_from_block(body: &[Stmt], names: &mut HashSet<String>) {
-    for stmt in body {
-        match stmt {
-            Stmt::Global(global_names) => {
-                names.extend(global_names.iter().cloned());
-            }
-            Stmt::Nonlocal(_) => {}
-            Stmt::If {
-                branches,
-                else_branch,
-            } => {
-                for (_, branch) in branches {
-                    collect_global_names_from_block(branch, names);
-                }
-                if let Some(branch) = else_branch {
-                    collect_global_names_from_block(branch, names);
-                }
-            }
-            Stmt::While {
-                body, else_branch, ..
-            } => {
-                collect_global_names_from_block(body, names);
-                if let Some(branch) = else_branch {
-                    collect_global_names_from_block(branch, names);
-                }
-            }
-            Stmt::For {
-                body, else_branch, ..
-            } => {
-                collect_global_names_from_block(body, names);
-                if let Some(branch) = else_branch {
-                    collect_global_names_from_block(branch, names);
-                }
-            }
-            Stmt::Try {
-                body,
-                handlers,
-                else_branch,
-                finally_branch,
-            } => {
-                collect_global_names_from_block(body, names);
-                for handler in handlers {
-                    collect_global_names_from_block(&handler.body, names);
-                }
-                if let Some(branch) = else_branch {
-                    collect_global_names_from_block(branch, names);
-                }
-                if let Some(branch) = finally_branch {
-                    collect_global_names_from_block(branch, names);
-                }
-            }
-            Stmt::Assign(_, _)
-            | Stmt::AttrAssign { .. }
-            | Stmt::IndexAssign { .. }
-            | Stmt::SliceAssign { .. }
-            | Stmt::AugAssign { .. }
-            | Stmt::Unpack { .. }
-            | Stmt::Delete(_)
-            | Stmt::Assert { .. }
-            | Stmt::Expr(_)
-            | Stmt::Def { .. }
-            | Stmt::Class { .. }
-            | Stmt::Import { .. }
-            | Stmt::ImportFrom { .. }
-            | Stmt::Raise { .. }
-            | Stmt::Return(_)
-            | Stmt::Break
-            | Stmt::Continue
-            | Stmt::Pass => {}
-            Stmt::With { body, .. } => {
-                collect_global_names_from_block(body, names);
-            }
-        }
-    }
+    collect_declared_names(body, |s| {
+        if let Stmt::Global(names) = s { Some(names) } else { None }
+    })
 }
 
 fn collect_nonlocal_names(body: &[Stmt]) -> HashSet<String> {
+    collect_declared_names(body, |s| {
+        if let Stmt::Nonlocal(names) = s { Some(names) } else { None }
+    })
+}
+
+fn collect_declared_names(body: &[Stmt], pick: fn(&Stmt) -> Option<&Vec<String>>) -> HashSet<String> {
     let mut names = HashSet::new();
-    collect_nonlocal_names_from_block(body, &mut names);
+    collect_declared_names_from_block(body, &mut names, pick);
     names
 }
 
-fn collect_nonlocal_names_from_block(body: &[Stmt], names: &mut HashSet<String>) {
+fn collect_declared_names_from_block(
+    body: &[Stmt],
+    names: &mut HashSet<String>,
+    pick: fn(&Stmt) -> Option<&Vec<String>>,
+) {
     for stmt in body {
+        if let Some(declared) = pick(stmt) {
+            names.extend(declared.iter().cloned());
+            continue;
+        }
         match stmt {
-            Stmt::Nonlocal(nonlocal_names) => {
-                names.extend(nonlocal_names.iter().cloned());
-            }
-            Stmt::Global(_) => {}
-            Stmt::If {
-                branches,
-                else_branch,
-            } => {
+            Stmt::If { branches, else_branch } => {
                 for (_, branch) in branches {
-                    collect_nonlocal_names_from_block(branch, names);
+                    collect_declared_names_from_block(branch, names, pick);
                 }
                 if let Some(branch) = else_branch {
-                    collect_nonlocal_names_from_block(branch, names);
+                    collect_declared_names_from_block(branch, names, pick);
                 }
             }
-            Stmt::While {
-                body, else_branch, ..
-            } => {
-                collect_nonlocal_names_from_block(body, names);
+            Stmt::While { body, else_branch, .. } => {
+                collect_declared_names_from_block(body, names, pick);
                 if let Some(branch) = else_branch {
-                    collect_nonlocal_names_from_block(branch, names);
+                    collect_declared_names_from_block(branch, names, pick);
                 }
             }
-            Stmt::For {
-                body, else_branch, ..
-            } => {
-                collect_nonlocal_names_from_block(body, names);
+            Stmt::For { body, else_branch, .. } => {
+                collect_declared_names_from_block(body, names, pick);
                 if let Some(branch) = else_branch {
-                    collect_nonlocal_names_from_block(branch, names);
+                    collect_declared_names_from_block(branch, names, pick);
                 }
             }
-            Stmt::Try {
-                body,
-                handlers,
-                else_branch,
-                finally_branch,
-            } => {
-                collect_nonlocal_names_from_block(body, names);
+            Stmt::Try { body, handlers, else_branch, finally_branch } => {
+                collect_declared_names_from_block(body, names, pick);
                 for handler in handlers {
-                    collect_nonlocal_names_from_block(&handler.body, names);
+                    collect_declared_names_from_block(&handler.body, names, pick);
                 }
                 if let Some(branch) = else_branch {
-                    collect_nonlocal_names_from_block(branch, names);
+                    collect_declared_names_from_block(branch, names, pick);
                 }
                 if let Some(branch) = finally_branch {
-                    collect_nonlocal_names_from_block(branch, names);
+                    collect_declared_names_from_block(branch, names, pick);
                 }
             }
-            Stmt::Assign(_, _)
-            | Stmt::AttrAssign { .. }
-            | Stmt::IndexAssign { .. }
-            | Stmt::SliceAssign { .. }
-            | Stmt::AugAssign { .. }
-            | Stmt::Unpack { .. }
-            | Stmt::Delete(_)
-            | Stmt::Assert { .. }
-            | Stmt::Expr(_)
-            | Stmt::Def { .. }
-            | Stmt::Class { .. }
-            | Stmt::Import { .. }
-            | Stmt::ImportFrom { .. }
-            | Stmt::Raise { .. }
-            | Stmt::Return(_)
-            | Stmt::Break
-            | Stmt::Continue
-            | Stmt::Pass => {}
             Stmt::With { body, .. } => {
-                collect_nonlocal_names_from_block(body, names);
+                collect_declared_names_from_block(body, names, pick);
             }
+            _ => {}
         }
     }
 }
