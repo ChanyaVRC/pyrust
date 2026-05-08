@@ -159,6 +159,25 @@ impl Interpreter {
     }
 
     // Returns the EnvRef that owns `name`, respecting global/nonlocal declarations.
+    // Determines the env where assignments to `name` should land, resolving
+    // global/nonlocal declarations. Unlike resolve_name_env this always returns
+    // an env — variables not yet defined are written into the current scope.
+    fn resolve_assign_env_for(&self, name: &str) -> EnvRef {
+        let (is_global, is_nonlocal) = {
+            let env = self.env.borrow();
+            (env.global_names.contains(name), env.nonlocal_names.contains(name))
+        };
+        if is_global {
+            return module_env(&self.env);
+        }
+        if is_nonlocal {
+            if let Some(env) = find_enclosing_local_env_for_name(&self.env, name) {
+                return env;
+            }
+        }
+        Rc::clone(&self.env)
+    }
+
     fn resolve_name_env(&self, name: &str) -> Option<EnvRef> {
         let (is_global, is_nonlocal) = {
             let env = self.env.borrow();
