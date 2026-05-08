@@ -197,6 +197,17 @@ impl Interpreter {
                     local_names.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect::<HashMap<String, usize>>()
                 );
                 let lambda_body = vec![crate::ast::Stmt::Return(Some(*body.clone()))];
+                let params_ufp: Vec<crate::ast::FunctionParam> = params
+                    .iter()
+                    .map(|n| crate::ast::FunctionParam {
+                        name: n.clone(),
+                        default: None,
+                        is_args: false,
+                        is_kwargs: false,
+                    })
+                    .collect();
+                let def_bound_mask =
+                    compute_def_bound_mask(&params_ufp, &lambda_body, &local_index);
                 let func = Rc::new(crate::value::UserFunction {
                     name: "<lambda>".to_string(),
                     params: params.iter().map(|n| crate::value::UserFunctionParam {
@@ -209,6 +220,7 @@ impl Interpreter {
                     global_names: Rc::new(std::collections::HashSet::new()),
                     nonlocal_names: Rc::new(std::collections::HashSet::new()),
                     env: closure,
+                    def_bound_mask,
                 });
                 Ok(Value::Function(func))
             }

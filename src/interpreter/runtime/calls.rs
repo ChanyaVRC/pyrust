@@ -516,6 +516,7 @@ impl Interpreter {
         let local_index = Rc::new(
             local_names.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect::<HashMap<String, usize>>()
         );
+        let def_bound_mask = compute_def_bound_mask(params, body, &local_index);
         Ok(Rc::new(UserFunction {
             name: name.to_string(),
             params: evaluated_params,
@@ -526,6 +527,7 @@ impl Interpreter {
             global_names: Rc::new(global_names),
             nonlocal_names: Rc::new(nonlocal_names),
             env: closure_env,
+            def_bound_mask,
         }))
     }
 
@@ -648,6 +650,7 @@ impl Interpreter {
                     local_env_ref.fastlocals = Some(FunctionLocals {
                         slots: vec![None; function.local_index.len()],
                         index: Rc::clone(&function.local_index),
+                        def_bound_mask: function.def_bound_mask,
                     });
                 }
                 let fn_val = Value::Function(Rc::clone(&function));
@@ -716,6 +719,7 @@ impl Interpreter {
                 local_env_ref.fastlocals = Some(FunctionLocals {
                     slots: vec![None; function.local_index.len()],
                     index: Rc::clone(&function.local_index),
+                    def_bound_mask: function.def_bound_mask,
                 });
             }
             let fn_val = Value::Function(Rc::clone(&function));

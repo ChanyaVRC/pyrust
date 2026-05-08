@@ -473,5 +473,24 @@ result = fib(35)
             interpreter.lookup_name("y").unwrap(),
             Some(Value::Str("hello world".to_string()))
         );
+
+    #[test]
+    fn def_bound_params_read_without_unbound_error() {
+        // Parameters are def-bound; reading them should never trigger the
+        // "local variable not associated" error, even after deep inlining.
+        let interpreter = run_program(
+            "def add(a, b):\n    return a + b\nresult = add(3, 4)\n",
+        );
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(7)));
+    }
+
+    #[test]
+    fn unconditional_top_level_assign_is_def_bound() {
+        // A variable assigned at the very start of a function body (before any
+        // branch) is def-bound; it must be readable on all paths.
+        let interpreter = run_program(
+            "def f():\n    x = 10\n    return x + 1\nresult = f()\n",
+        );
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(11)));
     }
 }
