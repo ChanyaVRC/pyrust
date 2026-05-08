@@ -33,7 +33,7 @@ pub enum AssignTarget {
 
 #[derive(Debug, Clone)]
 pub enum Stmt {
-    Assign(String, Expr),
+    Assign(AssignTarget, Expr),
     AttrAssign {
         target: Expr,
         name: String,
@@ -54,11 +54,6 @@ pub enum Stmt {
     AugAssign {
         target: AssignTarget,
         op: BinaryOp,
-        expr: Expr,
-    },
-    /// Unpack assignment: a, b = expr  (flat only for now)
-    Unpack {
-        targets: Vec<AssignTarget>,
         expr: Expr,
     },
     Expr(Expr),

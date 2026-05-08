@@ -138,7 +138,7 @@ impl Parser {
             };
             if targets.len() == 1 {
                 return match &targets[0] {
-                    Expr::Var(name) => Ok(Stmt::Assign(name.clone(), rhs)),
+                    Expr::Var(name) => Ok(Stmt::Assign(AssignTarget::Name(name.clone()), rhs)),
                     Expr::Attr { target, name } => Ok(Stmt::AttrAssign {
                         target: *target.clone(),
                         name: name.clone(),
@@ -161,18 +161,23 @@ impl Parser {
                         step: step.clone(),
                         expr: rhs,
                     }),
+                    Expr::Tuple(elems) => {
+                        let targets: Result<Vec<AssignTarget>> =
+                            elems.iter().map(|e| expr_to_assign_target(e)).collect();
+                        Ok(Stmt::Assign(AssignTarget::Tuple(targets?), rhs))
+                    }
                     _ => Err(PyError::Parse(
                         "cannot assign to this expression".to_string(),
                     )),
                 };
             }
-            // Multi-target: unpack
+            // Multi-target: tuple unpack
             let assign_targets: Result<Vec<AssignTarget>> =
                 targets.iter().map(|e| expr_to_assign_target(e)).collect();
-            return Ok(Stmt::Unpack {
-                targets: assign_targets?,
-                expr: rhs,
-            });
+            return Ok(Stmt::Assign(
+                AssignTarget::Tuple(assign_targets?),
+                rhs,
+            ));
         }
 
         // Augmented assignment: += -= etc.

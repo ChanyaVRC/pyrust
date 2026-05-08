@@ -47,9 +47,9 @@ impl Interpreter {
 
     fn exec_stmt(&mut self, stmt: &Stmt) -> Result<ExecSignal> {
         match stmt {
-            Stmt::Assign(name, expr) => {
+            Stmt::Assign(target, expr) => {
                 let val = self.eval_expr(expr)?;
-                self.assign_name(name.clone(), val);
+                self.assign_target(target, val)?;
                 Ok(ExecSignal::None)
             }
             Stmt::AttrAssign { target, name, expr } => {
@@ -117,20 +117,6 @@ impl Interpreter {
             Stmt::AugAssign { target, op, expr } => {
                 let rhs = self.eval_expr(expr)?;
                 self.exec_aug_assign(target, *op, rhs)?;
-                Ok(ExecSignal::None)
-            }
-            Stmt::Unpack { targets, expr } => {
-                let value = self.eval_expr(expr)?;
-                let items = self.iter_values(value)?;
-                if items.len() != targets.len() {
-                    return Err(PyError::Runtime(format!(
-                        "not enough values to unpack (expected {}, got {})",
-                        targets.len(), items.len()
-                    )));
-                }
-                for (t, val) in targets.iter().zip(items) {
-                    self.assign_target(t, val)?;
-                }
                 Ok(ExecSignal::None)
             }
             Stmt::Delete(exprs) => {

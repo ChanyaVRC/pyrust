@@ -293,10 +293,8 @@ fn collect_local_names_from_block(
 ) {
     for stmt in body {
         match stmt {
-            Stmt::Assign(name, _) => {
-                if !global_names.contains(name) && !nonlocal_names.contains(name) {
-                    names.insert(name.clone());
-                }
+            Stmt::Assign(target, _) => {
+                collect_assign_target_names(target, names, global_names, nonlocal_names);
             }
             Stmt::AttrAssign { .. } => {}
             Stmt::Def { name, .. } => {
@@ -347,11 +345,6 @@ fn collect_local_names_from_block(
             | Stmt::Break
             | Stmt::Continue
             | Stmt::Pass => {}
-            Stmt::Unpack { targets, .. } => {
-                for t in targets {
-                    collect_assign_target_names(t, names, global_names, nonlocal_names);
-                }
-            }
             Stmt::With { items, body } => {
                 for (_, alias) in items {
                     if let Some(target) = alias {
