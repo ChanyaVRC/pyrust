@@ -278,4 +278,50 @@ result = count(200)
             .unwrap();
         assert!(ok);
     }
+
+    #[test]
+    fn pure_recursive_function_is_memoized() {
+        // fib(35) makes ~39 million calls without memoization — far too slow
+        // to finish in a test.  With memoization it needs only 35 unique calls.
+        let src = "
+def fib(n):
+    if n <= 1:
+        return n
+    return fib(n - 1) + fib(n - 2)
+result = fib(35)
+";
+        let ok: bool = std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(move || {
+                let tokens = Lexer::new(src).unwrap().into_tokens();
+                let program = Parser::new(tokens).parse_program().unwrap();
+                let mut interp = Interpreter::default();
+                interp.exec_program(&program, false).unwrap();
+                matches!(interp.lookup_name("result").unwrap(), Some(Value::Int(9227465)))
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(ok);
+    }
+
+    #[test]
+    fn impure_function_is_not_cached() {
+        // A function that calls `print` is detected as impure and must execute
+        // its body on every call (no stale cache returns).
+        let interpreter = run_program(
+            "log = []\ndef track(n):\n    print(n)\n    return n * 2\na = track(3)\nb = track(3)\n",
+        );
+        assert_eq!(interpreter.lookup_name("a").unwrap(), Some(Value::Int(6)));
+        assert_eq!(interpreter.lookup_name("b").unwrap(), Some(Value::Int(6)));
+    }
+
+    #[test]
+    fn function_with_global_write_is_not_cached() {
+        let interpreter = run_program(
+            "count = 0\ndef inc(n):\n    global count\n    count += n\n    return count\na = inc(1)\nb = inc(1)\n",
+        );
+        assert_eq!(interpreter.lookup_name("a").unwrap(), Some(Value::Int(1)));
+        assert_eq!(interpreter.lookup_name("b").unwrap(), Some(Value::Int(2)));
+    }
 }

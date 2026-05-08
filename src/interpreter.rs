@@ -23,6 +23,7 @@ enum ExecSignal {
 }
 
 type ModuleCache = Rc<RefCell<HashMap<String, Value>>>;
+type FnCache = HashMap<(usize, Vec<PyKey>), Value>;
 
 const MAX_CALL_DEPTH: usize = 1000;
 const ENV_POOL_MAX: usize = 64;
@@ -35,6 +36,7 @@ pub struct Interpreter {
     module_cache: ModuleCache,
     call_depth: usize,
     env_pool: Vec<EnvRef>,
+    fn_cache: FnCache,
 }
 
 impl Default for Interpreter {
@@ -49,6 +51,7 @@ impl Default for Interpreter {
             module_cache: Rc::new(RefCell::new(HashMap::new())),
             call_depth: 0,
             env_pool: Vec::new(),
+            fn_cache: HashMap::new(),
         }
     }
 }

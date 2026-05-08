@@ -280,6 +280,7 @@ impl Interpreter {
         Ok(Rc::new(UserFunction {
             name: name.to_string(),
             params: evaluated_params,
+            is_pure: is_pure_body(body),
             body: body.to_vec(),
             local_names: Rc::new(collect_local_names(params, body, &global_names, &nonlocal_names)),
             global_names: Rc::new(global_names),
@@ -364,14 +365,8 @@ impl Interpreter {
                     positional_index += 1;
                 }
             }
-            let local_env = self.alloc_env(Some(Rc::clone(&function.env)));
-            {
-                let mut local_env_ref = local_env.borrow_mut();
-                local_env_ref.local_names = Rc::clone(&function.local_names);
-                local_env_ref.global_names = Rc::clone(&function.global_names);
-                local_env_ref.nonlocal_names = Rc::clone(&function.nonlocal_names);
-                local_env_ref.values.insert(function.name.clone(), Value::Function(Rc::clone(&function)));
-            }
+            // Resolve all parameter values (apply defaults where needed).
+            let mut param_vals: Vec<Value> = Vec::with_capacity(function.params.len());
             for (index, param) in function.params.iter().enumerate() {
                 let value = if let Some(v) = &bound_args[index] {
                     v.clone()
@@ -383,7 +378,36 @@ impl Interpreter {
                         ))
                     })?
                 };
-                local_env.borrow_mut().values.insert(param.name.clone(), value);
+                param_vals.push(value);
+            }
+
+            // Memoization: if the function is pure and all args are hashable,
+            // check the cache before building a call frame.
+            let cache_key: Option<(usize, Vec<PyKey>)> = if function.is_pure {
+                param_vals
+                    .iter()
+                    .map(|v| v.to_key())
+                    .collect::<Option<Vec<PyKey>>>()
+                    .map(|keys| (Rc::as_ptr(&function) as usize, keys))
+            } else {
+                None
+            };
+            if let Some(ref ck) = cache_key {
+                if let Some(cached) = self.fn_cache.get(ck).cloned() {
+                    return Ok(cached);
+                }
+            }
+
+            let local_env = self.alloc_env(Some(Rc::clone(&function.env)));
+            {
+                let mut local_env_ref = local_env.borrow_mut();
+                local_env_ref.local_names = Rc::clone(&function.local_names);
+                local_env_ref.global_names = Rc::clone(&function.global_names);
+                local_env_ref.nonlocal_names = Rc::clone(&function.nonlocal_names);
+                local_env_ref.values.insert(function.name.clone(), Value::Function(Rc::clone(&function)));
+                for (param, value) in function.params.iter().zip(param_vals) {
+                    local_env_ref.values.insert(param.name.clone(), value);
+                }
             }
             self.call_depth += 1;
             if self.call_depth > MAX_CALL_DEPTH {
@@ -399,13 +423,19 @@ impl Interpreter {
             let local_env = std::mem::replace(&mut self.env, previous_env);
             self.call_depth -= 1;
             self.free_env(local_env);
-            return match signal? {
-                ExecSignal::None => Ok(Value::None),
-                ExecSignal::Return(value) => Ok(value),
-                ExecSignal::Break | ExecSignal::Continue => Err(PyError::Runtime(
-                    "break/continue is only valid inside loops".to_string(),
-                )),
+            let result = match signal? {
+                ExecSignal::None => Value::None,
+                ExecSignal::Return(value) => value,
+                ExecSignal::Break | ExecSignal::Continue => {
+                    return Err(PyError::Runtime(
+                        "break/continue is only valid inside loops".to_string(),
+                    ))
+                }
             };
+            if let Some(ck) = cache_key {
+                self.fn_cache.insert(ck, result.clone());
+            }
+            return Ok(result);
         }
 
         // Variadic path: handle *args and **kwargs
