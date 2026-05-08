@@ -28,6 +28,7 @@ type FnCache = HashMap<(usize, Vec<PyKey>), Value>;
 const MAX_CALL_DEPTH: usize = 1000;
 const ENV_POOL_MAX: usize = 64;
 const SPEC_THRESHOLD: u8 = 8;
+const HOT_THRESHOLD: u32 = 50;
 
 pub struct Interpreter {
     env: EnvRef,
@@ -39,6 +40,12 @@ pub struct Interpreter {
     env_pool: Vec<EnvRef>,
     fn_cache: FnCache,
     spec_cache: HashMap<usize, SpecState>,
+    /// Tier-1 warmup counters: fn_ptr → call count.
+    call_counts: HashMap<usize, u32>,
+    /// Tier-2 hot frames: fn_ptr → dedicated pre-warmed EnvRef.
+    hot_frames: HashMap<usize, EnvRef>,
+    /// Set of fn_ptrs whose hot frame is currently executing (recursion guard).
+    hot_frames_active: HashSet<usize>,
 }
 
 impl Default for Interpreter {
@@ -55,6 +62,9 @@ impl Default for Interpreter {
             env_pool: Vec::new(),
             fn_cache: HashMap::new(),
             spec_cache: HashMap::new(),
+            call_counts: HashMap::new(),
+            hot_frames: HashMap::new(),
+            hot_frames_active: HashSet::new(),
         }
     }
 }

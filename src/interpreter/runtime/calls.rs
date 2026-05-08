@@ -640,6 +640,101 @@ impl Interpreter {
                 }
             }
 
+            let fn_ptr = Rc::as_ptr(&function) as usize;
+
+            // Tier-1: count calls.
+            let count = self.call_counts.entry(fn_ptr).or_insert(0);
+            *count += 1;
+
+            // Tier-2: promote to hot frame once threshold is reached.
+            if *count == HOT_THRESHOLD && is_hot_frame_eligible(&function) {
+                // Create the dedicated hot frame once.
+                let hot_env = self.alloc_env(Some(Rc::clone(&function.env)));
+                {
+                    let mut e = hot_env.borrow_mut();
+                    e.local_names = Rc::clone(&function.local_names);
+                    e.global_names = Rc::clone(&function.global_names);
+                    e.nonlocal_names = Rc::clone(&function.nonlocal_names);
+                    e.fastlocals = Some(FunctionLocals {
+                        slots: vec![None; function.local_index.len()],
+                        index: Rc::clone(&function.local_index),
+                        def_bound_mask: function.def_bound_mask,
+                    });
+                    // Insert function name binding.
+                    let fn_val = Value::Function(Rc::clone(&function));
+                    let fn_name = &function.name;
+                    match e.fastlocals.as_mut().and_then(|fl| fl.index.get(fn_name).copied()) {
+                        Some(idx) => e.fastlocals.as_mut().unwrap().slots[idx] = Some(fn_val),
+                        None => { e.values.insert(fn_name.clone(), fn_val); }
+                    }
+                }
+                self.hot_frames.insert(fn_ptr, hot_env);
+            }
+
+            // Use the hot frame if available and not currently active (recursion guard).
+            if let Some(hot_env) = self.hot_frames.get(&fn_ptr).cloned() {
+                if !self.hot_frames_active.contains(&fn_ptr) {
+                    self.hot_frames_active.insert(fn_ptr);
+
+                    // Clear non-function-name slots from the previous call.
+                    {
+                        let mut e = hot_env.borrow_mut();
+                        if let Some(fl) = e.fastlocals.as_mut() {
+                            // Clear all slots that aren't the function-name self-reference.
+                            let fn_slot = fl.index.get(&function.name).copied();
+                            for (i, slot) in fl.slots.iter_mut().enumerate() {
+                                if Some(i) != fn_slot {
+                                    *slot = None;
+                                }
+                            }
+                        }
+                        e.values.retain(|k, _| k == &function.name);
+                    }
+
+                    // Bind params into hot frame.
+                    {
+                        let mut e = hot_env.borrow_mut();
+                        for (param, value) in function.params.iter().zip(param_vals) {
+                            let fl_idx = e.fastlocals.as_ref().and_then(|fl| fl.index.get(&param.name).copied());
+                            match fl_idx {
+                                Some(slot) => e.fastlocals.as_mut().unwrap().slots[slot] = Some(value),
+                                None => { e.values.insert(param.name.clone(), value); }
+                            }
+                        }
+                    }
+
+                    self.call_depth += 1;
+                    if self.call_depth > MAX_CALL_DEPTH {
+                        self.call_depth -= 1;
+                        self.hot_frames_active.remove(&fn_ptr);
+                        let exc = self.instantiate_named_exception(
+                            "RecursionError",
+                            "maximum recursion depth exceeded".to_string(),
+                        )?;
+                        return Err(PyError::Raised(exc));
+                    }
+                    let previous_env = std::mem::replace(&mut self.env, hot_env);
+                    let signal = self.exec_block(&function.body);
+                    let _ = std::mem::replace(&mut self.env, previous_env);
+                    self.call_depth -= 1;
+                    self.hot_frames_active.remove(&fn_ptr);
+
+                    let result = match signal? {
+                        ExecSignal::None => Value::None,
+                        ExecSignal::Return(value) => value,
+                        ExecSignal::Break | ExecSignal::Continue => {
+                            return Err(PyError::Runtime(
+                                "break/continue is only valid inside loops".to_string(),
+                            ))
+                        }
+                    };
+                    if let Some(ck) = cache_key {
+                        self.fn_cache.insert(ck, result.clone());
+                    }
+                    return Ok(result);
+                }
+            }
+
             let local_env = self.alloc_env(Some(Rc::clone(&function.env)));
             {
                 let mut local_env_ref = local_env.borrow_mut();
@@ -923,4 +1018,12 @@ impl Interpreter {
         }
     }
 
+}
+
+fn is_hot_frame_eligible(f: &UserFunction) -> bool {
+    f.global_names.is_empty()
+        && f.nonlocal_names.is_empty()
+        && !f.params.iter().any(|p| p.is_args || p.is_kwargs)
+        && !f.local_index.is_empty()
+        && f.env.borrow().parent.is_none()
 }
