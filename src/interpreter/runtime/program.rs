@@ -188,18 +188,35 @@ impl Interpreter {
                 else_branch,
             } => {
                 let iter_value = self.eval_expr(iter)?;
-                let values = iter_values(iter_value)?;
                 let mut broke = false;
-                for value in values {
-                    self.assign_target(target, value)?;
-                    match self.exec_block(body)? {
-                        ExecSignal::None => {}
-                        ExecSignal::Break => {
-                            broke = true;
-                            break;
+                // Drive Range lazily to avoid materializing up to N elements
+                if let Value::Range { start, stop, step } = iter_value {
+                    if step == 0 {
+                        return Err(PyError::Runtime("range() step argument must not be zero".to_string()));
+                    }
+                    let mut cur = start;
+                    'range_loop: loop {
+                        if step > 0 && cur >= stop { break; }
+                        if step < 0 && cur <= stop { break; }
+                        self.assign_target(target, Value::Int(cur))?;
+                        match self.exec_block(body)? {
+                            ExecSignal::None => {}
+                            ExecSignal::Break => { broke = true; break 'range_loop; }
+                            ExecSignal::Continue => {}
+                            ExecSignal::Return(v) => return Ok(ExecSignal::Return(v)),
                         }
-                        ExecSignal::Continue => continue,
-                        ExecSignal::Return(value) => return Ok(ExecSignal::Return(value)),
+                        cur += step;
+                    }
+                } else {
+                    let values = iter_values(iter_value)?;
+                    for value in values {
+                        self.assign_target(target, value)?;
+                        match self.exec_block(body)? {
+                            ExecSignal::None => {}
+                            ExecSignal::Break => { broke = true; break; }
+                            ExecSignal::Continue => continue,
+                            ExecSignal::Return(value) => return Ok(ExecSignal::Return(value)),
+                        }
                     }
                 }
                 if !broke {
