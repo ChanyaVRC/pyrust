@@ -453,8 +453,6 @@ result = fib(35)
 
     #[test]
     fn int_add_specializes_after_repeated_calls() {
-        // A tight loop hitting the same + site with Int operands should produce
-        // correct results regardless of specialization state.
         let interpreter = run_program(
             "total = 0\nfor i in range(20):\n    total = total + i\n",
         );
@@ -463,8 +461,6 @@ result = fib(35)
 
     #[test]
     fn specialize_degrades_gracefully_on_type_change() {
-        // A site first observed as Int+Int, then called with Str+Str, must not
-        // crash — it should fall back to the generic path and return the correct value.
         let interpreter = run_program(
             "def add(a, b):\n    return a + b\nx = add(1, 2)\ny = add('hello', ' world')\n",
         );
@@ -477,8 +473,6 @@ result = fib(35)
 
     #[test]
     fn def_bound_params_read_without_unbound_error() {
-        // Parameters are def-bound; reading them should never trigger the
-        // "local variable not associated" error, even after deep inlining.
         let interpreter = run_program(
             "def add(a, b):\n    return a + b\nresult = add(3, 4)\n",
         );
@@ -487,11 +481,62 @@ result = fib(35)
 
     #[test]
     fn unconditional_top_level_assign_is_def_bound() {
-        // A variable assigned at the very start of a function body (before any
-        // branch) is def-bound; it must be readable on all paths.
         let interpreter = run_program(
             "def f():\n    x = 10\n    return x + 1\nresult = f()\n",
         );
         assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(11)));
+    }
+
+    #[test]
+    fn hot_frame_reuse_produces_correct_results() {
+        // Call a simple function more than HOT_THRESHOLD times to trigger
+        // hot-frame promotion; results must remain correct.
+        let src = "
+def square(n):
+    return n * n
+total = 0
+for i in range(60):
+    total = total + square(i)
+";
+        let ok: bool = std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(move || {
+                let tokens = Lexer::new(src).unwrap().into_tokens();
+                let program = Parser::new(tokens).parse_program().unwrap();
+                let mut interp = Interpreter::default();
+                interp.exec_program(&program, false).unwrap();
+                // sum of squares 0..59 = (59*60*119)/6 = 70,210
+                matches!(interp.lookup_name("total").unwrap(), Some(Value::Int(70210)))
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(ok);
+    }
+
+    #[test]
+    fn hot_frame_falls_back_for_recursive_calls() {
+        // A hot function that calls itself must use the normal path (recursion guard),
+        // not the hot frame, for the recursive invocation.
+        let src = "
+def fact(n):
+    if n <= 1:
+        return 1
+    return n * fact(n - 1)
+result = fact(10)
+";
+        let ok: bool = std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(move || {
+                let tokens = Lexer::new(src).unwrap().into_tokens();
+                let program = Parser::new(tokens).parse_program().unwrap();
+                let mut interp = Interpreter::default();
+                interp.exec_program(&program, false).unwrap();
+                matches!(interp.lookup_name("result").unwrap(), Some(Value::Int(3628800)))
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(ok);
     }
 }
