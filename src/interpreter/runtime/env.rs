@@ -207,6 +207,25 @@ impl Interpreter {
         Ok(())
     }
 
+    fn alloc_env(&mut self, parent: Option<EnvRef>) -> EnvRef {
+        if let Some(env) = self.env_pool.pop() {
+            {
+                let mut e = env.borrow_mut();
+                e.values.clear();
+                e.parent = parent;
+            }
+            env
+        } else {
+            Environment::new(parent)
+        }
+    }
+
+    fn free_env(&mut self, env: EnvRef) {
+        if self.env_pool.len() < ENV_POOL_MAX && Rc::strong_count(&env) == 1 {
+            self.env_pool.push(env);
+        }
+    }
+
     fn build_class(
         &mut self,
         name: &str,

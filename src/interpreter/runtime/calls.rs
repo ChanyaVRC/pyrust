@@ -364,7 +364,7 @@ impl Interpreter {
                     positional_index += 1;
                 }
             }
-            let local_env = Environment::new(Some(Rc::clone(&function.env)));
+            let local_env = self.alloc_env(Some(Rc::clone(&function.env)));
             {
                 let mut local_env_ref = local_env.borrow_mut();
                 local_env_ref.local_names = Rc::clone(&function.local_names);
@@ -396,8 +396,9 @@ impl Interpreter {
             }
             let previous_env = std::mem::replace(&mut self.env, local_env);
             let signal = self.exec_block(&function.body);
-            self.env = previous_env;
+            let local_env = std::mem::replace(&mut self.env, previous_env);
             self.call_depth -= 1;
+            self.free_env(local_env);
             return match signal? {
                 ExecSignal::None => Ok(Value::None),
                 ExecSignal::Return(value) => Ok(value),
@@ -420,12 +421,12 @@ impl Interpreter {
             }
         }
 
-        let local_env = Environment::new(Some(Rc::clone(&function.env)));
+        let local_env = self.alloc_env(Some(Rc::clone(&function.env)));
         {
             let mut local_env_ref = local_env.borrow_mut();
-            local_env_ref.local_names = function.local_names.clone();
-            local_env_ref.global_names = function.global_names.clone();
-            local_env_ref.nonlocal_names = function.nonlocal_names.clone();
+            local_env_ref.local_names = Rc::clone(&function.local_names);
+            local_env_ref.global_names = Rc::clone(&function.global_names);
+            local_env_ref.nonlocal_names = Rc::clone(&function.nonlocal_names);
             local_env_ref.values.insert(function.name.clone(), Value::Function(Rc::clone(&function)));
         }
 
@@ -494,8 +495,9 @@ impl Interpreter {
         }
         let previous_env = std::mem::replace(&mut self.env, local_env);
         let signal = self.exec_block(&function.body);
-        self.env = previous_env;
+        let local_env = std::mem::replace(&mut self.env, previous_env);
         self.call_depth -= 1;
+        self.free_env(local_env);
 
         match signal? {
             ExecSignal::None => Ok(Value::None),

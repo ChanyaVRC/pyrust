@@ -39,7 +39,10 @@ fn run_file(path: &str) -> Result<()> {
         .stack_size(INTERPRETER_STACK_SIZE)
         .spawn(move || {
             let mut interp = Interpreter::with_script_dir(script_dir);
-            interp.exec_program(&program, false).err().map(|e| e.to_string())
+            interp
+                .exec_program(&program, false)
+                .err()
+                .map(|e| e.to_string())
         })
         .expect("failed to spawn interpreter thread")
         .join()
@@ -78,9 +81,7 @@ fn run_repl() -> Result<()> {
                 }
 
                 let one_line = format!("{src}\n");
-                match parse_source(&one_line)
-                    .and_then(|p| interpreter.exec_program(&p, true))
-                {
+                match parse_source(&one_line).and_then(|p| interpreter.exec_program(&p, true)) {
                     Ok(()) => {}
                     Err(e) => eprintln!("{e}"),
                 }
