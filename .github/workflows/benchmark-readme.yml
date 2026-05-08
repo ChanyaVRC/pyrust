@@ -37,6 +37,7 @@ jobs:
         run: |
           python tools/benchmark_compare.py \
             --iterations 10 --top 12 \
+            --svg-out docs/benchmark.svg \
             --benchmark-action-out benchmark-output.json
 
       - name: Create benchmark-data branch if missing

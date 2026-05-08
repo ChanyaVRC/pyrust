@@ -8,4 +8,6 @@ Performance comparison between [PyRust](https://github.com/ChanyaVRC/pyrust) (Ru
 
 ## Benchmark Chart
 
+![Latest benchmark snapshot](./benchmark.svg)
+
 - [Benchmark History](./bench/) — per-commit performance graph (PyRust vs CPython)
