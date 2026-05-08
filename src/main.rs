@@ -10,8 +10,8 @@ use error::{PyError, Result};
 use interpreter::Interpreter;
 use lexer::Lexer;
 use parser::Parser;
-use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
 
 fn parse_source(src: &str) -> Result<Vec<ast::Stmt>> {
     let tokens = Lexer::new(src)?.into_tokens();
