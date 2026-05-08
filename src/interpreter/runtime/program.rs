@@ -278,16 +278,45 @@ impl Interpreter {
                 body,
                 else_branch,
             } => {
+                // Constant-false: skip body and always run else (if present).
+                // Mirrors CPython's peephole folding of dead while-bodies.
+                if is_const_false(cond) {
+                    return if let Some(branch) = else_branch {
+                        self.exec_block(branch)
+                    } else {
+                        Ok(ExecSignal::None)
+                    };
+                }
+
                 let mut broke = false;
-                while self.eval_expr(cond)?.truthy() {
-                    match self.exec_block(body)? {
-                        ExecSignal::None => {}
-                        ExecSignal::Break => {
-                            broke = true;
-                            break;
+                // Constant-true (`while True` / `while 1`): skip the condition
+                // re-evaluation on every iteration — the condition is never
+                // going to flip.  Analogous to CPython's `JUMP_BACKWARD`
+                // replacing `LOAD_CONST True; POP_JUMP_IF_FALSE` after
+                // peephole optimisation.
+                if is_const_true(cond) {
+                    loop {
+                        match self.exec_block(body)? {
+                            ExecSignal::None => {}
+                            ExecSignal::Break => {
+                                broke = true;
+                                break;
+                            }
+                            ExecSignal::Continue => continue,
+                            ExecSignal::Return(value) => return Ok(ExecSignal::Return(value)),
                         }
-                        ExecSignal::Continue => continue,
-                        ExecSignal::Return(value) => return Ok(ExecSignal::Return(value)),
+                    }
+                } else {
+                    while self.eval_expr(cond)?.truthy() {
+                        match self.exec_block(body)? {
+                            ExecSignal::None => {}
+                            ExecSignal::Break => {
+                                broke = true;
+                                break;
+                            }
+                            ExecSignal::Continue => continue,
+                            ExecSignal::Return(value) => return Ok(ExecSignal::Return(value)),
+                        }
                     }
                 }
                 if !broke {
