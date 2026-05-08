@@ -116,7 +116,7 @@ pub enum Value {
     },
     Module(Rc<RefCell<PyModule>>),
     Tuple(Vec<Value>),
-    Set(Vec<Value>),
+    Set(IndexSet<PyKey>),
 }
 
 impl PartialEq for Value {
@@ -274,9 +274,12 @@ impl Value {
                 }
             }
             Value::Set(items) => {
+                if items.is_empty() {
+                    return "set()".to_string();
+                }
                 let inner = items
                     .iter()
-                    .map(|v| v.repr())
+                    .map(key_repr)
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("{{{inner}}}")

@@ -111,10 +111,13 @@ impl Interpreter {
                 Ok(Value::Tuple(out))
             }
             Expr::Set(items) => {
-                let mut out = Vec::new();
+                let mut out = indexmap::IndexSet::new();
                 for item in items {
                     let v = self.eval_expr(item)?;
-                    if !out.contains(&v) { out.push(v); }
+                    let key = v.to_key().ok_or_else(|| {
+                        PyError::Runtime("unhashable type in set".to_string())
+                    })?;
+                    out.insert(key);
                 }
                 Ok(Value::Set(out))
             }
@@ -451,7 +454,10 @@ impl Interpreter {
         match container {
             Value::List(items) => Ok(Value::Bool(items.contains(&item))),
             Value::Tuple(items) => Ok(Value::Bool(items.contains(&item))),
-            Value::Set(items) => Ok(Value::Bool(items.contains(&item))),
+            Value::Set(items) => {
+                let key = item.to_key().ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
+                Ok(Value::Bool(items.contains(&key)))
+            }
             Value::Str(s) => {
                 if let Value::Str(sub) = &item {
                     Ok(Value::Bool(s.contains(sub.as_str())))
