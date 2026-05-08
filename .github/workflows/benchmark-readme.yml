@@ -1,0 +1,92 @@
+name: Benchmark Image Pages
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: benchmark-pages
+  cancel-in-progress: true
+
+jobs:
+  build_pages_artifact:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build PyRust
+        run: cargo build --verbose
+
+      - name: Set benchmark timestamp
+        run: echo "BENCHMARK_TIMESTAMP_UTC=$(date -u +'%Y-%m-%d %H:%M:%S')" >> "$GITHUB_ENV"
+
+      - name: Run benchmark and export SVG
+        run: python tools/benchmark_compare.py --iterations 10 --top 12 --svg-out benchmark.svg
+
+      - name: Build Pages content
+        run: |
+          mkdir -p dist
+          cp benchmark.svg dist/benchmark.svg
+          cat > dist/index.html << 'HTML'
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1" />
+            <title>PyRust Benchmark</title>
+            <style>
+              body { margin: 0; background: #0b1220; color: #e2e8f0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
+              .wrap { max-width: 1280px; margin: 24px auto; padding: 0 16px; }
+              img { width: 100%; height: auto; border: 1px solid #334155; border-radius: 12px; background: #0f172a; }
+              a { color: #93c5fd; }
+            </style>
+          </head>
+          <body>
+            <div class="wrap">
+              <h1>PyRust Latest Benchmark</h1>
+              <p>This image is auto-generated on every push to main/master.</p>
+              <img src="./benchmark.svg" alt="PyRust benchmark snapshot" />
+            </div>
+          </body>
+          </html>
+          HTML
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy_pages:
+    needs: build_pages_artifact
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
