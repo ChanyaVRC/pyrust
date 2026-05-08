@@ -566,6 +566,43 @@ result = fact(10)
     }
 
     #[test]
+    fn while_compare_increment_detected_as_range() {
+        // while i < n: ...; i += 1 should behave identically to for i in range(n)
+        let interpreter = run_program(
+            "i = 0\ns = 0\nwhile i < 10:\n    s += i\n    i += 1\n",
+        );
+        assert_eq!(interpreter.lookup_name("s").unwrap(), Some(Value::Int(45)));
+        assert_eq!(interpreter.lookup_name("i").unwrap(), Some(Value::Int(10)));
+    }
+
+    #[test]
+    fn while_le_increment_detected() {
+        let interpreter = run_program(
+            "i = 1\nproduct = 1\nwhile i <= 5:\n    product *= i\n    i += 1\n",
+        );
+        assert_eq!(interpreter.lookup_name("product").unwrap(), Some(Value::Int(120)));
+        assert_eq!(interpreter.lookup_name("i").unwrap(), Some(Value::Int(6)));
+    }
+
+    #[test]
+    fn small_range_unroll_correct() {
+        let interpreter = run_program(
+            "s = 0\nfor i in range(4):\n    s += i\n",
+        );
+        assert_eq!(interpreter.lookup_name("s").unwrap(), Some(Value::Int(6)));
+    }
+
+    #[test]
+    fn while_with_continue_not_converted() {
+        // continue in body means increment might be skipped — don't convert
+        let interpreter = run_program(
+            "i = 0\ns = 0\nwhile i < 10:\n    i += 1\n    if i % 2 == 0:\n        continue\n    s += i\n",
+        );
+        // Sum of odd numbers 1..9: 1+3+5+7+9 = 25
+        assert_eq!(interpreter.lookup_name("s").unwrap(), Some(Value::Int(25)));
+    }
+
+    #[test]
     fn for_loop_list_lazy_iter_sum() {
         let interpreter = run_program(
             "lst = [1, 2, 3, 4, 5]\ntotal = 0\nfor x in lst:\n    total += x\n",
