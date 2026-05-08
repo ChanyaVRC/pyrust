@@ -46,7 +46,9 @@ jobs:
           if ! git ls-remote --exit-code --heads origin benchmark-data; then
             git checkout --orphan benchmark-data
             git rm -rf . > /dev/null 2>&1 || true
-            git commit --allow-empty -m "init: benchmark-data branch"
+            git -c user.email="github-actions[bot]@users.noreply.github.com" \
+                -c user.name="github-actions[bot]" \
+                commit --allow-empty -m "init: benchmark-data branch"
             git push origin benchmark-data
             git checkout -
           fi
