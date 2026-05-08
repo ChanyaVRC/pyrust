@@ -189,12 +189,50 @@ impl Interpreter {
             } => {
                 let mut broke = false;
 
-                // Drive Range lazily to avoid materializing up to N elements.
-                // For other named variables, borrow the env directly to avoid
-                // cloning the entire collection — especially valuable for dicts
-                // where only keys are needed, not values (mirrors index-read opt).
+                // For named variables, borrow the env directly to avoid a
+                // redundant clone of the iterable Value (mirrors index-read opt).
+                // Range is kept fully lazy; other types snapshot their elements.
                 if let Expr::Var(name) = iter {
                     if let Some(env) = self.resolve_name_env(name) {
+                        // Named Range: extract the three parameters and drive lazily,
+                        // avoiding a second env borrow that the general path would incur.
+                        let range_spec: Option<(i64, i64, i64)> = {
+                            let borrowed = env.borrow();
+                            borrowed.values.get(name).and_then(|v| {
+                                if let Value::Range { start, stop, step } = v {
+                                    Some((*start, *stop, *step))
+                                } else {
+                                    None
+                                }
+                            })
+                        };
+                        if let Some((start, stop, step)) = range_spec {
+                            if step == 0 {
+                                return Err(PyError::Runtime("range() step argument must not be zero".to_string()));
+                            }
+                            let mut cur = start;
+                            'named_range_loop: loop {
+                                if step > 0 && cur >= stop { break; }
+                                if step < 0 && cur <= stop { break; }
+                                self.assign_target(target, Value::Int(cur))?;
+                                match self.exec_block(body)? {
+                                    ExecSignal::None => {}
+                                    ExecSignal::Break => { broke = true; break 'named_range_loop; }
+                                    ExecSignal::Continue => {}
+                                    ExecSignal::Return(v) => return Ok(ExecSignal::Return(v)),
+                                }
+                                cur += step;
+                            }
+                            if !broke {
+                                if let Some(branch) = else_branch {
+                                    return self.exec_block(branch);
+                                }
+                            }
+                            return Ok(ExecSignal::None);
+                        }
+
+                        // Other named iterables: collect elements without cloning
+                        // the outer Value (especially avoids copying dict values).
                         let fast_items: Option<Vec<Value>> = {
                             let borrowed = env.borrow();
                             borrowed.values.get(name).and_then(|v| match v {
