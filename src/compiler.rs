@@ -973,10 +973,7 @@ fn const_eq(a: &Value, b: &Value) -> bool {
 
 /// Compile a top-level script body as a zero-parameter synthetic function.
 /// Returns None if the script uses unsupported features or exceeds register limits.
-pub fn compile_script(
-    stmts: &[Stmt],
-    local_index: Rc<HashMap<String, usize>>,
-) -> Option<FnCode> {
+pub fn compile_script(stmts: &[Stmt], local_index: Rc<HashMap<String, usize>>) -> Option<FnCode> {
     use std::collections::HashSet;
     if has_unsupported(stmts) {
         return None;
