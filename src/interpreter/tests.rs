@@ -539,4 +539,29 @@ result = fact(10)
             .unwrap();
         assert!(ok);
     }
+
+    #[test]
+    fn aug_assign_fused_rmw_sum_loop() {
+        let interpreter = run_program(
+            "total = 0\nfor i in range(100):\n    total += i\n",
+        );
+        assert_eq!(interpreter.lookup_name("total").unwrap(), Some(Value::Int(4950)));
+    }
+
+    #[test]
+    fn range_step1_sum_matches_formula() {
+        // sum(range(1000)) = 999*1000/2 = 499500
+        let interpreter = run_program(
+            "s = 0\nfor i in range(1000):\n    s += i\n",
+        );
+        assert_eq!(interpreter.lookup_name("s").unwrap(), Some(Value::Int(499500)));
+    }
+
+    #[test]
+    fn range_step1_break_preserves_value() {
+        let interpreter = run_program(
+            "s = 0\nfor i in range(100):\n    if i == 10:\n        break\n    s += i\n",
+        );
+        assert_eq!(interpreter.lookup_name("s").unwrap(), Some(Value::Int(45)));
+    }
 }

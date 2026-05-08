@@ -68,9 +68,59 @@ impl Interpreter {
                 "range() step argument must not be zero".to_string(),
             ));
         }
+
+        let mut broke = false;
+
+        // step=1 fast path: avoids division in range_len and reduces per-iteration ops
+        if step == 1 {
+            if let AssignTarget::Name(loop_var) = target {
+                let target_env = self.resolve_assign_env_for(loop_var);
+                let mut cur = start;
+                'step1_name: loop {
+                    if cur >= stop {
+                        break;
+                    }
+                    env_assign_local(&target_env, loop_var, Value::Int(cur));
+                    match self.exec_block(body)? {
+                        ExecSignal::None => {}
+                        ExecSignal::Break => {
+                            broke = true;
+                            break 'step1_name;
+                        }
+                        ExecSignal::Continue => {}
+                        ExecSignal::Return(v) => return Ok(ExecSignal::Return(v)),
+                    }
+                    cur += 1;
+                }
+            } else {
+                let mut cur = start;
+                loop {
+                    if cur >= stop {
+                        break;
+                    }
+                    self.assign_target(target, Value::Int(cur))?;
+                    match self.exec_block(body)? {
+                        ExecSignal::None => {}
+                        ExecSignal::Break => {
+                            broke = true;
+                            break;
+                        }
+                        ExecSignal::Continue => {}
+                        ExecSignal::Return(v) => return Ok(ExecSignal::Return(v)),
+                    }
+                    cur += 1;
+                }
+            }
+            if !broke {
+                if let Some(branch) = else_branch {
+                    return self.exec_block(branch);
+                }
+            }
+            return Ok(ExecSignal::None);
+        }
+
         // Pre-compute iteration count (one division, done once).
         let mut remaining = range_len(start, stop, step);
-        let mut broke = false;
         if let AssignTarget::Name(loop_var) = target {
             let target_env = self.resolve_assign_env_for(loop_var);
             let mut cur = start;

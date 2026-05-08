@@ -383,6 +383,18 @@ fn lookup_name_in_enclosing_local_env(env: &EnvRef, name: &str) -> Result<Option
     lookup_name_in_env(&target_env, name)
 }
 
+// Read `name` directly from an already-resolved env (fastlocals slot first,
+// then values HashMap).  Does not walk the env chain.
+fn read_local(env: &EnvRef, name: &str) -> Option<Value> {
+    let borrowed = env.borrow();
+    if let Some(fl) = &borrowed.fastlocals {
+        if let Some(&idx) = fl.index.get(name) {
+            return fl.slots[idx].clone();
+        }
+    }
+    borrowed.values.get(name).cloned()
+}
+
 // Write `value` into `env` for `name`, using fastlocals slot when available.
 fn env_assign_local(env: &EnvRef, name: &str, value: Value) {
     let mut borrowed = env.borrow_mut();

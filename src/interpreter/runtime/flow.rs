@@ -58,11 +58,11 @@ impl Interpreter {
     fn exec_aug_assign(&mut self, target: &AssignTarget, op: BinaryOp, rhs: Value) -> Result<()> {
         match target {
             AssignTarget::Name(name) => {
-                let current = self
-                    .lookup_name(name)?
+                let target_env = self.resolve_assign_env_for(name);
+                let current = read_local(&target_env, name)
                     .ok_or_else(|| PyError::Runtime(format!("name '{}' is not defined", name)))?;
                 let new_val = self.compute_aug(current, op, rhs)?;
-                self.assign_name(name.clone(), new_val);
+                env_assign_local(&target_env, name, new_val);
                 Ok(())
             }
             AssignTarget::Attr(obj_expr, attr) => {
