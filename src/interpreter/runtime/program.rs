@@ -55,6 +55,7 @@ impl Interpreter {
         Ok(())
     }
 
+    #[inline(always)]
     fn exec_block(&mut self, block: &[Stmt]) -> Result<ExecSignal> {
         for stmt in block {
             let signal = self.exec_stmt(stmt)?;
@@ -755,7 +756,7 @@ impl Interpreter {
                     Some(expr) => self.eval_expr(expr)?,
                     None => Value::None,
                 };
-                Ok(ExecSignal::Return(value))
+                Ok(ExecSignal::Return(Box::new(value)))
             }
             Stmt::Break => Ok(ExecSignal::Break),
             Stmt::Continue => Ok(ExecSignal::Continue),

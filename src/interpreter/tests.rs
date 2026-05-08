@@ -566,6 +566,22 @@ result = fact(10)
     }
 
     #[test]
+    fn boxed_return_signal_propagates_correctly() {
+        let interpreter = run_program(
+            "def f(n):\n    for i in range(n):\n        if i == 5:\n            return i * 2\n    return -1\nresult = f(10)\n",
+        );
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(10)));
+    }
+
+    #[test]
+    fn nested_return_propagates_through_loops() {
+        let interpreter = run_program(
+            "def search(lst, target):\n    for i, x in enumerate(lst):\n        if x == target:\n            return i\n    return -1\nidx = search([10, 20, 30, 40], 30)\n",
+        );
+        assert_eq!(interpreter.lookup_name("idx").unwrap(), Some(Value::Int(2)));
+    }
+
+    #[test]
     fn while_compare_increment_detected_as_range() {
         // while i < n: ...; i += 1 should behave identically to for i in range(n)
         let interpreter = run_program(

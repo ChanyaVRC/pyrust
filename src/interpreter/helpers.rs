@@ -437,6 +437,7 @@ fn get_list_len(env: &EnvRef, name: &str) -> Option<usize> {
 }
 
 // Write `value` into `env` for `name`, using fastlocals slot when available.
+#[inline]
 fn env_assign_local(env: &EnvRef, name: &str, value: Value) {
     let mut borrowed = env.borrow_mut();
     if let Some(fl) = &mut borrowed.fastlocals {
