@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778258093289,
+  "lastUpdate": 1778258799666,
   "repoUrl": "https://github.com/ChanyaVRC/pyrust",
   "entries": {
     "Benchmark": [
@@ -839,6 +839,306 @@ window.BENCHMARK_DATA = {
             "name": "test_operators [Python]",
             "value": 11.5,
             "range": "±0.352 ms",
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "63221603+ChanyaVRC@users.noreply.github.com",
+            "name": "ChanyaVRC",
+            "username": "ChanyaVRC"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "8c87684d4cac1ada99cac2296cd96fc7eb01a286",
+          "message": "Merge pull request #40 from ChanyaVRC/perf/for-lazy-iter\n\nperf: lazy list iteration + tuple-unpack for-target fast path",
+          "timestamp": "2026-05-09T01:45:04+09:00",
+          "tree_id": "b2b95ed52889d1a843a836e939ee2c85b5c7a5b0",
+          "url": "https://github.com/ChanyaVRC/pyrust/commit/8c87684d4cac1ada99cac2296cd96fc7eb01a286"
+        },
+        "date": 1778258799196,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "test_while_true [PyRust]",
+            "value": 2644.756,
+            "range": "±26.127 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_while_true [Python]",
+            "value": 122.341,
+            "range": "±7.408 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_range_loop [PyRust]",
+            "value": 1396.348,
+            "range": "±21.483 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_range_loop [Python]",
+            "value": 94.056,
+            "range": "±2.982 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_range_loop_step [PyRust]",
+            "value": 705.33,
+            "range": "±3.811 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_range_loop_step [Python]",
+            "value": 51.572,
+            "range": "±1.137 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_fib_iterative [PyRust]",
+            "value": 117.006,
+            "range": "±1.503 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_fib_iterative [Python]",
+            "value": 13.936,
+            "range": "±0.398 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_insertion_sort [PyRust]",
+            "value": 108.706,
+            "range": "±0.376 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_insertion_sort [Python]",
+            "value": 12.676,
+            "range": "±0.338 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_list_repeat [PyRust]",
+            "value": 39.32,
+            "range": "±0.347 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_list_repeat [Python]",
+            "value": 12.421,
+            "range": "±0.249 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_for_iter [PyRust]",
+            "value": 9.255,
+            "range": "±0.105 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_for_iter [Python]",
+            "value": 10.547,
+            "range": "±0.433 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_dict_operations [PyRust]",
+            "value": 6.828,
+            "range": "±0.122 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_dict_operations [Python]",
+            "value": 10.046,
+            "range": "±0.295 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_fib_recursive [PyRust]",
+            "value": 3.02,
+            "range": "±0.619 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_fib_recursive [Python]",
+            "value": 20.192,
+            "range": "±0.45 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_functions [PyRust]",
+            "value": 2.606,
+            "range": "±0.139 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_functions [Python]",
+            "value": 10.602,
+            "range": "±0.148 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_exceptions [PyRust]",
+            "value": 2.514,
+            "range": "±0.19 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_exceptions [Python]",
+            "value": 11.143,
+            "range": "±0.219 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_builtins_iter [PyRust]",
+            "value": 2.111,
+            "range": "±0.204 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_builtins_iter [Python]",
+            "value": 10.469,
+            "range": "±0.226 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_collections [PyRust]",
+            "value": 2.02,
+            "range": "±0.141 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_collections [Python]",
+            "value": 10.369,
+            "range": "±0.159 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_classes [PyRust]",
+            "value": 1.99,
+            "range": "±0.126 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_classes [Python]",
+            "value": 10.762,
+            "range": "±0.236 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_builtins_type [PyRust]",
+            "value": 1.84,
+            "range": "±0.166 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_builtins_type [Python]",
+            "value": 10.195,
+            "range": "±0.154 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_aug_assign_loop [PyRust]",
+            "value": 1.719,
+            "range": "±0.053 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_aug_assign_loop [Python]",
+            "value": 10.726,
+            "range": "±0.116 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_control_flow [PyRust]",
+            "value": 1.59,
+            "range": "±0.071 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_control_flow [Python]",
+            "value": 10.035,
+            "range": "±0.112 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_builtins_numeric [PyRust]",
+            "value": 1.567,
+            "range": "±0.137 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_builtins_numeric [Python]",
+            "value": 10.165,
+            "range": "±0.199 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_modules [PyRust]",
+            "value": 1.533,
+            "range": "±0.131 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_modules [Python]",
+            "value": 10.302,
+            "range": "±0.189 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_while_constant [PyRust]",
+            "value": 1.506,
+            "range": "±0.07 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_while_constant [Python]",
+            "value": 9.995,
+            "range": "±0.218 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_arithmetic [PyRust]",
+            "value": 1.481,
+            "range": "±0.077 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_arithmetic [Python]",
+            "value": 9.998,
+            "range": "±0.21 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_for_lazy_tuple [PyRust]",
+            "value": 1.391,
+            "range": "±0.084 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_for_lazy_tuple [Python]",
+            "value": 9.922,
+            "range": "±0.135 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_operators [PyRust]",
+            "value": 1.367,
+            "range": "±0.106 ms",
+            "unit": "ms"
+          },
+          {
+            "name": "test_operators [Python]",
+            "value": 10.01,
+            "range": "±0.235 ms",
             "unit": "ms"
           }
         ]
