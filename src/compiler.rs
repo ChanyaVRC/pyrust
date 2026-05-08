@@ -503,25 +503,51 @@ impl<'a> Compiler<'a> {
     }
 
     fn compile_while(&mut self, cond: &Expr, body: &[Stmt], else_branch: Option<&[Stmt]>) {
-        // Constant-true: no condition check needed, like CPython's peephole optimizer.
+        // Constant-false: body never executes, only else branch runs.
+        if is_const_false_expr(cond) {
+            if let Some(else_stmts) = else_branch {
+                self.compile_block(else_stmts);
+            }
+            return;
+        }
+
         let is_infinite = matches!(cond, Expr::Bool(true) | Expr::Int(1));
-        let loop_start = self.pc();
+
+        // while-compare-increment → for-range dispatch (mirrors tree-walker optimization).
+        if !is_infinite && !body_has_continue(body) {
+            if self.try_compile_while_range(cond, body, else_branch) {
+                return;
+            }
+        }
+
+        // LICM: condition reads only loop-invariant names → evaluate once before body.
+        let is_licm = !is_infinite && {
+            let written = collect_body_written(body);
+            expr_is_invariant(cond, &written)
+        };
+
+        // For LICM: emit condition once before loop_start so `continue` skips re-evaluation.
+        // For normal: loop_start is before the condition check.
+        let (loop_start, exit_jmp) = if is_licm {
+            let cond_reg = self.compile_expr(cond);
+            let jmp = self.emit(Insn::JumpIfFalse(cond_reg, 0));
+            self.free_temp(cond_reg);
+            (self.pc(), Some(jmp))
+        } else if is_infinite {
+            (self.pc(), None)
+        } else {
+            let start = self.pc();
+            let cond_reg = self.compile_expr(cond);
+            let jmp = self.emit(Insn::JumpIfFalse(cond_reg, 0));
+            self.free_temp(cond_reg);
+            (start, Some(jmp))
+        };
 
         self.loops.push(LoopCtx {
             break_patches: Vec::new(),
             continue_target: loop_start,
         });
 
-        let exit_jmp = if is_infinite {
-            None
-        } else {
-            let cond_reg = self.compile_expr(cond);
-            let jmp = self.emit(Insn::JumpIfFalse(cond_reg, 0));
-            self.free_temp(cond_reg);
-            Some(jmp)
-        };
-
-        // While body may run 0 times, so assignments inside are not visible after.
         let saved = self.def_set;
         self.compile_block(body);
         self.def_set = saved;
@@ -533,7 +559,6 @@ impl<'a> Compiler<'a> {
         let back_offset = loop_start as i32 - back_from;
         self.emit(Insn::Jump(back_offset));
 
-        // Condition false → falls through to else block (or post-loop if no else).
         if let Some(jmp) = exit_jmp {
             self.patch_jump(jmp);
         }
@@ -541,16 +566,119 @@ impl<'a> Compiler<'a> {
         let ctx = self.loops.pop().unwrap();
 
         if let Some(else_stmts) = else_branch {
-            // Natural condition-false exit falls through; compile else first.
             self.compile_block(else_stmts);
             if self.failed {
                 return;
             }
         }
-        // Breaks (and no-else natural exit) land here, past the else block.
         for idx in ctx.break_patches {
             self.patch_jump(idx);
         }
+    }
+
+    /// Emit a for-range loop for the while-compare-increment pattern.
+    /// Returns true if the pattern was matched and code was emitted.
+    fn try_compile_while_range(
+        &mut self,
+        cond: &Expr,
+        body: &[Stmt],
+        else_branch: Option<&[Stmt]>,
+    ) -> bool {
+        let (var_name, stop_expr, step, inclusive) = match detect_while_range(cond, body) {
+            Some(x) => x,
+            None => return false,
+        };
+        let var_reg = match self.local_reg(var_name) {
+            Some(r) => r,
+            None => return false,
+        };
+
+        // Call frame: [range_fn, start, stop, step] + 1 extra slot if inclusive adjustment needed.
+        let frame = self.next_temp;
+        let slots = if inclusive { 5usize } else { 4 };
+        if (frame as usize).saturating_add(slots) > 256 {
+            return false;
+        }
+        self.next_temp = frame + slots as u8;
+        if self.next_temp - 1 > self.max_reg {
+            self.max_reg = self.next_temp - 1;
+        }
+
+        // frame+0: range builtin
+        let range_idx = self.intern_name("range");
+        self.emit(Insn::LoadGlobal(frame, range_idx));
+        // frame+1: start = current var value
+        self.emit(Insn::Move(frame + 1, var_reg));
+        // frame+2: stop
+        {
+            let saved = self.next_temp;
+            let r = self.compile_expr(stop_expr);
+            if r != frame + 2 {
+                self.emit(Insn::Move(frame + 2, r));
+            }
+            self.next_temp = saved;
+        }
+        // Adjust stop for Le (stop+1) or Ge (stop-1).
+        if inclusive {
+            let one_idx = self.intern_const(Value::Int(1));
+            self.emit(Insn::LoadConst(frame + 4, one_idx));
+            let adj = if step > 0 {
+                BinaryOp::Add
+            } else {
+                BinaryOp::Sub
+            };
+            self.emit(Insn::BinOp(frame + 2, frame + 2, adj, frame + 4));
+        }
+        // frame+3: step constant
+        let step_idx = self.intern_const(Value::Int(step));
+        self.emit(Insn::LoadConst(frame + 3, step_idx));
+        // Call range(start, stop, step) → result in frame
+        self.emit(Insn::Call(frame, 3));
+        self.next_temp = frame + 1;
+
+        // GetIter
+        let iter_slot = self.alloc_iter();
+        self.emit(Insn::GetIter(iter_slot, frame));
+        self.free_temp(frame);
+
+        // Loop: ForIter writes directly into var_reg each iteration.
+        let loop_start = self.pc();
+        let exit_jmp = self.emit(Insn::ForIter(var_reg, iter_slot, 0));
+        self.mark_def(var_reg);
+
+        self.loops.push(LoopCtx {
+            break_patches: Vec::new(),
+            continue_target: loop_start,
+        });
+
+        // Compile full body. ForIter overwrites var_reg at the start of each
+        // iteration, so the body's AugAssign is redundant for driving the loop
+        // but still needed to produce the correct post-loop value of the variable.
+        let saved = self.def_set;
+        self.compile_block(body);
+        self.def_set = saved;
+        if self.failed {
+            return true;
+        }
+
+        let back_from = self.pc() as i32 + 1;
+        let back_offset = loop_start as i32 - back_from;
+        self.emit(Insn::Jump(back_offset));
+
+        self.patch_jump(exit_jmp);
+        let ctx = self.loops.pop().unwrap();
+        self.free_iter();
+
+        if let Some(else_stmts) = else_branch {
+            self.compile_block(else_stmts);
+            if self.failed {
+                return true;
+            }
+        }
+        for idx in ctx.break_patches {
+            self.patch_jump(idx);
+        }
+        true
     }
 
     fn compile_for(
@@ -968,6 +1096,146 @@ fn const_eq(a: &Value, b: &Value) -> bool {
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::None, Value::None) => true,
         _ => false,
+    }
+}
+
+fn is_const_false_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Bool(false) | Expr::Int(0) | Expr::None => true,
+        Expr::Float(f) => *f == 0.0,
+        _ => false,
+    }
+}
+
+fn body_has_continue(body: &[Stmt]) -> bool {
+    body.iter().any(stmt_has_continue)
+}
+
+fn stmt_has_continue(s: &Stmt) -> bool {
+    match s {
+        Stmt::Continue => true,
+        Stmt::If {
+            branches,
+            else_branch,
+        } => {
+            branches.iter().any(|(_, b)| body_has_continue(b))
+                || else_branch.as_deref().map_or(false, body_has_continue)
+        }
+        Stmt::While { .. } | Stmt::For { .. } => false,
+        _ => false,
+    }
+}
+
+fn collect_body_written(body: &[Stmt]) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    collect_written_in(body, &mut names);
+    names
+}
+
+fn collect_written_in(body: &[Stmt], names: &mut std::collections::HashSet<String>) {
+    for stmt in body {
+        match stmt {
+            Stmt::Assign(target, _) | Stmt::AugAssign { target, .. } => {
+                collect_written_target(target, names);
+            }
+            Stmt::If {
+                branches,
+                else_branch,
+            } => {
+                for (_, b) in branches {
+                    collect_written_in(b, names);
+                }
+                if let Some(b) = else_branch {
+                    collect_written_in(b, names);
+                }
+            }
+            Stmt::While {
+                body, else_branch, ..
+            } => {
+                collect_written_in(body, names);
+                if let Some(b) = else_branch {
+                    collect_written_in(b, names);
+                }
+            }
+            Stmt::For {
+                target,
+                body,
+                else_branch,
+                ..
+            } => {
+                collect_written_target(target, names);
+                collect_written_in(body, names);
+                if let Some(b) = else_branch {
+                    collect_written_in(b, names);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_written_target(target: &AssignTarget, names: &mut std::collections::HashSet<String>) {
+    match target {
+        AssignTarget::Name(n) => {
+            names.insert(n.clone());
+        }
+        AssignTarget::Tuple(ts) => {
+            for t in ts {
+                collect_written_target(t, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn expr_is_invariant(expr: &Expr, written: &std::collections::HashSet<String>) -> bool {
+    match expr {
+        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::None => true,
+        Expr::Var(name) => !written.contains(name.as_str()),
+        Expr::Binary { left, right, .. } => {
+            expr_is_invariant(left, written) && expr_is_invariant(right, written)
+        }
+        Expr::Unary { expr, .. } => expr_is_invariant(expr, written),
+        _ => false,
+    }
+}
+
+/// Detect `while VAR cmp STOP: ...; VAR += STEP` (or -= for decreasing).
+/// Returns (var_name, stop_expr, signed_step, inclusive).
+fn detect_while_range<'a>(
+    cond: &'a Expr,
+    body: &'a [Stmt],
+) -> Option<(&'a str, &'a Expr, i64, bool)> {
+    let (var_name, cmp_op, stop_expr) = match cond {
+        Expr::Binary { op, left, right }
+            if matches!(
+                op,
+                BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+            ) =>
+        {
+            match left.as_ref() {
+                Expr::Var(name) => (name.as_str(), op, right.as_ref()),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    match body.last()? {
+        Stmt::AugAssign {
+            target: AssignTarget::Name(aug_var),
+            op: BinaryOp::Add,
+            expr: Expr::Int(s),
+        } if aug_var == var_name && *s > 0 && matches!(cmp_op, BinaryOp::Lt | BinaryOp::Le) => {
+            Some((var_name, stop_expr, *s, matches!(cmp_op, BinaryOp::Le)))
+        }
+        Stmt::AugAssign {
+            target: AssignTarget::Name(aug_var),
+            op: BinaryOp::Sub,
+            expr: Expr::Int(s),
+        } if aug_var == var_name && *s > 0 && matches!(cmp_op, BinaryOp::Gt | BinaryOp::Ge) => {
+            Some((var_name, stop_expr, -*s, matches!(cmp_op, BinaryOp::Ge)))
+        }
+        _ => None,
     }
 }
 
