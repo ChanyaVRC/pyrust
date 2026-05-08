@@ -231,6 +231,7 @@ impl Interpreter {
             {
                 let mut e = env.borrow_mut();
                 e.values.clear();
+                e.fastlocals = None;
                 e.parent = parent;
             }
             env

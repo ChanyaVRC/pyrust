@@ -76,13 +76,7 @@ impl Interpreter {
             let mut cur = start;
             'range_loop: loop {
                 if remaining == 0 { break; }
-                {
-                    let mut env = target_env.borrow_mut();
-                    match env.values.get_mut(loop_var.as_str()) {
-                        Some(slot) => *slot = Value::Int(cur),
-                        None => { env.values.insert(loop_var.clone(), Value::Int(cur)); }
-                    }
-                }
+                env_assign_local(&target_env, loop_var, Value::Int(cur));
                 match self.exec_block(body)? {
                     ExecSignal::None => {}
                     ExecSignal::Break => { broke = true; break 'range_loop; }
@@ -128,13 +122,7 @@ impl Interpreter {
         if let AssignTarget::Name(loop_var) = target {
             let target_env = self.resolve_assign_env_for(loop_var);
             for value in items {
-                {
-                    let mut env = target_env.borrow_mut();
-                    match env.values.get_mut(loop_var.as_str()) {
-                        Some(slot) => *slot = value,
-                        None => { env.values.insert(loop_var.clone(), value); }
-                    }
-                }
+                env_assign_local(&target_env, loop_var, value);
                 match self.exec_block(body)? {
                     ExecSignal::None => {}
                     ExecSignal::Break => { broke = true; break; }
