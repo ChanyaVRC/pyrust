@@ -96,6 +96,7 @@ impl Interpreter {
                 let mut sub = Interpreter::default();
                 sub.script_dir = self.script_dir.clone();
                 sub.module_cache = Rc::clone(&self.module_cache);
+                sub.call_depth = self.call_depth;
                 sub.exec_program(&program, false)?;
                 // Harvest all top-level bindings as module attrs
                 let attrs: HashMap<String, Value> = sub

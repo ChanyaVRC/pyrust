@@ -385,9 +385,19 @@ impl Interpreter {
                 };
                 local_env.borrow_mut().values.insert(param.name.clone(), value);
             }
+            self.call_depth += 1;
+            if self.call_depth > MAX_CALL_DEPTH {
+                self.call_depth -= 1;
+                let exc = self.instantiate_named_exception(
+                    "RecursionError",
+                    "maximum recursion depth exceeded".to_string(),
+                )?;
+                return Err(PyError::Raised(exc));
+            }
             let previous_env = std::mem::replace(&mut self.env, local_env);
             let signal = self.exec_block(&function.body);
             self.env = previous_env;
+            self.call_depth -= 1;
             return match signal? {
                 ExecSignal::None => Ok(Value::None),
                 ExecSignal::Return(value) => Ok(value),
@@ -473,9 +483,19 @@ impl Interpreter {
             }
         }
 
+        self.call_depth += 1;
+        if self.call_depth > MAX_CALL_DEPTH {
+            self.call_depth -= 1;
+            let exc = self.instantiate_named_exception(
+                "RecursionError",
+                "maximum recursion depth exceeded".to_string(),
+            )?;
+            return Err(PyError::Raised(exc));
+        }
         let previous_env = std::mem::replace(&mut self.env, local_env);
         let signal = self.exec_block(&function.body);
         self.env = previous_env;
+        self.call_depth -= 1;
 
         match signal? {
             ExecSignal::None => Ok(Value::None),

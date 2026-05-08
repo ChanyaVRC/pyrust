@@ -19,6 +19,11 @@ fn parse_source(src: &str) -> Result<Vec<ast::Stmt>> {
     parser.parse_program()
 }
 
+// 256 MB stack so that deep Python recursion (up to RecursionError limit of
+// 1000 calls) never overflows the OS default (1 MB on Windows), even in
+// debug builds where Rust stack frames can be 80–100 KB each.
+const INTERPRETER_STACK_SIZE: usize = 256 * 1024 * 1024;
+
 fn run_file(path: &str) -> Result<()> {
     let src = std::fs::read_to_string(path)
         .map_err(|e| PyError::Runtime(format!("failed to read '{path}': {e}")))?;
@@ -27,44 +32,63 @@ fn run_file(path: &str) -> Result<()> {
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let mut interpreter = Interpreter::with_script_dir(script_dir);
-    interpreter.exec_program(&program, false)
+
+    // Marshal errors as strings so the Result crosses the thread boundary
+    // (Value contains Rc which is not Send).
+    let err_str: Option<String> = std::thread::Builder::new()
+        .stack_size(INTERPRETER_STACK_SIZE)
+        .spawn(move || {
+            let mut interp = Interpreter::with_script_dir(script_dir);
+            interp.exec_program(&program, false).err().map(|e| e.to_string())
+        })
+        .expect("failed to spawn interpreter thread")
+        .join()
+        .expect("interpreter thread panicked");
+
+    if let Some(msg) = err_str {
+        return Err(PyError::Runtime(msg));
+    }
+    Ok(())
 }
 
 fn run_repl() -> Result<()> {
     println!("PyRust 0.2 (Python-like subset). Type 'exit' or 'quit' to leave.");
 
-    let mut interpreter = Interpreter::default();
     let stdin = io::stdin();
+    std::thread::Builder::new()
+        .stack_size(INTERPRETER_STACK_SIZE)
+        .spawn(move || {
+            let mut interpreter = Interpreter::default();
+            loop {
+                print!(">>> ");
+                io::stdout().flush().ok();
 
-    loop {
-        print!(">>> ");
-        io::stdout()
-            .flush()
-            .map_err(|e| PyError::Runtime(format!("stdout flush failed: {e}")))?;
+                let mut line = String::new();
+                let n = stdin.read_line(&mut line).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
 
-        let mut line = String::new();
-        let n = stdin
-            .read_line(&mut line)
-            .map_err(|e| PyError::Runtime(format!("stdin read failed: {e}")))?;
-        if n == 0 {
-            break;
-        }
+                let src = line.trim_end();
+                if src.trim().is_empty() {
+                    continue;
+                }
+                if src.trim() == "exit" || src.trim() == "quit" {
+                    break;
+                }
 
-        let src = line.trim_end();
-        if src.trim().is_empty() {
-            continue;
-        }
-        if src.trim() == "exit" || src.trim() == "quit" {
-            break;
-        }
-
-        let one_line = format!("{src}\n");
-        match parse_source(&one_line).and_then(|program| interpreter.exec_program(&program, true)) {
-            Ok(()) => {}
-            Err(e) => eprintln!("{e}"),
-        }
-    }
+                let one_line = format!("{src}\n");
+                match parse_source(&one_line)
+                    .and_then(|p| interpreter.exec_program(&p, true))
+                {
+                    Ok(()) => {}
+                    Err(e) => eprintln!("{e}"),
+                }
+            }
+        })
+        .expect("failed to spawn REPL thread")
+        .join()
+        .expect("REPL thread panicked");
 
     Ok(())
 }
