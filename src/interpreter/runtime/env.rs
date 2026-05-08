@@ -127,12 +127,15 @@ impl Interpreter {
     }
 
     fn assign_name(&self, name: String, value: Value) {
-        if self.env.borrow().global_names.contains(&name) {
-            let module_env = module_env(&self.env);
-            module_env.borrow_mut().values.insert(name, value);
+        let (is_global, is_nonlocal) = {
+            let env = self.env.borrow();
+            (env.global_names.contains(&name), env.nonlocal_names.contains(&name))
+        };
+        if is_global {
+            module_env(&self.env).borrow_mut().values.insert(name, value);
             return;
         }
-        if self.env.borrow().nonlocal_names.contains(&name) {
+        if is_nonlocal {
             if let Some(env) = find_enclosing_local_env_for_name(&self.env, &name) {
                 env.borrow_mut().values.insert(name, value);
                 return;
@@ -142,13 +145,33 @@ impl Interpreter {
     }
 
     fn lookup_name(&self, name: &str) -> Result<Option<Value>> {
-        if self.env.borrow().global_names.contains(name) {
+        let (is_global, is_nonlocal) = {
+            let env = self.env.borrow();
+            (env.global_names.contains(name), env.nonlocal_names.contains(name))
+        };
+        if is_global {
             return Ok(lookup_name_in_module(&self.env, name));
         }
-        if self.env.borrow().nonlocal_names.contains(name) {
+        if is_nonlocal {
             return lookup_name_in_enclosing_local_env(&self.env, name);
         }
         lookup_name_in_env(&self.env, name)
+    }
+
+    // Returns the EnvRef that owns `name`, respecting global/nonlocal declarations.
+    fn resolve_name_env(&self, name: &str) -> Option<EnvRef> {
+        let (is_global, is_nonlocal) = {
+            let env = self.env.borrow();
+            (env.global_names.contains(name), env.nonlocal_names.contains(name))
+        };
+        if is_global {
+            let me = module_env(&self.env);
+            return if me.borrow().values.contains_key(name) { Some(me) } else { None };
+        }
+        if is_nonlocal {
+            return find_enclosing_local_env_for_name(&self.env, name);
+        }
+        find_env_for_name(&self.env, name)
     }
 
     fn declare_global_names(&self, names: &[String]) {
