@@ -27,6 +27,7 @@ type FnCache = HashMap<(usize, Vec<PyKey>), Value>;
 
 const MAX_CALL_DEPTH: usize = 1000;
 const ENV_POOL_MAX: usize = 64;
+const SPEC_THRESHOLD: u8 = 8;
 
 pub struct Interpreter {
     env: EnvRef,
@@ -37,6 +38,7 @@ pub struct Interpreter {
     call_depth: usize,
     env_pool: Vec<EnvRef>,
     fn_cache: FnCache,
+    spec_cache: HashMap<usize, SpecState>,
 }
 
 impl Default for Interpreter {
@@ -52,6 +54,7 @@ impl Default for Interpreter {
             call_depth: 0,
             env_pool: Vec::new(),
             fn_cache: HashMap::new(),
+            spec_cache: HashMap::new(),
         }
     }
 }

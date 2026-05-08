@@ -450,4 +450,28 @@ result = fib(35)
         assert_eq!(interpreter.lookup_name("d").unwrap(), Some(Value::Bool(false)));
         assert_eq!(interpreter.lookup_name("e").unwrap(), Some(Value::Bool(true)));
     }
+
+    #[test]
+    fn int_add_specializes_after_repeated_calls() {
+        // A tight loop hitting the same + site with Int operands should produce
+        // correct results regardless of specialization state.
+        let interpreter = run_program(
+            "total = 0\nfor i in range(20):\n    total = total + i\n",
+        );
+        assert_eq!(interpreter.lookup_name("total").unwrap(), Some(Value::Int(190)));
+    }
+
+    #[test]
+    fn specialize_degrades_gracefully_on_type_change() {
+        // A site first observed as Int+Int, then called with Str+Str, must not
+        // crash — it should fall back to the generic path and return the correct value.
+        let interpreter = run_program(
+            "def add(a, b):\n    return a + b\nx = add(1, 2)\ny = add('hello', ' world')\n",
+        );
+        assert_eq!(interpreter.lookup_name("x").unwrap(), Some(Value::Int(3)));
+        assert_eq!(
+            interpreter.lookup_name("y").unwrap(),
+            Some(Value::Str("hello world".to_string()))
+        );
+    }
 }
