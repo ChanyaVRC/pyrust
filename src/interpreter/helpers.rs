@@ -356,12 +356,17 @@ fn lookup_name_in_env(env: &EnvRef, name: &str) -> Result<Option<Value>> {
     let borrowed = env.borrow();
     if let Some(fl) = &borrowed.fastlocals {
         if let Some(&idx) = fl.index.get(name) {
-            return match &fl.slots[idx] {
-                Some(v) => Ok(Some(v.clone())),
-                None => Err(PyError::Runtime(format!(
-                    "cannot access local variable '{}' where it is not associated with a value",
-                    name
-                ))),
+            return if idx < 64 && fl.def_bound_mask & (1u64 << idx) != 0 {
+                // Definitely-bound slot — skip the None check (analogous to CPython LOAD_FAST).
+                Ok(Some(fl.slots[idx].as_ref().unwrap().clone()))
+            } else {
+                match &fl.slots[idx] {
+                    Some(v) => Ok(Some(v.clone())),
+                    None => Err(PyError::Runtime(format!(
+                        "cannot access local variable '{}' where it is not associated with a value",
+                        name
+                    ))),
+                }
             };
         }
     }
@@ -640,6 +645,28 @@ fn collect_assign_target_names(
         }
         AssignTarget::Attr(..) | AssignTarget::Index(..) => {}
     }
+}
+
+pub(crate) fn compute_def_bound_mask(
+    params: &[crate::ast::FunctionParam],
+    _body: &[Stmt],
+    local_index: &HashMap<String, usize>,
+) -> u64 {
+    let mut mask: u64 = 0;
+    // Only parameters are guaranteed bound at function entry — they are set
+    // by the call setup code before the body runs.  Body-level assignments
+    // are NOT included here because a name can be read (as a local) before
+    // it is assigned (e.g. `y = x; x = 9`), which would cause an unsound
+    // unwrap.  The parameter-only subset is sufficient to eliminate the
+    // None check for the most frequently read locals in hot inner loops.
+    for param in params {
+        if let Some(&idx) = local_index.get(&param.name) {
+            if idx < 64 {
+                mask |= 1u64 << idx;
+            }
+        }
+    }
+    mask
 }
 
 fn value_to_float(v: &Value, ctx: &str) -> Result<f64> {
