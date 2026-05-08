@@ -414,6 +414,30 @@ def build_json_snapshot(
     }
 
 
+def build_benchmark_action_output(rows: list[ScriptStats]) -> list[dict]:
+    """
+    Produce output for benchmark-action/github-action-benchmark
+    (tool: customSmallerIsBetter).  Each script emits two entries:
+    one for PyRust and one for Python so both trend lines appear on the chart.
+    """
+    entries = []
+    for row in rows:
+        name = row.path.split("/")[-1].removesuffix(".py")
+        entries.append({
+            "name": f"{name} [PyRust]",
+            "value": round(row.rs_avg_ms, 3),
+            "unit": "ms",
+            "range": f"±{round(row.rs_std_ms, 3)} ms",
+        })
+        entries.append({
+            "name": f"{name} [Python]",
+            "value": round(row.py_avg_ms, 3),
+            "unit": "ms",
+            "range": f"±{round(row.py_std_ms, 3)} ms",
+        })
+    return entries
+
+
 def build_markdown_snapshot(
     rows: list[ScriptStats],
     iterations: int,
@@ -577,6 +601,12 @@ def main() -> int:
         help="optional output path for JSON snapshot (used by build_benchmark_pages.py)",
     )
     parser.add_argument(
+        "--benchmark-action-out",
+        type=str,
+        default="",
+        help="output path for benchmark-action/github-action-benchmark JSON (customSmallerIsBetter)",
+    )
+    parser.add_argument(
         "--base-bin",
         type=str,
         default="",
@@ -656,6 +686,10 @@ def main() -> int:
             benchmark_elapsed_ms=benchmark_elapsed,
         )
         Path(args.json_out).write_text(json.dumps(snapshot_json, indent=2), encoding="utf-8")
+
+    if args.benchmark_action_out:
+        ba_output = build_benchmark_action_output(rows)
+        Path(args.benchmark_action_out).write_text(json.dumps(ba_output, indent=2), encoding="utf-8")
 
     return 0
 

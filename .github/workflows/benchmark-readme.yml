@@ -10,23 +10,19 @@ permissions:
   contents: write
   pages: write
   id-token: write
+  deployments: write
 
 concurrency:
   group: benchmark-pages
   cancel-in-progress: true
 
 jobs:
-  build_pages_artifact:
+  benchmark:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -45,64 +41,75 @@ jobs:
       - name: Set benchmark timestamp
         run: echo "BENCHMARK_TIMESTAMP_UTC=$(date -u +'%Y-%m-%d %H:%M:%S')" >> "$GITHUB_ENV"
 
-      - name: Run benchmark and export snapshot
+      - name: Run benchmark
         run: |
           python tools/benchmark_compare.py \
             --iterations 10 --top 12 \
             --svg-out benchmark.svg \
-            --json-out benchmark-snapshot.json
+            --benchmark-action-out benchmark-action-output.json
 
-      - name: Fetch benchmark history
-        run: |
-          if git fetch origin benchmark-data; then
-            git worktree add /tmp/bench-data benchmark-data
-          else
-            # First run: create orphan branch
-            git worktree add --no-checkout /tmp/bench-data
-            cd /tmp/bench-data
-            git checkout --orphan benchmark-data
-            git rm -rf . 2>/dev/null || true
-            echo '[]' > history.json
-            git add history.json
-            git -c user.email="github-actions[bot]@users.noreply.github.com" \
-                -c user.name="github-actions[bot]" \
-                commit -m "init: benchmark-data branch"
-            git push origin benchmark-data
-          fi
+      - name: Store benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: PyRust Benchmark
+          tool: customSmallerIsBetter
+          output-file-path: benchmark-action-output.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          gh-pages-branch: benchmark-data
+          benchmark-data-dir-path: dev/bench
+          alert-threshold: "130%"
+          comment-on-alert: true
+          fail-on-alert: false
+          summary-always: true
 
-      - name: Build pages with updated history
+  publish_svg:
+    needs: benchmark
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout benchmark-data
+        uses: actions/checkout@v4
+        with:
+          ref: benchmark-data
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Build Pages content
         run: |
           mkdir -p dist
-          python tools/build_benchmark_pages.py \
-            --snapshot benchmark-snapshot.json \
-            --history /tmp/bench-data/history.json \
-            --svg benchmark.svg \
-            --out-html dist/index.html \
-            --max-entries 200
-          cp benchmark.svg dist/benchmark.svg
-
-      - name: Push updated history to benchmark-data branch
-        run: |
-          cd /tmp/bench-data
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git config user.name "github-actions[bot]"
-          git add history.json
-          git diff --cached --quiet || \
-            git commit -m "benchmark: ${GITHUB_SHA::12} $(date -u +'%Y-%m-%d')"
-          git push origin benchmark-data
+          cp -r dev/bench dist/bench 2>/dev/null || true
+          cat > dist/index.html << 'HTML'
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1" />
+            <title>PyRust Benchmark</title>
+            <style>
+              body { margin: 0; background: #0b1220; color: #e2e8f0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
+              .wrap { max-width: 1280px; margin: 24px auto; padding: 0 16px; }
+              a { color: #93c5fd; }
+            </style>
+          </head>
+          <body>
+            <div class="wrap">
+              <h1>PyRust Benchmark</h1>
+              <p>See the <a href="./bench/">interactive history graph</a> for commit-by-commit trends.</p>
+            </div>
+          </body>
+          </html>
+          HTML
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: dist
 
-  deploy_pages:
-    needs: build_pages_artifact
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
