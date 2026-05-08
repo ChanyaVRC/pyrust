@@ -1,4 +1,6 @@
 mod ast;
+mod bytecode;
+mod compiler;
 mod error;
 mod interpreter;
 mod lexer;

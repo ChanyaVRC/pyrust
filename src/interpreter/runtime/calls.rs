@@ -642,6 +642,44 @@ impl Interpreter {
 
             let fn_ptr = Rc::as_ptr(&function) as usize;
 
+            // Tier-0: register-VM path — try compiled bytecode before any env allocation.
+            if let Some(code) = self.get_or_compile_bytecode(fn_ptr, &function) {
+                let num_regs = code.num_regs as usize;
+                let mut regs: Vec<Option<Value>> = vec![None; num_regs];
+                // Bind params into register file using fastlocals slot indices.
+                for (param, val) in function.params.iter().zip(param_vals.iter()) {
+                    if let Some(&slot) = function.local_index.get(&param.name) {
+                        if slot < num_regs {
+                            regs[slot] = Some(val.clone());
+                        }
+                    }
+                }
+                // Self-reference for recursive calls.
+                if let Some(&slot) = function.local_index.get(&function.name) {
+                    if slot < num_regs {
+                        regs[slot] = Some(Value::Function(Rc::clone(&function)));
+                    }
+                }
+                self.call_depth += 1;
+                if self.call_depth > MAX_CALL_DEPTH {
+                    self.call_depth -= 1;
+                    let exc = self.instantiate_named_exception(
+                        "RecursionError",
+                        "maximum recursion depth exceeded".to_string(),
+                    )?;
+                    return Err(PyError::Raised(exc));
+                }
+                let previous_env = std::mem::replace(&mut self.env, Rc::clone(&function.env));
+                let vm_result = self.run_bytecode(&code, &mut regs);
+                self.env = previous_env;
+                self.call_depth -= 1;
+                let value = vm_result?;
+                if let Some(ck) = cache_key {
+                    self.fn_cache.insert(ck, value.clone());
+                }
+                return Ok(value);
+            }
+
             // Tier-1: count calls.
             let count = self.call_counts.entry(fn_ptr).or_insert(0);
             *count += 1;
@@ -1016,6 +1054,24 @@ impl Interpreter {
         } else {
             Ok(None)
         }
+    }
+
+    /// Return the compiled `FnCode` for `function`, compiling and caching it on first call.
+    /// Returns `None` if the function is ineligible for bytecode compilation.
+    fn get_or_compile_bytecode(
+        &mut self,
+        fn_ptr: usize,
+        function: &Rc<UserFunction>,
+    ) -> Option<Rc<FnCode>> {
+        if let Some((weak_fn, entry)) = self.bytecode_cache.get(&fn_ptr) {
+            // Guard against stale entries from pointer reuse after drop.
+            if weak_fn.upgrade().is_some() {
+                return entry.clone();
+            }
+        }
+        let compiled = crate::compiler::compile_fn(function).map(Rc::new);
+        self.bytecode_cache.insert(fn_ptr, (Rc::downgrade(function), compiled.clone()));
+        compiled
     }
 
 }

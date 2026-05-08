@@ -672,4 +672,73 @@ result = fact(10)
         assert_eq!(interpreter.lookup_name("s").unwrap(), Some(Value::Int(45)));
         assert_eq!(interpreter.lookup_name("i").unwrap(), Some(Value::Int(10)));
     }
+
+    // ── Register-VM specific tests ──────────────────────────────────────────
+
+    #[test]
+    fn vm_basic_arithmetic() {
+        let interpreter = run_program(
+            "def f(a, b): return a * b + 1\nresult = f(6, 7)\n",
+        );
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(43)));
+    }
+
+    #[test]
+    fn vm_factorial_recursive() {
+        let interpreter = run_program(
+            "def fact(n):\n    if n <= 1: return 1\n    return n * fact(n - 1)\nresult = fact(10)\n",
+        );
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(3628800)));
+    }
+
+    #[test]
+    fn vm_for_loop_sum() {
+        let interpreter = run_program(
+            "def s(n):\n    t = 0\n    for i in range(n):\n        t += i\n    return t\nresult = s(100)\n",
+        );
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(4950)));
+    }
+
+    #[test]
+    fn vm_early_return_from_for_loop() {
+        let interpreter = run_program(
+            "def f(n, limit):\n    s = 0\n    for i in range(n):\n        s += i\n        if s > limit:\n            return s\n    return s\nresult = f(100, 50)\n",
+        );
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(55)));
+    }
+
+    #[test]
+    fn vm_list_and_index() {
+        let interpreter = run_program(
+            "def f(lst): return lst[0] + lst[2]\nresult = f([10, 20, 30])\n",
+        );
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(40)));
+    }
+
+    #[test]
+    fn vm_tuple_unpack_in_for() {
+        let interpreter = run_program(
+            "def f(pairs):\n    t = 0\n    for a, b in pairs:\n        t += a + b\n    return t\nresult = f([(1, 2), (3, 4), (5, 6)])\n",
+        );
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(21)));
+    }
+
+    #[test]
+    fn vm_while_loop() {
+        let interpreter = run_program(
+            "def f(n):\n    i = 0\n    s = 0\n    while i < n:\n        s += i\n        i += 1\n    return s\nresult = f(10)\n",
+        );
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(45)));
+    }
+
+    #[test]
+    fn vm_unbound_local_after_lambda_drop() {
+        // Regression: bytecode_cache stale-ptr bug — a lambda dropped after its
+        // first call must not pollute the cache for a later function allocated at
+        // the same address.
+        let interpreter = run_program(
+            "def find_first(lst, pred):\n    for i, x in enumerate(lst):\n        if pred(x): return i\n    return -1\nfind_first([1, 4, 7], lambda x: x > 5)\ndef g(n):\n    s = 0\n    for i in range(n):\n        s += i\n    return s\nresult = g(5)\n",
+        );
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(10)));
+    }
 }

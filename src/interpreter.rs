@@ -6,6 +6,7 @@ use std::rc::Rc;
 use crate::ast::{
     AssignTarget, BinaryOp, CallArg, CmpOp, ExceptHandler, Expr, FunctionParam, Stmt, UnaryOp,
 };
+use crate::bytecode::FnCode;
 use crate::error::{PyError, Result};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
@@ -46,6 +47,8 @@ pub struct Interpreter {
     hot_frames: HashMap<usize, EnvRef>,
     /// Set of fn_ptrs whose hot frame is currently executing (recursion guard).
     hot_frames_active: HashSet<usize>,
+    /// Bytecode cache: fn_ptr → compiled FnCode (None = compilation failed, use tree-walker).
+    bytecode_cache: HashMap<usize, (std::rc::Weak<UserFunction>, Option<Rc<FnCode>>)>,
 }
 
 impl Default for Interpreter {
@@ -65,6 +68,7 @@ impl Default for Interpreter {
             call_counts: HashMap::new(),
             hot_frames: HashMap::new(),
             hot_frames_active: HashSet::new(),
+            bytecode_cache: HashMap::new(),
         }
     }
 }
