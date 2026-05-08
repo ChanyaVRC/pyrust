@@ -495,11 +495,8 @@ result = fib(35)
 def square(n):
     return n * n
 total = 0
-count = 0
 for i in range(60):
-    sq = square(i)
-    total = total + sq
-    count = count + 1
+    total = total + square(i)
 ";
         let ok: bool = std::thread::Builder::new()
             .stack_size(256 * 1024 * 1024)
@@ -508,7 +505,7 @@ for i in range(60):
                 let program = Parser::new(tokens).parse_program().unwrap();
                 let mut interp = Interpreter::default();
                 interp.exec_program(&program, false).unwrap();
-                // sum of squares 0..59 = 59*60*119/6 = 70,210
+                // sum of squares 0..59 = (59*60*119)/6 = 70,210
                 matches!(interp.lookup_name("total").unwrap(), Some(Value::Int(70210)))
             })
             .unwrap()
