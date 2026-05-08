@@ -26,6 +26,11 @@ impl Interpreter {
     }
 
     pub fn exec_program(&mut self, program: &[Stmt], repl_mode: bool) -> Result<()> {
+        if !repl_mode {
+            if let Some(result) = self.try_exec_vm_script(program) {
+                return result;
+            }
+        }
         for stmt in program {
             match stmt {
                 Stmt::Expr(expr) if repl_mode => {
@@ -53,6 +58,30 @@ impl Interpreter {
             }
         }
         Ok(())
+    }
+
+    fn try_exec_vm_script(&mut self, program: &[Stmt]) -> Option<Result<()>> {
+        let empty: HashSet<String> = HashSet::new();
+        let local_names = collect_local_names(&[], program, &empty, &empty);
+        if local_names.len() > 255 {
+            return None;
+        }
+        let local_index: Rc<HashMap<String, usize>> = Rc::new(
+            local_names.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect(),
+        );
+        let code = Rc::new(crate::compiler::compile_script(program, Rc::clone(&local_index))?);
+        let num_regs = code.num_regs as usize;
+        let mut regs: Vec<Option<Value>> = vec![None; num_regs];
+        let module_env = Rc::clone(&self.env);
+        self.call_depth += 1;
+        let vm_result = self.run_bytecode(&code, &mut regs);
+        self.call_depth -= 1;
+        for (name, &idx) in local_index.iter() {
+            if let Some(val) = regs[idx].take() {
+                env_assign_local(&module_env, name, val);
+            }
+        }
+        Some(vm_result.map(|_| ()))
     }
 
     #[inline(always)]

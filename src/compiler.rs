@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::ast::{AssignTarget, BinaryOp, CmpOp, Expr, Stmt};
 use crate::bytecode::{FnCode, Insn, Reg};
-use crate::value::{UserFunction, Value};
+use crate::value::{Environment, UserFunction, Value};
 
 /// Compile a user function to bytecode.
 /// Returns None if the function uses features the VM does not support.
@@ -502,6 +503,8 @@ impl<'a> Compiler<'a> {
     }
 
     fn compile_while(&mut self, cond: &Expr, body: &[Stmt], else_branch: Option<&[Stmt]>) {
+        // Constant-true: no condition check needed, like CPython's peephole optimizer.
+        let is_infinite = matches!(cond, Expr::Bool(true) | Expr::Int(1));
         let loop_start = self.pc();
 
         self.loops.push(LoopCtx {
@@ -509,9 +512,14 @@ impl<'a> Compiler<'a> {
             continue_target: loop_start,
         });
 
-        let cond_reg = self.compile_expr(cond);
-        let exit_jmp = self.emit(Insn::JumpIfFalse(cond_reg, 0));
-        self.free_temp(cond_reg);
+        let exit_jmp = if is_infinite {
+            None
+        } else {
+            let cond_reg = self.compile_expr(cond);
+            let jmp = self.emit(Insn::JumpIfFalse(cond_reg, 0));
+            self.free_temp(cond_reg);
+            Some(jmp)
+        };
 
         // While body may run 0 times, so assignments inside are not visible after.
         let saved = self.def_set;
@@ -526,7 +534,9 @@ impl<'a> Compiler<'a> {
         self.emit(Insn::Jump(back_offset));
 
         // Condition false → falls through to else block (or post-loop if no else).
-        self.patch_jump(exit_jmp);
+        if let Some(jmp) = exit_jmp {
+            self.patch_jump(jmp);
+        }
 
         let ctx = self.loops.pop().unwrap();
 
@@ -959,4 +969,31 @@ fn const_eq(a: &Value, b: &Value) -> bool {
         (Value::None, Value::None) => true,
         _ => false,
     }
+}
+
+/// Compile a top-level script body as a zero-parameter synthetic function.
+/// Returns None if the script uses unsupported features or exceeds register limits.
+pub fn compile_script(
+    stmts: &[Stmt],
+    local_index: Rc<HashMap<String, usize>>,
+) -> Option<FnCode> {
+    use std::collections::HashSet;
+    if has_unsupported(stmts) {
+        return None;
+    }
+    let empty: Rc<HashSet<String>> = Rc::new(HashSet::new());
+    let local_names: Rc<HashSet<String>> = Rc::new(local_index.keys().cloned().collect());
+    let func = UserFunction {
+        name: "<module>".to_string(),
+        params: vec![],
+        body: stmts.to_vec(),
+        local_names,
+        local_index,
+        global_names: Rc::clone(&empty),
+        nonlocal_names: empty,
+        env: Environment::new(None),
+        is_pure: false,
+        def_bound_mask: 0,
+    };
+    compile_fn(&func)
 }
