@@ -176,10 +176,8 @@ impl Interpreter {
     }
 
     fn declare_global_names(&self, names: &[String]) {
-        self.env
-            .borrow_mut()
-            .global_names
-            .extend(names.iter().cloned());
+        let mut env = self.env.borrow_mut();
+        Rc::make_mut(&mut env.global_names).extend(names.iter().cloned());
     }
 
     fn declare_nonlocal_names(&self, names: &[String]) -> Result<()> {
@@ -204,10 +202,8 @@ impl Interpreter {
             }
         }
 
-        self.env
-            .borrow_mut()
-            .nonlocal_names
-            .extend(names.iter().cloned());
+        let mut env = self.env.borrow_mut();
+        Rc::make_mut(&mut env.nonlocal_names).extend(names.iter().cloned());
         Ok(())
     }
 

@@ -281,9 +281,9 @@ impl Interpreter {
             name: name.to_string(),
             params: evaluated_params,
             body: body.to_vec(),
-            local_names: collect_local_names(params, body, &global_names, &nonlocal_names),
-            global_names,
-            nonlocal_names,
+            local_names: Rc::new(collect_local_names(params, body, &global_names, &nonlocal_names)),
+            global_names: Rc::new(global_names),
+            nonlocal_names: Rc::new(nonlocal_names),
             env: closure_env,
         }))
     }
@@ -367,9 +367,9 @@ impl Interpreter {
             let local_env = Environment::new(Some(Rc::clone(&function.env)));
             {
                 let mut local_env_ref = local_env.borrow_mut();
-                local_env_ref.local_names = function.local_names.clone();
-                local_env_ref.global_names = function.global_names.clone();
-                local_env_ref.nonlocal_names = function.nonlocal_names.clone();
+                local_env_ref.local_names = Rc::clone(&function.local_names);
+                local_env_ref.global_names = Rc::clone(&function.global_names);
+                local_env_ref.nonlocal_names = Rc::clone(&function.nonlocal_names);
                 local_env_ref.values.insert(function.name.clone(), Value::Function(Rc::clone(&function)));
             }
             for (index, param) in function.params.iter().enumerate() {

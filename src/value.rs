@@ -31,12 +31,14 @@ impl Hash for PyKey {
     }
 }
 
+pub type NameSet = Rc<HashSet<String>>;
+
 #[derive(Debug, Clone)]
 pub struct Environment {
     pub values: HashMap<String, Value>,
-    pub local_names: HashSet<String>,
-    pub global_names: HashSet<String>,
-    pub nonlocal_names: HashSet<String>,
+    pub local_names: NameSet,
+    pub global_names: NameSet,
+    pub nonlocal_names: NameSet,
     pub parent: Option<EnvRef>,
 }
 
@@ -46,9 +48,9 @@ impl Environment {
     pub fn new(parent: Option<EnvRef>) -> EnvRef {
         Rc::new(RefCell::new(Self {
             values: HashMap::new(),
-            local_names: HashSet::new(),
-            global_names: HashSet::new(),
-            nonlocal_names: HashSet::new(),
+            local_names: Rc::new(HashSet::new()),
+            global_names: Rc::new(HashSet::new()),
+            nonlocal_names: Rc::new(HashSet::new()),
             parent,
         }))
     }
@@ -67,9 +69,9 @@ pub struct UserFunction {
     pub name: String,
     pub params: Vec<UserFunctionParam>,
     pub body: Vec<Stmt>,
-    pub local_names: HashSet<String>,
-    pub global_names: HashSet<String>,
-    pub nonlocal_names: HashSet<String>,
+    pub local_names: NameSet,
+    pub global_names: NameSet,
+    pub nonlocal_names: NameSet,
     pub env: EnvRef,
 }
 
