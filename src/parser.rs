@@ -50,9 +50,9 @@ impl Parser {
         match self.current() {
             Some(Token::Def) => self.parse_def(decorators),
             Some(Token::Class) => self.parse_class(decorators),
-            _ if !decorators.is_empty() => {
-                Err(PyError::Parse("decorator must be followed by def or class".to_string()))
-            }
+            _ if !decorators.is_empty() => Err(PyError::Parse(
+                "decorator must be followed by def or class".to_string(),
+            )),
             Some(Token::Global) => self.parse_global(),
             Some(Token::Nonlocal) => self.parse_nonlocal(),
             Some(Token::If) => self.parse_if(),
@@ -73,9 +73,18 @@ impl Parser {
                     Ok(Stmt::Return(Some(self.parse_expr()?)))
                 }
             }
-            Some(Token::Break) => { self.bump(); Ok(Stmt::Break) }
-            Some(Token::Continue) => { self.bump(); Ok(Stmt::Continue) }
-            Some(Token::Pass) => { self.bump(); Ok(Stmt::Pass) }
+            Some(Token::Break) => {
+                self.bump();
+                Ok(Stmt::Break)
+            }
+            Some(Token::Continue) => {
+                self.bump();
+                Ok(Stmt::Continue)
+            }
+            Some(Token::Pass) => {
+                self.bump();
+                Ok(Stmt::Pass)
+            }
             _ => self.parse_expr_stmt(),
         }
     }
@@ -84,7 +93,9 @@ impl Parser {
         self.expect(&Token::At)?;
         let expr = self.parse_postfix()?;
         // skip newline after decorator
-        if self.is(&Token::Newline) { self.bump(); }
+        if self.is(&Token::Newline) {
+            self.bump();
+        }
         Ok(expr)
     }
 
@@ -97,7 +108,9 @@ impl Parser {
             let mut items = vec![first];
             while self.is(&Token::Comma) {
                 self.bump();
-                if self.at_stmt_end() { break; }
+                if self.at_stmt_end() {
+                    break;
+                }
                 items.push(self.parse_expr()?);
             }
             items
@@ -114,11 +127,15 @@ impl Parser {
                 let mut items = vec![rhs_first];
                 while self.is(&Token::Comma) {
                     self.bump();
-                    if self.at_stmt_end() { break; }
+                    if self.at_stmt_end() {
+                        break;
+                    }
                     items.push(self.parse_expr()?);
                 }
                 Expr::Tuple(items)
-            } else { rhs_first };
+            } else {
+                rhs_first
+            };
             if targets.len() == 1 {
                 return match &targets[0] {
                     Expr::Var(name) => Ok(Stmt::Assign(name.clone(), rhs)),
@@ -132,14 +149,21 @@ impl Parser {
                         index: index.clone(),
                         expr: rhs,
                     }),
-                    Expr::Slice { target, lower, upper, step } => Ok(Stmt::SliceAssign {
+                    Expr::Slice {
+                        target,
+                        lower,
+                        upper,
+                        step,
+                    } => Ok(Stmt::SliceAssign {
                         target: target.clone(),
                         lower: lower.clone(),
                         upper: upper.clone(),
                         step: step.clone(),
                         expr: rhs,
                     }),
-                    _ => Err(PyError::Parse("cannot assign to this expression".to_string())),
+                    _ => Err(PyError::Parse(
+                        "cannot assign to this expression".to_string(),
+                    )),
                 };
             }
             // Multi-target: unpack
@@ -158,9 +182,15 @@ impl Parser {
             let target = if targets.len() == 1 {
                 expr_to_assign_target(&targets[0])?
             } else {
-                return Err(PyError::Parse("invalid augmented assignment target".to_string()));
+                return Err(PyError::Parse(
+                    "invalid augmented assignment target".to_string(),
+                ));
             };
-            return Ok(Stmt::AugAssign { target, op: aug_op, expr: rhs });
+            return Ok(Stmt::AugAssign {
+                target,
+                op: aug_op,
+                expr: rhs,
+            });
         }
 
         // Plain expression statement
@@ -203,7 +233,12 @@ impl Parser {
         }
         self.expect(&Token::Colon)?;
         let body = self.parse_suite()?;
-        Ok(Stmt::Def { name, params, body, decorators })
+        Ok(Stmt::Def {
+            name,
+            params,
+            body,
+            decorators,
+        })
     }
 
     fn parse_params(&mut self) -> Result<Vec<FunctionParam>> {
@@ -228,8 +263,15 @@ impl Parser {
                     self.bump();
                     seen_default = true;
                     Some(self.parse_expr()?)
-                } else { None };
-                params.push(FunctionParam { name, default, is_args: false, is_kwargs: true });
+                } else {
+                    None
+                };
+                params.push(FunctionParam {
+                    name,
+                    default,
+                    is_args: false,
+                    is_kwargs: true,
+                });
                 seen_kwargs = true;
             } else if self.is(&Token::Star) {
                 self.bump();
@@ -237,7 +279,12 @@ impl Parser {
                     // bare * separator: keyword-only follows
                 } else {
                     let name = self.expect_ident("args parameter name")?;
-                    params.push(FunctionParam { name, default: None, is_args: true, is_kwargs: false });
+                    params.push(FunctionParam {
+                        name,
+                        default: None,
+                        is_args: true,
+                        is_kwargs: false,
+                    });
                     seen_args = true;
                 }
             } else {
@@ -261,7 +308,12 @@ impl Parser {
                             }
                             None
                         };
-                        params.push(FunctionParam { name, default, is_args: false, is_kwargs: false });
+                        params.push(FunctionParam {
+                            name,
+                            default,
+                            is_args: false,
+                            is_kwargs: false,
+                        });
                     }
                     other => {
                         return Err(PyError::Parse(format!(
@@ -293,9 +345,13 @@ impl Parser {
             if !self.is(&Token::RParen) {
                 loop {
                     bases.push(self.parse_expr()?);
-                    if self.is(&Token::RParen) { break; }
+                    if self.is(&Token::RParen) {
+                        break;
+                    }
                     self.expect(&Token::Comma)?;
-                    if self.is(&Token::RParen) { break; }
+                    if self.is(&Token::RParen) {
+                        break;
+                    }
                 }
             }
             self.expect(&Token::RParen)?;
@@ -306,7 +362,12 @@ impl Parser {
 
         self.expect(&Token::Colon)?;
         let body = self.parse_suite()?;
-        Ok(Stmt::Class { name, bases, body, decorators })
+        Ok(Stmt::Class {
+            name,
+            bases,
+            body,
+            decorators,
+        })
     }
 
     fn parse_global(&mut self) -> Result<Stmt> {
@@ -325,7 +386,9 @@ impl Parser {
         let mut names = Vec::new();
         loop {
             names.push(self.expect_ident(ctx)?);
-            if !self.is(&Token::Comma) { break; }
+            if !self.is(&Token::Comma) {
+                break;
+            }
             self.bump();
         }
         Ok(names)
@@ -350,7 +413,10 @@ impl Parser {
             self.expect(&Token::Colon)?;
             else_branch = Some(self.parse_suite()?);
         }
-        Ok(Stmt::If { branches, else_branch })
+        Ok(Stmt::If {
+            branches,
+            else_branch,
+        })
     }
 
     fn parse_while(&mut self) -> Result<Stmt> {
@@ -359,7 +425,11 @@ impl Parser {
         self.expect(&Token::Colon)?;
         let body = self.parse_suite()?;
         let else_branch = self.parse_optional_else()?;
-        Ok(Stmt::While { cond, body, else_branch })
+        Ok(Stmt::While {
+            cond,
+            body,
+            else_branch,
+        })
     }
 
     fn parse_for(&mut self) -> Result<Stmt> {
@@ -370,7 +440,9 @@ impl Parser {
             let mut names = vec![AssignTarget::Name(first)];
             while self.is(&Token::Comma) {
                 self.bump();
-                if self.is(&Token::In) { break; }
+                if self.is(&Token::In) {
+                    break;
+                }
                 names.push(AssignTarget::Name(self.expect_ident("for loop variable")?));
             }
             AssignTarget::Tuple(names)
@@ -382,7 +454,12 @@ impl Parser {
         self.expect(&Token::Colon)?;
         let body = self.parse_suite()?;
         let else_branch = self.parse_optional_else()?;
-        Ok(Stmt::For { target, iter, body, else_branch })
+        Ok(Stmt::For {
+            target,
+            iter,
+            body,
+            else_branch,
+        })
     }
 
     fn parse_optional_else(&mut self) -> Result<Option<Vec<Stmt>>> {
@@ -413,9 +490,13 @@ impl Parser {
             let alias = if self.is(&Token::As) {
                 self.bump();
                 Some(self.expect_ident("alias after 'as'")?)
-            } else { None };
+            } else {
+                None
+            };
             names.push((module, alias));
-            if !self.is(&Token::Comma) { break; }
+            if !self.is(&Token::Comma) {
+                break;
+            }
             self.bump();
         }
         Ok(Stmt::Import { names })
@@ -431,19 +512,29 @@ impl Parser {
             names.push(("*".to_string(), None));
         } else {
             let paren = self.is(&Token::LParen);
-            if paren { self.bump(); }
+            if paren {
+                self.bump();
+            }
             loop {
                 let name = self.expect_ident("name in import list")?;
                 let alias = if self.is(&Token::As) {
                     self.bump();
                     Some(self.expect_ident("alias after 'as'")?)
-                } else { None };
+                } else {
+                    None
+                };
                 names.push((name, alias));
-                if !self.is(&Token::Comma) { break; }
+                if !self.is(&Token::Comma) {
+                    break;
+                }
                 self.bump();
-                if paren && self.is(&Token::RParen) { break; }
+                if paren && self.is(&Token::RParen) {
+                    break;
+                }
             }
-            if paren { self.expect(&Token::RParen)?; }
+            if paren {
+                self.expect(&Token::RParen)?;
+            }
         }
         Ok(Stmt::ImportFrom { module, names })
     }
@@ -471,10 +562,16 @@ impl Parser {
             let name = if self.is(&Token::As) {
                 self.bump();
                 Some(self.expect_ident("exception variable")?)
-            } else { None };
+            } else {
+                None
+            };
             self.expect(&Token::Colon)?;
             let handler_body = self.parse_suite()?;
-            handlers.push(ExceptHandler { kind, name, body: handler_body });
+            handlers.push(ExceptHandler {
+                kind,
+                name,
+                body: handler_body,
+            });
         }
 
         if self.is(&Token::Else) {
@@ -492,7 +589,12 @@ impl Parser {
                 "try statement must have at least one except or finally clause".to_string(),
             ));
         }
-        Ok(Stmt::Try { body, handlers, else_branch, finally_branch })
+        Ok(Stmt::Try {
+            body,
+            handlers,
+            else_branch,
+            finally_branch,
+        })
     }
 
     fn parse_raise(&mut self) -> Result<Stmt> {
@@ -519,7 +621,9 @@ impl Parser {
         let mut targets = vec![self.parse_expr()?];
         while self.is(&Token::Comma) {
             self.bump();
-            if self.at_stmt_end() { break; }
+            if self.at_stmt_end() {
+                break;
+            }
             targets.push(self.parse_expr()?);
         }
         Ok(Stmt::Delete(targets))
@@ -531,7 +635,9 @@ impl Parser {
         let msg = if self.is(&Token::Comma) {
             self.bump();
             Some(self.parse_expr()?)
-        } else { None };
+        } else {
+            None
+        };
         Ok(Stmt::Assert { test, msg })
     }
 
@@ -543,9 +649,13 @@ impl Parser {
             let var = if self.is(&Token::As) {
                 self.bump();
                 Some(expr_to_assign_target(&self.parse_expr()?)?)
-            } else { None };
+            } else {
+                None
+            };
             items.push((expr, var));
-            if !self.is(&Token::Comma) { break; }
+            if !self.is(&Token::Comma) {
+                break;
+            }
             self.bump();
         }
         self.expect(&Token::Colon)?;
@@ -615,13 +725,18 @@ impl Parser {
         if !self.is(&Token::Colon) {
             loop {
                 params.push(self.expect_ident("lambda parameter")?);
-                if !self.is(&Token::Comma) { break; }
+                if !self.is(&Token::Comma) {
+                    break;
+                }
                 self.bump();
             }
         }
         self.expect(&Token::Colon)?;
         let body = self.parse_expr()?;
-        Ok(Expr::Lambda { params, body: Box::new(body) })
+        Ok(Expr::Lambda {
+            params,
+            body: Box::new(body),
+        })
     }
 
     fn parse_or(&mut self) -> Result<Expr> {
@@ -629,7 +744,11 @@ impl Parser {
         while self.is(&Token::Or) {
             self.bump();
             let right = self.parse_and()?;
-            expr = Expr::Binary { left: Box::new(expr), op: BinaryOp::Or, right: Box::new(right) };
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::Or,
+                right: Box::new(right),
+            };
         }
         Ok(expr)
     }
@@ -639,7 +758,11 @@ impl Parser {
         while self.is(&Token::And) {
             self.bump();
             let right = self.parse_not()?;
-            expr = Expr::Binary { left: Box::new(expr), op: BinaryOp::And, right: Box::new(right) };
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::And,
+                right: Box::new(right),
+            };
         }
         Ok(expr)
     }
@@ -648,7 +771,10 @@ impl Parser {
         if self.is(&Token::Not) {
             self.bump();
             let expr = self.parse_not()?;
-            return Ok(Expr::Unary { op: UnaryOp::Not, expr: Box::new(expr) });
+            return Ok(Expr::Unary {
+                op: UnaryOp::Not,
+                expr: Box::new(expr),
+            });
         }
         self.parse_comparison()
     }
@@ -659,19 +785,47 @@ impl Parser {
 
         loop {
             let op = match self.current() {
-                Some(Token::Eq) => { self.bump(); CmpOp::Eq }
-                Some(Token::Ne) => { self.bump(); CmpOp::Ne }
-                Some(Token::Lt) => { self.bump(); CmpOp::Lt }
-                Some(Token::Le) => { self.bump(); CmpOp::Le }
-                Some(Token::Gt) => { self.bump(); CmpOp::Gt }
-                Some(Token::Ge) => { self.bump(); CmpOp::Ge }
-                Some(Token::In) => { self.bump(); CmpOp::In }
+                Some(Token::Eq) => {
+                    self.bump();
+                    CmpOp::Eq
+                }
+                Some(Token::Ne) => {
+                    self.bump();
+                    CmpOp::Ne
+                }
+                Some(Token::Lt) => {
+                    self.bump();
+                    CmpOp::Lt
+                }
+                Some(Token::Le) => {
+                    self.bump();
+                    CmpOp::Le
+                }
+                Some(Token::Gt) => {
+                    self.bump();
+                    CmpOp::Gt
+                }
+                Some(Token::Ge) => {
+                    self.bump();
+                    CmpOp::Ge
+                }
+                Some(Token::In) => {
+                    self.bump();
+                    CmpOp::In
+                }
                 Some(Token::Not) if self.peek() == Some(&Token::In) => {
-                    self.bump(); self.bump(); CmpOp::NotIn
+                    self.bump();
+                    self.bump();
+                    CmpOp::NotIn
                 }
                 Some(Token::Is) => {
                     self.bump();
-                    if self.is(&Token::Not) { self.bump(); CmpOp::IsNot } else { CmpOp::Is }
+                    if self.is(&Token::Not) {
+                        self.bump();
+                        CmpOp::IsNot
+                    } else {
+                        CmpOp::Is
+                    }
                 }
                 _ => break,
             };
@@ -690,7 +844,10 @@ impl Parser {
                 right: Box::new(right),
             });
         }
-        Ok(Expr::Compare { left: Box::new(left), ops })
+        Ok(Expr::Compare {
+            left: Box::new(left),
+            ops,
+        })
     }
 
     fn parse_bitor(&mut self) -> Result<Expr> {
@@ -698,7 +855,11 @@ impl Parser {
         while self.is(&Token::Pipe) {
             self.bump();
             let right = self.parse_bitxor()?;
-            expr = Expr::Binary { left: Box::new(expr), op: BinaryOp::BitOr, right: Box::new(right) };
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::BitOr,
+                right: Box::new(right),
+            };
         }
         Ok(expr)
     }
@@ -708,7 +869,11 @@ impl Parser {
         while self.is(&Token::Caret) {
             self.bump();
             let right = self.parse_bitand()?;
-            expr = Expr::Binary { left: Box::new(expr), op: BinaryOp::BitXor, right: Box::new(right) };
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::BitXor,
+                right: Box::new(right),
+            };
         }
         Ok(expr)
     }
@@ -718,7 +883,11 @@ impl Parser {
         while self.is(&Token::Ampersand) {
             self.bump();
             let right = self.parse_shift()?;
-            expr = Expr::Binary { left: Box::new(expr), op: BinaryOp::BitAnd, right: Box::new(right) };
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op: BinaryOp::BitAnd,
+                right: Box::new(right),
+            };
         }
         Ok(expr)
     }
@@ -726,12 +895,20 @@ impl Parser {
     fn parse_shift(&mut self) -> Result<Expr> {
         let mut expr = self.parse_term()?;
         loop {
-            let op = if self.is(&Token::LShift) { BinaryOp::LShift }
-                     else if self.is(&Token::RShift) { BinaryOp::RShift }
-                     else { break };
+            let op = if self.is(&Token::LShift) {
+                BinaryOp::LShift
+            } else if self.is(&Token::RShift) {
+                BinaryOp::RShift
+            } else {
+                break;
+            };
             self.bump();
             let right = self.parse_term()?;
-            expr = Expr::Binary { left: Box::new(expr), op, right: Box::new(right) };
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
         }
         Ok(expr)
     }
@@ -739,12 +916,20 @@ impl Parser {
     fn parse_term(&mut self) -> Result<Expr> {
         let mut expr = self.parse_factor()?;
         loop {
-            let op = if self.is(&Token::Plus) { BinaryOp::Add }
-                     else if self.is(&Token::Minus) { BinaryOp::Sub }
-                     else { break };
+            let op = if self.is(&Token::Plus) {
+                BinaryOp::Add
+            } else if self.is(&Token::Minus) {
+                BinaryOp::Sub
+            } else {
+                break;
+            };
             self.bump();
             let right = self.parse_factor()?;
-            expr = Expr::Binary { left: Box::new(expr), op, right: Box::new(right) };
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
         }
         Ok(expr)
     }
@@ -752,15 +937,26 @@ impl Parser {
     fn parse_factor(&mut self) -> Result<Expr> {
         let mut expr = self.parse_unary()?;
         loop {
-            let op = if self.is(&Token::Star) { BinaryOp::Mul }
-                     else if self.is(&Token::At) { BinaryOp::MatMul }
-                     else if self.is(&Token::Slash) { BinaryOp::Div }
-                     else if self.is(&Token::SlashSlash) { BinaryOp::FloorDiv }
-                     else if self.is(&Token::Percent) { BinaryOp::Mod }
-                     else { break };
+            let op = if self.is(&Token::Star) {
+                BinaryOp::Mul
+            } else if self.is(&Token::At) {
+                BinaryOp::MatMul
+            } else if self.is(&Token::Slash) {
+                BinaryOp::Div
+            } else if self.is(&Token::SlashSlash) {
+                BinaryOp::FloorDiv
+            } else if self.is(&Token::Percent) {
+                BinaryOp::Mod
+            } else {
+                break;
+            };
             self.bump();
             let right = self.parse_unary()?;
-            expr = Expr::Binary { left: Box::new(expr), op, right: Box::new(right) };
+            expr = Expr::Binary {
+                left: Box::new(expr),
+                op,
+                right: Box::new(right),
+            };
         }
         Ok(expr)
     }
@@ -768,15 +964,24 @@ impl Parser {
     fn parse_unary(&mut self) -> Result<Expr> {
         if self.is(&Token::Minus) {
             self.bump();
-            return Ok(Expr::Unary { op: UnaryOp::Neg, expr: Box::new(self.parse_unary()?) });
+            return Ok(Expr::Unary {
+                op: UnaryOp::Neg,
+                expr: Box::new(self.parse_unary()?),
+            });
         }
         if self.is(&Token::Tilde) {
             self.bump();
-            return Ok(Expr::Unary { op: UnaryOp::BitNot, expr: Box::new(self.parse_unary()?) });
+            return Ok(Expr::Unary {
+                op: UnaryOp::BitNot,
+                expr: Box::new(self.parse_unary()?),
+            });
         }
         if self.is(&Token::Plus) {
             self.bump();
-            return Ok(Expr::Unary { op: UnaryOp::Pos, expr: Box::new(self.parse_unary()?) });
+            return Ok(Expr::Unary {
+                op: UnaryOp::Pos,
+                expr: Box::new(self.parse_unary()?),
+            });
         }
         self.parse_power()
     }
@@ -802,7 +1007,10 @@ impl Parser {
                 self.bump();
                 let args = self.parse_call_args()?;
                 self.expect(&Token::RParen)?;
-                expr = Expr::Call { func: Box::new(expr), args };
+                expr = Expr::Call {
+                    func: Box::new(expr),
+                    args,
+                };
                 continue;
             }
             if self.is(&Token::LBracket) {
@@ -813,12 +1021,20 @@ impl Parser {
             if self.is(&Token::Dot) {
                 self.bump();
                 let name = match self.current().cloned() {
-                    Some(Token::Ident(name)) => { self.bump(); name }
-                    other => return Err(PyError::Parse(format!(
-                        "expected attribute name after '.', found {other:?}"
-                    ))),
+                    Some(Token::Ident(name)) => {
+                        self.bump();
+                        name
+                    }
+                    other => {
+                        return Err(PyError::Parse(format!(
+                            "expected attribute name after '.', found {other:?}"
+                        )));
+                    }
                 };
-                expr = Expr::Attr { target: Box::new(expr), name };
+                expr = Expr::Attr {
+                    target: Box::new(expr),
+                    name,
+                };
                 continue;
             }
             break;
@@ -844,9 +1060,14 @@ impl Parser {
             };
             let step = if self.is(&Token::Colon) {
                 self.bump();
-                if self.is(&Token::RBracket) { None }
-                else { Some(Box::new(self.parse_expr()?)) }
-            } else { None };
+                if self.is(&Token::RBracket) {
+                    None
+                } else {
+                    Some(Box::new(self.parse_expr()?))
+                }
+            } else {
+                None
+            };
             self.expect(&Token::RBracket)?;
             Ok(Expr::Slice {
                 target: Box::new(target),
@@ -859,7 +1080,9 @@ impl Parser {
             self.expect(&Token::RBracket)?;
             Ok(Expr::Index {
                 target: Box::new(target),
-                index: Box::new(first.ok_or_else(|| PyError::Parse("empty subscript".to_string()))?),
+                index: Box::new(
+                    first.ok_or_else(|| PyError::Parse("empty subscript".to_string()))?,
+                ),
             })
         }
     }
@@ -874,41 +1097,83 @@ impl Parser {
             if self.is(&Token::StarStar) {
                 self.bump();
                 seen_keyword = true;
-                args.push(CallArg { name: None, value: self.parse_expr()?, splat: false, double_splat: true });
+                args.push(CallArg {
+                    name: None,
+                    value: self.parse_expr()?,
+                    splat: false,
+                    double_splat: true,
+                });
             } else if self.is(&Token::Star) {
                 self.bump();
                 if seen_keyword {
-                    return Err(PyError::Parse("positional argument follows keyword argument".to_string()));
+                    return Err(PyError::Parse(
+                        "positional argument follows keyword argument".to_string(),
+                    ));
                 }
-                args.push(CallArg { name: None, value: self.parse_expr()?, splat: true, double_splat: false });
+                args.push(CallArg {
+                    name: None,
+                    value: self.parse_expr()?,
+                    splat: true,
+                    double_splat: false,
+                });
             } else if let Some(Token::Ident(name)) = self.current().cloned() {
                 if self.peek() == Some(&Token::Assign) {
-                    self.bump(); self.bump();
+                    self.bump();
+                    self.bump();
                     seen_keyword = true;
-                    args.push(CallArg { name: Some(name), value: self.parse_expr()?, splat: false, double_splat: false });
+                    args.push(CallArg {
+                        name: Some(name),
+                        value: self.parse_expr()?,
+                        splat: false,
+                        double_splat: false,
+                    });
                 } else {
                     if seen_keyword {
-                        return Err(PyError::Parse("positional argument follows keyword argument".to_string()));
+                        return Err(PyError::Parse(
+                            "positional argument follows keyword argument".to_string(),
+                        ));
                     }
-                    args.push(CallArg { name: None, value: self.parse_expr()?, splat: false, double_splat: false });
+                    args.push(CallArg {
+                        name: None,
+                        value: self.parse_expr()?,
+                        splat: false,
+                        double_splat: false,
+                    });
                 }
             } else {
                 if seen_keyword {
-                    return Err(PyError::Parse("positional argument follows keyword argument".to_string()));
+                    return Err(PyError::Parse(
+                        "positional argument follows keyword argument".to_string(),
+                    ));
                 }
-                args.push(CallArg { name: None, value: self.parse_expr()?, splat: false, double_splat: false });
+                args.push(CallArg {
+                    name: None,
+                    value: self.parse_expr()?,
+                    splat: false,
+                    double_splat: false,
+                });
             }
-            if self.is(&Token::RParen) { break; }
+            if self.is(&Token::RParen) {
+                break;
+            }
             self.expect(&Token::Comma)?;
-            if self.is(&Token::RParen) { break; }
+            if self.is(&Token::RParen) {
+                break;
+            }
         }
         Ok(args)
     }
 
     fn parse_primary(&mut self) -> Result<Expr> {
         match self.current().cloned() {
-            Some(Token::Int(v)) => { self.bump(); Ok(Expr::Int(v)) }
-            Some(Token::Float(v)) => { self.bump(); Ok(Expr::Float(v)) }
+            Some(Token::Int(v)) => {
+                self.bump();
+                Ok(Expr::Int(v))
+            }
+            Some(Token::Float(v)) => {
+                self.bump();
+                Ok(Expr::Float(v))
+            }
             Some(Token::Str(v)) => {
                 self.bump();
                 // Adjacent string literal concatenation
@@ -919,10 +1184,22 @@ impl Parser {
                 }
                 Ok(Expr::Str(s))
             }
-            Some(Token::True) => { self.bump(); Ok(Expr::Bool(true)) }
-            Some(Token::False) => { self.bump(); Ok(Expr::Bool(false)) }
-            Some(Token::None) => { self.bump(); Ok(Expr::None) }
-            Some(Token::Ident(name)) => { self.bump(); Ok(Expr::Var(name)) }
+            Some(Token::True) => {
+                self.bump();
+                Ok(Expr::Bool(true))
+            }
+            Some(Token::False) => {
+                self.bump();
+                Ok(Expr::Bool(false))
+            }
+            Some(Token::None) => {
+                self.bump();
+                Ok(Expr::None)
+            }
+            Some(Token::Ident(name)) => {
+                self.bump();
+                Ok(Expr::Var(name))
+            }
             Some(Token::LParen) => {
                 self.bump();
                 if self.is(&Token::RParen) {
@@ -935,7 +1212,9 @@ impl Parser {
                     let mut items = vec![first];
                     while self.is(&Token::Comma) {
                         self.bump();
-                        if self.is(&Token::RParen) { break; }
+                        if self.is(&Token::RParen) {
+                            break;
+                        }
                         items.push(self.parse_expr()?);
                     }
                     self.expect(&Token::RParen)?;
@@ -959,9 +1238,13 @@ impl Parser {
         if !self.is(&Token::RBracket) {
             loop {
                 items.push(self.parse_expr()?);
-                if self.is(&Token::RBracket) { break; }
+                if self.is(&Token::RBracket) {
+                    break;
+                }
                 self.expect(&Token::Comma)?;
-                if self.is(&Token::RBracket) { break; }
+                if self.is(&Token::RBracket) {
+                    break;
+                }
             }
         }
         self.expect(&Token::RBracket)?;
@@ -982,7 +1265,9 @@ impl Parser {
             let mut items = vec![(first, val)];
             while self.is(&Token::Comma) {
                 self.bump();
-                if self.is(&Token::RBrace) { break; }
+                if self.is(&Token::RBrace) {
+                    break;
+                }
                 let k = self.parse_expr()?;
                 self.expect(&Token::Colon)?;
                 let v = self.parse_expr()?;
@@ -995,7 +1280,9 @@ impl Parser {
             let mut items = vec![first];
             while self.is(&Token::Comma) {
                 self.bump();
-                if self.is(&Token::RBrace) { break; }
+                if self.is(&Token::RBrace) {
+                    break;
+                }
                 items.push(self.parse_expr()?);
             }
             self.expect(&Token::RBrace)?;
@@ -1007,7 +1294,10 @@ impl Parser {
 
     fn expect_ident(&mut self, ctx: &str) -> Result<String> {
         match self.current().cloned() {
-            Some(Token::Ident(name)) => { self.bump(); Ok(name) }
+            Some(Token::Ident(name)) => {
+                self.bump();
+                Ok(name)
+            }
             other => Err(PyError::Parse(format!("expected {ctx}, found {other:?}"))),
         }
     }
@@ -1064,10 +1354,13 @@ fn expr_to_assign_target(expr: &Expr) -> Result<AssignTarget> {
         Expr::Attr { target, name } => Ok(AssignTarget::Attr(target.clone(), name.clone())),
         Expr::Index { target, index } => Ok(AssignTarget::Index(target.clone(), index.clone())),
         Expr::Tuple(items) => {
-            let targets: Result<Vec<AssignTarget>> = items.iter().map(|e| expr_to_assign_target(e)).collect();
+            let targets: Result<Vec<AssignTarget>> =
+                items.iter().map(|e| expr_to_assign_target(e)).collect();
             Ok(AssignTarget::Tuple(targets?))
         }
-        _ => Err(PyError::Parse("cannot assign to this expression".to_string())),
+        _ => Err(PyError::Parse(
+            "cannot assign to this expression".to_string(),
+        )),
     }
 }
 

@@ -171,7 +171,9 @@ impl Value {
 
     pub fn to_py_str(&self) -> String {
         match self {
-            Value::Instance(instance) if is_exception_class(instance) => exception_to_string(instance),
+            Value::Instance(instance) if is_exception_class(instance) => {
+                exception_to_string(instance)
+            }
             Value::Str(s) => s.clone(),
             _ => self.repr(),
         }
@@ -244,11 +246,23 @@ impl Value {
             }
             Value::Module(m) => format!("<module '{}'>", m.borrow().name),
             Value::Tuple(items) => {
-                let inner = items.iter().map(|v| v.repr()).collect::<Vec<_>>().join(", ");
-                if items.len() == 1 { format!("({inner},)") } else { format!("({inner})") }
+                let inner = items
+                    .iter()
+                    .map(|v| v.repr())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if items.len() == 1 {
+                    format!("({inner},)")
+                } else {
+                    format!("({inner})")
+                }
             }
             Value::Set(items) => {
-                let inner = items.iter().map(|v| v.repr()).collect::<Vec<_>>().join(", ");
+                let inner = items
+                    .iter()
+                    .map(|v| v.repr())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!("{{{inner}}}")
             }
         }

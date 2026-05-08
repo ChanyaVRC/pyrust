@@ -45,7 +45,7 @@ pub enum Token {
     Colon,
     Semicolon,
     Dot,
-    Arrow,   // ->
+    Arrow, // ->
     // Comparison / assignment
     Assign,
     Eq,

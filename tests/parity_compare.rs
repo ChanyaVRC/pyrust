@@ -100,10 +100,7 @@ fn compare_against_python_reference_for_all_py_tests() {
     collect_test_scripts(&cases_dir, &mut scripts);
 
     scripts.sort();
-    assert!(
-        !scripts.is_empty(),
-        "no test_*.py found under tests/cases/"
-    );
+    assert!(!scripts.is_empty(), "no test_*.py found under tests/cases/");
 
     let mut failures: Vec<String> = Vec::new();
 

@@ -246,7 +246,9 @@ impl Lexer {
                 }
                 ')' => {
                     self.tokens.push(Token::RParen);
-                    if paren_depth > 0 { paren_depth -= 1; }
+                    if paren_depth > 0 {
+                        paren_depth -= 1;
+                    }
                     pos += 1;
                 }
                 '[' => {
@@ -256,7 +258,9 @@ impl Lexer {
                 }
                 ']' => {
                     self.tokens.push(Token::RBracket);
-                    if paren_depth > 0 { paren_depth -= 1; }
+                    if paren_depth > 0 {
+                        paren_depth -= 1;
+                    }
                     pos += 1;
                 }
                 '{' => {
@@ -266,7 +270,9 @@ impl Lexer {
                 }
                 '}' => {
                     self.tokens.push(Token::RBrace);
-                    if paren_depth > 0 { paren_depth -= 1; }
+                    if paren_depth > 0 {
+                        paren_depth -= 1;
+                    }
                     pos += 1;
                 }
                 ',' => {
@@ -329,9 +335,7 @@ fn count_indent(line: &str) -> Result<usize> {
 fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
     let mut pos = start;
     // Hex
-    if chars.get(pos) == Some(&'0')
-        && matches!(chars.get(pos + 1), Some(&'x') | Some(&'X'))
-    {
+    if chars.get(pos) == Some(&'0') && matches!(chars.get(pos + 1), Some(&'x') | Some(&'X')) {
         pos += 2;
         let hex_start = pos;
         while matches!(chars.get(pos), Some('0'..='9' | 'a'..='f' | 'A'..='F')) {
@@ -343,9 +347,7 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
         return Ok((Token::Int(val), pos));
     }
     // Octal
-    if chars.get(pos) == Some(&'0')
-        && matches!(chars.get(pos + 1), Some(&'o') | Some(&'O'))
-    {
+    if chars.get(pos) == Some(&'0') && matches!(chars.get(pos + 1), Some(&'o') | Some(&'O')) {
         pos += 2;
         let oct_start = pos;
         while matches!(chars.get(pos), Some('0'..='7')) {
@@ -357,9 +359,7 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
         return Ok((Token::Int(val), pos));
     }
     // Binary
-    if chars.get(pos) == Some(&'0')
-        && matches!(chars.get(pos + 1), Some(&'b') | Some(&'B'))
-    {
+    if chars.get(pos) == Some(&'0') && matches!(chars.get(pos + 1), Some(&'b') | Some(&'B')) {
         pos += 2;
         let bin_start = pos;
         while matches!(chars.get(pos), Some('0'..='1')) {
@@ -487,7 +487,11 @@ fn lex_string(chars: &[char], start: usize) -> Result<(Token, usize)> {
                 return Ok((Token::Str(out), pos + 3));
             }
             match chars.get(pos) {
-                None => return Err(PyError::Lex("unterminated triple-quoted string".to_string())),
+                None => {
+                    return Err(PyError::Lex(
+                        "unterminated triple-quoted string".to_string(),
+                    ));
+                }
                 Some(&'\\') => {
                     pos += 1;
                     let escaped = chars

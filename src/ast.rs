@@ -10,7 +10,7 @@ pub struct FunctionParam {
 pub struct CallArg {
     pub name: Option<String>,
     pub value: Expr,
-    pub splat: bool,    // *expr
+    pub splat: bool,        // *expr
     pub double_splat: bool, // **expr
 }
 

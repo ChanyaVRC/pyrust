@@ -3,7 +3,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use crate::ast::{AssignTarget, BinaryOp, CallArg, CmpOp, ExceptHandler, Expr, FunctionParam, Stmt, UnaryOp};
+use crate::ast::{
+    AssignTarget, BinaryOp, CallArg, CmpOp, ExceptHandler, Expr, FunctionParam, Stmt, UnaryOp,
+};
 use crate::error::{PyError, Result};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
@@ -41,7 +43,6 @@ impl Default for Interpreter {
         }
     }
 }
-
 
 include!("interpreter/runtime.rs");
 
