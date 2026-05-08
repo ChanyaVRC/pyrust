@@ -699,8 +699,7 @@ impl<'a> Compiler<'a> {
             }
             Expr::Var(name) => {
                 if let Some(reg) = self.local_reg(name) {
-                    let definitely_bound =
-                        (reg as usize) < 64 && (self.def_set >> reg) & 1 != 0;
+                    let definitely_bound = (reg as usize) < 64 && (self.def_set >> reg) & 1 != 0;
                     if !definitely_bound {
                         let name_idx = self.intern_name(name);
                         self.emit(Insn::CheckLocal(reg, name_idx));
