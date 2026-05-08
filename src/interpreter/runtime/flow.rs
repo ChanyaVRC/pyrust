@@ -55,52 +55,34 @@ impl Interpreter {
         }
     }
 
-    fn load_aug_target_value(&mut self, target: &AssignTarget) -> Result<Value> {
-        match target {
-            AssignTarget::Name(name) => self
-                .lookup_name(name)?
-                .ok_or_else(|| PyError::Runtime(format!("name '{}' is not defined", name))),
-            AssignTarget::Attr(obj_expr, attr) => {
-                let obj = self.eval_expr(obj_expr)?;
-                match obj {
-                    Value::Instance(inst) => {
-                        inst.borrow().attrs.get(attr).cloned().ok_or_else(|| {
-                            PyError::Runtime(format!("attribute '{}' not found", attr))
-                        })
-                    }
-                    _ => Err(PyError::Runtime("attr access on non-instance".to_string())),
-                }
-            }
-            AssignTarget::Index(target_expr, index_expr) => {
-                let tval = self.eval_expr(target_expr)?;
-                let ival = self.eval_expr(index_expr)?;
-                self.eval_index(tval, ival)
-            }
-            AssignTarget::Tuple(_) => Err(PyError::Runtime(
-                "illegal target for augmented assignment".to_string(),
-            )),
-        }
-    }
-
-    fn store_aug_target_value(&mut self, target: &AssignTarget, value: Value) -> Result<()> {
+    fn exec_aug_assign(&mut self, target: &AssignTarget, op: BinaryOp, rhs: Value) -> Result<()> {
         match target {
             AssignTarget::Name(name) => {
-                self.assign_name(name.clone(), value);
+                let current = self
+                    .lookup_name(name)?
+                    .ok_or_else(|| PyError::Runtime(format!("name '{}' is not defined", name)))?;
+                let new_val = self.compute_aug(current, op, rhs)?;
+                self.assign_name(name.clone(), new_val);
                 Ok(())
             }
             AssignTarget::Attr(obj_expr, attr) => {
                 let obj = self.eval_expr(obj_expr)?;
-                match obj {
-                    Value::Instance(inst) => {
-                        inst.borrow_mut().attrs.insert(attr.clone(), value);
-                        Ok(())
-                    }
-                    _ => Err(PyError::Runtime("attr assign on non-instance".to_string())),
-                }
+                let Value::Instance(inst) = obj else {
+                    return Err(PyError::Runtime("attr access on non-instance".to_string()));
+                };
+                let current = inst.borrow().attrs.get(attr).cloned().ok_or_else(|| {
+                    PyError::Runtime(format!("attribute '{}' not found", attr))
+                })?;
+                let new_val = self.compute_aug(current, op, rhs)?;
+                inst.borrow_mut().attrs.insert(attr.clone(), new_val);
+                Ok(())
             }
             AssignTarget::Index(target_expr, index_expr) => {
+                let tval = self.eval_expr(target_expr)?;
                 let ival = self.eval_expr(index_expr)?;
-                self.exec_index_assign(target_expr, ival, value)
+                let current = self.eval_index(tval, ival.clone())?;
+                let new_val = self.compute_aug(current, op, rhs)?;
+                self.exec_index_assign(target_expr, ival, new_val)
             }
             AssignTarget::Tuple(_) => Err(PyError::Runtime(
                 "illegal target for augmented assignment".to_string(),
@@ -108,18 +90,13 @@ impl Interpreter {
         }
     }
 
-    fn exec_aug_assign(&mut self, target: &AssignTarget, op: BinaryOp, rhs: Value) -> Result<()> {
-        let current = self.load_aug_target_value(target)?;
-        let new_val = if matches!(op, BinaryOp::MatMul) {
+    fn compute_aug(&mut self, current: Value, op: BinaryOp, rhs: Value) -> Result<Value> {
+        if matches!(op, BinaryOp::MatMul) {
             if let Some(value) = self.try_inplace_matmul(current.clone(), rhs.clone())? {
-                value
-            } else {
-                self.eval_binary(current, op, rhs)?
+                return Ok(value);
             }
-        } else {
-            self.eval_binary(current, op, rhs)?
-        };
-        self.store_aug_target_value(target, new_val)
+        }
+        self.eval_binary(current, op, rhs)
     }
 
     fn exec_index_assign(&mut self, target: &Expr, index: Value, value: Value) -> Result<()> {
