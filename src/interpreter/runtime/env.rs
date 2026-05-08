@@ -96,6 +96,7 @@ impl Interpreter {
                 let mut sub = Interpreter::default();
                 sub.script_dir = self.script_dir.clone();
                 sub.module_cache = Rc::clone(&self.module_cache);
+                sub.call_depth = self.call_depth;
                 sub.exec_program(&program, false)?;
                 // Harvest all top-level bindings as module attrs
                 let attrs: HashMap<String, Value> = sub
@@ -194,10 +195,8 @@ impl Interpreter {
     }
 
     fn declare_global_names(&self, names: &[String]) {
-        self.env
-            .borrow_mut()
-            .global_names
-            .extend(names.iter().cloned());
+        let mut env = self.env.borrow_mut();
+        Rc::make_mut(&mut env.global_names).extend(names.iter().cloned());
     }
 
     fn declare_nonlocal_names(&self, names: &[String]) -> Result<()> {
@@ -222,11 +221,28 @@ impl Interpreter {
             }
         }
 
-        self.env
-            .borrow_mut()
-            .nonlocal_names
-            .extend(names.iter().cloned());
+        let mut env = self.env.borrow_mut();
+        Rc::make_mut(&mut env.nonlocal_names).extend(names.iter().cloned());
         Ok(())
+    }
+
+    fn alloc_env(&mut self, parent: Option<EnvRef>) -> EnvRef {
+        if let Some(env) = self.env_pool.pop() {
+            {
+                let mut e = env.borrow_mut();
+                e.values.clear();
+                e.parent = parent;
+            }
+            env
+        } else {
+            Environment::new(parent)
+        }
+    }
+
+    fn free_env(&mut self, env: EnvRef) {
+        if self.env_pool.len() < ENV_POOL_MAX && Rc::strong_count(&env) == 1 {
+            self.env_pool.push(env);
+        }
     }
 
     fn build_class(

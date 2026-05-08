@@ -281,9 +281,9 @@ impl Interpreter {
             name: name.to_string(),
             params: evaluated_params,
             body: body.to_vec(),
-            local_names: collect_local_names(params, body, &global_names, &nonlocal_names),
-            global_names,
-            nonlocal_names,
+            local_names: Rc::new(collect_local_names(params, body, &global_names, &nonlocal_names)),
+            global_names: Rc::new(global_names),
+            nonlocal_names: Rc::new(nonlocal_names),
             env: closure_env,
         }))
     }
@@ -364,12 +364,12 @@ impl Interpreter {
                     positional_index += 1;
                 }
             }
-            let local_env = Environment::new(Some(Rc::clone(&function.env)));
+            let local_env = self.alloc_env(Some(Rc::clone(&function.env)));
             {
                 let mut local_env_ref = local_env.borrow_mut();
-                local_env_ref.local_names = function.local_names.clone();
-                local_env_ref.global_names = function.global_names.clone();
-                local_env_ref.nonlocal_names = function.nonlocal_names.clone();
+                local_env_ref.local_names = Rc::clone(&function.local_names);
+                local_env_ref.global_names = Rc::clone(&function.global_names);
+                local_env_ref.nonlocal_names = Rc::clone(&function.nonlocal_names);
                 local_env_ref.values.insert(function.name.clone(), Value::Function(Rc::clone(&function)));
             }
             for (index, param) in function.params.iter().enumerate() {
@@ -385,9 +385,20 @@ impl Interpreter {
                 };
                 local_env.borrow_mut().values.insert(param.name.clone(), value);
             }
+            self.call_depth += 1;
+            if self.call_depth > MAX_CALL_DEPTH {
+                self.call_depth -= 1;
+                let exc = self.instantiate_named_exception(
+                    "RecursionError",
+                    "maximum recursion depth exceeded".to_string(),
+                )?;
+                return Err(PyError::Raised(exc));
+            }
             let previous_env = std::mem::replace(&mut self.env, local_env);
             let signal = self.exec_block(&function.body);
-            self.env = previous_env;
+            let local_env = std::mem::replace(&mut self.env, previous_env);
+            self.call_depth -= 1;
+            self.free_env(local_env);
             return match signal? {
                 ExecSignal::None => Ok(Value::None),
                 ExecSignal::Return(value) => Ok(value),
@@ -410,12 +421,12 @@ impl Interpreter {
             }
         }
 
-        let local_env = Environment::new(Some(Rc::clone(&function.env)));
+        let local_env = self.alloc_env(Some(Rc::clone(&function.env)));
         {
             let mut local_env_ref = local_env.borrow_mut();
-            local_env_ref.local_names = function.local_names.clone();
-            local_env_ref.global_names = function.global_names.clone();
-            local_env_ref.nonlocal_names = function.nonlocal_names.clone();
+            local_env_ref.local_names = Rc::clone(&function.local_names);
+            local_env_ref.global_names = Rc::clone(&function.global_names);
+            local_env_ref.nonlocal_names = Rc::clone(&function.nonlocal_names);
             local_env_ref.values.insert(function.name.clone(), Value::Function(Rc::clone(&function)));
         }
 
@@ -473,9 +484,20 @@ impl Interpreter {
             }
         }
 
+        self.call_depth += 1;
+        if self.call_depth > MAX_CALL_DEPTH {
+            self.call_depth -= 1;
+            let exc = self.instantiate_named_exception(
+                "RecursionError",
+                "maximum recursion depth exceeded".to_string(),
+            )?;
+            return Err(PyError::Raised(exc));
+        }
         let previous_env = std::mem::replace(&mut self.env, local_env);
         let signal = self.exec_block(&function.body);
-        self.env = previous_env;
+        let local_env = std::mem::replace(&mut self.env, previous_env);
+        self.call_depth -= 1;
+        self.free_env(local_env);
 
         match signal? {
             ExecSignal::None => Ok(Value::None),

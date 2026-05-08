@@ -174,9 +174,9 @@ impl Interpreter {
                         name: n.clone(), default: None, is_args: false, is_kwargs: false,
                     }).collect(),
                     body: vec![crate::ast::Stmt::Return(Some(*body.clone()))],
-                    local_names: std::collections::HashSet::new(),
-                    global_names: std::collections::HashSet::new(),
-                    nonlocal_names: std::collections::HashSet::new(),
+                    local_names: Rc::new(std::collections::HashSet::new()),
+                    global_names: Rc::new(std::collections::HashSet::new()),
+                    nonlocal_names: Rc::new(std::collections::HashSet::new()),
                     env: closure,
                 });
                 Ok(Value::Function(func))

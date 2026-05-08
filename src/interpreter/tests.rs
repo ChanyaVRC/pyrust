@@ -224,4 +224,58 @@ mod tests {
             Some(Value::Int(5))
         );
     }
+
+    #[test]
+    fn deeply_recursive_function_raises_recursion_error() {
+        let src = "
+def inf():
+    return inf()
+caught = False
+try:
+    inf()
+except RecursionError:
+    caught = True
+";
+        // Must run on a large-stack thread; Interpreter (Rc-based) is created
+        // inside so Send is not required for the interpreter itself.
+        let caught: bool = std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(move || {
+                let tokens = Lexer::new(src).unwrap().into_tokens();
+                let program = Parser::new(tokens).parse_program().unwrap();
+                let mut interp = Interpreter::default();
+                interp.exec_program(&program, false).unwrap();
+                matches!(interp.lookup_name("caught").unwrap(), Some(Value::Bool(true)))
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(caught);
+    }
+
+    #[test]
+    fn recursion_within_limit_succeeds() {
+        let src = "
+def count(n):
+    if n == 0:
+        return 0
+    return 1 + count(n - 1)
+result = count(200)
+";
+        // Large-stack thread because 200 Python frames × ~80 KB/frame in debug
+        // mode exceeds the test harness's default 8 MB stack.
+        let ok: bool = std::thread::Builder::new()
+            .stack_size(256 * 1024 * 1024)
+            .spawn(move || {
+                let tokens = Lexer::new(src).unwrap().into_tokens();
+                let program = Parser::new(tokens).parse_program().unwrap();
+                let mut interp = Interpreter::default();
+                interp.exec_program(&program, false).unwrap();
+                matches!(interp.lookup_name("result").unwrap(), Some(Value::Int(200)))
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(ok);
+    }
 }

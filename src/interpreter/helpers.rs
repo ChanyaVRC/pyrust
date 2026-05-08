@@ -130,6 +130,7 @@ fn install_exception_builtins(env: &EnvRef) {
     let type_error = make_child("TypeError");
     let value_error = make_child("ValueError");
     let assertion_error = make_child("AssertionError");
+    let recursion_error = make_child("RecursionError");
 
     let mut module = env.borrow_mut();
     module
@@ -147,6 +148,9 @@ fn install_exception_builtins(env: &EnvRef) {
     module
         .values
         .insert("AssertionError".to_string(), Value::Class(assertion_error));
+    module
+        .values
+        .insert("RecursionError".to_string(), Value::Class(recursion_error));
 }
 
 fn key_to_value(key: PyKey) -> Value {
