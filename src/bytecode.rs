@@ -15,6 +15,8 @@ pub enum Insn {
     Move(Reg, Reg),
     /// R[dst] = R[lhs] op R[rhs]
     BinOp(Reg, Reg, BinaryOp, Reg),
+    /// R[dst] = R[lhs] op consts[const_idx]  (fuses LoadConst + BinOp)
+    BinOpConst(Reg, Reg, BinaryOp, u16),
     /// R[dst] = unary_op(R[src])
     UnaryOp(Reg, UnaryOp, Reg),
     /// R[dst] = R[obj].names[name_idx]

@@ -80,6 +80,29 @@ impl Interpreter {
                     };
                     regs[*dst as usize] = Some(result);
                 }
+                Insn::BinOpConst(dst, lhs, op, const_idx) => {
+                    let l = vm_read(regs, *lhs, num_locals)?;
+                    let r = code.consts[*const_idx as usize].clone();
+                    let result = match (&l, op, &r) {
+                        (Value::Int(a), BinaryOp::Add, Value::Int(b)) => {
+                            Value::Int(a.wrapping_add(*b))
+                        }
+                        (Value::Int(a), BinaryOp::Sub, Value::Int(b)) => {
+                            Value::Int(a.wrapping_sub(*b))
+                        }
+                        (Value::Int(a), BinaryOp::Mul, Value::Int(b)) => {
+                            Value::Int(a.wrapping_mul(*b))
+                        }
+                        (Value::Int(a), BinaryOp::Eq, Value::Int(b)) => Value::Bool(a == b),
+                        (Value::Int(a), BinaryOp::Ne, Value::Int(b)) => Value::Bool(a != b),
+                        (Value::Int(a), BinaryOp::Lt, Value::Int(b)) => Value::Bool(a < b),
+                        (Value::Int(a), BinaryOp::Le, Value::Int(b)) => Value::Bool(a <= b),
+                        (Value::Int(a), BinaryOp::Gt, Value::Int(b)) => Value::Bool(a > b),
+                        (Value::Int(a), BinaryOp::Ge, Value::Int(b)) => Value::Bool(a >= b),
+                        _ => self.eval_binary(l, *op, r)?,
+                    };
+                    regs[*dst as usize] = Some(result);
+                }
                 Insn::UnaryOp(dst, op, src) => {
                     let val = vm_read(regs, *src, num_locals)?;
                     let result = vm_eval_unary(*op, val)?;

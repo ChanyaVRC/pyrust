@@ -177,6 +177,18 @@ impl<'a> Compiler<'a> {
         idx
     }
 
+    /// Returns the const-pool index for a literal expression without emitting any instruction.
+    /// Returns None if `expr` is not a scalar literal.
+    fn try_literal_const_idx(&mut self, expr: &Expr) -> Option<u16> {
+        match expr {
+            Expr::Int(v) => Some(self.intern_const(Value::Int(*v))),
+            Expr::Float(v) => Some(self.intern_const(Value::Float(*v))),
+            Expr::Str(s) => Some(self.intern_const(Value::Str(s.clone()))),
+            Expr::Bool(b) => Some(self.intern_const(Value::Bool(*b))),
+            _ => None,
+        }
+    }
+
     fn intern_const(&mut self, val: Value) -> u16 {
         for (i, v) in self.consts.iter().enumerate() {
             if const_eq(v, &val) {
@@ -503,9 +515,13 @@ impl<'a> Compiler<'a> {
         match target {
             AssignTarget::Name(name) => {
                 if let Some(reg) = self.local_reg(name) {
-                    let rhs = self.compile_expr(expr);
-                    self.emit(Insn::BinOp(reg, reg, op, rhs));
-                    self.free_temp(rhs);
+                    if let Some(const_idx) = self.try_literal_const_idx(expr) {
+                        self.emit(Insn::BinOpConst(reg, reg, op, const_idx));
+                    } else {
+                        let rhs = self.compile_expr(expr);
+                        self.emit(Insn::BinOp(reg, reg, op, rhs));
+                        self.free_temp(rhs);
+                    }
                 } else {
                     self.failed = true;
                 }
@@ -938,10 +954,14 @@ impl<'a> Compiler<'a> {
                 }
                 _ => {
                     let lhs = self.compile_expr(left);
-                    let rhs = self.compile_expr(right);
                     let dst = self.ensure_dst(lhs);
-                    self.emit(Insn::BinOp(dst, lhs, *op, rhs));
-                    self.free_temp(rhs);
+                    if let Some(const_idx) = self.try_literal_const_idx(right) {
+                        self.emit(Insn::BinOpConst(dst, lhs, *op, const_idx));
+                    } else {
+                        let rhs = self.compile_expr(right);
+                        self.emit(Insn::BinOp(dst, lhs, *op, rhs));
+                        self.free_temp(rhs);
+                    }
                     dst
                 }
             },
@@ -949,11 +969,15 @@ impl<'a> Compiler<'a> {
                 if ops.len() == 1 {
                     let (cmp_op, right) = &ops[0];
                     let lhs = self.compile_expr(left);
-                    let rhs = self.compile_expr(right);
                     let bin_op = cmp_to_binary(*cmp_op);
                     let dst = self.ensure_dst(lhs);
-                    self.emit(Insn::BinOp(dst, lhs, bin_op, rhs));
-                    self.free_temp(rhs);
+                    if let Some(const_idx) = self.try_literal_const_idx(right) {
+                        self.emit(Insn::BinOpConst(dst, lhs, bin_op, const_idx));
+                    } else {
+                        let rhs = self.compile_expr(right);
+                        self.emit(Insn::BinOp(dst, lhs, bin_op, rhs));
+                        self.free_temp(rhs);
+                    }
                     dst
                 } else {
                     self.failed = true;
