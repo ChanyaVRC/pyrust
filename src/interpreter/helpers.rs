@@ -1,3 +1,99 @@
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum BinopTypeTag {
+    Int,
+    Float,
+    Str,
+    Other,
+}
+
+#[derive(Clone)]
+pub(crate) enum SpecState {
+    /// Seen `count` examples of the same type tag.
+    Counting { tag: BinopTypeTag, count: u8 },
+    /// Promoted to a specialized path after SPEC_THRESHOLD observations.
+    Specialized(BinopTypeTag),
+    /// Seen mixed types — no further specialization.
+    Megamorphic,
+}
+
+/// Attempt a pure-integer binary operation. Returns Some(Result<Value>) on success,
+/// None if the operation is not applicable to integers (e.g. Str concat).
+fn eval_binary_int(op: BinaryOp, a: i64, b: i64) -> Option<Result<Value>> {
+    match op {
+        BinaryOp::Add => Some(Ok(Value::Int(a.wrapping_add(b)))),
+        BinaryOp::Sub => Some(Ok(Value::Int(a.wrapping_sub(b)))),
+        BinaryOp::Mul => Some(Ok(Value::Int(a.wrapping_mul(b)))),
+        BinaryOp::Div => {
+            if b == 0 {
+                Some(Err(PyError::Runtime("division by zero".to_string())))
+            } else {
+                Some(Ok(Value::Float(a as f64 / b as f64)))
+            }
+        }
+        BinaryOp::FloorDiv => {
+            if b == 0 {
+                Some(Err(PyError::Runtime(
+                    "integer division or modulo by zero".to_string(),
+                )))
+            } else {
+                let modulo = py_mod_i64(a, b);
+                Some(Ok(Value::Int((a - modulo) / b)))
+            }
+        }
+        BinaryOp::Mod => {
+            if b == 0 {
+                Some(Err(PyError::Runtime(
+                    "integer division or modulo by zero".to_string(),
+                )))
+            } else {
+                Some(Ok(Value::Int(py_mod_i64(a, b))))
+            }
+        }
+        BinaryOp::Pow => Some(Ok(if b >= 0 {
+            Value::Int(a.wrapping_pow(b as u32))
+        } else {
+            Value::Float((a as f64).powi(b as i32))
+        })),
+        BinaryOp::Eq => Some(Ok(Value::Bool(a == b))),
+        BinaryOp::Ne => Some(Ok(Value::Bool(a != b))),
+        BinaryOp::Lt => Some(Ok(Value::Bool(a < b))),
+        BinaryOp::Le => Some(Ok(Value::Bool(a <= b))),
+        BinaryOp::Gt => Some(Ok(Value::Bool(a > b))),
+        BinaryOp::Ge => Some(Ok(Value::Bool(a >= b))),
+        BinaryOp::BitAnd => Some(Ok(Value::Int(a & b))),
+        BinaryOp::BitOr => Some(Ok(Value::Int(a | b))),
+        BinaryOp::BitXor => Some(Ok(Value::Int(a ^ b))),
+        BinaryOp::LShift => Some(Ok(Value::Int(a << (b & 63)))),
+        BinaryOp::RShift => Some(Ok(Value::Int(a >> (b & 63)))),
+        _ => None, // And/Or handled separately; In/NotIn/Is/IsNot/MatMul not applicable
+    }
+}
+
+/// Attempt a pure-float binary operation.
+fn eval_binary_float(op: BinaryOp, a: f64, b: f64) -> Option<Result<Value>> {
+    match op {
+        BinaryOp::Add => Some(Ok(Value::Float(a + b))),
+        BinaryOp::Sub => Some(Ok(Value::Float(a - b))),
+        BinaryOp::Mul => Some(Ok(Value::Float(a * b))),
+        BinaryOp::Div => {
+            if b == 0.0 {
+                Some(Err(PyError::Runtime(
+                    "float division by zero".to_string(),
+                )))
+            } else {
+                Some(Ok(Value::Float(a / b)))
+            }
+        }
+        BinaryOp::Eq => Some(Ok(Value::Bool(a == b))),
+        BinaryOp::Ne => Some(Ok(Value::Bool(a != b))),
+        BinaryOp::Lt => Some(Ok(Value::Bool(a < b))),
+        BinaryOp::Le => Some(Ok(Value::Bool(a <= b))),
+        BinaryOp::Gt => Some(Ok(Value::Bool(a > b))),
+        BinaryOp::Ge => Some(Ok(Value::Bool(a >= b))),
+        _ => None,
+    }
+}
+
 /// True for expressions that are statically always-truthy (no side effects).
 fn is_const_true(expr: &Expr) -> bool {
     matches!(expr, Expr::Bool(true) | Expr::Int(1))

@@ -452,6 +452,30 @@ result = fib(35)
     }
 
     #[test]
+    fn int_add_specializes_after_repeated_calls() {
+        // A tight loop hitting the same + site with Int operands should produce
+        // correct results regardless of specialization state.
+        let interpreter = run_program(
+            "total = 0\nfor i in range(20):\n    total = total + i\n",
+        );
+        assert_eq!(interpreter.lookup_name("total").unwrap(), Some(Value::Int(190)));
+    }
+
+    #[test]
+    fn specialize_degrades_gracefully_on_type_change() {
+        // A site first observed as Int+Int, then called with Str+Str, must not
+        // crash — it should fall back to the generic path and return the correct value.
+        let interpreter = run_program(
+            "def add(a, b):\n    return a + b\nx = add(1, 2)\ny = add('hello', ' world')\n",
+        );
+        assert_eq!(interpreter.lookup_name("x").unwrap(), Some(Value::Int(3)));
+        assert_eq!(
+            interpreter.lookup_name("y").unwrap(),
+            Some(Value::Str("hello world".to_string()))
+        );
+    }
+
+    #[test]
     fn def_bound_params_read_without_unbound_error() {
         // Parameters are def-bound; reading them should never trigger the
         // "local variable not associated" error, even after deep inlining.

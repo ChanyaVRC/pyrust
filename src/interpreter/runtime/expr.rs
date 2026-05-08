@@ -96,7 +96,7 @@ impl Interpreter {
                 _ => {
                     let left_value = self.eval_expr(left)?;
                     let right_value = self.eval_expr(right)?;
-                    self.eval_binary(left_value, *op, right_value)
+                    self.eval_binary_speculative(expr, *op, left_value, right_value)
                 }
             },
             Expr::Call { func, args } => {
@@ -489,6 +489,87 @@ impl Interpreter {
             _ => return Err(PyError::Runtime("bitwise op requires integer".to_string())),
         };
         Ok(Value::Int(op(a, b)))
+    }
+
+    fn eval_binary_speculative(
+        &mut self,
+        site: &Expr,
+        op: BinaryOp,
+        left: Value,
+        right: Value,
+    ) -> Result<Value> {
+        let site_id = site as *const Expr as usize;
+
+        let tag_of = |v: &Value| match v {
+            Value::Int(_) => BinopTypeTag::Int,
+            Value::Float(_) => BinopTypeTag::Float,
+            Value::Str(_) => BinopTypeTag::Str,
+            _ => BinopTypeTag::Other,
+        };
+
+        // Attempt the specialized fast path if this site is promoted.
+        if let Some(SpecState::Specialized(spec_tag)) = self.spec_cache.get(&site_id) {
+            let spec_tag = *spec_tag;
+            if spec_tag == BinopTypeTag::Int {
+                if let (Value::Int(a), Value::Int(b)) = (&left, &right) {
+                    if let Some(result) = eval_binary_int(op, *a, *b) {
+                        return result;
+                    }
+                }
+                // Type mismatch — deoptimize.
+                self.spec_cache.insert(site_id, SpecState::Megamorphic);
+            } else if spec_tag == BinopTypeTag::Float {
+                if let (Value::Float(a), Value::Float(b)) = (&left, &right) {
+                    if let Some(result) = eval_binary_float(op, *a, *b) {
+                        return result;
+                    }
+                }
+                self.spec_cache.insert(site_id, SpecState::Megamorphic);
+            }
+        }
+
+        // Generic path — also update speculation state.
+        let observed_tag = {
+            let lt = tag_of(&left);
+            let rt = tag_of(&right);
+            if lt == rt {
+                lt
+            } else {
+                BinopTypeTag::Other
+            }
+        };
+
+        // Only update if not already megamorphic and not yet specialized.
+        if !matches!(
+            self.spec_cache.get(&site_id),
+            Some(SpecState::Megamorphic) | Some(SpecState::Specialized(_))
+        ) {
+            let next = match self.spec_cache.get(&site_id) {
+                None => SpecState::Counting {
+                    tag: observed_tag,
+                    count: 1,
+                },
+                Some(SpecState::Counting { tag, count }) => {
+                    if *tag == observed_tag {
+                        let new_count = count + 1;
+                        if new_count >= SPEC_THRESHOLD {
+                            SpecState::Specialized(observed_tag)
+                        } else {
+                            SpecState::Counting {
+                                tag: observed_tag,
+                                count: new_count,
+                            }
+                        }
+                    } else {
+                        SpecState::Megamorphic
+                    }
+                }
+                _ => unreachable!(),
+            };
+            self.spec_cache.insert(site_id, next);
+        }
+
+        self.eval_binary(left, op, right)
     }
 
     fn eval_in(&mut self, container: Value, item: Value) -> Result<Value> {
