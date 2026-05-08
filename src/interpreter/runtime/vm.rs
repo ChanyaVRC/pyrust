@@ -1,3 +1,9 @@
+#[derive(Clone)]
+enum IterState {
+    Materialized(Vec<Value>, usize),
+    Range { cur: i64, stop: i64, step: i64 },
+}
+
 impl Interpreter {
     /// Execute compiled bytecode for a user function.
     ///
@@ -10,7 +16,7 @@ impl Interpreter {
         use crate::bytecode::Insn;
         let num_locals = code.num_locals;
 
-        let mut iters: Vec<Option<(Vec<Value>, usize)>> =
+        let mut iters: Vec<Option<IterState>> =
             vec![None; code.num_iters as usize];
 
         let mut pc: usize = 0;
@@ -117,15 +123,23 @@ impl Interpreter {
                 // ── Calls ────────────────────────────────────────────────
                 Insn::Call(func_reg, argc) => {
                     let func_val = vm_read(regs, *func_reg, num_locals)?;
-                    let mut args: Vec<ExpandedCallArg> = Vec::with_capacity(*argc as usize);
+                    // Reuse the interpreter-level buffer to avoid a per-call heap
+                    // allocation in the common (non-recursive) case.
+                    let mut buf = std::mem::take(&mut self.call_arg_buf);
+                    buf.clear();
                     for i in 0..*argc as usize {
-                        args.push(ExpandedCallArg {
+                        buf.push(ExpandedCallArg {
                             name: None,
                             value: vm_read(regs, *func_reg + 1 + i as u8, num_locals)?,
                         });
                     }
-                    let result = self.call_function_expanded(func_val, &args)?;
-                    regs[*func_reg as usize] = Some(result);
+                    let call_result = self.call_function_expanded(func_val, &buf);
+                    // Always restore buf so the capacity is reused on the next call.
+                    // A nested VM call may have left a different (smaller) buffer in
+                    // self.call_arg_buf; we prefer ours since it already has the right
+                    // capacity for this call site.
+                    self.call_arg_buf = buf;
+                    regs[*func_reg as usize] = Some(call_result?);
                 }
 
                 // ── Returns ──────────────────────────────────────────────
@@ -181,8 +195,14 @@ impl Interpreter {
                 // ── Iterator ─────────────────────────────────────────────
                 Insn::GetIter(slot, src) => {
                     let src_val = vm_read(regs, *src, num_locals)?;
-                    let items = iter_values(src_val)?;
-                    iters[*slot as usize] = Some((items, 0));
+                    // Range is kept lazy: no Vec allocation until elements are needed.
+                    let state = match src_val {
+                        Value::Range { start, stop, step } => {
+                            IterState::Range { cur: start, stop, step }
+                        }
+                        other => IterState::Materialized(iter_values(other)?, 0),
+                    };
+                    iters[*slot as usize] = Some(state);
                 }
                 Insn::CheckLocal(reg, name_idx) => {
                     if regs[*reg as usize].is_none() {
@@ -194,17 +214,30 @@ impl Interpreter {
                     }
                 }
                 Insn::ForIter(dst, slot, offset) => {
-                    if let Some((items, pos)) = iters[*slot as usize].as_mut() {
-                        if *pos < items.len() {
-                            let v = items[*pos].clone();
-                            *pos += 1;
-                            regs[*dst as usize] = Some(v);
-                        } else {
-                            // Iterator exhausted: jump past the loop
+                    match iters[*slot as usize].as_mut() {
+                        Some(IterState::Materialized(items, pos)) => {
+                            if *pos < items.len() {
+                                let v = items[*pos].clone();
+                                *pos += 1;
+                                regs[*dst as usize] = Some(v);
+                            } else {
+                                pc = (pc as i32 + offset) as usize;
+                            }
+                        }
+                        Some(IterState::Range { cur, stop, step }) => {
+                            let exhausted =
+                                if *step > 0 { *cur >= *stop } else { *cur <= *stop };
+                            if exhausted {
+                                pc = (pc as i32 + offset) as usize;
+                            } else {
+                                let v = Value::Int(*cur);
+                                *cur += *step;
+                                regs[*dst as usize] = Some(v);
+                            }
+                        }
+                        None => {
                             pc = (pc as i32 + offset) as usize;
                         }
-                    } else {
-                        pc = (pc as i32 + offset) as usize;
                     }
                 }
             }

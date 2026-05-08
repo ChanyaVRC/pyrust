@@ -49,6 +49,9 @@ pub struct Interpreter {
     hot_frames_active: HashSet<usize>,
     /// Bytecode cache: fn_ptr → compiled FnCode (None = compilation failed, use tree-walker).
     bytecode_cache: HashMap<usize, (std::rc::Weak<UserFunction>, Option<Rc<FnCode>>)>,
+    /// Reusable argument buffer for VM Call instructions — avoids a per-call
+    /// heap allocation in the common (non-recursive) case.
+    call_arg_buf: Vec<ExpandedCallArg>,
 }
 
 impl Default for Interpreter {
@@ -69,6 +72,7 @@ impl Default for Interpreter {
             hot_frames: HashMap::new(),
             hot_frames_active: HashSet::new(),
             bytecode_cache: HashMap::new(),
+            call_arg_buf: Vec::new(),
         }
     }
 }

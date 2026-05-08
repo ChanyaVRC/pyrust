@@ -637,8 +637,16 @@ impl<'a> Compiler<'a> {
             }
             Expr::Var(name) => {
                 if let Some(reg) = self.local_reg(name) {
-                    let name_idx = self.intern_name(name);
-                    self.emit(Insn::CheckLocal(reg, name_idx));
+                    // Emit CheckLocal only when the slot may still be None at
+                    // this point.  def_bound_mask has bit `reg` set for
+                    // parameters, which are always initialised before the body
+                    // runs, so we can skip the check for them.
+                    let definitely_bound =
+                        (reg as u64) < 64 && (self.func.def_bound_mask >> reg) & 1 != 0;
+                    if !definitely_bound {
+                        let name_idx = self.intern_name(name);
+                        self.emit(Insn::CheckLocal(reg, name_idx));
+                    }
                     reg
                 } else {
                     let name_idx = self.intern_name(name);
