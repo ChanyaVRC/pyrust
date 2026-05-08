@@ -56,7 +56,12 @@ fn run_file(path: &str) -> Result<()> {
 
 fn is_incomplete(err: &PyError) -> bool {
     match err {
-        PyError::Parse(msg) | PyError::Lex(msg) => msg.contains("found Eof"),
+        // "found Eof" — input cut off mid-expression
+        // "expected Indent, found" — block header (e.g. "for x:") with no body yet;
+        //   the trailing \n produces an extra Newline token instead of Eof
+        PyError::Parse(msg) | PyError::Lex(msg) => {
+            msg.contains("found Eof") || msg.contains("expected Indent, found")
+        }
         _ => false,
     }
 }
@@ -105,6 +110,11 @@ fn run_repl() -> Result<()> {
 
                 buf.push_str(&line);
                 buf.push('\n');
+
+                // Lines ending with ':' always need a body — skip parse attempt
+                if trimmed.ends_with(':') {
+                    continue;
+                }
 
                 // Try to parse and execute; stay in continuation if incomplete
                 match parse_source(&buf) {
