@@ -54,6 +54,14 @@ fn run_file(path: &str) -> Result<()> {
     Ok(())
 }
 
+fn last_line_is_indented(buf: &str) -> bool {
+    buf.lines()
+        .filter(|l| !l.trim().is_empty())
+        .last()
+        .map(|l| l.starts_with(|c: char| c == ' ' || c == '\t'))
+        .unwrap_or(false)
+}
+
 fn is_incomplete(err: &PyError) -> bool {
     match err {
         // "found Eof" — input cut off mid-expression
@@ -121,11 +129,14 @@ fn run_repl() -> Result<()> {
 
                 // Try to parse and execute; stay in continuation if incomplete
                 match parse_source(&buf) {
-                    Ok(program) => {
+                    Ok(program) if !last_line_is_indented(&buf) => {
                         buf.clear();
                         if let Err(e) = interpreter.exec_program(&program, true) {
                             eprintln!("{e}");
                         }
+                    }
+                    Ok(_) => {
+                        // Last line is still indented — wait for empty line to flush
                     }
                     Err(e) if is_incomplete(&e) => {
                         // Need more input — keep buf and show "..." next iteration
