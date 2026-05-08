@@ -277,11 +277,7 @@ impl Value {
                 if items.is_empty() {
                     return "set()".to_string();
                 }
-                let inner = items
-                    .iter()
-                    .map(key_repr)
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let inner = items.iter().map(key_repr).collect::<Vec<_>>().join(", ");
                 format!("{{{inner}}}")
             }
         }

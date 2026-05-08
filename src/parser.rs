@@ -174,10 +174,7 @@ impl Parser {
             // Multi-target: tuple unpack
             let assign_targets: Result<Vec<AssignTarget>> =
                 targets.iter().map(|e| expr_to_assign_target(e)).collect();
-            return Ok(Stmt::Assign(
-                AssignTarget::Tuple(assign_targets?),
-                rhs,
-            ));
+            return Ok(Stmt::Assign(AssignTarget::Tuple(assign_targets?), rhs));
         }
 
         // Augmented assignment: += -= etc.

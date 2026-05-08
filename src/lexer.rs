@@ -79,7 +79,11 @@ impl Lexer {
         Ok(())
     }
 
-    fn lex_content_tracking(&mut self, content: &str, mut paren_depth: usize) -> Result<(usize, bool)> {
+    fn lex_content_tracking(
+        &mut self,
+        content: &str,
+        mut paren_depth: usize,
+    ) -> Result<(usize, bool)> {
         let chars: Vec<char> = content.chars().collect();
         let mut pos = 0;
 
