@@ -96,7 +96,6 @@ fn run_repl() -> Result<()> {
                 // Empty line while in a block flushes the buffer
                 if !buf.is_empty() && trimmed.is_empty() {
                     let src = std::mem::take(&mut buf);
-                    rl.add_history_entry(src.trim_end()).ok();
                     match parse_source(&src).and_then(|p| interpreter.exec_program(&p, true)) {
                         Ok(()) => {}
                         Err(e) => eprintln!("{e}"),
@@ -107,6 +106,10 @@ fn run_repl() -> Result<()> {
                 if trimmed.is_empty() {
                     continue;
                 }
+
+                // Add each line to history individually (not the whole buffer) so
+                // recalled lines are displayed one at a time with proper indentation.
+                rl.add_history_entry(&line).ok();
 
                 buf.push_str(&line);
                 buf.push('\n');
@@ -119,7 +122,6 @@ fn run_repl() -> Result<()> {
                 // Try to parse and execute; stay in continuation if incomplete
                 match parse_source(&buf) {
                     Ok(program) => {
-                        rl.add_history_entry(buf.trim_end()).ok();
                         buf.clear();
                         if let Err(e) = interpreter.exec_program(&program, true) {
                             eprintln!("{e}");
@@ -129,7 +131,6 @@ fn run_repl() -> Result<()> {
                         // Need more input — keep buf and show "..." next iteration
                     }
                     Err(e) => {
-                        rl.add_history_entry(buf.trim_end()).ok();
                         buf.clear();
                         eprintln!("{e}");
                     }
