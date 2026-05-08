@@ -241,7 +241,10 @@ fn collect_class_method_outer_refs(
                 }
             }
             // Recursively handle class-level control flow.
-            Stmt::If { branches, else_branch } => {
+            Stmt::If {
+                branches,
+                else_branch,
+            } => {
                 for (_, b) in branches {
                     collect_class_method_outer_refs(b, local_index, cells);
                 }
