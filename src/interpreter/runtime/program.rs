@@ -1,3 +1,23 @@
+fn body_has_continue(body: &[Stmt]) -> bool {
+    for stmt in body {
+        match stmt {
+            Stmt::Continue => return true,
+            Stmt::If { branches, else_branch } => {
+                for (_, b) in branches {
+                    if body_has_continue(b) { return true; }
+                }
+                if let Some(b) = else_branch {
+                    if body_has_continue(b) { return true; }
+                }
+            }
+            // Don't recurse into nested loops — continue only affects the innermost
+            Stmt::While { .. } | Stmt::For { .. } => {}
+            _ => {}
+        }
+    }
+    false
+}
+
 impl Interpreter {
     pub fn with_script_dir(dir: PathBuf) -> Self {
         let mut interp = Self::default();
@@ -120,7 +140,43 @@ impl Interpreter {
         }
 
         // Pre-compute iteration count (one division, done once).
-        let mut remaining = range_len(start, stop, step);
+        let count = range_len(start, stop, step);
+
+        // Small-count fast path (step=1, ≤8 iterations): unroll without remaining counter.
+        if step == 1 && count <= 8 {
+            let mut broke = false;
+            if let AssignTarget::Name(loop_var) = target {
+                let target_env = self.resolve_assign_env_for(loop_var);
+                'small_name: for i in 0..count {
+                    env_assign_local(&target_env, loop_var, Value::Int(start + i));
+                    match self.exec_block(body)? {
+                        ExecSignal::None => {}
+                        ExecSignal::Break => { broke = true; break 'small_name; }
+                        ExecSignal::Continue => {}
+                        ExecSignal::Return(v) => return Ok(ExecSignal::Return(v)),
+                    }
+                }
+            } else {
+                'small_other: for i in 0..count {
+                    self.assign_target(target, Value::Int(start + i))?;
+                    match self.exec_block(body)? {
+                        ExecSignal::None => {}
+                        ExecSignal::Break => { broke = true; break 'small_other; }
+                        ExecSignal::Continue => {}
+                        ExecSignal::Return(v) => return Ok(ExecSignal::Return(v)),
+                    }
+                }
+            }
+            if !broke {
+                if let Some(branch) = else_branch {
+                    return self.exec_block(branch);
+                }
+            }
+            return Ok(ExecSignal::None);
+        }
+
+        let mut remaining = count;
+        let mut broke = false;
         if let AssignTarget::Name(loop_var) = target {
             let target_env = self.resolve_assign_env_for(loop_var);
             let mut cur = start;
@@ -324,6 +380,83 @@ impl Interpreter {
                     } else {
                         Ok(ExecSignal::None)
                     };
+                }
+
+                // while-compare-increment → range loop detection
+                // Detect: while VAR <cmp> STOP: ...; VAR += STEP
+                if let Expr::Binary { op: cmp_op, left, right: stop_expr } = cond {
+                    if let Expr::Var(var_name) = left.as_ref() {
+                        if let Some(last) = body.last() {
+                            // Positive step: Lt/Le with AugAssign Add
+                            if let Stmt::AugAssign {
+                                target: AssignTarget::Name(aug_var),
+                                op: BinaryOp::Add,
+                                expr: Expr::Int(step_val),
+                            } = last
+                            {
+                                if aug_var == var_name
+                                    && *step_val > 0
+                                    && matches!(cmp_op, BinaryOp::Lt | BinaryOp::Le)
+                                    && !body_has_continue(body)
+                                {
+                                    if let Some(Value::Int(start)) = self.lookup_name(var_name)? {
+                                        let stop_val = self.eval_expr(stop_expr)?;
+                                        if let Value::Int(mut stop) = stop_val {
+                                            if matches!(cmp_op, BinaryOp::Le) {
+                                                stop += 1;
+                                            }
+                                            let loop_target = AssignTarget::Name(var_name.clone());
+                                            // Include full body (with the increment statement)
+                                            // so that the loop variable is updated to stop
+                                            // after the last iteration, matching while semantics.
+                                            return self.exec_range_loop(
+                                                start,
+                                                stop,
+                                                *step_val,
+                                                &loop_target,
+                                                body,
+                                                else_branch.as_deref(),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            // Negative step: Gt/Ge with AugAssign Sub
+                            if let Stmt::AugAssign {
+                                target: AssignTarget::Name(aug_var),
+                                op: BinaryOp::Sub,
+                                expr: Expr::Int(step_val),
+                            } = last
+                            {
+                                if aug_var == var_name
+                                    && *step_val > 0
+                                    && matches!(cmp_op, BinaryOp::Gt | BinaryOp::Ge)
+                                    && !body_has_continue(body)
+                                {
+                                    if let Some(Value::Int(start)) = self.lookup_name(var_name)? {
+                                        let stop_val = self.eval_expr(stop_expr)?;
+                                        if let Value::Int(mut stop) = stop_val {
+                                            if matches!(cmp_op, BinaryOp::Ge) {
+                                                stop -= 1;
+                                            }
+                                            let loop_target = AssignTarget::Name(var_name.clone());
+                                            // Include full body (with the decrement statement)
+                                            // so that the loop variable is updated to stop
+                                            // after the last iteration, matching while semantics.
+                                            return self.exec_range_loop(
+                                                start,
+                                                stop,
+                                                -*step_val,
+                                                &loop_target,
+                                                body,
+                                                else_branch.as_deref(),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 let mut broke = false;
