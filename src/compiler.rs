@@ -36,11 +36,7 @@ fn stmt_unsupported(s: &Stmt) -> bool {
         | Stmt::Delete(_)
         | Stmt::Global(_)
         | Stmt::Nonlocal(_)
-        | Stmt::Def { .. }
-        // Assert failures require the tree-walker; bail out early instead of mid-compile.
-        | Stmt::Assert { .. } => true,
-        // AugAssign on attribute/index targets isn't compiled; reject upfront.
-        Stmt::AugAssign { target, .. } => !matches!(target, AssignTarget::Name(_)),
+        | Stmt::Def { .. } => true,
         Stmt::If {
             branches,
             else_branch,
@@ -91,6 +87,12 @@ struct Compiler<'a> {
     max_reg: Reg,
     loops: Vec<LoopCtx>,
     failed: bool,
+    /// Bitmask of locals provably assigned at the current compilation point.
+    /// Bit `r` set ↔ register `r` is definitely Some when this instruction runs.
+    /// Initialised from `func.def_bound_mask` (parameters), then extended by the
+    /// forward definite-assignment pass as statements are compiled in order.
+    /// Mirrors CPython's LOAD_FAST vs LOAD_FAST_CHECK distinction.
+    def_set: u64,
 }
 
 impl<'a> Compiler<'a> {
@@ -114,11 +116,12 @@ impl<'a> Compiler<'a> {
             max_reg: if base_temp > 0 { base_temp - 1 } else { 0 },
             loops: Vec::new(),
             failed: false,
+            def_set: func.def_bound_mask,
         }
     }
 
     fn failed_compiler(func: &'a UserFunction) -> Self {
-        let c = Self {
+        Self {
             func,
             insns: Vec::new(),
             consts: Vec::new(),
@@ -131,8 +134,32 @@ impl<'a> Compiler<'a> {
             max_reg: 0,
             loops: Vec::new(),
             failed: true,
-        };
-        c
+            def_set: 0,
+        }
+    }
+
+    /// Mark register `reg` as definitely assigned at the current program point.
+    fn mark_def(&mut self, reg: Reg) {
+        if (reg as usize) < 64 {
+            self.def_set |= 1u64 << reg;
+        }
+    }
+
+    /// Mark all Name registers reachable from `target` as definitely assigned.
+    fn mark_target_def(&mut self, target: &AssignTarget) {
+        match target {
+            AssignTarget::Name(name) => {
+                if let Some(reg) = self.local_reg(name) {
+                    self.mark_def(reg);
+                }
+            }
+            AssignTarget::Tuple(targets) => {
+                for t in targets {
+                    self.mark_target_def(t);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn intern_name(&mut self, name: &str) -> u16 {
@@ -277,9 +304,17 @@ impl<'a> Compiler<'a> {
             }
             Stmt::Assign(target, expr) => {
                 self.compile_assign(target, expr);
+                // Every assignment makes the target register definitely bound.
+                self.mark_target_def(target);
             }
             Stmt::AugAssign { target, op, expr } => {
                 self.compile_aug_assign(target, *op, expr);
+                // After a successful AugAssign the target is still assigned.
+                if let AssignTarget::Name(name) = target {
+                    if let Some(reg) = self.local_reg(name) {
+                        self.mark_def(reg);
+                    }
+                }
             }
             Stmt::AttrAssign { target, name, expr } => {
                 let obj = self.compile_expr(target);
@@ -302,9 +337,22 @@ impl<'a> Compiler<'a> {
                 self.free_temp(idx);
                 self.free_temp(obj);
             }
-            Stmt::Assert { .. } => {
-                // Caught by has_unsupported; should not be reached.
-                self.failed = true;
+            Stmt::Assert { test, msg } => {
+                let cond = self.compile_expr(test);
+                // Jump over the raise if the assertion holds.
+                let skip = self.emit(Insn::JumpIfTrue(cond, 0));
+                self.free_temp(cond);
+                // Compile optional message, defaulting to None.
+                let msg_reg = if let Some(msg_expr) = msg {
+                    self.compile_expr(msg_expr)
+                } else {
+                    let r = self.alloc_temp();
+                    self.emit(Insn::LoadNone(r));
+                    r
+                };
+                self.emit(Insn::RaiseAssert(msg_reg));
+                self.free_temp(msg_reg);
+                self.patch_jump(skip);
             }
             Stmt::If {
                 branches,
@@ -426,7 +474,11 @@ impl<'a> Compiler<'a> {
             let jmp_false = self.emit(Insn::JumpIfFalse(cond_reg, 0));
             self.free_temp(cond_reg);
 
+            // Assignments inside a branch are not visible after it — any path
+            // that didn't take the branch wouldn't have executed them.
+            let saved = self.def_set;
             self.compile_block(body);
+            self.def_set = saved;
             if self.failed {
                 return;
             }
@@ -439,7 +491,9 @@ impl<'a> Compiler<'a> {
         }
 
         if let Some(else_stmts) = else_branch {
+            let saved = self.def_set;
             self.compile_block(else_stmts);
+            self.def_set = saved;
         }
 
         for idx in end_patches {
@@ -459,7 +513,10 @@ impl<'a> Compiler<'a> {
         let exit_jmp = self.emit(Insn::JumpIfFalse(cond_reg, 0));
         self.free_temp(cond_reg);
 
+        // While body may run 0 times, so assignments inside are not visible after.
+        let saved = self.def_set;
         self.compile_block(body);
+        self.def_set = saved;
         if self.failed {
             return;
         }
@@ -559,7 +616,12 @@ impl<'a> Compiler<'a> {
             continue_target: loop_start,
         });
 
+        // The loop target is definitely bound for the duration of the body.
+        // Restore after: the loop may run 0 iterations.
+        let saved_def_set = self.def_set;
+        self.mark_target_def(target);
         self.compile_block(body);
+        self.def_set = saved_def_set;
         if self.failed {
             return;
         }
@@ -637,12 +699,8 @@ impl<'a> Compiler<'a> {
             }
             Expr::Var(name) => {
                 if let Some(reg) = self.local_reg(name) {
-                    // Emit CheckLocal only when the slot may still be None at
-                    // this point.  def_bound_mask has bit `reg` set for
-                    // parameters, which are always initialised before the body
-                    // runs, so we can skip the check for them.
                     let definitely_bound =
-                        (reg as u64) < 64 && (self.func.def_bound_mask >> reg) & 1 != 0;
+                        (reg as usize) < 64 && (self.def_set >> reg) & 1 != 0;
                     if !definitely_bound {
                         let name_idx = self.intern_name(name);
                         self.emit(Insn::CheckLocal(reg, name_idx));

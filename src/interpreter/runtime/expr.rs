@@ -190,7 +190,7 @@ impl Interpreter {
                     })
                     .collect();
                 let def_bound_mask =
-                    compute_def_bound_mask(&params_ufp, &lambda_body, &local_index);
+                    compute_def_bound_mask(&params_ufp, &local_index);
                 let func = Rc::new(crate::value::UserFunction {
                     name: "<lambda>".to_string(),
                     params: params.iter().map(|n| crate::value::UserFunctionParam {

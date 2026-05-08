@@ -799,7 +799,6 @@ fn collect_assign_target_names(
 
 pub(crate) fn compute_def_bound_mask(
     params: &[crate::ast::FunctionParam],
-    _body: &[Stmt],
     local_index: &HashMap<String, usize>,
 ) -> u64 {
     let mut mask: u64 = 0;

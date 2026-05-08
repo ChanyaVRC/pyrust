@@ -516,7 +516,7 @@ impl Interpreter {
         let local_index = Rc::new(
             local_names.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect::<HashMap<String, usize>>()
         );
-        let def_bound_mask = compute_def_bound_mask(params, body, &local_index);
+        let def_bound_mask = compute_def_bound_mask(params, &local_index);
         Ok(Rc::new(UserFunction {
             name: name.to_string(),
             params: evaluated_params,

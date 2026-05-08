@@ -51,6 +51,8 @@ pub enum Insn {
     ForIter(Reg, u8, i32),
     /// error if R[reg] is uninitialised: "cannot access local variable '<name>' ..."
     CheckLocal(Reg, u16),
+    /// raise AssertionError(R[msg])  (condition already tested by JumpIfTrue)
+    RaiseAssert(Reg),
 }
 
 #[derive(Debug)]

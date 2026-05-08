@@ -213,6 +213,15 @@ impl Interpreter {
                         )));
                     }
                 }
+                Insn::RaiseAssert(msg_reg) => {
+                    let msg = vm_read(regs, *msg_reg, num_locals)?;
+                    let msg_str = match msg {
+                        Value::None => String::new(),
+                        other => other.to_py_str(),
+                    };
+                    let exc = self.instantiate_named_exception("AssertionError", msg_str)?;
+                    return Err(PyError::Raised(exc));
+                }
                 Insn::ForIter(dst, slot, offset) => {
                     match iters[*slot as usize].as_mut() {
                         Some(IterState::Materialized(items, pos)) => {
