@@ -7,24 +7,22 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
+  deployments: write
 
 concurrency:
   group: benchmark-pages
   cancel-in-progress: true
 
 jobs:
-  build_pages_artifact:
+  benchmark:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -43,13 +41,48 @@ jobs:
       - name: Set benchmark timestamp
         run: echo "BENCHMARK_TIMESTAMP_UTC=$(date -u +'%Y-%m-%d %H:%M:%S')" >> "$GITHUB_ENV"
 
-      - name: Run benchmark and export SVG
-        run: python tools/benchmark_compare.py --iterations 10 --top 12 --svg-out benchmark.svg
+      - name: Run benchmark
+        run: |
+          python tools/benchmark_compare.py \
+            --iterations 10 --top 12 \
+            --svg-out benchmark.svg \
+            --benchmark-action-out benchmark-action-output.json
+
+      - name: Store benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: PyRust Benchmark
+          tool: customSmallerIsBetter
+          output-file-path: benchmark-action-output.json
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          gh-pages-branch: benchmark-data
+          benchmark-data-dir-path: dev/bench
+          alert-threshold: "130%"
+          comment-on-alert: true
+          fail-on-alert: false
+          summary-always: true
+
+  publish_svg:
+    needs: benchmark
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout benchmark-data
+        uses: actions/checkout@v4
+        with:
+          ref: benchmark-data
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
 
       - name: Build Pages content
         run: |
           mkdir -p dist
-          cp benchmark.svg dist/benchmark.svg
+          cp -r dev/bench dist/bench 2>/dev/null || true
           cat > dist/index.html << 'HTML'
           <!doctype html>
           <html lang="en">
@@ -60,15 +93,13 @@ jobs:
             <style>
               body { margin: 0; background: #0b1220; color: #e2e8f0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
               .wrap { max-width: 1280px; margin: 24px auto; padding: 0 16px; }
-              img { width: 100%; height: auto; border: 1px solid #334155; border-radius: 12px; background: #0f172a; }
               a { color: #93c5fd; }
             </style>
           </head>
           <body>
             <div class="wrap">
-              <h1>PyRust Latest Benchmark</h1>
-              <p>This image is auto-generated on every push to master.</p>
-              <img src="./benchmark.svg" alt="PyRust benchmark snapshot" />
+              <h1>PyRust Benchmark</h1>
+              <p>See the <a href="./bench/">interactive history graph</a> for commit-by-commit trends.</p>
             </div>
           </body>
           </html>
@@ -79,13 +110,6 @@ jobs:
         with:
           path: dist
 
-  deploy_pages:
-    needs: build_pages_artifact
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4

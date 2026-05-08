@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import html
+import json
 import math
 import os
 import platform
@@ -379,6 +380,64 @@ def write_github_step_summary(rows: list[ScriptStats]) -> None:
     Path(summary_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def build_json_snapshot(
+    rows: list[ScriptStats],
+    iterations: int,
+    warmup: bool,
+    benchmark_elapsed_ms: float,
+) -> dict:
+    timestamp = os.environ.get("BENCHMARK_TIMESTAMP_UTC", "")
+    commit = os.environ.get("GITHUB_SHA", "local")
+    commit_short = commit[:12] if len(commit) > 12 else commit
+    total_py = sum(row.py_avg_ms for row in rows)
+    total_rs = sum(row.rs_avg_ms for row in rows)
+    return {
+        "commit": commit,
+        "commit_short": commit_short,
+        "timestamp": timestamp,
+        "iterations": iterations,
+        "warmup": warmup,
+        "elapsed_ms": benchmark_elapsed_ms,
+        "total_py_ms": total_py,
+        "total_rs_ms": total_rs,
+        "overall_ratio": (total_rs / total_py) if total_py > 0 else None,
+        "scripts": [
+            {
+                "path": row.path,
+                "category": row.category,
+                "py_avg_ms": row.py_avg_ms,
+                "rs_avg_ms": row.rs_avg_ms,
+                "ratio": row.ratio if math.isfinite(row.ratio) else None,
+            }
+            for row in rows
+        ],
+    }
+
+
+def build_benchmark_action_output(rows: list[ScriptStats]) -> list[dict]:
+    """
+    Produce output for benchmark-action/github-action-benchmark
+    (tool: customSmallerIsBetter).  Each script emits two entries:
+    one for PyRust and one for Python so both trend lines appear on the chart.
+    """
+    entries = []
+    for row in rows:
+        name = row.path.split("/")[-1].removesuffix(".py")
+        entries.append({
+            "name": f"{name} [PyRust]",
+            "value": round(row.rs_avg_ms, 3),
+            "unit": "ms",
+            "range": f"±{round(row.rs_std_ms, 3)} ms",
+        })
+        entries.append({
+            "name": f"{name} [Python]",
+            "value": round(row.py_avg_ms, 3),
+            "unit": "ms",
+            "range": f"±{round(row.py_std_ms, 3)} ms",
+        })
+    return entries
+
+
 def build_markdown_snapshot(
     rows: list[ScriptStats],
     iterations: int,
@@ -536,6 +595,18 @@ def main() -> int:
         help="optional output path for svg snapshot",
     )
     parser.add_argument(
+        "--json-out",
+        type=str,
+        default="",
+        help="optional output path for JSON snapshot (used by build_benchmark_pages.py)",
+    )
+    parser.add_argument(
+        "--benchmark-action-out",
+        type=str,
+        default="",
+        help="output path for benchmark-action/github-action-benchmark JSON (customSmallerIsBetter)",
+    )
+    parser.add_argument(
         "--base-bin",
         type=str,
         default="",
@@ -606,6 +677,19 @@ def main() -> int:
             top=args.top,
         )
         Path(args.svg_out).write_text(snapshot_svg, encoding="utf-8")
+
+    if args.json_out:
+        snapshot_json = build_json_snapshot(
+            rows=rows,
+            iterations=args.iterations,
+            warmup=not args.no_warmup,
+            benchmark_elapsed_ms=benchmark_elapsed,
+        )
+        Path(args.json_out).write_text(json.dumps(snapshot_json, indent=2), encoding="utf-8")
+
+    if args.benchmark_action_out:
+        ba_output = build_benchmark_action_output(rows)
+        Path(args.benchmark_action_out).write_text(json.dumps(ba_output, indent=2), encoding="utf-8")
 
     return 0
 
