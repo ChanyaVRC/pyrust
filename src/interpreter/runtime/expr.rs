@@ -218,10 +218,10 @@ impl Interpreter {
             BinaryOp::Mod => self.modulo(left, right),
             BinaryOp::Eq => Ok(Value::Bool(left == right)),
             BinaryOp::Ne => Ok(Value::Bool(left != right)),
-            BinaryOp::Lt => self.compare(left, right, |a, b| a < b),
-            BinaryOp::Le => self.compare(left, right, |a, b| a <= b),
-            BinaryOp::Gt => self.compare(left, right, |a, b| a > b),
-            BinaryOp::Ge => self.compare(left, right, |a, b| a >= b),
+            BinaryOp::Lt => self.compare(left, right, |o| o.is_lt()),
+            BinaryOp::Le => self.compare(left, right, |o| o.is_le()),
+            BinaryOp::Gt => self.compare(left, right, |o| o.is_gt()),
+            BinaryOp::Ge => self.compare(left, right, |o| o.is_ge()),
             BinaryOp::Pow => {
                 match (&left, &right) {
                     (Value::Int(a), Value::Int(b)) if *b >= 0 => {
@@ -395,10 +395,8 @@ impl Interpreter {
         }
     }
 
-    fn compare(&self, left: Value, right: Value, cmp: impl Fn(f64, f64) -> bool) -> Result<Value> {
-        let a = self.to_number(&left)?;
-        let b = self.to_number(&right)?;
-        Ok(Value::Bool(cmp(a, b)))
+    fn compare(&self, left: Value, right: Value, cmp: impl Fn(std::cmp::Ordering) -> bool) -> Result<Value> {
+        Ok(Value::Bool(cmp(py_ordering(&left, &right)?)))
     }
 
     fn to_pair_number(&self, left: Value, right: Value) -> Result<(f64, f64)> {
@@ -409,6 +407,7 @@ impl Interpreter {
         match value {
             Value::Int(v) => Ok(*v as f64),
             Value::Float(v) => Ok(*v),
+            Value::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
             _ => Err(PyError::Runtime("expected number".to_string())),
         }
     }
@@ -485,4 +484,35 @@ impl Interpreter {
         }
     }
 
+}
+
+fn py_ordering(left: &Value, right: &Value) -> Result<std::cmp::Ordering> {
+    match (left, right) {
+        (Value::Int(a), Value::Int(b)) => Ok(a.cmp(b)),
+        (Value::Bool(a), Value::Bool(b)) => Ok(a.cmp(b)),
+        (Value::Bool(a), Value::Int(b)) => Ok((*a as i64).cmp(b)),
+        (Value::Int(a), Value::Bool(b)) => Ok(a.cmp(&(*b as i64))),
+        (Value::Float(a), Value::Float(b)) => {
+            Ok(a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        }
+        (Value::Int(a), Value::Float(b)) => {
+            Ok((*a as f64).partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        }
+        (Value::Float(a), Value::Int(b)) => {
+            Ok(a.partial_cmp(&(*b as f64)).unwrap_or(std::cmp::Ordering::Equal))
+        }
+        (Value::Str(a), Value::Str(b)) => Ok(a.cmp(b)),
+        (Value::List(a), Value::List(b)) | (Value::Tuple(a), Value::Tuple(b)) => {
+            for (x, y) in a.iter().zip(b.iter()) {
+                let ord = py_ordering(x, y)?;
+                if ord != std::cmp::Ordering::Equal {
+                    return Ok(ord);
+                }
+            }
+            Ok(a.len().cmp(&b.len()))
+        }
+        _ => Err(PyError::Runtime(
+            "'<' not supported between instances of these types".to_string(),
+        )),
+    }
 }
