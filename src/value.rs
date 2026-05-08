@@ -37,6 +37,7 @@ pub type NameSet = Rc<HashSet<String>>;
 pub struct FunctionLocals {
     pub slots: Vec<Option<Value>>,
     pub index: Rc<HashMap<String, usize>>,
+    pub def_bound_mask: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +86,9 @@ pub struct UserFunction {
     /// True when static analysis found no side-effecting statements in the body.
     /// Pure functions with all-hashable arguments are transparently memoized.
     pub is_pure: bool,
+    /// Bitmask of def-bound slots: bit `i` set means slot `i` is always `Some`
+    /// after function entry (parameters + unconditional top-level assignments).
+    pub def_bound_mask: u64,
 }
 
 #[derive(Debug, Clone)]
