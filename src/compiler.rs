@@ -1853,24 +1853,26 @@ impl Compiler {
         self.emit(Insn::GetIter(iter_slot, src));
         self.free_temp(src);
         let loop_start = self.pc();
-        let item_reg = self.alloc_temp();
-        let exit_jmp = self.emit(Insn::ForIter(item_reg, iter_slot, 0));
+        // For a local-variable target, write ForIter directly into the local register
+        // to avoid an extra Move per iteration. For all other cases, use a temp.
+        let for_dst = if let AssignTarget::Name(n) = target {
+            self.local_reg(n).unwrap_or_else(|| self.alloc_temp())
+        } else {
+            self.alloc_temp()
+        };
+        let exit_jmp = self.emit(Insn::ForIter(for_dst, iter_slot, 0));
         match target {
             AssignTarget::Name(name) => {
-                if let Some(var_reg) = self.local_reg(name) {
-                    if item_reg != var_reg {
-                        self.emit(Insn::Move(var_reg, item_reg));
-                    }
-                    self.free_temp(item_reg);
-                } else {
+                if self.local_reg(name).is_none() {
                     let name_idx = self.intern_name(name);
-                    self.emit(Insn::StoreGlobal(name_idx, item_reg));
-                    self.free_temp(item_reg);
+                    self.emit(Insn::StoreGlobal(name_idx, for_dst));
+                    self.free_temp(for_dst);
                 }
+                // local case: for_dst == var_reg, already written — no Move needed
             }
             AssignTarget::Tuple(targets) => {
                 let n = targets.len() as u8;
-                let base = item_reg + 1;
+                let base = for_dst + 1;
                 if base as usize + n as usize > 256 {
                     self.failed = true;
                     return;
@@ -1879,7 +1881,7 @@ impl Compiler {
                 if self.next_temp - 1 > self.max_reg {
                     self.max_reg = self.next_temp - 1;
                 }
-                self.emit(Insn::Unpack(base, item_reg, n));
+                self.emit(Insn::Unpack(base, for_dst, n));
                 for (i, t) in targets.iter().enumerate() {
                     match t {
                         AssignTarget::Name(name) => {
@@ -1896,7 +1898,7 @@ impl Compiler {
                         }
                     }
                 }
-                self.next_temp = item_reg;
+                self.next_temp = for_dst;
             }
             _ => {
                 self.failed = true;
