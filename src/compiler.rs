@@ -1582,6 +1582,17 @@ impl Compiler {
         }
     }
 
+    /// Convert `while VAR cmp STOP: ...; VAR += STEP` to a range-backed for loop.
+    ///
+    /// Uses ForIter+IterState::Range (raw i64 counters) rather than ForCount, since
+    /// ForIter operates on unboxed integers while ForCount must go through Option<Value>
+    /// registers on every iteration.
+    ///
+    /// The key optimisation over the naive compilation: we omit the last body statement
+    /// (VAR += STEP — which is a dead store because ForIter overwrites VAR on the next
+    /// iteration), reducing the per-iteration dispatch count from 4 to 3.
+    /// After natural loop exit we emit one BinOpConst to restore the post-increment
+    /// value that Python semantics require (i.e. `while i < n: …; i += 1` leaves i=n).
     fn try_compile_while_range(
         &mut self,
         cond: &Expr,
@@ -1642,7 +1653,12 @@ impl Compiler {
             continue_patches: Vec::new(),
         });
         let saved = self.def_set;
-        self.compile_block(body);
+        // Skip the last body statement (VAR += STEP): ForIter already manages the
+        // range counter, so VAR += STEP is a dead store on every non-final iteration.
+        // On the final iteration it would produce the correct post-loop value, but we
+        // restore that with a single BinOpConst after the exit instead.
+        let body_without_inc = &body[..body.len() - 1];
+        self.compile_block(body_without_inc);
         self.def_set = saved;
         if self.failed {
             return true;
@@ -1651,6 +1667,11 @@ impl Compiler {
         let back_offset = loop_start as i32 - back_from;
         self.emit(Insn::Jump(back_offset));
         self.patch_jump(exit_jmp);
+        // Restore post-loop variable value: Python semantics require that after
+        // `while i < n: …; i += 1` the variable equals n (the value that failed the
+        // condition), not n-1 (the last ForIter-assigned value).
+        // Break patches jump PAST this instruction, so break exits with the break value.
+        self.emit(Insn::BinOpConst(var_reg, var_reg, BinaryOp::Add, step_idx));
         let ctx = self.loops.pop().unwrap();
         self.free_iter();
         if let Some(else_stmts) = else_branch {
