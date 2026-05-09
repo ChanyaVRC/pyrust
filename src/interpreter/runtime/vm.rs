@@ -495,7 +495,11 @@ impl Interpreter {
                 }
                 Insn::MatchExcept(type_reg, offset) => {
                     let type_val = vm_try!(vm_read(regs, *type_reg, num_locals));
-                    let exc = self.active_exception.clone().unwrap_or(Value::None);
+                    let exc = vm_try!(self.active_exception.clone().ok_or_else(|| {
+                        PyError::Runtime(
+                            "internal error: MatchExcept with no active exception".to_string(),
+                        )
+                    }));
                     if !vm_try!(self.exception_matches(&exc, &type_val)) {
                         pc = (pc as i32 + offset) as usize;
                     }

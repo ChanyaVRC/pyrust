@@ -19,7 +19,10 @@ impl Interpreter {
         let empty: HashSet<String> = HashSet::new();
         let local_names =
             crate::interpreter::collect_local_names(&[], program, &empty, &empty);
-        if local_names.len() > 200 {
+        // Reg type is u8, so at most 255 slots. Keep a safety margin so temp
+        // registers don't collide with locals.
+        const MAX_SCRIPT_LOCALS: usize = 200;
+        if local_names.len() > MAX_SCRIPT_LOCALS {
             // Too many locals — fall back to all-env mode.
             let local_index: Rc<HashMap<String, usize>> = Rc::new(HashMap::new());
             return self.try_exec_vm_script_with_index(program, local_index, repl_mode);
