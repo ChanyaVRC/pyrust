@@ -102,9 +102,14 @@ impl Interpreter {
                         (&regs[*lhs as usize], &regs[*rhs as usize])
                     {
                         match op {
-                            BinaryOp::Add => { regs[*dst as usize] = Some(Value::Int(a.wrapping_add(*b))); continue; }
-                            BinaryOp::Sub => { regs[*dst as usize] = Some(Value::Int(a.wrapping_sub(*b))); continue; }
-                            BinaryOp::Mul => { regs[*dst as usize] = Some(Value::Int(a.wrapping_mul(*b))); continue; }
+                            BinaryOp::Add    => { regs[*dst as usize] = Some(Value::Int(a.wrapping_add(*b))); continue; }
+                            BinaryOp::Sub    => { regs[*dst as usize] = Some(Value::Int(a.wrapping_sub(*b))); continue; }
+                            BinaryOp::Mul    => { regs[*dst as usize] = Some(Value::Int(a.wrapping_mul(*b))); continue; }
+                            BinaryOp::BitAnd => { regs[*dst as usize] = Some(Value::Int(a & b)); continue; }
+                            BinaryOp::BitOr  => { regs[*dst as usize] = Some(Value::Int(a | b)); continue; }
+                            BinaryOp::BitXor => { regs[*dst as usize] = Some(Value::Int(a ^ b)); continue; }
+                            BinaryOp::LShift => { regs[*dst as usize] = Some(Value::Int(a << (*b & 63))); continue; }
+                            BinaryOp::RShift => { regs[*dst as usize] = Some(Value::Int(a >> (*b & 63))); continue; }
                             BinaryOp::Eq  => { regs[*dst as usize] = Some(Value::Bool(a == b)); continue; }
                             BinaryOp::Ne  => { regs[*dst as usize] = Some(Value::Bool(a != b)); continue; }
                             BinaryOp::Lt  => { regs[*dst as usize] = Some(Value::Bool(a < b)); continue; }
@@ -116,25 +121,7 @@ impl Interpreter {
                     }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = vm_try!(vm_read(regs, *rhs, num_locals));
-                    let result = match (&l, op, &r) {
-                        (Value::Int(a), BinaryOp::Add, Value::Int(b)) => {
-                            Value::Int(a.wrapping_add(*b))
-                        }
-                        (Value::Int(a), BinaryOp::Sub, Value::Int(b)) => {
-                            Value::Int(a.wrapping_sub(*b))
-                        }
-                        (Value::Int(a), BinaryOp::Mul, Value::Int(b)) => {
-                            Value::Int(a.wrapping_mul(*b))
-                        }
-                        (Value::Int(a), BinaryOp::Eq, Value::Int(b)) => Value::Bool(a == b),
-                        (Value::Int(a), BinaryOp::Ne, Value::Int(b)) => Value::Bool(a != b),
-                        (Value::Int(a), BinaryOp::Lt, Value::Int(b)) => Value::Bool(a < b),
-                        (Value::Int(a), BinaryOp::Le, Value::Int(b)) => Value::Bool(a <= b),
-                        (Value::Int(a), BinaryOp::Gt, Value::Int(b)) => Value::Bool(a > b),
-                        (Value::Int(a), BinaryOp::Ge, Value::Int(b)) => Value::Bool(a >= b),
-                        _ => vm_try!(self.eval_binary(l, *op, r)),
-                    };
-                    regs[*dst as usize] = Some(result);
+                    regs[*dst as usize] = Some(vm_try!(self.eval_binary(l, *op, r)));
                 }
                 Insn::BinOpInPlace(dst, lhs, op, rhs) => {
                     // Fast path: borrow both Int operands to avoid 2× Value clone.
@@ -142,9 +129,14 @@ impl Interpreter {
                         (&regs[*lhs as usize], &regs[*rhs as usize])
                     {
                         match op {
-                            BinaryOp::Add => { regs[*dst as usize] = Some(Value::Int(a.wrapping_add(*b))); continue; }
-                            BinaryOp::Sub => { regs[*dst as usize] = Some(Value::Int(a.wrapping_sub(*b))); continue; }
-                            BinaryOp::Mul => { regs[*dst as usize] = Some(Value::Int(a.wrapping_mul(*b))); continue; }
+                            BinaryOp::Add    => { regs[*dst as usize] = Some(Value::Int(a.wrapping_add(*b))); continue; }
+                            BinaryOp::Sub    => { regs[*dst as usize] = Some(Value::Int(a.wrapping_sub(*b))); continue; }
+                            BinaryOp::Mul    => { regs[*dst as usize] = Some(Value::Int(a.wrapping_mul(*b))); continue; }
+                            BinaryOp::BitAnd => { regs[*dst as usize] = Some(Value::Int(a & b)); continue; }
+                            BinaryOp::BitOr  => { regs[*dst as usize] = Some(Value::Int(a | b)); continue; }
+                            BinaryOp::BitXor => { regs[*dst as usize] = Some(Value::Int(a ^ b)); continue; }
+                            BinaryOp::LShift => { regs[*dst as usize] = Some(Value::Int(a << (*b & 63))); continue; }
+                            BinaryOp::RShift => { regs[*dst as usize] = Some(Value::Int(a >> (*b & 63))); continue; }
                             BinaryOp::Eq  => { regs[*dst as usize] = Some(Value::Bool(a == b)); continue; }
                             BinaryOp::Ne  => { regs[*dst as usize] = Some(Value::Bool(a != b)); continue; }
                             BinaryOp::Lt  => { regs[*dst as usize] = Some(Value::Bool(a < b)); continue; }
