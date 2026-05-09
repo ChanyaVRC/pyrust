@@ -7,7 +7,6 @@ use std::rc::Rc;
 
 use indexmap::{IndexMap, IndexSet};
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PyKey {
     Int(i64),
