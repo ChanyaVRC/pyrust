@@ -977,6 +977,9 @@ impl PartialEq for Value {
             // Python: True == 1 is True
             (ValueKind::Bool(a), ValueKind::Int(b)) => (a as i64) == b,
             (ValueKind::Int(a), ValueKind::Bool(b)) => a == (b as i64),
+            // Python: True == 1.0 is True
+            (ValueKind::Bool(a), ValueKind::Float(b)) => (a as u8 as f64) == b,
+            (ValueKind::Float(a), ValueKind::Bool(b)) => a == (b as u8 as f64),
             (ValueKind::None, ValueKind::None) => true,
             (ValueKind::List(a), ValueKind::List(b)) => a == b,
             (ValueKind::Tuple(a), ValueKind::Tuple(b)) => a == b,
