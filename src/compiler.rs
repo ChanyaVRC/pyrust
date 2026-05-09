@@ -1628,17 +1628,15 @@ impl Compiler {
         }
     }
 
-    /// Convert `while VAR cmp STOP: ...; VAR += STEP` to a range-backed for loop.
+    /// Convert `while VAR cmp STOP: ...; VAR += STEP` to a ForCount* integer counter.
     ///
-    /// Uses ForIter+IterState::Range (raw i64 counters) rather than ForCount, since
-    /// ForIter operates on unboxed integers while ForCount must go through Option<Value>
-    /// registers on every iteration.
+    /// Uses ForCountConst/ForCountReg (same as the for-range optimisation) instead of
+    /// ForIter+IterState::Range.  This avoids the range() call, the IterState allocation,
+    /// and the indirect ForIter dispatch, giving a tight integer-counter loop.
     ///
-    /// The key optimisation over the naive compilation: we omit the last body statement
-    /// (VAR += STEP — which is a dead store because ForIter overwrites VAR on the next
-    /// iteration), reducing the per-iteration dispatch count from 4 to 3.
-    /// After natural loop exit we emit one BinOpConst to restore the post-increment
-    /// value that Python semantics require (i.e. `while i < n: …; i += 1` leaves i=n).
+    /// Semantics mirror try_compile_for_range: initialise VAR = i_initial - step so the
+    /// first ForCount yields i_initial.  After natural exit emit BinOpConst to restore
+    /// the post-loop value (Python requires i == stop after `while i < stop: …; i += 1`).
     fn try_compile_while_range(
         &mut self,
         cond: &Expr,
@@ -1653,45 +1651,40 @@ impl Compiler {
             Some(r) => r,
             None => return false,
         };
-        let frame = self.next_temp;
-        let slots = if inclusive { 5usize } else { 4 };
-        if (frame as usize).saturating_add(slots) > 256 {
-            return false;
-        }
-        self.next_temp = frame + slots as u8;
-        if self.next_temp - 1 > self.max_reg {
-            self.max_reg = self.next_temp - 1;
-        }
-        let range_idx = self.intern_name("range");
-        self.emit(Insn::LoadGlobal(frame, range_idx));
-        self.emit(Insn::Move(frame + 1, var_reg));
-        {
-            let saved = self.next_temp;
-            let r = self.compile_expr(stop_expr);
-            if r != frame + 2 {
-                self.emit(Insn::Move(frame + 2, r));
-            }
-            self.next_temp = saved;
-        }
-        if inclusive {
-            let one_idx = self.intern_const(Value::Int(1));
-            self.emit(Insn::LoadConst(frame + 4, one_idx));
-            let adj = if step > 0 {
-                BinaryOp::Add
-            } else {
-                BinaryOp::Sub
-            };
-            self.emit(Insn::BinOp(frame + 2, frame + 2, adj, frame + 4));
-        }
+
+        let cmp_op = if step > 0 { BinaryOp::Lt } else { BinaryOp::Gt };
         let step_idx = self.intern_const(Value::Int(step));
-        self.emit(Insn::LoadConst(frame + 3, step_idx));
-        self.emit(Insn::Call(frame, 3));
-        self.next_temp = frame + 1;
-        let iter_slot = self.alloc_iter();
-        self.emit(Insn::GetIter(iter_slot, frame));
-        self.free_temp(frame);
+        let neg_step_idx = self.intern_const(Value::Int(step.wrapping_neg()));
+
+        // Initialise var_reg = i_initial - step (so first ForCount yields i_initial).
+        self.emit(Insn::BinOpConst(var_reg, var_reg, BinaryOp::Add, neg_step_idx));
+
+        // Determine stop value: for inclusive (<=/>= condition) adjust by ±1.
         let loop_start = self.pc();
-        let exit_jmp = self.emit(Insn::ForIter(var_reg, iter_slot, 0));
+        let stop_adjust: i64 = if inclusive { if step > 0 { 1 } else { -1 } } else { 0 };
+
+        let (exit_jmp, stop_temp) = if let Some(mut stop_val) = extract_literal_int(stop_expr) {
+            stop_val = stop_val.wrapping_add(stop_adjust);
+            let stop_idx = self.intern_const(Value::Int(stop_val));
+            let jmp = self.emit(Insn::ForCountConst(var_reg, cmp_op, stop_idx, step_idx, 0));
+            (jmp, None)
+        } else {
+            let r = self.compile_expr(stop_expr);
+            let sr = if r < self.base_temp {
+                let t = self.alloc_temp();
+                self.emit(Insn::Move(t, r));
+                t
+            } else {
+                r
+            };
+            if stop_adjust != 0 {
+                let adj_idx = self.intern_const(Value::Int(stop_adjust));
+                self.emit(Insn::BinOpConst(sr, sr, BinaryOp::Add, adj_idx));
+            }
+            let jmp = self.emit(Insn::ForCountReg(var_reg, cmp_op, sr, step_idx, 0));
+            (jmp, Some(sr))
+        };
+
         self.mark_def(var_reg);
         self.loops.push(LoopCtx {
             break_patches: Vec::new(),
@@ -1699,10 +1692,8 @@ impl Compiler {
             continue_patches: Vec::new(),
         });
         let saved = self.def_set;
-        // Skip the last body statement (VAR += STEP): ForIter already manages the
-        // range counter, so VAR += STEP is a dead store on every non-final iteration.
-        // On the final iteration it would produce the correct post-loop value, but we
-        // restore that with a single BinOpConst after the exit instead.
+        // Skip the last body statement (VAR += STEP): ForCount already manages
+        // the counter increment, so VAR += STEP is a dead store.
         let body_without_inc = &body[..body.len() - 1];
         self.compile_block(body_without_inc);
         self.def_set = saved;
@@ -1713,13 +1704,13 @@ impl Compiler {
         let back_offset = loop_start as i32 - back_from;
         self.emit(Insn::Jump(back_offset));
         self.patch_jump(exit_jmp);
-        // Restore post-loop variable value: Python semantics require that after
-        // `while i < n: …; i += 1` the variable equals n (the value that failed the
-        // condition), not n-1 (the last ForIter-assigned value).
-        // Break patches jump PAST this instruction, so break exits with the break value.
+        // Restore post-loop value: Python semantics require i == stop after natural exit.
+        // Break patches jump PAST this BinOpConst so break leaves the break-iteration value.
         self.emit(Insn::BinOpConst(var_reg, var_reg, BinaryOp::Add, step_idx));
         let ctx = self.loops.pop().unwrap();
-        self.free_iter();
+        if let Some(t) = stop_temp {
+            self.free_temp(t);
+        }
         if let Some(else_stmts) = else_branch {
             self.compile_block(else_stmts);
             if self.failed {
