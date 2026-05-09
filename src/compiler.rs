@@ -577,6 +577,23 @@ fn fold_binop(l: &Value, op: BinaryOp, r: &Value) -> Option<Value> {
     }
 }
 
+fn extract_literal_int(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Int(n) => Some(*n),
+        Expr::Unary {
+            op: UnaryOp::Neg,
+            expr: inner,
+        } => {
+            if let Expr::Int(n) = inner.as_ref() {
+                Some(-n)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 fn is_const_false_expr(expr: &Expr) -> bool {
     match expr {
         Expr::Bool(false) | Expr::Int(0) | Expr::None => true,
@@ -720,7 +737,12 @@ fn detect_while_range<'a>(
 
 struct LoopCtx {
     break_patches: Vec<usize>,
-    continue_target: usize,
+    /// None when the continue target is not yet known (e.g. counter-range loop
+    /// where the increment comes after the body).  Patched before the increment.
+    continue_target: Option<usize>,
+    /// Indices of Jump(0) instructions emitted for `continue` when continue_target
+    /// was None; fixed up once continue_target is established.
+    continue_patches: Vec<usize>,
 }
 
 struct Compiler {
@@ -915,7 +937,9 @@ impl Compiler {
             | Insn::CmpJumpIfFalse(_, _, _, off)
             | Insn::CmpJumpIfTrue(_, _, _, off)
             | Insn::CmpJumpIfFalseConst(_, _, _, off)
-            | Insn::CmpJumpIfTrueConst(_, _, _, off) => *off = offset,
+            | Insn::CmpJumpIfTrueConst(_, _, _, off)
+            | Insn::ForCountReg(_, _, _, _, off)
+            | Insn::ForCountConst(_, _, _, _, off) => *off = offset,
             _ => self.failed = true,
         }
     }
@@ -1094,12 +1118,15 @@ impl Compiler {
                     return;
                 }
                 let last = self.loops.len() - 1;
-                let target = self.loops[last].continue_target;
                 let idx = self.emit(Insn::Jump(0));
-                let from = idx as i32 + 1;
-                let offset = target as i32 - from;
-                if let Insn::Jump(off) = &mut self.insns[idx] {
-                    *off = offset;
+                if let Some(target) = self.loops[last].continue_target {
+                    let from = idx as i32 + 1;
+                    let offset = target as i32 - from;
+                    if let Insn::Jump(off) = &mut self.insns[idx] {
+                        *off = offset;
+                    }
+                } else {
+                    self.loops[last].continue_patches.push(idx);
                 }
             }
             Stmt::Return(None) => {
@@ -1528,7 +1555,8 @@ impl Compiler {
 
         self.loops.push(LoopCtx {
             break_patches: Vec::new(),
-            continue_target: loop_start,
+            continue_target: Some(loop_start),
+            continue_patches: Vec::new(),
         });
         let saved = self.def_set;
         self.compile_block(body);
@@ -1610,7 +1638,8 @@ impl Compiler {
         self.mark_def(var_reg);
         self.loops.push(LoopCtx {
             break_patches: Vec::new(),
-            continue_target: loop_start,
+            continue_target: Some(loop_start),
+            continue_patches: Vec::new(),
         });
         let saved = self.def_set;
         self.compile_block(body);
@@ -1636,6 +1665,144 @@ impl Compiler {
         true
     }
 
+    /// Detect `for VAR in range(...)` and compile to a direct integer counter loop:
+    ///   VAR = start; while VAR < stop: body; VAR += step
+    /// This avoids calling range(), allocating an IterState, and the ForIter
+    /// overhead per iteration, giving a tight loop equivalent to C `for`.
+    fn try_compile_for_range(
+        &mut self,
+        target: &AssignTarget,
+        iter_expr: &Expr,
+        body: &[Stmt],
+        else_branch: Option<&[Stmt]>,
+    ) -> bool {
+        // Target must be a Name with a fastlocal register.
+        let var_name = match target {
+            AssignTarget::Name(n) => n.as_str(),
+            _ => return false,
+        };
+        let var_reg = match self.local_reg(var_name) {
+            Some(r) => r,
+            None => return false,
+        };
+
+        // iter_expr must be a plain `range(...)` call with no splats/kwargs.
+        let (func, args) = match iter_expr {
+            Expr::Call { func, args } => (func.as_ref(), args.as_slice()),
+            _ => return false,
+        };
+        if !matches!(func, Expr::Var(n) if n == "range") {
+            return false;
+        }
+        if args
+            .iter()
+            .any(|a| a.splat || a.double_splat || a.name.is_some())
+        {
+            return false;
+        }
+
+        // Extract (start_opt, stop, step) from 1–3 positional args.
+        let (start_opt, stop_expr, step_val): (Option<&Expr>, &Expr, i64) = match args {
+            [s] => (None, &s.value, 1),
+            [a, b] => (Some(&a.value), &b.value, 1),
+            [a, b, c] => {
+                let s = match extract_literal_int(&c.value) {
+                    Some(v) => v,
+                    None => return false,
+                };
+                if s == 0 {
+                    return false;
+                }
+                (Some(&a.value), &b.value, s)
+            }
+            _ => return false,
+        };
+
+        // ForCount semantics: initialise var = start - step_val, then on each
+        // iteration: next = var + step_val; if next op stop → var=next (continue)
+        // else → jump (exit).  This way the body always sees the current value
+        // and the variable retains its last iteration value after normal exit.
+        let cmp_op = if step_val > 0 {
+            BinaryOp::Lt
+        } else {
+            BinaryOp::Gt
+        };
+        let step_idx = self.intern_const(Value::Int(step_val));
+
+        // ── 1. Initialise var_reg = start - step_val ─────────────────────
+        //    For the common range(n) case (start=0), init = -step_val.
+        let neg_step_idx = self.intern_const(Value::Int(step_val.wrapping_neg()));
+        if let Some(start) = start_opt {
+            let r = self.compile_expr(start);
+            // var_reg = r + (-step_val) = r - step_val
+            self.emit(Insn::BinOpConst(var_reg, r, BinaryOp::Add, neg_step_idx));
+            self.free_temp(r);
+        } else {
+            // start = 0; init = -step_val
+            self.emit(Insn::LoadConst(var_reg, neg_step_idx));
+        }
+
+        // ── 2. ForCount instruction at loop top ───────────────────────────
+        //    If stop is a literal integer use the Const variant (avoids a temp
+        //    register and a register read each iteration).  Otherwise compile
+        //    stop once into a temp that lives for the loop duration.
+        let loop_start = self.pc();
+        let (exit_jmp, stop_temp) = if let Some(stop_val) = extract_literal_int(stop_expr) {
+            let stop_idx = self.intern_const(Value::Int(stop_val));
+            let jmp = self.emit(Insn::ForCountConst(var_reg, cmp_op, stop_idx, step_idx, 0));
+            (jmp, None)
+        } else {
+            let r = self.compile_expr(stop_expr);
+            // Copy to a temp if the stop expression resolved to a local register
+            // so body mutations of that variable don't affect our bound.
+            let sr = if r < self.base_temp {
+                let t = self.alloc_temp();
+                self.emit(Insn::Move(t, r));
+                t
+            } else {
+                r
+            };
+            let jmp = self.emit(Insn::ForCountReg(var_reg, cmp_op, sr, step_idx, 0));
+            (jmp, Some(sr))
+        };
+
+        // ── 3. Body ──────────────────────────────────────────────────────
+        //    `continue` → loop_start (ForCount does the increment automatically)
+        self.mark_def(var_reg);
+        self.loops.push(LoopCtx {
+            break_patches: Vec::new(),
+            continue_target: Some(loop_start),
+            continue_patches: Vec::new(),
+        });
+        let saved = self.def_set;
+        self.compile_block(body);
+        self.def_set = saved;
+        if self.failed {
+            return true;
+        }
+
+        // ── 4. Back edge ─────────────────────────────────────────────────
+        let back_offset = loop_start as i32 - (self.pc() as i32 + 1);
+        self.emit(Insn::Jump(back_offset));
+
+        // ── 5. Exit + else ───────────────────────────────────────────────
+        self.patch_jump(exit_jmp);
+        if let Some(sr) = stop_temp {
+            self.free_temp(sr);
+        }
+        let ctx = self.loops.pop().unwrap();
+        if let Some(else_stmts) = else_branch {
+            self.compile_block(else_stmts);
+            if self.failed {
+                return true;
+            }
+        }
+        for idx in ctx.break_patches {
+            self.patch_jump(idx);
+        }
+        true
+    }
+
     fn compile_for(
         &mut self,
         target: &AssignTarget,
@@ -1643,6 +1810,9 @@ impl Compiler {
         body: &[Stmt],
         else_branch: Option<&[Stmt]>,
     ) {
+        if self.try_compile_for_range(target, iter_expr, body, else_branch) {
+            return;
+        }
         let iter_slot = self.alloc_iter();
         let src = self.compile_expr(iter_expr);
         self.emit(Insn::GetIter(iter_slot, src));
@@ -1700,7 +1870,8 @@ impl Compiler {
         }
         self.loops.push(LoopCtx {
             break_patches: Vec::new(),
-            continue_target: loop_start,
+            continue_target: Some(loop_start),
+            continue_patches: Vec::new(),
         });
         let saved_def_set = self.def_set;
         self.mark_target_def(target);

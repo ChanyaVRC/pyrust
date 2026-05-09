@@ -98,6 +98,13 @@ pub enum Insn {
     GetIter(u8, Reg),
     /// if iters[slot] exhausted: pc += offset; else R[dst] = next(iters[slot])
     ForIter(Reg, u8, i32),
+    /// Integer counter for-range (register bound, signed step in consts[step_idx]).
+    /// Semantics: next = R[var] + consts[step_idx]; if (next op R[stop]): R[var]=next; else: pc+=offset
+    /// (op is Lt for step>0, Gt for step<0; initialise R[var] = start - step before loop)
+    ForCountReg(Reg, BinaryOp, Reg, u16, i32),
+    /// Integer counter for-range (constant bound).
+    /// Same semantics as ForCountReg but stop comes from consts[stop_idx].
+    ForCountConst(Reg, BinaryOp, u16, u16, i32),
     /// error if R[reg] is uninitialised: "cannot access local variable '<name>' ..."
     CheckLocal(Reg, u16),
     /// raise AssertionError(R[msg])  (condition already tested by JumpIfTrue)
