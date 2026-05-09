@@ -853,20 +853,26 @@ impl Compiler {
     }
 
     fn intern_const(&mut self, val: Value) -> u16 {
-        if let Some(key) = val.to_key() {
-            if let Some(&idx) = self.const_index.get(&key) {
+        // Bool(true) and Int(1) share the same PyKey::Int(1) after normalisation, so
+        // skip the hash-map fast path for booleans to avoid the two kinds colliding in
+        // the constant pool.  Use the type-exact linear scan for them instead.
+        let is_bool = matches!(val.kind(), ValueKind::Bool(_));
+        if !is_bool {
+            if let Some(key) = val.to_key() {
+                if let Some(&idx) = self.const_index.get(&key) {
+                    return idx;
+                }
+                if self.consts.len() >= u16::MAX as usize {
+                    self.failed = true;
+                    return 0;
+                }
+                let idx = self.consts.len() as u16;
+                self.const_index.insert(key, idx);
+                self.consts.push(val);
                 return idx;
             }
-            if self.consts.len() >= u16::MAX as usize {
-                self.failed = true;
-                return 0;
-            }
-            let idx = self.consts.len() as u16;
-            self.const_index.insert(key, idx);
-            self.consts.push(val);
-            return idx;
         }
-        // Non-hashable constants (shouldn't arise in practice).
+        // Non-hashable constants and booleans: type-exact linear scan.
         for (i, v) in self.consts.iter().enumerate() {
             if const_eq(v, &val) {
                 return i as u16;

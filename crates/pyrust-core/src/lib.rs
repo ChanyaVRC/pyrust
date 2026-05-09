@@ -875,7 +875,7 @@ impl Value {
             ValueKind::Int(v) => Some(PyKey::Int(v)),
             ValueKind::Float(v) => Some(PyKey::Float(v.to_bits())),
             ValueKind::Str(v) => Some(PyKey::Str(v.to_string())),
-            ValueKind::Bool(v) => Some(PyKey::Bool(v)),
+            ValueKind::Bool(v) => Some(PyKey::Int(v as i64)),
             ValueKind::None => Some(PyKey::None),
             _ => None,
         }
