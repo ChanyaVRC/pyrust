@@ -763,6 +763,8 @@ struct Compiler {
     failed: bool,
     def_set: u64,
     fn_protos: Vec<FnProto>,
+    /// Names of pure (side-effect-free) functions defined in this scope.
+    pure_locals: HashSet<String>,
 }
 
 impl Compiler {
@@ -813,6 +815,7 @@ impl Compiler {
             failed: n > 255,
             def_set: def_bound_mask,
             fn_protos: Vec::new(),
+            pure_locals: HashSet::new(),
         }
     }
 
@@ -2239,6 +2242,9 @@ impl Compiler {
         if let Some(reg) = self.local_reg(name) {
             self.mark_def(reg);
         }
+        if is_pure && decorators.is_empty() {
+            self.pure_locals.insert(name.to_string());
+        }
         self.free_temp(dst);
     }
 
@@ -3037,7 +3043,12 @@ impl Compiler {
             }
             self.next_temp = saved;
         }
-        self.emit(Insn::Call(func_reg, argc));
+        let is_pure_callee = matches!(func, Expr::Var(n) if self.pure_locals.contains(n.as_str()));
+        if is_pure_callee {
+            self.emit(Insn::CallMemo(func_reg, argc));
+        } else {
+            self.emit(Insn::Call(func_reg, argc));
+        }
         self.next_temp = func_reg + 1;
         func_reg
     }

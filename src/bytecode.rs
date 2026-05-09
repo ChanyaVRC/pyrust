@@ -82,6 +82,8 @@ pub enum Insn {
     CmpJumpIfTrueConst(Reg, BinaryOp, u16, i32),
     /// R[func_reg] = call(R[func_reg], R[func_reg+1..func_reg+1+argc]); result in R[func_reg]
     Call(Reg, u8),
+    /// Like Call but VM tries fn_cache before dispatching (emitted for known-pure callees).
+    CallMemo(Reg, u8),
     /// return R[src]
     Return(Reg),
     /// return None

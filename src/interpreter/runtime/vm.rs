@@ -557,6 +557,56 @@ impl Interpreter {
                     regs[*func_reg as usize] = Some(vm_try!(call_result));
                 }
 
+                Insn::CallMemo(func_reg, argc) => {
+                    // Cache-first path for known-pure callees.
+                    if let Some(Value::Function(func)) = &regs[*func_reg as usize] {
+                        if func.is_pure {
+                            let fn_id = Rc::as_ptr(func) as usize;
+                            let mut key: Vec<crate::value::PyKey> =
+                                Vec::with_capacity(*argc as usize);
+                            let mut all_hashable = true;
+                            for i in 0..*argc as usize {
+                                match regs[*func_reg as usize + 1 + i]
+                                    .as_ref()
+                                    .and_then(|v| v.to_key())
+                                {
+                                    Some(k) => key.push(k),
+                                    None => {
+                                        all_hashable = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if all_hashable {
+                                if let Some(hit) =
+                                    self.fn_cache.get(&(fn_id, key)).cloned()
+                                {
+                                    regs[*func_reg as usize] = Some(hit);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    // Cache miss or unhashable args: normal call (call_function_expanded
+                    // will store the result in fn_cache on the way back).
+                    let func_val = vm_try!(vm_read(regs, *func_reg, num_locals));
+                    let mut buf = std::mem::take(&mut self.call_arg_buf);
+                    buf.clear();
+                    for i in 0..*argc as usize {
+                        buf.push(ExpandedCallArg {
+                            name: None,
+                            value: vm_try!(vm_read(
+                                regs,
+                                *func_reg + 1 + i as u8,
+                                num_locals
+                            )),
+                        });
+                    }
+                    let call_result = self.call_function_expanded(func_val, &buf);
+                    self.call_arg_buf = buf;
+                    regs[*func_reg as usize] = Some(vm_try!(call_result));
+                }
+
                 // ── Returns ──────────────────────────────────────────────
                 Insn::Return(src) => {
                     return Ok(vm_try!(vm_read(regs, *src, num_locals)));
