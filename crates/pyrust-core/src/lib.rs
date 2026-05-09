@@ -1,6 +1,6 @@
 use std::alloc::{alloc, dealloc, Layout};
 use std::any::Any;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
@@ -205,6 +205,45 @@ pub enum ValueKind<'a> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Layout-B pool — thread-local free list for 20-byte string-slice headers
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Each free slot stores a *mut u8 to the next free slot in its first 8 bytes.
+thread_local! {
+    // (head, len)
+    static POOL_B: Cell<(*mut u8, usize)> = const { Cell::new((std::ptr::null_mut(), 0)) };
+}
+
+const POOL_B_CAP: usize = 64;
+
+#[inline(always)]
+unsafe fn pool_b_alloc() -> *mut u8 {
+    POOL_B.with(|c| {
+        let (head, len) = c.get();
+        if len > 0 {
+            let next = unsafe { *(head as *const *mut u8) };
+            c.set((next, len - 1));
+            head
+        } else {
+            unsafe { alloc(Layout::from_size_align(20, 8).unwrap()) }
+        }
+    })
+}
+
+#[inline(always)]
+unsafe fn pool_b_dealloc(ptr: *mut u8) {
+    POOL_B.with(|c| {
+        let (head, len) = c.get();
+        if len < POOL_B_CAP {
+            unsafe { *(ptr as *mut *mut u8) = head };
+            c.set((ptr, len + 1));
+        } else {
+            unsafe { dealloc(ptr, Layout::from_size_align(20, 8).unwrap()) };
+        }
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Value — NaN-boxed u64
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -283,8 +322,7 @@ impl Value {
         // Layout B: [rc_type:u32][sub_len:u32][ref:*mut u8][offset:u32]
         //            offset 0     offset 4     offset 8     offset 16
         // ref points directly to this slice's bytes[0]; ref - offset - 16 = A_ptr
-        let layout = Layout::from_size_align(20, 8).unwrap();
-        let ptr = unsafe { alloc(layout) };
+        let ptr = unsafe { pool_b_alloc() };
         unsafe {
             (ptr as *mut u32).write(3u32);  // rc=1, type=1
             (ptr.add(4) as *mut u32).write(sub_len as u32);
@@ -723,7 +761,7 @@ impl Drop for Value {
                             let root_len = *(a_ptr.add(4) as *const u32) as usize;
                             dealloc(a_ptr, Layout::from_size_align(16 + root_len, 8).unwrap());
                         }
-                        dealloc(hdr, Layout::from_size_align(20, 8).unwrap());
+                        pool_b_dealloc(hdr);
                     }
                 }
             },
