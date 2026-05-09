@@ -28,8 +28,6 @@ pub struct FnProto {
     pub nonlocal_names: Rc<HashSet<String>>,
     pub is_pure: bool,
     pub def_bound_mask: u64,
-    /// True when this proto describes a class body (MakeClass uses this).
-    pub is_class_body: bool,
 }
 
 #[derive(Debug, Clone)]
