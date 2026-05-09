@@ -1,5 +1,22 @@
 use pyrust_core::{PyError, Result, Value, ValueKind};
 
+/// Compute the byte offset of a subslice `sub` within its parent `parent`.
+///
+/// `sub` must be a contiguous subslice of `parent` (i.e. produced by Rust's
+/// `split`, `split_whitespace`, `trim_*`, etc. applied to `parent`).  The
+/// assertion is a safety net; in correct code it always holds.
+#[inline(always)]
+fn subslice_offset(parent: &str, sub: &str) -> usize {
+    let off = sub.as_ptr() as usize - parent.as_ptr() as usize;
+    debug_assert!(
+        off + sub.len() <= parent.len(),
+        "subslice_offset: sub ({off}..{}) is outside parent (..{})",
+        off + sub.len(),
+        parent.len()
+    );
+    off
+}
+
 pub fn call(method: &str, src: &Value, args: &[Value]) -> Result<Value> {
     let s: &str = src.as_str().unwrap();
     match method {
@@ -143,7 +160,7 @@ fn split(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
                 // Heuristic capacity (avg word ~4 chars) avoids Vec realloc in one pass
                 let mut parts = Vec::with_capacity(s.len() / 4 + 1);
                 for p in s.split_whitespace() {
-                    let off = p.as_ptr() as usize - s.as_ptr() as usize;
+                    let off = subslice_offset(s, p);
                     parts.push(src.string_slice(off, off + p.len()));
                 }
                 parts
@@ -163,13 +180,13 @@ fn split(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
                     }
                     match t.find(char::is_whitespace) {
                         None => {
-                            let off = t.as_ptr() as usize - s.as_ptr() as usize;
+                            let off = subslice_offset(s, t);
                             out.push(src.string_slice(off, off + t.len()));
                             remaining = "";
                             break;
                         }
                         Some(pos) => {
-                            let off = t.as_ptr() as usize - s.as_ptr() as usize;
+                            let off = subslice_offset(s, t);
                             out.push(src.string_slice(off, off + pos));
                             remaining = &t[pos..];
                         }
@@ -177,29 +194,31 @@ fn split(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
                 }
                 let tail = remaining.trim_start();
                 if !tail.is_empty() {
-                    let off = tail.as_ptr() as usize - s.as_ptr() as usize;
+                    let off = subslice_offset(s, tail);
                     out.push(src.string_slice(off, off + tail.len()));
                 }
                 return Ok(Value::list(out));
             }
         }
         Some(sep_str) => {
+            if sep_str.is_empty() {
+                return Err(PyError::Named(
+    "ValueError".to_string(),
+    "empty separator".to_string(),
+));
+            }
             if maxsplit < 0 {
-                let cap = if sep_str.is_empty() {
-                    s.len() + 1
-                } else {
-                    s.len() / sep_str.len() + 1
-                };
+                let cap = s.len() / sep_str.len() + 1;
                 let mut parts = Vec::with_capacity(cap);
                 for p in s.split(sep_str) {
-                    let off = p.as_ptr() as usize - s.as_ptr() as usize;
+                    let off = subslice_offset(s, p);
                     parts.push(src.string_slice(off, off + p.len()));
                 }
                 parts
             } else {
                 s.splitn(maxsplit as usize + 1, sep_str)
                     .map(|p| {
-                        let off = p.as_ptr() as usize - s.as_ptr() as usize;
+                        let off = subslice_offset(s, p);
                         src.string_slice(off, off + p.len())
                     })
                     .collect()
@@ -217,7 +236,7 @@ fn rsplit(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
             if maxsplit < 0 {
                 let mut parts = Vec::with_capacity(s.len() / 4 + 1);
                 for p in s.split_whitespace() {
-                    let off = p.as_ptr() as usize - s.as_ptr() as usize;
+                    let off = subslice_offset(s, p);
                     parts.push(src.string_slice(off, off + p.len()));
                 }
                 parts
@@ -232,21 +251,22 @@ fn rsplit(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
                     }
                     match t.rfind(char::is_whitespace) {
                         None => {
-                            let off = t.as_ptr() as usize - s.as_ptr() as usize;
+                            let off = subslice_offset(s, t);
                             out.push(src.string_slice(off, off + t.len()));
                             remaining = "";
                             break;
                         }
                         Some(pos) => {
-                            let off = t[pos + 1..].as_ptr() as usize - s.as_ptr() as usize;
-                            out.push(src.string_slice(off, off + t[pos + 1..].len()));
+                            let tail = &t[pos + 1..];
+                            let off = subslice_offset(s, tail);
+                            out.push(src.string_slice(off, off + tail.len()));
                             remaining = &t[..pos];
                         }
                     }
                 }
                 let head = remaining.trim_end();
                 if !head.is_empty() {
-                    let off = head.as_ptr() as usize - s.as_ptr() as usize;
+                    let off = subslice_offset(s, head);
                     out.push(src.string_slice(off, off + head.len()));
                 }
                 out.reverse();
@@ -254,15 +274,17 @@ fn rsplit(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
             }
         }
         Some(sep_str) => {
+            if sep_str.is_empty() {
+                return Err(PyError::Named(
+    "ValueError".to_string(),
+    "empty separator".to_string(),
+));
+            }
             if maxsplit < 0 {
-                let cap = if sep_str.is_empty() {
-                    s.len() + 1
-                } else {
-                    s.len() / sep_str.len() + 1
-                };
+                let cap = s.len() / sep_str.len() + 1;
                 let mut parts = Vec::with_capacity(cap);
                 for p in s.split(sep_str) {
-                    let off = p.as_ptr() as usize - s.as_ptr() as usize;
+                    let off = subslice_offset(s, p);
                     parts.push(src.string_slice(off, off + p.len()));
                 }
                 parts.reverse();
@@ -271,7 +293,7 @@ fn rsplit(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
                 let mut parts: Vec<Value> = s
                     .rsplitn(maxsplit as usize + 1, sep_str)
                     .map(|p| {
-                        let off = p.as_ptr() as usize - s.as_ptr() as usize;
+                        let off = subslice_offset(s, p);
                         src.string_slice(off, off + p.len())
                     })
                     .collect();

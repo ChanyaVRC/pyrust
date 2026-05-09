@@ -1071,6 +1071,10 @@ pub enum PyError {
     Lex(String),
     Parse(String),
     Runtime(String),
+    /// A named Python exception (e.g. "ValueError", "TypeError") raised from
+    /// builtin code that cannot instantiate exception objects directly.
+    /// The VM converts this to a proper PyInstance before propagating.
+    Named(String, String), // (class_name, message)
     Raised(Value),
 }
 
@@ -1080,6 +1084,7 @@ impl fmt::Display for PyError {
             PyError::Lex(s) => write!(f, "Lex error: {s}"),
             PyError::Parse(s) => write!(f, "Parse error: {s}"),
             PyError::Runtime(s) => write!(f, "Runtime error: {s}"),
+            PyError::Named(cls, s) => write!(f, "{cls}: {s}"),
             PyError::Raised(value) => write!(f, "Uncaught exception: {}", value.repr()),
         }
     }

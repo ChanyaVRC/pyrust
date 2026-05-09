@@ -41,6 +41,12 @@ impl Interpreter {
                                         Err(e2) => return Err(e2),
                                     }
                                 }
+                                PyError::Named(cls, msg) => {
+                                    match self.instantiate_named_exception(&cls, msg) {
+                                        Ok(v) => v,
+                                        Err(e2) => return Err(e2),
+                                    }
+                                }
                                 other => return Err(other),
                             };
                             self.active_exception = Some(exc_val);

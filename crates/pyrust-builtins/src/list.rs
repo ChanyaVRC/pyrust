@@ -32,6 +32,12 @@ pub fn call(
 }
 
 fn sort(items: &mut Vec<Value>, args: &[Value], kwargs: &IndexMap<PyKey, Value>) -> Result<Value> {
+    if kwargs.contains_key(&PyKey::Str("key".to_string())) {
+        return Err(PyError::Named(
+            "NotImplementedError".to_string(),
+            "list.sort(key=...) is not yet supported".to_string(),
+        ));
+    }
     let reverse_flag = match (
         args.first().map(|v| v.kind()),
         kwargs

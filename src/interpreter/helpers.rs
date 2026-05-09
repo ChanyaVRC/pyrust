@@ -235,6 +235,11 @@ fn install_exception_builtins(env: &EnvRef) {
     let value_error = make_child("ValueError");
     let assertion_error = make_child("AssertionError");
     let recursion_error = make_child("RecursionError");
+    let not_implemented_error = make_child("NotImplementedError");
+    let stop_iteration = make_child("StopIteration");
+    let index_error = make_child("IndexError");
+    let key_error = make_child("KeyError");
+    let attribute_error = make_child("AttributeError");
 
     let mut module = env.borrow_mut();
     module
@@ -255,6 +260,21 @@ fn install_exception_builtins(env: &EnvRef) {
     module
         .values
         .insert("RecursionError".to_string(), Value::py_class(recursion_error));
+    module
+        .values
+        .insert("NotImplementedError".to_string(), Value::py_class(not_implemented_error));
+    module
+        .values
+        .insert("StopIteration".to_string(), Value::py_class(stop_iteration));
+    module
+        .values
+        .insert("IndexError".to_string(), Value::py_class(index_error));
+    module
+        .values
+        .insert("KeyError".to_string(), Value::py_class(key_error));
+    module
+        .values
+        .insert("AttributeError".to_string(), Value::py_class(attribute_error));
 }
 
 fn key_to_value(key: PyKey) -> Value {
