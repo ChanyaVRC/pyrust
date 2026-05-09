@@ -1011,3 +1011,63 @@ fn vm_eval_unary(op: UnaryOp, val: Value) -> Result<Value> {
         },
     }
 }
+
+#[cfg(test)]
+mod vm_tests {
+    use super::*;
+    use crate::bytecode::{FnCode, Insn};
+    use crate::interpreter::Interpreter;
+
+    fn empty_code(insns: Vec<Insn>) -> FnCode {
+        FnCode {
+            insns,
+            consts: vec![],
+            names: vec![],
+            num_regs: 0,
+            num_iters: 0,
+            num_locals: 0,
+            fn_protos: vec![],
+            cell_vars: vec![],
+        }
+    }
+
+    #[test]
+    fn oob_pc_returns_error_not_none() {
+        // Jump(100): new_pc = 1 + 100 = 101 > insns.len() (1) → error
+        let code = empty_code(vec![Insn::Jump(100)]);
+        let mut interp = Interpreter::default();
+        let mut regs: Vec<Option<Value>> = vec![];
+        let result = interp.run_bytecode(&code, &mut regs);
+        assert!(result.is_err(), "expected Err for OOB jump, got {:?}", result);
+        assert!(result.unwrap_err().to_string().contains("internal error"));
+    }
+
+    #[test]
+    fn negative_jump_returns_error() {
+        // Jump(-100): new_pc = 1 + (-100) = -99 → underflow error
+        let code = empty_code(vec![Insn::Jump(-100)]);
+        let mut interp = Interpreter::default();
+        let mut regs: Vec<Option<Value>> = vec![];
+        let result = interp.run_bytecode(&code, &mut regs);
+        assert!(result.is_err(), "expected Err for negative jump, got {:?}", result);
+        assert!(result.unwrap_err().to_string().contains("internal error"));
+    }
+
+    #[test]
+    fn normal_fallthrough_returns_none() {
+        let code = empty_code(vec![Insn::ReturnNone]);
+        let mut interp = Interpreter::default();
+        let mut regs: Vec<Option<Value>> = vec![];
+        assert_eq!(interp.run_bytecode(&code, &mut regs).unwrap(), Value::None);
+    }
+
+    #[test]
+    fn setup_except_negative_offset_returns_error() {
+        // SetupExcept(-100): handler_pc = 1 + (-100) < 0 → error at push time
+        let code = empty_code(vec![Insn::SetupExcept(-100), Insn::ReturnNone]);
+        let mut interp = Interpreter::default();
+        let mut regs: Vec<Option<Value>> = vec![];
+        let result = interp.run_bytecode(&code, &mut regs);
+        assert!(result.is_err(), "expected Err for SetupExcept with OOB offset, got {:?}", result);
+    }
+}
