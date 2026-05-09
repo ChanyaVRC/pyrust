@@ -137,37 +137,30 @@ impl Interpreter {
                     regs[*dst as usize] = Some(result);
                 }
                 Insn::BinOpInPlace(dst, lhs, op, rhs) => {
+                    // Fast path: borrow both Int operands to avoid 2× Value clone.
+                    if let (Some(Value::Int(a)), Some(Value::Int(b))) =
+                        (&regs[*lhs as usize], &regs[*rhs as usize])
+                    {
+                        match op {
+                            BinaryOp::Add => { regs[*dst as usize] = Some(Value::Int(a.wrapping_add(*b))); continue; }
+                            BinaryOp::Sub => { regs[*dst as usize] = Some(Value::Int(a.wrapping_sub(*b))); continue; }
+                            BinaryOp::Mul => { regs[*dst as usize] = Some(Value::Int(a.wrapping_mul(*b))); continue; }
+                            BinaryOp::Eq  => { regs[*dst as usize] = Some(Value::Bool(a == b)); continue; }
+                            BinaryOp::Ne  => { regs[*dst as usize] = Some(Value::Bool(a != b)); continue; }
+                            BinaryOp::Lt  => { regs[*dst as usize] = Some(Value::Bool(a < b)); continue; }
+                            BinaryOp::Le  => { regs[*dst as usize] = Some(Value::Bool(a <= b)); continue; }
+                            BinaryOp::Gt  => { regs[*dst as usize] = Some(Value::Bool(a > b)); continue; }
+                            BinaryOp::Ge  => { regs[*dst as usize] = Some(Value::Bool(a >= b)); continue; }
+                            _ => {}
+                        }
+                    }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = vm_try!(vm_read(regs, *rhs, num_locals));
-                    let result = match (&l, op, &r) {
-                        (Value::Int(a), BinaryOp::Add, Value::Int(b)) => {
-                            Value::Int(a.wrapping_add(*b))
-                        }
-                        (Value::Int(a), BinaryOp::Sub, Value::Int(b)) => {
-                            Value::Int(a.wrapping_sub(*b))
-                        }
-                        (Value::Int(a), BinaryOp::Mul, Value::Int(b)) => {
-                            Value::Int(a.wrapping_mul(*b))
-                        }
-                        (Value::Int(a), BinaryOp::Eq, Value::Int(b)) => Value::Bool(a == b),
-                        (Value::Int(a), BinaryOp::Ne, Value::Int(b)) => Value::Bool(a != b),
-                        (Value::Int(a), BinaryOp::Lt, Value::Int(b)) => Value::Bool(a < b),
-                        (Value::Int(a), BinaryOp::Le, Value::Int(b)) => Value::Bool(a <= b),
-                        (Value::Int(a), BinaryOp::Gt, Value::Int(b)) => Value::Bool(a > b),
-                        (Value::Int(a), BinaryOp::Ge, Value::Int(b)) => Value::Bool(a >= b),
-                        _ => {
-                            if *op == BinaryOp::MatMul {
-                                if let Some(v) =
-                                    vm_try!(self.try_inplace_matmul(l.clone(), r.clone()))
-                                {
-                                    v
-                                } else {
-                                    vm_try!(self.eval_binary(l, BinaryOp::MatMul, r))
-                                }
-                            } else {
-                                vm_try!(self.eval_binary(l, *op, r))
-                            }
-                        }
+                    let result = if *op == BinaryOp::MatMul {
+                        if let Some(v) = vm_try!(self.try_inplace_matmul(l.clone(), r.clone())) { v }
+                        else { vm_try!(self.eval_binary(l, BinaryOp::MatMul, r)) }
+                    } else {
+                        vm_try!(self.eval_binary(l, *op, r))
                     };
                     regs[*dst as usize] = Some(result);
                 }
@@ -376,11 +369,21 @@ impl Interpreter {
                     pc = (pc as i32 + offset) as usize;
                 }
                 Insn::JumpIfFalse(cond, offset) => {
+                    match &regs[*cond as usize] {
+                        Some(Value::Int(n))  => { if *n == 0 { pc = (pc as i32 + offset) as usize; } continue; }
+                        Some(Value::Bool(b)) => { if !b     { pc = (pc as i32 + offset) as usize; } continue; }
+                        _ => {}
+                    }
                     if !vm_try!(vm_read(regs, *cond, num_locals)).truthy() {
                         pc = (pc as i32 + offset) as usize;
                     }
                 }
                 Insn::JumpIfTrue(cond, offset) => {
+                    match &regs[*cond as usize] {
+                        Some(Value::Int(n))  => { if *n != 0 { pc = (pc as i32 + offset) as usize; } continue; }
+                        Some(Value::Bool(b)) => { if *b      { pc = (pc as i32 + offset) as usize; } continue; }
+                        _ => {}
+                    }
                     if vm_try!(vm_read(regs, *cond, num_locals)).truthy() {
                         pc = (pc as i32 + offset) as usize;
                     }
