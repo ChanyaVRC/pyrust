@@ -61,7 +61,11 @@ impl Interpreter {
             match insn {
                 // ── Loads ────────────────────────────────────────────────
                 Insn::LoadConst(dst, idx) => {
-                    regs[*dst as usize] = Some(code.consts[*idx as usize].clone());
+                    if let Value::Int(n) = &code.consts[*idx as usize] {
+                        regs[*dst as usize] = Some(Value::Int(*n));
+                    } else {
+                        regs[*dst as usize] = Some(code.consts[*idx as usize].clone());
+                    }
                 }
                 Insn::LoadGlobal(dst, name_idx) => {
                     let name = &code.names[*name_idx as usize];
