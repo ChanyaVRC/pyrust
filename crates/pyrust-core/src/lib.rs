@@ -242,6 +242,14 @@ unsafe fn pool_b_alloc() -> *mut u8 {
 unsafe fn pool_b_dealloc(ptr: *mut u8) {
     POOL_B.with(|c| {
         let (head, len) = c.get();
+        // In debug builds catch double-free: a block already in the pool has its first
+        // 8 bytes overwritten with the next-pointer, so it cannot equal any live
+        // allocation's first word.  Check ptr != head as a lightweight guard; a full
+        // traversal is too expensive for a hot path.
+        debug_assert!(
+            ptr != head || head.is_null(),
+            "pool_b_dealloc: double-free detected (ptr == head)"
+        );
         if len < POOL_B_CAP {
             unsafe { *(ptr as *mut *mut u8) = head };
             c.set((ptr, len + 1));

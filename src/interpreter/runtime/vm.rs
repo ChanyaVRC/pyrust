@@ -1087,12 +1087,21 @@ impl Interpreter {
 
         match obj_kind_tag {
             1 => {
-                let items = regs[obj as usize].as_mut().unwrap().as_list_mut().unwrap();
+                // as_list_mut is safe: we confirmed tag==List above (single-threaded).
+                // obj_reg and dst_reg may coincide; the mutable borrow of the Vec ends
+                // before exec_call_method returns, so no alias with the later store.
+                let items = regs[obj as usize]
+                    .as_mut()
+                    .and_then(|v| v.as_list_mut())
+                    .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
                 let empty_kw = indexmap::IndexMap::new();
                 pyrust_builtins::list::call(&method, items, &args, &empty_kw)
             }
             2 => {
-                let dict = regs[obj as usize].as_mut().unwrap().as_dict_mut().unwrap();
+                let dict = regs[obj as usize]
+                    .as_mut()
+                    .and_then(|v| v.as_dict_mut())
+                    .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
                 pyrust_builtins::dict::call(&method, dict, &args)
             }
             3 => {
@@ -1157,18 +1166,24 @@ impl Interpreter {
 
         match obj_kind_tag {
             1 => {
-                let items = regs[obj as usize].as_mut().unwrap().as_list_mut().unwrap();
+                let items = regs[obj as usize]
+                    .as_mut()
+                    .and_then(|v| v.as_list_mut())
+                    .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
                 pyrust_builtins::list::call(&method, items, &pos_items, &kw_map)
             }
             2 => {
-                let dict = regs[obj as usize].as_mut().unwrap().as_dict_mut().unwrap();
+                let dict = regs[obj as usize]
+                    .as_mut()
+                    .and_then(|v| v.as_dict_mut())
+                    .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
                 pyrust_builtins::dict::call(&method, dict, &pos_items)
             }
             3 => {
                 if let Some(ValueKind::Tuple(items)) = regs[obj as usize].as_ref().map(|v| v.kind()) {
                     pyrust_builtins::tuple::call(&method, items, &pos_items)
                 } else {
-                    unreachable!()
+                    Err(PyError::Runtime("internal: expected tuple".to_string()))
                 }
             }
             4 => {
