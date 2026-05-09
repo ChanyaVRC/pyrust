@@ -89,6 +89,23 @@ impl Interpreter {
 
                 // ── Arithmetic / Logic ───────────────────────────────────
                 Insn::BinOp(dst, lhs, op, rhs) => {
+                    // Fast path: borrow both Int operands to avoid 2× Value clone.
+                    if let (Some(Value::Int(a)), Some(Value::Int(b))) =
+                        (&regs[*lhs as usize], &regs[*rhs as usize])
+                    {
+                        match op {
+                            BinaryOp::Add => { regs[*dst as usize] = Some(Value::Int(a.wrapping_add(*b))); continue; }
+                            BinaryOp::Sub => { regs[*dst as usize] = Some(Value::Int(a.wrapping_sub(*b))); continue; }
+                            BinaryOp::Mul => { regs[*dst as usize] = Some(Value::Int(a.wrapping_mul(*b))); continue; }
+                            BinaryOp::Eq  => { regs[*dst as usize] = Some(Value::Bool(a == b)); continue; }
+                            BinaryOp::Ne  => { regs[*dst as usize] = Some(Value::Bool(a != b)); continue; }
+                            BinaryOp::Lt  => { regs[*dst as usize] = Some(Value::Bool(a < b)); continue; }
+                            BinaryOp::Le  => { regs[*dst as usize] = Some(Value::Bool(a <= b)); continue; }
+                            BinaryOp::Gt  => { regs[*dst as usize] = Some(Value::Bool(a > b)); continue; }
+                            BinaryOp::Ge  => { regs[*dst as usize] = Some(Value::Bool(a >= b)); continue; }
+                            _ => {}
+                        }
+                    }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = vm_try!(vm_read(regs, *rhs, num_locals));
                     let result = match (&l, op, &r) {
@@ -147,6 +164,24 @@ impl Interpreter {
                     regs[*dst as usize] = Some(result);
                 }
                 Insn::BinOpConst(dst, lhs, op, const_idx) => {
+                    // Fast path: borrow Int operands to avoid 2× Value clone.
+                    if let (Some(Value::Int(a)), Value::Int(b)) = (
+                        &regs[*lhs as usize],
+                        &code.consts[*const_idx as usize],
+                    ) {
+                        match op {
+                            BinaryOp::Add => { regs[*dst as usize] = Some(Value::Int(a.wrapping_add(*b))); continue; }
+                            BinaryOp::Sub => { regs[*dst as usize] = Some(Value::Int(a.wrapping_sub(*b))); continue; }
+                            BinaryOp::Mul => { regs[*dst as usize] = Some(Value::Int(a.wrapping_mul(*b))); continue; }
+                            BinaryOp::Eq  => { regs[*dst as usize] = Some(Value::Bool(a == b)); continue; }
+                            BinaryOp::Ne  => { regs[*dst as usize] = Some(Value::Bool(a != b)); continue; }
+                            BinaryOp::Lt  => { regs[*dst as usize] = Some(Value::Bool(a < b)); continue; }
+                            BinaryOp::Le  => { regs[*dst as usize] = Some(Value::Bool(a <= b)); continue; }
+                            BinaryOp::Gt  => { regs[*dst as usize] = Some(Value::Bool(a > b)); continue; }
+                            BinaryOp::Ge  => { regs[*dst as usize] = Some(Value::Bool(a >= b)); continue; }
+                            _ => {}
+                        }
+                    }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = code.consts[*const_idx as usize].clone();
                     let result = match (&l, op, &r) {
