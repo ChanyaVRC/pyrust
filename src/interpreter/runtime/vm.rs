@@ -378,68 +378,76 @@ impl Interpreter {
                     }
                 }
                 Insn::CmpJumpIfFalse(lhs, op, rhs, offset) => {
+                    if let (Some(Value::Int(a)), Some(Value::Int(b))) =
+                        (&regs[*lhs as usize], &regs[*rhs as usize])
+                    {
+                        match op {
+                            BinaryOp::Eq => { if !(a == b) { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Ne => { if !(a != b) { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Lt => { if !(a < b)  { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Le => { if !(a <= b) { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Gt => { if !(a > b)  { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Ge => { if !(a >= b) { pc = (pc as i32 + offset) as usize; } continue; }
+                            _ => {}
+                        }
+                    }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = vm_try!(vm_read(regs, *rhs, num_locals));
-                    let cond = match (&l, op, &r) {
-                        (Value::Int(a), BinaryOp::Eq, Value::Int(b)) => a == b,
-                        (Value::Int(a), BinaryOp::Ne, Value::Int(b)) => a != b,
-                        (Value::Int(a), BinaryOp::Lt, Value::Int(b)) => a < b,
-                        (Value::Int(a), BinaryOp::Le, Value::Int(b)) => a <= b,
-                        (Value::Int(a), BinaryOp::Gt, Value::Int(b)) => a > b,
-                        (Value::Int(a), BinaryOp::Ge, Value::Int(b)) => a >= b,
-                        _ => vm_try!(self.eval_binary(l, *op, r)).truthy(),
-                    };
-                    if !cond {
-                        pc = (pc as i32 + offset) as usize;
-                    }
+                    if !vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = (pc as i32 + offset) as usize; }
                 }
                 Insn::CmpJumpIfTrue(lhs, op, rhs, offset) => {
+                    if let (Some(Value::Int(a)), Some(Value::Int(b))) =
+                        (&regs[*lhs as usize], &regs[*rhs as usize])
+                    {
+                        match op {
+                            BinaryOp::Eq => { if a == b { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Ne => { if a != b { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Lt => { if a < b  { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Le => { if a <= b { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Gt => { if a > b  { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Ge => { if a >= b { pc = (pc as i32 + offset) as usize; } continue; }
+                            _ => {}
+                        }
+                    }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = vm_try!(vm_read(regs, *rhs, num_locals));
-                    let cond = match (&l, op, &r) {
-                        (Value::Int(a), BinaryOp::Eq, Value::Int(b)) => a == b,
-                        (Value::Int(a), BinaryOp::Ne, Value::Int(b)) => a != b,
-                        (Value::Int(a), BinaryOp::Lt, Value::Int(b)) => a < b,
-                        (Value::Int(a), BinaryOp::Le, Value::Int(b)) => a <= b,
-                        (Value::Int(a), BinaryOp::Gt, Value::Int(b)) => a > b,
-                        (Value::Int(a), BinaryOp::Ge, Value::Int(b)) => a >= b,
-                        _ => vm_try!(self.eval_binary(l, *op, r)).truthy(),
-                    };
-                    if cond {
-                        pc = (pc as i32 + offset) as usize;
-                    }
+                    if vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = (pc as i32 + offset) as usize; }
                 }
                 Insn::CmpJumpIfFalseConst(lhs, op, const_idx, offset) => {
-                    let l = vm_try!(vm_read(regs, *lhs, num_locals));
-                    let r = &code.consts[*const_idx as usize];
-                    let cond = match (&l, op, r) {
-                        (Value::Int(a), BinaryOp::Eq, Value::Int(b)) => a == b,
-                        (Value::Int(a), BinaryOp::Ne, Value::Int(b)) => a != b,
-                        (Value::Int(a), BinaryOp::Lt, Value::Int(b)) => a < b,
-                        (Value::Int(a), BinaryOp::Le, Value::Int(b)) => a <= b,
-                        (Value::Int(a), BinaryOp::Gt, Value::Int(b)) => a > b,
-                        (Value::Int(a), BinaryOp::Ge, Value::Int(b)) => a >= b,
-                        _ => vm_try!(self.eval_binary(l, *op, r.clone())).truthy(),
-                    };
-                    if !cond {
-                        pc = (pc as i32 + offset) as usize;
+                    if let (Some(Value::Int(a)), Value::Int(b)) =
+                        (&regs[*lhs as usize], &code.consts[*const_idx as usize])
+                    {
+                        match op {
+                            BinaryOp::Eq => { if !(a == b) { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Ne => { if !(a != b) { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Lt => { if !(a < b)  { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Le => { if !(a <= b) { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Gt => { if !(a > b)  { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Ge => { if !(a >= b) { pc = (pc as i32 + offset) as usize; } continue; }
+                            _ => {}
+                        }
                     }
+                    let l = vm_try!(vm_read(regs, *lhs, num_locals));
+                    let r = code.consts[*const_idx as usize].clone();
+                    if !vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = (pc as i32 + offset) as usize; }
                 }
                 Insn::CmpJumpIfTrueConst(lhs, op, const_idx, offset) => {
-                    let l = vm_try!(vm_read(regs, *lhs, num_locals));
-                    let r = &code.consts[*const_idx as usize];
-                    let cond = match (&l, op, r) {
-                        (Value::Int(a), BinaryOp::Eq, Value::Int(b)) => a == b,
-                        (Value::Int(a), BinaryOp::Ne, Value::Int(b)) => a != b,
-                        (Value::Int(a), BinaryOp::Lt, Value::Int(b)) => a < b,
-                        (Value::Int(a), BinaryOp::Le, Value::Int(b)) => a <= b,
-                        (Value::Int(a), BinaryOp::Gt, Value::Int(b)) => a > b,
-                        (Value::Int(a), BinaryOp::Ge, Value::Int(b)) => a >= b,
-                        _ => vm_try!(self.eval_binary(l, *op, r.clone())).truthy(),
-                    };
-                    if cond {
-                        pc = (pc as i32 + offset) as usize;
+                    if let (Some(Value::Int(a)), Value::Int(b)) =
+                        (&regs[*lhs as usize], &code.consts[*const_idx as usize])
+                    {
+                        match op {
+                            BinaryOp::Eq => { if a == b { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Ne => { if a != b { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Lt => { if a < b  { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Le => { if a <= b { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Gt => { if a > b  { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Ge => { if a >= b { pc = (pc as i32 + offset) as usize; } continue; }
+                            _ => {}
+                        }
                     }
+                    let l = vm_try!(vm_read(regs, *lhs, num_locals));
+                    let r = code.consts[*const_idx as usize].clone();
+                    if vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = (pc as i32 + offset) as usize; }
                 }
 
                 // ── Exception handling ───────────────────────────────────
