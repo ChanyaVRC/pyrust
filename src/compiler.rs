@@ -1490,17 +1490,21 @@ impl Compiler {
         let has_else = else_branch.is_some();
         let n = branches.len();
         let mut end_patches: Vec<usize> = Vec::new();
+        let pre_def_set = self.def_set;
+        // Collect def_set after each branch body for definite-assignment analysis.
+        let mut branch_def_sets: Vec<u64> = Vec::with_capacity(n + 1);
 
         for (bi, (cond, body)) in branches.iter().enumerate() {
+            self.def_set = pre_def_set;
             let cond_reg = self.compile_expr(cond);
             let jmp_false = self.emit_cond_jump(cond_reg, false);
             self.free_temp(cond_reg);
-            let saved = self.def_set;
             self.compile_block(body);
-            self.def_set = saved;
             if self.failed {
                 return;
             }
+            branch_def_sets.push(self.def_set);
+            self.def_set = pre_def_set;
             if bi < n - 1 || has_else {
                 let jmp_end = self.emit(Insn::Jump(0));
                 end_patches.push(jmp_end);
@@ -1508,12 +1512,22 @@ impl Compiler {
             self.patch_jump(jmp_false);
         }
         if let Some(else_stmts) = else_branch {
-            let saved = self.def_set;
             self.compile_block(else_stmts);
-            self.def_set = saved;
+            if self.failed {
+                return;
+            }
+            branch_def_sets.push(self.def_set);
         }
         for idx in end_patches {
             self.patch_jump(idx);
+        }
+        // Variables defined in every branch (including else) are definitely bound after.
+        // Without an else, control may skip all branches so no new defs can be assumed.
+        if has_else && !branch_def_sets.is_empty() {
+            let all_define = branch_def_sets.iter().fold(!0u64, |acc, &s| acc & s);
+            self.def_set = pre_def_set | all_define;
+        } else {
+            self.def_set = pre_def_set;
         }
     }
 
