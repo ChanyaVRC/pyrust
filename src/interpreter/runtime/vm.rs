@@ -83,6 +83,10 @@ impl Interpreter {
                     regs[*dst as usize] = Some(Value::None);
                 }
                 Insn::Move(dst, src) => {
+                    if let Some(Value::Int(n)) = &regs[*src as usize] {
+                        regs[*dst as usize] = Some(Value::Int(*n));
+                        continue;
+                    }
                     let v = vm_try!(vm_read(regs, *src, num_locals));
                     regs[*dst as usize] = Some(v);
                 }
