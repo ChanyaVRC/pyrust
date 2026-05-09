@@ -2917,15 +2917,27 @@ impl Compiler {
                     let k_slot = base + (i * 2) as u8;
                     let v_slot = base + (i * 2 + 1) as u8;
                     let saved = self.next_temp;
+                    let insn_before = self.insns.len();
                     let kr = self.compile_expr(key_expr);
                     if kr != k_slot {
-                        self.emit(Insn::Move(k_slot, kr));
+                        let single = self.insns.len() == insn_before + 1;
+                        if single && kr >= self.base_temp && self.retarget_last(kr, k_slot) {
+                            // retargeted in place — no Move needed
+                        } else {
+                            self.emit(Insn::Move(k_slot, kr));
+                        }
                     }
                     self.next_temp = saved;
                     let saved = self.next_temp;
+                    let insn_before = self.insns.len();
                     let vr = self.compile_expr(val_expr);
                     if vr != v_slot {
-                        self.emit(Insn::Move(v_slot, vr));
+                        let single = self.insns.len() == insn_before + 1;
+                        if single && vr >= self.base_temp && self.retarget_last(vr, v_slot) {
+                            // retargeted in place — no Move needed
+                        } else {
+                            self.emit(Insn::Move(v_slot, vr));
+                        }
                     }
                     self.next_temp = saved;
                 }
@@ -3167,9 +3179,15 @@ impl Compiler {
         for (i, item) in items.iter().enumerate() {
             let slot = base + i as u8;
             let saved = self.next_temp;
+            let insn_before = self.insns.len();
             let r = self.compile_expr(item);
             if r != slot {
-                self.emit(Insn::Move(slot, r));
+                let single = self.insns.len() == insn_before + 1;
+                if single && r >= self.base_temp && self.retarget_last(r, slot) {
+                    // retargeted in place — no Move needed
+                } else {
+                    self.emit(Insn::Move(slot, r));
+                }
             }
             self.next_temp = saved;
         }
