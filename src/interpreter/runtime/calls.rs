@@ -899,6 +899,7 @@ impl Interpreter {
         for arg in args {
             match arg.value.kind() {
                 ValueKind::Int(v) => ints.push(v),
+                ValueKind::Bool(b) => ints.push(b as i64),
                 _ => {
                     return Err(PyError::Runtime(
                         "range arguments must be integers".to_string(),
