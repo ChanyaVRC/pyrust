@@ -239,6 +239,33 @@ impl Interpreter {
                     }
                 }
                 Insn::GetItem(dst, obj, idx) => {
+                    // Fast path: List/Tuple indexed by Int — borrow idx, avoid clone.
+                    if let Some(Value::Int(raw_i)) = &regs[*idx as usize] {
+                        let raw_i = *raw_i;
+                        match regs[*obj as usize].as_ref() {
+                            Some(Value::List(items)) => {
+                                let len = items.len() as i64;
+                                let j = if raw_i < 0 { raw_i + len } else { raw_i };
+                                if j >= 0 && (j as usize) < items.len() {
+                                    regs[*dst as usize] = Some(items[j as usize].clone());
+                                } else {
+                                    vm_try!(Err(PyError::Runtime("index out of range".into())));
+                                }
+                                continue;
+                            }
+                            Some(Value::Tuple(items)) => {
+                                let len = items.len() as i64;
+                                let j = if raw_i < 0 { raw_i + len } else { raw_i };
+                                if j >= 0 && (j as usize) < items.len() {
+                                    regs[*dst as usize] = Some(items[j as usize].clone());
+                                } else {
+                                    vm_try!(Err(PyError::Runtime("index out of range".into())));
+                                }
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
                     let idx_val = vm_try!(vm_read(regs, *idx, num_locals));
                     // Slice key: tuple of (lo, hi, step) produced by the compiler.
                     if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
