@@ -648,7 +648,11 @@ impl Value {
 
     pub fn get_dict_rc(&self) -> Option<&Rc<RefCell<IndexMap<PyKey, Value>>>> {
         self.as_opaque().and_then(|o| {
-            if let Opaque::Dict(rc) = o { Some(rc) } else { None }
+            if let Opaque::Dict(rc) = o {
+                Some(rc)
+            } else {
+                None
+            }
         })
     }
 

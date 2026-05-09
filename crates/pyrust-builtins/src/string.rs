@@ -73,7 +73,7 @@ fn is_python_digit(c: char) -> bool {
     matches!(c as u32,
         0x00B2 | 0x00B3 | 0x00B9        // ²³¹
         | 0x2070 | 0x2074..=0x2079      // ⁰⁴⁵⁶⁷⁸⁹
-        | 0x2080..=0x2089)              // ₀₁₂₃₄₅₆₇₈₉
+        | 0x2080..=0x2089) // ₀₁₂₃₄₅₆₇₈₉
 }
 
 /// Python's str.isalpha(): Unicode general category L* (Letter).
@@ -231,9 +231,9 @@ fn split(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
         Some(sep_str) => {
             if sep_str.is_empty() {
                 return Err(PyError::Named(
-    "ValueError".to_string(),
-    "empty separator".to_string(),
-));
+                    "ValueError".to_string(),
+                    "empty separator".to_string(),
+                ));
             }
             if maxsplit < 0 {
                 let cap = s.len() / sep_str.len() + 1;
@@ -304,9 +304,9 @@ fn rsplit(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
         Some(sep_str) => {
             if sep_str.is_empty() {
                 return Err(PyError::Named(
-    "ValueError".to_string(),
-    "empty separator".to_string(),
-));
+                    "ValueError".to_string(),
+                    "empty separator".to_string(),
+                ));
             }
             if maxsplit < 0 {
                 let cap = s.len() / sep_str.len() + 1;
@@ -417,7 +417,11 @@ fn str_startswith(s: &str, args: &[Value]) -> Result<Value> {
     match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(p)) => Ok(Value::bool_(slice.starts_with(p))),
         Some(ValueKind::Tuple(prefixes)) => Ok(Value::bool_(prefixes.iter().any(|pv| {
-            if let ValueKind::Str(p) = pv.kind() { slice.starts_with(p) } else { false }
+            if let ValueKind::Str(p) = pv.kind() {
+                slice.starts_with(p)
+            } else {
+                false
+            }
         }))),
         _ => Err(PyError::Runtime(
             "str.startswith() first arg must be str or a tuple of str".to_string(),
@@ -431,7 +435,11 @@ fn str_endswith(s: &str, args: &[Value]) -> Result<Value> {
     match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(p)) => Ok(Value::bool_(slice.ends_with(p))),
         Some(ValueKind::Tuple(suffixes)) => Ok(Value::bool_(suffixes.iter().any(|sv| {
-            if let ValueKind::Str(p) = sv.kind() { slice.ends_with(p) } else { false }
+            if let ValueKind::Str(p) = sv.kind() {
+                slice.ends_with(p)
+            } else {
+                false
+            }
         }))),
         _ => Err(PyError::Runtime(
             "str.endswith() first arg must be str or a tuple of str".to_string(),
