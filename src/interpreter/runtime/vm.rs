@@ -1127,6 +1127,24 @@ mod vm_tests {
     }
 
     #[test]
+    fn matchexcept_with_no_active_exception_returns_error() {
+        // MatchExcept must error when no exception is active (compiler bug scenario).
+        let mut code = empty_code(vec![]);
+        code.num_regs = 1;
+        code.insns.push(Insn::LoadNone(0));           // type_reg = None (placeholder)
+        code.insns.push(Insn::MatchExcept(0, 1));     // no active_exception → error
+        code.insns.push(Insn::ReturnNone);
+        let mut interp = Interpreter::default();
+        let mut regs: Vec<Option<Value>> = vec![None; 1];
+        let result = interp.run_bytecode(&code, &mut regs);
+        assert!(result.is_err(), "expected Err, got {:?}", result);
+        assert!(
+            result.unwrap_err().to_string().contains("no active exception"),
+            "error should mention no active exception"
+        );
+    }
+
+    #[test]
     fn oob_pc_returns_error_not_none() {
         // Jump(100): new_pc = 1 + 100 = 101 > insns.len() (1) → error
         let code = empty_code(vec![Insn::Jump(100)]);
