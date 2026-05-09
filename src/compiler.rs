@@ -2012,8 +2012,12 @@ impl Compiler {
     fn compile_delete(&mut self, expr: &Expr) {
         match expr {
             Expr::Var(name) => {
-                let name_idx = self.intern_name(name);
-                self.emit(Insn::DeleteName(name_idx));
+                if let Some(reg) = self.local_reg(name) {
+                    self.emit(Insn::DeleteLocal(reg));
+                } else {
+                    let name_idx = self.intern_name(name);
+                    self.emit(Insn::DeleteName(name_idx));
+                }
             }
             Expr::Attr { target, name } => {
                 let obj = self.compile_expr(target);
@@ -2427,6 +2431,16 @@ impl Compiler {
                 self.compile_block(&handler.body);
                 if self.failed {
                     return;
+                }
+                // PEP 3110: delete the `as VAR` binding when the handler exits
+                // (breaks reference cycles and matches CPython behaviour).
+                if let Some(var_name) = &handler.name {
+                    if let Some(reg) = self.local_reg(var_name) {
+                        self.emit(Insn::DeleteLocal(reg));
+                    } else {
+                        let name_idx = self.intern_name(var_name);
+                        self.emit(Insn::DeleteName(name_idx));
+                    }
                 }
                 self.emit(Insn::EndExcept);
 

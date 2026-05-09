@@ -445,6 +445,9 @@ impl Interpreter {
                     let name = code.names[*name_idx as usize].clone();
                     self.env.borrow_mut().values.remove(&name);
                 }
+                Insn::DeleteLocal(reg) => {
+                    regs[*reg as usize] = None;
+                }
 
                 // ── Control flow ─────────────────────────────────────────
                 Insn::Jump(offset) => {
