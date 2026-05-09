@@ -2729,8 +2729,7 @@ impl Compiler {
                     }
                     let jmp = self.emit(Insn::JumpIfFalse(dst, 0));
                     let saved = self.next_temp;
-                    let rhs = self.compile_expr(right);
-                    self.emit(Insn::Move(dst, rhs));
+                    self.compile_expr_into(right, dst);
                     self.next_temp = saved;
                     self.patch_jump(jmp);
                     dst
@@ -2743,8 +2742,7 @@ impl Compiler {
                     }
                     let jmp = self.emit(Insn::JumpIfTrue(dst, 0));
                     let saved = self.next_temp;
-                    let rhs = self.compile_expr(right);
-                    self.emit(Insn::Move(dst, rhs));
+                    self.compile_expr_into(right, dst);
                     self.next_temp = saved;
                     self.patch_jump(jmp);
                     dst
