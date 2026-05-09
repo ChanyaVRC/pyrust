@@ -281,6 +281,11 @@ impl Interpreter {
                     out.extend_from_slice(b);
                     Ok(Value::list(out))
                 }
+                (ValueKind::Tuple(a), ValueKind::Tuple(b)) => {
+                    let mut out = a.clone();
+                    out.extend_from_slice(b);
+                    Ok(Value::tuple(out))
+                }
                 _ => Err(Self::unsupported_binary_operand("+")),
             }
         }
