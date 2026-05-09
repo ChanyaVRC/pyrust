@@ -72,8 +72,18 @@ pub enum Insn {
     JumpIfFalse(Reg, i32),
     /// if R[cond].truthy(): pc += offset
     JumpIfTrue(Reg, i32),
+    /// if !(R[lhs] op R[rhs]): pc += offset  (integer fast path; avoids bool temp reg)
+    CmpJumpIfFalse(Reg, BinaryOp, Reg, i32),
+    /// if (R[lhs] op R[rhs]): pc += offset
+    CmpJumpIfTrue(Reg, BinaryOp, Reg, i32),
+    /// if !(R[lhs] op consts[idx]): pc += offset
+    CmpJumpIfFalseConst(Reg, BinaryOp, u16, i32),
+    /// if (R[lhs] op consts[idx]): pc += offset
+    CmpJumpIfTrueConst(Reg, BinaryOp, u16, i32),
     /// R[func_reg] = call(R[func_reg], R[func_reg+1..func_reg+1+argc]); result in R[func_reg]
     Call(Reg, u8),
+    /// Like Call but VM tries fn_cache before dispatching (emitted for known-pure callees).
+    CallMemo(Reg, u8),
     /// return R[src]
     Return(Reg),
     /// return None
@@ -90,6 +100,13 @@ pub enum Insn {
     GetIter(u8, Reg),
     /// if iters[slot] exhausted: pc += offset; else R[dst] = next(iters[slot])
     ForIter(Reg, u8, i32),
+    /// Integer counter for-range (register bound, signed step in consts[step_idx]).
+    /// Semantics: next = R[var] + consts[step_idx]; if (next op R[stop]): R[var]=next; else: pc+=offset
+    /// (op is Lt for step>0, Gt for step<0; initialise R[var] = start - step before loop)
+    ForCountReg(Reg, BinaryOp, Reg, u16, i32),
+    /// Integer counter for-range (constant bound).
+    /// Same semantics as ForCountReg but stop comes from consts[stop_idx].
+    ForCountConst(Reg, BinaryOp, u16, u16, i32),
     /// error if R[reg] is uninitialised: "cannot access local variable '<name>' ..."
     CheckLocal(Reg, u16),
     /// raise AssertionError(R[msg])  (condition already tested by JumpIfTrue)

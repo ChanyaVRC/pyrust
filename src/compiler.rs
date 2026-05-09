@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use crate::ast::{AssignTarget, BinaryOp, CmpOp, Expr, FunctionParam, Stmt};
+use crate::ast::{AssignTarget, BinaryOp, CmpOp, Expr, FunctionParam, Stmt, UnaryOp};
 use crate::bytecode::{CellVar, FnCode, FnProto, Insn, Reg};
-use crate::value::{Environment, UserFunction, Value};
+use crate::value::{UserFunction, Value};
 
 /// Compile a user function to bytecode.  Always succeeds now that the VM
 /// handles all Python features.  Returns None only on internal limits
@@ -489,6 +489,111 @@ fn const_eq(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// Attempt to evaluate a pure constant expression at compile time.
+/// Returns Some(value) only when the entire expression tree consists of
+/// literals and operations on literals that cannot raise.
+fn fold_constant(expr: &Expr) -> Option<Value> {
+    match expr {
+        Expr::Int(v) => Some(Value::Int(*v)),
+        Expr::Float(v) => Some(Value::Float(*v)),
+        Expr::Str(s) => Some(Value::Str(s.clone())),
+        Expr::Bool(b) => Some(Value::Bool(*b)),
+        Expr::None => Some(Value::None),
+        Expr::Unary { op, expr } => {
+            let val = fold_constant(expr)?;
+            match (op, &val) {
+                (UnaryOp::Neg, Value::Int(n)) => Some(Value::Int(n.wrapping_neg())),
+                (UnaryOp::Neg, Value::Float(f)) => Some(Value::Float(-f)),
+                (UnaryOp::Not, v) => Some(Value::Bool(!v.truthy())),
+                (UnaryOp::BitNot, Value::Int(n)) => Some(Value::Int(!n)),
+                _ => None,
+            }
+        }
+        Expr::Binary { left, op, right } => {
+            let l = fold_constant(left)?;
+            let r = fold_constant(right)?;
+            fold_binop(&l, *op, &r)
+        }
+        Expr::Compare { left, ops } => {
+            let mut cur = fold_constant(left)?;
+            for (cmp_op, rhs_expr) in ops {
+                let rhs = fold_constant(rhs_expr)?;
+                let op = cmp_to_binary(*cmp_op);
+                let result = fold_binop(&cur, op, &rhs)?;
+                if !result.truthy() {
+                    return Some(Value::Bool(false));
+                }
+                cur = rhs;
+            }
+            Some(Value::Bool(true))
+        }
+        _ => None,
+    }
+}
+
+fn fold_binop(l: &Value, op: BinaryOp, r: &Value) -> Option<Value> {
+    match (l, op, r) {
+        (Value::Int(a), BinaryOp::Add, Value::Int(b)) => Some(Value::Int(a.wrapping_add(*b))),
+        (Value::Int(a), BinaryOp::Sub, Value::Int(b)) => Some(Value::Int(a.wrapping_sub(*b))),
+        (Value::Int(a), BinaryOp::Mul, Value::Int(b)) => Some(Value::Int(a.wrapping_mul(*b))),
+        (Value::Int(a), BinaryOp::Div, Value::Int(b)) if *b != 0 => {
+            Some(Value::Float(*a as f64 / *b as f64))
+        }
+        (Value::Int(a), BinaryOp::FloorDiv, Value::Int(b)) if *b != 0 => {
+            let q = a.wrapping_div(*b);
+            let r = a.wrapping_rem(*b);
+            Some(Value::Int(if (r != 0) && ((r < 0) != (*b < 0)) {
+                q - 1
+            } else {
+                q
+            }))
+        }
+        (Value::Int(a), BinaryOp::Mod, Value::Int(b)) if *b != 0 => {
+            let r = a.wrapping_rem(*b);
+            Some(Value::Int(if (r != 0) && ((r < 0) != (*b < 0)) {
+                r + b
+            } else {
+                r
+            }))
+        }
+        (Value::Int(a), BinaryOp::Pow, Value::Int(b)) if *b >= 0 => {
+            Some(Value::Int(a.wrapping_pow(*b as u32)))
+        }
+        (Value::Float(a), BinaryOp::Add, Value::Float(b)) => Some(Value::Float(a + b)),
+        (Value::Float(a), BinaryOp::Sub, Value::Float(b)) => Some(Value::Float(a - b)),
+        (Value::Float(a), BinaryOp::Mul, Value::Float(b)) => Some(Value::Float(a * b)),
+        (Value::Float(a), BinaryOp::Div, Value::Float(b)) if *b != 0.0 => Some(Value::Float(a / b)),
+        (Value::Str(a), BinaryOp::Add, Value::Str(b)) => Some(Value::Str(a.clone() + b)),
+        (Value::Int(a), BinaryOp::Eq, Value::Int(b)) => Some(Value::Bool(a == b)),
+        (Value::Int(a), BinaryOp::Ne, Value::Int(b)) => Some(Value::Bool(a != b)),
+        (Value::Int(a), BinaryOp::Lt, Value::Int(b)) => Some(Value::Bool(a < b)),
+        (Value::Int(a), BinaryOp::Le, Value::Int(b)) => Some(Value::Bool(a <= b)),
+        (Value::Int(a), BinaryOp::Gt, Value::Int(b)) => Some(Value::Bool(a > b)),
+        (Value::Int(a), BinaryOp::Ge, Value::Int(b)) => Some(Value::Bool(a >= b)),
+        (Value::Str(a), BinaryOp::Eq, Value::Str(b)) => Some(Value::Bool(a == b)),
+        (Value::Str(a), BinaryOp::Ne, Value::Str(b)) => Some(Value::Bool(a != b)),
+        (Value::Bool(a), BinaryOp::Eq, Value::Bool(b)) => Some(Value::Bool(a == b)),
+        _ => None,
+    }
+}
+
+fn extract_literal_int(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Int(n) => Some(*n),
+        Expr::Unary {
+            op: UnaryOp::Neg,
+            expr: inner,
+        } => {
+            if let Expr::Int(n) = inner.as_ref() {
+                Some(-n)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 fn is_const_false_expr(expr: &Expr) -> bool {
     match expr {
         Expr::Bool(false) | Expr::Int(0) | Expr::None => true,
@@ -632,7 +737,12 @@ fn detect_while_range<'a>(
 
 struct LoopCtx {
     break_patches: Vec<usize>,
-    continue_target: usize,
+    /// None when the continue target is not yet known (e.g. counter-range loop
+    /// where the increment comes after the body).  Patched before the increment.
+    continue_target: Option<usize>,
+    /// Indices of Jump(0) instructions emitted for `continue` when continue_target
+    /// was None; fixed up once continue_target is established.
+    continue_patches: Vec<usize>,
 }
 
 struct Compiler {
@@ -653,6 +763,8 @@ struct Compiler {
     failed: bool,
     def_set: u64,
     fn_protos: Vec<FnProto>,
+    /// Names of pure (side-effect-free) functions defined in this scope.
+    pure_locals: HashSet<String>,
 }
 
 impl Compiler {
@@ -703,6 +815,7 @@ impl Compiler {
             failed: n > 255,
             def_set: def_bound_mask,
             fn_protos: Vec::new(),
+            pure_locals: HashSet::new(),
         }
     }
 
@@ -750,7 +863,8 @@ impl Compiler {
             Expr::Float(v) => Some(self.intern_const(Value::Float(*v))),
             Expr::Str(s) => Some(self.intern_const(Value::Str(s.clone()))),
             Expr::Bool(b) => Some(self.intern_const(Value::Bool(*b))),
-            _ => None,
+            Expr::None => Some(self.intern_const(Value::None)),
+            _ => fold_constant(expr).map(|v| self.intern_const(v)),
         }
     }
 
@@ -823,8 +937,61 @@ impl Compiler {
             | Insn::JumpIfTrue(_, off)
             | Insn::ForIter(_, _, off)
             | Insn::SetupExcept(off)
-            | Insn::MatchExcept(_, off) => *off = offset,
+            | Insn::MatchExcept(_, off)
+            | Insn::CmpJumpIfFalse(_, _, _, off)
+            | Insn::CmpJumpIfTrue(_, _, _, off)
+            | Insn::CmpJumpIfFalseConst(_, _, _, off)
+            | Insn::CmpJumpIfTrueConst(_, _, _, off)
+            | Insn::ForCountReg(_, _, _, _, off)
+            | Insn::ForCountConst(_, _, _, _, off) => *off = offset,
             _ => self.failed = true,
+        }
+    }
+
+    /// Try to fuse the last emitted instruction with a conditional jump.
+    ///
+    /// If the last instruction is `BinOpConst(cond_reg, lhs, op, c)` or
+    /// `BinOp(cond_reg, lhs, op, rhs)`, replace it with the corresponding
+    /// `CmpJump*` variant (offset=0, to be patched).  Otherwise fall back to
+    /// emitting `JumpIfFalse`/`JumpIfTrue` as normal.
+    ///
+    /// `invert=false` → JumpIfFalse semantics (jump when comparison is false)
+    /// `invert=true`  → JumpIfTrue semantics (jump when comparison is true)
+    fn emit_cond_jump(&mut self, cond_reg: Reg, invert: bool) -> usize {
+        // Only fuse when the result register is a temp (not a named local).
+        if cond_reg >= self.base_temp {
+            if let Some(last) = self.insns.last().cloned() {
+                match last {
+                    Insn::BinOpConst(dst, lhs, op, c) if dst == cond_reg => {
+                        let idx = self.insns.len() - 1;
+                        // Free the temp that would have held the bool result.
+                        self.free_temp(cond_reg);
+                        self.insns[idx] = if invert {
+                            Insn::CmpJumpIfTrueConst(lhs, op, c, 0)
+                        } else {
+                            Insn::CmpJumpIfFalseConst(lhs, op, c, 0)
+                        };
+                        return idx;
+                    }
+                    Insn::BinOp(dst, lhs, op, rhs) if dst == cond_reg => {
+                        let idx = self.insns.len() - 1;
+                        self.free_temp(cond_reg);
+                        self.insns[idx] = if invert {
+                            Insn::CmpJumpIfTrue(lhs, op, rhs, 0)
+                        } else {
+                            Insn::CmpJumpIfFalse(lhs, op, rhs, 0)
+                        };
+                        return idx;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Fall back: emit a regular conditional jump.
+        if invert {
+            self.emit(Insn::JumpIfTrue(cond_reg, 0))
+        } else {
+            self.emit(Insn::JumpIfFalse(cond_reg, 0))
         }
     }
 
@@ -955,12 +1122,15 @@ impl Compiler {
                     return;
                 }
                 let last = self.loops.len() - 1;
-                let target = self.loops[last].continue_target;
                 let idx = self.emit(Insn::Jump(0));
-                let from = idx as i32 + 1;
-                let offset = target as i32 - from;
-                if let Insn::Jump(off) = &mut self.insns[idx] {
-                    *off = offset;
+                if let Some(target) = self.loops[last].continue_target {
+                    let from = idx as i32 + 1;
+                    let offset = target as i32 - from;
+                    if let Insn::Jump(off) = &mut self.insns[idx] {
+                        *off = offset;
+                    }
+                } else {
+                    self.loops[last].continue_patches.push(idx);
                 }
             }
             Stmt::Return(None) => {
@@ -1324,17 +1494,52 @@ impl Compiler {
         let has_else = else_branch.is_some();
         let n = branches.len();
         let mut end_patches: Vec<usize> = Vec::new();
+        let pre_def_set = self.def_set;
+        // Collect def_set after each branch body for definite-assignment analysis.
+        let mut branch_def_sets: Vec<u64> = Vec::with_capacity(n + 1);
 
         for (bi, (cond, body)) in branches.iter().enumerate() {
+            self.def_set = pre_def_set;
+            // Constant-condition optimisation: fold at compile time.
+            if let Some(val) = fold_constant(cond) {
+                if val.truthy() {
+                    // Always-true branch: compile body unconditionally; skip rest.
+                    self.compile_block(body);
+                    if self.failed {
+                        return;
+                    }
+                    branch_def_sets.push(self.def_set);
+                    // Treat as if there were an else so intersection analysis kicks in.
+                    for _ in bi + 1..n {
+                        branch_def_sets.push(pre_def_set);
+                    }
+                    if has_else {
+                        branch_def_sets.push(pre_def_set);
+                    }
+                    for idx in end_patches {
+                        self.patch_jump(idx);
+                    }
+                    if has_else && !branch_def_sets.is_empty() {
+                        let all_define = branch_def_sets.iter().fold(!0u64, |acc, &s| acc & s);
+                        self.def_set = pre_def_set | all_define;
+                    } else {
+                        self.def_set = pre_def_set | branch_def_sets[0];
+                    }
+                    return;
+                } else {
+                    // Always-false branch: skip it entirely.
+                    continue;
+                }
+            }
             let cond_reg = self.compile_expr(cond);
-            let jmp_false = self.emit(Insn::JumpIfFalse(cond_reg, 0));
+            let jmp_false = self.emit_cond_jump(cond_reg, false);
             self.free_temp(cond_reg);
-            let saved = self.def_set;
             self.compile_block(body);
-            self.def_set = saved;
             if self.failed {
                 return;
             }
+            branch_def_sets.push(self.def_set);
+            self.def_set = pre_def_set;
             if bi < n - 1 || has_else {
                 let jmp_end = self.emit(Insn::Jump(0));
                 end_patches.push(jmp_end);
@@ -1342,12 +1547,22 @@ impl Compiler {
             self.patch_jump(jmp_false);
         }
         if let Some(else_stmts) = else_branch {
-            let saved = self.def_set;
             self.compile_block(else_stmts);
-            self.def_set = saved;
+            if self.failed {
+                return;
+            }
+            branch_def_sets.push(self.def_set);
         }
         for idx in end_patches {
             self.patch_jump(idx);
+        }
+        // Variables defined in every branch (including else) are definitely bound after.
+        // Without an else, control may skip all branches so no new defs can be assumed.
+        if has_else && !branch_def_sets.is_empty() {
+            let all_define = branch_def_sets.iter().fold(!0u64, |acc, &s| acc & s);
+            self.def_set = pre_def_set | all_define;
+        } else {
+            self.def_set = pre_def_set;
         }
     }
 
@@ -1374,7 +1589,7 @@ impl Compiler {
 
         let (loop_start, exit_jmp) = if is_licm {
             let cond_reg = self.compile_expr(cond);
-            let jmp = self.emit(Insn::JumpIfFalse(cond_reg, 0));
+            let jmp = self.emit_cond_jump(cond_reg, false);
             self.free_temp(cond_reg);
             (self.pc(), Some(jmp))
         } else if is_infinite {
@@ -1382,14 +1597,15 @@ impl Compiler {
         } else {
             let start = self.pc();
             let cond_reg = self.compile_expr(cond);
-            let jmp = self.emit(Insn::JumpIfFalse(cond_reg, 0));
+            let jmp = self.emit_cond_jump(cond_reg, false);
             self.free_temp(cond_reg);
             (start, Some(jmp))
         };
 
         self.loops.push(LoopCtx {
             break_patches: Vec::new(),
-            continue_target: loop_start,
+            continue_target: Some(loop_start),
+            continue_patches: Vec::new(),
         });
         let saved = self.def_set;
         self.compile_block(body);
@@ -1415,6 +1631,15 @@ impl Compiler {
         }
     }
 
+    /// Convert `while VAR cmp STOP: ...; VAR += STEP` to a ForCount* integer counter.
+    ///
+    /// Uses ForCountConst/ForCountReg (same as the for-range optimisation) instead of
+    /// ForIter+IterState::Range.  This avoids the range() call, the IterState allocation,
+    /// and the indirect ForIter dispatch, giving a tight integer-counter loop.
+    ///
+    /// Semantics mirror try_compile_for_range: initialise VAR = i_initial - step so the
+    /// first ForCount yields i_initial.  After natural exit emit BinOpConst to restore
+    /// the post-loop value (Python requires i == stop after `while i < stop: …; i += 1`).
     fn try_compile_while_range(
         &mut self,
         cond: &Expr,
@@ -1429,52 +1654,60 @@ impl Compiler {
             Some(r) => r,
             None => return false,
         };
-        let frame = self.next_temp;
-        let slots = if inclusive { 5usize } else { 4 };
-        if (frame as usize).saturating_add(slots) > 256 {
-            return false;
-        }
-        self.next_temp = frame + slots as u8;
-        if self.next_temp - 1 > self.max_reg {
-            self.max_reg = self.next_temp - 1;
-        }
-        let range_idx = self.intern_name("range");
-        self.emit(Insn::LoadGlobal(frame, range_idx));
-        self.emit(Insn::Move(frame + 1, var_reg));
-        {
-            let saved = self.next_temp;
-            let r = self.compile_expr(stop_expr);
-            if r != frame + 2 {
-                self.emit(Insn::Move(frame + 2, r));
-            }
-            self.next_temp = saved;
-        }
-        if inclusive {
-            let one_idx = self.intern_const(Value::Int(1));
-            self.emit(Insn::LoadConst(frame + 4, one_idx));
-            let adj = if step > 0 {
-                BinaryOp::Add
-            } else {
-                BinaryOp::Sub
-            };
-            self.emit(Insn::BinOp(frame + 2, frame + 2, adj, frame + 4));
-        }
+
+        let cmp_op = if step > 0 { BinaryOp::Lt } else { BinaryOp::Gt };
         let step_idx = self.intern_const(Value::Int(step));
-        self.emit(Insn::LoadConst(frame + 3, step_idx));
-        self.emit(Insn::Call(frame, 3));
-        self.next_temp = frame + 1;
-        let iter_slot = self.alloc_iter();
-        self.emit(Insn::GetIter(iter_slot, frame));
-        self.free_temp(frame);
+        let neg_step_idx = self.intern_const(Value::Int(step.wrapping_neg()));
+
+        // Initialise var_reg = i_initial - step (so first ForCount yields i_initial).
+        self.emit(Insn::BinOpConst(
+            var_reg,
+            var_reg,
+            BinaryOp::Add,
+            neg_step_idx,
+        ));
+
+        // Determine stop value: for inclusive (<=/>= condition) adjust by ±1.
         let loop_start = self.pc();
-        let exit_jmp = self.emit(Insn::ForIter(var_reg, iter_slot, 0));
+        let stop_adjust: i64 = if inclusive {
+            if step > 0 { 1 } else { -1 }
+        } else {
+            0
+        };
+
+        let (exit_jmp, stop_temp) = if let Some(mut stop_val) = extract_literal_int(stop_expr) {
+            stop_val = stop_val.wrapping_add(stop_adjust);
+            let stop_idx = self.intern_const(Value::Int(stop_val));
+            let jmp = self.emit(Insn::ForCountConst(var_reg, cmp_op, stop_idx, step_idx, 0));
+            (jmp, None)
+        } else {
+            let r = self.compile_expr(stop_expr);
+            let sr = if r < self.base_temp {
+                let t = self.alloc_temp();
+                self.emit(Insn::Move(t, r));
+                t
+            } else {
+                r
+            };
+            if stop_adjust != 0 {
+                let adj_idx = self.intern_const(Value::Int(stop_adjust));
+                self.emit(Insn::BinOpConst(sr, sr, BinaryOp::Add, adj_idx));
+            }
+            let jmp = self.emit(Insn::ForCountReg(var_reg, cmp_op, sr, step_idx, 0));
+            (jmp, Some(sr))
+        };
+
         self.mark_def(var_reg);
         self.loops.push(LoopCtx {
             break_patches: Vec::new(),
-            continue_target: loop_start,
+            continue_target: Some(loop_start),
+            continue_patches: Vec::new(),
         });
         let saved = self.def_set;
-        self.compile_block(body);
+        // Skip the last body statement (VAR += STEP): ForCount already manages
+        // the counter increment, so VAR += STEP is a dead store.
+        let body_without_inc = &body[..body.len() - 1];
+        self.compile_block(body_without_inc);
         self.def_set = saved;
         if self.failed {
             return true;
@@ -1483,8 +1716,151 @@ impl Compiler {
         let back_offset = loop_start as i32 - back_from;
         self.emit(Insn::Jump(back_offset));
         self.patch_jump(exit_jmp);
+        // Restore post-loop value: Python semantics require i == stop after natural exit.
+        // Break patches jump PAST this BinOpConst so break leaves the break-iteration value.
+        self.emit(Insn::BinOpConst(var_reg, var_reg, BinaryOp::Add, step_idx));
         let ctx = self.loops.pop().unwrap();
-        self.free_iter();
+        if let Some(t) = stop_temp {
+            self.free_temp(t);
+        }
+        if let Some(else_stmts) = else_branch {
+            self.compile_block(else_stmts);
+            if self.failed {
+                return true;
+            }
+        }
+        for idx in ctx.break_patches {
+            self.patch_jump(idx);
+        }
+        true
+    }
+
+    /// Detect `for VAR in range(...)` and compile to a direct integer counter loop:
+    ///   VAR = start; while VAR < stop: body; VAR += step
+    /// This avoids calling range(), allocating an IterState, and the ForIter
+    /// overhead per iteration, giving a tight loop equivalent to C `for`.
+    fn try_compile_for_range(
+        &mut self,
+        target: &AssignTarget,
+        iter_expr: &Expr,
+        body: &[Stmt],
+        else_branch: Option<&[Stmt]>,
+    ) -> bool {
+        // Target must be a Name with a fastlocal register.
+        let var_name = match target {
+            AssignTarget::Name(n) => n.as_str(),
+            _ => return false,
+        };
+        let var_reg = match self.local_reg(var_name) {
+            Some(r) => r,
+            None => return false,
+        };
+
+        // iter_expr must be a plain `range(...)` call with no splats/kwargs.
+        let (func, args) = match iter_expr {
+            Expr::Call { func, args } => (func.as_ref(), args.as_slice()),
+            _ => return false,
+        };
+        if !matches!(func, Expr::Var(n) if n == "range") {
+            return false;
+        }
+        if args
+            .iter()
+            .any(|a| a.splat || a.double_splat || a.name.is_some())
+        {
+            return false;
+        }
+
+        // Extract (start_opt, stop, step) from 1–3 positional args.
+        let (start_opt, stop_expr, step_val): (Option<&Expr>, &Expr, i64) = match args {
+            [s] => (None, &s.value, 1),
+            [a, b] => (Some(&a.value), &b.value, 1),
+            [a, b, c] => {
+                let s = match extract_literal_int(&c.value) {
+                    Some(v) => v,
+                    None => return false,
+                };
+                if s == 0 {
+                    return false;
+                }
+                (Some(&a.value), &b.value, s)
+            }
+            _ => return false,
+        };
+
+        // ForCount semantics: initialise var = start - step_val, then on each
+        // iteration: next = var + step_val; if next op stop → var=next (continue)
+        // else → jump (exit).  This way the body always sees the current value
+        // and the variable retains its last iteration value after normal exit.
+        let cmp_op = if step_val > 0 {
+            BinaryOp::Lt
+        } else {
+            BinaryOp::Gt
+        };
+        let step_idx = self.intern_const(Value::Int(step_val));
+
+        // ── 1. Initialise var_reg = start - step_val ─────────────────────
+        //    For the common range(n) case (start=0), init = -step_val.
+        let neg_step_idx = self.intern_const(Value::Int(step_val.wrapping_neg()));
+        if let Some(start) = start_opt {
+            let r = self.compile_expr(start);
+            // var_reg = r + (-step_val) = r - step_val
+            self.emit(Insn::BinOpConst(var_reg, r, BinaryOp::Add, neg_step_idx));
+            self.free_temp(r);
+        } else {
+            // start = 0; init = -step_val
+            self.emit(Insn::LoadConst(var_reg, neg_step_idx));
+        }
+
+        // ── 2. ForCount instruction at loop top ───────────────────────────
+        //    If stop is a literal integer use the Const variant (avoids a temp
+        //    register and a register read each iteration).  Otherwise compile
+        //    stop once into a temp that lives for the loop duration.
+        let loop_start = self.pc();
+        let (exit_jmp, stop_temp) = if let Some(stop_val) = extract_literal_int(stop_expr) {
+            let stop_idx = self.intern_const(Value::Int(stop_val));
+            let jmp = self.emit(Insn::ForCountConst(var_reg, cmp_op, stop_idx, step_idx, 0));
+            (jmp, None)
+        } else {
+            let r = self.compile_expr(stop_expr);
+            // Copy to a temp if the stop expression resolved to a local register
+            // so body mutations of that variable don't affect our bound.
+            let sr = if r < self.base_temp {
+                let t = self.alloc_temp();
+                self.emit(Insn::Move(t, r));
+                t
+            } else {
+                r
+            };
+            let jmp = self.emit(Insn::ForCountReg(var_reg, cmp_op, sr, step_idx, 0));
+            (jmp, Some(sr))
+        };
+
+        // ── 3. Body ──────────────────────────────────────────────────────
+        //    `continue` → loop_start (ForCount does the increment automatically)
+        self.mark_def(var_reg);
+        self.loops.push(LoopCtx {
+            break_patches: Vec::new(),
+            continue_target: Some(loop_start),
+            continue_patches: Vec::new(),
+        });
+        let saved = self.def_set;
+        self.compile_block(body);
+        self.def_set = saved;
+        if self.failed {
+            return true;
+        }
+
+        // ── 4. Back edge ─────────────────────────────────────────────────
+        let back_offset = loop_start as i32 - (self.pc() as i32 + 1);
+        self.emit(Insn::Jump(back_offset));
+
+        // ── 5. Exit + else ───────────────────────────────────────────────
+        self.patch_jump(exit_jmp);
+        if let Some(sr) = stop_temp {
+            self.free_temp(sr);
+        }
+        let ctx = self.loops.pop().unwrap();
         if let Some(else_stmts) = else_branch {
             self.compile_block(else_stmts);
             if self.failed {
@@ -1504,29 +1880,34 @@ impl Compiler {
         body: &[Stmt],
         else_branch: Option<&[Stmt]>,
     ) {
+        if self.try_compile_for_range(target, iter_expr, body, else_branch) {
+            return;
+        }
         let iter_slot = self.alloc_iter();
         let src = self.compile_expr(iter_expr);
         self.emit(Insn::GetIter(iter_slot, src));
         self.free_temp(src);
         let loop_start = self.pc();
-        let item_reg = self.alloc_temp();
-        let exit_jmp = self.emit(Insn::ForIter(item_reg, iter_slot, 0));
+        // For a local-variable target, write ForIter directly into the local register
+        // to avoid an extra Move per iteration. For all other cases, use a temp.
+        let for_dst = if let AssignTarget::Name(n) = target {
+            self.local_reg(n).unwrap_or_else(|| self.alloc_temp())
+        } else {
+            self.alloc_temp()
+        };
+        let exit_jmp = self.emit(Insn::ForIter(for_dst, iter_slot, 0));
         match target {
             AssignTarget::Name(name) => {
-                if let Some(var_reg) = self.local_reg(name) {
-                    if item_reg != var_reg {
-                        self.emit(Insn::Move(var_reg, item_reg));
-                    }
-                    self.free_temp(item_reg);
-                } else {
+                if self.local_reg(name).is_none() {
                     let name_idx = self.intern_name(name);
-                    self.emit(Insn::StoreGlobal(name_idx, item_reg));
-                    self.free_temp(item_reg);
+                    self.emit(Insn::StoreGlobal(name_idx, for_dst));
+                    self.free_temp(for_dst);
                 }
+                // local case: for_dst == var_reg, already written — no Move needed
             }
             AssignTarget::Tuple(targets) => {
                 let n = targets.len() as u8;
-                let base = item_reg + 1;
+                let base = for_dst + 1;
                 if base as usize + n as usize > 256 {
                     self.failed = true;
                     return;
@@ -1535,7 +1916,7 @@ impl Compiler {
                 if self.next_temp - 1 > self.max_reg {
                     self.max_reg = self.next_temp - 1;
                 }
-                self.emit(Insn::Unpack(base, item_reg, n));
+                self.emit(Insn::Unpack(base, for_dst, n));
                 for (i, t) in targets.iter().enumerate() {
                     match t {
                         AssignTarget::Name(name) => {
@@ -1552,7 +1933,7 @@ impl Compiler {
                         }
                     }
                 }
-                self.next_temp = item_reg;
+                self.next_temp = for_dst;
             }
             _ => {
                 self.failed = true;
@@ -1561,7 +1942,8 @@ impl Compiler {
         }
         self.loops.push(LoopCtx {
             break_patches: Vec::new(),
-            continue_target: loop_start,
+            continue_target: Some(loop_start),
+            continue_patches: Vec::new(),
         });
         let saved_def_set = self.def_set;
         self.mark_target_def(target);
@@ -1869,6 +2251,9 @@ impl Compiler {
         if let Some(reg) = self.local_reg(name) {
             self.mark_def(reg);
         }
+        if is_pure && decorators.is_empty() {
+            self.pure_locals.insert(name.to_string());
+        }
         self.free_temp(dst);
     }
 
@@ -2030,7 +2415,7 @@ impl Compiler {
             }
         }
         // Normal finally exit
-        if let Some(outer_idx) = outer_finally_patch {
+        if outer_finally_patch.is_some() {
             self.emit(Insn::PopExcept);
             let finally_stmts = finally_branch.unwrap();
             self.compile_block(finally_stmts);
@@ -2245,16 +2630,64 @@ impl Compiler {
 
     // ── Expression compilation ────────────────────────────────────────────────
 
+    /// Retarget the last emitted instruction's dst from `from` to `to`.
+    /// Returns true if the instruction was retargeted (had dst == from).
+    fn retarget_last(&mut self, from: Reg, to: Reg) -> bool {
+        let Some(insn) = self.insns.last_mut() else {
+            return false;
+        };
+        let dst = match insn {
+            Insn::BinOp(d, ..)
+            | Insn::BinOpInPlace(d, ..)
+            | Insn::BinOpConst(d, ..)
+            | Insn::UnaryOp(d, ..)
+            | Insn::LoadConst(d, ..)
+            | Insn::LoadNone(d)
+            | Insn::LoadGlobal(d, ..)
+            | Insn::Move(d, ..)
+            | Insn::GetAttr(d, ..)
+            | Insn::GetItem(d, ..)
+            // Call is NOT retargetable: Call(func_reg, argc) uses func_reg as both
+            // the function source and the result destination. Retargeting it to a
+            // different register would point the call at the wrong function.
+            | Insn::MakeFunction(d, ..)
+            | Insn::MakeClass(d, ..)
+            | Insn::BuildList(d, ..)
+            | Insn::BuildTuple(d, ..)
+            | Insn::BuildDict(d, ..)
+            | Insn::ForIter(d, ..)
+            | Insn::LoadExc(d)
+            | Insn::ImportModule(d, ..) => d,
+            _ => return false,
+        };
+        if *dst == from {
+            *dst = to;
+            true
+        } else {
+            false
+        }
+    }
+
     fn compile_expr_into(&mut self, expr: &Expr, dst: Reg) {
         if self.failed {
             return;
         }
         let saved_next = self.next_temp;
+        let insn_before = self.insns.len();
         let r = self.compile_expr(expr);
         if r != dst {
-            self.emit(Insn::Move(dst, r));
-            if r >= self.base_temp {
+            // Safe to retarget only when the expression compiled to EXACTLY one
+            // instruction and the result is a fresh temp: guarantees no control
+            // flow or multi-instruction sequences where other branches still write
+            // to `r` and would be missed by retargeting only the last instruction.
+            let single = self.insns.len() == insn_before + 1;
+            if single && r >= self.base_temp && self.retarget_last(r, dst) {
                 self.next_temp = saved_next;
+            } else {
+                self.emit(Insn::Move(dst, r));
+                if r >= self.base_temp {
+                    self.next_temp = saved_next;
+                }
             }
         }
     }
@@ -2310,6 +2743,15 @@ impl Compiler {
                 }
             }
             Expr::Unary { op, expr } => {
+                if let Some(val) = fold_constant(&Expr::Unary {
+                    op: *op,
+                    expr: expr.clone(),
+                }) {
+                    let idx = self.intern_const(val);
+                    let dst = self.alloc_temp();
+                    self.emit(Insn::LoadConst(dst, idx));
+                    return dst;
+                }
                 let src = self.compile_expr(expr);
                 let dst = self.ensure_dst(src);
                 self.emit(Insn::UnaryOp(dst, *op, src));
@@ -2324,8 +2766,7 @@ impl Compiler {
                     }
                     let jmp = self.emit(Insn::JumpIfFalse(dst, 0));
                     let saved = self.next_temp;
-                    let rhs = self.compile_expr(right);
-                    self.emit(Insn::Move(dst, rhs));
+                    self.compile_expr_into(right, dst);
                     self.next_temp = saved;
                     self.patch_jump(jmp);
                     dst
@@ -2338,13 +2779,19 @@ impl Compiler {
                     }
                     let jmp = self.emit(Insn::JumpIfTrue(dst, 0));
                     let saved = self.next_temp;
-                    let rhs = self.compile_expr(right);
-                    self.emit(Insn::Move(dst, rhs));
+                    self.compile_expr_into(right, dst);
                     self.next_temp = saved;
                     self.patch_jump(jmp);
                     dst
                 }
                 _ => {
+                    // Constant fold: if both sides are literals, compute at compile time.
+                    if let Some(val) = fold_constant(expr) {
+                        let idx = self.intern_const(val);
+                        let dst = self.alloc_temp();
+                        self.emit(Insn::LoadConst(dst, idx));
+                        return dst;
+                    }
                     let lhs = self.compile_expr(left);
                     let dst = self.ensure_dst(lhs);
                     if let Some(const_idx) = self.try_literal_const_idx(right) {
@@ -2358,6 +2805,13 @@ impl Compiler {
                 }
             },
             Expr::Compare { left, ops } => {
+                // Constant fold: e.g. `1 < 2` at compile time.
+                if let Some(val) = fold_constant(expr) {
+                    let idx = self.intern_const(val);
+                    let dst = self.alloc_temp();
+                    self.emit(Insn::LoadConst(dst, idx));
+                    return dst;
+                }
                 if ops.len() == 1 {
                     let (cmp_op, right) = &ops[0];
                     let lhs = self.compile_expr(left);
@@ -2499,15 +2953,27 @@ impl Compiler {
                     let k_slot = base + (i * 2) as u8;
                     let v_slot = base + (i * 2 + 1) as u8;
                     let saved = self.next_temp;
+                    let insn_before = self.insns.len();
                     let kr = self.compile_expr(key_expr);
                     if kr != k_slot {
-                        self.emit(Insn::Move(k_slot, kr));
+                        let single = self.insns.len() == insn_before + 1;
+                        if single && kr >= self.base_temp && self.retarget_last(kr, k_slot) {
+                            // retargeted in place — no Move needed
+                        } else {
+                            self.emit(Insn::Move(k_slot, kr));
+                        }
                     }
                     self.next_temp = saved;
                     let saved = self.next_temp;
+                    let insn_before = self.insns.len();
                     let vr = self.compile_expr(val_expr);
                     if vr != v_slot {
-                        self.emit(Insn::Move(v_slot, vr));
+                        let single = self.insns.len() == insn_before + 1;
+                        if single && vr >= self.base_temp && self.retarget_last(vr, v_slot) {
+                            // retargeted in place — no Move needed
+                        } else {
+                            self.emit(Insn::Move(v_slot, vr));
+                        }
                     }
                     self.next_temp = saved;
                 }
@@ -2574,13 +3040,24 @@ impl Compiler {
         for (i, arg) in args.iter().enumerate() {
             let arg_reg = func_reg + 1 + i as u8;
             let saved = self.next_temp;
+            let insn_before = self.insns.len();
             let r = self.compile_expr(&arg.value);
             if r != arg_reg {
-                self.emit(Insn::Move(arg_reg, r));
+                let single = self.insns.len() == insn_before + 1;
+                if single && r >= self.base_temp && self.retarget_last(r, arg_reg) {
+                    // retargeted in place — no Move needed
+                } else {
+                    self.emit(Insn::Move(arg_reg, r));
+                }
             }
             self.next_temp = saved;
         }
-        self.emit(Insn::Call(func_reg, argc));
+        let is_pure_callee = matches!(func, Expr::Var(n) if self.pure_locals.contains(n.as_str()));
+        if is_pure_callee {
+            self.emit(Insn::CallMemo(func_reg, argc));
+        } else {
+            self.emit(Insn::Call(func_reg, argc));
+        }
         self.next_temp = func_reg + 1;
         func_reg
     }
@@ -2743,9 +3220,15 @@ impl Compiler {
         for (i, item) in items.iter().enumerate() {
             let slot = base + i as u8;
             let saved = self.next_temp;
+            let insn_before = self.insns.len();
             let r = self.compile_expr(item);
             if r != slot {
-                self.emit(Insn::Move(slot, r));
+                let single = self.insns.len() == insn_before + 1;
+                if single && r >= self.base_temp && self.retarget_last(r, slot) {
+                    // retargeted in place — no Move needed
+                } else {
+                    self.emit(Insn::Move(slot, r));
+                }
             }
             self.next_temp = saved;
         }

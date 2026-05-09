@@ -685,10 +685,38 @@ result = fact(10)
 
     #[test]
     fn vm_factorial_recursive() {
-        let interpreter = run_program(
-            "def fact(n):\n    if n <= 1: return 1\n    return n * fact(n - 1)\nresult = fact(10)\n",
-        );
-        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(3628800)));
+        // run_bytecode debug-mode frame is large (~150 KB); spawn with explicit
+        // stack so this test stays stable as new VM arms are added.
+        let ok: bool = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let interpreter = run_program(
+                    "def fact(n):\n    if n <= 1: return 1\n    return n * fact(n - 1)\nresult = fact(10)\n",
+                );
+                interpreter.lookup_name("result").unwrap() == Some(Value::Int(3628800))
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(ok);
+    }
+
+    #[test]
+    fn vm_pure_fn_memoized_fib() {
+        // fib(35) without memoization requires ~29M recursive calls and takes seconds.
+        // With CallMemo, each unique n is computed once and cached — must finish fast.
+        let ok: bool = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let interpreter = run_program(
+                    "def fib(n):\n    if n <= 1: return n\n    return fib(n-1) + fib(n-2)\nresult = fib(35)\n",
+                );
+                interpreter.lookup_name("result").unwrap() == Some(Value::Int(9227465))
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(ok);
     }
 
     #[test]

@@ -61,7 +61,11 @@ impl Interpreter {
             match insn {
                 // ── Loads ────────────────────────────────────────────────
                 Insn::LoadConst(dst, idx) => {
-                    regs[*dst as usize] = Some(code.consts[*idx as usize].clone());
+                    if let Value::Int(n) = &code.consts[*idx as usize] {
+                        regs[*dst as usize] = Some(Value::Int(*n));
+                    } else {
+                        regs[*dst as usize] = Some(code.consts[*idx as usize].clone());
+                    }
                 }
                 Insn::LoadGlobal(dst, name_idx) => {
                     let name = &code.names[*name_idx as usize];
@@ -83,70 +87,94 @@ impl Interpreter {
                     regs[*dst as usize] = Some(Value::None);
                 }
                 Insn::Move(dst, src) => {
+                    if let Some(Value::Int(n)) = &regs[*src as usize] {
+                        regs[*dst as usize] = Some(Value::Int(*n));
+                        continue;
+                    }
                     let v = vm_try!(vm_read(regs, *src, num_locals));
                     regs[*dst as usize] = Some(v);
                 }
 
                 // ── Arithmetic / Logic ───────────────────────────────────
                 Insn::BinOp(dst, lhs, op, rhs) => {
+                    // Fast path: borrow both Int operands to avoid 2× Value clone.
+                    if let (Some(Value::Int(a)), Some(Value::Int(b))) =
+                        (&regs[*lhs as usize], &regs[*rhs as usize])
+                    {
+                        match op {
+                            BinaryOp::Add    => { regs[*dst as usize] = Some(Value::Int(a.wrapping_add(*b))); continue; }
+                            BinaryOp::Sub    => { regs[*dst as usize] = Some(Value::Int(a.wrapping_sub(*b))); continue; }
+                            BinaryOp::Mul    => { regs[*dst as usize] = Some(Value::Int(a.wrapping_mul(*b))); continue; }
+                            BinaryOp::BitAnd => { regs[*dst as usize] = Some(Value::Int(a & b)); continue; }
+                            BinaryOp::BitOr  => { regs[*dst as usize] = Some(Value::Int(a | b)); continue; }
+                            BinaryOp::BitXor => { regs[*dst as usize] = Some(Value::Int(a ^ b)); continue; }
+                            BinaryOp::LShift => { regs[*dst as usize] = Some(Value::Int(a << (*b & 63))); continue; }
+                            BinaryOp::RShift => { regs[*dst as usize] = Some(Value::Int(a >> (*b & 63))); continue; }
+                            BinaryOp::Eq  => { regs[*dst as usize] = Some(Value::Bool(a == b)); continue; }
+                            BinaryOp::Ne  => { regs[*dst as usize] = Some(Value::Bool(a != b)); continue; }
+                            BinaryOp::Lt  => { regs[*dst as usize] = Some(Value::Bool(a < b)); continue; }
+                            BinaryOp::Le  => { regs[*dst as usize] = Some(Value::Bool(a <= b)); continue; }
+                            BinaryOp::Gt  => { regs[*dst as usize] = Some(Value::Bool(a > b)); continue; }
+                            BinaryOp::Ge  => { regs[*dst as usize] = Some(Value::Bool(a >= b)); continue; }
+                            _ => {}
+                        }
+                    }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = vm_try!(vm_read(regs, *rhs, num_locals));
-                    let result = match (&l, op, &r) {
-                        (Value::Int(a), BinaryOp::Add, Value::Int(b)) => {
-                            Value::Int(a.wrapping_add(*b))
-                        }
-                        (Value::Int(a), BinaryOp::Sub, Value::Int(b)) => {
-                            Value::Int(a.wrapping_sub(*b))
-                        }
-                        (Value::Int(a), BinaryOp::Mul, Value::Int(b)) => {
-                            Value::Int(a.wrapping_mul(*b))
-                        }
-                        (Value::Int(a), BinaryOp::Eq, Value::Int(b)) => Value::Bool(a == b),
-                        (Value::Int(a), BinaryOp::Ne, Value::Int(b)) => Value::Bool(a != b),
-                        (Value::Int(a), BinaryOp::Lt, Value::Int(b)) => Value::Bool(a < b),
-                        (Value::Int(a), BinaryOp::Le, Value::Int(b)) => Value::Bool(a <= b),
-                        (Value::Int(a), BinaryOp::Gt, Value::Int(b)) => Value::Bool(a > b),
-                        (Value::Int(a), BinaryOp::Ge, Value::Int(b)) => Value::Bool(a >= b),
-                        _ => vm_try!(self.eval_binary(l, *op, r)),
-                    };
-                    regs[*dst as usize] = Some(result);
+                    regs[*dst as usize] = Some(vm_try!(self.eval_binary(l, *op, r)));
                 }
                 Insn::BinOpInPlace(dst, lhs, op, rhs) => {
+                    // Fast path: borrow both Int operands to avoid 2× Value clone.
+                    if let (Some(Value::Int(a)), Some(Value::Int(b))) =
+                        (&regs[*lhs as usize], &regs[*rhs as usize])
+                    {
+                        match op {
+                            BinaryOp::Add    => { regs[*dst as usize] = Some(Value::Int(a.wrapping_add(*b))); continue; }
+                            BinaryOp::Sub    => { regs[*dst as usize] = Some(Value::Int(a.wrapping_sub(*b))); continue; }
+                            BinaryOp::Mul    => { regs[*dst as usize] = Some(Value::Int(a.wrapping_mul(*b))); continue; }
+                            BinaryOp::BitAnd => { regs[*dst as usize] = Some(Value::Int(a & b)); continue; }
+                            BinaryOp::BitOr  => { regs[*dst as usize] = Some(Value::Int(a | b)); continue; }
+                            BinaryOp::BitXor => { regs[*dst as usize] = Some(Value::Int(a ^ b)); continue; }
+                            BinaryOp::LShift => { regs[*dst as usize] = Some(Value::Int(a << (*b & 63))); continue; }
+                            BinaryOp::RShift => { regs[*dst as usize] = Some(Value::Int(a >> (*b & 63))); continue; }
+                            BinaryOp::Eq  => { regs[*dst as usize] = Some(Value::Bool(a == b)); continue; }
+                            BinaryOp::Ne  => { regs[*dst as usize] = Some(Value::Bool(a != b)); continue; }
+                            BinaryOp::Lt  => { regs[*dst as usize] = Some(Value::Bool(a < b)); continue; }
+                            BinaryOp::Le  => { regs[*dst as usize] = Some(Value::Bool(a <= b)); continue; }
+                            BinaryOp::Gt  => { regs[*dst as usize] = Some(Value::Bool(a > b)); continue; }
+                            BinaryOp::Ge  => { regs[*dst as usize] = Some(Value::Bool(a >= b)); continue; }
+                            _ => {}
+                        }
+                    }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = vm_try!(vm_read(regs, *rhs, num_locals));
-                    let result = match (&l, op, &r) {
-                        (Value::Int(a), BinaryOp::Add, Value::Int(b)) => {
-                            Value::Int(a.wrapping_add(*b))
-                        }
-                        (Value::Int(a), BinaryOp::Sub, Value::Int(b)) => {
-                            Value::Int(a.wrapping_sub(*b))
-                        }
-                        (Value::Int(a), BinaryOp::Mul, Value::Int(b)) => {
-                            Value::Int(a.wrapping_mul(*b))
-                        }
-                        (Value::Int(a), BinaryOp::Eq, Value::Int(b)) => Value::Bool(a == b),
-                        (Value::Int(a), BinaryOp::Ne, Value::Int(b)) => Value::Bool(a != b),
-                        (Value::Int(a), BinaryOp::Lt, Value::Int(b)) => Value::Bool(a < b),
-                        (Value::Int(a), BinaryOp::Le, Value::Int(b)) => Value::Bool(a <= b),
-                        (Value::Int(a), BinaryOp::Gt, Value::Int(b)) => Value::Bool(a > b),
-                        (Value::Int(a), BinaryOp::Ge, Value::Int(b)) => Value::Bool(a >= b),
-                        _ => {
-                            if *op == BinaryOp::MatMul {
-                                if let Some(v) =
-                                    vm_try!(self.try_inplace_matmul(l.clone(), r.clone()))
-                                {
-                                    v
-                                } else {
-                                    vm_try!(self.eval_binary(l, BinaryOp::MatMul, r))
-                                }
-                            } else {
-                                vm_try!(self.eval_binary(l, *op, r))
-                            }
-                        }
+                    let result = if *op == BinaryOp::MatMul {
+                        if let Some(v) = vm_try!(self.try_inplace_matmul(l.clone(), r.clone())) { v }
+                        else { vm_try!(self.eval_binary(l, BinaryOp::MatMul, r)) }
+                    } else {
+                        vm_try!(self.eval_binary(l, *op, r))
                     };
                     regs[*dst as usize] = Some(result);
                 }
                 Insn::BinOpConst(dst, lhs, op, const_idx) => {
+                    // Fast path: borrow Int operands to avoid 2× Value clone.
+                    if let (Some(Value::Int(a)), Value::Int(b)) = (
+                        &regs[*lhs as usize],
+                        &code.consts[*const_idx as usize],
+                    ) {
+                        match op {
+                            BinaryOp::Add => { regs[*dst as usize] = Some(Value::Int(a.wrapping_add(*b))); continue; }
+                            BinaryOp::Sub => { regs[*dst as usize] = Some(Value::Int(a.wrapping_sub(*b))); continue; }
+                            BinaryOp::Mul => { regs[*dst as usize] = Some(Value::Int(a.wrapping_mul(*b))); continue; }
+                            BinaryOp::Eq  => { regs[*dst as usize] = Some(Value::Bool(a == b)); continue; }
+                            BinaryOp::Ne  => { regs[*dst as usize] = Some(Value::Bool(a != b)); continue; }
+                            BinaryOp::Lt  => { regs[*dst as usize] = Some(Value::Bool(a < b)); continue; }
+                            BinaryOp::Le  => { regs[*dst as usize] = Some(Value::Bool(a <= b)); continue; }
+                            BinaryOp::Gt  => { regs[*dst as usize] = Some(Value::Bool(a > b)); continue; }
+                            BinaryOp::Ge  => { regs[*dst as usize] = Some(Value::Bool(a >= b)); continue; }
+                            _ => {}
+                        }
+                    }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = code.consts[*const_idx as usize].clone();
                     let result = match (&l, op, &r) {
@@ -203,6 +231,33 @@ impl Interpreter {
                     }
                 }
                 Insn::GetItem(dst, obj, idx) => {
+                    // Fast path: List/Tuple indexed by Int — borrow idx, avoid clone.
+                    if let Some(Value::Int(raw_i)) = &regs[*idx as usize] {
+                        let raw_i = *raw_i;
+                        match regs[*obj as usize].as_ref() {
+                            Some(Value::List(items)) => {
+                                let len = items.len() as i64;
+                                let j = if raw_i < 0 { raw_i + len } else { raw_i };
+                                if j >= 0 && (j as usize) < items.len() {
+                                    regs[*dst as usize] = Some(items[j as usize].clone());
+                                } else {
+                                    vm_try!(Err(PyError::Runtime("index out of range".into())));
+                                }
+                                continue;
+                            }
+                            Some(Value::Tuple(items)) => {
+                                let len = items.len() as i64;
+                                let j = if raw_i < 0 { raw_i + len } else { raw_i };
+                                if j >= 0 && (j as usize) < items.len() {
+                                    regs[*dst as usize] = Some(items[j as usize].clone());
+                                } else {
+                                    vm_try!(Err(PyError::Runtime("index out of range".into())));
+                                }
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
                     let idx_val = vm_try!(vm_read(regs, *idx, num_locals));
                     // Slice key: tuple of (lo, hi, step) produced by the compiler.
                     if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
@@ -333,14 +388,96 @@ impl Interpreter {
                     pc = (pc as i32 + offset) as usize;
                 }
                 Insn::JumpIfFalse(cond, offset) => {
+                    match &regs[*cond as usize] {
+                        Some(Value::Int(n))  => { if *n == 0 { pc = (pc as i32 + offset) as usize; } continue; }
+                        Some(Value::Bool(b)) => { if !b     { pc = (pc as i32 + offset) as usize; } continue; }
+                        _ => {}
+                    }
                     if !vm_try!(vm_read(regs, *cond, num_locals)).truthy() {
                         pc = (pc as i32 + offset) as usize;
                     }
                 }
                 Insn::JumpIfTrue(cond, offset) => {
+                    match &regs[*cond as usize] {
+                        Some(Value::Int(n))  => { if *n != 0 { pc = (pc as i32 + offset) as usize; } continue; }
+                        Some(Value::Bool(b)) => { if *b      { pc = (pc as i32 + offset) as usize; } continue; }
+                        _ => {}
+                    }
                     if vm_try!(vm_read(regs, *cond, num_locals)).truthy() {
                         pc = (pc as i32 + offset) as usize;
                     }
+                }
+                Insn::CmpJumpIfFalse(lhs, op, rhs, offset) => {
+                    if let (Some(Value::Int(a)), Some(Value::Int(b))) =
+                        (&regs[*lhs as usize], &regs[*rhs as usize])
+                    {
+                        match op {
+                            BinaryOp::Eq => { if !(a == b) { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Ne => { if !(a != b) { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Lt => { if !(a < b)  { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Le => { if !(a <= b) { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Gt => { if !(a > b)  { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Ge => { if !(a >= b) { pc = (pc as i32 + offset) as usize; } continue; }
+                            _ => {}
+                        }
+                    }
+                    let l = vm_try!(vm_read(regs, *lhs, num_locals));
+                    let r = vm_try!(vm_read(regs, *rhs, num_locals));
+                    if !vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = (pc as i32 + offset) as usize; }
+                }
+                Insn::CmpJumpIfTrue(lhs, op, rhs, offset) => {
+                    if let (Some(Value::Int(a)), Some(Value::Int(b))) =
+                        (&regs[*lhs as usize], &regs[*rhs as usize])
+                    {
+                        match op {
+                            BinaryOp::Eq => { if a == b { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Ne => { if a != b { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Lt => { if a < b  { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Le => { if a <= b { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Gt => { if a > b  { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Ge => { if a >= b { pc = (pc as i32 + offset) as usize; } continue; }
+                            _ => {}
+                        }
+                    }
+                    let l = vm_try!(vm_read(regs, *lhs, num_locals));
+                    let r = vm_try!(vm_read(regs, *rhs, num_locals));
+                    if vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = (pc as i32 + offset) as usize; }
+                }
+                Insn::CmpJumpIfFalseConst(lhs, op, const_idx, offset) => {
+                    if let (Some(Value::Int(a)), Value::Int(b)) =
+                        (&regs[*lhs as usize], &code.consts[*const_idx as usize])
+                    {
+                        match op {
+                            BinaryOp::Eq => { if !(a == b) { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Ne => { if !(a != b) { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Lt => { if !(a < b)  { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Le => { if !(a <= b) { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Gt => { if !(a > b)  { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Ge => { if !(a >= b) { pc = (pc as i32 + offset) as usize; } continue; }
+                            _ => {}
+                        }
+                    }
+                    let l = vm_try!(vm_read(regs, *lhs, num_locals));
+                    let r = code.consts[*const_idx as usize].clone();
+                    if !vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = (pc as i32 + offset) as usize; }
+                }
+                Insn::CmpJumpIfTrueConst(lhs, op, const_idx, offset) => {
+                    if let (Some(Value::Int(a)), Value::Int(b)) =
+                        (&regs[*lhs as usize], &code.consts[*const_idx as usize])
+                    {
+                        match op {
+                            BinaryOp::Eq => { if a == b { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Ne => { if a != b { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Lt => { if a < b  { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Le => { if a <= b { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Gt => { if a > b  { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Ge => { if a >= b { pc = (pc as i32 + offset) as usize; } continue; }
+                            _ => {}
+                        }
+                    }
+                    let l = vm_try!(vm_read(regs, *lhs, num_locals));
+                    let r = code.consts[*const_idx as usize].clone();
+                    if vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = (pc as i32 + offset) as usize; }
                 }
 
                 // ── Exception handling ───────────────────────────────────
@@ -403,6 +540,56 @@ impl Interpreter {
                     let func_val = vm_try!(vm_read(regs, *func_reg, num_locals));
                     // Reuse the interpreter-level buffer to avoid a per-call heap
                     // allocation in the common (non-recursive) case.
+                    let mut buf = std::mem::take(&mut self.call_arg_buf);
+                    buf.clear();
+                    for i in 0..*argc as usize {
+                        buf.push(ExpandedCallArg {
+                            name: None,
+                            value: vm_try!(vm_read(
+                                regs,
+                                *func_reg + 1 + i as u8,
+                                num_locals
+                            )),
+                        });
+                    }
+                    let call_result = self.call_function_expanded(func_val, &buf);
+                    self.call_arg_buf = buf;
+                    regs[*func_reg as usize] = Some(vm_try!(call_result));
+                }
+
+                Insn::CallMemo(func_reg, argc) => {
+                    // Cache-first path for known-pure callees.
+                    if let Some(Value::Function(func)) = &regs[*func_reg as usize] {
+                        if func.is_pure {
+                            let fn_id = Rc::as_ptr(func) as usize;
+                            let mut key: Vec<crate::value::PyKey> =
+                                Vec::with_capacity(*argc as usize);
+                            let mut all_hashable = true;
+                            for i in 0..*argc as usize {
+                                match regs[*func_reg as usize + 1 + i]
+                                    .as_ref()
+                                    .and_then(|v| v.to_key())
+                                {
+                                    Some(k) => key.push(k),
+                                    None => {
+                                        all_hashable = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if all_hashable {
+                                if let Some(hit) =
+                                    self.fn_cache.get(&(fn_id, key)).cloned()
+                                {
+                                    regs[*func_reg as usize] = Some(hit);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    // Cache miss or unhashable args: normal call (call_function_expanded
+                    // will store the result in fn_cache on the way back).
+                    let func_val = vm_try!(vm_read(regs, *func_reg, num_locals));
                     let mut buf = std::mem::take(&mut self.call_arg_buf);
                     buf.clear();
                     for i in 0..*argc as usize {
@@ -596,6 +783,52 @@ impl Interpreter {
                         }
                     }
                 }
+                Insn::ForCountReg(var, cmp_op, stop_reg, step_idx, offset) => {
+                    let step = match &code.consts[*step_idx as usize] {
+                        Value::Int(s) => *s,
+                        _ => unreachable!("ForCountReg step must be Int"),
+                    };
+                    if let (Some(Value::Int(cur)), Some(Value::Int(stop))) =
+                        (&regs[*var as usize], &regs[*stop_reg as usize])
+                    {
+                        let next = cur.wrapping_add(step);
+                        let cont = match cmp_op {
+                            BinaryOp::Lt => next < *stop,
+                            BinaryOp::Gt => next > *stop,
+                            _ => unreachable!("ForCountReg uses Lt or Gt only"),
+                        };
+                        if cont { regs[*var as usize] = Some(Value::Int(next)); }
+                        else { pc = (pc as i32 + offset) as usize; }
+                    } else {
+                        vm_try!(Err(crate::error::PyError::Runtime(
+                            "for-range: non-integer counter or stop".into(),
+                        )))
+                    }
+                }
+                Insn::ForCountConst(var, cmp_op, stop_idx, step_idx, offset) => {
+                    let step = match &code.consts[*step_idx as usize] {
+                        Value::Int(s) => *s,
+                        _ => unreachable!("ForCountConst step must be Int"),
+                    };
+                    let stop = match &code.consts[*stop_idx as usize] {
+                        Value::Int(s) => *s,
+                        _ => unreachable!("ForCountConst stop must be Int"),
+                    };
+                    if let Some(Value::Int(cur)) = &regs[*var as usize] {
+                        let next = cur.wrapping_add(step);
+                        let cont = match cmp_op {
+                            BinaryOp::Lt => next < stop,
+                            BinaryOp::Gt => next > stop,
+                            _ => unreachable!("ForCountConst uses Lt or Gt only"),
+                        };
+                        if cont { regs[*var as usize] = Some(Value::Int(next)); }
+                        else { pc = (pc as i32 + offset) as usize; }
+                    } else {
+                        vm_try!(Err(crate::error::PyError::Runtime(
+                            "for-range: non-integer counter".into(),
+                        )))
+                    }
+                }
                 Insn::CheckLocal(reg, name_idx) => {
                     if regs[*reg as usize].is_none() {
                         let name = &code.names[*name_idx as usize];
@@ -607,7 +840,7 @@ impl Interpreter {
                 }
 
                 // ── Function / Class creation ────────────────────────────
-                Insn::MakeFunction(dst, proto_idx, defs_base, defs_n) => {
+                Insn::MakeFunction(dst, proto_idx, defs_base, _defs_n) => {
                     let proto = &code.fn_protos[*proto_idx as usize];
                     let proto_code = Rc::clone(&proto.code);
                     let proto_name = proto.name.clone();
