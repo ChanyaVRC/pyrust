@@ -3,32 +3,7 @@ use std::rc::Rc;
 
 use crate::ast::{AssignTarget, BinaryOp, CmpOp, Expr, FunctionParam, Stmt, UnaryOp};
 use crate::bytecode::{CellVar, FnCode, FnProto, Insn, Reg};
-use crate::value::{UserFunction, Value};
-
-/// Compile a user function to bytecode.  Always succeeds now that the VM
-/// handles all Python features.  Returns None only on internal limits
-/// (>255 locals, >255 nested protos, etc.).
-pub fn compile_fn(func: &UserFunction) -> Option<FnCode> {
-    // Detect which of the outer function's locals are captured by nested
-    // functions via `nonlocal`.  These become cell variables stored in the
-    // env rather than registers.
-    let cell_vars = collect_cell_vars(&func.body, &func.local_index);
-
-    let n = func.local_index.len();
-    if n > 255 {
-        return None;
-    }
-
-    let mut c = Compiler::new(
-        Rc::clone(&func.local_index),
-        Rc::clone(&func.global_names),
-        Rc::clone(&func.nonlocal_names),
-        func.def_bound_mask,
-        cell_vars,
-    );
-    c.compile_block(&func.body);
-    c.finish()
-}
+use crate::value::Value;
 
 /// Compile a top-level script body.  All script-level names are locals.
 ///
@@ -39,11 +14,10 @@ pub fn compile_script(
     local_index: Rc<HashMap<String, usize>>,
     repl_mode: bool,
 ) -> Option<FnCode> {
-    let empty: Rc<HashSet<String>> = Rc::new(HashSet::new());
     // Script-level code cannot have nonlocal, and nothing captures script
     // locals via nonlocal from a nested scope at this level.
     let cell_vars = collect_cell_vars(stmts, &local_index);
-    let mut c = Compiler::new(local_index, Rc::clone(&empty), empty, 0, cell_vars);
+    let mut c = Compiler::new(local_index, 0, cell_vars);
     if repl_mode {
         for stmt in stmts {
             if let Stmt::Expr(e) = stmt {
@@ -747,8 +721,6 @@ struct LoopCtx {
 
 struct Compiler {
     local_index: Rc<HashMap<String, usize>>,
-    global_names: Rc<HashSet<String>>,
-    nonlocal_names: Rc<HashSet<String>>,
     cell_vars: HashSet<String>,
     insns: Vec<Insn>,
     consts: Vec<Value>,
@@ -770,8 +742,6 @@ struct Compiler {
 impl Compiler {
     fn new(
         local_index: Rc<HashMap<String, usize>>,
-        global_names: Rc<HashSet<String>>,
-        nonlocal_names: Rc<HashSet<String>>,
         def_bound_mask: u64,
         cell_vars: Vec<CellVar>,
     ) -> Self {
@@ -780,23 +750,9 @@ impl Compiler {
         // base_temp must cover ALL local_index slots (including cell vars) so
         // that temp registers never overlap with local-variable slot numbers.
         let base_temp = n as Reg;
-        // Recompute def_bound_mask to skip cell vars (they're not in registers).
-        let mut adjusted_mask = 0u64;
-        for (name, &idx) in local_index.iter() {
-            if !cell_set.contains(name) && idx < 64 {
-                // The register index is idx minus how many cell vars precede it.
-                // But local_index already maps name → slot; cell vars won't be
-                // accessed as registers, so we just strip their bits.
-                if def_bound_mask & (1u64 << idx) != 0 {
-                    adjusted_mask |= 1u64 << idx;
-                }
-            }
-        }
 
         Self {
             local_index,
-            global_names,
-            nonlocal_names,
             cell_vars: cell_set,
             insns: Vec::new(),
             consts: Vec::new(),
@@ -1070,32 +1026,6 @@ impl Compiler {
         } else {
             let idx = self.intern_name(name);
             self.emit(Insn::StoreGlobal(idx, src));
-        }
-    }
-
-    /// Compile `target = <value already in src_reg>`.
-    fn compile_store_target(&mut self, target: &AssignTarget, src: Reg) {
-        match target {
-            AssignTarget::Name(name) => {
-                self.compile_store_name(name, src);
-            }
-            AssignTarget::Attr(obj_expr, attr) => {
-                let obj = self.compile_expr(obj_expr);
-                let name_idx = self.intern_name(attr);
-                self.emit(Insn::SetAttr(obj, name_idx, src));
-                self.free_temp(obj);
-            }
-            AssignTarget::Index(obj_expr, idx_expr) => {
-                let obj = self.compile_expr(obj_expr);
-                let idx = self.compile_expr(idx_expr);
-                self.emit(Insn::SetItem(obj, idx, src));
-                self.free_temp(idx);
-                self.free_temp(obj);
-            }
-            AssignTarget::Tuple(_) => {
-                // Caller must handle tuple targets separately.
-                self.failed = true;
-            }
         }
     }
 
@@ -2156,8 +2086,6 @@ impl Compiler {
 
         let mut sub = Compiler::new(
             Rc::clone(&inner_index_rc),
-            Rc::clone(&inner_global_rc),
-            Rc::clone(&inner_nonlocal_rc),
             def_bound,
             inner_cell_vars.clone(),
         );
@@ -2186,8 +2114,6 @@ impl Compiler {
             global_names: inner_global_rc,
             nonlocal_names: inner_nonlocal_rc,
             is_pure,
-            def_bound_mask: def_bound,
-            is_class_body: false,
         });
 
         // Compile default values (right-to-left in declaration, left-to-right in slots).
@@ -2270,13 +2196,7 @@ impl Compiler {
         let body_index_rc: Rc<HashMap<String, usize>> = Rc::new(body_index);
         let cell_vars = collect_cell_vars(body, &body_index_rc);
 
-        let mut sub = Compiler::new(
-            Rc::clone(&body_index_rc),
-            Rc::clone(&empty_global),
-            Rc::clone(&empty_nonlocal),
-            0,
-            cell_vars,
-        );
+        let mut sub = Compiler::new(Rc::clone(&body_index_rc), 0, cell_vars);
         sub.compile_block(body);
         // Add implicit ReturnNone at end of class body
         sub.emit(Insn::ReturnNone);
@@ -2303,8 +2223,6 @@ impl Compiler {
             global_names: empty_global,
             nonlocal_names: empty_nonlocal,
             is_pure: false,
-            def_bound_mask: 0,
-            is_class_body: true,
         });
 
         // Compile base class expressions.

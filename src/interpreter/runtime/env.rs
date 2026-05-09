@@ -162,26 +162,6 @@ impl Interpreter {
         lookup_name_in_env(&self.env, name)
     }
 
-    // Returns the EnvRef that owns `name`, respecting global/nonlocal declarations.
-    // Determines the env where assignments to `name` should land, resolving
-    // global/nonlocal declarations. Unlike resolve_name_env this always returns
-    // an env — variables not yet defined are written into the current scope.
-    fn resolve_assign_env_for(&self, name: &str) -> EnvRef {
-        let (is_global, is_nonlocal) = {
-            let env = self.env.borrow();
-            (env.global_names.contains(name), env.nonlocal_names.contains(name))
-        };
-        if is_global {
-            return module_env(&self.env);
-        }
-        if is_nonlocal {
-            if let Some(env) = find_enclosing_local_env_for_name(&self.env, name) {
-                return env;
-            }
-        }
-        Rc::clone(&self.env)
-    }
-
     fn resolve_name_env(&self, name: &str) -> Option<EnvRef> {
         let (is_global, is_nonlocal) = {
             let env = self.env.borrow();
@@ -195,38 +175,6 @@ impl Interpreter {
             return find_enclosing_local_env_for_name(&self.env, name);
         }
         find_env_for_name(&self.env, name)
-    }
-
-    fn declare_global_names(&self, names: &[String]) {
-        let mut env = self.env.borrow_mut();
-        Rc::make_mut(&mut env.global_names).extend(names.iter().cloned());
-    }
-
-    fn declare_nonlocal_names(&self, names: &[String]) -> Result<()> {
-        if self.env.borrow().parent.is_none() {
-            return Err(PyError::Runtime(
-                "nonlocal declaration not allowed at module level".to_string(),
-            ));
-        }
-
-        for name in names {
-            if self.env.borrow().global_names.contains(name) {
-                return Err(PyError::Runtime(format!(
-                    "name '{}' is nonlocal and global",
-                    name
-                )));
-            }
-            if !has_enclosing_local_binding(&self.env, name) {
-                return Err(PyError::Runtime(format!(
-                    "no binding for nonlocal '{}' found",
-                    name
-                )));
-            }
-        }
-
-        let mut env = self.env.borrow_mut();
-        Rc::make_mut(&mut env.nonlocal_names).extend(names.iter().cloned());
-        Ok(())
     }
 
     fn alloc_env(&mut self, parent: Option<EnvRef>) -> EnvRef {

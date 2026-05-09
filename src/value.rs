@@ -7,8 +7,6 @@ use std::rc::Rc;
 
 use indexmap::{IndexMap, IndexSet};
 
-use crate::ast::Stmt;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PyKey {
     Int(i64),
@@ -77,7 +75,6 @@ pub struct UserFunctionParam {
 pub struct UserFunction {
     pub name: String,
     pub params: Vec<UserFunctionParam>,
-    pub body: Vec<Stmt>,
     pub local_names: NameSet,
     pub local_index: Rc<HashMap<String, usize>>,
     pub global_names: NameSet,
@@ -86,9 +83,6 @@ pub struct UserFunction {
     /// True when static analysis found no side-effecting statements in the body.
     /// Pure functions with all-hashable arguments are transparently memoized.
     pub is_pure: bool,
-    /// Bitmask of def-bound slots: bit `i` set means slot `i` is always `Some`
-    /// after function entry (parameters + unconditional top-level assignments).
-    pub def_bound_mask: u64,
     /// Pre-compiled bytecode attached at function-definition time (via MakeFunction).
     /// Takes priority over the bytecode cache, so the body is never recompiled.
     pub precompiled_code: Option<Rc<crate::bytecode::FnCode>>,

@@ -94,11 +94,6 @@ fn eval_binary_float(op: BinaryOp, a: f64, b: f64) -> Option<Result<Value>> {
     }
 }
 
-/// True for expressions that are statically always-truthy (no side effects).
-fn is_const_true(expr: &Expr) -> bool {
-    matches!(expr, Expr::Bool(true) | Expr::Int(1))
-}
-
 /// Total order for Python values used by `sorted()` / `min()` / `max()`.
 /// Mirrors CPython's `<` semantics: numbers by magnitude, strings
 /// lexicographically, bools as 0/1.  Incomparable pairs fall back to
@@ -124,15 +119,6 @@ fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
             x.len().cmp(&y.len())
         }
         _ => std::cmp::Ordering::Equal,
-    }
-}
-
-/// True for expressions that are statically always-falsy (no side effects).
-fn is_const_false(expr: &Expr) -> bool {
-    match expr {
-        Expr::Bool(false) | Expr::Int(0) | Expr::None => true,
-        Expr::Float(f) => *f == 0.0,
-        _ => false,
     }
 }
 
@@ -314,25 +300,6 @@ fn has_local_binding_in_current_or_ancestor(env: &EnvRef, name: &str) -> bool {
     false
 }
 
-fn has_enclosing_local_binding(env: &EnvRef, name: &str) -> bool {
-    let mut current = env.borrow().parent.clone();
-    while let Some(candidate) = current {
-        let (is_function_scope, has_name, next) = {
-            let borrowed = candidate.borrow();
-            (
-                borrowed.parent.is_some(),
-                borrowed.local_names.contains(name),
-                borrowed.parent.clone(),
-            )
-        };
-        if is_function_scope && has_name {
-            return true;
-        }
-        current = next;
-    }
-    false
-}
-
 fn find_enclosing_local_env_for_name(env: &EnvRef, name: &str) -> Option<EnvRef> {
     let mut current = env.borrow().parent.clone();
     while let Some(candidate) = current {
@@ -363,58 +330,6 @@ fn lookup_name_in_enclosing_local_env(env: &EnvRef, name: &str) -> Result<Option
 }
 
 
-// Read `name` directly from an already-resolved env (fastlocals slot first,
-// then values HashMap).  Does not walk the env chain.
-fn read_local(env: &EnvRef, name: &str) -> Option<Value> {
-    let borrowed = env.borrow();
-    if let Some(fl) = &borrowed.fastlocals {
-        if let Some(&idx) = fl.index.get(name) {
-            return fl.slots[idx].clone();
-        }
-    }
-    borrowed.values.get(name).cloned()
-}
-
-// Read the item at `index` from the List/Tuple stored under `name` in `env`.
-// Checks fastlocals first, then falls back to the values HashMap.
-// Returns None if the name does not exist, is not a List/Tuple, or `index` is
-// out of bounds (the list may have been shortened during iteration).
-fn get_item_at(env: &EnvRef, name: &str, index: usize) -> Option<Value> {
-    let borrowed = env.borrow();
-    let list_val = if let Some(fl) = &borrowed.fastlocals {
-        if let Some(&idx) = fl.index.get(name) {
-            fl.slots[idx].as_ref()
-        } else {
-            borrowed.values.get(name)
-        }
-    } else {
-        borrowed.values.get(name)
-    };
-    match list_val? {
-        Value::List(items) | Value::Tuple(items) => items.get(index).cloned(),
-        _ => None,
-    }
-}
-
-// Return the length of the List/Tuple stored under `name` in `env`, or None
-// if the name does not exist or is not a List/Tuple.
-fn get_list_len(env: &EnvRef, name: &str) -> Option<usize> {
-    let borrowed = env.borrow();
-    let list_val = if let Some(fl) = &borrowed.fastlocals {
-        if let Some(&idx) = fl.index.get(name) {
-            fl.slots[idx].as_ref()
-        } else {
-            borrowed.values.get(name)
-        }
-    } else {
-        borrowed.values.get(name)
-    };
-    match list_val? {
-        Value::List(items) | Value::Tuple(items) => Some(items.len()),
-        _ => None,
-    }
-}
-
 // Write `value` into `env` for `name`, using fastlocals slot when available.
 #[inline]
 fn env_assign_local(env: &EnvRef, name: &str, value: Value) {
@@ -426,28 +341,6 @@ fn env_assign_local(env: &EnvRef, name: &str, value: Value) {
         }
     }
     borrowed.values.insert(name.to_string(), value);
-}
-
-// Swap `value` into `env` for `name`, returning the previous value (like HashMap::insert).
-fn env_replace_local(env: &EnvRef, name: &str, value: Value) -> Option<Value> {
-    let mut borrowed = env.borrow_mut();
-    if let Some(fl) = &mut borrowed.fastlocals {
-        if let Some(&idx) = fl.index.get(name) {
-            return fl.slots[idx].replace(value);
-        }
-    }
-    borrowed.values.insert(name.to_string(), value)
-}
-
-// Remove `name` from `env`, returning the previous value.
-fn env_remove_local(env: &EnvRef, name: &str) -> Option<Value> {
-    let mut borrowed = env.borrow_mut();
-    if let Some(fl) = &mut borrowed.fastlocals {
-        if let Some(&idx) = fl.index.get(name) {
-            return fl.slots[idx].take();
-        }
-    }
-    borrowed.values.remove(name)
 }
 
 // Walk the env chain and return the `EnvRef` that owns `name`, without cloning
@@ -795,74 +688,6 @@ pub(crate) fn compute_def_bound_mask(
         }
     }
     mask
-}
-
-/// Returns the set of names directly assigned anywhere in a block (including nested loops).
-fn collect_assigned_names(body: &[Stmt]) -> HashSet<String> {
-    let mut names = HashSet::new();
-    collect_assigned_names_in(body, &mut names);
-    names
-}
-
-fn collect_assigned_names_in(body: &[Stmt], names: &mut HashSet<String>) {
-    for stmt in body {
-        match stmt {
-            Stmt::Assign(target, _) => collect_target_names(target, names),
-            Stmt::AugAssign { target, .. } => collect_target_names(target, names),
-            Stmt::If { branches, else_branch } => {
-                for (_, b) in branches {
-                    collect_assigned_names_in(b, names);
-                }
-                if let Some(b) = else_branch {
-                    collect_assigned_names_in(b, names);
-                }
-            }
-            Stmt::While { body, .. } => collect_assigned_names_in(body, names),
-            Stmt::For { target, body, .. } => {
-                collect_target_names(target, names);
-                collect_assigned_names_in(body, names);
-            }
-            _ => {}
-        }
-    }
-}
-
-fn collect_target_names(target: &AssignTarget, names: &mut HashSet<String>) {
-    match target {
-        AssignTarget::Name(n) => {
-            names.insert(n.clone());
-        }
-        AssignTarget::Tuple(targets) => {
-            for t in targets {
-                collect_target_names(t, names);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Returns true if the expression is body-invariant for LICM purposes:
-/// no function calls, no attribute access, no index access, and every
-/// variable it reads is absent from `modified_names`.
-fn expr_is_body_invariant(expr: &Expr, modified_names: &HashSet<String>) -> bool {
-    match expr {
-        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::None => true,
-        Expr::Var(name) => !modified_names.contains(name.as_str()),
-        Expr::Binary { left, right, .. } => {
-            expr_is_body_invariant(left, modified_names)
-                && expr_is_body_invariant(right, modified_names)
-        }
-        Expr::Unary { expr, .. } => expr_is_body_invariant(expr, modified_names),
-        // Function calls or attribute / index access may have side effects or
-        // read mutable state — not invariant.
-        Expr::Call { .. } | Expr::Attr { .. } | Expr::Index { .. } => false,
-        // Tuple/List literals: check all elements.
-        Expr::Tuple(items) | Expr::List(items) => {
-            items.iter().all(|e| expr_is_body_invariant(e, modified_names))
-        }
-        // Default: not invariant (Compare, Ternary, Lambda, Slice, Dict, Set, …).
-        _ => false,
-    }
 }
 
 fn value_to_float(v: &Value, ctx: &str) -> Result<f64> {

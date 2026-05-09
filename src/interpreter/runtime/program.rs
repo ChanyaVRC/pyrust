@@ -63,18 +63,4 @@ impl Interpreter {
         Some(vm_result.map(|_| ()))
     }
 
-    fn apply_decorators(&mut self, mut value: Value, decorators: &[Expr]) -> Result<Value> {
-        for deco_expr in decorators.iter().rev() {
-            let deco = self.eval_expr(deco_expr)?;
-            value = self.call_function_expanded(
-                deco,
-                &[ExpandedCallArg {
-                    name: None,
-                    value,
-                }],
-            )?;
-        }
-        Ok(value)
-    }
-
 }

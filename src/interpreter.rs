@@ -22,7 +22,6 @@ const SPEC_THRESHOLD: u8 = 8;
 
 pub struct Interpreter {
     env: EnvRef,
-    class_closure_env: Option<EnvRef>,
     active_exception: Option<Value>,
     script_dir: Option<PathBuf>,
     module_cache: ModuleCache,
@@ -41,7 +40,6 @@ impl Default for Interpreter {
         install_exception_builtins(&env);
         Self {
             env,
-            class_closure_env: None,
             active_exception: None,
             script_dir: None,
             module_cache: Rc::new(RefCell::new(HashMap::new())),

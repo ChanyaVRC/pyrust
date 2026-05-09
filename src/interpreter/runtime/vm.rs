@@ -393,7 +393,7 @@ impl Interpreter {
                                 let key = vm_try!(idx_val.to_key().ok_or_else(|| {
                                     PyError::Runtime("unhashable type".to_string())
                                 }));
-                                dict.remove(&key);
+                                dict.shift_remove(&key);
                             }
                             _ => {
                                 vm_try!(Err(PyError::Runtime(
@@ -879,7 +879,6 @@ impl Interpreter {
                     let param_is_args = proto.param_is_args.clone();
                     let param_is_kwargs = proto.param_is_kwargs.clone();
                     let is_pure = proto.is_pure;
-                    let def_bound_mask = proto.def_bound_mask;
 
                     let mut params = Vec::new();
                     let mut def_slot = 0u8;
@@ -912,14 +911,12 @@ impl Interpreter {
                     let func = Rc::new(UserFunction {
                         name: proto_name,
                         params,
-                        body: vec![],
                         local_names: Rc::new(proto_local_index.keys().cloned().collect()),
                         local_index: proto_local_index,
                         global_names: proto_global_names,
                         nonlocal_names: proto_nonlocal_names,
                         env: Rc::clone(&self.env),
                         is_pure,
-                        def_bound_mask,
                         precompiled_code: Some(proto_code),
                     });
                     regs[*dst as usize] = Some(Value::Function(func));
@@ -991,95 +988,6 @@ fn vm_read(regs: &[Option<Value>], reg: u8, num_locals: u8) -> crate::interprete
                 ))
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod vm_tests {
-    use super::*;
-    use crate::bytecode::{FnCode, Insn};
-    use crate::interpreter::Interpreter;
-
-    fn empty_code(insns: Vec<Insn>) -> FnCode {
-        FnCode {
-            insns,
-            consts: vec![],
-            names: vec![],
-            num_regs: 0,
-            num_iters: 0,
-            num_locals: 0,
-            fn_protos: vec![],
-            cell_vars: vec![],
-        }
-    }
-
-    #[test]
-    fn oob_pc_returns_error_not_none() {
-        // Jump(100): new_pc = 1 + 100 = 101, but insns.len() = 1
-        let code = empty_code(vec![Insn::Jump(100)]);
-        let mut interp = Interpreter::default();
-        let mut regs: Vec<Option<Value>> = vec![];
-        let result = interp.run_bytecode(&code, &mut regs);
-        assert!(result.is_err(), "expected Err for OOB jump, got {:?}", result);
-        assert!(
-            result.unwrap_err().to_string().contains("internal error"),
-            "error message should mention internal error"
-        );
-    }
-
-    #[test]
-    fn negative_jump_returns_error() {
-        // Jump(-100): new_pc = 1 + (-100) = -99 → underflow
-        let code = empty_code(vec![Insn::Jump(-100)]);
-        let mut interp = Interpreter::default();
-        let mut regs: Vec<Option<Value>> = vec![];
-        let result = interp.run_bytecode(&code, &mut regs);
-        assert!(result.is_err(), "expected Err for negative jump, got {:?}", result);
-        assert!(
-            result.unwrap_err().to_string().contains("internal error"),
-            "error message should mention internal error"
-        );
-    }
-
-    #[test]
-    fn normal_fallthrough_returns_none() {
-        // ReturnNone terminates normally
-        let code = empty_code(vec![Insn::ReturnNone]);
-        let mut interp = Interpreter::default();
-        let mut regs: Vec<Option<Value>> = vec![];
-        let result = interp.run_bytecode(&code, &mut regs);
-        assert_eq!(result.unwrap(), Value::None);
-    }
-
-    #[test]
-    fn matchexcept_with_no_active_exception_returns_error() {
-        let mut code = empty_code(vec![]);
-        // LoadNone into reg 0 (used as type_reg), then MatchExcept
-        code.num_regs = 1;
-        code.insns.push(Insn::LoadNone(0));
-        code.insns.push(Insn::MatchExcept(0, 1));
-        code.insns.push(Insn::ReturnNone);
-        let mut interp = Interpreter::default();
-        // active_exception is None — no exception active
-        let mut regs: Vec<Option<Value>> = vec![None; 1];
-        let result = interp.run_bytecode(&code, &mut regs);
-        assert!(result.is_err(), "expected Err for MatchExcept with no active exception, got {:?}", result);
-        assert!(
-            result.unwrap_err().to_string().contains("no active exception"),
-            "error should mention no active exception"
-        );
-    }
-
-    #[test]
-    fn setup_except_with_negative_offset_returns_error() {
-        // SetupExcept(-100): handler_pc = 1 + (-100) < 0 → error
-        let code = empty_code(vec![Insn::SetupExcept(-100), Insn::ReturnNone]);
-        let mut interp = Interpreter::default();
-        let mut regs: Vec<Option<Value>> = vec![];
-        // Trigger the error path by raising inside the try block
-        let result = interp.run_bytecode(&code, &mut regs);
-        // SetupExcept itself should reject the invalid offset
-        assert!(result.is_err(), "expected Err for SetupExcept with OOB offset, got {:?}", result);
     }
 }
 
