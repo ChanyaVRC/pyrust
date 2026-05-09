@@ -216,6 +216,25 @@ impl Interpreter {
                 }
             }
 
+            Value::Builtin("set") => {
+                reject_keyword_args_expanded("set", args)?;
+                match args.len() {
+                    0 => Ok(Value::Set(indexmap::IndexSet::new())),
+                    1 => {
+                        let items = iter_values(args[0].value.clone())?;
+                        let mut set = indexmap::IndexSet::new();
+                        for item in items {
+                            let key = item.to_key().ok_or_else(|| {
+                                PyError::Runtime("unhashable type in set".to_string())
+                            })?;
+                            set.insert(key);
+                        }
+                        Ok(Value::Set(set))
+                    }
+                    _ => Err(PyError::Runtime("set() takes at most one argument".to_string())),
+                }
+            }
+
             Value::Builtin("str") => {
                 reject_keyword_args_expanded("str", args)?;
                 match args.len() {
@@ -356,6 +375,25 @@ impl Interpreter {
                     Ok(Value::Float(x.ln()))
                 }
             }
+            Value::Builtin("__vcall__") => {
+                if args.len() != 3 {
+                    return Err(PyError::Runtime("__vcall__ requires 3 arguments".to_string()));
+                }
+                let func = args[0].value.clone();
+                let pos_items = iter_values(args[1].value.clone())?;
+                let mut expanded: Vec<ExpandedCallArg> = pos_items
+                    .into_iter()
+                    .map(|v| ExpandedCallArg { name: None, value: v })
+                    .collect();
+                if let Value::Dict(kw_map) = &args[2].value {
+                    for (k, v) in kw_map {
+                        if let PyKey::Str(name) = k {
+                            expanded.push(ExpandedCallArg { name: Some(name.clone()), value: v.clone() });
+                        }
+                    }
+                }
+                self.call_function_expanded(func, &expanded)
+            }
             Value::Function(function) => self.call_user_function_expanded(function, args, &[]),
             Value::Class(class) => self.call_class_expanded(class, args),
             Value::BoundMethod { function, receiver } => {
@@ -449,86 +487,6 @@ impl Interpreter {
         }
 
         Ok(PrintOptions { values, sep, end })
-    }
-
-    fn create_user_function(
-        &mut self,
-        name: &str,
-        params: &[FunctionParam],
-        body: &[Stmt],
-        closure_env: EnvRef,
-    ) -> Result<Rc<UserFunction>> {
-        let mut evaluated_params = Vec::with_capacity(params.len());
-        for param in params {
-            let default = match &param.default {
-                Some(expr) => Some(self.eval_expr(expr)?),
-                None => None,
-            };
-            evaluated_params.push(UserFunctionParam {
-                name: param.name.clone(),
-                default,
-                is_args: param.is_args,
-                is_kwargs: param.is_kwargs,
-            });
-        }
-        let global_names = collect_global_names(body);
-        let nonlocal_names = collect_nonlocal_names(body);
-        if let Some(param_name) = params
-            .iter()
-            .map(|param| &param.name)
-            .find(|param_name| global_names.contains(*param_name))
-        {
-            return Err(PyError::Runtime(format!(
-                "name '{}' is parameter and global",
-                param_name
-            )));
-        }
-        if let Some(param_name) = params
-            .iter()
-            .map(|param| &param.name)
-            .find(|param_name| nonlocal_names.contains(*param_name))
-        {
-            return Err(PyError::Runtime(format!(
-                "name '{}' is parameter and nonlocal",
-                param_name
-            )));
-        }
-        if let Some(name) = nonlocal_names
-            .iter()
-            .find(|name| global_names.contains(*name))
-        {
-            return Err(PyError::Runtime(format!(
-                "name '{}' is nonlocal and global",
-                name
-            )));
-        }
-        if let Some(name) = nonlocal_names
-            .iter()
-            .find(|name| !has_local_binding_in_current_or_ancestor(&closure_env, name))
-        {
-            return Err(PyError::Runtime(format!(
-                "no binding for nonlocal '{}' found",
-                name
-            )));
-        }
-
-        let local_names = collect_local_names(params, body, &global_names, &nonlocal_names);
-        let local_index = Rc::new(
-            local_names.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect::<HashMap<String, usize>>()
-        );
-        let def_bound_mask = compute_def_bound_mask(params, body, &local_index);
-        Ok(Rc::new(UserFunction {
-            name: name.to_string(),
-            params: evaluated_params,
-            is_pure: is_pure_body(body),
-            body: body.to_vec(),
-            local_names: Rc::new(local_names),
-            local_index,
-            global_names: Rc::new(global_names),
-            nonlocal_names: Rc::new(nonlocal_names),
-            env: closure_env,
-            def_bound_mask,
-        }))
     }
 
     fn call_user_function(
@@ -642,207 +600,114 @@ impl Interpreter {
 
             let fn_ptr = Rc::as_ptr(&function) as usize;
 
-            // Tier-1: count calls.
-            let count = self.call_counts.entry(fn_ptr).or_insert(0);
-            *count += 1;
+            // Tier-0: register-VM path — try compiled bytecode before any env allocation.
+            if let Some(code) = self.get_or_compile_bytecode(fn_ptr, &function) {
+                let num_regs = code.num_regs as usize;
+                let mut regs: Vec<Option<Value>> = vec![None; num_regs];
 
-            // Tier-2: promote to hot frame once threshold is reached.
-            if *count == HOT_THRESHOLD && is_hot_frame_eligible(&function) {
-                // Create the dedicated hot frame once.
-                let hot_env = self.alloc_env(Some(Rc::clone(&function.env)));
-                {
-                    let mut e = hot_env.borrow_mut();
-                    e.local_names = Rc::clone(&function.local_names);
-                    e.global_names = Rc::clone(&function.global_names);
-                    e.nonlocal_names = Rc::clone(&function.nonlocal_names);
-                    e.fastlocals = Some(FunctionLocals {
-                        slots: vec![None; function.local_index.len()],
-                        index: Rc::clone(&function.local_index),
-                        def_bound_mask: function.def_bound_mask,
-                    });
-                    // Insert function name binding.
-                    let fn_val = Value::Function(Rc::clone(&function));
-                    let fn_name = &function.name;
-                    match e.fastlocals.as_mut().and_then(|fl| fl.index.get(fn_name).copied()) {
-                        Some(idx) => e.fastlocals.as_mut().unwrap().slots[idx] = Some(fn_val),
-                        None => { e.values.insert(fn_name.clone(), fn_val); }
+                // Bind non-cell params into register file using fastlocals slot indices.
+                for (param, val) in function.params.iter().zip(param_vals.iter()) {
+                    if !code.cell_vars.contains(&param.name) {
+                        if let Some(&slot) = function.local_index.get(&param.name) {
+                            if slot < num_regs {
+                                regs[slot] = Some(val.clone());
+                            }
+                        }
                     }
                 }
-                self.hot_frames.insert(fn_ptr, hot_env);
-            }
-
-            // Use the hot frame if available and not currently active (recursion guard).
-            if let Some(hot_env) = self.hot_frames.get(&fn_ptr).cloned() {
-                if !self.hot_frames_active.contains(&fn_ptr) {
-                    self.hot_frames_active.insert(fn_ptr);
-
-                    // Clear non-function-name slots from the previous call.
-                    {
-                        let mut e = hot_env.borrow_mut();
-                        if let Some(fl) = e.fastlocals.as_mut() {
-                            // Clear all slots that aren't the function-name self-reference.
-                            let fn_slot = fl.index.get(&function.name).copied();
-                            for (i, slot) in fl.slots.iter_mut().enumerate() {
-                                if Some(i) != fn_slot {
-                                    *slot = None;
-                                }
-                            }
-                        }
-                        e.values.retain(|k, _| k == &function.name);
-                    }
-
-                    // Bind params into hot frame.
-                    {
-                        let mut e = hot_env.borrow_mut();
-                        for (param, value) in function.params.iter().zip(param_vals) {
-                            let fl_idx = e.fastlocals.as_ref().and_then(|fl| fl.index.get(&param.name).copied());
-                            match fl_idx {
-                                Some(slot) => e.fastlocals.as_mut().unwrap().slots[slot] = Some(value),
-                                None => { e.values.insert(param.name.clone(), value); }
-                            }
+                // Self-reference for recursive calls (only if not a cell var).
+                if !code.cell_vars.contains(&function.name) {
+                    if let Some(&slot) = function.local_index.get(&function.name) {
+                        if slot < num_regs {
+                            regs[slot] = Some(Value::Function(Rc::clone(&function)));
                         }
                     }
+                }
 
-                    self.call_depth += 1;
-                    if self.call_depth > MAX_CALL_DEPTH {
-                        self.call_depth -= 1;
-                        self.hot_frames_active.remove(&fn_ptr);
-                        let exc = self.instantiate_named_exception(
-                            "RecursionError",
-                            "maximum recursion depth exceeded".to_string(),
-                        )?;
-                        return Err(PyError::Raised(exc));
-                    }
-                    let previous_env = std::mem::replace(&mut self.env, hot_env);
-                    let signal = self.exec_block(&function.body);
-                    let _ = std::mem::replace(&mut self.env, previous_env);
+                self.call_depth += 1;
+                if self.call_depth > MAX_CALL_DEPTH {
                     self.call_depth -= 1;
-                    self.hot_frames_active.remove(&fn_ptr);
+                    let exc = self.instantiate_named_exception(
+                        "RecursionError",
+                        "maximum recursion depth exceeded".to_string(),
+                    )?;
+                    return Err(PyError::Raised(exc));
+                }
 
-                    let result = match signal? {
-                        ExecSignal::None => Value::None,
-                        ExecSignal::Return(value) => *value,
-                        ExecSignal::Break | ExecSignal::Continue => {
-                            return Err(PyError::Runtime(
-                                "break/continue is only valid inside loops".to_string(),
-                            ))
+                // Create a local env when the function uses globals, nonlocals, or cell vars.
+                let needs_local_env = !function.global_names.is_empty()
+                    || !function.nonlocal_names.is_empty()
+                    || !code.cell_vars.is_empty();
+
+                let previous_env = if needs_local_env {
+                    let local_env = self.alloc_env(Some(Rc::clone(&function.env)));
+                    {
+                        let mut e = local_env.borrow_mut();
+                        e.local_names = Rc::clone(&function.local_names);
+                        e.global_names = Rc::clone(&function.global_names);
+                        e.nonlocal_names = Rc::clone(&function.nonlocal_names);
+                        // Store cell var params in the env so inner closures can capture them.
+                        for (param, val) in function.params.iter().zip(param_vals.iter()) {
+                            if code.cell_vars.contains(&param.name) {
+                                e.values.insert(param.name.clone(), val.clone());
+                            }
                         }
-                    };
-                    if let Some(ck) = cache_key {
-                        self.fn_cache.insert(ck, result.clone());
                     }
-                    return Ok(result);
+                    std::mem::replace(&mut self.env, local_env)
+                } else {
+                    std::mem::replace(&mut self.env, Rc::clone(&function.env))
+                };
+
+                let vm_result = self.run_bytecode(&code, &mut regs);
+
+                let used_env = std::mem::replace(&mut self.env, previous_env);
+                if needs_local_env {
+                    self.free_env(used_env);
                 }
+                self.call_depth -= 1;
+                let value = vm_result?;
+                if let Some(ck) = cache_key {
+                    self.fn_cache.insert(ck, value.clone());
+                }
+                return Ok(value);
             }
 
-            let local_env = self.alloc_env(Some(Rc::clone(&function.env)));
-            {
-                let mut local_env_ref = local_env.borrow_mut();
-                local_env_ref.local_names = Rc::clone(&function.local_names);
-                local_env_ref.global_names = Rc::clone(&function.global_names);
-                local_env_ref.nonlocal_names = Rc::clone(&function.nonlocal_names);
-                if !function.local_index.is_empty() {
-                    local_env_ref.fastlocals = Some(FunctionLocals {
-                        slots: vec![None; function.local_index.len()],
-                        index: Rc::clone(&function.local_index),
-                        def_bound_mask: function.def_bound_mask,
-                    });
-                }
-                let fn_val = Value::Function(Rc::clone(&function));
-                let fn_name = &function.name;
-                match local_env_ref.fastlocals.as_mut().and_then(|fl| fl.index.get(fn_name).copied()) {
-                    Some(idx) => local_env_ref.fastlocals.as_mut().unwrap().slots[idx] = Some(fn_val),
-                    None => { local_env_ref.values.insert(fn_name.clone(), fn_val); }
-                }
-                for (param, value) in function.params.iter().zip(param_vals) {
-                    let fl_idx = local_env_ref.fastlocals.as_ref().and_then(|fl| fl.index.get(&param.name).copied());
-                    match fl_idx {
-                        Some(slot) => local_env_ref.fastlocals.as_mut().unwrap().slots[slot] = Some(value),
-                        None => { local_env_ref.values.insert(param.name.clone(), value); }
-                    }
-                }
-            }
-            self.call_depth += 1;
-            if self.call_depth > MAX_CALL_DEPTH {
-                self.call_depth -= 1;
-                let exc = self.instantiate_named_exception(
-                    "RecursionError",
-                    "maximum recursion depth exceeded".to_string(),
-                )?;
-                return Err(PyError::Raised(exc));
-            }
-            let previous_env = std::mem::replace(&mut self.env, local_env);
-            let signal = self.exec_block(&function.body);
-            let local_env = std::mem::replace(&mut self.env, previous_env);
-            self.call_depth -= 1;
-            self.free_env(local_env);
-            let result = match signal? {
-                ExecSignal::None => Value::None,
-                ExecSignal::Return(value) => *value,
-                ExecSignal::Break | ExecSignal::Continue => {
-                    return Err(PyError::Runtime(
-                        "break/continue is only valid inside loops".to_string(),
-                    ))
-                }
-            };
-            if let Some(ck) = cache_key {
-                self.fn_cache.insert(ck, result.clone());
-            }
-            return Ok(result);
+            // All user functions must have precompiled bytecode
+            return Err(PyError::Runtime(format!("no bytecode for '{}'", function.name)));
         }
 
         // Variadic path: handle *args and **kwargs
-        // Evaluate all args
+        // Gather positional and keyword args
         let mut positional_vals: Vec<Value> = bound_prefix.to_vec();
         let mut keyword_vals: Vec<(String, Value)> = Vec::new();
         for arg in args {
-            let value = arg.value.clone();
             if let Some(name) = &arg.name {
-                keyword_vals.push((name.clone(), value));
+                keyword_vals.push((name.clone(), arg.value.clone()));
             } else {
-                positional_vals.push(value);
+                positional_vals.push(arg.value.clone());
             }
         }
-
-        let local_env = self.alloc_env(Some(Rc::clone(&function.env)));
-        {
-            let mut local_env_ref = local_env.borrow_mut();
-            local_env_ref.local_names = Rc::clone(&function.local_names);
-            local_env_ref.global_names = Rc::clone(&function.global_names);
-            local_env_ref.nonlocal_names = Rc::clone(&function.nonlocal_names);
-            if !function.local_index.is_empty() {
-                local_env_ref.fastlocals = Some(FunctionLocals {
-                    slots: vec![None; function.local_index.len()],
-                    index: Rc::clone(&function.local_index),
-                    def_bound_mask: function.def_bound_mask,
-                });
-            }
-            let fn_val = Value::Function(Rc::clone(&function));
-            let fn_name = &function.name;
-            match local_env_ref.fastlocals.as_mut().and_then(|fl| fl.index.get(fn_name).copied()) {
-                Some(idx) => local_env_ref.fastlocals.as_mut().unwrap().slots[idx] = Some(fn_val),
-                None => { local_env_ref.values.insert(fn_name.clone(), fn_val); }
-            }
-        }
-
-        let mut pos_idx = 0;
-        let mut kwargs_dict: indexmap::IndexMap<crate::value::PyKey, Value> = indexmap::IndexMap::new();
 
         let has_kwargs = function.params.iter().any(|p| p.is_kwargs);
         let mut consumed_keywords = std::collections::HashSet::new();
+        let mut pos_idx = 0;
+        let mut param_vals: Vec<Value> = Vec::with_capacity(function.params.len());
 
         for param in function.params.iter() {
             let value = if param.is_args {
-                let rest: Vec<Value> = positional_vals[pos_idx..].to_vec();
+                let rest = positional_vals[pos_idx..].to_vec();
                 pos_idx = positional_vals.len();
                 Value::Tuple(rest)
             } else if param.is_kwargs {
+                let mut dict: indexmap::IndexMap<crate::value::PyKey, Value> = indexmap::IndexMap::new();
                 for (k, v) in &keyword_vals {
-                    if let Some(key) = Value::Str(k.clone()).to_key() {
-                        kwargs_dict.insert(key, v.clone());
+                    if !consumed_keywords.contains(k) {
+                        if let Some(key) = Value::Str(k.clone()).to_key() {
+                            dict.insert(key, v.clone());
+                        }
                     }
                 }
-                Value::Dict(kwargs_dict.clone())
+                Value::Dict(dict)
             } else {
                 let kw_pos = keyword_vals.iter().position(|(k, _)| k == &param.name);
                 if let Some(ki) = kw_pos {
@@ -852,8 +717,8 @@ impl Interpreter {
                     let v = positional_vals[pos_idx].clone();
                     pos_idx += 1;
                     v
-                } else if let Some(default) = &param.default {
-                    default.clone()
+                } else if let Some(d) = &param.default {
+                    d.clone()
                 } else {
                     return Err(PyError::Runtime(format!(
                         "{}() missing required argument: '{}'",
@@ -861,15 +726,9 @@ impl Interpreter {
                     )));
                 }
             };
-            let mut env = local_env.borrow_mut();
-            let fl_idx = env.fastlocals.as_ref().and_then(|fl| fl.index.get(&param.name).copied());
-            match fl_idx {
-                Some(slot) => env.fastlocals.as_mut().unwrap().slots[slot] = Some(value),
-                None => { env.values.insert(param.name.clone(), value); }
-            }
+            param_vals.push(value);
         }
 
-        // Check for unexpected keyword arguments if no **kwargs
         if !has_kwargs {
             for (name, _) in &keyword_vals {
                 if !consumed_keywords.contains(name) {
@@ -881,28 +740,77 @@ impl Interpreter {
             }
         }
 
-        self.call_depth += 1;
-        if self.call_depth > MAX_CALL_DEPTH {
-            self.call_depth -= 1;
-            let exc = self.instantiate_named_exception(
-                "RecursionError",
-                "maximum recursion depth exceeded".to_string(),
-            )?;
-            return Err(PyError::Raised(exc));
-        }
-        let previous_env = std::mem::replace(&mut self.env, local_env);
-        let signal = self.exec_block(&function.body);
-        let local_env = std::mem::replace(&mut self.env, previous_env);
-        self.call_depth -= 1;
-        self.free_env(local_env);
+        // Now run via VM (same as non-variadic Tier-0 path)
+        let fn_ptr = Rc::as_ptr(&function) as usize;
+        if let Some(code) = self.get_or_compile_bytecode(fn_ptr, &function) {
+            let num_regs = code.num_regs as usize;
+            let mut regs: Vec<Option<Value>> = vec![None; num_regs];
 
-        match signal? {
-            ExecSignal::None => Ok(Value::None),
-            ExecSignal::Return(value) => Ok(*value),
-            ExecSignal::Break | ExecSignal::Continue => Err(PyError::Runtime(
-                "break/continue is only valid inside loops".to_string(),
-            )),
+            // Bind non-cell params into register file using fastlocals slot indices.
+            for (param, val) in function.params.iter().zip(param_vals.iter()) {
+                if !code.cell_vars.contains(&param.name) {
+                    if let Some(&slot) = function.local_index.get(&param.name) {
+                        if slot < num_regs {
+                            regs[slot] = Some(val.clone());
+                        }
+                    }
+                }
+            }
+            // Self-reference for recursive calls (only if not a cell var).
+            if !code.cell_vars.contains(&function.name) {
+                if let Some(&slot) = function.local_index.get(&function.name) {
+                    if slot < num_regs {
+                        regs[slot] = Some(Value::Function(Rc::clone(&function)));
+                    }
+                }
+            }
+
+            self.call_depth += 1;
+            if self.call_depth > MAX_CALL_DEPTH {
+                self.call_depth -= 1;
+                let exc = self.instantiate_named_exception(
+                    "RecursionError",
+                    "maximum recursion depth exceeded".to_string(),
+                )?;
+                return Err(PyError::Raised(exc));
+            }
+
+            // Create a local env when the function uses globals, nonlocals, or cell vars.
+            let needs_local_env = !function.global_names.is_empty()
+                || !function.nonlocal_names.is_empty()
+                || !code.cell_vars.is_empty();
+
+            let previous_env = if needs_local_env {
+                let local_env = self.alloc_env(Some(Rc::clone(&function.env)));
+                {
+                    let mut e = local_env.borrow_mut();
+                    e.local_names = Rc::clone(&function.local_names);
+                    e.global_names = Rc::clone(&function.global_names);
+                    e.nonlocal_names = Rc::clone(&function.nonlocal_names);
+                    // Store cell var params in the env so inner closures can capture them.
+                    for (param, val) in function.params.iter().zip(param_vals.iter()) {
+                        if code.cell_vars.contains(&param.name) {
+                            e.values.insert(param.name.clone(), val.clone());
+                        }
+                    }
+                }
+                std::mem::replace(&mut self.env, local_env)
+            } else {
+                std::mem::replace(&mut self.env, Rc::clone(&function.env))
+            };
+
+            let vm_result = self.run_bytecode(&code, &mut regs);
+
+            let used_env = std::mem::replace(&mut self.env, previous_env);
+            if needs_local_env {
+                self.free_env(used_env);
+            }
+            self.call_depth -= 1;
+            return Ok(vm_result?);
         }
+
+        // All user functions must have precompiled bytecode
+        Err(PyError::Runtime(format!("no bytecode for '{}'", function.name)))
     }
 
     fn call_class_expanded(
@@ -1018,12 +926,14 @@ impl Interpreter {
         }
     }
 
-}
+    /// Return the compiled `FnCode` for `function`.
+    /// Returns `None` only if `precompiled_code` is absent.
+    fn get_or_compile_bytecode(
+        &mut self,
+        _fn_ptr: usize,
+        function: &Rc<UserFunction>,
+    ) -> Option<Rc<FnCode>> {
+        function.precompiled_code.clone()
+    }
 
-fn is_hot_frame_eligible(f: &UserFunction) -> bool {
-    f.global_names.is_empty()
-        && f.nonlocal_names.is_empty()
-        && !f.params.iter().any(|p| p.is_args || p.is_kwargs)
-        && !f.local_index.is_empty()
-        && f.env.borrow().parent.is_none()
 }

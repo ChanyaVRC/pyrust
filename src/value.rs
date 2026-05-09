@@ -89,6 +89,9 @@ pub struct UserFunction {
     /// Bitmask of def-bound slots: bit `i` set means slot `i` is always `Some`
     /// after function entry (parameters + unconditional top-level assignments).
     pub def_bound_mask: u64,
+    /// Pre-compiled bytecode attached at function-definition time (via MakeFunction).
+    /// Takes priority over the bytecode cache, so the body is never recompiled.
+    pub precompiled_code: Option<Rc<crate::bytecode::FnCode>>,
 }
 
 #[derive(Debug, Clone)]

@@ -1,234 +1,4 @@
 impl Interpreter {
-    fn context_manager_protocol_error() -> PyError {
-        PyError::Runtime("object does not support the context manager protocol".to_string())
-    }
-
-    fn call_context_enter(&mut self, ctx: &Value) -> Result<Value> {
-        self.call_instance_method_values(ctx, "__enter__", &[])?
-            .ok_or_else(Self::context_manager_protocol_error)
-    }
-
-    fn call_context_exit(
-        &mut self,
-        ctx: &Value,
-        exc_type: Value,
-        exc_value: Value,
-        traceback: Value,
-    ) -> Result<Value> {
-        self.call_instance_method_values(ctx, "__exit__", &[exc_type, exc_value, traceback])?
-            .ok_or_else(Self::context_manager_protocol_error)
-    }
-
-    fn assign_target(&mut self, target: &AssignTarget, value: Value) -> Result<()> {
-        match target {
-            AssignTarget::Name(name) => {
-                self.assign_name(name.clone(), value);
-                Ok(())
-            }
-            AssignTarget::Attr(obj_expr, attr) => {
-                let obj = self.eval_expr(obj_expr)?;
-                match obj {
-                    Value::Instance(inst) => {
-                        inst.borrow_mut().attrs.insert(attr.clone(), value);
-                        Ok(())
-                    }
-                    _ => Err(PyError::Runtime("can only assign attr on instance".to_string())),
-                }
-            }
-            AssignTarget::Index(target_expr, index_expr) => {
-                let index_val = self.eval_expr(index_expr)?;
-                self.exec_index_assign(target_expr, index_val, value)
-            }
-            AssignTarget::Tuple(targets) => {
-                let items = iter_values(value)?;
-                if items.len() != targets.len() {
-                    return Err(PyError::Runtime(format!(
-                        "not enough values to unpack (expected {}, got {})",
-                        targets.len(), items.len()
-                    )));
-                }
-                for (t, v) in targets.iter().zip(items) {
-                    self.assign_target(t, v)?;
-                }
-                Ok(())
-            }
-        }
-    }
-
-    fn exec_aug_assign(&mut self, target: &AssignTarget, op: BinaryOp, rhs: Value) -> Result<()> {
-        match target {
-            AssignTarget::Name(name) => {
-                let target_env = self.resolve_assign_env_for(name);
-                let current = read_local(&target_env, name)
-                    .ok_or_else(|| PyError::Runtime(format!("name '{}' is not defined", name)))?;
-                let new_val = self.compute_aug(current, op, rhs)?;
-                env_assign_local(&target_env, name, new_val);
-                Ok(())
-            }
-            AssignTarget::Attr(obj_expr, attr) => {
-                let obj = self.eval_expr(obj_expr)?;
-                let Value::Instance(inst) = obj else {
-                    return Err(PyError::Runtime("attr access on non-instance".to_string()));
-                };
-                let current = inst.borrow().attrs.get(attr).cloned().ok_or_else(|| {
-                    PyError::Runtime(format!("attribute '{}' not found", attr))
-                })?;
-                let new_val = self.compute_aug(current, op, rhs)?;
-                inst.borrow_mut().attrs.insert(attr.clone(), new_val);
-                Ok(())
-            }
-            AssignTarget::Index(target_expr, index_expr) => {
-                let tval = self.eval_expr(target_expr)?;
-                let ival = self.eval_expr(index_expr)?;
-                let current = self.eval_index(tval, ival.clone())?;
-                let new_val = self.compute_aug(current, op, rhs)?;
-                self.exec_index_assign(target_expr, ival, new_val)
-            }
-            AssignTarget::Tuple(_) => Err(PyError::Runtime(
-                "illegal target for augmented assignment".to_string(),
-            )),
-        }
-    }
-
-    fn compute_aug(&mut self, current: Value, op: BinaryOp, rhs: Value) -> Result<Value> {
-        if matches!(op, BinaryOp::MatMul) {
-            if let Some(value) = self.try_inplace_matmul(current.clone(), rhs.clone())? {
-                return Ok(value);
-            }
-        }
-        self.eval_binary(current, op, rhs)
-    }
-
-    fn exec_index_assign(&mut self, target: &Expr, index: Value, value: Value) -> Result<()> {
-        match target {
-            Expr::Var(name) => {
-                let env = self
-                    .resolve_name_env(name)
-                    .ok_or_else(|| PyError::Runtime(format!("name '{}' is not defined", name)))?;
-                let fl_idx = {
-                    let borrowed = env.borrow();
-                    borrowed.fastlocals.as_ref().and_then(|fl| fl.index.get(name.as_str()).copied())
-                };
-                let mut borrowed = env.borrow_mut();
-                let col: &mut Value = if let Some(idx) = fl_idx {
-                    borrowed.fastlocals.as_mut().unwrap().slots[idx].as_mut().unwrap()
-                } else {
-                    borrowed.values.get_mut(name.as_str()).unwrap()
-                };
-                match col {
-                    Value::List(items) => {
-                        let idx = normalize_index(&index, items.len())?;
-                        items[idx] = value;
-                        Ok(())
-                    }
-                    Value::Dict(items) => {
-                        let key = index
-                            .to_key()
-                            .ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
-                        items.insert(key, value);
-                        Ok(())
-                    }
-                    _ => Err(PyError::Runtime(
-                        "object does not support item assignment".to_string(),
-                    )),
-                }
-            }
-            Expr::Attr {
-                target: obj_expr,
-                name: attr,
-            } => self.update_attr_collection(
-                obj_expr,
-                attr,
-                "cannot index-assign non-instance attribute",
-                move |current| Self::do_index_set(current, index, value),
-            ),
-            _ => Err(PyError::Runtime("illegal target for index assignment".to_string())),
-        }
-    }
-
-    fn exec_slice_assign(
-        &mut self,
-        target: &Expr,
-        lo: Option<Value>,
-        hi: Option<Value>,
-        st: Option<Value>,
-        rhs: Value,
-    ) -> Result<()> {
-        match target {
-            Expr::Var(name) => self.update_named_collection(name, move |collection| {
-                Self::do_slice_set(collection, lo, hi, st, rhs)
-            }),
-            Expr::Attr {
-                target: obj_expr,
-                name: attr,
-            } => self.update_attr_collection(
-                obj_expr,
-                attr,
-                "cannot slice-assign non-instance attribute",
-                move |current| Self::do_slice_set(current, lo, hi, st, rhs),
-            ),
-            _ => Err(PyError::Runtime(
-                "illegal target for slice assignment".to_string(),
-            )),
-        }
-    }
-
-    fn do_index_set(collection: Value, index: Value, value: Value) -> Result<Value> {
-        match collection {
-            Value::List(mut items) => {
-                let idx = normalize_index(&index, items.len())?;
-                items[idx] = value;
-                Ok(Value::List(items))
-            }
-            Value::Dict(mut items) => {
-                let key = index.to_key().ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
-                items.insert(key, value);
-                Ok(Value::Dict(items))
-            }
-            _ => Err(PyError::Runtime("object does not support item assignment".to_string())),
-        }
-    }
-
-    fn update_named_collection<F>(&mut self, name: &str, transform: F) -> Result<()>
-    where
-        F: FnOnce(Value) -> Result<Value>,
-    {
-        let name = name.to_string();
-        let collection = self
-            .lookup_name(&name)?
-            .ok_or_else(|| PyError::Runtime(format!("name '{}' is not defined", name)))?;
-        let updated = transform(collection)?;
-        self.assign_name(name, updated);
-        Ok(())
-    }
-
-    fn update_attr_collection<F>(
-        &mut self,
-        obj_expr: &Expr,
-        attr: &str,
-        non_instance_msg: &str,
-        transform: F,
-    ) -> Result<()>
-    where
-        F: FnOnce(Value) -> Result<Value>,
-    {
-        let obj = self.eval_expr(obj_expr)?;
-        match obj {
-            Value::Instance(inst) => {
-                let current = inst
-                    .borrow()
-                    .attrs
-                    .get(attr)
-                    .cloned()
-                    .ok_or_else(|| PyError::Runtime(format!("no attribute '{}'", attr)))?;
-                let updated = transform(current)?;
-                inst.borrow_mut().attrs.insert(attr.to_string(), updated);
-                Ok(())
-            }
-            _ => Err(PyError::Runtime(non_instance_msg.to_string())),
-        }
-    }
-
     fn slice_index_from_value(value: &Value) -> Result<i64> {
         match value {
             Value::Int(i) => Ok(*i),
@@ -318,330 +88,63 @@ impl Interpreter {
         targets
     }
 
+    /// If `key` is a 3-element tuple produced by the slice compiler, unpack it.
+    /// Returns `Some((lo, hi, step))` where each is `None` for a missing bound.
+    pub(crate) fn unpack_slice_key(key: &Value) -> Option<(Option<Value>, Option<Value>, Option<Value>)> {
+        if let Value::Tuple(elems) = key {
+            if elems.len() == 3 {
+                let opt = |v: &Value| if matches!(v, Value::None) { None } else { Some(v.clone()) };
+                return Some((opt(&elems[0]), opt(&elems[1]), opt(&elems[2])));
+            }
+        }
+        None
+    }
 
-    fn do_slice_set(
-        collection: Value,
-        lo: Option<Value>,
-        hi: Option<Value>,
-        st: Option<Value>,
-        rhs: Value,
-    ) -> Result<Value> {
-        let Value::List(mut items) = collection else {
-            return Err(PyError::Runtime(
-                "object does not support slice assignment".to_string(),
-            ));
-        };
-
+    /// Slice-assign: `items[lo:hi:step] = new_items`.
+    pub(crate) fn slice_setitem(
+        items: &mut Vec<Value>,
+        lo: Option<&Value>,
+        hi: Option<&Value>,
+        st: Option<&Value>,
+        new_items: Vec<Value>,
+    ) -> Result<()> {
         let len = items.len() as i64;
-        let (start, end, step) =
-            Self::resolve_slice_bounds(len, lo.as_ref(), hi.as_ref(), st.as_ref())?;
-        let replacement = iter_values(rhs)?;
-
+        let (start, end, step) = Self::resolve_slice_bounds(len, lo, hi, st)?;
         if step == 1 {
-            let start_u = start as usize;
-            let end_u = (end.max(start)).min(len) as usize;
-            items.splice(start_u..end_u, replacement);
-            return Ok(Value::List(items));
+            let s = start as usize;
+            let e = end as usize;
+            items.splice(s..e, new_items);
+        } else {
+            let indices = Self::slice_target_indices(len, start, end, step);
+            if indices.len() != new_items.len() {
+                return Err(PyError::Runtime(
+                    "attempt to assign sequence of wrong size".to_string(),
+                ));
+            }
+            for (ix, val) in indices.into_iter().zip(new_items) {
+                items[ix] = val;
+            }
         }
-
-        let targets = Self::slice_target_indices(len, start, end, step);
-
-        if targets.len() != replacement.len() {
-            return Err(PyError::Runtime(format!(
-                "attempt to assign sequence of size {} to extended slice of size {}",
-                replacement.len(),
-                targets.len()
-            )));
-        }
-
-        for (idx, value) in targets.into_iter().zip(replacement.into_iter()) {
-            items[idx] = value;
-        }
-        Ok(Value::List(items))
+        Ok(())
     }
 
-    fn do_slice_delete(
-        collection: Value,
-        lo: Option<Value>,
-        hi: Option<Value>,
-        st: Option<Value>,
-    ) -> Result<Value> {
-        let Value::List(mut items) = collection else {
-            return Err(PyError::Runtime(
-                "object does not support item deletion".to_string(),
-            ));
-        };
-
+    /// Slice-delete: `del items[lo:hi:step]` (equivalent to `items[lo:hi:step] = []`).
+    pub(crate) fn slice_delitem(
+        items: &mut Vec<Value>,
+        lo: Option<&Value>,
+        hi: Option<&Value>,
+        st: Option<&Value>,
+    ) -> Result<()> {
         let len = items.len() as i64;
-        let (start, end, step) =
-            Self::resolve_slice_bounds(len, lo.as_ref(), hi.as_ref(), st.as_ref())?;
-
-        if step == 1 {
-            let start_u = start as usize;
-            let end_u = (end.max(start)).min(len) as usize;
-            items.splice(start_u..end_u, std::iter::empty());
-            return Ok(Value::List(items));
+        let (start, end, step) = Self::resolve_slice_bounds(len, lo, hi, st)?;
+        let indices = Self::slice_target_indices(len, start, end, step);
+        // Remove in reverse so indices stay valid.
+        let mut sorted = indices;
+        sorted.sort_unstable_by(|a, b| b.cmp(a));
+        for ix in sorted {
+            items.remove(ix);
         }
-
-        let mut targets = Self::slice_target_indices(len, start, end, step);
-
-        // Delete from back to front to keep earlier indices stable.
-        targets.sort_unstable();
-        for idx in targets.into_iter().rev() {
-            items.remove(idx);
-        }
-        Ok(Value::List(items))
-    }
-
-    fn exec_delete(&mut self, expr: &Expr) -> Result<()> {
-        match expr {
-            Expr::Var(name) => {
-                let removed = env_remove_local(&self.env, name.as_str());
-                if removed.is_none() {
-                    return Err(PyError::Runtime(format!("name '{}' is not defined", name)));
-                }
-                Ok(())
-            }
-            Expr::Attr { target, name } => {
-                let val = self.eval_expr(target)?;
-                match val {
-                    Value::Instance(inst) => {
-                        inst.borrow_mut().attrs.remove(name);
-                        Ok(())
-                    }
-                    _ => Err(PyError::Runtime("can only delete attr on instance".to_string())),
-                }
-            }
-            Expr::Index { target, index } => {
-                let index_val = self.eval_expr(index)?;
-                match target.as_ref() {
-                    Expr::Var(name) => self.update_named_collection(name, move |collection| {
-                        let updated = match collection {
-                            Value::Dict(mut items) => {
-                                let key = index_val
-                                    .to_key()
-                                    .ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
-                                items.shift_remove(&key);
-                                Value::Dict(items)
-                            }
-                            Value::List(mut items) => {
-                                let idx = normalize_index(&index_val, items.len())?;
-                                items.remove(idx);
-                                Value::List(items)
-                            }
-                            _ => {
-                                return Err(PyError::Runtime(
-                                    "object does not support item deletion".to_string(),
-                                ))
-                            }
-                        };
-                        Ok(updated)
-                    }),
-                    _ => Err(PyError::Runtime("cannot delete indexed item on complex expression".to_string())),
-                }
-            }
-            Expr::Slice {
-                target,
-                lower,
-                upper,
-                step,
-            } => {
-                let lo = lower.as_ref().map(|e| self.eval_expr(e)).transpose()?;
-                let hi = upper.as_ref().map(|e| self.eval_expr(e)).transpose()?;
-                let st = step.as_ref().map(|e| self.eval_expr(e)).transpose()?;
-                match target.as_ref() {
-                    Expr::Var(name) => self.update_named_collection(name, move |collection| {
-                        Self::do_slice_delete(collection, lo, hi, st)
-                    }),
-                    Expr::Attr {
-                        target: obj_expr,
-                        name: attr,
-                    } => self.update_attr_collection(
-                        obj_expr,
-                        attr,
-                        "cannot delete slice on non-instance attribute",
-                        move |current| Self::do_slice_delete(current, lo, hi, st),
-                    ),
-                    _ => Err(PyError::Runtime(
-                        "cannot delete sliced item on complex expression".to_string(),
-                    )),
-                }
-            }
-            _ => Err(PyError::Runtime("cannot delete this expression".to_string())),
-        }
-    }
-
-    fn exec_with(&mut self, items: &[(Expr, Option<AssignTarget>)], body: &[Stmt]) -> Result<ExecSignal> {
-        let mut contexts: Vec<Value> = Vec::with_capacity(items.len());
-
-        for (ctx_expr, alias) in items {
-            let ctx = match self.eval_expr(ctx_expr) {
-                Ok(v) => v,
-                Err(err) => return self.unwind_with_contexts(contexts, Some(err), ExecSignal::None),
-            };
-
-            let entered = match self.call_context_enter(&ctx) {
-                Ok(v) => v,
-                Err(err) => return self.unwind_with_contexts(contexts, Some(err), ExecSignal::None),
-            };
-
-            if let Some(target) = alias {
-                if let Err(err) = self.assign_target(target, entered) {
-                    return self.unwind_with_contexts(contexts, Some(err), ExecSignal::None);
-                }
-            }
-
-            contexts.push(ctx);
-        }
-
-        let (signal, pending_error) = match self.exec_block(body) {
-            Ok(signal) => (signal, None),
-            Err(err) => (ExecSignal::None, Some(err)),
-        };
-        self.unwind_with_contexts(contexts, pending_error, signal)
-    }
-
-    fn unwind_with_contexts(
-        &mut self,
-        contexts: Vec<Value>,
-        mut pending_error: Option<PyError>,
-        signal: ExecSignal,
-    ) -> Result<ExecSignal> {
-        for ctx in contexts.into_iter().rev() {
-            let mut had_error = false;
-            let mut exception_for_exit: Option<Value> = None;
-
-            let (exc_type, exc_value, traceback) = if let Some(err) = pending_error.take() {
-                had_error = true;
-                match self.error_to_exception(err) {
-                    Ok(exception) => {
-                        let exc_type = match &exception {
-                            Value::Instance(inst) => Value::Class(Rc::clone(&inst.borrow().class)),
-                            _ => Value::None,
-                        };
-                        exception_for_exit = Some(exception.clone());
-                        (exc_type, exception, Value::Str("<traceback>".to_string()))
-                    }
-                    Err(err) => {
-                        pending_error = Some(err);
-                        (Value::None, Value::None, Value::None)
-                    }
-                }
-            } else {
-                (Value::None, Value::None, Value::None)
-            };
-
-            let exit_result = match self.call_context_exit(&ctx, exc_type, exc_value, traceback) {
-                Ok(v) => v,
-                Err(err) => {
-                    pending_error = Some(err);
-                    continue;
-                }
-            };
-
-            if had_error {
-                if exit_result.truthy() {
-                    pending_error = None;
-                } else if let Some(exception) = exception_for_exit {
-                    pending_error = Some(PyError::Raised(exception));
-                }
-            }
-        }
-
-        if let Some(err) = pending_error {
-            return Err(err);
-        }
-        Ok(signal)
-    }
-
-    fn exec_try(
-        &mut self,
-        body: &[Stmt],
-        handlers: &[ExceptHandler],
-        else_branch: Option<&[Stmt]>,
-        finally_branch: Option<&[Stmt]>,
-    ) -> Result<ExecSignal> {
-        let mut outcome = match self.exec_block(body) {
-            Ok(ExecSignal::None) => {
-                if let Some(branch) = else_branch {
-                    BlockOutcome::from_result(self.exec_block(branch))
-                } else {
-                    BlockOutcome::Signal(ExecSignal::None)
-                }
-            }
-            Ok(signal) => BlockOutcome::Signal(signal),
-            Err(error) => BlockOutcome::Error(error),
-        };
-
-        if let BlockOutcome::Error(error) = outcome {
-            let exception = self.error_to_exception(error)?;
-            outcome = self.handle_exception(handlers, exception)?;
-        }
-
-        if let Some(branch) = finally_branch {
-            outcome = match self.exec_block(branch) {
-                Ok(ExecSignal::None) => outcome,
-                Ok(signal) => BlockOutcome::Signal(signal),
-                Err(error) => BlockOutcome::Error(error),
-            };
-        }
-
-        outcome.into_result()
-    }
-
-    fn handle_exception(
-        &mut self,
-        handlers: &[ExceptHandler],
-        exception: Value,
-    ) -> Result<BlockOutcome> {
-        for handler in handlers {
-            let matches = match &handler.kind {
-                Some(expr) => {
-                    let kind = self.eval_expr(expr)?;
-                    self.exception_matches(&exception, &kind)?
-                }
-                None => true,
-            };
-
-            if !matches {
-                continue;
-            }
-
-            let previous_active = self.active_exception.replace(exception.clone());
-            let previous_binding = if let Some(name) = &handler.name {
-                Some(env_replace_local(&self.env, name.as_str(), exception.clone()))
-            } else {
-                None
-            };
-
-            let result = BlockOutcome::from_result(self.exec_block(&handler.body));
-
-            self.active_exception = previous_active;
-            if let Some(name) = &handler.name {
-                if let Some(prev) = previous_binding.flatten() {
-                    env_assign_local(&self.env, name.as_str(), prev);
-                } else {
-                    env_remove_local(&self.env, name.as_str());
-                }
-            }
-
-            return Ok(result);
-        }
-
-        Ok(BlockOutcome::Error(PyError::Raised(exception)))
-    }
-
-    fn error_to_exception(&self, error: PyError) -> Result<Value> {
-        match error {
-            PyError::Raised(value) => Ok(value),
-            PyError::Runtime(message) => self.instantiate_named_exception("RuntimeError", message),
-            other => Err(other),
-        }
-    }
-
-    fn raise_value_from_expr(&mut self, expr: &Expr) -> Result<Value> {
-        let value = self.eval_expr(expr)?;
-        self.coerce_to_exception(value)
+        Ok(())
     }
 
     fn coerce_to_exception(&self, value: Value) -> Result<Value> {
