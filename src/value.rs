@@ -1,4 +1,4 @@
 pub use pyrust_core::{
     EnvRef, Environment, PyClass, PyInstance, PyKey, PyModule, UserFunction, UserFunctionParam,
-    Value, ValueKind, range_len,
+    Value, ValueKind, next_fn_id, range_len,
 };

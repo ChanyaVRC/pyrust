@@ -185,6 +185,7 @@ impl Interpreter {
                 );
                 let lambda_body = vec![crate::ast::Stmt::Return(Some(*body.clone()))];
                 let func = Rc::new(crate::value::UserFunction {
+                    id: crate::value::next_fn_id(),
                     name: "<lambda>".to_string(),
                     params: params.iter().map(|n| crate::value::UserFunctionParam {
                         name: n.clone(), default: None, is_args: false, is_kwargs: false,

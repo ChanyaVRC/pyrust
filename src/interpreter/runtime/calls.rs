@@ -605,12 +605,12 @@ impl Interpreter {
 
             // Memoization: if the function is pure and all args are hashable,
             // check the cache before building a call frame.
-            let cache_key: Option<(usize, Vec<PyKey>)> = if function.is_pure {
+            let cache_key: Option<(u64, Vec<PyKey>)> = if function.is_pure {
                 param_vals
                     .iter()
                     .map(|v| v.to_key())
                     .collect::<Option<Vec<PyKey>>>()
-                    .map(|keys| (Rc::as_ptr(&function) as usize, keys))
+                    .map(|keys| (function.id, keys))
             } else {
                 None
             };

@@ -14,7 +14,7 @@ use crate::value::{
 };
 
 type ModuleCache = Rc<RefCell<HashMap<String, Value>>>;
-type FnCache = HashMap<(usize, Vec<PyKey>), Value>;
+type FnCache = HashMap<(u64, Vec<PyKey>), Value>;
 
 const MAX_CALL_DEPTH: usize = 1000;
 const ENV_POOL_MAX: usize = 64;
