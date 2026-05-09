@@ -864,4 +864,87 @@ result = fact(10)
         );
         assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(10)));
     }
+
+    // ── Edge-case tests (issue #57) ───────────────────────────────────────────
+
+    #[test]
+    fn int_add_at_i64_max_wraps() {
+        // Documents current behavior: i64 arithmetic wraps (issue #49).
+        // When arbitrary-precision integers are added, update this test to
+        // assert the result equals 9223372036854775808 instead of i64::MIN.
+        let tokens = Lexer::new("x = 9223372036854775807\nx = x + 1\n")
+            .unwrap()
+            .into_tokens();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut interpreter = Interpreter::default();
+        interpreter.exec_program(&program, false).unwrap();
+        assert_eq!(
+            interpreter.lookup_name("x").unwrap(),
+            Some(Value::Int(i64::MIN)),
+            "i64 arithmetic currently wraps; update when #49 is fixed"
+        );
+    }
+
+    #[test]
+    fn call_depth_restored_after_runtime_error() {
+        let tokens = Lexer::new("def f():\n    return undefined_var\ntry:\n    f()\nexcept:\n    pass\n")
+            .unwrap()
+            .into_tokens();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut interpreter = Interpreter::default();
+        let depth_before = interpreter.call_depth;
+        interpreter.exec_program(&program, false).unwrap();
+        assert_eq!(
+            interpreter.call_depth, depth_before,
+            "call_depth must be restored after a runtime error inside a function"
+        );
+    }
+
+    #[test]
+    fn del_list_front_middle_end_produces_correct_result() {
+        let interpreter = run_program(
+            "lst = [1, 2, 3, 4, 5]\ndel lst[2]\ndel lst[0]\ndel lst[-1]\nresult = lst\n",
+        );
+        assert_eq!(
+            interpreter.lookup_name("result").unwrap(),
+            Some(Value::List(vec![Value::Int(2), Value::Int(4)]))
+        );
+    }
+
+    #[test]
+    fn dict_update_via_double_splat_call() {
+        // DictUpdate instruction is emitted when calling f(**a, **b).
+        // Verifies that the merged kwargs dict has the correct values.
+        let interpreter = run_program(
+            "def merge(**kw): return kw\na = {'x': 1, 'y': 2}\nb = {'y': 99, 'z': 3}\nresult = merge(**a, **b)\n",
+        );
+        use crate::value::PyKey;
+        let mut expected = indexmap::IndexMap::new();
+        expected.insert(PyKey::Str("x".to_string()), Value::Int(1));
+        expected.insert(PyKey::Str("y".to_string()), Value::Int(99));
+        expected.insert(PyKey::Str("z".to_string()), Value::Int(3));
+        assert_eq!(
+            interpreter.lookup_name("result").unwrap(),
+            Some(Value::Dict(expected))
+        );
+    }
+
+    #[test]
+    fn function_with_many_locals_executes_correctly() {
+        // Generates a function with 60 locals to exercise the register allocator
+        // without exceeding MAX_SCRIPT_LOCALS (issue #53 / #55).
+        let assignments: String = (0..60).map(|i| format!("    v{i} = {i}\n")).collect();
+        let src = format!("def f():\n{assignments}    return v59\nresult = f()\n");
+        let tokens = Lexer::new(&src).unwrap().into_tokens();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut interpreter = Interpreter::default();
+        interpreter.exec_program(&program, false).unwrap();
+        assert_eq!(
+            interpreter.lookup_name("result").unwrap(),
+            Some(Value::Int(59))
+        );
+    }
 }
