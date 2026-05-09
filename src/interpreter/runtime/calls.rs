@@ -261,7 +261,37 @@ impl Interpreter {
                             "int() argument must be a number or string".to_string(),
                         )),
                     },
-                    _ => Err(PyError::Runtime("int() takes at most one argument".to_string())),
+                    2 => {
+                        let base = match args[1].value.kind() {
+                            ValueKind::Int(b) if b >= 2 && b <= 36 => b as u32,
+                            ValueKind::Int(b) => return Err(PyError::Named(
+                                "ValueError".to_string(),
+                                format!("int() base must be >= 2 and <= 36, or 0, not {b}"))),
+                            _ => return Err(PyError::Runtime("int() base must be an integer".to_string())),
+                        };
+                        match args[0].value.kind() {
+                            ValueKind::Str(s) => {
+                                let stripped = s.trim();
+                                let stripped = if base == 16 && (stripped.starts_with("0x") || stripped.starts_with("0X")) {
+                                    &stripped[2..]
+                                } else if base == 2 && (stripped.starts_with("0b") || stripped.starts_with("0B")) {
+                                    &stripped[2..]
+                                } else if base == 8 && (stripped.starts_with("0o") || stripped.starts_with("0O")) {
+                                    &stripped[2..]
+                                } else {
+                                    stripped
+                                };
+                                i64::from_str_radix(stripped, base)
+                                    .map(Value::int)
+                                    .map_err(|_| PyError::Runtime(format!(
+                                        "invalid literal for int() with base {base}: '{}'",
+                                        s.trim()
+                                    )))
+                            }
+                            _ => Err(PyError::Runtime("int() can't convert non-string with explicit base".to_string())),
+                        }
+                    }
+                    _ => Err(PyError::Runtime("int() takes at most two arguments".to_string())),
                 }
             }
 
