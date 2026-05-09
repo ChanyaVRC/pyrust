@@ -2197,11 +2197,7 @@ impl Compiler {
         let body_index_rc: Rc<HashMap<String, usize>> = Rc::new(body_index);
         let cell_vars = collect_cell_vars(body, &body_index_rc);
 
-        let mut sub = Compiler::new(
-            Rc::clone(&body_index_rc),
-            0,
-            cell_vars,
-        );
+        let mut sub = Compiler::new(Rc::clone(&body_index_rc), 0, cell_vars);
         sub.compile_block(body);
         // Add implicit ReturnNone at end of class body
         sub.emit(Insn::ReturnNone);
