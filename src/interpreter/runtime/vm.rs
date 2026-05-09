@@ -54,9 +54,30 @@ impl Interpreter {
             };
         }
             let Some(insn) = code.insns.get(pc) else {
-                return Ok(Value::None);
+                if pc == code.insns.len() {
+                    return Ok(Value::None);
+                }
+                return Err(PyError::Runtime(format!(
+                    "internal error: PC {} out of bounds (insns len {})",
+                    pc,
+                    code.insns.len()
+                )));
             };
             pc += 1;
+
+            macro_rules! jump_pc {
+                ($offset:expr) => {{
+                    let new_pc = pc as i64 + $offset as i64;
+                    if new_pc < 0 || new_pc as usize > code.insns.len() {
+                        return Err(PyError::Runtime(format!(
+                            "internal error: jump to invalid PC {} (insns len {})",
+                            new_pc,
+                            code.insns.len()
+                        )));
+                    }
+                    new_pc as usize
+                }};
+            }
 
             match insn {
                 // ── Loads ────────────────────────────────────────────────
@@ -385,26 +406,26 @@ impl Interpreter {
 
                 // ── Control flow ─────────────────────────────────────────
                 Insn::Jump(offset) => {
-                    pc = (pc as i32 + offset) as usize;
+                    pc = jump_pc!(*offset);
                 }
                 Insn::JumpIfFalse(cond, offset) => {
                     match &regs[*cond as usize] {
-                        Some(Value::Int(n))  => { if *n == 0 { pc = (pc as i32 + offset) as usize; } continue; }
-                        Some(Value::Bool(b)) => { if !b     { pc = (pc as i32 + offset) as usize; } continue; }
+                        Some(Value::Int(n))  => { if *n == 0 { pc = jump_pc!(*offset); } continue; }
+                        Some(Value::Bool(b)) => { if !b     { pc = jump_pc!(*offset); } continue; }
                         _ => {}
                     }
                     if !vm_try!(vm_read(regs, *cond, num_locals)).truthy() {
-                        pc = (pc as i32 + offset) as usize;
+                        pc = jump_pc!(*offset);
                     }
                 }
                 Insn::JumpIfTrue(cond, offset) => {
                     match &regs[*cond as usize] {
-                        Some(Value::Int(n))  => { if *n != 0 { pc = (pc as i32 + offset) as usize; } continue; }
-                        Some(Value::Bool(b)) => { if *b      { pc = (pc as i32 + offset) as usize; } continue; }
+                        Some(Value::Int(n))  => { if *n != 0 { pc = jump_pc!(*offset); } continue; }
+                        Some(Value::Bool(b)) => { if *b      { pc = jump_pc!(*offset); } continue; }
                         _ => {}
                     }
                     if vm_try!(vm_read(regs, *cond, num_locals)).truthy() {
-                        pc = (pc as i32 + offset) as usize;
+                        pc = jump_pc!(*offset);
                     }
                 }
                 Insn::CmpJumpIfFalse(lhs, op, rhs, offset) => {
@@ -412,77 +433,77 @@ impl Interpreter {
                         (&regs[*lhs as usize], &regs[*rhs as usize])
                     {
                         match op {
-                            BinaryOp::Eq => { if !(a == b) { pc = (pc as i32 + offset) as usize; } continue; }
-                            BinaryOp::Ne => { if !(a != b) { pc = (pc as i32 + offset) as usize; } continue; }
-                            BinaryOp::Lt => { if !(a < b)  { pc = (pc as i32 + offset) as usize; } continue; }
-                            BinaryOp::Le => { if !(a <= b) { pc = (pc as i32 + offset) as usize; } continue; }
-                            BinaryOp::Gt => { if !(a > b)  { pc = (pc as i32 + offset) as usize; } continue; }
-                            BinaryOp::Ge => { if !(a >= b) { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Eq => { if !(a == b) { pc = jump_pc!(*offset); } continue; }
+                            BinaryOp::Ne => { if !(a != b) { pc = jump_pc!(*offset); } continue; }
+                            BinaryOp::Lt => { if !(a < b)  { pc = jump_pc!(*offset); } continue; }
+                            BinaryOp::Le => { if !(a <= b) { pc = jump_pc!(*offset); } continue; }
+                            BinaryOp::Gt => { if !(a > b)  { pc = jump_pc!(*offset); } continue; }
+                            BinaryOp::Ge => { if !(a >= b) { pc = jump_pc!(*offset); } continue; }
                             _ => {}
                         }
                     }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = vm_try!(vm_read(regs, *rhs, num_locals));
-                    if !vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = (pc as i32 + offset) as usize; }
+                    if !vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = jump_pc!(*offset); }
                 }
                 Insn::CmpJumpIfTrue(lhs, op, rhs, offset) => {
                     if let (Some(Value::Int(a)), Some(Value::Int(b))) =
                         (&regs[*lhs as usize], &regs[*rhs as usize])
                     {
                         match op {
-                            BinaryOp::Eq => { if a == b { pc = (pc as i32 + offset) as usize; } continue; }
-                            BinaryOp::Ne => { if a != b { pc = (pc as i32 + offset) as usize; } continue; }
-                            BinaryOp::Lt => { if a < b  { pc = (pc as i32 + offset) as usize; } continue; }
-                            BinaryOp::Le => { if a <= b { pc = (pc as i32 + offset) as usize; } continue; }
-                            BinaryOp::Gt => { if a > b  { pc = (pc as i32 + offset) as usize; } continue; }
-                            BinaryOp::Ge => { if a >= b { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Eq => { if a == b { pc = jump_pc!(*offset); } continue; }
+                            BinaryOp::Ne => { if a != b { pc = jump_pc!(*offset); } continue; }
+                            BinaryOp::Lt => { if a < b  { pc = jump_pc!(*offset); } continue; }
+                            BinaryOp::Le => { if a <= b { pc = jump_pc!(*offset); } continue; }
+                            BinaryOp::Gt => { if a > b  { pc = jump_pc!(*offset); } continue; }
+                            BinaryOp::Ge => { if a >= b { pc = jump_pc!(*offset); } continue; }
                             _ => {}
                         }
                     }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = vm_try!(vm_read(regs, *rhs, num_locals));
-                    if vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = (pc as i32 + offset) as usize; }
+                    if vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = jump_pc!(*offset); }
                 }
                 Insn::CmpJumpIfFalseConst(lhs, op, const_idx, offset) => {
                     if let (Some(Value::Int(a)), Value::Int(b)) =
                         (&regs[*lhs as usize], &code.consts[*const_idx as usize])
                     {
                         match op {
-                            BinaryOp::Eq => { if !(a == b) { pc = (pc as i32 + offset) as usize; } continue; }
-                            BinaryOp::Ne => { if !(a != b) { pc = (pc as i32 + offset) as usize; } continue; }
-                            BinaryOp::Lt => { if !(a < b)  { pc = (pc as i32 + offset) as usize; } continue; }
-                            BinaryOp::Le => { if !(a <= b) { pc = (pc as i32 + offset) as usize; } continue; }
-                            BinaryOp::Gt => { if !(a > b)  { pc = (pc as i32 + offset) as usize; } continue; }
-                            BinaryOp::Ge => { if !(a >= b) { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Eq => { if !(a == b) { pc = jump_pc!(*offset); } continue; }
+                            BinaryOp::Ne => { if !(a != b) { pc = jump_pc!(*offset); } continue; }
+                            BinaryOp::Lt => { if !(a < b)  { pc = jump_pc!(*offset); } continue; }
+                            BinaryOp::Le => { if !(a <= b) { pc = jump_pc!(*offset); } continue; }
+                            BinaryOp::Gt => { if !(a > b)  { pc = jump_pc!(*offset); } continue; }
+                            BinaryOp::Ge => { if !(a >= b) { pc = jump_pc!(*offset); } continue; }
                             _ => {}
                         }
                     }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = code.consts[*const_idx as usize].clone();
-                    if !vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = (pc as i32 + offset) as usize; }
+                    if !vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = jump_pc!(*offset); }
                 }
                 Insn::CmpJumpIfTrueConst(lhs, op, const_idx, offset) => {
                     if let (Some(Value::Int(a)), Value::Int(b)) =
                         (&regs[*lhs as usize], &code.consts[*const_idx as usize])
                     {
                         match op {
-                            BinaryOp::Eq => { if a == b { pc = (pc as i32 + offset) as usize; } continue; }
-                            BinaryOp::Ne => { if a != b { pc = (pc as i32 + offset) as usize; } continue; }
-                            BinaryOp::Lt => { if a < b  { pc = (pc as i32 + offset) as usize; } continue; }
-                            BinaryOp::Le => { if a <= b { pc = (pc as i32 + offset) as usize; } continue; }
-                            BinaryOp::Gt => { if a > b  { pc = (pc as i32 + offset) as usize; } continue; }
-                            BinaryOp::Ge => { if a >= b { pc = (pc as i32 + offset) as usize; } continue; }
+                            BinaryOp::Eq => { if a == b { pc = jump_pc!(*offset); } continue; }
+                            BinaryOp::Ne => { if a != b { pc = jump_pc!(*offset); } continue; }
+                            BinaryOp::Lt => { if a < b  { pc = jump_pc!(*offset); } continue; }
+                            BinaryOp::Le => { if a <= b { pc = jump_pc!(*offset); } continue; }
+                            BinaryOp::Gt => { if a > b  { pc = jump_pc!(*offset); } continue; }
+                            BinaryOp::Ge => { if a >= b { pc = jump_pc!(*offset); } continue; }
                             _ => {}
                         }
                     }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = code.consts[*const_idx as usize].clone();
-                    if vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = (pc as i32 + offset) as usize; }
+                    if vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = jump_pc!(*offset); }
                 }
 
                 // ── Exception handling ───────────────────────────────────
                 Insn::SetupExcept(offset) => {
-                    exc_handlers.push((pc as i32 + offset) as usize);
+                    exc_handlers.push(jump_pc!(*offset));
                 }
                 Insn::PopExcept => {
                     exc_handlers.pop();
@@ -497,7 +518,7 @@ impl Interpreter {
                     let type_val = vm_try!(vm_read(regs, *type_reg, num_locals));
                     let exc = self.active_exception.clone().unwrap_or(Value::None);
                     if !vm_try!(self.exception_matches(&exc, &type_val)) {
-                        pc = (pc as i32 + offset) as usize;
+                        pc = jump_pc!(*offset);
                     }
                 }
                 Insn::EndExcept => {
@@ -745,14 +766,14 @@ impl Interpreter {
                                 *pos += 1;
                                 regs[*dst as usize] = Some(v);
                             } else {
-                                pc = (pc as i32 + offset) as usize;
+                                pc = jump_pc!(*offset);
                             }
                         }
                         Some(IterState::Range { cur, stop, step }) => {
                             let exhausted =
                                 if *step > 0 { *cur >= *stop } else { *cur <= *stop };
                             if exhausted {
-                                pc = (pc as i32 + offset) as usize;
+                                pc = jump_pc!(*offset);
                             } else {
                                 let v = Value::Int(*cur);
                                 *cur += *step;
@@ -775,11 +796,11 @@ impl Interpreter {
                                 *pos += 1;
                                 regs[*dst as usize] = Some(v);
                             } else {
-                                pc = (pc as i32 + offset) as usize;
+                                pc = jump_pc!(*offset);
                             }
                         }
                         None => {
-                            pc = (pc as i32 + offset) as usize;
+                            pc = jump_pc!(*offset);
                         }
                     }
                 }
@@ -798,7 +819,7 @@ impl Interpreter {
                             _ => unreachable!("ForCountReg uses Lt or Gt only"),
                         };
                         if cont { regs[*var as usize] = Some(Value::Int(next)); }
-                        else { pc = (pc as i32 + offset) as usize; }
+                        else { pc = jump_pc!(*offset); }
                     } else {
                         vm_try!(Err(crate::error::PyError::Runtime(
                             "for-range: non-integer counter or stop".into(),
@@ -822,7 +843,7 @@ impl Interpreter {
                             _ => unreachable!("ForCountConst uses Lt or Gt only"),
                         };
                         if cont { regs[*var as usize] = Some(Value::Int(next)); }
-                        else { pc = (pc as i32 + offset) as usize; }
+                        else { pc = jump_pc!(*offset); }
                     } else {
                         vm_try!(Err(crate::error::PyError::Runtime(
                             "for-range: non-integer counter".into(),
