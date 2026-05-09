@@ -1660,11 +1660,20 @@ impl Compiler {
         let neg_step_idx = self.intern_const(Value::Int(step.wrapping_neg()));
 
         // Initialise var_reg = i_initial - step (so first ForCount yields i_initial).
-        self.emit(Insn::BinOpConst(var_reg, var_reg, BinaryOp::Add, neg_step_idx));
+        self.emit(Insn::BinOpConst(
+            var_reg,
+            var_reg,
+            BinaryOp::Add,
+            neg_step_idx,
+        ));
 
         // Determine stop value: for inclusive (<=/>= condition) adjust by ±1.
         let loop_start = self.pc();
-        let stop_adjust: i64 = if inclusive { if step > 0 { 1 } else { -1 } } else { 0 };
+        let stop_adjust: i64 = if inclusive {
+            if step > 0 { 1 } else { -1 }
+        } else {
+            0
+        };
 
         let (exit_jmp, stop_temp) = if let Some(mut stop_val) = extract_literal_int(stop_expr) {
             stop_val = stop_val.wrapping_add(stop_adjust);
