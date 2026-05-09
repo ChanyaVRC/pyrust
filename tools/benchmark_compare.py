@@ -159,19 +159,29 @@ def benchmark(
             rs_samples=[],
         )
 
+    # Scripts that the base binary cannot run (e.g. new features not on base branch).
+    base_unsupported: set[Path] = set()
+
     if warmup:
         for script in scripts:
             run_once(python_bin, script)
             run_once(pyrust_bin, script)
             if base_bin:
-                run_once(base_bin, script)
+                try:
+                    run_once(base_bin, script)
+                except RuntimeError:
+                    base_unsupported.add(script)
 
     for _ in range(iterations):
         for script in scripts:
             stats[script].py_samples.append(run_once(python_bin, script))
             stats[script].rs_samples.append(run_once(pyrust_bin, script))
-            if base_bin:
-                stats[script].base_samples.append(run_once(base_bin, script))
+            if base_bin and script not in base_unsupported:
+                try:
+                    stats[script].base_samples.append(run_once(base_bin, script))
+                except RuntimeError:
+                    base_unsupported.add(script)
+                    stats[script].base_samples.clear()
 
     rows = [stats[script] for script in scripts]
     rows.sort(key=lambda row: row.rs_avg_ms, reverse=True)
