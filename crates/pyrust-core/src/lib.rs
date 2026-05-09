@@ -398,8 +398,12 @@ impl Value {
             (hdr as *mut u8, byte_start)
         } else {
             let base = unsafe { *(hdr.add(16) as *const u32) as usize };
-            // Safety: self_ref == a_ptr + 16 + base by construction, so the subtraction
-            // is always in-bounds for any valid Layout B descriptor.
+            // SAFETY: `base` is the byte distance from Layout A's bytes[0] to this
+            // slice's bytes[0], written by a prior `string_slice` call.  Therefore
+            // `self_ref == a_ptr + 16 + base` by construction, and the subtraction
+            // `self_ref - (base + 16)` cannot underflow.  The `byte_start <= byte_end`
+            // assert at entry guarantees we never produce an invalid descriptor, so
+            // this invariant is preserved through any chain of slices.
             let a_ptr = unsafe { (self_ref as *mut u8).sub(base.wrapping_add(16)) };
             debug_assert!(
                 a_ptr as usize + 16 + base == self_ref as usize,
@@ -408,9 +412,11 @@ impl Value {
             (a_ptr, base + byte_start)
         };
 
-        // Increment A.rc
+        // Increment A.rc. Saturate instead of wrapping: a saturated rc leaks the
+        // backing buffer, but u32::MAX/2 simultaneous slice references is unreachable.
         unsafe {
-            *(a_ptr as *mut u32) += 2;
+            let hdr_a = a_ptr as *mut u32;
+            *hdr_a = (*hdr_a).saturating_add(2);
         }
 
         // Layout B: [rc_type:u32][sub_len:u32][ref:*mut u8][offset:u32]
