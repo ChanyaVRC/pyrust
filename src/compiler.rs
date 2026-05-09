@@ -1497,6 +1497,37 @@ impl Compiler {
 
         for (bi, (cond, body)) in branches.iter().enumerate() {
             self.def_set = pre_def_set;
+            // Constant-condition optimisation: fold at compile time.
+            if let Some(val) = fold_constant(cond) {
+                if val.truthy() {
+                    // Always-true branch: compile body unconditionally; skip rest.
+                    self.compile_block(body);
+                    if self.failed {
+                        return;
+                    }
+                    branch_def_sets.push(self.def_set);
+                    // Treat as if there were an else so intersection analysis kicks in.
+                    for _ in bi + 1..n {
+                        branch_def_sets.push(pre_def_set);
+                    }
+                    if has_else {
+                        branch_def_sets.push(pre_def_set);
+                    }
+                    for idx in end_patches {
+                        self.patch_jump(idx);
+                    }
+                    if has_else && !branch_def_sets.is_empty() {
+                        let all_define = branch_def_sets.iter().fold(!0u64, |acc, &s| acc & s);
+                        self.def_set = pre_def_set | all_define;
+                    } else {
+                        self.def_set = pre_def_set | branch_def_sets[0];
+                    }
+                    return;
+                } else {
+                    // Always-false branch: skip it entirely.
+                    continue;
+                }
+            }
             let cond_reg = self.compile_expr(cond);
             let jmp_false = self.emit_cond_jump(cond_reg, false);
             self.free_temp(cond_reg);
