@@ -34,7 +34,7 @@ jobs:
       - name: Run benchmark and generate report
         run: |
           python tools/benchmark_compare.py \
-            --iterations 3 \
+            --iterations 15 \
             --top 12 \
             --base-bin /tmp/pyrust-base/target/debug/pyrust \
             --pr-comment-out /tmp/benchmark_body.md
