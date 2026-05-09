@@ -327,11 +327,7 @@ def _change_indicator(pct: float) -> str:
     return "➡️"
 
 
-def write_github_step_summary(rows: list[ScriptStats]) -> None:
-    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if not summary_path:
-        return
-
+def _build_summary_lines(rows: list[ScriptStats]) -> list[str]:
     lines: list[str] = []
     base_rows = [row for row in rows if row.has_base]
 
@@ -377,7 +373,21 @@ def write_github_step_summary(rows: list[ScriptStats]) -> None:
             f"| {row.path} | {row.py_avg_ms:.3f} | {row.rs_avg_ms:.3f} | {row.ratio:.2f}x |"
         )
 
+    return lines
+
+
+def write_github_step_summary(rows: list[ScriptStats]) -> None:
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary_path:
+        return
+    lines = _build_summary_lines(rows)
     Path(summary_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_pr_comment(rows: list[ScriptStats], out_path: str) -> None:
+    """Write a standalone Markdown PR comment (PR-vs-base + Python-vs-PyRust)."""
+    lines = _build_summary_lines(rows)
+    Path(out_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def build_json_snapshot(
@@ -612,6 +622,12 @@ def main() -> int:
         default="",
         help="path to the base branch PyRust binary for PR vs base comparison",
     )
+    parser.add_argument(
+        "--pr-comment-out",
+        type=str,
+        default="",
+        help="output path for a Markdown PR comment (PR-vs-base + Python-vs-PyRust tables)",
+    )
     args = parser.parse_args()
 
     if args.iterations <= 0:
@@ -657,6 +673,9 @@ def main() -> int:
     print(f"Benchmark wall-clock: {benchmark_elapsed:.3f} ms")
 
     write_github_step_summary(rows)
+
+    if args.pr_comment_out:
+        write_pr_comment(rows, args.pr_comment_out)
 
     if args.markdown_out:
         snapshot = build_markdown_snapshot(
