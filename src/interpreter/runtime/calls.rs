@@ -598,10 +598,8 @@ impl Interpreter {
                 }
             }
 
-            let fn_ptr = Rc::as_ptr(&function) as usize;
-
             // Tier-0: register-VM path — try compiled bytecode before any env allocation.
-            if let Some(code) = self.get_or_compile_bytecode(fn_ptr, &function) {
+            if let Some(code) = self.get_or_compile_bytecode(&function) {
                 let num_regs = code.num_regs as usize;
                 let mut regs: Vec<Option<Value>> = vec![None; num_regs];
 
@@ -741,8 +739,7 @@ impl Interpreter {
         }
 
         // Now run via VM (same as non-variadic Tier-0 path)
-        let fn_ptr = Rc::as_ptr(&function) as usize;
-        if let Some(code) = self.get_or_compile_bytecode(fn_ptr, &function) {
+        if let Some(code) = self.get_or_compile_bytecode(&function) {
             let num_regs = code.num_regs as usize;
             let mut regs: Vec<Option<Value>> = vec![None; num_regs];
 
@@ -928,11 +925,7 @@ impl Interpreter {
 
     /// Return the compiled `FnCode` for `function`.
     /// Returns `None` only if `precompiled_code` is absent.
-    fn get_or_compile_bytecode(
-        &mut self,
-        _fn_ptr: usize,
-        function: &Rc<UserFunction>,
-    ) -> Option<Rc<FnCode>> {
+    fn get_or_compile_bytecode(&mut self, function: &Rc<UserFunction>) -> Option<Rc<FnCode>> {
         function.precompiled_code.clone()
     }
 
