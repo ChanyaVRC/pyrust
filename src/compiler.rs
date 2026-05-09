@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use crate::ast::{AssignTarget, BinaryOp, CmpOp, Expr, FunctionParam, Stmt};
+use crate::ast::{AssignTarget, BinaryOp, CmpOp, Expr, FunctionParam, Stmt, UnaryOp};
 use crate::bytecode::{CellVar, FnCode, FnProto, Insn, Reg};
 use crate::value::{Environment, UserFunction, Value};
 
@@ -489,6 +489,94 @@ fn const_eq(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// Attempt to evaluate a pure constant expression at compile time.
+/// Returns Some(value) only when the entire expression tree consists of
+/// literals and operations on literals that cannot raise.
+fn fold_constant(expr: &Expr) -> Option<Value> {
+    match expr {
+        Expr::Int(v) => Some(Value::Int(*v)),
+        Expr::Float(v) => Some(Value::Float(*v)),
+        Expr::Str(s) => Some(Value::Str(s.clone())),
+        Expr::Bool(b) => Some(Value::Bool(*b)),
+        Expr::None => Some(Value::None),
+        Expr::Unary { op, expr } => {
+            let val = fold_constant(expr)?;
+            match (op, &val) {
+                (UnaryOp::Neg, Value::Int(n)) => Some(Value::Int(n.wrapping_neg())),
+                (UnaryOp::Neg, Value::Float(f)) => Some(Value::Float(-f)),
+                (UnaryOp::Not, v) => Some(Value::Bool(!v.truthy())),
+                (UnaryOp::BitNot, Value::Int(n)) => Some(Value::Int(!n)),
+                _ => None,
+            }
+        }
+        Expr::Binary { left, op, right } => {
+            let l = fold_constant(left)?;
+            let r = fold_constant(right)?;
+            fold_binop(&l, *op, &r)
+        }
+        Expr::Compare { left, ops } => {
+            let mut cur = fold_constant(left)?;
+            for (cmp_op, rhs_expr) in ops {
+                let rhs = fold_constant(rhs_expr)?;
+                let op = cmp_to_binary(*cmp_op);
+                let result = fold_binop(&cur, op, &rhs)?;
+                if !result.truthy() {
+                    return Some(Value::Bool(false));
+                }
+                cur = rhs;
+            }
+            Some(Value::Bool(true))
+        }
+        _ => None,
+    }
+}
+
+fn fold_binop(l: &Value, op: BinaryOp, r: &Value) -> Option<Value> {
+    match (l, op, r) {
+        (Value::Int(a), BinaryOp::Add, Value::Int(b)) => Some(Value::Int(a.wrapping_add(*b))),
+        (Value::Int(a), BinaryOp::Sub, Value::Int(b)) => Some(Value::Int(a.wrapping_sub(*b))),
+        (Value::Int(a), BinaryOp::Mul, Value::Int(b)) => Some(Value::Int(a.wrapping_mul(*b))),
+        (Value::Int(a), BinaryOp::Div, Value::Int(b)) if *b != 0 => {
+            Some(Value::Float(*a as f64 / *b as f64))
+        }
+        (Value::Int(a), BinaryOp::FloorDiv, Value::Int(b)) if *b != 0 => {
+            let q = a.wrapping_div(*b);
+            let r = a.wrapping_rem(*b);
+            Some(Value::Int(if (r != 0) && ((r < 0) != (*b < 0)) {
+                q - 1
+            } else {
+                q
+            }))
+        }
+        (Value::Int(a), BinaryOp::Mod, Value::Int(b)) if *b != 0 => {
+            let r = a.wrapping_rem(*b);
+            Some(Value::Int(if (r != 0) && ((r < 0) != (*b < 0)) {
+                r + b
+            } else {
+                r
+            }))
+        }
+        (Value::Int(a), BinaryOp::Pow, Value::Int(b)) if *b >= 0 => {
+            Some(Value::Int(a.wrapping_pow(*b as u32)))
+        }
+        (Value::Float(a), BinaryOp::Add, Value::Float(b)) => Some(Value::Float(a + b)),
+        (Value::Float(a), BinaryOp::Sub, Value::Float(b)) => Some(Value::Float(a - b)),
+        (Value::Float(a), BinaryOp::Mul, Value::Float(b)) => Some(Value::Float(a * b)),
+        (Value::Float(a), BinaryOp::Div, Value::Float(b)) if *b != 0.0 => Some(Value::Float(a / b)),
+        (Value::Str(a), BinaryOp::Add, Value::Str(b)) => Some(Value::Str(a.clone() + b)),
+        (Value::Int(a), BinaryOp::Eq, Value::Int(b)) => Some(Value::Bool(a == b)),
+        (Value::Int(a), BinaryOp::Ne, Value::Int(b)) => Some(Value::Bool(a != b)),
+        (Value::Int(a), BinaryOp::Lt, Value::Int(b)) => Some(Value::Bool(a < b)),
+        (Value::Int(a), BinaryOp::Le, Value::Int(b)) => Some(Value::Bool(a <= b)),
+        (Value::Int(a), BinaryOp::Gt, Value::Int(b)) => Some(Value::Bool(a > b)),
+        (Value::Int(a), BinaryOp::Ge, Value::Int(b)) => Some(Value::Bool(a >= b)),
+        (Value::Str(a), BinaryOp::Eq, Value::Str(b)) => Some(Value::Bool(a == b)),
+        (Value::Str(a), BinaryOp::Ne, Value::Str(b)) => Some(Value::Bool(a != b)),
+        (Value::Bool(a), BinaryOp::Eq, Value::Bool(b)) => Some(Value::Bool(a == b)),
+        _ => None,
+    }
+}
+
 fn is_const_false_expr(expr: &Expr) -> bool {
     match expr {
         Expr::Bool(false) | Expr::Int(0) | Expr::None => true,
@@ -823,8 +911,59 @@ impl Compiler {
             | Insn::JumpIfTrue(_, off)
             | Insn::ForIter(_, _, off)
             | Insn::SetupExcept(off)
-            | Insn::MatchExcept(_, off) => *off = offset,
+            | Insn::MatchExcept(_, off)
+            | Insn::CmpJumpIfFalse(_, _, _, off)
+            | Insn::CmpJumpIfTrue(_, _, _, off)
+            | Insn::CmpJumpIfFalseConst(_, _, _, off)
+            | Insn::CmpJumpIfTrueConst(_, _, _, off) => *off = offset,
             _ => self.failed = true,
+        }
+    }
+
+    /// Try to fuse the last emitted instruction with a conditional jump.
+    ///
+    /// If the last instruction is `BinOpConst(cond_reg, lhs, op, c)` or
+    /// `BinOp(cond_reg, lhs, op, rhs)`, replace it with the corresponding
+    /// `CmpJump*` variant (offset=0, to be patched).  Otherwise fall back to
+    /// emitting `JumpIfFalse`/`JumpIfTrue` as normal.
+    ///
+    /// `invert=false` → JumpIfFalse semantics (jump when comparison is false)
+    /// `invert=true`  → JumpIfTrue semantics (jump when comparison is true)
+    fn emit_cond_jump(&mut self, cond_reg: Reg, invert: bool) -> usize {
+        // Only fuse when the result register is a temp (not a named local).
+        if cond_reg >= self.base_temp {
+            if let Some(last) = self.insns.last().cloned() {
+                match last {
+                    Insn::BinOpConst(dst, lhs, op, c) if dst == cond_reg => {
+                        let idx = self.insns.len() - 1;
+                        // Free the temp that would have held the bool result.
+                        self.free_temp(cond_reg);
+                        self.insns[idx] = if invert {
+                            Insn::CmpJumpIfTrueConst(lhs, op, c, 0)
+                        } else {
+                            Insn::CmpJumpIfFalseConst(lhs, op, c, 0)
+                        };
+                        return idx;
+                    }
+                    Insn::BinOp(dst, lhs, op, rhs) if dst == cond_reg => {
+                        let idx = self.insns.len() - 1;
+                        self.free_temp(cond_reg);
+                        self.insns[idx] = if invert {
+                            Insn::CmpJumpIfTrue(lhs, op, rhs, 0)
+                        } else {
+                            Insn::CmpJumpIfFalse(lhs, op, rhs, 0)
+                        };
+                        return idx;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Fall back: emit a regular conditional jump.
+        if invert {
+            self.emit(Insn::JumpIfTrue(cond_reg, 0))
+        } else {
+            self.emit(Insn::JumpIfFalse(cond_reg, 0))
         }
     }
 
@@ -1327,7 +1466,7 @@ impl Compiler {
 
         for (bi, (cond, body)) in branches.iter().enumerate() {
             let cond_reg = self.compile_expr(cond);
-            let jmp_false = self.emit(Insn::JumpIfFalse(cond_reg, 0));
+            let jmp_false = self.emit_cond_jump(cond_reg, false);
             self.free_temp(cond_reg);
             let saved = self.def_set;
             self.compile_block(body);
@@ -1374,7 +1513,7 @@ impl Compiler {
 
         let (loop_start, exit_jmp) = if is_licm {
             let cond_reg = self.compile_expr(cond);
-            let jmp = self.emit(Insn::JumpIfFalse(cond_reg, 0));
+            let jmp = self.emit_cond_jump(cond_reg, false);
             self.free_temp(cond_reg);
             (self.pc(), Some(jmp))
         } else if is_infinite {
@@ -1382,7 +1521,7 @@ impl Compiler {
         } else {
             let start = self.pc();
             let cond_reg = self.compile_expr(cond);
-            let jmp = self.emit(Insn::JumpIfFalse(cond_reg, 0));
+            let jmp = self.emit_cond_jump(cond_reg, false);
             self.free_temp(cond_reg);
             (start, Some(jmp))
         };
@@ -2310,6 +2449,15 @@ impl Compiler {
                 }
             }
             Expr::Unary { op, expr } => {
+                if let Some(val) = fold_constant(&Expr::Unary {
+                    op: *op,
+                    expr: expr.clone(),
+                }) {
+                    let idx = self.intern_const(val);
+                    let dst = self.alloc_temp();
+                    self.emit(Insn::LoadConst(dst, idx));
+                    return dst;
+                }
                 let src = self.compile_expr(expr);
                 let dst = self.ensure_dst(src);
                 self.emit(Insn::UnaryOp(dst, *op, src));
@@ -2345,6 +2493,13 @@ impl Compiler {
                     dst
                 }
                 _ => {
+                    // Constant fold: if both sides are literals, compute at compile time.
+                    if let Some(val) = fold_constant(expr) {
+                        let idx = self.intern_const(val);
+                        let dst = self.alloc_temp();
+                        self.emit(Insn::LoadConst(dst, idx));
+                        return dst;
+                    }
                     let lhs = self.compile_expr(left);
                     let dst = self.ensure_dst(lhs);
                     if let Some(const_idx) = self.try_literal_const_idx(right) {
@@ -2358,6 +2513,13 @@ impl Compiler {
                 }
             },
             Expr::Compare { left, ops } => {
+                // Constant fold: e.g. `1 < 2` at compile time.
+                if let Some(val) = fold_constant(expr) {
+                    let idx = self.intern_const(val);
+                    let dst = self.alloc_temp();
+                    self.emit(Insn::LoadConst(dst, idx));
+                    return dst;
+                }
                 if ops.len() == 1 {
                     let (cmp_op, right) = &ops[0];
                     let lhs = self.compile_expr(left);

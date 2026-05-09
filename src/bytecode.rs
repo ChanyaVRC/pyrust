@@ -72,6 +72,14 @@ pub enum Insn {
     JumpIfFalse(Reg, i32),
     /// if R[cond].truthy(): pc += offset
     JumpIfTrue(Reg, i32),
+    /// if !(R[lhs] op R[rhs]): pc += offset  (integer fast path; avoids bool temp reg)
+    CmpJumpIfFalse(Reg, BinaryOp, Reg, i32),
+    /// if (R[lhs] op R[rhs]): pc += offset
+    CmpJumpIfTrue(Reg, BinaryOp, Reg, i32),
+    /// if !(R[lhs] op consts[idx]): pc += offset
+    CmpJumpIfFalseConst(Reg, BinaryOp, u16, i32),
+    /// if (R[lhs] op consts[idx]): pc += offset
+    CmpJumpIfTrueConst(Reg, BinaryOp, u16, i32),
     /// R[func_reg] = call(R[func_reg], R[func_reg+1..func_reg+1+argc]); result in R[func_reg]
     Call(Reg, u8),
     /// return R[src]
