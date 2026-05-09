@@ -362,7 +362,11 @@ impl Interpreter {
                         match regs[*obj as usize].as_mut() {
                             Some(Value::List(items)) => {
                                 let i = vm_try!(normalize_index(&idx_val, items.len()));
-                                items.remove(i);
+                                if i == items.len() - 1 {
+                                    items.pop();
+                                } else {
+                                    items.remove(i);
+                                }
                             }
                             Some(Value::Dict(dict)) => {
                                 let key = vm_try!(idx_val.to_key().ok_or_else(|| {
@@ -671,11 +675,9 @@ impl Interpreter {
                     let src_val = vm_try!(vm_read(regs, *src_reg, num_locals));
                     match src_val {
                         Value::Dict(src_dict) => {
-                            let pairs: Vec<(PyKey, Value)> =
-                                src_dict.into_iter().collect();
                             match regs[*dict_reg as usize].as_mut() {
                                 Some(Value::Dict(dict)) => {
-                                    for (k, v) in pairs {
+                                    for (k, v) in src_dict {
                                         dict.insert(k, v);
                                     }
                                 }
