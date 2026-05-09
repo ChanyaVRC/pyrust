@@ -346,7 +346,8 @@ impl Value {
         unsafe {
             (ptr as *mut u32).write(2u32); // rc=1, type=0
             (ptr.add(4) as *mut u32).write(len as u32);
-            *(ptr.add(8) as *mut *mut u8) = ptr.add(16); // ref → own bytes
+            // Store the self-referential pointer as *const u8 (immutable bytes).
+            (ptr.add(8) as *mut *const u8).write(ptr.add(16)); // ref → own bytes
             if len > 0 {
                 ptr.add(16)
                     .copy_from_nonoverlapping(s.as_bytes().as_ptr(), len);
@@ -356,6 +357,12 @@ impl Value {
     }
 
     pub fn string_slice(&self, byte_start: usize, byte_end: usize) -> Self {
+        // Guard against inverted indices: wrapping subtraction would produce a
+        // colossal sub_len and the resulting slice descriptor would be invalid.
+        assert!(
+            byte_start <= byte_end,
+            "string_slice: byte_start ({byte_start}) > byte_end ({byte_end})"
+        );
         let sub_len = byte_end - byte_start;
         let hdr = (self.0 & PAYLOAD_MASK) as *const u8;
         let rc_type = unsafe { *(hdr as *const u32) };
@@ -363,14 +370,24 @@ impl Value {
         let self_ref = unsafe { *(hdr.add(8) as *const *const u8) };
         let new_ref = unsafe { self_ref.add(byte_start) };
 
-        // Find A_ptr (Layout A root) to increment its rc, and compute new offset
+        // Find A_ptr (Layout A root) to increment its rc, and compute new offset.
         // Layout A: A_ptr = hdr,   new_offset = byte_start
-        // Layout B: A_ptr = ref - offset - 16,  new_offset = stored_offset + byte_start
+        // Layout B: A_ptr = ref - stored_offset - 16,  new_offset = stored_offset + byte_start
+        //
+        // For Layout B→B chains the stored_offset already encodes the distance from A's
+        // bytes[0] to this slice's bytes[0], so subtracting it (plus the 16-byte header)
+        // from self_ref always recovers A_ptr without underflow.
         let (a_ptr, new_offset): (*mut u8, usize) = if rc_type & 1 == 0 {
             (hdr as *mut u8, byte_start)
         } else {
             let base = unsafe { *(hdr.add(16) as *const u32) as usize };
-            let a_ptr = unsafe { (self_ref as *mut u8).sub(base + 16) };
+            // Safety: self_ref == a_ptr + 16 + base by construction, so the subtraction
+            // is always in-bounds for any valid Layout B descriptor.
+            let a_ptr = unsafe { (self_ref as *mut u8).sub(base.wrapping_add(16)) };
+            debug_assert!(
+                a_ptr as usize + 16 + base == self_ref as usize,
+                "string_slice: Layout B offset mismatch — possible heap corruption"
+            );
             (a_ptr, base + byte_start)
         };
 
@@ -783,7 +800,11 @@ impl Clone for Value {
             0xFFFC => {
                 let hdr = (self.0 & PAYLOAD_MASK) as *mut u32;
                 unsafe {
-                    *hdr += 2;
+                    // rc is stored in bits 31:1; increment by 2 (the type bit stays in bit 0).
+                    // Saturate instead of wrapping: a saturated rc means we never free the
+                    // backing buffer (acceptable memory leak for absurdly-shared strings).
+                    let old = *hdr;
+                    *hdr = old.saturating_add(2);
                 } // rc++ (bits 31:1)
                 Value(self.0) // same bits, 0 allocations
             }
