@@ -64,6 +64,17 @@ print("unpack", a, b, c)
 a, b = b, a
 print("swap", a, b)
 
+# Unpack error messages (Issue #96)
+try:
+    a, b, c = (1, 2)
+except Exception as e:
+    print("unpack-too-few", str(e))
+
+try:
+    a, b = (1, 2, 3)
+except Exception as e:
+    print("unpack-too-many", str(e))
+
 # Membership testing
 lst = [1, 2, 3]
 print("in-list", 2 in lst)
