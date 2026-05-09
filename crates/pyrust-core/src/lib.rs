@@ -242,15 +242,54 @@ impl Value {
 
     pub fn string(s: impl AsRef<str>) -> Self {
         let s = s.as_ref();
-        let bytes = s.as_bytes();
-        let len = bytes.len();
-        let layout = Layout::from_size_align(4 + len, 4).unwrap();
+        let len = s.len();
+        // Layout A: [rc_type:u32][sub_len:u32][ref:*mut u8][bytes: u8 × len]
+        //            offset 0     offset 4     offset 8     offset 16
+        let layout = Layout::from_size_align(16 + len, 8).unwrap();
         let ptr = unsafe { alloc(layout) };
         unsafe {
-            (ptr as *mut u32).write(len as u32);
+            (ptr as *mut u32).write(2u32);           // rc=1, type=0
+            (ptr.add(4) as *mut u32).write(len as u32);
+            *(ptr.add(8) as *mut *mut u8) = ptr.add(16); // ref → own bytes
             if len > 0 {
-                ptr.add(4).copy_from_nonoverlapping(bytes.as_ptr(), len);
+                ptr.add(16).copy_from_nonoverlapping(s.as_bytes().as_ptr(), len);
             }
+        }
+        Value(TAG_STR_BITS | (ptr as u64 & PAYLOAD_MASK))
+    }
+
+    pub fn string_slice(&self, byte_start: usize, byte_end: usize) -> Self {
+        let sub_len = byte_end - byte_start;
+        let hdr = (self.0 & PAYLOAD_MASK) as *const u8;
+        let rc_type = unsafe { *(hdr as *const u32) };
+        // self.ref (offset 8) points to self's bytes[0]; add byte_start for new slice
+        let self_ref = unsafe { *(hdr.add(8) as *const *const u8) };
+        let new_ref = unsafe { self_ref.add(byte_start) };
+
+        // Find A_ptr (Layout A root) to increment its rc, and compute new offset
+        // Layout A: A_ptr = hdr,   new_offset = byte_start
+        // Layout B: A_ptr = ref - offset - 16,  new_offset = stored_offset + byte_start
+        let (a_ptr, new_offset): (*mut u8, usize) = if rc_type & 1 == 0 {
+            (hdr as *mut u8, byte_start)
+        } else {
+            let base = unsafe { *(hdr.add(16) as *const u32) as usize };
+            let a_ptr = unsafe { (self_ref as *mut u8).sub(base + 16) };
+            (a_ptr, base + byte_start)
+        };
+
+        // Increment A.rc
+        unsafe { *(a_ptr as *mut u32) += 2; }
+
+        // Layout B: [rc_type:u32][sub_len:u32][ref:*mut u8][offset:u32]
+        //            offset 0     offset 4     offset 8     offset 16
+        // ref points directly to this slice's bytes[0]; ref - offset - 16 = A_ptr
+        let layout = Layout::from_size_align(20, 8).unwrap();
+        let ptr = unsafe { alloc(layout) };
+        unsafe {
+            (ptr as *mut u32).write(3u32);  // rc=1, type=1
+            (ptr.add(4) as *mut u32).write(sub_len as u32);
+            *(ptr.add(8) as *mut *const u8) = new_ref;
+            (ptr.add(16) as *mut u32).write(new_offset as u32);
         }
         Value(TAG_STR_BITS | (ptr as u64 & PAYLOAD_MASK))
     }
@@ -340,19 +379,16 @@ impl Value {
 
     // ── Private unsafe helpers ───────────────────────────────────────────────
 
-    unsafe fn thin_str_ptr(&self) -> *const u8 {
+    unsafe fn str_hdr(&self) -> *const u8 {
         (self.0 & PAYLOAD_MASK) as *const u8
     }
 
-    unsafe fn thin_as_str(&self) -> &str {
-        let ptr = unsafe { self.thin_str_ptr() };
-        let len = unsafe { *(ptr as *const u32) } as usize;
-        if len == 0 {
-            ""
-        } else {
-            unsafe {
-                std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr.add(4), len))
-            }
+    unsafe fn str_as_str(&self) -> &str {
+        unsafe {
+            let hdr = self.str_hdr();
+            let sub_len = *(hdr.add(4) as *const u32) as usize;
+            let ref_ptr = *(hdr.add(8) as *const *const u8);
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(ref_ptr, sub_len))
         }
     }
 
@@ -389,7 +425,7 @@ impl Value {
 
     pub fn as_str(&self) -> Option<&str> {
         if self.is_str() {
-            Some(unsafe { self.thin_as_str() })
+            Some(unsafe { self.str_as_str() })
         } else {
             None
         }
@@ -478,7 +514,7 @@ impl Value {
             0xFFF9 => ValueKind::None,
             0xFFFA => ValueKind::Bool(self.as_bool()),
             0xFFFB => ValueKind::Int(self.as_int_raw()),
-            0xFFFC => ValueKind::Str(unsafe { self.thin_as_str() }),
+            0xFFFC => ValueKind::Str(unsafe { self.str_as_str() }),
             0xFFFD => ValueKind::Tuple(unsafe { &*self.tuple_ptr() }),
             0xFFFE => ValueKind::List(unsafe { &*self.list_ptr() }),
             0xFFFF => match unsafe { &*self.opaque_ptr() } {
@@ -637,13 +673,9 @@ impl Clone for Value {
             t if t <= 0xFFFB => Value(self.0),
             // Str
             0xFFFC => {
-                let old_ptr = (self.0 & PAYLOAD_MASK) as *const u8;
-                let len = unsafe { *(old_ptr as *const u32) as usize };
-                let total = 4 + len;
-                let layout = Layout::from_size_align(total, 4).unwrap();
-                let new_ptr = unsafe { alloc(layout) };
-                unsafe { new_ptr.copy_from_nonoverlapping(old_ptr, total) };
-                Value(TAG_STR_BITS | (new_ptr as u64 & PAYLOAD_MASK))
+                let hdr = (self.0 & PAYLOAD_MASK) as *mut u32;
+                unsafe { *hdr += 2; }  // rc++ (bits 31:1)
+                Value(self.0)  // same bits, 0 allocations
             }
             // Tuple
             0xFFFD => {
@@ -672,10 +704,28 @@ impl Drop for Value {
         match top16(self.0) {
             t if t <= 0xFFFB => {} // primitives: no heap
             0xFFFC => unsafe {
-                let ptr = (self.0 & PAYLOAD_MASK) as *mut u8;
-                let len = *(ptr as *const u32) as usize;
-                let layout = Layout::from_size_align(4 + len, 4).unwrap();
-                dealloc(ptr, layout);
+                let hdr = (self.0 & PAYLOAD_MASK) as *mut u8;
+                let rc_type_ptr = hdr as *mut u32;
+                *rc_type_ptr -= 2;  // rc--
+                if *rc_type_ptr >> 1 == 0 {  // rc reached 0
+                    if *rc_type_ptr & 1 == 0 {
+                        // Layout A: [rc_type:u32][sub_len:u32][ref:*mut u8][bytes...]
+                        let len = *(hdr.add(4) as *const u32) as usize;
+                        dealloc(hdr, Layout::from_size_align(16 + len, 8).unwrap());
+                    } else {
+                        // Layout B: [rc_type:u32][sub_len:u32][ref:*mut u8][offset:u32]
+                        // A_ptr = ref - offset - 16
+                        let ref_ptr = *(hdr.add(8) as *const *mut u8);
+                        let offset = *(hdr.add(16) as *const u32) as usize;
+                        let a_ptr = ref_ptr.sub(offset + 16);
+                        *(a_ptr as *mut u32) -= 2;  // A.rc--
+                        if *(a_ptr as *const u32) >> 1 == 0 {
+                            let root_len = *(a_ptr.add(4) as *const u32) as usize;
+                            dealloc(a_ptr, Layout::from_size_align(16 + root_len, 8).unwrap());
+                        }
+                        dealloc(hdr, Layout::from_size_align(20, 8).unwrap());
+                    }
+                }
             },
             0xFFFD => unsafe {
                 drop(Box::from_raw(self.tuple_ptr()));

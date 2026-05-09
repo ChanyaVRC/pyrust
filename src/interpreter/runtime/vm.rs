@@ -1104,9 +1104,7 @@ impl Interpreter {
             }
             4 => {
                 if let Some(v) = &regs[obj as usize] {
-                    if let ValueKind::Str(s) = v.kind() {
-                        pyrust_builtins::string::call(&method, s, &args)
-                    } else { unreachable!() }
+                    pyrust_builtins::string::call(&method, v, &args)
                 } else { unreachable!() }
             }
             _ => {
@@ -1175,9 +1173,7 @@ impl Interpreter {
             }
             4 => {
                 if let Some(v) = &regs[obj as usize] {
-                    if let ValueKind::Str(s) = v.kind() {
-                        pyrust_builtins::string::call(&method, s, &pos_items)
-                    } else { unreachable!() }
+                    pyrust_builtins::string::call(&method, v, &pos_items)
                 } else { unreachable!() }
             }
             _ => {

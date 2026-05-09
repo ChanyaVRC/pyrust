@@ -1,13 +1,14 @@
 use pyrust_core::{PyError, Result, Value, ValueKind};
 
-pub fn call(method: &str, s: &str, args: &[Value]) -> Result<Value> {
+pub fn call(method: &str, src: &Value, args: &[Value]) -> Result<Value> {
+    let s: &str = src.as_str().unwrap();
     match method {
         // Common Sequence Operations (via char indexing)
         "index" => str_index(s, args),
         "count" => str_count(s, args),
         // Splitting / joining
-        "split" => split(s, args),
-        "rsplit" => rsplit(s, args),
+        "split" => split(src, s, args),
+        "rsplit" => rsplit(src, s, args),
         "join" => join(s, args),
         // Stripping
         "strip" => Ok(Value::string(strip_chars(s, args, true, true))),
@@ -110,12 +111,15 @@ fn str_rfind(s: &str, args: &[Value], raise_on_miss: bool) -> Result<Value> {
     }
 }
 
-fn split(s: &str, args: &[Value]) -> Result<Value> {
+fn split(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
     let (sep, maxsplit) = split_args(args)?;
     let parts: Vec<Value> = match sep {
         None => {
             if maxsplit < 0 {
-                s.split_whitespace().map(|p| Value::string(p)).collect()
+                s.split_whitespace().map(|p| {
+                    let off = p.as_ptr() as usize - s.as_ptr() as usize;
+                    src.string_slice(off, off + p.len())
+                }).collect()
             } else {
                 let n = maxsplit as usize;
                 // Python's whitespace split: consecutive whitespace treated as one
@@ -129,38 +133,54 @@ fn split(s: &str, args: &[Value]) -> Result<Value> {
                     let t = remaining.trim_start();
                     if t.is_empty() { break; }
                     match t.find(char::is_whitespace) {
-                        None => { out.push(Value::string(t)); remaining = ""; break; }
+                        None => {
+                            let off = t.as_ptr() as usize - s.as_ptr() as usize;
+                            out.push(src.string_slice(off, off + t.len()));
+                            remaining = "";
+                            break;
+                        }
                         Some(pos) => {
-                            out.push(Value::string(&t[..pos]));
+                            let off = t.as_ptr() as usize - s.as_ptr() as usize;
+                            out.push(src.string_slice(off, off + pos));
                             remaining = &t[pos..];
                         }
                     }
                 }
                 let tail = remaining.trim_start();
-                if !tail.is_empty() { out.push(Value::string(tail)); }
+                if !tail.is_empty() {
+                    let off = tail.as_ptr() as usize - s.as_ptr() as usize;
+                    out.push(src.string_slice(off, off + tail.len()));
+                }
                 return Ok(Value::list(out));
             }
         }
         Some(sep_str) => {
             if maxsplit < 0 {
-                s.split(sep_str).map(|p| Value::string(p)).collect()
+                s.split(sep_str).map(|p| {
+                    let off = p.as_ptr() as usize - s.as_ptr() as usize;
+                    src.string_slice(off, off + p.len())
+                }).collect()
             } else {
-                s.splitn(maxsplit as usize + 1, sep_str)
-                    .map(|p| Value::string(p))
-                    .collect()
+                s.splitn(maxsplit as usize + 1, sep_str).map(|p| {
+                    let off = p.as_ptr() as usize - s.as_ptr() as usize;
+                    src.string_slice(off, off + p.len())
+                }).collect()
             }
         }
     };
     Ok(Value::list(parts))
 }
 
-fn rsplit(s: &str, args: &[Value]) -> Result<Value> {
+fn rsplit(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
     let (sep, maxsplit) = split_args(args)?;
     let parts: Vec<Value> = match sep {
         None => {
             // For rsplit with no sep, reverse the whitespace split
             if maxsplit < 0 {
-                s.split_whitespace().map(|p| Value::string(p)).collect()
+                s.split_whitespace().map(|p| {
+                    let off = p.as_ptr() as usize - s.as_ptr() as usize;
+                    src.string_slice(off, off + p.len())
+                }).collect()
             } else {
                 let n = maxsplit as usize;
                 let mut out = Vec::new();
@@ -169,26 +189,39 @@ fn rsplit(s: &str, args: &[Value]) -> Result<Value> {
                     let t = remaining.trim_end();
                     if t.is_empty() { break; }
                     match t.rfind(char::is_whitespace) {
-                        None => { out.push(Value::string(t)); remaining = ""; break; }
+                        None => {
+                            let off = t.as_ptr() as usize - s.as_ptr() as usize;
+                            out.push(src.string_slice(off, off + t.len()));
+                            remaining = "";
+                            break;
+                        }
                         Some(pos) => {
-                            out.push(Value::string(&t[pos+1..]));
+                            let off = t[pos+1..].as_ptr() as usize - s.as_ptr() as usize;
+                            out.push(src.string_slice(off, off + t[pos+1..].len()));
                             remaining = &t[..pos];
                         }
                     }
                 }
                 let head = remaining.trim_end();
-                if !head.is_empty() { out.push(Value::string(head)); }
+                if !head.is_empty() {
+                    let off = head.as_ptr() as usize - s.as_ptr() as usize;
+                    out.push(src.string_slice(off, off + head.len()));
+                }
                 out.reverse();
                 return Ok(Value::list(out));
             }
         }
         Some(sep_str) => {
             if maxsplit < 0 {
-                s.split(sep_str).map(|p| Value::string(p)).collect()
+                s.split(sep_str).map(|p| {
+                    let off = p.as_ptr() as usize - s.as_ptr() as usize;
+                    src.string_slice(off, off + p.len())
+                }).collect()
             } else {
-                let mut parts: Vec<Value> = s.rsplitn(maxsplit as usize + 1, sep_str)
-                    .map(|p| Value::string(p))
-                    .collect();
+                let mut parts: Vec<Value> = s.rsplitn(maxsplit as usize + 1, sep_str).map(|p| {
+                    let off = p.as_ptr() as usize - s.as_ptr() as usize;
+                    src.string_slice(off, off + p.len())
+                }).collect();
                 parts.reverse();
                 parts
             }
