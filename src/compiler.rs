@@ -553,7 +553,7 @@ fn fold_binop(l: &Value, op: BinaryOp, r: &Value) -> Option<Value> {
         (ValueKind::Float(a), BinaryOp::Sub, ValueKind::Float(b)) => Some(Value::float(a - b)),
         (ValueKind::Float(a), BinaryOp::Mul, ValueKind::Float(b)) => Some(Value::float(a * b)),
         (ValueKind::Float(a), BinaryOp::Div, ValueKind::Float(b)) if b != 0.0 => Some(Value::float(a / b)),
-        (ValueKind::Str(a), BinaryOp::Add, ValueKind::Str(b)) => Some(Value::string(a.clone() + b)),
+        (ValueKind::Str(a), BinaryOp::Add, ValueKind::Str(b)) => Some(Value::string(a.to_string() + b)),
         (ValueKind::Int(a), BinaryOp::Eq, ValueKind::Int(b)) => Some(Value::bool_(a == b)),
         (ValueKind::Int(a), BinaryOp::Ne, ValueKind::Int(b)) => Some(Value::bool_(a != b)),
         (ValueKind::Int(a), BinaryOp::Lt, ValueKind::Int(b)) => Some(Value::bool_(a < b)),

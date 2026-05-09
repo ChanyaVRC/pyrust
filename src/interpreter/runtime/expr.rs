@@ -574,7 +574,7 @@ impl Interpreter {
             }
             ValueKind::Str(s) => {
                 match item.kind() {
-                    ValueKind::Str(sub) => Ok(Value::bool_(s.contains(sub.as_str()))),
+                    ValueKind::Str(sub) => Ok(Value::bool_(s.contains(sub))),
                     _ => Err(PyError::Runtime("'in <string>' requires string as left operand".to_string())),
                 }
             }

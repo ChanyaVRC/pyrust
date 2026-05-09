@@ -352,9 +352,9 @@ result = fib(35)
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
             Some(Value::list(vec![
-                Value::tuple(vec![Value::int(0), Value::string("a".into())]),
-                Value::tuple(vec![Value::int(1), Value::string("b".into())]),
-                Value::tuple(vec![Value::int(2), Value::string("c".into())]),
+                Value::tuple(vec![Value::int(0), Value::string("a")]),
+                Value::tuple(vec![Value::int(1), Value::string("b")]),
+                Value::tuple(vec![Value::int(2), Value::string("c")]),
             ]))
         );
     }
@@ -367,8 +367,8 @@ result = fib(35)
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
             Some(Value::list(vec![
-                Value::tuple(vec![Value::int(10), Value::string("x".into())]),
-                Value::tuple(vec![Value::int(11), Value::string("y".into())]),
+                Value::tuple(vec![Value::int(10), Value::string("x")]),
+                Value::tuple(vec![Value::int(11), Value::string("y")]),
             ]))
         );
     }
@@ -379,9 +379,9 @@ result = fib(35)
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
             Some(Value::list(vec![
-                Value::tuple(vec![Value::int(1), Value::string("a".into())]),
-                Value::tuple(vec![Value::int(2), Value::string("b".into())]),
-                Value::tuple(vec![Value::int(3), Value::string("c".into())]),
+                Value::tuple(vec![Value::int(1), Value::string("a")]),
+                Value::tuple(vec![Value::int(2), Value::string("b")]),
+                Value::tuple(vec![Value::int(3), Value::string("c")]),
             ]))
         );
     }
@@ -446,7 +446,7 @@ result = fib(35)
         );
         assert_eq!(interpreter.lookup_name("a").unwrap(), Some(Value::int(42)));
         assert_eq!(interpreter.lookup_name("b").unwrap(), Some(Value::float(3.14)));
-        assert_eq!(interpreter.lookup_name("c").unwrap(), Some(Value::string("100".into())));
+        assert_eq!(interpreter.lookup_name("c").unwrap(), Some(Value::string("100")));
         assert_eq!(interpreter.lookup_name("d").unwrap(), Some(Value::bool_(false)));
         assert_eq!(interpreter.lookup_name("e").unwrap(), Some(Value::bool_(true)));
     }

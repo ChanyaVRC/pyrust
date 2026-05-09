@@ -1,3 +1,4 @@
+use std::alloc::{alloc, dealloc, Layout};
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -186,7 +187,7 @@ pub enum ValueKind<'a> {
     Bool(bool),
     Int(i64),
     Float(f64),
-    Str(&'a String),
+    Str(&'a str),
     List(&'a Vec<Value>),
     Tuple(&'a Vec<Value>),
     Dict(&'a IndexMap<PyKey, Value>),
@@ -239,9 +240,19 @@ impl Value {
         }
     }
 
-    pub fn string(s: String) -> Self {
-        let ptr = Box::into_raw(Box::new(s)) as u64;
-        Value(TAG_STR_BITS | (ptr & PAYLOAD_MASK))
+    pub fn string(s: impl AsRef<str>) -> Self {
+        let s = s.as_ref();
+        let bytes = s.as_bytes();
+        let len = bytes.len();
+        let layout = Layout::from_size_align(4 + len, 4).unwrap();
+        let ptr = unsafe { alloc(layout) };
+        unsafe {
+            (ptr as *mut u32).write(len as u32);
+            if len > 0 {
+                ptr.add(4).copy_from_nonoverlapping(bytes.as_ptr(), len);
+            }
+        }
+        Value(TAG_STR_BITS | (ptr as u64 & PAYLOAD_MASK))
     }
 
     pub fn list(v: Vec<Value>) -> Self {
@@ -329,8 +340,20 @@ impl Value {
 
     // ── Private unsafe helpers ───────────────────────────────────────────────
 
-    unsafe fn str_ptr(&self) -> *mut String {
-        (self.0 & PAYLOAD_MASK) as *mut _
+    unsafe fn thin_str_ptr(&self) -> *const u8 {
+        (self.0 & PAYLOAD_MASK) as *const u8
+    }
+
+    unsafe fn thin_as_str(&self) -> &str {
+        let ptr = unsafe { self.thin_str_ptr() };
+        let len = unsafe { *(ptr as *const u32) } as usize;
+        if len == 0 {
+            ""
+        } else {
+            unsafe {
+                std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr.add(4), len))
+            }
+        }
     }
 
     unsafe fn tuple_ptr(&self) -> *mut Vec<Value> {
@@ -364,9 +387,9 @@ impl Value {
         f64::from_bits(self.0)
     }
 
-    pub fn as_str(&self) -> Option<&String> {
+    pub fn as_str(&self) -> Option<&str> {
         if self.is_str() {
-            Some(unsafe { &*self.str_ptr() })
+            Some(unsafe { self.thin_as_str() })
         } else {
             None
         }
@@ -455,7 +478,7 @@ impl Value {
             0xFFF9 => ValueKind::None,
             0xFFFA => ValueKind::Bool(self.as_bool()),
             0xFFFB => ValueKind::Int(self.as_int_raw()),
-            0xFFFC => ValueKind::Str(unsafe { &*self.str_ptr() }),
+            0xFFFC => ValueKind::Str(unsafe { self.thin_as_str() }),
             0xFFFD => ValueKind::Tuple(unsafe { &*self.tuple_ptr() }),
             0xFFFE => ValueKind::List(unsafe { &*self.list_ptr() }),
             0xFFFF => match unsafe { &*self.opaque_ptr() } {
@@ -508,7 +531,7 @@ impl Value {
             ValueKind::PyInstance(instance) if is_exception_instance(instance) => {
                 exception_to_string(instance)
             }
-            ValueKind::Str(s) => s.clone(),
+            ValueKind::Str(s) => s.to_string(),
             _ => self.repr(),
         }
     }
@@ -597,7 +620,7 @@ impl Value {
         match self.kind() {
             ValueKind::Int(v) => Some(PyKey::Int(v)),
             ValueKind::Float(v) => Some(PyKey::Float(v.to_bits())),
-            ValueKind::Str(v) => Some(PyKey::Str(v.clone())),
+            ValueKind::Str(v) => Some(PyKey::Str(v.to_string())),
             ValueKind::Bool(v) => Some(PyKey::Bool(v)),
             ValueKind::None => Some(PyKey::None),
             _ => None,
@@ -614,8 +637,13 @@ impl Clone for Value {
             t if t <= 0xFFFB => Value(self.0),
             // Str
             0xFFFC => {
-                let s = unsafe { &*self.str_ptr() };
-                Value::string(s.clone())
+                let old_ptr = (self.0 & PAYLOAD_MASK) as *const u8;
+                let len = unsafe { *(old_ptr as *const u32) as usize };
+                let total = 4 + len;
+                let layout = Layout::from_size_align(total, 4).unwrap();
+                let new_ptr = unsafe { alloc(layout) };
+                unsafe { new_ptr.copy_from_nonoverlapping(old_ptr, total) };
+                Value(TAG_STR_BITS | (new_ptr as u64 & PAYLOAD_MASK))
             }
             // Tuple
             0xFFFD => {
@@ -644,7 +672,10 @@ impl Drop for Value {
         match top16(self.0) {
             t if t <= 0xFFFB => {} // primitives: no heap
             0xFFFC => unsafe {
-                drop(Box::from_raw(self.str_ptr()));
+                let ptr = (self.0 & PAYLOAD_MASK) as *mut u8;
+                let len = *(ptr as *const u32) as usize;
+                let layout = Layout::from_size_align(4 + len, 4).unwrap();
+                dealloc(ptr, layout);
             },
             0xFFFD => unsafe {
                 drop(Box::from_raw(self.tuple_ptr()));

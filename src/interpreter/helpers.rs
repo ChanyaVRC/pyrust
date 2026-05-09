@@ -147,7 +147,7 @@ struct ExpandedCallArg {
 
 fn extract_optional_string(value: Value, name: &str) -> Result<Option<String>> {
     match value.kind() {
-        ValueKind::Str(text) => Ok(Some(text.clone())),
+        ValueKind::Str(text) => Ok(Some(text.to_string())),
         ValueKind::None => Ok(None),
         _ => Err(PyError::Runtime(format!(
             "print() {} must be None or a string",
