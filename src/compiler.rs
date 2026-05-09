@@ -2992,9 +2992,15 @@ impl Compiler {
         for (i, arg) in args.iter().enumerate() {
             let arg_reg = func_reg + 1 + i as u8;
             let saved = self.next_temp;
+            let insn_before = self.insns.len();
             let r = self.compile_expr(&arg.value);
             if r != arg_reg {
-                self.emit(Insn::Move(arg_reg, r));
+                let single = self.insns.len() == insn_before + 1;
+                if single && r >= self.base_temp && self.retarget_last(r, arg_reg) {
+                    // retargeted in place — no Move needed
+                } else {
+                    self.emit(Insn::Move(arg_reg, r));
+                }
             }
             self.next_temp = saved;
         }
