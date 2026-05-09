@@ -116,10 +116,13 @@ fn split(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
     let parts: Vec<Value> = match sep {
         None => {
             if maxsplit < 0 {
-                s.split_whitespace().map(|p| {
+                // Heuristic capacity (avg word ~4 chars) avoids Vec realloc in one pass
+                let mut parts = Vec::with_capacity(s.len() / 4 + 1);
+                for p in s.split_whitespace() {
                     let off = p.as_ptr() as usize - s.as_ptr() as usize;
-                    src.string_slice(off, off + p.len())
-                }).collect()
+                    parts.push(src.string_slice(off, off + p.len()));
+                }
+                parts
             } else {
                 let n = maxsplit as usize;
                 // Python's whitespace split: consecutive whitespace treated as one
@@ -156,10 +159,13 @@ fn split(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
         }
         Some(sep_str) => {
             if maxsplit < 0 {
-                s.split(sep_str).map(|p| {
+                let cap = if sep_str.is_empty() { s.len() + 1 } else { s.len() / sep_str.len() + 1 };
+                let mut parts = Vec::with_capacity(cap);
+                for p in s.split(sep_str) {
                     let off = p.as_ptr() as usize - s.as_ptr() as usize;
-                    src.string_slice(off, off + p.len())
-                }).collect()
+                    parts.push(src.string_slice(off, off + p.len()));
+                }
+                parts
             } else {
                 s.splitn(maxsplit as usize + 1, sep_str).map(|p| {
                     let off = p.as_ptr() as usize - s.as_ptr() as usize;
@@ -177,10 +183,12 @@ fn rsplit(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
         None => {
             // For rsplit with no sep, reverse the whitespace split
             if maxsplit < 0 {
-                s.split_whitespace().map(|p| {
+                let mut parts = Vec::with_capacity(s.len() / 4 + 1);
+                for p in s.split_whitespace() {
                     let off = p.as_ptr() as usize - s.as_ptr() as usize;
-                    src.string_slice(off, off + p.len())
-                }).collect()
+                    parts.push(src.string_slice(off, off + p.len()));
+                }
+                parts
             } else {
                 let n = maxsplit as usize;
                 let mut out = Vec::new();
@@ -213,10 +221,14 @@ fn rsplit(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
         }
         Some(sep_str) => {
             if maxsplit < 0 {
-                s.split(sep_str).map(|p| {
+                let cap = if sep_str.is_empty() { s.len() + 1 } else { s.len() / sep_str.len() + 1 };
+                let mut parts = Vec::with_capacity(cap);
+                for p in s.split(sep_str) {
                     let off = p.as_ptr() as usize - s.as_ptr() as usize;
-                    src.string_slice(off, off + p.len())
-                }).collect()
+                    parts.push(src.string_slice(off, off + p.len()));
+                }
+                parts.reverse();
+                parts
             } else {
                 let mut parts: Vec<Value> = s.rsplitn(maxsplit as usize + 1, sep_str).map(|p| {
                     let off = p.as_ptr() as usize - s.as_ptr() as usize;

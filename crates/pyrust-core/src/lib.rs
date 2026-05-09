@@ -205,7 +205,7 @@ pub enum ValueKind<'a> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Layout-B pool — thread-local free list for 20-byte string-slice headers
+// Thread-local free lists for fixed-size allocations
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Each free slot stores a *mut u8 to the next free slot in its first 8 bytes.
@@ -243,6 +243,45 @@ unsafe fn pool_b_dealloc(ptr: *mut u8) {
     })
 }
 
+// Pool for Vec<Value> struct headers (list / tuple).
+// Vec<Value> = [ptr: *mut Value][len: usize][cap: usize] = 24 bytes / align 8 on 64-bit.
+// Replacing Box::new(v) with this pool eliminates one system alloc per list creation.
+
+const VEC_HDR_SIZE: usize = 24;  // size_of::<Vec<Value>>() — asserted in Value impl
+const VEC_HDR_ALIGN: usize = 8;
+const POOL_VEC_HDR_CAP: usize = 64;
+
+thread_local! {
+    static POOL_VEC_HDR: Cell<(*mut u8, usize)> = const { Cell::new((std::ptr::null_mut(), 0)) };
+}
+
+#[inline(always)]
+unsafe fn pool_vec_hdr_alloc() -> *mut u8 {
+    POOL_VEC_HDR.with(|c| {
+        let (head, len) = c.get();
+        if len > 0 {
+            let next = unsafe { *(head as *const *mut u8) };
+            c.set((next, len - 1));
+            head
+        } else {
+            unsafe { alloc(Layout::from_size_align(VEC_HDR_SIZE, VEC_HDR_ALIGN).unwrap()) }
+        }
+    })
+}
+
+#[inline(always)]
+unsafe fn pool_vec_hdr_dealloc(ptr: *mut u8) {
+    POOL_VEC_HDR.with(|c| {
+        let (head, len) = c.get();
+        if len < POOL_VEC_HDR_CAP {
+            unsafe { *(ptr as *mut *mut u8) = head };
+            c.set((ptr, len + 1));
+        } else {
+            unsafe { dealloc(ptr, Layout::from_size_align(VEC_HDR_SIZE, VEC_HDR_ALIGN).unwrap()) };
+        }
+    })
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Value — NaN-boxed u64
 // ─────────────────────────────────────────────────────────────────────────────
@@ -251,6 +290,11 @@ unsafe fn pool_b_dealloc(ptr: *mut u8) {
 pub struct Value(u64);
 
 impl Value {
+    const _ASSERT_VEC_HDR: () = {
+        assert!(std::mem::size_of::<Vec<Value>>() == VEC_HDR_SIZE);
+        assert!(std::mem::align_of::<Vec<Value>>() == VEC_HDR_ALIGN);
+    };
+
     // ── Constructors ─────────────────────────────────────────────────────────
 
     pub fn none() -> Self {
@@ -333,13 +377,15 @@ impl Value {
     }
 
     pub fn list(v: Vec<Value>) -> Self {
-        let ptr = Box::into_raw(Box::new(v)) as u64;
-        Value(TAG_LIST_BITS | (ptr & PAYLOAD_MASK))
+        let hdr = unsafe { pool_vec_hdr_alloc() };
+        unsafe { std::ptr::write(hdr as *mut Vec<Value>, v) };
+        Value(TAG_LIST_BITS | (hdr as u64 & PAYLOAD_MASK))
     }
 
     pub fn tuple(v: Vec<Value>) -> Self {
-        let ptr = Box::into_raw(Box::new(v)) as u64;
-        Value(TAG_TUPLE_BITS | (ptr & PAYLOAD_MASK))
+        let hdr = unsafe { pool_vec_hdr_alloc() };
+        unsafe { std::ptr::write(hdr as *mut Vec<Value>, v) };
+        Value(TAG_TUPLE_BITS | (hdr as u64 & PAYLOAD_MASK))
     }
 
     pub fn dict(d: IndexMap<PyKey, Value>) -> Self {
@@ -766,10 +812,14 @@ impl Drop for Value {
                 }
             },
             0xFFFD => unsafe {
-                drop(Box::from_raw(self.tuple_ptr()));
+                let hdr = (self.0 & PAYLOAD_MASK) as *mut u8;
+                std::ptr::drop_in_place(hdr as *mut Vec<Value>);
+                pool_vec_hdr_dealloc(hdr);
             },
             0xFFFE => unsafe {
-                drop(Box::from_raw(self.list_ptr()));
+                let hdr = (self.0 & PAYLOAD_MASK) as *mut u8;
+                std::ptr::drop_in_place(hdr as *mut Vec<Value>);
+                pool_vec_hdr_dealloc(hdr);
             },
             0xFFFF => unsafe {
                 drop(Box::from_raw(self.opaque_ptr()));
