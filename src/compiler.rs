@@ -2592,16 +2592,64 @@ impl Compiler {
 
     // ── Expression compilation ────────────────────────────────────────────────
 
+    /// Retarget the last emitted instruction's dst from `from` to `to`.
+    /// Returns true if the instruction was retargeted (had dst == from).
+    fn retarget_last(&mut self, from: Reg, to: Reg) -> bool {
+        let Some(insn) = self.insns.last_mut() else {
+            return false;
+        };
+        let dst = match insn {
+            Insn::BinOp(d, ..)
+            | Insn::BinOpInPlace(d, ..)
+            | Insn::BinOpConst(d, ..)
+            | Insn::UnaryOp(d, ..)
+            | Insn::LoadConst(d, ..)
+            | Insn::LoadNone(d)
+            | Insn::LoadGlobal(d, ..)
+            | Insn::Move(d, ..)
+            | Insn::GetAttr(d, ..)
+            | Insn::GetItem(d, ..)
+            // Call is NOT retargetable: Call(func_reg, argc) uses func_reg as both
+            // the function source and the result destination. Retargeting it to a
+            // different register would point the call at the wrong function.
+            | Insn::MakeFunction(d, ..)
+            | Insn::MakeClass(d, ..)
+            | Insn::BuildList(d, ..)
+            | Insn::BuildTuple(d, ..)
+            | Insn::BuildDict(d, ..)
+            | Insn::ForIter(d, ..)
+            | Insn::LoadExc(d)
+            | Insn::ImportModule(d, ..) => d,
+            _ => return false,
+        };
+        if *dst == from {
+            *dst = to;
+            true
+        } else {
+            false
+        }
+    }
+
     fn compile_expr_into(&mut self, expr: &Expr, dst: Reg) {
         if self.failed {
             return;
         }
         let saved_next = self.next_temp;
+        let insn_before = self.insns.len();
         let r = self.compile_expr(expr);
         if r != dst {
-            self.emit(Insn::Move(dst, r));
-            if r >= self.base_temp {
+            // Safe to retarget only when the expression compiled to EXACTLY one
+            // instruction and the result is a fresh temp: guarantees no control
+            // flow or multi-instruction sequences where other branches still write
+            // to `r` and would be missed by retargeting only the last instruction.
+            let single = self.insns.len() == insn_before + 1;
+            if single && r >= self.base_temp && self.retarget_last(r, dst) {
                 self.next_temp = saved_next;
+            } else {
+                self.emit(Insn::Move(dst, r));
+                if r >= self.base_temp {
+                    self.next_temp = saved_next;
+                }
             }
         }
     }
