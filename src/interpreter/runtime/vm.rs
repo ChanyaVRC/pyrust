@@ -704,59 +704,49 @@ impl Interpreter {
                     }
                 }
                 Insn::ForCountReg(var, cmp_op, stop_reg, step_idx, offset) => {
-                    let cur = match vm_try!(vm_read(regs, *var, num_locals)) {
-                        Value::Int(i) => i,
-                        _ => vm_try!(Err(crate::error::PyError::Runtime(
-                            "for-range: non-integer counter".into(),
-                        ))),
-                    };
                     let step = match &code.consts[*step_idx as usize] {
                         Value::Int(s) => *s,
                         _ => unreachable!("ForCountReg step must be Int"),
                     };
-                    let next = cur.wrapping_add(step);
-                    let stop = match vm_try!(vm_read(regs, *stop_reg, num_locals)) {
-                        Value::Int(s) => s,
-                        _ => vm_try!(Err(crate::error::PyError::Runtime(
-                            "for-range: non-integer stop".into(),
-                        ))),
-                    };
-                    let cont = match cmp_op {
-                        BinaryOp::Lt => next < stop,
-                        BinaryOp::Gt => next > stop,
-                        _ => unreachable!("ForCountReg uses Lt or Gt only"),
-                    };
-                    if cont {
-                        regs[*var as usize] = Some(Value::Int(next));
+                    if let (Some(Value::Int(cur)), Some(Value::Int(stop))) =
+                        (&regs[*var as usize], &regs[*stop_reg as usize])
+                    {
+                        let next = cur.wrapping_add(step);
+                        let cont = match cmp_op {
+                            BinaryOp::Lt => next < *stop,
+                            BinaryOp::Gt => next > *stop,
+                            _ => unreachable!("ForCountReg uses Lt or Gt only"),
+                        };
+                        if cont { regs[*var as usize] = Some(Value::Int(next)); }
+                        else { pc = (pc as i32 + offset) as usize; }
                     } else {
-                        pc = (pc as i32 + offset) as usize;
+                        vm_try!(Err(crate::error::PyError::Runtime(
+                            "for-range: non-integer counter or stop".into(),
+                        )))
                     }
                 }
                 Insn::ForCountConst(var, cmp_op, stop_idx, step_idx, offset) => {
-                    let cur = match vm_try!(vm_read(regs, *var, num_locals)) {
-                        Value::Int(i) => i,
-                        _ => vm_try!(Err(crate::error::PyError::Runtime(
-                            "for-range: non-integer counter".into(),
-                        ))),
-                    };
                     let step = match &code.consts[*step_idx as usize] {
                         Value::Int(s) => *s,
                         _ => unreachable!("ForCountConst step must be Int"),
                     };
-                    let next = cur.wrapping_add(step);
                     let stop = match &code.consts[*stop_idx as usize] {
                         Value::Int(s) => *s,
                         _ => unreachable!("ForCountConst stop must be Int"),
                     };
-                    let cont = match cmp_op {
-                        BinaryOp::Lt => next < stop,
-                        BinaryOp::Gt => next > stop,
-                        _ => unreachable!("ForCountConst uses Lt or Gt only"),
-                    };
-                    if cont {
-                        regs[*var as usize] = Some(Value::Int(next));
+                    if let Some(Value::Int(cur)) = &regs[*var as usize] {
+                        let next = cur.wrapping_add(step);
+                        let cont = match cmp_op {
+                            BinaryOp::Lt => next < stop,
+                            BinaryOp::Gt => next > stop,
+                            _ => unreachable!("ForCountConst uses Lt or Gt only"),
+                        };
+                        if cont { regs[*var as usize] = Some(Value::Int(next)); }
+                        else { pc = (pc as i32 + offset) as usize; }
                     } else {
-                        pc = (pc as i32 + offset) as usize;
+                        vm_try!(Err(crate::error::PyError::Runtime(
+                            "for-range: non-integer counter".into(),
+                        )))
                     }
                 }
                 Insn::CheckLocal(reg, name_idx) => {
