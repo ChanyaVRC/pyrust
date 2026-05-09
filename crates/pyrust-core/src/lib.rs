@@ -760,7 +760,11 @@ impl Value {
         match self.kind() {
             ValueKind::Int(v) => v.to_string(),
             ValueKind::Float(v) => {
-                if v.fract() == 0.0 {
+                if v.is_nan() {
+                    "nan".to_string()
+                } else if v.is_infinite() {
+                    if v > 0.0 { "inf".to_string() } else { "-inf".to_string() }
+                } else if v.fract() == 0.0 {
                     format!("{v:.1}")
                 } else {
                     v.to_string()
@@ -1037,7 +1041,11 @@ fn key_repr(key: &PyKey) -> String {
         PyKey::Int(v) => v.to_string(),
         PyKey::Float(v) => {
             let as_f = f64::from_bits(*v);
-            if as_f.fract() == 0.0 {
+            if as_f.is_nan() {
+                "nan".to_string()
+            } else if as_f.is_infinite() {
+                if as_f > 0.0 { "inf".to_string() } else { "-inf".to_string() }
+            } else if as_f.fract() == 0.0 {
                 format!("{as_f:.1}")
             } else {
                 as_f.to_string()
