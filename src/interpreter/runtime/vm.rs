@@ -1104,6 +1104,19 @@ impl Interpreter {
                 pyrust_builtins::list::call(&method, items, &args, &empty_kw)
             }
             2 => {
+                if matches!(method.as_str(), "keys" | "values" | "items") {
+                    let rc = regs[obj as usize]
+                        .as_ref()
+                        .and_then(|v| v.get_dict_rc())
+                        .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?
+                        .clone();
+                    return match method.as_str() {
+                        "keys"   => Ok(Value::dict_keys_view(rc)),
+                        "values" => Ok(Value::dict_values_view(rc)),
+                        "items"  => Ok(Value::dict_items_view(rc)),
+                        _ => unreachable!(),
+                    };
+                }
                 let dict = regs[obj as usize]
                     .as_mut()
                     .and_then(|v| v.as_dict_mut())
@@ -1172,6 +1185,55 @@ impl Interpreter {
 
         match obj_kind_tag {
             1 => {
+                // Intercept list.sort here to support key= (needs interpreter access).
+                if method == "sort" {
+                    for k in kw_map.keys() {
+                        if let PyKey::Str(s) = k {
+                            if s != "key" && s != "reverse" {
+                                return Err(PyError::Named(
+                                    "TypeError".to_string(),
+                                    format!("sort() got an unexpected keyword argument '{s}'"),
+                                ));
+                            }
+                        }
+                    }
+                    let key_fn = kw_map.get(&PyKey::Str("key".to_string())).cloned();
+                    let reverse = kw_map
+                        .get(&PyKey::Str("reverse".to_string()))
+                        .map(|v| v.truthy())
+                        .unwrap_or(false);
+                    if let Some(key_fn_val) = key_fn {
+                        // Compute keys via the interpreter, then delegate sorting to builtins.
+                        let items_snapshot = regs[obj as usize]
+                            .as_ref()
+                            .and_then(|v| v.as_list())
+                            .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?
+                            .clone();
+                        let mut keys: Vec<Value> = Vec::with_capacity(items_snapshot.len());
+                        for item in &items_snapshot {
+                            let key_val = {
+                                let mut buf = std::mem::take(&mut self.call_arg_buf);
+                                buf.clear();
+                                buf.push(ExpandedCallArg { name: None, value: item.clone() });
+                                let r = self.call_function_expanded(key_fn_val.clone(), &buf);
+                                self.call_arg_buf = buf;
+                                r?
+                            };
+                            keys.push(key_val);
+                        }
+                        let items_out = regs[obj as usize]
+                            .as_mut()
+                            .and_then(|v| v.as_list_mut())
+                            .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
+                        return pyrust_builtins::list::sort_with_precomputed_keys(items_out, keys, reverse);
+                    }
+                    // No key: delegate to builtins (handles reverse kwarg)
+                    let items = regs[obj as usize]
+                        .as_mut()
+                        .and_then(|v| v.as_list_mut())
+                        .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
+                    return pyrust_builtins::list::call(&method, items, &pos_items, &kw_map);
+                }
                 let items = regs[obj as usize]
                     .as_mut()
                     .and_then(|v| v.as_list_mut())
@@ -1179,6 +1241,19 @@ impl Interpreter {
                 pyrust_builtins::list::call(&method, items, &pos_items, &kw_map)
             }
             2 => {
+                if matches!(method.as_str(), "keys" | "values" | "items") {
+                    let rc = regs[obj as usize]
+                        .as_ref()
+                        .and_then(|v| v.get_dict_rc())
+                        .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?
+                        .clone();
+                    return match method.as_str() {
+                        "keys"   => Ok(Value::dict_keys_view(rc)),
+                        "values" => Ok(Value::dict_values_view(rc)),
+                        "items"  => Ok(Value::dict_items_view(rc)),
+                        _ => unreachable!(),
+                    };
+                }
                 let dict = regs[obj as usize]
                     .as_mut()
                     .and_then(|v| v.as_dict_mut())

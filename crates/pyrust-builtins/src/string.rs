@@ -1,4 +1,5 @@
-use pyrust_core::{PyError, Result, Value, ValueKind};
+use pyrust_core::{PyError, PyKey, Result, Value, ValueKind};
+use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
 /// Compute the byte offset of a subslice `sub` within its parent `parent`.
 ///
@@ -45,10 +46,10 @@ pub fn call(method: &str, src: &Value, args: &[Value]) -> Result<Value> {
         "startswith" => str_startswith(s, args),
         "endswith" => str_endswith(s, args),
         "isdigit" => Ok(Value::bool_(
-            !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()),
+            !s.is_empty() && s.chars().all(is_python_digit),
         )),
         "isalpha" => Ok(Value::bool_(
-            !s.is_empty() && s.chars().all(|c| c.is_alphabetic()),
+            !s.is_empty() && s.chars().all(is_python_alpha),
         )),
         "isalnum" => Ok(Value::bool_(
             !s.is_empty() && s.chars().all(|c| c.is_alphanumeric()),
@@ -60,6 +61,31 @@ pub fn call(method: &str, src: &Value, args: &[Value]) -> Result<Value> {
             "'str' object has no attribute '{method}'"
         ))),
     }
+}
+
+/// Python's str.isdigit(): Unicode Nd (DecimalNumber) category plus superscript/subscript digits.
+fn is_python_digit(c: char) -> bool {
+    // Nd covers all decimal digit scripts (Arabic-Indic, Devanagari, etc.)
+    if c.general_category() == GeneralCategory::DecimalNumber {
+        return true;
+    }
+    // Superscript/subscript digits have Numeric_Type=Digit but category No (OtherNumber)
+    matches!(c as u32,
+        0x00B2 | 0x00B3 | 0x00B9        // ²³¹
+        | 0x2070 | 0x2074..=0x2079      // ⁰⁴⁵⁶⁷⁸⁹
+        | 0x2080..=0x2089)              // ₀₁₂₃₄₅₆₇₈₉
+}
+
+/// Python's str.isalpha(): Unicode general category L* (Letter).
+fn is_python_alpha(c: char) -> bool {
+    matches!(
+        c.general_category(),
+        GeneralCategory::UppercaseLetter
+            | GeneralCategory::LowercaseLetter
+            | GeneralCategory::TitlecaseLetter
+            | GeneralCategory::ModifierLetter
+            | GeneralCategory::OtherLetter
+    )
 }
 
 fn str_index(s: &str, args: &[Value]) -> Result<Value> {
@@ -92,7 +118,9 @@ fn str_count(s: &str, args: &[Value]) -> Result<Value> {
         }
     };
     if sub.is_empty() {
-        return Ok(Value::int((s.chars().count() + 1) as i64));
+        let (start, end) = str_slice_args(s, args)?;
+        let haystack = &s[start..end];
+        return Ok(Value::int((haystack.chars().count() + 1) as i64));
     }
     let (start, end) = str_slice_args(s, args)?;
     let haystack = &s[start..end];
@@ -328,6 +356,13 @@ fn join(sep: &str, args: &[Value]) -> Result<Value> {
             .chars()
             .map(|c| Ok(c.to_string()))
             .collect::<Result<_>>()?,
+        ValueKind::Dict(d) => d
+            .keys()
+            .map(|k| match k {
+                PyKey::Str(s) => Ok(s.clone()),
+                _ => Err(PyError::Runtime("sequence item must be str".to_string())),
+            })
+            .collect::<Result<_>>()?,
         _ => {
             return Err(PyError::Runtime(
                 "str.join() argument must be iterable".to_string(),
@@ -377,29 +412,31 @@ fn str_replace(s: &str, args: &[Value]) -> Result<Value> {
 }
 
 fn str_startswith(s: &str, args: &[Value]) -> Result<Value> {
-    let prefix = match args.first().map(|v| v.kind()) {
-        Some(ValueKind::Str(p)) => p,
-        _ => {
-            return Err(PyError::Runtime(
-                "str.startswith() requires a str argument".to_string(),
-            ));
-        }
-    };
     let (start, end) = str_slice_args(s, args)?;
-    Ok(Value::bool_(s[start..end].starts_with(prefix)))
+    let slice = &s[start..end];
+    match args.first().map(|v| v.kind()) {
+        Some(ValueKind::Str(p)) => Ok(Value::bool_(slice.starts_with(p))),
+        Some(ValueKind::Tuple(prefixes)) => Ok(Value::bool_(prefixes.iter().any(|pv| {
+            if let ValueKind::Str(p) = pv.kind() { slice.starts_with(p) } else { false }
+        }))),
+        _ => Err(PyError::Runtime(
+            "str.startswith() first arg must be str or a tuple of str".to_string(),
+        )),
+    }
 }
 
 fn str_endswith(s: &str, args: &[Value]) -> Result<Value> {
-    let suffix = match args.first().map(|v| v.kind()) {
-        Some(ValueKind::Str(p)) => p,
-        _ => {
-            return Err(PyError::Runtime(
-                "str.endswith() requires a str argument".to_string(),
-            ));
-        }
-    };
     let (start, end) = str_slice_args(s, args)?;
-    Ok(Value::bool_(s[start..end].ends_with(suffix)))
+    let slice = &s[start..end];
+    match args.first().map(|v| v.kind()) {
+        Some(ValueKind::Str(p)) => Ok(Value::bool_(slice.ends_with(p))),
+        Some(ValueKind::Tuple(suffixes)) => Ok(Value::bool_(suffixes.iter().any(|sv| {
+            if let ValueKind::Str(p) = sv.kind() { slice.ends_with(p) } else { false }
+        }))),
+        _ => Err(PyError::Runtime(
+            "str.endswith() first arg must be str or a tuple of str".to_string(),
+        )),
+    }
 }
 
 fn capitalize(s: &str) -> String {

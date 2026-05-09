@@ -47,6 +47,9 @@ fn type_name_of(v: &Value) -> &'static str {
         ValueKind::PyClass(_) => "type",
         ValueKind::PyInstance(_) => "object",
         ValueKind::PyModule(_) => "module",
+        ValueKind::DictKeysView(_) => "dict_keys",
+        ValueKind::DictValuesView(_) => "dict_values",
+        ValueKind::DictItemsView(_) => "dict_items",
     }
 }
 
@@ -88,7 +91,8 @@ pub fn insert(items: &mut Vec<Value>, args: &[Value]) -> Result<Value> {
         ValueKind::Int(i) => i,
         ValueKind::Bool(b) => b as i64,
         _ => {
-            return Err(PyError::Runtime(
+            return Err(PyError::Named(
+                "TypeError".to_string(),
                 "list.insert() index must be an integer".to_string(),
             ));
         }

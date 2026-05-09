@@ -140,7 +140,10 @@ fn top16(bits: u64) -> u16 {
 
 pub enum Opaque {
     BigInt(i64),
-    Dict(IndexMap<PyKey, Value>),
+    Dict(Rc<RefCell<IndexMap<PyKey, Value>>>),
+    DictKeysView(Rc<RefCell<IndexMap<PyKey, Value>>>),
+    DictValuesView(Rc<RefCell<IndexMap<PyKey, Value>>>),
+    DictItemsView(Rc<RefCell<IndexMap<PyKey, Value>>>),
     Set(IndexSet<PyKey>),
     Range {
         start: i64,
@@ -162,7 +165,10 @@ impl Clone for Opaque {
     fn clone(&self) -> Self {
         match self {
             Opaque::BigInt(n) => Opaque::BigInt(*n),
-            Opaque::Dict(d) => Opaque::Dict(d.clone()),
+            Opaque::Dict(rc) => Opaque::Dict(Rc::clone(rc)),
+            Opaque::DictKeysView(rc) => Opaque::DictKeysView(Rc::clone(rc)),
+            Opaque::DictValuesView(rc) => Opaque::DictValuesView(Rc::clone(rc)),
+            Opaque::DictItemsView(rc) => Opaque::DictItemsView(Rc::clone(rc)),
             Opaque::Set(s) => Opaque::Set(s.clone()),
             Opaque::Range { start, stop, step } => Opaque::Range {
                 start: *start,
@@ -195,6 +201,9 @@ pub enum ValueKind<'a> {
     List(&'a Vec<Value>),
     Tuple(&'a Vec<Value>),
     Dict(&'a IndexMap<PyKey, Value>),
+    DictKeysView(&'a Rc<RefCell<IndexMap<PyKey, Value>>>),
+    DictValuesView(&'a Rc<RefCell<IndexMap<PyKey, Value>>>),
+    DictItemsView(&'a Rc<RefCell<IndexMap<PyKey, Value>>>),
     Set(&'a IndexSet<PyKey>),
     Range {
         start: i64,
@@ -430,7 +439,19 @@ impl Value {
     }
 
     pub fn dict(d: IndexMap<PyKey, Value>) -> Self {
-        Value::opaque(Opaque::Dict(d))
+        Value::opaque(Opaque::Dict(Rc::new(RefCell::new(d))))
+    }
+
+    pub fn dict_keys_view(rc: Rc<RefCell<IndexMap<PyKey, Value>>>) -> Self {
+        Value::opaque(Opaque::DictKeysView(rc))
+    }
+
+    pub fn dict_values_view(rc: Rc<RefCell<IndexMap<PyKey, Value>>>) -> Self {
+        Value::opaque(Opaque::DictValuesView(rc))
+    }
+
+    pub fn dict_items_view(rc: Rc<RefCell<IndexMap<PyKey, Value>>>) -> Self {
+        Value::opaque(Opaque::DictItemsView(rc))
     }
 
     pub fn set(s: IndexSet<PyKey>) -> Self {
@@ -598,8 +619,9 @@ impl Value {
 
     pub fn as_dict(&self) -> Option<&IndexMap<PyKey, Value>> {
         self.as_opaque().and_then(|o| {
-            if let Opaque::Dict(d) = o {
-                Some(d)
+            if let Opaque::Dict(rc) = o {
+                // SAFETY: same invariant as in kind() — no concurrent mutable borrow.
+                Some(unsafe { &*rc.as_ref().as_ptr() })
             } else {
                 None
             }
@@ -608,11 +630,19 @@ impl Value {
 
     pub fn as_dict_mut(&mut self) -> Option<&mut IndexMap<PyKey, Value>> {
         self.as_opaque_mut().and_then(|o| {
-            if let Opaque::Dict(d) = o {
-                Some(d)
+            if let Opaque::Dict(rc) = o {
+                // SAFETY: &mut self prevents any other alias to this Value while the
+                // returned reference is live.  No concurrent borrow_mut in single-threaded use.
+                Some(unsafe { &mut *rc.as_ref().as_ptr() })
             } else {
                 None
             }
+        })
+    }
+
+    pub fn get_dict_rc(&self) -> Option<&Rc<RefCell<IndexMap<PyKey, Value>>>> {
+        self.as_opaque().and_then(|o| {
+            if let Opaque::Dict(rc) = o { Some(rc) } else { None }
         })
     }
 
@@ -644,7 +674,14 @@ impl Value {
             0xFFFE => ValueKind::List(unsafe { &*self.list_ptr() }),
             0xFFFF => match unsafe { &*self.opaque_ptr() } {
                 Opaque::BigInt(n) => ValueKind::Int(*n),
-                Opaque::Dict(d) => ValueKind::Dict(d),
+                // SAFETY: rc.as_ref().as_ptr() yields *mut IndexMap whose lifetime is
+                // bounded by the Rc, which lives at least as long as this &self borrow.
+                // No mutable borrow (borrow_mut) is held concurrently in our single-
+                // threaded interpreter, so the raw-pointer alias is sound.
+                Opaque::Dict(rc) => ValueKind::Dict(unsafe { &*rc.as_ref().as_ptr() }),
+                Opaque::DictKeysView(rc) => ValueKind::DictKeysView(rc),
+                Opaque::DictValuesView(rc) => ValueKind::DictValuesView(rc),
+                Opaque::DictItemsView(rc) => ValueKind::DictItemsView(rc),
                 Opaque::Set(s) => ValueKind::Set(s),
                 Opaque::Range { start, stop, step } => ValueKind::Range {
                     start: *start,
@@ -675,6 +712,9 @@ impl Value {
             ValueKind::None => false,
             ValueKind::List(v) => !v.is_empty(),
             ValueKind::Dict(v) => !v.is_empty(),
+            ValueKind::DictKeysView(rc) => !rc.borrow().is_empty(),
+            ValueKind::DictValuesView(rc) => !rc.borrow().is_empty(),
+            ValueKind::DictItemsView(rc) => !rc.borrow().is_empty(),
             ValueKind::Set(v) => !v.is_empty(),
             ValueKind::Range { start, stop, step } => range_len(start, stop, step) > 0,
             ValueKind::UserFunction(_) => true,
@@ -770,6 +810,24 @@ impl Value {
                 format!("<bound method {class_name}.{}>", function.name)
             }
             ValueKind::PyModule(m) => format!("<module '{}'>", m.borrow().name),
+            ValueKind::DictKeysView(rc) => {
+                let map = rc.borrow();
+                let keys: Vec<String> = map.keys().map(key_repr).collect();
+                format!("dict_keys([{}])", keys.join(", "))
+            }
+            ValueKind::DictValuesView(rc) => {
+                let map = rc.borrow();
+                let vals: Vec<String> = map.values().map(|v| v.repr()).collect();
+                format!("dict_values([{}])", vals.join(", "))
+            }
+            ValueKind::DictItemsView(rc) => {
+                let map = rc.borrow();
+                let items: Vec<String> = map
+                    .iter()
+                    .map(|(k, v)| format!("({}, {})", key_repr(k), v.repr()))
+                    .collect();
+                format!("dict_items([{}])", items.join(", "))
+            }
             ValueKind::Tuple(items) => {
                 let inner = items
                     .iter()

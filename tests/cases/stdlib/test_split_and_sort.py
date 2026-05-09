@@ -30,15 +30,16 @@ except ValueError:
     ok = True
 assert ok, "rsplit('') should raise ValueError"
 
-# --- list.sort(key=fn) must raise NotImplementedError ---
-ok = False
-try:
-    [3, 1, 2].sort(key=lambda x: x)
-except NotImplementedError:
-    ok = True
-assert ok, "sort(key=fn) should raise NotImplementedError"
+# --- list.sort(key=fn) ---
+lst = [3, 1, 4, 1, 5]
+lst.sort(key=lambda x: -x)
+assert lst == [5, 4, 3, 1, 1], repr(lst)
 
-# sort without key still works
+lst = ["banana", "apple", "cherry"]
+lst.sort(key=lambda s: len(s))
+assert lst == ["apple", "banana", "cherry"], repr(lst)
+
+# sort without key
 lst = [3, 1, 4, 1, 5]
 lst.sort()
 assert lst == [1, 1, 3, 4, 5]

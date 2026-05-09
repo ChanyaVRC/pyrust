@@ -394,6 +394,18 @@ impl Interpreter {
                 }
                 self.call_function_expanded(func, &expanded)
             }
+            ValueKind::BuiltinFunction(name) if name.starts_with("str.") => {
+                let method = &name[4..];
+                let self_val = args
+                    .first()
+                    .map(|a| &a.value)
+                    .ok_or_else(|| PyError::Named(
+                        "TypeError".to_string(),
+                        format!("descriptor '{method}' of 'str' object needs an argument"),
+                    ))?;
+                let rest: Vec<Value> = args[1..].iter().map(|a| a.value.clone()).collect();
+                pyrust_builtins::string::call(method, self_val, &rest)
+            }
             ValueKind::UserFunction(function) => {
                 let function = Rc::clone(function);
                 self.call_user_function_expanded(function, args, &[])
@@ -903,7 +915,8 @@ impl Interpreter {
         };
 
         if step == 0 {
-            return Err(PyError::Runtime(
+            return Err(PyError::Named(
+                "ValueError".to_string(),
                 "range() arg 3 must not be zero".to_string(),
             ));
         }

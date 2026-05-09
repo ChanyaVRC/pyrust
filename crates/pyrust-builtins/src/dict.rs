@@ -40,18 +40,36 @@ fn get(dict: &IndexMap<PyKey, Value>, args: &[Value]) -> Result<Value> {
 }
 
 fn update(dict: &mut IndexMap<PyKey, Value>, args: &[Value]) -> Result<Value> {
-    let other = args
-        .first()
-        .ok_or_else(|| PyError::Runtime("dict.update() requires 1 argument".to_string()))?;
+    let other = match args.first() {
+        None => return Ok(Value::none()),
+        Some(v) => v,
+    };
     match other.kind() {
         ValueKind::Dict(other_map) => {
             for (k, v) in other_map {
                 dict.insert(k.clone(), v.clone());
             }
         }
+        ValueKind::List(items) | ValueKind::Tuple(items) => {
+            for pair in items {
+                match pair.kind() {
+                    ValueKind::Tuple(kv) | ValueKind::List(kv) if kv.len() == 2 => {
+                        let k = kv[0].to_key().ok_or_else(|| {
+                            PyError::Runtime("dict.update(): key is not hashable".to_string())
+                        })?;
+                        dict.insert(k, kv[1].clone());
+                    }
+                    _ => {
+                        return Err(PyError::Runtime(
+                            "dict.update() element must be a (key, value) pair".to_string(),
+                        ));
+                    }
+                }
+            }
+        }
         _ => {
             return Err(PyError::Runtime(
-                "dict.update() argument must be a dict".to_string(),
+                "dict.update() argument must be a dict or iterable of pairs".to_string(),
             ));
         }
     }

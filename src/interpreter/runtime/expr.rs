@@ -582,6 +582,23 @@ impl Interpreter {
                 let key = item.to_key().ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
                 Ok(Value::bool_(items.contains_key(&key)))
             }
+            ValueKind::DictKeysView(rc) => {
+                let key = item.to_key().ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
+                Ok(Value::bool_(rc.borrow().contains_key(&key)))
+            }
+            ValueKind::DictValuesView(rc) => {
+                Ok(Value::bool_(rc.borrow().values().any(|v| v == &item)))
+            }
+            ValueKind::DictItemsView(rc) => {
+                match item.kind() {
+                    ValueKind::Tuple(kv) if kv.len() == 2 => {
+                        let key = kv[0].to_key().ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
+                        let map = rc.borrow();
+                        Ok(Value::bool_(map.get(&key).map_or(false, |v| v == &kv[1])))
+                    }
+                    _ => Ok(Value::bool_(false)),
+                }
+            }
             ValueKind::Range { start, stop, step } => {
                 match item.kind() {
                     ValueKind::Int(v) => {
@@ -655,6 +672,18 @@ fn iter_values(value: Value) -> Result<Vec<Value>> {
         ValueKind::Set(items) => Ok(items.iter().map(|k| key_to_value(k.clone())).collect()),
         ValueKind::Str(text) => Ok(text.chars().map(|c| Value::string(c.to_string())).collect()),
         ValueKind::Dict(items) => Ok(items.keys().map(|k| key_to_value(k.clone())).collect()),
+        ValueKind::DictKeysView(rc) => {
+            let map = rc.borrow();
+            Ok(map.keys().map(|k| key_to_value(k.clone())).collect())
+        }
+        ValueKind::DictValuesView(rc) => {
+            let map = rc.borrow();
+            Ok(map.values().cloned().collect())
+        }
+        ValueKind::DictItemsView(rc) => {
+            let map = rc.borrow();
+            Ok(map.iter().map(|(k, v)| Value::tuple(vec![key_to_value(k.clone()), v.clone()])).collect())
+        }
         ValueKind::Range { start, stop, step } => {
             let mut out = Vec::new();
             if step > 0 {

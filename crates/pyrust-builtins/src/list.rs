@@ -32,13 +32,12 @@ pub fn call(
 }
 
 fn sort(items: &mut Vec<Value>, args: &[Value], kwargs: &IndexMap<PyKey, Value>) -> Result<Value> {
-    if kwargs.contains_key(&PyKey::Str("key".to_string())) {
-        return Err(PyError::Named(
-            "NotImplementedError".to_string(),
-            "list.sort(key=...) is not yet supported".to_string(),
-        ));
-    }
-    let reverse_flag = match (
+    let reverse_flag = extract_reverse(args, kwargs)?;
+    sort_by_cmp(items, reverse_flag)
+}
+
+fn extract_reverse(args: &[Value], kwargs: &IndexMap<PyKey, Value>) -> Result<bool> {
+    Ok(match (
         args.first().map(|v| v.kind()),
         kwargs
             .get(&PyKey::Str("reverse".to_string()))
@@ -53,14 +52,17 @@ fn sort(items: &mut Vec<Value>, args: &[Value], kwargs: &IndexMap<PyKey, Value>)
         }
         (Some(ValueKind::Bool(b)), _) => b,
         _ => false,
-    };
+    })
+}
 
+fn sort_by_cmp(items: &mut Vec<Value>, reverse: bool) -> Result<Value> {
     let mut err: Option<PyError> = None;
     items.sort_by(|a, b| {
         if err.is_some() {
             return std::cmp::Ordering::Equal;
         }
-        match compare_values(a, b) {
+        let (lhs, rhs) = if reverse { (b, a) } else { (a, b) };
+        match compare_values(lhs, rhs) {
             Ok(ord) => ord,
             Err(e) => {
                 err = Some(e);
@@ -71,13 +73,40 @@ fn sort(items: &mut Vec<Value>, args: &[Value], kwargs: &IndexMap<PyKey, Value>)
     if let Some(e) = err {
         return Err(e);
     }
-    if reverse_flag {
-        items.reverse();
-    }
     Ok(Value::none())
 }
 
-fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
+/// Sort items using precomputed keys (one key per item in the same order).
+/// Called by the VM after evaluating each key function call.
+pub fn sort_with_precomputed_keys(
+    items: &mut Vec<Value>,
+    keys: Vec<Value>,
+    reverse: bool,
+) -> Result<Value> {
+    debug_assert_eq!(items.len(), keys.len());
+    let mut keyed: Vec<(Value, Value)> = keys.into_iter().zip(items.iter().cloned()).collect();
+    let mut sort_err: Option<PyError> = None;
+    keyed.sort_by(|(ka, _), (kb, _)| {
+        if sort_err.is_some() {
+            return std::cmp::Ordering::Equal;
+        }
+        let (lhs, rhs) = if reverse { (kb, ka) } else { (ka, kb) };
+        match compare_values(lhs, rhs) {
+            Ok(ord) => ord,
+            Err(e) => {
+                sort_err = Some(e);
+                std::cmp::Ordering::Equal
+            }
+        }
+    });
+    if let Some(e) = sort_err {
+        return Err(e);
+    }
+    *items = keyed.into_iter().map(|(_, v)| v).collect();
+    Ok(Value::none())
+}
+
+pub fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
     match (a.kind(), b.kind()) {
         (ValueKind::Int(x), ValueKind::Int(y)) => Ok(x.cmp(&y)),
         (ValueKind::Float(x), ValueKind::Float(y)) => {

@@ -9,7 +9,7 @@ use crate::error::{PyError, Result};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::value::{
-    EnvRef, Environment, Opaque, PyClass, PyInstance, PyKey, PyModule, UserFunction,
+    EnvRef, Environment, PyClass, PyInstance, PyKey, PyModule, UserFunction,
     UserFunctionParam, Value, ValueKind, range_len,
 };
 

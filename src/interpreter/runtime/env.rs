@@ -50,6 +50,33 @@ impl Interpreter {
                     "module '{mod_name}' has no attribute '{name}'"
                 )))
             }
+            ValueKind::BuiltinFunction("str") => {
+                match name {
+                    "lower"      => Ok(Value::builtin_function("str.lower")),
+                    "upper"      => Ok(Value::builtin_function("str.upper")),
+                    "strip"      => Ok(Value::builtin_function("str.strip")),
+                    "lstrip"     => Ok(Value::builtin_function("str.lstrip")),
+                    "rstrip"     => Ok(Value::builtin_function("str.rstrip")),
+                    "capitalize" => Ok(Value::builtin_function("str.capitalize")),
+                    "split"      => Ok(Value::builtin_function("str.split")),
+                    "join"       => Ok(Value::builtin_function("str.join")),
+                    "replace"    => Ok(Value::builtin_function("str.replace")),
+                    "find"       => Ok(Value::builtin_function("str.find")),
+                    "rfind"      => Ok(Value::builtin_function("str.rfind")),
+                    "index"      => Ok(Value::builtin_function("str.index")),
+                    "rindex"     => Ok(Value::builtin_function("str.rindex")),
+                    "count"      => Ok(Value::builtin_function("str.count")),
+                    "startswith" => Ok(Value::builtin_function("str.startswith")),
+                    "endswith"   => Ok(Value::builtin_function("str.endswith")),
+                    "isdigit"    => Ok(Value::builtin_function("str.isdigit")),
+                    "isalpha"    => Ok(Value::builtin_function("str.isalpha")),
+                    "isalnum"    => Ok(Value::builtin_function("str.isalnum")),
+                    "isspace"    => Ok(Value::builtin_function("str.isspace")),
+                    _ => Err(PyError::Runtime(format!(
+                        "type object 'str' has no attribute '{name}'"
+                    ))),
+                }
+            }
             _ => Err(PyError::Runtime(format!(
                 "object has no attribute '{}'",
                 name
