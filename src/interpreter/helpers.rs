@@ -20,14 +20,14 @@ pub(crate) enum SpecState {
 /// None if the operation is not applicable to integers (e.g. Str concat).
 fn eval_binary_int(op: BinaryOp, a: i64, b: i64) -> Option<Result<Value>> {
     match op {
-        BinaryOp::Add => Some(Ok(Value::Int(a.wrapping_add(b)))),
-        BinaryOp::Sub => Some(Ok(Value::Int(a.wrapping_sub(b)))),
-        BinaryOp::Mul => Some(Ok(Value::Int(a.wrapping_mul(b)))),
+        BinaryOp::Add => Some(Ok(Value::int(a.wrapping_add(b)))),
+        BinaryOp::Sub => Some(Ok(Value::int(a.wrapping_sub(b)))),
+        BinaryOp::Mul => Some(Ok(Value::int(a.wrapping_mul(b)))),
         BinaryOp::Div => {
             if b == 0 {
                 Some(Err(PyError::Runtime("division by zero".to_string())))
             } else {
-                Some(Ok(Value::Float(a as f64 / b as f64)))
+                Some(Ok(Value::float(a as f64 / b as f64)))
             }
         }
         BinaryOp::FloorDiv => {
@@ -37,7 +37,7 @@ fn eval_binary_int(op: BinaryOp, a: i64, b: i64) -> Option<Result<Value>> {
                 )))
             } else {
                 let modulo = py_mod_i64(a, b);
-                Some(Ok(Value::Int((a - modulo) / b)))
+                Some(Ok(Value::int((a - modulo) / b)))
             }
         }
         BinaryOp::Mod => {
@@ -46,25 +46,25 @@ fn eval_binary_int(op: BinaryOp, a: i64, b: i64) -> Option<Result<Value>> {
                     "integer division or modulo by zero".to_string(),
                 )))
             } else {
-                Some(Ok(Value::Int(py_mod_i64(a, b))))
+                Some(Ok(Value::int(py_mod_i64(a, b))))
             }
         }
         BinaryOp::Pow => Some(Ok(if b >= 0 {
-            Value::Int(a.wrapping_pow(b as u32))
+            Value::int(a.wrapping_pow(b as u32))
         } else {
-            Value::Float((a as f64).powi(b as i32))
+            Value::float((a as f64).powi(b as i32))
         })),
-        BinaryOp::Eq => Some(Ok(Value::Bool(a == b))),
-        BinaryOp::Ne => Some(Ok(Value::Bool(a != b))),
-        BinaryOp::Lt => Some(Ok(Value::Bool(a < b))),
-        BinaryOp::Le => Some(Ok(Value::Bool(a <= b))),
-        BinaryOp::Gt => Some(Ok(Value::Bool(a > b))),
-        BinaryOp::Ge => Some(Ok(Value::Bool(a >= b))),
-        BinaryOp::BitAnd => Some(Ok(Value::Int(a & b))),
-        BinaryOp::BitOr => Some(Ok(Value::Int(a | b))),
-        BinaryOp::BitXor => Some(Ok(Value::Int(a ^ b))),
-        BinaryOp::LShift => Some(Ok(Value::Int(a << (b & 63)))),
-        BinaryOp::RShift => Some(Ok(Value::Int(a >> (b & 63)))),
+        BinaryOp::Eq => Some(Ok(Value::bool_(a == b))),
+        BinaryOp::Ne => Some(Ok(Value::bool_(a != b))),
+        BinaryOp::Lt => Some(Ok(Value::bool_(a < b))),
+        BinaryOp::Le => Some(Ok(Value::bool_(a <= b))),
+        BinaryOp::Gt => Some(Ok(Value::bool_(a > b))),
+        BinaryOp::Ge => Some(Ok(Value::bool_(a >= b))),
+        BinaryOp::BitAnd => Some(Ok(Value::int(a & b))),
+        BinaryOp::BitOr => Some(Ok(Value::int(a | b))),
+        BinaryOp::BitXor => Some(Ok(Value::int(a ^ b))),
+        BinaryOp::LShift => Some(Ok(Value::int(a << (b & 63)))),
+        BinaryOp::RShift => Some(Ok(Value::int(a >> (b & 63)))),
         _ => None, // And/Or handled separately; In/NotIn/Is/IsNot/MatMul not applicable
     }
 }
@@ -72,24 +72,24 @@ fn eval_binary_int(op: BinaryOp, a: i64, b: i64) -> Option<Result<Value>> {
 /// Attempt a pure-float binary operation.
 fn eval_binary_float(op: BinaryOp, a: f64, b: f64) -> Option<Result<Value>> {
     match op {
-        BinaryOp::Add => Some(Ok(Value::Float(a + b))),
-        BinaryOp::Sub => Some(Ok(Value::Float(a - b))),
-        BinaryOp::Mul => Some(Ok(Value::Float(a * b))),
+        BinaryOp::Add => Some(Ok(Value::float(a + b))),
+        BinaryOp::Sub => Some(Ok(Value::float(a - b))),
+        BinaryOp::Mul => Some(Ok(Value::float(a * b))),
         BinaryOp::Div => {
             if b == 0.0 {
                 Some(Err(PyError::Runtime(
                     "float division by zero".to_string(),
                 )))
             } else {
-                Some(Ok(Value::Float(a / b)))
+                Some(Ok(Value::float(a / b)))
             }
         }
-        BinaryOp::Eq => Some(Ok(Value::Bool(a == b))),
-        BinaryOp::Ne => Some(Ok(Value::Bool(a != b))),
-        BinaryOp::Lt => Some(Ok(Value::Bool(a < b))),
-        BinaryOp::Le => Some(Ok(Value::Bool(a <= b))),
-        BinaryOp::Gt => Some(Ok(Value::Bool(a > b))),
-        BinaryOp::Ge => Some(Ok(Value::Bool(a >= b))),
+        BinaryOp::Eq => Some(Ok(Value::bool_(a == b))),
+        BinaryOp::Ne => Some(Ok(Value::bool_(a != b))),
+        BinaryOp::Lt => Some(Ok(Value::bool_(a < b))),
+        BinaryOp::Le => Some(Ok(Value::bool_(a <= b))),
+        BinaryOp::Gt => Some(Ok(Value::bool_(a > b))),
+        BinaryOp::Ge => Some(Ok(Value::bool_(a >= b))),
         _ => None,
     }
 }
@@ -100,16 +100,16 @@ fn eval_binary_float(op: BinaryOp, a: f64, b: f64) -> Option<Result<Value>> {
 /// `Ordering::Equal` (same as CPython raising TypeError in that case, but we
 /// keep the sort stable rather than panicking).
 fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
-    match (a, b) {
-        (Value::Int(x), Value::Int(y)) => x.cmp(y),
-        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-        (Value::Int(x), Value::Float(y)) => (*x as f64).partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-        (Value::Float(x), Value::Int(y)) => x.partial_cmp(&(*y as f64)).unwrap_or(std::cmp::Ordering::Equal),
-        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
-        (Value::Bool(x), Value::Int(y)) => (*x as i64).cmp(y),
-        (Value::Int(x), Value::Bool(y)) => x.cmp(&(*y as i64)),
-        (Value::Str(x), Value::Str(y)) => x.cmp(y),
-        (Value::Tuple(x), Value::Tuple(y)) => {
+    match (a.kind(), b.kind()) {
+        (ValueKind::Int(x), ValueKind::Int(y)) => x.cmp(&y),
+        (ValueKind::Float(x), ValueKind::Float(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+        (ValueKind::Int(x), ValueKind::Float(y)) => (x as f64).partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+        (ValueKind::Float(x), ValueKind::Int(y)) => x.partial_cmp(&(y as f64)).unwrap_or(std::cmp::Ordering::Equal),
+        (ValueKind::Bool(x), ValueKind::Bool(y)) => x.cmp(&y),
+        (ValueKind::Bool(x), ValueKind::Int(y)) => (x as i64).cmp(&y),
+        (ValueKind::Int(x), ValueKind::Bool(y)) => x.cmp(&(y as i64)),
+        (ValueKind::Str(x), ValueKind::Str(y)) => x.cmp(y),
+        (ValueKind::Tuple(x), ValueKind::Tuple(y)) => {
             for (a, b) in x.iter().zip(y.iter()) {
                 let ord = compare_values(a, b);
                 if ord != std::cmp::Ordering::Equal {
@@ -146,9 +146,9 @@ struct ExpandedCallArg {
 }
 
 fn extract_optional_string(value: Value, name: &str) -> Result<Option<String>> {
-    match value {
-        Value::Str(text) => Ok(Some(text)),
-        Value::None => Ok(None),
+    match value.kind() {
+        ValueKind::Str(text) => Ok(Some(text.clone())),
+        ValueKind::None => Ok(None),
         _ => Err(PyError::Runtime(format!(
             "print() {} must be None or a string",
             name
@@ -176,8 +176,9 @@ fn py_mod_i64(a: i64, b: i64) -> i64 {
 
 
 fn normalize_index(index: &Value, len: usize) -> Result<usize> {
-    let mut value = match index {
-        Value::Int(v) => *v,
+    let mut value = match index.kind() {
+        ValueKind::Int(v) => v,
+        ValueKind::Bool(b) => b as i64,
         _ => return Err(PyError::Runtime("indices must be integers".to_string())),
     };
     if value < 0 {
@@ -210,8 +211,8 @@ fn is_exception_class(class: &Rc<RefCell<PyClass>>) -> bool {
 
 fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value>) -> Value {
     let mut attrs = HashMap::new();
-    attrs.insert("args".to_string(), Value::List(args));
-    Value::Instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
+    attrs.insert("args".to_string(), Value::list(args));
+    Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 
 fn install_exception_builtins(env: &EnvRef) {
@@ -238,31 +239,31 @@ fn install_exception_builtins(env: &EnvRef) {
     let mut module = env.borrow_mut();
     module
         .values
-        .insert("Exception".to_string(), Value::Class(exception));
+        .insert("Exception".to_string(), Value::py_class(exception));
     module
         .values
-        .insert("RuntimeError".to_string(), Value::Class(runtime_error));
+        .insert("RuntimeError".to_string(), Value::py_class(runtime_error));
     module
         .values
-        .insert("TypeError".to_string(), Value::Class(type_error));
+        .insert("TypeError".to_string(), Value::py_class(type_error));
     module
         .values
-        .insert("ValueError".to_string(), Value::Class(value_error));
+        .insert("ValueError".to_string(), Value::py_class(value_error));
     module
         .values
-        .insert("AssertionError".to_string(), Value::Class(assertion_error));
+        .insert("AssertionError".to_string(), Value::py_class(assertion_error));
     module
         .values
-        .insert("RecursionError".to_string(), Value::Class(recursion_error));
+        .insert("RecursionError".to_string(), Value::py_class(recursion_error));
 }
 
 fn key_to_value(key: PyKey) -> Value {
     match key {
-        PyKey::Int(v) => Value::Int(v),
-        PyKey::Float(v) => Value::Float(f64::from_bits(v)),
-        PyKey::Str(v) => Value::Str(v),
-        PyKey::Bool(v) => Value::Bool(v),
-        PyKey::None => Value::None,
+        PyKey::Int(v) => Value::int(v),
+        PyKey::Float(v) => Value::float(f64::from_bits(v)),
+        PyKey::Str(v) => Value::string(v),
+        PyKey::Bool(v) => Value::bool_(v),
+        PyKey::None => Value::none(),
     }
 }
 
@@ -637,13 +638,13 @@ fn cmp_op_to_binary_op(op: CmpOp) -> BinaryOp {
 }
 
 fn values_are_identical(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::None, Value::None) => true,
-        (Value::Bool(x), Value::Bool(y)) => x == y,
-        (Value::Int(x), Value::Int(y)) => x == y,
-        (Value::Instance(x), Value::Instance(y)) => Rc::ptr_eq(x, y),
-        (Value::Class(x), Value::Class(y)) => Rc::ptr_eq(x, y),
-        (Value::Function(x), Value::Function(y)) => Rc::ptr_eq(x, y),
+    match (a.kind(), b.kind()) {
+        (ValueKind::None, ValueKind::None) => true,
+        (ValueKind::Bool(x), ValueKind::Bool(y)) => x == y,
+        (ValueKind::Int(x), ValueKind::Int(y)) => x == y,
+        (ValueKind::PyInstance(x), ValueKind::PyInstance(y)) => Rc::ptr_eq(x, y),
+        (ValueKind::PyClass(x), ValueKind::PyClass(y)) => Rc::ptr_eq(x, y),
+        (ValueKind::UserFunction(x), ValueKind::UserFunction(y)) => Rc::ptr_eq(x, y),
         _ => false,
     }
 }
@@ -691,10 +692,10 @@ pub(crate) fn compute_def_bound_mask(
 }
 
 fn value_to_float(v: &Value, ctx: &str) -> Result<f64> {
-    match v {
-        Value::Float(f) => Ok(*f),
-        Value::Int(i) => Ok(*i as f64),
-        Value::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
+    match v.kind() {
+        ValueKind::Float(f) => Ok(f),
+        ValueKind::Int(i) => Ok(i as f64),
+        ValueKind::Bool(b) => Ok(if b { 1.0 } else { 0.0 }),
         _ => Err(PyError::Runtime(format!(
             "{ctx}: a float is required, not {}",
             v.repr()
@@ -704,11 +705,11 @@ fn value_to_float(v: &Value, ctx: &str) -> Result<f64> {
 
 fn make_math_module() -> Value {
     let mut attrs: HashMap<String, Value> = HashMap::new();
-    attrs.insert("pi".to_string(), Value::Float(std::f64::consts::PI));
-    attrs.insert("e".to_string(), Value::Float(std::f64::consts::E));
-    attrs.insert("tau".to_string(), Value::Float(std::f64::consts::TAU));
-    attrs.insert("inf".to_string(), Value::Float(f64::INFINITY));
-    attrs.insert("nan".to_string(), Value::Float(f64::NAN));
+    attrs.insert("pi".to_string(), Value::float(std::f64::consts::PI));
+    attrs.insert("e".to_string(), Value::float(std::f64::consts::E));
+    attrs.insert("tau".to_string(), Value::float(std::f64::consts::TAU));
+    attrs.insert("inf".to_string(), Value::float(f64::INFINITY));
+    attrs.insert("nan".to_string(), Value::float(f64::NAN));
     const MATH_FUNS: &[(&str, &str)] = &[
         ("floor", "math.floor"),
         ("ceil", "math.ceil"),
@@ -730,9 +731,9 @@ fn make_math_module() -> Value {
         ("log", "math.log"),
     ];
     for (name, builtin) in MATH_FUNS {
-        attrs.insert(name.to_string(), Value::Builtin(builtin));
+        attrs.insert(name.to_string(), Value::builtin_function(builtin));
     }
-    Value::Module(Rc::new(RefCell::new(PyModule {
+    Value::py_module(Rc::new(RefCell::new(PyModule {
         name: "math".to_string(),
         attrs,
     })))
@@ -740,10 +741,10 @@ fn make_math_module() -> Value {
 
 fn make_sys_module() -> Value {
     let mut attrs: HashMap<String, Value> = HashMap::new();
-    attrs.insert("version".to_string(), Value::Str("PyRust 0.2".to_string()));
-    attrs.insert("argv".to_string(), Value::List(vec![]));
-    attrs.insert("exit".to_string(), Value::Builtin("sys.exit"));
-    Value::Module(Rc::new(RefCell::new(PyModule {
+    attrs.insert("version".to_string(), Value::string("PyRust 0.2".to_string()));
+    attrs.insert("argv".to_string(), Value::list(Vec::new()));
+    attrs.insert("exit".to_string(), Value::builtin_function("sys.exit"));
+    Value::py_module(Rc::new(RefCell::new(PyModule {
         name: "sys".to_string(),
         attrs,
     })))

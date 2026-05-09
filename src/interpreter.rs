@@ -9,8 +9,8 @@ use crate::error::{PyError, Result};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::value::{
-    EnvRef, Environment, PyClass, PyInstance, PyKey, PyModule, UserFunction, UserFunctionParam,
-    Value, range_len,
+    EnvRef, Environment, Opaque, PyClass, PyInstance, PyKey, PyModule, UserFunction,
+    UserFunctionParam, Value, ValueKind, range_len,
 };
 
 type ModuleCache = Rc<RefCell<HashMap<String, Value>>>;

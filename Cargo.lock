@@ -143,7 +143,24 @@ name = "pyrust"
 version = "0.1.0"
 dependencies = [
  "indexmap",
+ "pyrust-builtins",
+ "pyrust-core",
  "rustyline",
+]
+
+[[package]]
+name = "pyrust-builtins"
+version = "0.1.0"
+dependencies = [
+ "indexmap",
+ "pyrust-core",
+]
+
+[[package]]
+name = "pyrust-core"
+version = "0.1.0"
+dependencies = [
+ "indexmap",
 ]
 
 [[package]]

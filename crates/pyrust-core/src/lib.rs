@@ -1,0 +1,845 @@
+use std::any::Any;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::fmt;
+use std::hash::{Hash, Hasher};
+use std::rc::Rc;
+
+use indexmap::{IndexMap, IndexSet};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PyKey — hashable subset of Value used as dict/set keys (unchanged)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PyKey {
+    Int(i64),
+    Float(u64),
+    Str(String),
+    Bool(bool),
+    None,
+}
+
+impl Hash for PyKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            PyKey::Int(v) => v.hash(state),
+            PyKey::Bool(b) => b.hash(state),
+            PyKey::Float(bits) => bits.hash(state),
+            PyKey::Str(s) => s.hash(state),
+            PyKey::None => {}
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared types
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub type NameSet = Rc<HashSet<String>>;
+
+#[derive(Debug, Clone)]
+pub struct FunctionLocals {
+    pub slots: Vec<Option<Value>>,
+    pub index: Rc<HashMap<String, usize>>,
+    pub def_bound_mask: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct Environment {
+    pub values: HashMap<String, Value>,
+    pub fastlocals: Option<FunctionLocals>,
+    pub local_names: NameSet,
+    pub global_names: NameSet,
+    pub nonlocal_names: NameSet,
+    pub parent: Option<EnvRef>,
+}
+
+pub type EnvRef = Rc<RefCell<Environment>>;
+
+impl Environment {
+    pub fn new(parent: Option<EnvRef>) -> EnvRef {
+        Rc::new(RefCell::new(Self {
+            values: HashMap::new(),
+            fastlocals: None,
+            local_names: Rc::new(HashSet::new()),
+            global_names: Rc::new(HashSet::new()),
+            nonlocal_names: Rc::new(HashSet::new()),
+            parent,
+        }))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UserFunctionParam {
+    pub name: String,
+    pub default: Option<Value>,
+    pub is_args: bool,
+    pub is_kwargs: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct UserFunction {
+    pub name: String,
+    pub params: Vec<UserFunctionParam>,
+    pub local_names: NameSet,
+    pub local_index: Rc<HashMap<String, usize>>,
+    pub global_names: NameSet,
+    pub nonlocal_names: NameSet,
+    pub env: EnvRef,
+    pub is_pure: bool,
+    pub precompiled_code: Option<Rc<dyn Any>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PyClass {
+    pub name: String,
+    pub base: Option<Rc<RefCell<PyClass>>>,
+    pub attrs: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PyInstance {
+    pub class: Rc<RefCell<PyClass>>,
+    pub attrs: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PyModule {
+    pub name: String,
+    pub attrs: HashMap<String, Value>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NaN-boxing constants
+// ─────────────────────────────────────────────────────────────────────────────
+
+const PAYLOAD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
+const INT_SIGN_BIT: u64 = 1 << 47;
+const CANONICAL_NAN: u64 = 0x7FF8_0000_0000_0000;
+
+const TAG_NONE_BITS: u64 = 0xFFF9_0000_0000_0000;
+const TAG_BOOL_BITS: u64 = 0xFFFA_0000_0000_0000;
+const TAG_INT_BITS: u64 = 0xFFFB_0000_0000_0000;
+const TAG_STR_BITS: u64 = 0xFFFC_0000_0000_0000;
+const TAG_TUPLE_BITS: u64 = 0xFFFD_0000_0000_0000;
+const TAG_LIST_BITS: u64 = 0xFFFE_0000_0000_0000;
+const TAG_OPAQUE_BITS: u64 = 0xFFFF_0000_0000_0000;
+
+#[inline(always)]
+fn top16(bits: u64) -> u16 {
+    (bits >> 48) as u16
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Opaque — heap-allocated types that don't fit in 48 bits
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub enum Opaque {
+    BigInt(i64),
+    Dict(IndexMap<PyKey, Value>),
+    Set(IndexSet<PyKey>),
+    Range { start: i64, stop: i64, step: i64 },
+    UserFunction(Rc<UserFunction>),
+    BuiltinFunction(&'static str),
+    PyClass(Rc<RefCell<PyClass>>),
+    PyInstance(Rc<RefCell<PyInstance>>),
+    PyModule(Rc<RefCell<PyModule>>),
+    BoundMethod {
+        function: Rc<UserFunction>,
+        receiver: Rc<RefCell<PyInstance>>,
+    },
+}
+
+impl Clone for Opaque {
+    fn clone(&self) -> Self {
+        match self {
+            Opaque::BigInt(n) => Opaque::BigInt(*n),
+            Opaque::Dict(d) => Opaque::Dict(d.clone()),
+            Opaque::Set(s) => Opaque::Set(s.clone()),
+            Opaque::Range { start, stop, step } => Opaque::Range {
+                start: *start,
+                stop: *stop,
+                step: *step,
+            },
+            Opaque::UserFunction(f) => Opaque::UserFunction(Rc::clone(f)),
+            Opaque::BuiltinFunction(s) => Opaque::BuiltinFunction(s),
+            Opaque::PyClass(c) => Opaque::PyClass(Rc::clone(c)),
+            Opaque::PyInstance(i) => Opaque::PyInstance(Rc::clone(i)),
+            Opaque::PyModule(m) => Opaque::PyModule(Rc::clone(m)),
+            Opaque::BoundMethod { function, receiver } => Opaque::BoundMethod {
+                function: Rc::clone(function),
+                receiver: Rc::clone(receiver),
+            },
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ValueKind — borrow-based view used for pattern matching
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub enum ValueKind<'a> {
+    None,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Str(&'a String),
+    List(&'a Vec<Value>),
+    Tuple(&'a Vec<Value>),
+    Dict(&'a IndexMap<PyKey, Value>),
+    Set(&'a IndexSet<PyKey>),
+    Range { start: i64, stop: i64, step: i64 },
+    UserFunction(&'a Rc<UserFunction>),
+    BuiltinFunction(&'static str),
+    PyClass(&'a Rc<RefCell<PyClass>>),
+    PyInstance(&'a Rc<RefCell<PyInstance>>),
+    PyModule(&'a Rc<RefCell<PyModule>>),
+    BoundMethod {
+        function: &'a Rc<UserFunction>,
+        receiver: &'a Rc<RefCell<PyInstance>>,
+    },
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Value — NaN-boxed u64
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[repr(transparent)]
+pub struct Value(u64);
+
+impl Value {
+    // ── Constructors ─────────────────────────────────────────────────────────
+
+    pub fn none() -> Self {
+        Value(TAG_NONE_BITS)
+    }
+
+    pub fn bool_(b: bool) -> Self {
+        Value(TAG_BOOL_BITS | b as u64)
+    }
+
+    pub fn int(n: i64) -> Self {
+        const MAX_I48: i64 = (1 << 47) - 1;
+        const MIN_I48: i64 = -(1 << 47);
+        if n >= MIN_I48 && n <= MAX_I48 {
+            Value(TAG_INT_BITS | (n as u64 & PAYLOAD_MASK))
+        } else {
+            Value::opaque(Opaque::BigInt(n))
+        }
+    }
+
+    pub fn float(f: f64) -> Self {
+        if f.is_nan() {
+            Value(CANONICAL_NAN)
+        } else {
+            Value(f.to_bits())
+        }
+    }
+
+    pub fn string(s: String) -> Self {
+        let ptr = Box::into_raw(Box::new(s)) as u64;
+        Value(TAG_STR_BITS | (ptr & PAYLOAD_MASK))
+    }
+
+    pub fn list(v: Vec<Value>) -> Self {
+        let ptr = Box::into_raw(Box::new(v)) as u64;
+        Value(TAG_LIST_BITS | (ptr & PAYLOAD_MASK))
+    }
+
+    pub fn tuple(v: Vec<Value>) -> Self {
+        let ptr = Box::into_raw(Box::new(v)) as u64;
+        Value(TAG_TUPLE_BITS | (ptr & PAYLOAD_MASK))
+    }
+
+    pub fn dict(d: IndexMap<PyKey, Value>) -> Self {
+        Value::opaque(Opaque::Dict(d))
+    }
+
+    pub fn set(s: IndexSet<PyKey>) -> Self {
+        Value::opaque(Opaque::Set(s))
+    }
+
+    pub fn range(start: i64, stop: i64, step: i64) -> Self {
+        Value::opaque(Opaque::Range { start, stop, step })
+    }
+
+    pub fn user_function(f: Rc<UserFunction>) -> Self {
+        Value::opaque(Opaque::UserFunction(f))
+    }
+
+    pub fn builtin_function(name: &'static str) -> Self {
+        Value::opaque(Opaque::BuiltinFunction(name))
+    }
+
+    pub fn py_class(c: Rc<RefCell<PyClass>>) -> Self {
+        Value::opaque(Opaque::PyClass(c))
+    }
+
+    pub fn py_instance(i: Rc<RefCell<PyInstance>>) -> Self {
+        Value::opaque(Opaque::PyInstance(i))
+    }
+
+    pub fn py_module(m: Rc<RefCell<PyModule>>) -> Self {
+        Value::opaque(Opaque::PyModule(m))
+    }
+
+    pub fn bound_method(function: Rc<UserFunction>, receiver: Rc<RefCell<PyInstance>>) -> Self {
+        Value::opaque(Opaque::BoundMethod { function, receiver })
+    }
+
+    fn opaque(o: Opaque) -> Self {
+        let ptr = Box::into_raw(Box::new(o)) as u64;
+        Value(TAG_OPAQUE_BITS | (ptr & PAYLOAD_MASK))
+    }
+
+    // ── Type checks ──────────────────────────────────────────────────────────
+
+    pub fn is_none(&self) -> bool {
+        self.0 == TAG_NONE_BITS
+    }
+
+    pub fn is_bool(&self) -> bool {
+        top16(self.0) == 0xFFFA
+    }
+
+    pub fn is_int(&self) -> bool {
+        top16(self.0) == 0xFFFB
+            || (top16(self.0) == 0xFFFF
+                && matches!(unsafe { &*self.opaque_ptr() }, Opaque::BigInt(_)))
+    }
+
+    pub fn is_float(&self) -> bool {
+        top16(self.0) <= 0xFFF8
+    }
+
+    pub fn is_str(&self) -> bool {
+        top16(self.0) == 0xFFFC
+    }
+
+    pub fn is_tuple(&self) -> bool {
+        top16(self.0) == 0xFFFD
+    }
+
+    pub fn is_list(&self) -> bool {
+        top16(self.0) == 0xFFFE
+    }
+
+    // ── Private unsafe helpers ───────────────────────────────────────────────
+
+    unsafe fn str_ptr(&self) -> *mut String {
+        (self.0 & PAYLOAD_MASK) as *mut _
+    }
+
+    unsafe fn tuple_ptr(&self) -> *mut Vec<Value> {
+        (self.0 & PAYLOAD_MASK) as *mut _
+    }
+
+    unsafe fn list_ptr(&self) -> *mut Vec<Value> {
+        (self.0 & PAYLOAD_MASK) as *mut _
+    }
+
+    unsafe fn opaque_ptr(&self) -> *mut Opaque {
+        (self.0 & PAYLOAD_MASK) as *mut _
+    }
+
+    // ── Public accessors ─────────────────────────────────────────────────────
+
+    pub fn as_bool(&self) -> bool {
+        (self.0 & 1) != 0
+    }
+
+    pub fn as_int_raw(&self) -> i64 {
+        let raw = (self.0 & PAYLOAD_MASK) as i64;
+        if self.0 & INT_SIGN_BIT != 0 {
+            raw | !PAYLOAD_MASK as i64
+        } else {
+            raw
+        }
+    }
+
+    pub fn as_float_raw(&self) -> f64 {
+        f64::from_bits(self.0)
+    }
+
+    pub fn as_str(&self) -> Option<&String> {
+        if self.is_str() {
+            Some(unsafe { &*self.str_ptr() })
+        } else {
+            None
+        }
+    }
+
+    pub fn as_list(&self) -> Option<&Vec<Value>> {
+        if self.is_list() {
+            Some(unsafe { &*self.list_ptr() })
+        } else {
+            None
+        }
+    }
+
+    pub fn as_list_mut(&mut self) -> Option<&mut Vec<Value>> {
+        if self.is_list() {
+            Some(unsafe { &mut *self.list_ptr() })
+        } else {
+            None
+        }
+    }
+
+    pub fn as_tuple(&self) -> Option<&Vec<Value>> {
+        if self.is_tuple() {
+            Some(unsafe { &*self.tuple_ptr() })
+        } else {
+            None
+        }
+    }
+
+    pub fn as_opaque(&self) -> Option<&Opaque> {
+        if top16(self.0) == 0xFFFF {
+            Some(unsafe { &*self.opaque_ptr() })
+        } else {
+            None
+        }
+    }
+
+    pub fn as_opaque_mut(&mut self) -> Option<&mut Opaque> {
+        if top16(self.0) == 0xFFFF {
+            Some(unsafe { &mut *self.opaque_ptr() })
+        } else {
+            None
+        }
+    }
+
+    pub fn as_dict(&self) -> Option<&IndexMap<PyKey, Value>> {
+        self.as_opaque().and_then(|o| {
+            if let Opaque::Dict(d) = o {
+                Some(d)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn as_dict_mut(&mut self) -> Option<&mut IndexMap<PyKey, Value>> {
+        self.as_opaque_mut().and_then(|o| {
+            if let Opaque::Dict(d) = o {
+                Some(d)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Unified int accessor (handles both inline i48 and Opaque::BigInt)
+    pub fn as_int(&self) -> Option<i64> {
+        match top16(self.0) {
+            0xFFFB => Some(self.as_int_raw()),
+            0xFFFF => {
+                if let Opaque::BigInt(n) = unsafe { &*self.opaque_ptr() } {
+                    Some(*n)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    // ── kind() — borrow-based view for pattern matching ──────────────────────
+
+    pub fn kind(&self) -> ValueKind<'_> {
+        match top16(self.0) {
+            t if t <= 0xFFF8 => ValueKind::Float(self.as_float_raw()),
+            0xFFF9 => ValueKind::None,
+            0xFFFA => ValueKind::Bool(self.as_bool()),
+            0xFFFB => ValueKind::Int(self.as_int_raw()),
+            0xFFFC => ValueKind::Str(unsafe { &*self.str_ptr() }),
+            0xFFFD => ValueKind::Tuple(unsafe { &*self.tuple_ptr() }),
+            0xFFFE => ValueKind::List(unsafe { &*self.list_ptr() }),
+            0xFFFF => match unsafe { &*self.opaque_ptr() } {
+                Opaque::BigInt(n) => ValueKind::Int(*n),
+                Opaque::Dict(d) => ValueKind::Dict(d),
+                Opaque::Set(s) => ValueKind::Set(s),
+                Opaque::Range { start, stop, step } => ValueKind::Range {
+                    start: *start,
+                    stop: *stop,
+                    step: *step,
+                },
+                Opaque::UserFunction(f) => ValueKind::UserFunction(f),
+                Opaque::BuiltinFunction(s) => ValueKind::BuiltinFunction(s),
+                Opaque::PyClass(c) => ValueKind::PyClass(c),
+                Opaque::PyInstance(i) => ValueKind::PyInstance(i),
+                Opaque::PyModule(m) => ValueKind::PyModule(m),
+                Opaque::BoundMethod { function, receiver } => {
+                    ValueKind::BoundMethod { function, receiver }
+                }
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    // ── Existing Value methods rewritten with kind() ─────────────────────────
+
+    pub fn truthy(&self) -> bool {
+        match self.kind() {
+            ValueKind::Bool(v) => v,
+            ValueKind::Int(v) => v != 0,
+            ValueKind::Float(v) => v != 0.0,
+            ValueKind::Str(v) => !v.is_empty(),
+            ValueKind::None => false,
+            ValueKind::List(v) => !v.is_empty(),
+            ValueKind::Dict(v) => !v.is_empty(),
+            ValueKind::Set(v) => !v.is_empty(),
+            ValueKind::Range { start, stop, step } => range_len(start, stop, step) > 0,
+            ValueKind::UserFunction(_) => true,
+            ValueKind::BuiltinFunction(_) => true,
+            ValueKind::PyClass(_) => true,
+            ValueKind::PyInstance(_) => true,
+            ValueKind::BoundMethod { .. } => true,
+            ValueKind::PyModule(_) => true,
+            ValueKind::Tuple(v) => !v.is_empty(),
+        }
+    }
+
+    pub fn to_py_str(&self) -> String {
+        match self.kind() {
+            ValueKind::PyInstance(instance) if is_exception_instance(instance) => {
+                exception_to_string(instance)
+            }
+            ValueKind::Str(s) => s.clone(),
+            _ => self.repr(),
+        }
+    }
+
+    pub fn repr(&self) -> String {
+        match self.kind() {
+            ValueKind::Int(v) => v.to_string(),
+            ValueKind::Float(v) => {
+                if v.fract() == 0.0 {
+                    format!("{v:.1}")
+                } else {
+                    v.to_string()
+                }
+            }
+            ValueKind::Str(v) => format!("'{}'", escape_str(v)),
+            ValueKind::Bool(v) => {
+                if v {
+                    "True".to_string()
+                } else {
+                    "False".to_string()
+                }
+            }
+            ValueKind::None => "None".to_string(),
+            ValueKind::List(items) => {
+                let inner = items.iter().map(|v| v.repr()).collect::<Vec<_>>().join(", ");
+                format!("[{inner}]")
+            }
+            ValueKind::Dict(items) => {
+                let mut out = String::new();
+                out.push('{');
+                for (i, (k, v)) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str(&key_repr(k));
+                    out.push_str(": ");
+                    out.push_str(&v.repr());
+                }
+                out.push('}');
+                out
+            }
+            ValueKind::Set(items) => {
+                if items.is_empty() {
+                    return "set()".to_string();
+                }
+                let inner = items.iter().map(key_repr).collect::<Vec<_>>().join(", ");
+                format!("{{{inner}}}")
+            }
+            ValueKind::Range { start, stop, step } => {
+                if step == 1 {
+                    format!("range({start}, {stop})")
+                } else {
+                    format!("range({start}, {stop}, {step})")
+                }
+            }
+            ValueKind::BuiltinFunction(name) => format!("<built-in function {name}>"),
+            ValueKind::UserFunction(func) => format!("<function {}>", func.name),
+            ValueKind::PyClass(class) => {
+                let name = class.borrow().name.clone();
+                format!("<class '{name}'>")
+            }
+            ValueKind::PyInstance(instance) => {
+                if is_exception_instance(instance) {
+                    return exception_repr(instance);
+                }
+                let class_name = instance.borrow().class.borrow().name.clone();
+                format!("<{class_name} object>")
+            }
+            ValueKind::BoundMethod { function, receiver } => {
+                let class_name = receiver.borrow().class.borrow().name.clone();
+                format!("<bound method {class_name}.{}>", function.name)
+            }
+            ValueKind::PyModule(m) => format!("<module '{}'>", m.borrow().name),
+            ValueKind::Tuple(items) => {
+                let inner = items.iter().map(|v| v.repr()).collect::<Vec<_>>().join(", ");
+                if items.len() == 1 {
+                    format!("({inner},)")
+                } else {
+                    format!("({inner})")
+                }
+            }
+        }
+    }
+
+    pub fn to_key(&self) -> Option<PyKey> {
+        match self.kind() {
+            ValueKind::Int(v) => Some(PyKey::Int(v)),
+            ValueKind::Float(v) => Some(PyKey::Float(v.to_bits())),
+            ValueKind::Str(v) => Some(PyKey::Str(v.clone())),
+            ValueKind::Bool(v) => Some(PyKey::Bool(v)),
+            ValueKind::None => Some(PyKey::None),
+            _ => None,
+        }
+    }
+}
+
+// ── Clone ─────────────────────────────────────────────────────────────────────
+
+impl Clone for Value {
+    fn clone(&self) -> Self {
+        match top16(self.0) {
+            // Primitives: just copy bits
+            t if t <= 0xFFFB => Value(self.0),
+            // Str
+            0xFFFC => {
+                let s = unsafe { &*self.str_ptr() };
+                Value::string(s.clone())
+            }
+            // Tuple
+            0xFFFD => {
+                let v = unsafe { &*self.tuple_ptr() };
+                Value::tuple(v.clone())
+            }
+            // List
+            0xFFFE => {
+                let v = unsafe { &*self.list_ptr() };
+                Value::list(v.clone())
+            }
+            // Opaque
+            0xFFFF => {
+                let o = unsafe { &*self.opaque_ptr() };
+                Value::opaque(o.clone())
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+// ── Drop ──────────────────────────────────────────────────────────────────────
+
+impl Drop for Value {
+    fn drop(&mut self) {
+        match top16(self.0) {
+            t if t <= 0xFFFB => {} // primitives: no heap
+            0xFFFC => unsafe {
+                drop(Box::from_raw(self.str_ptr()));
+            },
+            0xFFFD => unsafe {
+                drop(Box::from_raw(self.tuple_ptr()));
+            },
+            0xFFFE => unsafe {
+                drop(Box::from_raw(self.list_ptr()));
+            },
+            0xFFFF => unsafe {
+                drop(Box::from_raw(self.opaque_ptr()));
+            },
+            _ => unreachable!(),
+        }
+    }
+}
+
+// ── PartialEq ─────────────────────────────────────────────────────────────────
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self.kind(), other.kind()) {
+            (ValueKind::Int(a), ValueKind::Int(b)) => a == b,
+            // Python: 1 == 1.0 is True
+            (ValueKind::Int(a), ValueKind::Float(b)) => (a as f64) == b,
+            (ValueKind::Float(a), ValueKind::Int(b)) => a == (b as f64),
+            (ValueKind::Float(a), ValueKind::Float(b)) => a == b,
+            (ValueKind::Str(a), ValueKind::Str(b)) => a == b,
+            (ValueKind::Bool(a), ValueKind::Bool(b)) => a == b,
+            // Python: True == 1 is True
+            (ValueKind::Bool(a), ValueKind::Int(b)) => (a as i64) == b,
+            (ValueKind::Int(a), ValueKind::Bool(b)) => a == (b as i64),
+            (ValueKind::None, ValueKind::None) => true,
+            (ValueKind::List(a), ValueKind::List(b)) => a == b,
+            (ValueKind::Tuple(a), ValueKind::Tuple(b)) => a == b,
+            (ValueKind::Dict(a), ValueKind::Dict(b)) => a == b,
+            (ValueKind::Set(a), ValueKind::Set(b)) => a == b,
+            (
+                ValueKind::Range { start: as_, stop: ao, step: at },
+                ValueKind::Range { start: bs, stop: bo, step: bt },
+            ) => as_ == bs && ao == bo && at == bt,
+            (ValueKind::BuiltinFunction(a), ValueKind::BuiltinFunction(b)) => a == b,
+            (ValueKind::UserFunction(a), ValueKind::UserFunction(b)) => Rc::ptr_eq(a, b),
+            (ValueKind::PyClass(a), ValueKind::PyClass(b)) => Rc::ptr_eq(a, b),
+            (ValueKind::PyInstance(a), ValueKind::PyInstance(b)) => Rc::ptr_eq(a, b),
+            (ValueKind::PyModule(a), ValueKind::PyModule(b)) => Rc::ptr_eq(a, b),
+            (
+                ValueKind::BoundMethod { function: af, receiver: ar },
+                ValueKind::BoundMethod { function: bf, receiver: br },
+            ) => Rc::ptr_eq(af, bf) && Rc::ptr_eq(ar, br),
+            _ => false,
+        }
+    }
+}
+
+// ── Display / Debug ───────────────────────────────────────────────────────────
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_py_str())
+    }
+}
+
+impl fmt::Debug for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.repr())
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper free functions
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn key_repr(key: &PyKey) -> String {
+    match key {
+        PyKey::Int(v) => v.to_string(),
+        PyKey::Float(v) => {
+            let as_f = f64::from_bits(*v);
+            if as_f.fract() == 0.0 {
+                format!("{as_f:.1}")
+            } else {
+                as_f.to_string()
+            }
+        }
+        PyKey::Str(v) => format!("'{}'", escape_str(v)),
+        PyKey::Bool(v) => {
+            if *v {
+                "True".to_string()
+            } else {
+                "False".to_string()
+            }
+        }
+        PyKey::None => "None".to_string(),
+    }
+}
+
+fn is_exception_instance(instance: &Rc<RefCell<PyInstance>>) -> bool {
+    let class = Rc::clone(&instance.borrow().class);
+    class_chain_contains_exception(&class)
+}
+
+fn class_chain_contains_exception(class: &Rc<RefCell<PyClass>>) -> bool {
+    let (name, base) = {
+        let borrowed = class.borrow();
+        (borrowed.name.clone(), borrowed.base.clone())
+    };
+    if name == "Exception" {
+        return true;
+    }
+    base.is_some_and(|base| class_chain_contains_exception(&base))
+}
+
+fn exception_args(instance: &Rc<RefCell<PyInstance>>) -> Vec<Value> {
+    match instance.borrow().attrs.get("args").map(|v| v.kind()) {
+        Some(ValueKind::List(args)) => args.iter().cloned().collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn format_exception_args(args: &[Value], repr_mode: bool) -> String {
+    match args {
+        [] => String::new(),
+        [value] => {
+            if repr_mode {
+                value.repr()
+            } else {
+                value.to_py_str()
+            }
+        }
+        _ => {
+            let inner = args.iter().map(|value| value.repr()).collect::<Vec<_>>().join(", ");
+            format!("({inner})")
+        }
+    }
+}
+
+fn exception_to_string(instance: &Rc<RefCell<PyInstance>>) -> String {
+    let args = exception_args(instance);
+    format_exception_args(&args, false)
+}
+
+fn exception_repr(instance: &Rc<RefCell<PyInstance>>) -> String {
+    let class_name = instance.borrow().class.borrow().name.clone();
+    let args = exception_args(instance);
+    if args.is_empty() {
+        format!("{class_name}()")
+    } else {
+        format!("{class_name}({})", format_exception_args(&args, true))
+    }
+}
+
+fn escape_str(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('\t', "\\t")
+        .replace('\r', "\\r")
+        .replace('\'', "\\'")
+}
+
+pub fn range_len(start: i64, stop: i64, step: i64) -> i64 {
+    if step == 0 {
+        return 0;
+    }
+    if step > 0 {
+        if start >= stop {
+            0
+        } else {
+            ((stop - start - 1) / step) + 1
+        }
+    } else if start <= stop {
+        0
+    } else {
+        ((start - stop - 1) / (-step)) + 1
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Error types
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub enum PyError {
+    Lex(String),
+    Parse(String),
+    Runtime(String),
+    Raised(Value),
+}
+
+impl fmt::Display for PyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PyError::Lex(s) => write!(f, "Lex error: {s}"),
+            PyError::Parse(s) => write!(f, "Parse error: {s}"),
+            PyError::Runtime(s) => write!(f, "Runtime error: {s}"),
+            PyError::Raised(value) => write!(f, "Uncaught exception: {}", value.repr()),
+        }
+    }
+}
+
+pub type Result<T> = std::result::Result<T, PyError>;

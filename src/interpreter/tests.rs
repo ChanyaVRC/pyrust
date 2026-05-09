@@ -36,7 +36,7 @@ mod tests {
 
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
-            Some(Value::Int(2))
+            Some(Value::int(2))
         );
     }
 
@@ -62,7 +62,7 @@ mod tests {
     fn global_assignment_updates_module_binding() {
         let interpreter = run_program("x = 1\ndef f():\n    global x\n    x = 3\nf()\n");
 
-        assert_eq!(interpreter.lookup_name("x").unwrap(), Some(Value::Int(3)));
+        assert_eq!(interpreter.lookup_name("x").unwrap(), Some(Value::int(3)));
     }
 
     #[test]
@@ -73,9 +73,9 @@ mod tests {
 
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
-            Some(Value::Int(7))
+            Some(Value::int(7))
         );
-        assert_eq!(interpreter.lookup_name("x").unwrap(), Some(Value::Int(9)));
+        assert_eq!(interpreter.lookup_name("x").unwrap(), Some(Value::int(9)));
     }
 
     #[test]
@@ -86,7 +86,7 @@ mod tests {
 
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
-            Some(Value::List(vec![Value::Int(5), Value::Int(5)]))
+            Some(Value::list(vec![Value::int(5), Value::int(5)]))
         );
     }
 
@@ -115,11 +115,11 @@ mod tests {
 
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
-            Some(Value::List(vec![
-                Value::Int(10),
-                Value::Int(11),
-                Value::Int(15),
-                Value::Int(15),
+            Some(Value::list(vec![
+                Value::int(10),
+                Value::int(11),
+                Value::int(15),
+                Value::int(15),
             ]))
         );
     }
@@ -132,11 +132,11 @@ mod tests {
 
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
-            Some(Value::List(vec![
-                Value::Str("base".to_string()),
-                Value::Int(10),
-                Value::Int(11),
-                Value::Str("base".to_string()),
+            Some(Value::list(vec![
+                Value::string("base".to_string()),
+                Value::int(10),
+                Value::int(11),
+                Value::string("base".to_string()),
             ]))
         );
     }
@@ -149,9 +149,9 @@ mod tests {
 
         assert_eq!(
             interpreter.lookup_name("events").unwrap(),
-            Some(Value::List(vec![
-                Value::Str("bad".to_string()),
-                Value::Str("finally".to_string()),
+            Some(Value::list(vec![
+                Value::string("bad".to_string()),
+                Value::string("finally".to_string()),
             ]))
         );
     }
@@ -164,7 +164,7 @@ mod tests {
 
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
-            Some(Value::Str("inner".to_string()))
+            Some(Value::string("inner".to_string()))
         );
     }
 
@@ -176,7 +176,7 @@ mod tests {
 
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
-            Some(Value::Str("division by zero".to_string()))
+            Some(Value::string("division by zero".to_string()))
         );
     }
 
@@ -188,15 +188,15 @@ mod tests {
 
         assert_eq!(
             interpreter.lookup_name("pi_val").unwrap(),
-            Some(Value::Float(std::f64::consts::PI))
+            Some(Value::float(std::f64::consts::PI))
         );
         assert_eq!(
             interpreter.lookup_name("floor_val").unwrap(),
-            Some(Value::Int(2))
+            Some(Value::int(2))
         );
         assert_eq!(
             interpreter.lookup_name("sqrt_val").unwrap(),
-            Some(Value::Float(4.0))
+            Some(Value::float(4.0))
         );
     }
 
@@ -207,11 +207,11 @@ mod tests {
 
         assert_eq!(
             interpreter.lookup_name("pi_val").unwrap(),
-            Some(Value::Float(std::f64::consts::PI))
+            Some(Value::float(std::f64::consts::PI))
         );
         assert_eq!(
             interpreter.lookup_name("floor_val").unwrap(),
-            Some(Value::Int(3))
+            Some(Value::int(3))
         );
     }
 
@@ -221,7 +221,7 @@ mod tests {
 
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
-            Some(Value::Int(5))
+            Some(Value::int(5))
         );
     }
 
@@ -245,7 +245,7 @@ except RecursionError:
                 let program = Parser::new(tokens).parse_program().unwrap();
                 let mut interp = Interpreter::default();
                 interp.exec_program(&program, false).unwrap();
-                matches!(interp.lookup_name("caught").unwrap(), Some(Value::Bool(true)))
+                interp.lookup_name("caught").unwrap() == Some(Value::bool_(true))
             })
             .unwrap()
             .join()
@@ -271,7 +271,7 @@ result = count(200)
                 let program = Parser::new(tokens).parse_program().unwrap();
                 let mut interp = Interpreter::default();
                 interp.exec_program(&program, false).unwrap();
-                matches!(interp.lookup_name("result").unwrap(), Some(Value::Int(200)))
+                interp.lookup_name("result").unwrap() == Some(Value::int(200))
             })
             .unwrap()
             .join()
@@ -297,7 +297,7 @@ result = fib(35)
                 let program = Parser::new(tokens).parse_program().unwrap();
                 let mut interp = Interpreter::default();
                 interp.exec_program(&program, false).unwrap();
-                matches!(interp.lookup_name("result").unwrap(), Some(Value::Int(9227465)))
+                interp.lookup_name("result").unwrap() == Some(Value::int(9227465))
             })
             .unwrap()
             .join()
@@ -312,8 +312,8 @@ result = fib(35)
         let interpreter = run_program(
             "log = []\ndef track(n):\n    print(n)\n    return n * 2\na = track(3)\nb = track(3)\n",
         );
-        assert_eq!(interpreter.lookup_name("a").unwrap(), Some(Value::Int(6)));
-        assert_eq!(interpreter.lookup_name("b").unwrap(), Some(Value::Int(6)));
+        assert_eq!(interpreter.lookup_name("a").unwrap(), Some(Value::int(6)));
+        assert_eq!(interpreter.lookup_name("b").unwrap(), Some(Value::int(6)));
     }
 
     #[test]
@@ -321,8 +321,8 @@ result = fib(35)
         let interpreter = run_program(
             "count = 0\ndef inc(n):\n    global count\n    count += n\n    return count\na = inc(1)\nb = inc(1)\n",
         );
-        assert_eq!(interpreter.lookup_name("a").unwrap(), Some(Value::Int(1)));
-        assert_eq!(interpreter.lookup_name("b").unwrap(), Some(Value::Int(2)));
+        assert_eq!(interpreter.lookup_name("a").unwrap(), Some(Value::int(1)));
+        assert_eq!(interpreter.lookup_name("b").unwrap(), Some(Value::int(2)));
     }
 
     #[test]
@@ -330,19 +330,19 @@ result = fib(35)
         let interpreter = run_program(
             "n = 0\nwhile True:\n    n += 1\n    if n == 5:\n        break\n",
         );
-        assert_eq!(interpreter.lookup_name("n").unwrap(), Some(Value::Int(5)));
+        assert_eq!(interpreter.lookup_name("n").unwrap(), Some(Value::int(5)));
     }
 
     #[test]
     fn while_false_body_never_runs() {
         let interpreter = run_program("x = 0\nwhile False:\n    x = 99\n");
-        assert_eq!(interpreter.lookup_name("x").unwrap(), Some(Value::Int(0)));
+        assert_eq!(interpreter.lookup_name("x").unwrap(), Some(Value::int(0)));
     }
 
     #[test]
     fn while_false_else_branch_runs() {
         let interpreter = run_program("x = 0\nwhile False:\n    x = 99\nelse:\n    x = 42\n");
-        assert_eq!(interpreter.lookup_name("x").unwrap(), Some(Value::Int(42)));
+        assert_eq!(interpreter.lookup_name("x").unwrap(), Some(Value::int(42)));
     }
 
     #[test]
@@ -351,10 +351,10 @@ result = fib(35)
             run_program("result = list(enumerate(['a', 'b', 'c']))\n");
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
-            Some(Value::List(vec![
-                Value::Tuple(vec![Value::Int(0), Value::Str("a".into())]),
-                Value::Tuple(vec![Value::Int(1), Value::Str("b".into())]),
-                Value::Tuple(vec![Value::Int(2), Value::Str("c".into())]),
+            Some(Value::list(vec![
+                Value::tuple(vec![Value::int(0), Value::string("a".into())]),
+                Value::tuple(vec![Value::int(1), Value::string("b".into())]),
+                Value::tuple(vec![Value::int(2), Value::string("c".into())]),
             ]))
         );
     }
@@ -366,9 +366,9 @@ result = fib(35)
         );
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
-            Some(Value::List(vec![
-                Value::Tuple(vec![Value::Int(10), Value::Str("x".into())]),
-                Value::Tuple(vec![Value::Int(11), Value::Str("y".into())]),
+            Some(Value::list(vec![
+                Value::tuple(vec![Value::int(10), Value::string("x".into())]),
+                Value::tuple(vec![Value::int(11), Value::string("y".into())]),
             ]))
         );
     }
@@ -378,10 +378,10 @@ result = fib(35)
         let interpreter = run_program("result = list(zip([1, 2, 3], ['a', 'b', 'c']))\n");
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
-            Some(Value::List(vec![
-                Value::Tuple(vec![Value::Int(1), Value::Str("a".into())]),
-                Value::Tuple(vec![Value::Int(2), Value::Str("b".into())]),
-                Value::Tuple(vec![Value::Int(3), Value::Str("c".into())]),
+            Some(Value::list(vec![
+                Value::tuple(vec![Value::int(1), Value::string("a".into())]),
+                Value::tuple(vec![Value::int(2), Value::string("b".into())]),
+                Value::tuple(vec![Value::int(3), Value::string("c".into())]),
             ]))
         );
     }
@@ -391,9 +391,9 @@ result = fib(35)
         let interpreter = run_program("result = list(zip([1, 2, 3], [10, 20]))\n");
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
-            Some(Value::List(vec![
-                Value::Tuple(vec![Value::Int(1), Value::Int(10)]),
-                Value::Tuple(vec![Value::Int(2), Value::Int(20)]),
+            Some(Value::list(vec![
+                Value::tuple(vec![Value::int(1), Value::int(10)]),
+                Value::tuple(vec![Value::int(2), Value::int(20)]),
             ]))
         );
     }
@@ -403,9 +403,9 @@ result = fib(35)
         let interpreter = run_program("result = sorted([3, 1, 4, 1, 5, 9, 2, 6])\n");
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
-            Some(Value::List(vec![
-                Value::Int(1), Value::Int(1), Value::Int(2), Value::Int(3),
-                Value::Int(4), Value::Int(5), Value::Int(6), Value::Int(9),
+            Some(Value::list(vec![
+                Value::int(1), Value::int(1), Value::int(2), Value::int(3),
+                Value::int(4), Value::int(5), Value::int(6), Value::int(9),
             ]))
         );
     }
@@ -415,7 +415,7 @@ result = fib(35)
         let interpreter = run_program("result = sorted([3, 1, 2], reverse=True)\n");
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
-            Some(Value::List(vec![Value::Int(3), Value::Int(2), Value::Int(1)]))
+            Some(Value::list(vec![Value::int(3), Value::int(2), Value::int(1)]))
         );
     }
 
@@ -424,7 +424,7 @@ result = fib(35)
         let interpreter = run_program("result = list(reversed([1, 2, 3]))\n");
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
-            Some(Value::List(vec![Value::Int(3), Value::Int(2), Value::Int(1)]))
+            Some(Value::list(vec![Value::int(3), Value::int(2), Value::int(1)]))
         );
     }
 
@@ -433,10 +433,10 @@ result = fib(35)
         let interpreter = run_program(
             "a = abs(-7)\nb = min(3, 1, 4)\nc = max([5, 2, 8])\nd = sum([1, 2, 3, 4])\n",
         );
-        assert_eq!(interpreter.lookup_name("a").unwrap(), Some(Value::Int(7)));
-        assert_eq!(interpreter.lookup_name("b").unwrap(), Some(Value::Int(1)));
-        assert_eq!(interpreter.lookup_name("c").unwrap(), Some(Value::Int(8)));
-        assert_eq!(interpreter.lookup_name("d").unwrap(), Some(Value::Int(10)));
+        assert_eq!(interpreter.lookup_name("a").unwrap(), Some(Value::int(7)));
+        assert_eq!(interpreter.lookup_name("b").unwrap(), Some(Value::int(1)));
+        assert_eq!(interpreter.lookup_name("c").unwrap(), Some(Value::int(8)));
+        assert_eq!(interpreter.lookup_name("d").unwrap(), Some(Value::int(10)));
     }
 
     #[test]
@@ -444,11 +444,11 @@ result = fib(35)
         let interpreter = run_program(
             "a = int('42')\nb = float('3.14')\nc = str(100)\nd = bool(0)\ne = bool(1)\n",
         );
-        assert_eq!(interpreter.lookup_name("a").unwrap(), Some(Value::Int(42)));
-        assert_eq!(interpreter.lookup_name("b").unwrap(), Some(Value::Float(3.14)));
-        assert_eq!(interpreter.lookup_name("c").unwrap(), Some(Value::Str("100".into())));
-        assert_eq!(interpreter.lookup_name("d").unwrap(), Some(Value::Bool(false)));
-        assert_eq!(interpreter.lookup_name("e").unwrap(), Some(Value::Bool(true)));
+        assert_eq!(interpreter.lookup_name("a").unwrap(), Some(Value::int(42)));
+        assert_eq!(interpreter.lookup_name("b").unwrap(), Some(Value::float(3.14)));
+        assert_eq!(interpreter.lookup_name("c").unwrap(), Some(Value::string("100".into())));
+        assert_eq!(interpreter.lookup_name("d").unwrap(), Some(Value::bool_(false)));
+        assert_eq!(interpreter.lookup_name("e").unwrap(), Some(Value::bool_(true)));
     }
 
     #[test]
@@ -456,7 +456,7 @@ result = fib(35)
         let interpreter = run_program(
             "total = 0\nfor i in range(20):\n    total = total + i\n",
         );
-        assert_eq!(interpreter.lookup_name("total").unwrap(), Some(Value::Int(190)));
+        assert_eq!(interpreter.lookup_name("total").unwrap(), Some(Value::int(190)));
     }
 
     #[test]
@@ -464,10 +464,10 @@ result = fib(35)
         let interpreter = run_program(
             "def add(a, b):\n    return a + b\nx = add(1, 2)\ny = add('hello', ' world')\n",
         );
-        assert_eq!(interpreter.lookup_name("x").unwrap(), Some(Value::Int(3)));
+        assert_eq!(interpreter.lookup_name("x").unwrap(), Some(Value::int(3)));
         assert_eq!(
             interpreter.lookup_name("y").unwrap(),
-            Some(Value::Str("hello world".to_string()))
+            Some(Value::string("hello world".to_string()))
         );
     }
 
@@ -476,7 +476,7 @@ result = fib(35)
         let interpreter = run_program(
             "def add(a, b):\n    return a + b\nresult = add(3, 4)\n",
         );
-        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(7)));
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::int(7)));
     }
 
     #[test]
@@ -484,7 +484,7 @@ result = fib(35)
         let interpreter = run_program(
             "def f():\n    x = 10\n    return x + 1\nresult = f()\n",
         );
-        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(11)));
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::int(11)));
     }
 
     #[test]
@@ -506,7 +506,7 @@ for i in range(60):
                 let mut interp = Interpreter::default();
                 interp.exec_program(&program, false).unwrap();
                 // sum of squares 0..59 = (59*60*119)/6 = 70,210
-                matches!(interp.lookup_name("total").unwrap(), Some(Value::Int(70210)))
+                interp.lookup_name("total").unwrap() == Some(Value::int(70210))
             })
             .unwrap()
             .join()
@@ -532,7 +532,7 @@ result = fact(10)
                 let program = Parser::new(tokens).parse_program().unwrap();
                 let mut interp = Interpreter::default();
                 interp.exec_program(&program, false).unwrap();
-                matches!(interp.lookup_name("result").unwrap(), Some(Value::Int(3628800)))
+                interp.lookup_name("result").unwrap() == Some(Value::int(3628800))
             })
             .unwrap()
             .join()
@@ -545,7 +545,7 @@ result = fact(10)
         let interpreter = run_program(
             "total = 0\nfor i in range(100):\n    total += i\n",
         );
-        assert_eq!(interpreter.lookup_name("total").unwrap(), Some(Value::Int(4950)));
+        assert_eq!(interpreter.lookup_name("total").unwrap(), Some(Value::int(4950)));
     }
 
     #[test]
@@ -554,7 +554,7 @@ result = fact(10)
         let interpreter = run_program(
             "s = 0\nfor i in range(1000):\n    s += i\n",
         );
-        assert_eq!(interpreter.lookup_name("s").unwrap(), Some(Value::Int(499500)));
+        assert_eq!(interpreter.lookup_name("s").unwrap(), Some(Value::int(499500)));
     }
 
     #[test]
@@ -562,7 +562,7 @@ result = fact(10)
         let interpreter = run_program(
             "s = 0\nfor i in range(100):\n    if i == 10:\n        break\n    s += i\n",
         );
-        assert_eq!(interpreter.lookup_name("s").unwrap(), Some(Value::Int(45)));
+        assert_eq!(interpreter.lookup_name("s").unwrap(), Some(Value::int(45)));
     }
 
     #[test]
@@ -570,7 +570,7 @@ result = fact(10)
         let interpreter = run_program(
             "def f(n):\n    for i in range(n):\n        if i == 5:\n            return i * 2\n    return -1\nresult = f(10)\n",
         );
-        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(10)));
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::int(10)));
     }
 
     #[test]
@@ -578,7 +578,7 @@ result = fact(10)
         let interpreter = run_program(
             "def search(lst, target):\n    for i, x in enumerate(lst):\n        if x == target:\n            return i\n    return -1\nidx = search([10, 20, 30, 40], 30)\n",
         );
-        assert_eq!(interpreter.lookup_name("idx").unwrap(), Some(Value::Int(2)));
+        assert_eq!(interpreter.lookup_name("idx").unwrap(), Some(Value::int(2)));
     }
 
     #[test]
@@ -587,8 +587,8 @@ result = fact(10)
         let interpreter = run_program(
             "i = 0\ns = 0\nwhile i < 10:\n    s += i\n    i += 1\n",
         );
-        assert_eq!(interpreter.lookup_name("s").unwrap(), Some(Value::Int(45)));
-        assert_eq!(interpreter.lookup_name("i").unwrap(), Some(Value::Int(10)));
+        assert_eq!(interpreter.lookup_name("s").unwrap(), Some(Value::int(45)));
+        assert_eq!(interpreter.lookup_name("i").unwrap(), Some(Value::int(10)));
     }
 
     #[test]
@@ -596,8 +596,8 @@ result = fact(10)
         let interpreter = run_program(
             "i = 1\nproduct = 1\nwhile i <= 5:\n    product *= i\n    i += 1\n",
         );
-        assert_eq!(interpreter.lookup_name("product").unwrap(), Some(Value::Int(120)));
-        assert_eq!(interpreter.lookup_name("i").unwrap(), Some(Value::Int(6)));
+        assert_eq!(interpreter.lookup_name("product").unwrap(), Some(Value::int(120)));
+        assert_eq!(interpreter.lookup_name("i").unwrap(), Some(Value::int(6)));
     }
 
     #[test]
@@ -605,7 +605,7 @@ result = fact(10)
         let interpreter = run_program(
             "s = 0\nfor i in range(4):\n    s += i\n",
         );
-        assert_eq!(interpreter.lookup_name("s").unwrap(), Some(Value::Int(6)));
+        assert_eq!(interpreter.lookup_name("s").unwrap(), Some(Value::int(6)));
     }
 
     #[test]
@@ -615,7 +615,7 @@ result = fact(10)
             "i = 0\ns = 0\nwhile i < 10:\n    i += 1\n    if i % 2 == 0:\n        continue\n    s += i\n",
         );
         // Sum of odd numbers 1..9: 1+3+5+7+9 = 25
-        assert_eq!(interpreter.lookup_name("s").unwrap(), Some(Value::Int(25)));
+        assert_eq!(interpreter.lookup_name("s").unwrap(), Some(Value::int(25)));
     }
 
     #[test]
@@ -623,7 +623,7 @@ result = fact(10)
         let interpreter = run_program(
             "lst = [1, 2, 3, 4, 5]\ntotal = 0\nfor x in lst:\n    total += x\n",
         );
-        assert_eq!(interpreter.lookup_name("total").unwrap(), Some(Value::Int(15)));
+        assert_eq!(interpreter.lookup_name("total").unwrap(), Some(Value::int(15)));
     }
 
     #[test]
@@ -631,7 +631,7 @@ result = fact(10)
         let interpreter = run_program(
             "pairs = [(1, 10), (2, 20), (3, 30)]\ntotal = 0\nfor a, b in pairs:\n    total += a + b\n",
         );
-        assert_eq!(interpreter.lookup_name("total").unwrap(), Some(Value::Int(66)));
+        assert_eq!(interpreter.lookup_name("total").unwrap(), Some(Value::int(66)));
     }
 
     #[test]
@@ -642,7 +642,7 @@ result = fact(10)
         // Just verify it runs without panic and assigned the last key
         assert_eq!(
             interpreter.lookup_name("last_k").unwrap(),
-            Some(Value::Str("world".to_string()))
+            Some(Value::string("world".to_string()))
         );
     }
     #[test]
@@ -652,7 +652,7 @@ result = fact(10)
         let interpreter = run_program(
             "done = False\ncount = 0\nwhile not done:\n    count += 1\n    if count >= 10:\n        break\n",
         );
-        assert_eq!(interpreter.lookup_name("count").unwrap(), Some(Value::Int(10)));
+        assert_eq!(interpreter.lookup_name("count").unwrap(), Some(Value::int(10)));
     }
 
     #[test]
@@ -660,7 +660,7 @@ result = fact(10)
         let interpreter = run_program(
             "x = False\nran = False\nwhile x:\n    ran = True\n",
         );
-        assert_eq!(interpreter.lookup_name("ran").unwrap(), Some(Value::Bool(false)));
+        assert_eq!(interpreter.lookup_name("ran").unwrap(), Some(Value::bool_(false)));
     }
 
     #[test]
@@ -669,8 +669,8 @@ result = fact(10)
         let interpreter = run_program(
             "i = 0\ns = 0\nwhile i < 10:\n    s += i\n    i += 1\n",
         );
-        assert_eq!(interpreter.lookup_name("s").unwrap(), Some(Value::Int(45)));
-        assert_eq!(interpreter.lookup_name("i").unwrap(), Some(Value::Int(10)));
+        assert_eq!(interpreter.lookup_name("s").unwrap(), Some(Value::int(45)));
+        assert_eq!(interpreter.lookup_name("i").unwrap(), Some(Value::int(10)));
     }
 
     // ── Register-VM specific tests ──────────────────────────────────────────
@@ -680,7 +680,7 @@ result = fact(10)
         let interpreter = run_program(
             "def f(a, b): return a * b + 1\nresult = f(6, 7)\n",
         );
-        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(43)));
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::int(43)));
     }
 
     #[test]
@@ -693,7 +693,7 @@ result = fact(10)
                 let interpreter = run_program(
                     "def fact(n):\n    if n <= 1: return 1\n    return n * fact(n - 1)\nresult = fact(10)\n",
                 );
-                interpreter.lookup_name("result").unwrap() == Some(Value::Int(3628800))
+                interpreter.lookup_name("result").unwrap() == Some(Value::int(3628800))
             })
             .unwrap()
             .join()
@@ -711,7 +711,7 @@ result = fact(10)
                 let interpreter = run_program(
                     "def fib(n):\n    if n <= 1: return n\n    return fib(n-1) + fib(n-2)\nresult = fib(35)\n",
                 );
-                interpreter.lookup_name("result").unwrap() == Some(Value::Int(9227465))
+                interpreter.lookup_name("result").unwrap() == Some(Value::int(9227465))
             })
             .unwrap()
             .join()
@@ -724,7 +724,7 @@ result = fact(10)
         let interpreter = run_program(
             "def s(n):\n    t = 0\n    for i in range(n):\n        t += i\n    return t\nresult = s(100)\n",
         );
-        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(4950)));
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::int(4950)));
     }
 
     #[test]
@@ -732,7 +732,7 @@ result = fact(10)
         let interpreter = run_program(
             "def f(n, limit):\n    s = 0\n    for i in range(n):\n        s += i\n        if s > limit:\n            return s\n    return s\nresult = f(100, 50)\n",
         );
-        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(55)));
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::int(55)));
     }
 
     #[test]
@@ -740,7 +740,7 @@ result = fact(10)
         let interpreter = run_program(
             "def f(lst): return lst[0] + lst[2]\nresult = f([10, 20, 30])\n",
         );
-        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(40)));
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::int(40)));
     }
 
     #[test]
@@ -748,7 +748,7 @@ result = fact(10)
         let interpreter = run_program(
             "def f(pairs):\n    t = 0\n    for a, b in pairs:\n        t += a + b\n    return t\nresult = f([(1, 2), (3, 4), (5, 6)])\n",
         );
-        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(21)));
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::int(21)));
     }
 
     #[test]
@@ -756,7 +756,7 @@ result = fact(10)
         let interpreter = run_program(
             "def f(n):\n    i = 0\n    s = 0\n    while i < n:\n        s += i\n        i += 1\n    return s\nresult = f(10)\n",
         );
-        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(45)));
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::int(45)));
     }
 
     #[test]
@@ -765,7 +765,7 @@ result = fact(10)
         let interpreter = run_program(
             "def f(a, b): return a and b\nresult = f(1, 42)\n",
         );
-        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(42)));
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::int(42)));
     }
 
     #[test]
@@ -773,7 +773,7 @@ result = fact(10)
         let interpreter = run_program(
             "def f(a, b): return a or b\nresult = f(0, 99)\n",
         );
-        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(99)));
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::int(99)));
     }
 
     #[test]
@@ -781,7 +781,7 @@ result = fact(10)
         let interpreter = run_program(
             "def f(a, b): return a and b\nresult = f(0, 42)\n",
         );
-        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(0)));
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::int(0)));
     }
 
     #[test]
@@ -789,7 +789,7 @@ result = fact(10)
         let interpreter = run_program(
             "def f(lst):\n    for x in lst:\n        if x > 10: return x\n    else:\n        return -1\n    return 0\nresult = f([1, 2, 3])\n",
         );
-        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(-1)));
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::int(-1)));
     }
 
     #[test]
@@ -797,7 +797,7 @@ result = fact(10)
         let interpreter = run_program(
             "def f(lst):\n    for x in lst:\n        if x > 1: break\n    else:\n        return -1\n    return x\nresult = f([1, 5, 3])\n",
         );
-        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(5)));
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::int(5)));
     }
 
     #[test]
@@ -805,7 +805,7 @@ result = fact(10)
         let interpreter = run_program(
             "def f(n):\n    i = 0\n    while i < n:\n        i += 1\n    else:\n        return i\n    return -1\nresult = f(3)\n",
         );
-        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(3)));
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::int(3)));
     }
 
     #[test]
@@ -815,7 +815,7 @@ result = fact(10)
         let interpreter = run_program(
             "def f(x):\n    assert x > 0\n    return x * 2\nresult = f(5)\n",
         );
-        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(10)));
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::int(10)));
     }
 
     #[test]
@@ -825,7 +825,7 @@ result = fact(10)
         );
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
-            Some(Value::Tuple(vec![Value::Int(1), Value::Int(2), Value::Int(3)]))
+            Some(Value::tuple(vec![Value::int(1), Value::int(2), Value::int(3)]))
         );
     }
 
@@ -836,7 +836,7 @@ result = fact(10)
         );
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
-            Some(Value::Int(42))
+            Some(Value::int(42))
         );
     }
 
@@ -850,7 +850,7 @@ result = fact(10)
         );
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
-            Some(Value::Int(7))
+            Some(Value::int(7))
         );
     }
 
@@ -862,7 +862,7 @@ result = fact(10)
         let interpreter = run_program(
             "def find_first(lst, pred):\n    for i, x in enumerate(lst):\n        if pred(x): return i\n    return -1\nfind_first([1, 4, 7], lambda x: x > 5)\ndef g(n):\n    s = 0\n    for i in range(n):\n        s += i\n    return s\nresult = g(5)\n",
         );
-        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::Int(10)));
+        assert_eq!(interpreter.lookup_name("result").unwrap(), Some(Value::int(10)));
     }
 
     // ── Edge-case tests (issue #57) ───────────────────────────────────────────
@@ -881,7 +881,7 @@ result = fact(10)
         interpreter.exec_program(&program, false).unwrap();
         assert_eq!(
             interpreter.lookup_name("x").unwrap(),
-            Some(Value::Int(i64::MIN)),
+            Some(Value::int(i64::MIN)),
             "i64 arithmetic currently wraps; update when #49 is fixed"
         );
     }
@@ -909,7 +909,7 @@ result = fact(10)
         );
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
-            Some(Value::List(vec![Value::Int(2), Value::Int(4)]))
+            Some(Value::list(vec![Value::int(2), Value::int(4)]))
         );
     }
 
@@ -922,12 +922,12 @@ result = fact(10)
         );
         use crate::value::PyKey;
         let mut expected = indexmap::IndexMap::new();
-        expected.insert(PyKey::Str("x".to_string()), Value::Int(1));
-        expected.insert(PyKey::Str("y".to_string()), Value::Int(99));
-        expected.insert(PyKey::Str("z".to_string()), Value::Int(3));
+        expected.insert(PyKey::Str("x".to_string()), Value::int(1));
+        expected.insert(PyKey::Str("y".to_string()), Value::int(99));
+        expected.insert(PyKey::Str("z".to_string()), Value::int(3));
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
-            Some(Value::Dict(expected))
+            Some(Value::dict(expected))
         );
     }
 
@@ -944,7 +944,7 @@ result = fact(10)
         interpreter.exec_program(&program, false).unwrap();
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
-            Some(Value::Int(59))
+            Some(Value::int(59))
         );
     }
 }
