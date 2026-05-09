@@ -36,3 +36,12 @@ assert math.isnan(lst[2])
 assert lst[3] == 0.0   # -0.0 == 0.0
 
 print("float edge OK")
+
+# ── bool/float cross-type equality (Issue #89) ────────────────────────────
+print("bool-float-eq", True == 1.0)
+print("bool-float-eq2", False == 0.0)
+print("float-bool-eq", 1.0 == True)
+print("float-bool-eq2", 0.0 == False)
+print("bool-float-neq", True == 2.0)
+print("bool-float-neq2", False == 1.0)
+print("bool-float-ne-op", True != 2.0)
