@@ -320,8 +320,20 @@ impl Interpreter {
                 }
                 let x = value_to_float(&args[0].value, name)?;
                 match name {
-                    "math.floor" => Ok(Value::int(x.floor() as i64)),
-                    "math.ceil" => Ok(Value::int(x.ceil() as i64)),
+                    "math.floor" => {
+                        let f = x.floor();
+                        if f > i64::MAX as f64 || f < i64::MIN as f64 {
+                            return Err(PyError::Named("OverflowError".to_string(), "integer overflow".to_string()));
+                        }
+                        Ok(Value::int(f as i64))
+                    }
+                    "math.ceil" => {
+                        let f = x.ceil();
+                        if f > i64::MAX as f64 || f < i64::MIN as f64 {
+                            return Err(PyError::Named("OverflowError".to_string(), "integer overflow".to_string()));
+                        }
+                        Ok(Value::int(f as i64))
+                    }
                     "math.sqrt" => Ok(Value::float(x.sqrt())),
                     "math.fabs" => Ok(Value::float(x.abs())),
                     "math.sin" => Ok(Value::float(x.sin())),
