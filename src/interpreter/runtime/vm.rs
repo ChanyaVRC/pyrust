@@ -646,7 +646,7 @@ impl Interpreter {
                     if is_pure_fn {
                         if let Some(fv) = &regs[*func_reg as usize] {
                             if let ValueKind::UserFunction(func) = fv.kind() {
-                                let fn_id = Rc::as_ptr(func) as usize;
+                                let fn_id = func.id;
                                 let mut key = std::mem::take(&mut self.key_scratch);
                                 key.clear();
                                 let mut all_hashable = true;
@@ -1002,6 +1002,7 @@ impl Interpreter {
                         }
                     }
                     let func = Rc::new(UserFunction {
+                        id: crate::value::next_fn_id(),
                         name: proto_name,
                         params,
                         local_names: Rc::new(proto_local_index.keys().cloned().collect()),

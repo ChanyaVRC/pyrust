@@ -6,8 +6,15 @@ use std::collections::HashSet;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use indexmap::{IndexMap, IndexSet};
+
+static FN_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+pub fn next_fn_id() -> u64 {
+    FN_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PyKey — hashable subset of Value used as dict/set keys (unchanged)
@@ -83,6 +90,8 @@ pub struct UserFunctionParam {
 
 #[derive(Debug, Clone)]
 pub struct UserFunction {
+    /// Globally unique identity for fn_cache keying — stable across Rc drops/reallocations.
+    pub id: u64,
     pub name: String,
     pub params: Vec<UserFunctionParam>,
     pub local_names: NameSet,
