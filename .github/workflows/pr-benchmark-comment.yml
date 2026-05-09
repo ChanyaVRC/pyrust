@@ -1,0 +1,65 @@
+name: PR Benchmark Comment
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  benchmark-comment:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build PR binary
+        run: cargo build
+
+      - name: Build base binary
+        run: |
+          git worktree add /tmp/pyrust-base ${{ github.event.pull_request.base.sha }}
+          cargo build \
+            --manifest-path /tmp/pyrust-base/Cargo.toml \
+            --target-dir /tmp/pyrust-base/target
+
+      - name: Run benchmark and generate report
+        run: |
+          python tools/benchmark_compare.py \
+            --iterations 3 \
+            --top 12 \
+            --base-bin /tmp/pyrust-base/target/debug/pyrust \
+            --pr-comment-out /tmp/benchmark_body.md
+
+      - name: Prepend comment marker and header
+        run: |
+          {
+            echo "<!-- pyrust-benchmark-comment -->"
+            echo "## :bar_chart: Benchmark Results"
+            echo ""
+            cat /tmp/benchmark_body.md
+          } > /tmp/benchmark_comment.md
+
+      - name: Find existing benchmark comment
+        uses: peter-evans/find-comment@v3
+        id: find-comment
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-author: github-actions[bot]
+          body-includes: "<!-- pyrust-benchmark-comment -->"
+
+      - name: Create or update benchmark comment
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          comment-id: ${{ steps.find-comment.outputs.comment-id }}
+          issue-number: ${{ github.event.pull_request.number }}
+          body-file: /tmp/benchmark_comment.md
+          edit-mode: replace
