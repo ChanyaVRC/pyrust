@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use crate::ast::{AssignTarget, BinaryOp, CmpOp, Expr, FunctionParam, Stmt, UnaryOp};
 use crate::bytecode::{CellVar, FnCode, FnProto, Insn, Reg};
-use crate::value::{Environment, UserFunction, Value};
+use crate::value::{UserFunction, Value};
 
 /// Compile a user function to bytecode.  Always succeeds now that the VM
 /// handles all Python features.  Returns None only on internal limits
@@ -2409,7 +2409,7 @@ impl Compiler {
             }
         }
         // Normal finally exit
-        if let Some(outer_idx) = outer_finally_patch {
+        if outer_finally_patch.is_some() {
             self.emit(Insn::PopExcept);
             let finally_stmts = finally_branch.unwrap();
             self.compile_block(finally_stmts);

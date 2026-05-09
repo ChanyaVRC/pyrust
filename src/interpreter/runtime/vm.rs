@@ -760,7 +760,7 @@ impl Interpreter {
                 }
 
                 // ── Function / Class creation ────────────────────────────
-                Insn::MakeFunction(dst, proto_idx, defs_base, defs_n) => {
+                Insn::MakeFunction(dst, proto_idx, defs_base, _defs_n) => {
                     let proto = &code.fn_protos[*proto_idx as usize];
                     let proto_code = Rc::clone(&proto.code);
                     let proto_name = proto.name.clone();
