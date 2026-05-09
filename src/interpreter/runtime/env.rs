@@ -1,9 +1,10 @@
 impl Interpreter {
     fn get_attr(&self, target: Value, name: &str) -> Result<Value> {
-        match target {
-            Value::Instance(instance) => {
+        match target.kind() {
+            ValueKind::PyInstance(instance) => {
+                let instance = Rc::clone(instance);
                 if name == "__class__" {
-                    return Ok(Value::Class(Rc::clone(&instance.borrow().class)));
+                    return Ok(Value::py_class(Rc::clone(&instance.borrow().class)));
                 }
                 if let Some(value) = instance.borrow().attrs.get(name).cloned() {
                     return Ok(value);
@@ -11,12 +12,13 @@ impl Interpreter {
 
                 let class = { Rc::clone(&instance.borrow().class) };
                 if let Some(value) = lookup_class_attr(&class, name) {
-                    return Ok(match value {
-                        Value::Function(function) => Value::BoundMethod {
-                            function,
-                            receiver: instance,
-                        },
-                        other => other,
+                    return Ok(match value.kind() {
+                        ValueKind::UserFunction(_) => {
+                            if let ValueKind::UserFunction(f) = value.kind() {
+                                Value::bound_method(Rc::clone(f), instance)
+                            } else { unreachable!() }
+                        }
+                        _ => value,
                     });
                 }
 
@@ -26,7 +28,8 @@ impl Interpreter {
                     class_name, name
                 )))
             }
-            Value::Class(class) => {
+            ValueKind::PyClass(class) => {
+                let class = Rc::clone(class);
                 if let Some(value) = lookup_class_attr(&class, name) {
                     return Ok(value);
                 }
@@ -37,7 +40,8 @@ impl Interpreter {
                     class_name, name
                 )))
             }
-            Value::Module(module) => {
+            ValueKind::PyModule(module) => {
+                let module = Rc::clone(module);
                 if let Some(value) = module.borrow().attrs.get(name).cloned() {
                     return Ok(value);
                 }
@@ -45,6 +49,33 @@ impl Interpreter {
                 Err(PyError::Runtime(format!(
                     "module '{mod_name}' has no attribute '{name}'"
                 )))
+            }
+            ValueKind::BuiltinFunction("str") => {
+                match name {
+                    "lower"      => Ok(Value::builtin_function("str.lower")),
+                    "upper"      => Ok(Value::builtin_function("str.upper")),
+                    "strip"      => Ok(Value::builtin_function("str.strip")),
+                    "lstrip"     => Ok(Value::builtin_function("str.lstrip")),
+                    "rstrip"     => Ok(Value::builtin_function("str.rstrip")),
+                    "capitalize" => Ok(Value::builtin_function("str.capitalize")),
+                    "split"      => Ok(Value::builtin_function("str.split")),
+                    "join"       => Ok(Value::builtin_function("str.join")),
+                    "replace"    => Ok(Value::builtin_function("str.replace")),
+                    "find"       => Ok(Value::builtin_function("str.find")),
+                    "rfind"      => Ok(Value::builtin_function("str.rfind")),
+                    "index"      => Ok(Value::builtin_function("str.index")),
+                    "rindex"     => Ok(Value::builtin_function("str.rindex")),
+                    "count"      => Ok(Value::builtin_function("str.count")),
+                    "startswith" => Ok(Value::builtin_function("str.startswith")),
+                    "endswith"   => Ok(Value::builtin_function("str.endswith")),
+                    "isdigit"    => Ok(Value::builtin_function("str.isdigit")),
+                    "isalpha"    => Ok(Value::builtin_function("str.isalpha")),
+                    "isalnum"    => Ok(Value::builtin_function("str.isalnum")),
+                    "isspace"    => Ok(Value::builtin_function("str.isspace")),
+                    _ => Err(PyError::Runtime(format!(
+                        "type object 'str' has no attribute '{name}'"
+                    ))),
+                }
             }
             _ => Err(PyError::Runtime(format!(
                 "object has no attribute '{}'",
@@ -54,12 +85,12 @@ impl Interpreter {
     }
 
     fn assign_attr(&self, target: Value, name: &str, value: Value) -> Result<()> {
-        match target {
-            Value::Instance(instance) => {
+        match target.kind() {
+            ValueKind::PyInstance(instance) => {
                 instance.borrow_mut().attrs.insert(name.to_string(), value);
                 Ok(())
             }
-            Value::Class(class) => {
+            ValueKind::PyClass(class) => {
                 class.borrow_mut().attrs.insert(name.to_string(), value);
                 Ok(())
             }
@@ -119,7 +150,7 @@ impl Interpreter {
                     })
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
-                let module = Value::Module(Rc::new(RefCell::new(PyModule {
+                let module = Value::py_module(Rc::new(RefCell::new(PyModule {
                     name: name.to_string(),
                     attrs,
                 })));

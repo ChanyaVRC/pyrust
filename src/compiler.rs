@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use crate::ast::{AssignTarget, BinaryOp, CmpOp, Expr, FunctionParam, Stmt, UnaryOp};
 use crate::bytecode::{CellVar, FnCode, FnProto, Insn, Reg};
-use crate::value::Value;
+use crate::value::{Value, ValueKind};
 
 /// Compile a top-level script body.  All script-level names are locals.
 ///
@@ -453,12 +453,13 @@ fn cmp_to_binary(op: CmpOp) -> BinaryOp {
 }
 
 fn const_eq(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Int(x), Value::Int(y)) => x == y,
-        (Value::Float(x), Value::Float(y)) => x.to_bits() == y.to_bits(),
-        (Value::Str(x), Value::Str(y)) => x == y,
-        (Value::Bool(x), Value::Bool(y)) => x == y,
-        (Value::None, Value::None) => true,
+    use ValueKind::*;
+    match (a.kind(), b.kind()) {
+        (Int(x), Int(y)) => x == y,
+        (Float(x), Float(y)) => x.to_bits() == y.to_bits(),
+        (Str(x), Str(y)) => x == y,
+        (Bool(x), Bool(y)) => x == y,
+        (None, None) => true,
         _ => false,
     }
 }
@@ -468,18 +469,24 @@ fn const_eq(a: &Value, b: &Value) -> bool {
 /// literals and operations on literals that cannot raise.
 fn fold_constant(expr: &Expr) -> Option<Value> {
     match expr {
-        Expr::Int(v) => Some(Value::Int(*v)),
-        Expr::Float(v) => Some(Value::Float(*v)),
-        Expr::Str(s) => Some(Value::Str(s.clone())),
-        Expr::Bool(b) => Some(Value::Bool(*b)),
-        Expr::None => Some(Value::None),
+        Expr::Int(v) => Some(Value::int(*v)),
+        Expr::Float(v) => Some(Value::float(*v)),
+        Expr::Str(s) => Some(Value::string(s.clone())),
+        Expr::Bool(b) => Some(Value::bool_(*b)),
+        Expr::None => Some(Value::none()),
         Expr::Unary { op, expr } => {
             let val = fold_constant(expr)?;
-            match (op, &val) {
-                (UnaryOp::Neg, Value::Int(n)) => Some(Value::Int(n.wrapping_neg())),
-                (UnaryOp::Neg, Value::Float(f)) => Some(Value::Float(-f)),
-                (UnaryOp::Not, v) => Some(Value::Bool(!v.truthy())),
-                (UnaryOp::BitNot, Value::Int(n)) => Some(Value::Int(!n)),
+            match op {
+                UnaryOp::Neg => match val.kind() {
+                    ValueKind::Int(n) => Some(Value::int(n.wrapping_neg())),
+                    ValueKind::Float(f) => Some(Value::float(-f)),
+                    _ => None,
+                },
+                UnaryOp::Not => Some(Value::bool_(!val.truthy())),
+                UnaryOp::BitNot => match val.kind() {
+                    ValueKind::Int(n) => Some(Value::int(!n)),
+                    _ => None,
+                },
                 _ => None,
             }
         }
@@ -495,67 +502,77 @@ fn fold_constant(expr: &Expr) -> Option<Value> {
                 let op = cmp_to_binary(*cmp_op);
                 let result = fold_binop(&cur, op, &rhs)?;
                 if !result.truthy() {
-                    return Some(Value::Bool(false));
+                    return Some(Value::bool_(false));
                 }
                 cur = rhs;
             }
-            Some(Value::Bool(true))
+            Some(Value::bool_(true))
         }
         _ => None,
     }
 }
 
 fn fold_binop(l: &Value, op: BinaryOp, r: &Value) -> Option<Value> {
-    match (l, op, r) {
-        (Value::Int(a), BinaryOp::Add, Value::Int(b)) => Some(Value::Int(a.wrapping_add(*b))),
-        (Value::Int(a), BinaryOp::Sub, Value::Int(b)) => Some(Value::Int(a.wrapping_sub(*b))),
-        (Value::Int(a), BinaryOp::Mul, Value::Int(b)) => Some(Value::Int(a.wrapping_mul(*b))),
-        (Value::Int(a), BinaryOp::Div, Value::Int(b)) if *b != 0 => {
-            Some(Value::Float(*a as f64 / *b as f64))
+    match (l.kind(), op, r.kind()) {
+        (ValueKind::Int(a), BinaryOp::Add, ValueKind::Int(b)) => {
+            Some(Value::int(a.wrapping_add(b)))
         }
-        (Value::Int(a), BinaryOp::FloorDiv, Value::Int(b)) if *b != 0 => {
-            let q = a.wrapping_div(*b);
-            let r = a.wrapping_rem(*b);
-            Some(Value::Int(if (r != 0) && ((r < 0) != (*b < 0)) {
+        (ValueKind::Int(a), BinaryOp::Sub, ValueKind::Int(b)) => {
+            Some(Value::int(a.wrapping_sub(b)))
+        }
+        (ValueKind::Int(a), BinaryOp::Mul, ValueKind::Int(b)) => {
+            Some(Value::int(a.wrapping_mul(b)))
+        }
+        (ValueKind::Int(a), BinaryOp::Div, ValueKind::Int(b)) if b != 0 => {
+            Some(Value::float(a as f64 / b as f64))
+        }
+        (ValueKind::Int(a), BinaryOp::FloorDiv, ValueKind::Int(b)) if b != 0 => {
+            let q = a.wrapping_div(b);
+            let r = a.wrapping_rem(b);
+            Some(Value::int(if (r != 0) && ((r < 0) != (b < 0)) {
                 q - 1
             } else {
                 q
             }))
         }
-        (Value::Int(a), BinaryOp::Mod, Value::Int(b)) if *b != 0 => {
-            let r = a.wrapping_rem(*b);
-            Some(Value::Int(if (r != 0) && ((r < 0) != (*b < 0)) {
+        (ValueKind::Int(a), BinaryOp::Mod, ValueKind::Int(b)) if b != 0 => {
+            let r = a.wrapping_rem(b);
+            Some(Value::int(if (r != 0) && ((r < 0) != (b < 0)) {
                 r + b
             } else {
                 r
             }))
         }
-        (Value::Int(a), BinaryOp::Pow, Value::Int(b)) if *b >= 0 => {
-            Some(Value::Int(a.wrapping_pow(*b as u32)))
+        (ValueKind::Int(a), BinaryOp::Pow, ValueKind::Int(b)) if b >= 0 => {
+            Some(Value::int(a.wrapping_pow(b as u32)))
         }
-        (Value::Int(a), BinaryOp::BitAnd, Value::Int(b)) => Some(Value::Int(a & b)),
-        (Value::Int(a), BinaryOp::BitOr, Value::Int(b)) => Some(Value::Int(a | b)),
-        (Value::Int(a), BinaryOp::BitXor, Value::Int(b)) => Some(Value::Int(a ^ b)),
-        (Value::Int(a), BinaryOp::LShift, Value::Int(b)) if *b >= 0 && *b < 64 => {
-            Some(Value::Int(a.wrapping_shl(*b as u32)))
+        (ValueKind::Int(a), BinaryOp::BitAnd, ValueKind::Int(b)) => Some(Value::int(a & b)),
+        (ValueKind::Int(a), BinaryOp::BitOr, ValueKind::Int(b)) => Some(Value::int(a | b)),
+        (ValueKind::Int(a), BinaryOp::BitXor, ValueKind::Int(b)) => Some(Value::int(a ^ b)),
+        (ValueKind::Int(a), BinaryOp::LShift, ValueKind::Int(b)) if b >= 0 && b < 64 => {
+            Some(Value::int(a.wrapping_shl(b as u32)))
         }
-        (Value::Int(a), BinaryOp::RShift, Value::Int(b)) if *b >= 0 && *b < 64 => {
-            Some(Value::Int(a >> b))
+        (ValueKind::Int(a), BinaryOp::RShift, ValueKind::Int(b)) if b >= 0 && b < 64 => {
+            Some(Value::int(a >> b))
         }
-        (Value::Float(a), BinaryOp::Add, Value::Float(b)) => Some(Value::Float(a + b)),
-        (Value::Float(a), BinaryOp::Sub, Value::Float(b)) => Some(Value::Float(a - b)),
-        (Value::Float(a), BinaryOp::Mul, Value::Float(b)) => Some(Value::Float(a * b)),
-        (Value::Float(a), BinaryOp::Div, Value::Float(b)) if *b != 0.0 => Some(Value::Float(a / b)),
-        (Value::Str(a), BinaryOp::Add, Value::Str(b)) => Some(Value::Str(a.clone() + b)),
-        (Value::Int(a), BinaryOp::Eq, Value::Int(b)) => Some(Value::Bool(a == b)),
-        (Value::Int(a), BinaryOp::Ne, Value::Int(b)) => Some(Value::Bool(a != b)),
-        (Value::Int(a), BinaryOp::Lt, Value::Int(b)) => Some(Value::Bool(a < b)),
-        (Value::Int(a), BinaryOp::Le, Value::Int(b)) => Some(Value::Bool(a <= b)),
-        (Value::Int(a), BinaryOp::Gt, Value::Int(b)) => Some(Value::Bool(a > b)),
-        (Value::Int(a), BinaryOp::Ge, Value::Int(b)) => Some(Value::Bool(a >= b)),
-        (Value::Str(a), BinaryOp::Eq, Value::Str(b)) => Some(Value::Bool(a == b)),
-        (Value::Str(a), BinaryOp::Ne, Value::Str(b)) => Some(Value::Bool(a != b)),
-        (Value::Bool(a), BinaryOp::Eq, Value::Bool(b)) => Some(Value::Bool(a == b)),
+        (ValueKind::Float(a), BinaryOp::Add, ValueKind::Float(b)) => Some(Value::float(a + b)),
+        (ValueKind::Float(a), BinaryOp::Sub, ValueKind::Float(b)) => Some(Value::float(a - b)),
+        (ValueKind::Float(a), BinaryOp::Mul, ValueKind::Float(b)) => Some(Value::float(a * b)),
+        (ValueKind::Float(a), BinaryOp::Div, ValueKind::Float(b)) if b != 0.0 => {
+            Some(Value::float(a / b))
+        }
+        (ValueKind::Str(a), BinaryOp::Add, ValueKind::Str(b)) => {
+            Some(Value::string(a.to_string() + b))
+        }
+        (ValueKind::Int(a), BinaryOp::Eq, ValueKind::Int(b)) => Some(Value::bool_(a == b)),
+        (ValueKind::Int(a), BinaryOp::Ne, ValueKind::Int(b)) => Some(Value::bool_(a != b)),
+        (ValueKind::Int(a), BinaryOp::Lt, ValueKind::Int(b)) => Some(Value::bool_(a < b)),
+        (ValueKind::Int(a), BinaryOp::Le, ValueKind::Int(b)) => Some(Value::bool_(a <= b)),
+        (ValueKind::Int(a), BinaryOp::Gt, ValueKind::Int(b)) => Some(Value::bool_(a > b)),
+        (ValueKind::Int(a), BinaryOp::Ge, ValueKind::Int(b)) => Some(Value::bool_(a >= b)),
+        (ValueKind::Str(a), BinaryOp::Eq, ValueKind::Str(b)) => Some(Value::bool_(a == b)),
+        (ValueKind::Str(a), BinaryOp::Ne, ValueKind::Str(b)) => Some(Value::bool_(a != b)),
+        (ValueKind::Bool(a), BinaryOp::Eq, ValueKind::Bool(b)) => Some(Value::bool_(a == b)),
         _ => None,
     }
 }
@@ -826,11 +843,11 @@ impl Compiler {
 
     fn try_literal_const_idx(&mut self, expr: &Expr) -> Option<u16> {
         match expr {
-            Expr::Int(v) => Some(self.intern_const(Value::Int(*v))),
-            Expr::Float(v) => Some(self.intern_const(Value::Float(*v))),
-            Expr::Str(s) => Some(self.intern_const(Value::Str(s.clone()))),
-            Expr::Bool(b) => Some(self.intern_const(Value::Bool(*b))),
-            Expr::None => Some(self.intern_const(Value::None)),
+            Expr::Int(v) => Some(self.intern_const(Value::int(*v))),
+            Expr::Float(v) => Some(self.intern_const(Value::float(*v))),
+            Expr::Str(s) => Some(self.intern_const(Value::string(s.clone()))),
+            Expr::Bool(b) => Some(self.intern_const(Value::bool_(*b))),
+            Expr::None => Some(self.intern_const(Value::none())),
             _ => fold_constant(expr).map(|v| self.intern_const(v)),
         }
     }
@@ -1611,8 +1628,8 @@ impl Compiler {
         };
 
         let cmp_op = if step > 0 { BinaryOp::Lt } else { BinaryOp::Gt };
-        let step_idx = self.intern_const(Value::Int(step));
-        let neg_step_idx = self.intern_const(Value::Int(step.wrapping_neg()));
+        let step_idx = self.intern_const(Value::int(step));
+        let neg_step_idx = self.intern_const(Value::int(step.wrapping_neg()));
 
         // Initialise var_reg = i_initial - step (so first ForCount yields i_initial).
         self.emit(Insn::BinOpConst(
@@ -1632,7 +1649,7 @@ impl Compiler {
 
         let (exit_jmp, stop_temp) = if let Some(mut stop_val) = extract_literal_int(stop_expr) {
             stop_val = stop_val.wrapping_add(stop_adjust);
-            let stop_idx = self.intern_const(Value::Int(stop_val));
+            let stop_idx = self.intern_const(Value::int(stop_val));
             let jmp = self.emit(Insn::ForCountConst(var_reg, cmp_op, stop_idx, step_idx, 0));
             (jmp, None)
         } else {
@@ -1645,7 +1662,7 @@ impl Compiler {
                 r
             };
             if stop_adjust != 0 {
-                let adj_idx = self.intern_const(Value::Int(stop_adjust));
+                let adj_idx = self.intern_const(Value::int(stop_adjust));
                 self.emit(Insn::BinOpConst(sr, sr, BinaryOp::Add, adj_idx));
             }
             let jmp = self.emit(Insn::ForCountReg(var_reg, cmp_op, sr, step_idx, 0));
@@ -1752,11 +1769,11 @@ impl Compiler {
         } else {
             BinaryOp::Gt
         };
-        let step_idx = self.intern_const(Value::Int(step_val));
+        let step_idx = self.intern_const(Value::int(step_val));
 
         // ── 1. Initialise var_reg = start - step_val ─────────────────────
         //    For the common range(n) case (start=0), init = -step_val.
-        let neg_step_idx = self.intern_const(Value::Int(step_val.wrapping_neg()));
+        let neg_step_idx = self.intern_const(Value::int(step_val.wrapping_neg()));
         if let Some(start) = start_opt {
             let r = self.compile_expr(start);
             // var_reg = r + (-step_val) = r - step_val
@@ -1773,7 +1790,7 @@ impl Compiler {
         //    stop once into a temp that lives for the loop duration.
         let loop_start = self.pc();
         let (exit_jmp, stop_temp) = if let Some(stop_val) = extract_literal_int(stop_expr) {
-            let stop_idx = self.intern_const(Value::Int(stop_val));
+            let stop_idx = self.intern_const(Value::int(stop_val));
             let jmp = self.emit(Insn::ForCountConst(var_reg, cmp_op, stop_idx, step_idx, 0));
             (jmp, None)
         } else {
@@ -2646,25 +2663,25 @@ impl Compiler {
                 dst
             }
             Expr::Int(v) => {
-                let idx = self.intern_const(Value::Int(*v));
+                let idx = self.intern_const(Value::int(*v));
                 let dst = self.alloc_temp();
                 self.emit(Insn::LoadConst(dst, idx));
                 dst
             }
             Expr::Float(v) => {
-                let idx = self.intern_const(Value::Float(*v));
+                let idx = self.intern_const(Value::float(*v));
                 let dst = self.alloc_temp();
                 self.emit(Insn::LoadConst(dst, idx));
                 dst
             }
             Expr::Str(s) => {
-                let idx = self.intern_const(Value::Str(s.clone()));
+                let idx = self.intern_const(Value::string(s.clone()));
                 let dst = self.alloc_temp();
                 self.emit(Insn::LoadConst(dst, idx));
                 dst
             }
             Expr::Bool(b) => {
-                let idx = self.intern_const(Value::Bool(*b));
+                let idx = self.intern_const(Value::bool_(*b));
                 let dst = self.alloc_temp();
                 self.emit(Insn::LoadConst(dst, idx));
                 dst
@@ -2969,6 +2986,11 @@ impl Compiler {
             return self.compile_variadic_call(func, args);
         }
 
+        // Detect obj.method(args) — emit CallMethod to allow in-place mutation.
+        if let Expr::Attr { target, name } = func {
+            return self.compile_method_call(target, name, args);
+        }
+
         let argc = args.len() as u8;
         let func_reg = self.next_temp;
         let frame_top = func_reg.wrapping_add(1).wrapping_add(argc);
@@ -3006,6 +3028,96 @@ impl Compiler {
         }
         self.next_temp = func_reg + 1;
         func_reg
+    }
+
+    fn compile_method_call(
+        &mut self,
+        target: &Expr,
+        method_name: &str,
+        args: &[crate::ast::CallArg],
+    ) -> Reg {
+        let nargs = args.len() as u8;
+
+        // When the receiver is a plain fast-local variable, use its register directly
+        // as `obj` so that in-place mutations (append, pop, …) actually update the
+        // variable.  The return value goes into a fresh temp `dst_reg ≠ obj_reg`.
+        // For all other receivers we fall back to copying the value into a temp and
+        // using the same register for both obj and dst.
+        let (obj_reg, dst_reg, args_base, need_copy) = if let Expr::Var(name) = target {
+            if let Some(local) = self.local_reg(name) {
+                let dst = self.next_temp;
+                let abase = dst.wrapping_add(1);
+                let frame_top = abase.wrapping_add(nargs);
+                if frame_top < dst {
+                    self.failed = true;
+                    return 0;
+                }
+                self.next_temp = frame_top;
+                if frame_top > 0 && frame_top - 1 > self.max_reg {
+                    self.max_reg = frame_top - 1;
+                }
+                (local, dst, abase, false)
+            } else {
+                // cell / nonlocal — must load via env first
+                let o = self.next_temp;
+                let abase = o.wrapping_add(1);
+                let frame_top = abase.wrapping_add(nargs);
+                if frame_top < o {
+                    self.failed = true;
+                    return 0;
+                }
+                self.next_temp = frame_top;
+                if frame_top > 0 && frame_top - 1 > self.max_reg {
+                    self.max_reg = frame_top - 1;
+                }
+                (o, o, abase, true)
+            }
+        } else {
+            let o = self.next_temp;
+            let abase = o.wrapping_add(1);
+            let frame_top = abase.wrapping_add(nargs);
+            if frame_top < o {
+                self.failed = true;
+                return 0;
+            }
+            self.next_temp = frame_top;
+            if frame_top > 0 && frame_top - 1 > self.max_reg {
+                self.max_reg = frame_top - 1;
+            }
+            (o, o, abase, true)
+        };
+
+        if need_copy {
+            let saved = self.next_temp;
+            self.compile_expr_into(target, obj_reg);
+            self.next_temp = saved;
+        }
+
+        for (i, arg) in args.iter().enumerate() {
+            let arg_reg = args_base + i as u8;
+            let saved = self.next_temp;
+            let insn_before = self.insns.len();
+            let r = self.compile_expr(&arg.value);
+            if r != arg_reg {
+                let single = self.insns.len() == insn_before + 1;
+                if single && r >= self.base_temp && self.retarget_last(r, arg_reg) {
+                    // retargeted in place
+                } else {
+                    self.emit(Insn::Move(arg_reg, r));
+                }
+            }
+            self.next_temp = saved;
+        }
+        let name_idx = self.intern_name(method_name);
+        self.emit(Insn::CallMethod {
+            dst: dst_reg,
+            obj: obj_reg,
+            name_idx,
+            args_base,
+            nargs,
+        });
+        self.next_temp = dst_reg + 1;
+        dst_reg
     }
 
     fn compile_variadic_call(&mut self, func: &Expr, args: &[crate::ast::CallArg]) -> Reg {
@@ -3052,6 +3164,79 @@ impl Compiler {
         // For *args: args.iter().flat_map expand
         // For **kwargs: dict from kwargs
 
+        // Detect obj.method(*args, **kwargs) — emit CallMethodExpanded.
+        if let Expr::Attr { target, name } = func {
+            // Same fast-local optimisation as compile_method_call: use the
+            // variable's own register as `obj` so mutations persist.
+            let (obj_reg, dst_reg) = if let Expr::Var(tname) = target.as_ref() {
+                if let Some(local) = self.local_reg(tname) {
+                    let dst = self.alloc_temp();
+                    (local, dst)
+                } else {
+                    let o = self.alloc_temp();
+                    self.compile_expr_into(target, o);
+                    (o, o)
+                }
+            } else {
+                let o = self.alloc_temp();
+                self.compile_expr_into(target, o);
+                (o, o)
+            };
+            let name_idx = self.intern_name(name);
+
+            let pos_list_reg = self.alloc_temp();
+            let empty_list_base = self.next_temp;
+            self.next_temp = empty_list_base + 1;
+            if empty_list_base > self.max_reg {
+                self.max_reg = empty_list_base;
+            }
+            self.emit(Insn::BuildList(pos_list_reg, empty_list_base, 0));
+
+            let kw_dict_reg = self.alloc_temp();
+            let empty_dict_base = self.next_temp;
+            self.next_temp = empty_dict_base + 1;
+            if empty_dict_base > self.max_reg {
+                self.max_reg = empty_dict_base;
+            }
+            self.emit(Insn::BuildDict(kw_dict_reg, empty_dict_base, 0));
+
+            for arg in args {
+                if arg.splat {
+                    let val = self.compile_expr(&arg.value);
+                    self.emit(Insn::ListExtend(pos_list_reg, val));
+                    self.free_temp(val);
+                } else if arg.double_splat {
+                    let val = self.compile_expr(&arg.value);
+                    self.emit(Insn::DictUpdate(kw_dict_reg, val));
+                    self.free_temp(val);
+                } else if let Some(kw_name) = &arg.name {
+                    let val = self.compile_expr(&arg.value);
+                    let key_idx = self.intern_const(Value::string(kw_name.clone()));
+                    let key_reg = self.alloc_temp();
+                    self.emit(Insn::LoadConst(key_reg, key_idx));
+                    self.emit(Insn::SetItem(kw_dict_reg, key_reg, val));
+                    self.free_temp(key_reg);
+                    self.free_temp(val);
+                } else {
+                    let val = self.compile_expr(&arg.value);
+                    self.emit(Insn::ListAppend(pos_list_reg, val));
+                    self.free_temp(val);
+                }
+            }
+
+            self.emit(Insn::CallMethodExpanded {
+                dst: dst_reg,
+                obj: obj_reg,
+                name_idx,
+                pos_list: pos_list_reg,
+                kw_dict: kw_dict_reg,
+            });
+            self.free_temp(kw_dict_reg);
+            self.free_temp(pos_list_reg);
+            self.next_temp = dst_reg + 1;
+            return dst_reg;
+        }
+
         let func_reg = self.alloc_temp();
         self.compile_expr_into(func, func_reg);
 
@@ -3093,7 +3278,7 @@ impl Compiler {
                 self.free_temp(val);
             } else if let Some(kw_name) = &arg.name {
                 let val = self.compile_expr(&arg.value);
-                let key_idx = self.intern_const(Value::Str(kw_name.clone()));
+                let key_idx = self.intern_const(Value::string(kw_name.clone()));
                 let key_reg = self.alloc_temp();
                 self.emit(Insn::LoadConst(key_reg, key_idx));
                 self.emit(Insn::SetItem(kw_dict_reg, key_reg, val));

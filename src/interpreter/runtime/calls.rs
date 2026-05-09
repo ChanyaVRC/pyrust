@@ -9,17 +9,17 @@ impl Interpreter {
         function: Value,
         args: &[ExpandedCallArg],
     ) -> Result<Value> {
-        match function {
-            Value::Builtin("print") => {
+        match function.kind() {
+            ValueKind::BuiltinFunction("print") => {
                 let print_options = self.parse_print_options_expanded(args)?;
                 let mut rendered = Vec::with_capacity(print_options.values.len());
                 for value in print_options.values {
                     rendered.push(value.to_py_str());
                 }
                 print!("{}{}", rendered.join(&print_options.sep), print_options.end);
-                Ok(Value::None)
+                Ok(Value::none())
             }
-            Value::Builtin("len") => {
+            ValueKind::BuiltinFunction("len") => {
                 reject_keyword_args_expanded("len", args)?;
                 if args.len() != 1 {
                     return Err(PyError::Runtime(
@@ -27,22 +27,22 @@ impl Interpreter {
                     ));
                 }
                 let value = args[0].value.clone();
-                let size = match value {
-                    Value::Str(text) => text.chars().count() as i64,
-                    Value::List(items) => items.len() as i64,
-                    Value::Tuple(items) => items.len() as i64,
-                    Value::Set(items) => items.len() as i64,
-                    Value::Dict(items) => items.len() as i64,
-                    Value::Range { start, stop, step } => range_len(start, stop, step),
+                let size = match value.kind() {
+                    ValueKind::Str(text) => text.chars().count() as i64,
+                    ValueKind::List(items) => items.len() as i64,
+                    ValueKind::Tuple(items) => items.len() as i64,
+                    ValueKind::Set(items) => items.len() as i64,
+                    ValueKind::Dict(items) => items.len() as i64,
+                    ValueKind::Range { start, stop, step } => range_len(start, stop, step),
                     _ => {
                         return Err(PyError::Runtime("object has no len()".to_string()));
                     }
                 };
-                Ok(Value::Int(size))
+                Ok(Value::int(size))
             }
-            Value::Builtin("range") => self.call_range_expanded(args),
+            ValueKind::BuiltinFunction("range") => self.call_range_expanded(args),
 
-            Value::Builtin("enumerate") => {
+            ValueKind::BuiltinFunction("enumerate") => {
                 reject_keyword_args_expanded("enumerate", args)?;
                 if args.is_empty() || args.len() > 2 {
                     return Err(PyError::Runtime(
@@ -50,8 +50,8 @@ impl Interpreter {
                     ));
                 }
                 let start = if args.len() == 2 {
-                    match &args[1].value {
-                        Value::Int(n) => *n,
+                    match args[1].value.kind() {
+                        ValueKind::Int(n) => n,
                         _ => return Err(PyError::Runtime(
                             "enumerate() start argument must be an integer".to_string(),
                         )),
@@ -60,33 +60,33 @@ impl Interpreter {
                     0i64
                 };
                 let items = iter_values(args[0].value.clone())?;
-                Ok(Value::List(
+                Ok(Value::list(
                     items
                         .into_iter()
                         .enumerate()
-                        .map(|(i, v)| Value::Tuple(vec![Value::Int(i as i64 + start), v]))
+                        .map(|(i, v)| Value::tuple(vec![Value::int(i as i64 + start), v]))
                         .collect(),
                 ))
             }
 
-            Value::Builtin("zip") => {
+            ValueKind::BuiltinFunction("zip") => {
                 reject_keyword_args_expanded("zip", args)?;
                 if args.is_empty() {
-                    return Ok(Value::List(vec![]));
+                    return Ok(Value::list(vec![]));
                 }
                 let mut iters: Vec<Vec<Value>> = Vec::with_capacity(args.len());
                 for arg in args {
                     iters.push(iter_values(arg.value.clone())?);
                 }
                 let len = iters.iter().map(|v| v.len()).min().unwrap_or(0);
-                Ok(Value::List(
+                Ok(Value::list(
                     (0..len)
-                        .map(|i| Value::Tuple(iters.iter().map(|it| it[i].clone()).collect()))
+                        .map(|i| Value::tuple(iters.iter().map(|it| it[i].clone()).collect()))
                         .collect(),
                 ))
             }
 
-            Value::Builtin("reversed") => {
+            ValueKind::BuiltinFunction("reversed") => {
                 reject_keyword_args_expanded("reversed", args)?;
                 if args.len() != 1 {
                     return Err(PyError::Runtime(
@@ -95,10 +95,10 @@ impl Interpreter {
                 }
                 let mut items = iter_values(args[0].value.clone())?;
                 items.reverse();
-                Ok(Value::List(items))
+                Ok(Value::list(items))
             }
 
-            Value::Builtin("sorted") => {
+            ValueKind::BuiltinFunction("sorted") => {
                 if args.is_empty() {
                     return Err(PyError::Runtime(
                         "sorted() requires at least one argument".to_string(),
@@ -137,28 +137,28 @@ impl Interpreter {
                 if reverse {
                     items.reverse();
                 }
-                Ok(Value::List(items))
+                Ok(Value::list(items))
             }
 
-            Value::Builtin("abs") => {
+            ValueKind::BuiltinFunction("abs") => {
                 reject_keyword_args_expanded("abs", args)?;
                 if args.len() != 1 {
                     return Err(PyError::Runtime(
                         "abs() takes exactly one argument".to_string(),
                     ));
                 }
-                match &args[0].value {
-                    Value::Int(v) => Ok(Value::Int(v.abs())),
-                    Value::Float(v) => Ok(Value::Float(v.abs())),
-                    Value::Bool(b) => Ok(Value::Int(if *b { 1 } else { 0 })),
+                match args[0].value.kind() {
+                    ValueKind::Int(v) => Ok(Value::int(v.abs())),
+                    ValueKind::Float(v) => Ok(Value::float(v.abs())),
+                    ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
                     _ => Err(PyError::Runtime(
                         "abs() argument must be a number".to_string(),
                     )),
                 }
             }
 
-            Value::Builtin("min") | Value::Builtin("max") => {
-                let is_max = matches!(function, Value::Builtin("max"));
+            ValueKind::BuiltinFunction("min") | ValueKind::BuiltinFunction("max") => {
+                let is_max = matches!(function.kind(), ValueKind::BuiltinFunction("max"));
                 let fname = if is_max { "max" } else { "min" };
                 reject_keyword_args_expanded(fname, args)?;
                 let items: Vec<Value> = if args.len() == 1 {
@@ -182,7 +182,7 @@ impl Interpreter {
                 Ok(result)
             }
 
-            Value::Builtin("sum") => {
+            ValueKind::BuiltinFunction("sum") => {
                 reject_keyword_args_expanded("sum", args)?;
                 if args.is_empty() || args.len() > 2 {
                     return Err(PyError::Runtime(
@@ -190,7 +190,7 @@ impl Interpreter {
                     ));
                 }
                 let items = iter_values(args[0].value.clone())?;
-                let start = if args.len() == 2 { args[1].value.clone() } else { Value::Int(0) };
+                let start = if args.len() == 2 { args[1].value.clone() } else { Value::int(0) };
                 let mut acc = start;
                 for item in items {
                     acc = self.eval_binary(acc, BinaryOp::Add, item)?;
@@ -198,28 +198,28 @@ impl Interpreter {
                 Ok(acc)
             }
 
-            Value::Builtin("list") => {
+            ValueKind::BuiltinFunction("list") => {
                 reject_keyword_args_expanded("list", args)?;
                 match args.len() {
-                    0 => Ok(Value::List(vec![])),
-                    1 => Ok(Value::List(iter_values(args[0].value.clone())?)),
+                    0 => Ok(Value::list(vec![])),
+                    1 => Ok(Value::list(iter_values(args[0].value.clone())?)),
                     _ => Err(PyError::Runtime("list() takes at most one argument".to_string())),
                 }
             }
 
-            Value::Builtin("tuple") => {
+            ValueKind::BuiltinFunction("tuple") => {
                 reject_keyword_args_expanded("tuple", args)?;
                 match args.len() {
-                    0 => Ok(Value::Tuple(vec![])),
-                    1 => Ok(Value::Tuple(iter_values(args[0].value.clone())?)),
+                    0 => Ok(Value::tuple(vec![])),
+                    1 => Ok(Value::tuple(iter_values(args[0].value.clone())?)),
                     _ => Err(PyError::Runtime("tuple() takes at most one argument".to_string())),
                 }
             }
 
-            Value::Builtin("set") => {
+            ValueKind::BuiltinFunction("set") => {
                 reject_keyword_args_expanded("set", args)?;
                 match args.len() {
-                    0 => Ok(Value::Set(indexmap::IndexSet::new())),
+                    0 => Ok(Value::set(indexmap::IndexSet::new())),
                     1 => {
                         let items = iter_values(args[0].value.clone())?;
                         let mut set = indexmap::IndexSet::new();
@@ -229,30 +229,30 @@ impl Interpreter {
                             })?;
                             set.insert(key);
                         }
-                        Ok(Value::Set(set))
+                        Ok(Value::set(set))
                     }
                     _ => Err(PyError::Runtime("set() takes at most one argument".to_string())),
                 }
             }
 
-            Value::Builtin("str") => {
+            ValueKind::BuiltinFunction("str") => {
                 reject_keyword_args_expanded("str", args)?;
                 match args.len() {
-                    0 => Ok(Value::Str(String::new())),
-                    1 => Ok(Value::Str(args[0].value.to_py_str())),
+                    0 => Ok(Value::string(String::new())),
+                    1 => Ok(Value::string(args[0].value.to_py_str())),
                     _ => Err(PyError::Runtime("str() takes at most one argument".to_string())),
                 }
             }
 
-            Value::Builtin("int") => {
+            ValueKind::BuiltinFunction("int") => {
                 reject_keyword_args_expanded("int", args)?;
                 match args.len() {
-                    0 => Ok(Value::Int(0)),
-                    1 => match &args[0].value {
-                        Value::Int(v) => Ok(Value::Int(*v)),
-                        Value::Float(v) => Ok(Value::Int(*v as i64)),
-                        Value::Bool(b) => Ok(Value::Int(if *b { 1 } else { 0 })),
-                        Value::Str(s) => s.trim().parse::<i64>().map(Value::Int).map_err(|_| {
+                    0 => Ok(Value::int(0)),
+                    1 => match args[0].value.kind() {
+                        ValueKind::Int(v) => Ok(Value::int(v)),
+                        ValueKind::Float(v) => Ok(Value::int(v as i64)),
+                        ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
+                        ValueKind::Str(s) => s.trim().parse::<i64>().map(Value::int).map_err(|_| {
                             PyError::Runtime(format!(
                                 "invalid literal for int() with base 10: '{s}'"
                             ))
@@ -265,15 +265,15 @@ impl Interpreter {
                 }
             }
 
-            Value::Builtin("float") => {
+            ValueKind::BuiltinFunction("float") => {
                 reject_keyword_args_expanded("float", args)?;
                 match args.len() {
-                    0 => Ok(Value::Float(0.0)),
-                    1 => match &args[0].value {
-                        Value::Float(v) => Ok(Value::Float(*v)),
-                        Value::Int(v) => Ok(Value::Float(*v as f64)),
-                        Value::Bool(b) => Ok(Value::Float(if *b { 1.0 } else { 0.0 })),
-                        Value::Str(s) => s.trim().parse::<f64>().map(Value::Float).map_err(|_| {
+                    0 => Ok(Value::float(0.0)),
+                    1 => match args[0].value.kind() {
+                        ValueKind::Float(v) => Ok(Value::float(v)),
+                        ValueKind::Int(v) => Ok(Value::float(v as f64)),
+                        ValueKind::Bool(b) => Ok(Value::float(if b { 1.0 } else { 0.0 })),
+                        ValueKind::Str(s) => s.trim().parse::<f64>().map(Value::float).map_err(|_| {
                             PyError::Runtime(format!(
                                 "could not convert string to float: '{s}'"
                             ))
@@ -286,28 +286,28 @@ impl Interpreter {
                 }
             }
 
-            Value::Builtin("bool") => {
+            ValueKind::BuiltinFunction("bool") => {
                 reject_keyword_args_expanded("bool", args)?;
                 match args.len() {
-                    0 => Ok(Value::Bool(false)),
-                    1 => Ok(Value::Bool(args[0].value.truthy())),
+                    0 => Ok(Value::bool_(false)),
+                    1 => Ok(Value::bool_(args[0].value.truthy())),
                     _ => Err(PyError::Runtime("bool() takes at most one argument".to_string())),
                 }
             }
 
-            Value::Builtin("sys.exit") => {
+            ValueKind::BuiltinFunction("sys.exit") => {
                 let code = if args.is_empty() {
                     0i32
                 } else {
                     reject_keyword_args_expanded("sys.exit", args)?;
-                    match &args[0].value {
-                        Value::Int(n) => *n as i32,
+                    match args[0].value.kind() {
+                        ValueKind::Int(n) => n as i32,
                         _ => 1,
                     }
                 };
                 std::process::exit(code);
             }
-            Value::Builtin(
+            ValueKind::BuiltinFunction(
                 name @ ("math.floor" | "math.ceil" | "math.sqrt" | "math.fabs" | "math.sin"
                 | "math.cos" | "math.tan" | "math.asin" | "math.acos" | "math.atan"
                 | "math.exp" | "math.log2" | "math.log10" | "math.isnan" | "math.isinf"),
@@ -320,25 +320,25 @@ impl Interpreter {
                 }
                 let x = value_to_float(&args[0].value, name)?;
                 match name {
-                    "math.floor" => Ok(Value::Int(x.floor() as i64)),
-                    "math.ceil" => Ok(Value::Int(x.ceil() as i64)),
-                    "math.sqrt" => Ok(Value::Float(x.sqrt())),
-                    "math.fabs" => Ok(Value::Float(x.abs())),
-                    "math.sin" => Ok(Value::Float(x.sin())),
-                    "math.cos" => Ok(Value::Float(x.cos())),
-                    "math.tan" => Ok(Value::Float(x.tan())),
-                    "math.asin" => Ok(Value::Float(x.asin())),
-                    "math.acos" => Ok(Value::Float(x.acos())),
-                    "math.atan" => Ok(Value::Float(x.atan())),
-                    "math.exp" => Ok(Value::Float(x.exp())),
-                    "math.log2" => Ok(Value::Float(x.log2())),
-                    "math.log10" => Ok(Value::Float(x.log10())),
-                    "math.isnan" => Ok(Value::Bool(x.is_nan())),
-                    "math.isinf" => Ok(Value::Bool(x.is_infinite())),
+                    "math.floor" => Ok(Value::int(x.floor() as i64)),
+                    "math.ceil" => Ok(Value::int(x.ceil() as i64)),
+                    "math.sqrt" => Ok(Value::float(x.sqrt())),
+                    "math.fabs" => Ok(Value::float(x.abs())),
+                    "math.sin" => Ok(Value::float(x.sin())),
+                    "math.cos" => Ok(Value::float(x.cos())),
+                    "math.tan" => Ok(Value::float(x.tan())),
+                    "math.asin" => Ok(Value::float(x.asin())),
+                    "math.acos" => Ok(Value::float(x.acos())),
+                    "math.atan" => Ok(Value::float(x.atan())),
+                    "math.exp" => Ok(Value::float(x.exp())),
+                    "math.log2" => Ok(Value::float(x.log2())),
+                    "math.log10" => Ok(Value::float(x.log10())),
+                    "math.isnan" => Ok(Value::bool_(x.is_nan())),
+                    "math.isinf" => Ok(Value::bool_(x.is_infinite())),
                     _ => unreachable!(),
                 }
             }
-            Value::Builtin("math.pow") => {
+            ValueKind::BuiltinFunction("math.pow") => {
                 reject_keyword_args_expanded("math.pow", args)?;
                 if args.len() != 2 {
                     return Err(PyError::Runtime(
@@ -347,9 +347,9 @@ impl Interpreter {
                 }
                 let x = value_to_float(&args[0].value, "math.pow")?;
                 let y = value_to_float(&args[1].value, "math.pow")?;
-                Ok(Value::Float(x.powf(y)))
+                Ok(Value::float(x.powf(y)))
             }
-            Value::Builtin("math.atan2") => {
+            ValueKind::BuiltinFunction("math.atan2") => {
                 reject_keyword_args_expanded("math.atan2", args)?;
                 if args.len() != 2 {
                     return Err(PyError::Runtime(
@@ -358,9 +358,9 @@ impl Interpreter {
                 }
                 let y = value_to_float(&args[0].value, "math.atan2")?;
                 let x = value_to_float(&args[1].value, "math.atan2")?;
-                Ok(Value::Float(y.atan2(x)))
+                Ok(Value::float(y.atan2(x)))
             }
-            Value::Builtin("math.log") => {
+            ValueKind::BuiltinFunction("math.log") => {
                 reject_keyword_args_expanded("math.log", args)?;
                 if args.is_empty() || args.len() > 2 {
                     return Err(PyError::Runtime(
@@ -370,12 +370,12 @@ impl Interpreter {
                 let x = value_to_float(&args[0].value, "math.log")?;
                 if args.len() == 2 {
                     let base = value_to_float(&args[1].value, "math.log")?;
-                    Ok(Value::Float(x.log(base)))
+                    Ok(Value::float(x.log(base)))
                 } else {
-                    Ok(Value::Float(x.ln()))
+                    Ok(Value::float(x.ln()))
                 }
             }
-            Value::Builtin("__vcall__") => {
+            ValueKind::BuiltinFunction("__vcall__") => {
                 if args.len() != 3 {
                     return Err(PyError::Runtime("__vcall__ requires 3 arguments".to_string()));
                 }
@@ -385,7 +385,7 @@ impl Interpreter {
                     .into_iter()
                     .map(|v| ExpandedCallArg { name: None, value: v })
                     .collect();
-                if let Value::Dict(kw_map) = &args[2].value {
+                if let ValueKind::Dict(kw_map) = args[2].value.kind() {
                     for (k, v) in kw_map {
                         if let PyKey::Str(name) = k {
                             expanded.push(ExpandedCallArg { name: Some(name.clone()), value: v.clone() });
@@ -394,10 +394,30 @@ impl Interpreter {
                 }
                 self.call_function_expanded(func, &expanded)
             }
-            Value::Function(function) => self.call_user_function_expanded(function, args, &[]),
-            Value::Class(class) => self.call_class_expanded(class, args),
-            Value::BoundMethod { function, receiver } => {
-                self.call_user_function_expanded(function, args, &[Value::Instance(receiver)])
+            ValueKind::BuiltinFunction(name) if name.starts_with("str.") => {
+                let method = &name[4..];
+                let self_val = args
+                    .first()
+                    .map(|a| &a.value)
+                    .ok_or_else(|| PyError::Named(
+                        "TypeError".to_string(),
+                        format!("descriptor '{method}' of 'str' object needs an argument"),
+                    ))?;
+                let rest: Vec<Value> = args[1..].iter().map(|a| a.value.clone()).collect();
+                pyrust_builtins::string::call(method, self_val, &rest)
+            }
+            ValueKind::UserFunction(function) => {
+                let function = Rc::clone(function);
+                self.call_user_function_expanded(function, args, &[])
+            }
+            ValueKind::PyClass(class) => {
+                let class = Rc::clone(class);
+                self.call_class_expanded(class, args)
+            }
+            ValueKind::BoundMethod { function, receiver } => {
+                let function = Rc::clone(function);
+                let receiver = Rc::clone(receiver);
+                self.call_user_function_expanded(function, args, &[Value::py_instance(receiver)])
             }
             _ => Err(PyError::Runtime("object is not callable".to_string())),
         }
@@ -419,16 +439,18 @@ impl Interpreter {
             }
             if arg.double_splat {
                 let value = self.eval_expr(&arg.value)?;
-                let Value::Dict(items) = value else {
-                    return Err(PyError::Runtime(
+                let items = match value.kind() {
+                    ValueKind::Dict(d) => d.clone(),
+                    _ => return Err(PyError::Runtime(
                         "** argument after ** must be a mapping".to_string(),
-                    ));
+                    )),
                 };
                 for (k, v) in items {
-                    let PyKey::Str(name) = k else {
-                        return Err(PyError::Runtime(
+                    let name = match k {
+                        PyKey::Str(s) => s,
+                        _ => return Err(PyError::Runtime(
                             "keywords must be strings".to_string(),
-                        ));
+                        )),
                     };
                     out.push(ExpandedCallArg {
                         name: Some(name),
@@ -463,14 +485,14 @@ impl Interpreter {
                         extract_optional_string(value, "end")?.unwrap_or_else(|| "\n".to_string());
                 }
                 Some("file") => {
-                    if value != Value::None {
+                    if !value.is_none() {
                         return Err(PyError::Runtime(
                             "print() file argument is not supported yet".to_string(),
                         ));
                     }
                 }
-                Some("flush") => match value {
-                    Value::Bool(_) => {}
+                Some("flush") => match value.kind() {
+                    ValueKind::Bool(_) => {}
                     _ => {
                         return Err(PyError::Runtime(
                             "print() flush must be a boolean".to_string(),
@@ -617,7 +639,7 @@ impl Interpreter {
                 if !code.cell_vars.contains(&function.name) {
                     if let Some(&slot) = function.local_index.get(&function.name) {
                         if slot < num_regs {
-                            regs[slot] = Some(Value::Function(Rc::clone(&function)));
+                            regs[slot] = Some(Value::user_function(Rc::clone(&function)));
                         }
                     }
                 }
@@ -695,17 +717,17 @@ impl Interpreter {
             let value = if param.is_args {
                 let rest = positional_vals[pos_idx..].to_vec();
                 pos_idx = positional_vals.len();
-                Value::Tuple(rest)
+                Value::tuple(rest)
             } else if param.is_kwargs {
                 let mut dict: indexmap::IndexMap<crate::value::PyKey, Value> = indexmap::IndexMap::new();
                 for (k, v) in &keyword_vals {
                     if !consumed_keywords.contains(k) {
-                        if let Some(key) = Value::Str(k.clone()).to_key() {
+                        if let Some(key) = Value::string(k.clone()).to_key() {
                             dict.insert(key, v.clone());
                         }
                     }
                 }
-                Value::Dict(dict)
+                Value::dict(dict)
             } else {
                 let kw_pos = keyword_vals.iter().position(|(k, _)| k == &param.name);
                 if let Some(ki) = kw_pos {
@@ -757,7 +779,7 @@ impl Interpreter {
             if !code.cell_vars.contains(&function.name) {
                 if let Some(&slot) = function.local_index.get(&function.name) {
                     if slot < num_regs {
-                        regs[slot] = Some(Value::Function(Rc::clone(&function)));
+                        regs[slot] = Some(Value::user_function(Rc::clone(&function)));
                     }
                 }
             }
@@ -831,13 +853,16 @@ impl Interpreter {
 
         let init = lookup_class_attr(&class, "__init__");
         match init {
-            Some(Value::Function(function)) => {
+            Some(ref v) if matches!(v.kind(), ValueKind::UserFunction(_)) => {
+                let function = if let ValueKind::UserFunction(f) = v.kind() {
+                    Rc::clone(f)
+                } else { unreachable!() };
                 let result = self.call_user_function_expanded(
                     function,
                     args,
-                    &[Value::Instance(Rc::clone(&instance))],
+                    &[Value::py_instance(Rc::clone(&instance))],
                 )?;
-                if result != Value::None {
+                if !result.is_none() {
                     return Err(PyError::Runtime(
                         "__init__() should return None".to_string(),
                     ));
@@ -859,7 +884,7 @@ impl Interpreter {
             }
         }
 
-        Ok(Value::Instance(instance))
+        Ok(Value::py_instance(instance))
     }
 
     fn call_range_expanded(&mut self, args: &[ExpandedCallArg]) -> Result<Value> {
@@ -872,8 +897,8 @@ impl Interpreter {
 
         let mut ints = Vec::with_capacity(args.len());
         for arg in args {
-            match arg.value {
-                Value::Int(v) => ints.push(v),
+            match arg.value.kind() {
+                ValueKind::Int(v) => ints.push(v),
                 _ => {
                     return Err(PyError::Runtime(
                         "range arguments must be integers".to_string(),
@@ -890,18 +915,22 @@ impl Interpreter {
         };
 
         if step == 0 {
-            return Err(PyError::Runtime(
+            return Err(PyError::Named(
+                "ValueError".to_string(),
                 "range() arg 3 must not be zero".to_string(),
             ));
         }
 
-        Ok(Value::Range { start, stop, step })
+        Ok(Value::range(start, stop, step))
     }
 
     /// Return the compiled `FnCode` for `function`.
     /// Returns `None` only if `precompiled_code` is absent.
     fn get_or_compile_bytecode(&mut self, function: &Rc<UserFunction>) -> Option<Rc<FnCode>> {
-        function.precompiled_code.clone()
+        function
+            .precompiled_code
+            .as_ref()
+            .and_then(|rc| Rc::clone(rc).downcast::<FnCode>().ok())
     }
 
 }
