@@ -36,7 +36,7 @@ jobs:
       - name: Run benchmark
         run: |
           python tools/benchmark_compare.py \
-            --iterations 10 --top 12 \
+            --iterations 20 --top 12 \
             --svg-out docs/benchmark.svg \
             --benchmark-action-out benchmark-output.json
 
