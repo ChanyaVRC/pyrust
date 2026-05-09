@@ -36,3 +36,19 @@ assert math.isnan(lst[2])
 assert lst[3] == 0.0   # -0.0 == 0.0
 
 print("float edge OK")
+
+# ── nan/inf repr (Issue #100) ──────────────────────────────────────────────
+print("nan-repr", float("nan"))
+print("inf-repr", float("inf"))
+print("neginf-repr", float("-inf"))
+print("nan-str", str(float("nan")))
+print("inf-str", str(float("inf")))
+print("neginf-str", str(float("-inf")))
+
+# repr in collections
+print("nan-in-list", [float("nan"), float("inf"), float("-inf")])
+print("nan-as-key", {float("nan"): 1})
+
+# arithmetic-produced nan/inf also repr correctly
+print("arith-inf", 1e308 * 10)
+print("arith-nan", float("inf") - float("inf"))

@@ -763,7 +763,11 @@ impl Value {
                 if v.is_nan() {
                     "nan".to_string()
                 } else if v.is_infinite() {
-                    if v > 0.0 { "inf".to_string() } else { "-inf".to_string() }
+                    if v > 0.0 {
+                        "inf".to_string()
+                    } else {
+                        "-inf".to_string()
+                    }
                 } else if v.fract() == 0.0 {
                     format!("{v:.1}")
                 } else {
@@ -1044,7 +1048,11 @@ fn key_repr(key: &PyKey) -> String {
             if as_f.is_nan() {
                 "nan".to_string()
             } else if as_f.is_infinite() {
-                if as_f > 0.0 { "inf".to_string() } else { "-inf".to_string() }
+                if as_f > 0.0 {
+                    "inf".to_string()
+                } else {
+                    "-inf".to_string()
+                }
             } else if as_f.fract() == 0.0 {
                 format!("{as_f:.1}")
             } else {
