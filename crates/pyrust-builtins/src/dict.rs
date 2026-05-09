@@ -97,10 +97,7 @@ fn setdefault(dict: &mut IndexMap<PyKey, Value>, args: &[Value]) -> Result<Value
     let pk = key.to_key().ok_or_else(|| {
         PyError::Runtime("unhashable type".to_string())
     })?;
-    if !dict.contains_key(&pk) {
-        dict.insert(pk.clone(), default.clone());
-    }
-    Ok(dict[&pk].clone())
+    Ok(dict.entry(pk).or_insert(default).clone())
 }
 
 fn key_to_value(k: PyKey) -> Value {

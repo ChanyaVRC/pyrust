@@ -315,10 +315,15 @@ fn str_endswith(s: &str, args: &[Value]) -> Result<Value> {
 }
 
 fn capitalize(s: &str) -> String {
-    let mut c = s.chars();
-    match c.next() {
+    let mut chars = s.chars();
+    match chars.next() {
         None => String::new(),
-        Some(f) => f.to_uppercase().to_string() + &c.as_str().to_lowercase(),
+        Some(first) => {
+            let mut out = String::with_capacity(s.len());
+            out.extend(first.to_uppercase());
+            out.extend(chars.as_str().chars().flat_map(char::to_lowercase));
+            out
+        }
     }
 }
 
@@ -336,10 +341,9 @@ fn strip_chars(s: &str, args: &[Value], left: bool, right: bool) -> String {
             result.to_string()
         }
         Some(chars) => {
-            let chars_slice: Vec<char> = chars.chars().collect();
             let mut result = s;
-            if left { result = result.trim_start_matches(|c: char| chars_slice.contains(&c)); }
-            if right { result = result.trim_end_matches(|c: char| chars_slice.contains(&c)); }
+            if left { result = result.trim_start_matches(|c: char| chars.contains(c)); }
+            if right { result = result.trim_end_matches(|c: char| chars.contains(c)); }
             result.to_string()
         }
     }
@@ -363,6 +367,32 @@ fn split_args<'a>(args: &'a [Value]) -> Result<(Option<&'a str>, i64)> {
 
 /// Convert char-based start/end args (args[1], args[2]) to byte offsets.
 fn str_slice_args(s: &str, args: &[Value]) -> Result<(usize, usize)> {
+    // Fast path: no start/end args — common case for find/startswith/etc.
+    let has_start = args.get(1).is_some();
+    let has_end = args.get(2).is_some();
+    if !has_start && !has_end {
+        return Ok((0, s.len()));
+    }
+
+    // ASCII fast path: char index == byte index, no scanning needed
+    if s.is_ascii() {
+        let byte_len = s.len();
+        let start_char = match args.get(1).map(|v| v.kind()) {
+            Some(ValueKind::Int(i)) => normalise_char_idx(i, byte_len).min(byte_len),
+            Some(ValueKind::Bool(b)) => normalise_char_idx(b as i64, byte_len).min(byte_len),
+            None => 0,
+            _ => return Err(PyError::Runtime("slice indices must be integers".to_string())),
+        };
+        let end_char = match args.get(2).map(|v| v.kind()) {
+            Some(ValueKind::Int(i)) => normalise_char_idx(i, byte_len).min(byte_len),
+            Some(ValueKind::Bool(b)) => normalise_char_idx(b as i64, byte_len).min(byte_len),
+            None => byte_len,
+            _ => return Err(PyError::Runtime("slice indices must be integers".to_string())),
+        };
+        return Ok((start_char, end_char));
+    }
+
+    // Unicode: single scan for char_len + both byte positions
     let char_len = s.chars().count();
     let start_char = match args.get(1).map(|v| v.kind()) {
         Some(ValueKind::Int(i)) => normalise_char_idx(i, char_len),
@@ -376,9 +406,13 @@ fn str_slice_args(s: &str, args: &[Value]) -> Result<(usize, usize)> {
         None => char_len,
         _ => return Err(PyError::Runtime("slice indices must be integers".to_string())),
     };
-    // Convert char indices to byte indices
-    let start_byte = s.char_indices().nth(start_char).map(|(b, _)| b).unwrap_or(s.len());
-    let end_byte = s.char_indices().nth(end_char).map(|(b, _)| b).unwrap_or(s.len());
+    // Single pass to find both byte positions
+    let mut start_byte = s.len();
+    let mut end_byte = s.len();
+    for (i, (b, _)) in s.char_indices().enumerate() {
+        if i == start_char { start_byte = b; }
+        if i == end_char   { end_byte = b; break; }
+    }
     Ok((start_byte, end_byte))
 }
 

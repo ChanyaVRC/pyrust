@@ -2,7 +2,7 @@ use pyrust_core::{PyError, Result, Value, ValueKind};
 
 use crate::sequence::normalise_index;
 
-fn iter_value(v: Value) -> Result<Vec<Value>> {
+fn iter_value(v: &Value) -> Result<Vec<Value>> {
     match v.kind() {
         ValueKind::List(items) => Ok(items.clone()),
         ValueKind::Tuple(items) => Ok(items.clone()),
@@ -67,7 +67,7 @@ pub fn extend(items: &mut Vec<Value>, args: &[Value]) -> Result<Value> {
     let iterable = args.first().ok_or_else(|| {
         PyError::Runtime("list.extend() requires 1 argument".to_string())
     })?;
-    let new_items = iter_value(iterable.clone())?;
+    let new_items = iter_value(iterable)?;
     items.extend(new_items);
     Ok(Value::none())
 }
