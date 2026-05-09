@@ -184,38 +184,26 @@ impl Interpreter {
                         &code.consts[*const_idx as usize],
                     ) {
                         match op {
-                            BinaryOp::Add => { regs[*dst as usize] = Some(Value::Int(a.wrapping_add(*b))); continue; }
-                            BinaryOp::Sub => { regs[*dst as usize] = Some(Value::Int(a.wrapping_sub(*b))); continue; }
-                            BinaryOp::Mul => { regs[*dst as usize] = Some(Value::Int(a.wrapping_mul(*b))); continue; }
-                            BinaryOp::Eq  => { regs[*dst as usize] = Some(Value::Bool(a == b)); continue; }
-                            BinaryOp::Ne  => { regs[*dst as usize] = Some(Value::Bool(a != b)); continue; }
-                            BinaryOp::Lt  => { regs[*dst as usize] = Some(Value::Bool(a < b)); continue; }
-                            BinaryOp::Le  => { regs[*dst as usize] = Some(Value::Bool(a <= b)); continue; }
-                            BinaryOp::Gt  => { regs[*dst as usize] = Some(Value::Bool(a > b)); continue; }
-                            BinaryOp::Ge  => { regs[*dst as usize] = Some(Value::Bool(a >= b)); continue; }
+                            BinaryOp::Add    => { regs[*dst as usize] = Some(Value::Int(a.wrapping_add(*b))); continue; }
+                            BinaryOp::Sub    => { regs[*dst as usize] = Some(Value::Int(a.wrapping_sub(*b))); continue; }
+                            BinaryOp::Mul    => { regs[*dst as usize] = Some(Value::Int(a.wrapping_mul(*b))); continue; }
+                            BinaryOp::Eq     => { regs[*dst as usize] = Some(Value::Bool(a == b)); continue; }
+                            BinaryOp::Ne     => { regs[*dst as usize] = Some(Value::Bool(a != b)); continue; }
+                            BinaryOp::Lt     => { regs[*dst as usize] = Some(Value::Bool(a < b)); continue; }
+                            BinaryOp::Le     => { regs[*dst as usize] = Some(Value::Bool(a <= b)); continue; }
+                            BinaryOp::Gt     => { regs[*dst as usize] = Some(Value::Bool(a > b)); continue; }
+                            BinaryOp::Ge     => { regs[*dst as usize] = Some(Value::Bool(a >= b)); continue; }
+                            BinaryOp::BitAnd => { regs[*dst as usize] = Some(Value::Int(a & b)); continue; }
+                            BinaryOp::BitOr  => { regs[*dst as usize] = Some(Value::Int(a | b)); continue; }
+                            BinaryOp::BitXor => { regs[*dst as usize] = Some(Value::Int(a ^ b)); continue; }
+                            BinaryOp::LShift => { regs[*dst as usize] = Some(Value::Int(a.wrapping_shl(*b as u32))); continue; }
+                            BinaryOp::RShift => { regs[*dst as usize] = Some(Value::Int(a >> (*b).clamp(0, 63))); continue; }
                             _ => {}
                         }
                     }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = code.consts[*const_idx as usize].clone();
-                    let result = match (&l, op, &r) {
-                        (Value::Int(a), BinaryOp::Add, Value::Int(b)) => {
-                            Value::Int(a.wrapping_add(*b))
-                        }
-                        (Value::Int(a), BinaryOp::Sub, Value::Int(b)) => {
-                            Value::Int(a.wrapping_sub(*b))
-                        }
-                        (Value::Int(a), BinaryOp::Mul, Value::Int(b)) => {
-                            Value::Int(a.wrapping_mul(*b))
-                        }
-                        (Value::Int(a), BinaryOp::Eq, Value::Int(b)) => Value::Bool(a == b),
-                        (Value::Int(a), BinaryOp::Ne, Value::Int(b)) => Value::Bool(a != b),
-                        (Value::Int(a), BinaryOp::Lt, Value::Int(b)) => Value::Bool(a < b),
-                        (Value::Int(a), BinaryOp::Le, Value::Int(b)) => Value::Bool(a <= b),
-                        (Value::Int(a), BinaryOp::Gt, Value::Int(b)) => Value::Bool(a > b),
-                        (Value::Int(a), BinaryOp::Ge, Value::Int(b)) => Value::Bool(a >= b),
-                        _ => vm_try!(self.eval_binary(l, *op, r)),
-                    };
+                    let result = vm_try!(self.eval_binary(l, *op, r));
                     regs[*dst as usize] = Some(result);
                 }
                 Insn::UnaryOp(dst, op, src) => {
@@ -591,8 +579,9 @@ impl Interpreter {
                     if let Some(Value::Function(func)) = &regs[*func_reg as usize] {
                         if func.is_pure {
                             let fn_id = Rc::as_ptr(func) as usize;
-                            let mut key: Vec<crate::value::PyKey> =
-                                Vec::with_capacity(*argc as usize);
+                            // Reuse key_scratch to avoid a per-probe heap alloc.
+                            let mut key = std::mem::take(&mut self.key_scratch);
+                            key.clear();
                             let mut all_hashable = true;
                             for i in 0..*argc as usize {
                                 match regs[*func_reg as usize + 1 + i]
@@ -607,12 +596,17 @@ impl Interpreter {
                                 }
                             }
                             if all_hashable {
-                                if let Some(hit) =
-                                    self.fn_cache.get(&(fn_id, key)).cloned()
-                                {
-                                    regs[*func_reg as usize] = Some(hit);
+                                // Build tuple on stack, probe, then reclaim key.
+                                let lookup = (fn_id, key);
+                                let hit = self.fn_cache.get(&lookup).cloned();
+                                let (_, key) = lookup;
+                                self.key_scratch = key;
+                                if let Some(cached) = hit {
+                                    regs[*func_reg as usize] = Some(cached);
                                     continue;
                                 }
+                            } else {
+                                self.key_scratch = key;
                             }
                         }
                     }

@@ -533,6 +533,15 @@ fn fold_binop(l: &Value, op: BinaryOp, r: &Value) -> Option<Value> {
         (Value::Int(a), BinaryOp::Pow, Value::Int(b)) if *b >= 0 => {
             Some(Value::Int(a.wrapping_pow(*b as u32)))
         }
+        (Value::Int(a), BinaryOp::BitAnd, Value::Int(b)) => Some(Value::Int(a & b)),
+        (Value::Int(a), BinaryOp::BitOr, Value::Int(b)) => Some(Value::Int(a | b)),
+        (Value::Int(a), BinaryOp::BitXor, Value::Int(b)) => Some(Value::Int(a ^ b)),
+        (Value::Int(a), BinaryOp::LShift, Value::Int(b)) if *b >= 0 && *b < 64 => {
+            Some(Value::Int(a.wrapping_shl(*b as u32)))
+        }
+        (Value::Int(a), BinaryOp::RShift, Value::Int(b)) if *b >= 0 && *b < 64 => {
+            Some(Value::Int(a >> b))
+        }
         (Value::Float(a), BinaryOp::Add, Value::Float(b)) => Some(Value::Float(a + b)),
         (Value::Float(a), BinaryOp::Sub, Value::Float(b)) => Some(Value::Float(a - b)),
         (Value::Float(a), BinaryOp::Mul, Value::Float(b)) => Some(Value::Float(a * b)),
@@ -724,6 +733,7 @@ struct Compiler {
     cell_vars: HashSet<String>,
     insns: Vec<Insn>,
     consts: Vec<Value>,
+    const_index: HashMap<crate::value::PyKey, u16>,
     names: Vec<String>,
     name_map: HashMap<String, u16>,
     next_temp: Reg,
@@ -756,6 +766,7 @@ impl Compiler {
             cell_vars: cell_set,
             insns: Vec::new(),
             consts: Vec::new(),
+            const_index: HashMap::new(),
             names: Vec::new(),
             name_map: HashMap::new(),
             next_temp: base_temp,
@@ -825,6 +836,20 @@ impl Compiler {
     }
 
     fn intern_const(&mut self, val: Value) -> u16 {
+        if let Some(key) = val.to_key() {
+            if let Some(&idx) = self.const_index.get(&key) {
+                return idx;
+            }
+            if self.consts.len() >= u16::MAX as usize {
+                self.failed = true;
+                return 0;
+            }
+            let idx = self.consts.len() as u16;
+            self.const_index.insert(key, idx);
+            self.consts.push(val);
+            return idx;
+        }
+        // Non-hashable constants (shouldn't arise in practice).
         for (i, v) in self.consts.iter().enumerate() {
             if const_eq(v, &val) {
                 return i as u16;
@@ -2753,14 +2778,17 @@ impl Compiler {
                     for (i, (cmp_op, rhs_expr)) in ops.iter().enumerate() {
                         let bin_op = cmp_to_binary(*cmp_op);
                         let rhs = self.compile_expr(rhs_expr);
-                        let cmp_dst = self.alloc_temp();
+                        let last = i == ops.len() - 1;
+                        // For the last comparison write directly into result_dst to
+                        // avoid a trailing Move(result_dst, cmp_dst).
+                        let cmp_dst = if last { result_dst } else { self.alloc_temp() };
                         self.emit(Insn::BinOp(cmp_dst, prev_rhs, bin_op, rhs));
                         if i > 0 {
                             self.free_temp(prev_rhs);
                         }
-                        self.emit(Insn::Move(result_dst, cmp_dst));
-                        self.free_temp(cmp_dst);
-                        if i < ops.len() - 1 {
+                        if !last {
+                            self.emit(Insn::Move(result_dst, cmp_dst));
+                            self.free_temp(cmp_dst);
                             let p = self.emit(Insn::JumpIfFalse(result_dst, 0));
                             and_patches.push(p);
                         }

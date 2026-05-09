@@ -32,6 +32,9 @@ pub struct Interpreter {
     /// Reusable argument buffer for VM Call instructions — avoids a per-call
     /// heap allocation in the common (non-recursive) case.
     call_arg_buf: Vec<ExpandedCallArg>,
+    /// Reusable scratch buffer for building fn_cache probe keys — avoids a
+    /// per-probe heap allocation in CallMemo's cache-hit path.
+    key_scratch: Vec<crate::value::PyKey>,
 }
 
 impl Default for Interpreter {
@@ -48,6 +51,7 @@ impl Default for Interpreter {
             fn_cache: HashMap::new(),
             spec_cache: HashMap::new(),
             call_arg_buf: Vec::new(),
+            key_scratch: Vec::new(),
         }
     }
 }
