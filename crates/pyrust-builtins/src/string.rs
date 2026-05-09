@@ -27,10 +27,18 @@ pub fn call(method: &str, src: &Value, args: &[Value]) -> Result<Value> {
         // Testing
         "startswith" => str_startswith(s, args),
         "endswith" => str_endswith(s, args),
-        "isdigit" => Ok(Value::bool_(!s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))),
-        "isalpha" => Ok(Value::bool_(!s.is_empty() && s.chars().all(|c| c.is_alphabetic()))),
-        "isalnum" => Ok(Value::bool_(!s.is_empty() && s.chars().all(|c| c.is_alphanumeric()))),
-        "isspace" => Ok(Value::bool_(!s.is_empty() && s.chars().all(|c| c.is_whitespace()))),
+        "isdigit" => Ok(Value::bool_(
+            !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()),
+        )),
+        "isalpha" => Ok(Value::bool_(
+            !s.is_empty() && s.chars().all(|c| c.is_alphabetic()),
+        )),
+        "isalnum" => Ok(Value::bool_(
+            !s.is_empty() && s.chars().all(|c| c.is_alphanumeric()),
+        )),
+        "isspace" => Ok(Value::bool_(
+            !s.is_empty() && s.chars().all(|c| c.is_whitespace()),
+        )),
         _ => Err(PyError::Runtime(format!(
             "'str' object has no attribute '{method}'"
         ))),
@@ -40,7 +48,11 @@ pub fn call(method: &str, src: &Value, args: &[Value]) -> Result<Value> {
 fn str_index(s: &str, args: &[Value]) -> Result<Value> {
     let sub = match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(sub)) => sub,
-        _ => return Err(PyError::Runtime("str.index() requires a str argument".to_string())),
+        _ => {
+            return Err(PyError::Runtime(
+                "str.index() requires a str argument".to_string(),
+            ));
+        }
     };
     let (start, end) = str_slice_args(s, args)?;
     let haystack = &s[start..end];
@@ -56,7 +68,11 @@ fn str_index(s: &str, args: &[Value]) -> Result<Value> {
 fn str_count(s: &str, args: &[Value]) -> Result<Value> {
     let sub = match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(sub)) => sub,
-        _ => return Err(PyError::Runtime("str.count() requires a str argument".to_string())),
+        _ => {
+            return Err(PyError::Runtime(
+                "str.count() requires a str argument".to_string(),
+            ));
+        }
     };
     if sub.is_empty() {
         return Ok(Value::int((s.chars().count() + 1) as i64));
@@ -70,7 +86,11 @@ fn str_count(s: &str, args: &[Value]) -> Result<Value> {
 fn str_find(s: &str, args: &[Value], raise_on_miss: bool) -> Result<Value> {
     let sub = match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(sub)) => sub,
-        _ => return Err(PyError::Runtime("str.find() requires a str argument".to_string())),
+        _ => {
+            return Err(PyError::Runtime(
+                "str.find() requires a str argument".to_string(),
+            ));
+        }
     };
     let (start, end) = str_slice_args(s, args)?;
     let haystack = &s[start..end];
@@ -92,7 +112,11 @@ fn str_find(s: &str, args: &[Value], raise_on_miss: bool) -> Result<Value> {
 fn str_rfind(s: &str, args: &[Value], raise_on_miss: bool) -> Result<Value> {
     let sub = match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(sub)) => sub,
-        _ => return Err(PyError::Runtime("str.rfind() requires a str argument".to_string())),
+        _ => {
+            return Err(PyError::Runtime(
+                "str.rfind() requires a str argument".to_string(),
+            ));
+        }
     };
     let (start, end) = str_slice_args(s, args)?;
     let haystack = &s[start..end];
@@ -134,7 +158,9 @@ fn split(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
                 let mut remaining = s;
                 for _ in 0..n {
                     let t = remaining.trim_start();
-                    if t.is_empty() { break; }
+                    if t.is_empty() {
+                        break;
+                    }
                     match t.find(char::is_whitespace) {
                         None => {
                             let off = t.as_ptr() as usize - s.as_ptr() as usize;
@@ -159,7 +185,11 @@ fn split(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
         }
         Some(sep_str) => {
             if maxsplit < 0 {
-                let cap = if sep_str.is_empty() { s.len() + 1 } else { s.len() / sep_str.len() + 1 };
+                let cap = if sep_str.is_empty() {
+                    s.len() + 1
+                } else {
+                    s.len() / sep_str.len() + 1
+                };
                 let mut parts = Vec::with_capacity(cap);
                 for p in s.split(sep_str) {
                     let off = p.as_ptr() as usize - s.as_ptr() as usize;
@@ -167,10 +197,12 @@ fn split(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
                 }
                 parts
             } else {
-                s.splitn(maxsplit as usize + 1, sep_str).map(|p| {
-                    let off = p.as_ptr() as usize - s.as_ptr() as usize;
-                    src.string_slice(off, off + p.len())
-                }).collect()
+                s.splitn(maxsplit as usize + 1, sep_str)
+                    .map(|p| {
+                        let off = p.as_ptr() as usize - s.as_ptr() as usize;
+                        src.string_slice(off, off + p.len())
+                    })
+                    .collect()
             }
         }
     };
@@ -195,7 +227,9 @@ fn rsplit(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
                 let mut remaining = s;
                 for _ in 0..n {
                     let t = remaining.trim_end();
-                    if t.is_empty() { break; }
+                    if t.is_empty() {
+                        break;
+                    }
                     match t.rfind(char::is_whitespace) {
                         None => {
                             let off = t.as_ptr() as usize - s.as_ptr() as usize;
@@ -204,8 +238,8 @@ fn rsplit(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
                             break;
                         }
                         Some(pos) => {
-                            let off = t[pos+1..].as_ptr() as usize - s.as_ptr() as usize;
-                            out.push(src.string_slice(off, off + t[pos+1..].len()));
+                            let off = t[pos + 1..].as_ptr() as usize - s.as_ptr() as usize;
+                            out.push(src.string_slice(off, off + t[pos + 1..].len()));
                             remaining = &t[..pos];
                         }
                     }
@@ -221,7 +255,11 @@ fn rsplit(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
         }
         Some(sep_str) => {
             if maxsplit < 0 {
-                let cap = if sep_str.is_empty() { s.len() + 1 } else { s.len() / sep_str.len() + 1 };
+                let cap = if sep_str.is_empty() {
+                    s.len() + 1
+                } else {
+                    s.len() / sep_str.len() + 1
+                };
                 let mut parts = Vec::with_capacity(cap);
                 for p in s.split(sep_str) {
                     let off = p.as_ptr() as usize - s.as_ptr() as usize;
@@ -230,10 +268,13 @@ fn rsplit(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
                 parts.reverse();
                 parts
             } else {
-                let mut parts: Vec<Value> = s.rsplitn(maxsplit as usize + 1, sep_str).map(|p| {
-                    let off = p.as_ptr() as usize - s.as_ptr() as usize;
-                    src.string_slice(off, off + p.len())
-                }).collect();
+                let mut parts: Vec<Value> = s
+                    .rsplitn(maxsplit as usize + 1, sep_str)
+                    .map(|p| {
+                        let off = p.as_ptr() as usize - s.as_ptr() as usize;
+                        src.string_slice(off, off + p.len())
+                    })
+                    .collect();
                 parts.reverse();
                 parts
             }
@@ -243,51 +284,68 @@ fn rsplit(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
 }
 
 fn join(sep: &str, args: &[Value]) -> Result<Value> {
-    let iterable = args.first().ok_or_else(|| {
-        PyError::Runtime("str.join() requires 1 argument".to_string())
-    })?;
+    let iterable = args
+        .first()
+        .ok_or_else(|| PyError::Runtime("str.join() requires 1 argument".to_string()))?;
     let parts: Vec<String> = match iterable.kind() {
         ValueKind::List(items) => items
             .iter()
             .map(|v| match v.kind() {
                 ValueKind::Str(s) => Ok(s.to_string()),
-                _ => Err(PyError::Runtime(
-                    "sequence item must be str".to_string(),
-                )),
+                _ => Err(PyError::Runtime("sequence item must be str".to_string())),
             })
             .collect::<Result<_>>()?,
         ValueKind::Tuple(items) => items
             .iter()
             .map(|v| match v.kind() {
                 ValueKind::Str(s) => Ok(s.to_string()),
-                _ => Err(PyError::Runtime(
-                    "sequence item must be str".to_string(),
-                )),
+                _ => Err(PyError::Runtime("sequence item must be str".to_string())),
             })
             .collect::<Result<_>>()?,
-        ValueKind::Str(s) => s.chars().map(|c| Ok(c.to_string())).collect::<Result<_>>()?,
-        _ => return Err(PyError::Runtime("str.join() argument must be iterable".to_string())),
+        ValueKind::Str(s) => s
+            .chars()
+            .map(|c| Ok(c.to_string()))
+            .collect::<Result<_>>()?,
+        _ => {
+            return Err(PyError::Runtime(
+                "str.join() argument must be iterable".to_string(),
+            ));
+        }
     };
     Ok(Value::string(parts.join(sep)))
 }
 
 fn str_replace(s: &str, args: &[Value]) -> Result<Value> {
     if args.len() < 2 {
-        return Err(PyError::Runtime("str.replace() requires 2 arguments".to_string()));
+        return Err(PyError::Runtime(
+            "str.replace() requires 2 arguments".to_string(),
+        ));
     }
     let old: &str = match args[0].kind() {
         ValueKind::Str(s) => s,
-        _ => return Err(PyError::Runtime("str.replace() argument 1 must be str".to_string())),
+        _ => {
+            return Err(PyError::Runtime(
+                "str.replace() argument 1 must be str".to_string(),
+            ));
+        }
     };
     let new: &str = match args[1].kind() {
         ValueKind::Str(s) => s,
-        _ => return Err(PyError::Runtime("str.replace() argument 2 must be str".to_string())),
+        _ => {
+            return Err(PyError::Runtime(
+                "str.replace() argument 2 must be str".to_string(),
+            ));
+        }
     };
     let count = match args.get(2).map(|v| v.kind()) {
         Some(ValueKind::Int(n)) => n,
         Some(ValueKind::Bool(b)) => b as i64,
         None => -1,
-        _ => return Err(PyError::Runtime("str.replace() count must be int".to_string())),
+        _ => {
+            return Err(PyError::Runtime(
+                "str.replace() count must be int".to_string(),
+            ));
+        }
     };
     if count < 0 {
         Ok(Value::string(s.replace(old, new)))
@@ -299,7 +357,11 @@ fn str_replace(s: &str, args: &[Value]) -> Result<Value> {
 fn str_startswith(s: &str, args: &[Value]) -> Result<Value> {
     let prefix = match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(p)) => p,
-        _ => return Err(PyError::Runtime("str.startswith() requires a str argument".to_string())),
+        _ => {
+            return Err(PyError::Runtime(
+                "str.startswith() requires a str argument".to_string(),
+            ));
+        }
     };
     let (start, end) = str_slice_args(s, args)?;
     Ok(Value::bool_(s[start..end].starts_with(prefix)))
@@ -308,7 +370,11 @@ fn str_startswith(s: &str, args: &[Value]) -> Result<Value> {
 fn str_endswith(s: &str, args: &[Value]) -> Result<Value> {
     let suffix = match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(p)) => p,
-        _ => return Err(PyError::Runtime("str.endswith() requires a str argument".to_string())),
+        _ => {
+            return Err(PyError::Runtime(
+                "str.endswith() requires a str argument".to_string(),
+            ));
+        }
     };
     let (start, end) = str_slice_args(s, args)?;
     Ok(Value::bool_(s[start..end].ends_with(suffix)))
@@ -336,14 +402,22 @@ fn strip_chars(s: &str, args: &[Value], left: bool, right: bool) -> String {
     match chars_arg {
         None => {
             let mut result = s;
-            if left { result = result.trim_start(); }
-            if right { result = result.trim_end(); }
+            if left {
+                result = result.trim_start();
+            }
+            if right {
+                result = result.trim_end();
+            }
             result.to_string()
         }
         Some(chars) => {
             let mut result = s;
-            if left { result = result.trim_start_matches(|c: char| chars.contains(c)); }
-            if right { result = result.trim_end_matches(|c: char| chars.contains(c)); }
+            if left {
+                result = result.trim_start_matches(|c: char| chars.contains(c));
+            }
+            if right {
+                result = result.trim_end_matches(|c: char| chars.contains(c));
+            }
             result.to_string()
         }
     }
@@ -354,7 +428,11 @@ fn split_args<'a>(args: &'a [Value]) -> Result<(Option<&'a str>, i64)> {
     let sep = match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(s)) => Some(s),
         Some(ValueKind::None) | None => None,
-        _ => return Err(PyError::Runtime("split() separator must be str or None".to_string())),
+        _ => {
+            return Err(PyError::Runtime(
+                "split() separator must be str or None".to_string(),
+            ));
+        }
     };
     let maxsplit = match args.get(1).map(|v| v.kind()) {
         Some(ValueKind::Int(n)) => n,
@@ -381,13 +459,21 @@ fn str_slice_args(s: &str, args: &[Value]) -> Result<(usize, usize)> {
             Some(ValueKind::Int(i)) => normalise_char_idx(i, byte_len).min(byte_len),
             Some(ValueKind::Bool(b)) => normalise_char_idx(b as i64, byte_len).min(byte_len),
             None => 0,
-            _ => return Err(PyError::Runtime("slice indices must be integers".to_string())),
+            _ => {
+                return Err(PyError::Runtime(
+                    "slice indices must be integers".to_string(),
+                ));
+            }
         };
         let end_char = match args.get(2).map(|v| v.kind()) {
             Some(ValueKind::Int(i)) => normalise_char_idx(i, byte_len).min(byte_len),
             Some(ValueKind::Bool(b)) => normalise_char_idx(b as i64, byte_len).min(byte_len),
             None => byte_len,
-            _ => return Err(PyError::Runtime("slice indices must be integers".to_string())),
+            _ => {
+                return Err(PyError::Runtime(
+                    "slice indices must be integers".to_string(),
+                ));
+            }
         };
         return Ok((start_char, end_char));
     }
@@ -398,20 +484,33 @@ fn str_slice_args(s: &str, args: &[Value]) -> Result<(usize, usize)> {
         Some(ValueKind::Int(i)) => normalise_char_idx(i, char_len),
         Some(ValueKind::Bool(b)) => normalise_char_idx(b as i64, char_len),
         None => 0,
-        _ => return Err(PyError::Runtime("slice indices must be integers".to_string())),
+        _ => {
+            return Err(PyError::Runtime(
+                "slice indices must be integers".to_string(),
+            ));
+        }
     };
     let end_char = match args.get(2).map(|v| v.kind()) {
         Some(ValueKind::Int(i)) => normalise_char_idx(i, char_len).min(char_len),
         Some(ValueKind::Bool(b)) => normalise_char_idx(b as i64, char_len).min(char_len),
         None => char_len,
-        _ => return Err(PyError::Runtime("slice indices must be integers".to_string())),
+        _ => {
+            return Err(PyError::Runtime(
+                "slice indices must be integers".to_string(),
+            ));
+        }
     };
     // Single pass to find both byte positions
     let mut start_byte = s.len();
     let mut end_byte = s.len();
     for (i, (b, _)) in s.char_indices().enumerate() {
-        if i == start_char { start_byte = b; }
-        if i == end_char   { end_byte = b; break; }
+        if i == start_char {
+            start_byte = b;
+        }
+        if i == end_char {
+            end_byte = b;
+            break;
+        }
     }
     Ok((start_byte, end_byte))
 }

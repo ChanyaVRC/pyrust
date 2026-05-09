@@ -514,9 +514,15 @@ fn fold_constant(expr: &Expr) -> Option<Value> {
 
 fn fold_binop(l: &Value, op: BinaryOp, r: &Value) -> Option<Value> {
     match (l.kind(), op, r.kind()) {
-        (ValueKind::Int(a), BinaryOp::Add, ValueKind::Int(b)) => Some(Value::int(a.wrapping_add(b))),
-        (ValueKind::Int(a), BinaryOp::Sub, ValueKind::Int(b)) => Some(Value::int(a.wrapping_sub(b))),
-        (ValueKind::Int(a), BinaryOp::Mul, ValueKind::Int(b)) => Some(Value::int(a.wrapping_mul(b))),
+        (ValueKind::Int(a), BinaryOp::Add, ValueKind::Int(b)) => {
+            Some(Value::int(a.wrapping_add(b)))
+        }
+        (ValueKind::Int(a), BinaryOp::Sub, ValueKind::Int(b)) => {
+            Some(Value::int(a.wrapping_sub(b)))
+        }
+        (ValueKind::Int(a), BinaryOp::Mul, ValueKind::Int(b)) => {
+            Some(Value::int(a.wrapping_mul(b)))
+        }
         (ValueKind::Int(a), BinaryOp::Div, ValueKind::Int(b)) if b != 0 => {
             Some(Value::float(a as f64 / b as f64))
         }
@@ -552,8 +558,12 @@ fn fold_binop(l: &Value, op: BinaryOp, r: &Value) -> Option<Value> {
         (ValueKind::Float(a), BinaryOp::Add, ValueKind::Float(b)) => Some(Value::float(a + b)),
         (ValueKind::Float(a), BinaryOp::Sub, ValueKind::Float(b)) => Some(Value::float(a - b)),
         (ValueKind::Float(a), BinaryOp::Mul, ValueKind::Float(b)) => Some(Value::float(a * b)),
-        (ValueKind::Float(a), BinaryOp::Div, ValueKind::Float(b)) if b != 0.0 => Some(Value::float(a / b)),
-        (ValueKind::Str(a), BinaryOp::Add, ValueKind::Str(b)) => Some(Value::string(a.to_string() + b)),
+        (ValueKind::Float(a), BinaryOp::Div, ValueKind::Float(b)) if b != 0.0 => {
+            Some(Value::float(a / b))
+        }
+        (ValueKind::Str(a), BinaryOp::Add, ValueKind::Str(b)) => {
+            Some(Value::string(a.to_string() + b))
+        }
         (ValueKind::Int(a), BinaryOp::Eq, ValueKind::Int(b)) => Some(Value::bool_(a == b)),
         (ValueKind::Int(a), BinaryOp::Ne, ValueKind::Int(b)) => Some(Value::bool_(a != b)),
         (ValueKind::Int(a), BinaryOp::Lt, ValueKind::Int(b)) => Some(Value::bool_(a < b)),
@@ -3033,37 +3043,22 @@ impl Compiler {
         // variable.  The return value goes into a fresh temp `dst_reg ≠ obj_reg`.
         // For all other receivers we fall back to copying the value into a temp and
         // using the same register for both obj and dst.
-        let (obj_reg, dst_reg, args_base, need_copy) =
-            if let Expr::Var(name) = target {
-                if let Some(local) = self.local_reg(name) {
-                    let dst = self.next_temp;
-                    let abase = dst.wrapping_add(1);
-                    let frame_top = abase.wrapping_add(nargs);
-                    if frame_top < dst {
-                        self.failed = true;
-                        return 0;
-                    }
-                    self.next_temp = frame_top;
-                    if frame_top > 0 && frame_top - 1 > self.max_reg {
-                        self.max_reg = frame_top - 1;
-                    }
-                    (local, dst, abase, false)
-                } else {
-                    // cell / nonlocal — must load via env first
-                    let o = self.next_temp;
-                    let abase = o.wrapping_add(1);
-                    let frame_top = abase.wrapping_add(nargs);
-                    if frame_top < o {
-                        self.failed = true;
-                        return 0;
-                    }
-                    self.next_temp = frame_top;
-                    if frame_top > 0 && frame_top - 1 > self.max_reg {
-                        self.max_reg = frame_top - 1;
-                    }
-                    (o, o, abase, true)
+        let (obj_reg, dst_reg, args_base, need_copy) = if let Expr::Var(name) = target {
+            if let Some(local) = self.local_reg(name) {
+                let dst = self.next_temp;
+                let abase = dst.wrapping_add(1);
+                let frame_top = abase.wrapping_add(nargs);
+                if frame_top < dst {
+                    self.failed = true;
+                    return 0;
                 }
+                self.next_temp = frame_top;
+                if frame_top > 0 && frame_top - 1 > self.max_reg {
+                    self.max_reg = frame_top - 1;
+                }
+                (local, dst, abase, false)
             } else {
+                // cell / nonlocal — must load via env first
                 let o = self.next_temp;
                 let abase = o.wrapping_add(1);
                 let frame_top = abase.wrapping_add(nargs);
@@ -3076,7 +3071,21 @@ impl Compiler {
                     self.max_reg = frame_top - 1;
                 }
                 (o, o, abase, true)
-            };
+            }
+        } else {
+            let o = self.next_temp;
+            let abase = o.wrapping_add(1);
+            let frame_top = abase.wrapping_add(nargs);
+            if frame_top < o {
+                self.failed = true;
+                return 0;
+            }
+            self.next_temp = frame_top;
+            if frame_top > 0 && frame_top - 1 > self.max_reg {
+                self.max_reg = frame_top - 1;
+            }
+            (o, o, abase, true)
+        };
 
         if need_copy {
             let saved = self.next_temp;
@@ -3178,13 +3187,17 @@ impl Compiler {
             let pos_list_reg = self.alloc_temp();
             let empty_list_base = self.next_temp;
             self.next_temp = empty_list_base + 1;
-            if empty_list_base > self.max_reg { self.max_reg = empty_list_base; }
+            if empty_list_base > self.max_reg {
+                self.max_reg = empty_list_base;
+            }
             self.emit(Insn::BuildList(pos_list_reg, empty_list_base, 0));
 
             let kw_dict_reg = self.alloc_temp();
             let empty_dict_base = self.next_temp;
             self.next_temp = empty_dict_base + 1;
-            if empty_dict_base > self.max_reg { self.max_reg = empty_dict_base; }
+            if empty_dict_base > self.max_reg {
+                self.max_reg = empty_dict_base;
+            }
             self.emit(Insn::BuildDict(kw_dict_reg, empty_dict_base, 0));
 
             for arg in args {

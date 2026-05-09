@@ -84,10 +84,22 @@ pub enum Insn {
     /// R[dst] = R[obj].names[name_idx](R[args_base..args_base+nargs])
     /// Dispatches directly to pyrust_builtins without going through GetAttr.
     /// Allows the VM to give mutable access to List/Dict registers.
-    CallMethod { dst: Reg, obj: Reg, name_idx: u16, args_base: Reg, nargs: u8 },
+    CallMethod {
+        dst: Reg,
+        obj: Reg,
+        name_idx: u16,
+        args_base: Reg,
+        nargs: u8,
+    },
     /// Like CallMethod but args are pre-built as a positional list and a kwargs dict.
     /// R[dst] = R[obj].names[name_idx](*R[pos_list], **R[kw_dict])
-    CallMethodExpanded { dst: Reg, obj: Reg, name_idx: u16, pos_list: Reg, kw_dict: Reg },
+    CallMethodExpanded {
+        dst: Reg,
+        obj: Reg,
+        name_idx: u16,
+        pos_list: Reg,
+        kw_dict: Reg,
+    },
     /// return R[src]
     Return(Reg),
     /// return None

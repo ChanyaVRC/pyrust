@@ -34,13 +34,17 @@ pub fn call(
 fn sort(items: &mut Vec<Value>, args: &[Value], kwargs: &IndexMap<PyKey, Value>) -> Result<Value> {
     let reverse_flag = match (
         args.first().map(|v| v.kind()),
-        kwargs.get(&PyKey::Str("reverse".to_string())).map(|v| v.kind()),
+        kwargs
+            .get(&PyKey::Str("reverse".to_string()))
+            .map(|v| v.kind()),
     ) {
         (_, Some(ValueKind::Bool(b))) => b,
         (_, Some(ValueKind::Int(0))) => false,
-        (_, Some(v)) => matches!(v, ValueKind::Int(n) if n != 0)
-            || matches!(v, ValueKind::Bool(true))
-            || matches!(v, ValueKind::Float(f) if f != 0.0),
+        (_, Some(v)) => {
+            matches!(v, ValueKind::Int(n) if n != 0)
+                || matches!(v, ValueKind::Bool(true))
+                || matches!(v, ValueKind::Float(f) if f != 0.0)
+        }
         (Some(ValueKind::Bool(b)), _) => b,
         _ => false,
     };
@@ -70,9 +74,15 @@ fn sort(items: &mut Vec<Value>, args: &[Value], kwargs: &IndexMap<PyKey, Value>)
 fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
     match (a.kind(), b.kind()) {
         (ValueKind::Int(x), ValueKind::Int(y)) => Ok(x.cmp(&y)),
-        (ValueKind::Float(x), ValueKind::Float(y)) => Ok(x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)),
-        (ValueKind::Int(x), ValueKind::Float(y)) => Ok((x as f64).partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)),
-        (ValueKind::Float(x), ValueKind::Int(y)) => Ok(x.partial_cmp(&(y as f64)).unwrap_or(std::cmp::Ordering::Equal)),
+        (ValueKind::Float(x), ValueKind::Float(y)) => {
+            Ok(x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal))
+        }
+        (ValueKind::Int(x), ValueKind::Float(y)) => Ok((x as f64)
+            .partial_cmp(&y)
+            .unwrap_or(std::cmp::Ordering::Equal)),
+        (ValueKind::Float(x), ValueKind::Int(y)) => Ok(x
+            .partial_cmp(&(y as f64))
+            .unwrap_or(std::cmp::Ordering::Equal)),
         (ValueKind::Str(x), ValueKind::Str(y)) => Ok(x.cmp(y)),
         (ValueKind::Bool(x), ValueKind::Bool(y)) => Ok(x.cmp(&y)),
         (ValueKind::Bool(x), ValueKind::Int(y)) => Ok((x as i64).cmp(&y)),

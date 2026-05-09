@@ -1,11 +1,7 @@
 use indexmap::IndexMap;
 use pyrust_core::{PyError, PyKey, Result, Value, ValueKind};
 
-pub fn call(
-    method: &str,
-    dict: &mut IndexMap<PyKey, Value>,
-    args: &[Value],
-) -> Result<Value> {
+pub fn call(method: &str, dict: &mut IndexMap<PyKey, Value>, args: &[Value]) -> Result<Value> {
     match method {
         "get" => get(dict, args),
         "keys" => Ok(Value::list(
@@ -33,20 +29,20 @@ pub fn call(
 }
 
 fn get(dict: &IndexMap<PyKey, Value>, args: &[Value]) -> Result<Value> {
-    let key = args.first().ok_or_else(|| {
-        PyError::Runtime("dict.get() requires at least 1 argument".to_string())
-    })?;
+    let key = args
+        .first()
+        .ok_or_else(|| PyError::Runtime("dict.get() requires at least 1 argument".to_string()))?;
     let default = args.get(1).cloned().unwrap_or_else(Value::none);
-    let pk = key.to_key().ok_or_else(|| {
-        PyError::Runtime("unhashable type".to_string())
-    })?;
+    let pk = key
+        .to_key()
+        .ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
     Ok(dict.get(&pk).cloned().unwrap_or(default))
 }
 
 fn update(dict: &mut IndexMap<PyKey, Value>, args: &[Value]) -> Result<Value> {
-    let other = args.first().ok_or_else(|| {
-        PyError::Runtime("dict.update() requires 1 argument".to_string())
-    })?;
+    let other = args
+        .first()
+        .ok_or_else(|| PyError::Runtime("dict.update() requires 1 argument".to_string()))?;
     match other.kind() {
         ValueKind::Dict(other_map) => {
             for (k, v) in other_map {
@@ -63,12 +59,12 @@ fn update(dict: &mut IndexMap<PyKey, Value>, args: &[Value]) -> Result<Value> {
 }
 
 fn pop(dict: &mut IndexMap<PyKey, Value>, args: &[Value]) -> Result<Value> {
-    let key = args.first().ok_or_else(|| {
-        PyError::Runtime("dict.pop() requires at least 1 argument".to_string())
-    })?;
-    let pk = key.to_key().ok_or_else(|| {
-        PyError::Runtime("unhashable type".to_string())
-    })?;
+    let key = args
+        .first()
+        .ok_or_else(|| PyError::Runtime("dict.pop() requires at least 1 argument".to_string()))?;
+    let pk = key
+        .to_key()
+        .ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
     match dict.shift_remove(&pk) {
         Some(v) => Ok(v),
         None => {
@@ -80,7 +76,6 @@ fn pop(dict: &mut IndexMap<PyKey, Value>, args: &[Value]) -> Result<Value> {
         }
     }
 }
-
 
 fn popitem(dict: &mut IndexMap<PyKey, Value>) -> Result<Value> {
     match dict.pop() {
@@ -94,9 +89,9 @@ fn setdefault(dict: &mut IndexMap<PyKey, Value>, args: &[Value]) -> Result<Value
         PyError::Runtime("dict.setdefault() requires at least 1 argument".to_string())
     })?;
     let default = args.get(1).cloned().unwrap_or_else(Value::none);
-    let pk = key.to_key().ok_or_else(|| {
-        PyError::Runtime("unhashable type".to_string())
-    })?;
+    let pk = key
+        .to_key()
+        .ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
     Ok(dict.entry(pk).or_insert(default).clone())
 }
 

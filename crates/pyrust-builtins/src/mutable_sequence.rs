@@ -11,8 +11,12 @@ fn iter_value(v: &Value) -> Result<Vec<Value>> {
             let mut out = Vec::new();
             let mut cur = start;
             loop {
-                if step > 0 && cur >= stop { break; }
-                if step < 0 && cur <= stop { break; }
+                if step > 0 && cur >= stop {
+                    break;
+                }
+                if step < 0 && cur <= stop {
+                    break;
+                }
                 out.push(Value::int(cur));
                 cur = cur.wrapping_add(step);
             }
@@ -37,7 +41,9 @@ fn type_name_of(v: &Value) -> &'static str {
         ValueKind::Tuple(_) => "tuple",
         ValueKind::Set(_) => "set",
         ValueKind::Range { .. } => "range",
-        ValueKind::BuiltinFunction(_) | ValueKind::UserFunction(_) | ValueKind::BoundMethod { .. } => "function",
+        ValueKind::BuiltinFunction(_)
+        | ValueKind::UserFunction(_)
+        | ValueKind::BoundMethod { .. } => "function",
         ValueKind::PyClass(_) => "type",
         ValueKind::PyInstance(_) => "object",
         ValueKind::PyModule(_) => "module",
@@ -47,9 +53,9 @@ fn type_name_of(v: &Value) -> &'static str {
 // Mutable Sequence Operations (https://docs.python.org/3/library/stdtypes.html#mutable-sequence-types)
 
 pub fn append(items: &mut Vec<Value>, args: &[Value]) -> Result<Value> {
-    let val = args.first().ok_or_else(|| {
-        PyError::Runtime("list.append() requires 1 argument".to_string())
-    })?;
+    let val = args
+        .first()
+        .ok_or_else(|| PyError::Runtime("list.append() requires 1 argument".to_string()))?;
     items.push(val.clone());
     Ok(Value::none())
 }
@@ -64,9 +70,9 @@ pub fn copy(items: &[Value], _args: &[Value]) -> Result<Value> {
 }
 
 pub fn extend(items: &mut Vec<Value>, args: &[Value]) -> Result<Value> {
-    let iterable = args.first().ok_or_else(|| {
-        PyError::Runtime("list.extend() requires 1 argument".to_string())
-    })?;
+    let iterable = args
+        .first()
+        .ok_or_else(|| PyError::Runtime("list.extend() requires 1 argument".to_string()))?;
     let new_items = iter_value(iterable)?;
     items.extend(new_items);
     Ok(Value::none())
@@ -74,12 +80,18 @@ pub fn extend(items: &mut Vec<Value>, args: &[Value]) -> Result<Value> {
 
 pub fn insert(items: &mut Vec<Value>, args: &[Value]) -> Result<Value> {
     if args.len() < 2 {
-        return Err(PyError::Runtime("list.insert() requires 2 arguments".to_string()));
+        return Err(PyError::Runtime(
+            "list.insert() requires 2 arguments".to_string(),
+        ));
     }
     let idx = match args[0].kind() {
         ValueKind::Int(i) => i,
         ValueKind::Bool(b) => b as i64,
-        _ => return Err(PyError::Runtime("list.insert() index must be an integer".to_string())),
+        _ => {
+            return Err(PyError::Runtime(
+                "list.insert() index must be an integer".to_string(),
+            ));
+        }
     };
     let val = args[1].clone();
     let len = items.len();
@@ -97,7 +109,11 @@ pub fn pop(items: &mut Vec<Value>, args: &[Value]) -> Result<Value> {
     let idx = match args.first().map(|v| v.kind()) {
         Some(ValueKind::Int(i)) => i,
         Some(ValueKind::Bool(b)) => b as i64,
-        Some(_) => return Err(PyError::Runtime("list.pop() index must be an integer".to_string())),
+        Some(_) => {
+            return Err(PyError::Runtime(
+                "list.pop() index must be an integer".to_string(),
+            ));
+        }
         None => -1,
     };
     if items.is_empty() {
@@ -105,18 +121,21 @@ pub fn pop(items: &mut Vec<Value>, args: &[Value]) -> Result<Value> {
     }
     let pos = normalise_index(idx, items.len());
     if pos >= items.len() {
-        return Err(PyError::Runtime("list.pop() index out of range".to_string()));
+        return Err(PyError::Runtime(
+            "list.pop() index out of range".to_string(),
+        ));
     }
     Ok(items.remove(pos))
 }
 
 pub fn remove(items: &mut Vec<Value>, args: &[Value]) -> Result<Value> {
-    let target = args.first().ok_or_else(|| {
-        PyError::Runtime("list.remove() requires 1 argument".to_string())
-    })?;
-    let pos = items.iter().position(|v| v == target).ok_or_else(|| {
-        PyError::Runtime(format!("{} is not in list", target.repr()))
-    })?;
+    let target = args
+        .first()
+        .ok_or_else(|| PyError::Runtime("list.remove() requires 1 argument".to_string()))?;
+    let pos = items
+        .iter()
+        .position(|v| v == target)
+        .ok_or_else(|| PyError::Runtime(format!("{} is not in list", target.repr())))?;
     items.remove(pos);
     Ok(Value::none())
 }

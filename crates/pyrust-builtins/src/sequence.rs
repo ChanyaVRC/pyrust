@@ -36,9 +36,9 @@ pub fn seq_index(items: &[Value], args: &[Value], type_name: &str) -> Result<Val
 }
 
 pub fn seq_count(items: &[Value], args: &[Value], type_name: &str) -> Result<Value> {
-    let target = args.first().ok_or_else(|| {
-        PyError::Runtime(format!("{type_name}.count() requires 1 argument"))
-    })?;
+    let target = args
+        .first()
+        .ok_or_else(|| PyError::Runtime(format!("{type_name}.count() requires 1 argument")))?;
     let n = items.iter().filter(|v| *v == target).count();
     Ok(Value::int(n as i64))
 }

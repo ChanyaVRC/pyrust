@@ -1,4 +1,4 @@
-use std::alloc::{alloc, dealloc, Layout};
+use std::alloc::{Layout, alloc, dealloc};
 use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -142,7 +142,11 @@ pub enum Opaque {
     BigInt(i64),
     Dict(IndexMap<PyKey, Value>),
     Set(IndexSet<PyKey>),
-    Range { start: i64, stop: i64, step: i64 },
+    Range {
+        start: i64,
+        stop: i64,
+        step: i64,
+    },
     UserFunction(Rc<UserFunction>),
     BuiltinFunction(&'static str),
     PyClass(Rc<RefCell<PyClass>>),
@@ -192,7 +196,11 @@ pub enum ValueKind<'a> {
     Tuple(&'a Vec<Value>),
     Dict(&'a IndexMap<PyKey, Value>),
     Set(&'a IndexSet<PyKey>),
-    Range { start: i64, stop: i64, step: i64 },
+    Range {
+        start: i64,
+        stop: i64,
+        step: i64,
+    },
     UserFunction(&'a Rc<UserFunction>),
     BuiltinFunction(&'static str),
     PyClass(&'a Rc<RefCell<PyClass>>),
@@ -247,7 +255,7 @@ unsafe fn pool_b_dealloc(ptr: *mut u8) {
 // Vec<Value> = [ptr: *mut Value][len: usize][cap: usize] = 24 bytes / align 8 on 64-bit.
 // Replacing Box::new(v) with this pool eliminates one system alloc per list creation.
 
-const VEC_HDR_SIZE: usize = 24;  // size_of::<Vec<Value>>() — asserted in Value impl
+const VEC_HDR_SIZE: usize = 24; // size_of::<Vec<Value>>() — asserted in Value impl
 const VEC_HDR_ALIGN: usize = 8;
 const POOL_VEC_HDR_CAP: usize = 64;
 
@@ -277,7 +285,12 @@ unsafe fn pool_vec_hdr_dealloc(ptr: *mut u8) {
             unsafe { *(ptr as *mut *mut u8) = head };
             c.set((ptr, len + 1));
         } else {
-            unsafe { dealloc(ptr, Layout::from_size_align(VEC_HDR_SIZE, VEC_HDR_ALIGN).unwrap()) };
+            unsafe {
+                dealloc(
+                    ptr,
+                    Layout::from_size_align(VEC_HDR_SIZE, VEC_HDR_ALIGN).unwrap(),
+                )
+            };
         }
     })
 }
@@ -331,11 +344,12 @@ impl Value {
         let layout = Layout::from_size_align(16 + len, 8).unwrap();
         let ptr = unsafe { alloc(layout) };
         unsafe {
-            (ptr as *mut u32).write(2u32);           // rc=1, type=0
+            (ptr as *mut u32).write(2u32); // rc=1, type=0
             (ptr.add(4) as *mut u32).write(len as u32);
             *(ptr.add(8) as *mut *mut u8) = ptr.add(16); // ref → own bytes
             if len > 0 {
-                ptr.add(16).copy_from_nonoverlapping(s.as_bytes().as_ptr(), len);
+                ptr.add(16)
+                    .copy_from_nonoverlapping(s.as_bytes().as_ptr(), len);
             }
         }
         Value(TAG_STR_BITS | (ptr as u64 & PAYLOAD_MASK))
@@ -361,14 +375,16 @@ impl Value {
         };
 
         // Increment A.rc
-        unsafe { *(a_ptr as *mut u32) += 2; }
+        unsafe {
+            *(a_ptr as *mut u32) += 2;
+        }
 
         // Layout B: [rc_type:u32][sub_len:u32][ref:*mut u8][offset:u32]
         //            offset 0     offset 4     offset 8     offset 16
         // ref points directly to this slice's bytes[0]; ref - offset - 16 = A_ptr
         let ptr = unsafe { pool_b_alloc() };
         unsafe {
-            (ptr as *mut u32).write(3u32);  // rc=1, type=1
+            (ptr as *mut u32).write(3u32); // rc=1, type=1
             (ptr.add(4) as *mut u32).write(sub_len as u32);
             *(ptr.add(8) as *mut *const u8) = new_ref;
             (ptr.add(16) as *mut u32).write(new_offset as u32);
@@ -676,7 +692,11 @@ impl Value {
             }
             ValueKind::None => "None".to_string(),
             ValueKind::List(items) => {
-                let inner = items.iter().map(|v| v.repr()).collect::<Vec<_>>().join(", ");
+                let inner = items
+                    .iter()
+                    .map(|v| v.repr())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!("[{inner}]")
             }
             ValueKind::Dict(items) => {
@@ -726,7 +746,11 @@ impl Value {
             }
             ValueKind::PyModule(m) => format!("<module '{}'>", m.borrow().name),
             ValueKind::Tuple(items) => {
-                let inner = items.iter().map(|v| v.repr()).collect::<Vec<_>>().join(", ");
+                let inner = items
+                    .iter()
+                    .map(|v| v.repr())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 if items.len() == 1 {
                     format!("({inner},)")
                 } else {
@@ -758,8 +782,10 @@ impl Clone for Value {
             // Str
             0xFFFC => {
                 let hdr = (self.0 & PAYLOAD_MASK) as *mut u32;
-                unsafe { *hdr += 2; }  // rc++ (bits 31:1)
-                Value(self.0)  // same bits, 0 allocations
+                unsafe {
+                    *hdr += 2;
+                } // rc++ (bits 31:1)
+                Value(self.0) // same bits, 0 allocations
             }
             // Tuple
             0xFFFD => {
@@ -790,8 +816,9 @@ impl Drop for Value {
             0xFFFC => unsafe {
                 let hdr = (self.0 & PAYLOAD_MASK) as *mut u8;
                 let rc_type_ptr = hdr as *mut u32;
-                *rc_type_ptr -= 2;  // rc--
-                if *rc_type_ptr >> 1 == 0 {  // rc reached 0
+                *rc_type_ptr -= 2; // rc--
+                if *rc_type_ptr >> 1 == 0 {
+                    // rc reached 0
                     if *rc_type_ptr & 1 == 0 {
                         // Layout A: [rc_type:u32][sub_len:u32][ref:*mut u8][bytes...]
                         let len = *(hdr.add(4) as *const u32) as usize;
@@ -802,7 +829,7 @@ impl Drop for Value {
                         let ref_ptr = *(hdr.add(8) as *const *mut u8);
                         let offset = *(hdr.add(16) as *const u32) as usize;
                         let a_ptr = ref_ptr.sub(offset + 16);
-                        *(a_ptr as *mut u32) -= 2;  // A.rc--
+                        *(a_ptr as *mut u32) -= 2; // A.rc--
                         if *(a_ptr as *const u32) >> 1 == 0 {
                             let root_len = *(a_ptr.add(4) as *const u32) as usize;
                             dealloc(a_ptr, Layout::from_size_align(16 + root_len, 8).unwrap());
@@ -850,8 +877,16 @@ impl PartialEq for Value {
             (ValueKind::Dict(a), ValueKind::Dict(b)) => a == b,
             (ValueKind::Set(a), ValueKind::Set(b)) => a == b,
             (
-                ValueKind::Range { start: as_, stop: ao, step: at },
-                ValueKind::Range { start: bs, stop: bo, step: bt },
+                ValueKind::Range {
+                    start: as_,
+                    stop: ao,
+                    step: at,
+                },
+                ValueKind::Range {
+                    start: bs,
+                    stop: bo,
+                    step: bt,
+                },
             ) => as_ == bs && ao == bo && at == bt,
             (ValueKind::BuiltinFunction(a), ValueKind::BuiltinFunction(b)) => a == b,
             (ValueKind::UserFunction(a), ValueKind::UserFunction(b)) => Rc::ptr_eq(a, b),
@@ -859,8 +894,14 @@ impl PartialEq for Value {
             (ValueKind::PyInstance(a), ValueKind::PyInstance(b)) => Rc::ptr_eq(a, b),
             (ValueKind::PyModule(a), ValueKind::PyModule(b)) => Rc::ptr_eq(a, b),
             (
-                ValueKind::BoundMethod { function: af, receiver: ar },
-                ValueKind::BoundMethod { function: bf, receiver: br },
+                ValueKind::BoundMethod {
+                    function: af,
+                    receiver: ar,
+                },
+                ValueKind::BoundMethod {
+                    function: bf,
+                    receiver: br,
+                },
             ) => Rc::ptr_eq(af, bf) && Rc::ptr_eq(ar, br),
             _ => false,
         }
@@ -942,7 +983,11 @@ fn format_exception_args(args: &[Value], repr_mode: bool) -> String {
             }
         }
         _ => {
-            let inner = args.iter().map(|value| value.repr()).collect::<Vec<_>>().join(", ");
+            let inner = args
+                .iter()
+                .map(|value| value.repr())
+                .collect::<Vec<_>>()
+                .join(", ");
             format!("({inner})")
         }
     }
