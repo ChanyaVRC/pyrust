@@ -860,7 +860,8 @@ impl Compiler {
             Expr::Float(v) => Some(self.intern_const(Value::Float(*v))),
             Expr::Str(s) => Some(self.intern_const(Value::Str(s.clone()))),
             Expr::Bool(b) => Some(self.intern_const(Value::Bool(*b))),
-            _ => None,
+            Expr::None => Some(self.intern_const(Value::None)),
+            _ => fold_constant(expr).map(|v| self.intern_const(v)),
         }
     }
 
