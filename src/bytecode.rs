@@ -27,7 +27,6 @@ pub struct FnProto {
     pub global_names: Rc<HashSet<String>>,
     pub nonlocal_names: Rc<HashSet<String>>,
     pub is_pure: bool,
-    pub def_bound_mask: u64,
 }
 
 #[derive(Debug, Clone)]

@@ -898,31 +898,6 @@ impl Interpreter {
         Ok(Value::Range { start, stop, step })
     }
 
-    fn call_instance_method_values(
-        &mut self,
-        obj: &Value,
-        method: &str,
-        extra_args: &[Value],
-    ) -> Result<Option<Value>> {
-        let (func, self_val) = match obj {
-            Value::Instance(inst) => {
-                let class = Rc::clone(&inst.borrow().class);
-                let Some(f) = lookup_class_attr(&class, method) else {
-                    return Ok(None);
-                };
-                (f, Value::Instance(Rc::clone(inst)))
-            }
-            _ => return Ok(None),
-        };
-        if let Value::Function(func) = func {
-            let mut all_args = vec![self_val];
-            all_args.extend_from_slice(extra_args);
-            Ok(Some(self.call_user_function(Rc::clone(&func), &[], &all_args)?))
-        } else {
-            Ok(None)
-        }
-    }
-
     /// Return the compiled `FnCode` for `function`.
     /// Returns `None` only if `precompiled_code` is absent.
     fn get_or_compile_bytecode(&mut self, function: &Rc<UserFunction>) -> Option<Rc<FnCode>> {

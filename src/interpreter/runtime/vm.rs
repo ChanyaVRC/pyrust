@@ -879,7 +879,6 @@ impl Interpreter {
                     let param_is_args = proto.param_is_args.clone();
                     let param_is_kwargs = proto.param_is_kwargs.clone();
                     let is_pure = proto.is_pure;
-                    let def_bound_mask = proto.def_bound_mask;
 
                     let mut params = Vec::new();
                     let mut def_slot = 0u8;
@@ -912,14 +911,12 @@ impl Interpreter {
                     let func = Rc::new(UserFunction {
                         name: proto_name,
                         params,
-                        body: vec![],
                         local_names: Rc::new(proto_local_index.keys().cloned().collect()),
                         local_index: proto_local_index,
                         global_names: proto_global_names,
                         nonlocal_names: proto_nonlocal_names,
                         env: Rc::clone(&self.env),
                         is_pure,
-                        def_bound_mask,
                         precompiled_code: Some(proto_code),
                     });
                     regs[*dst as usize] = Some(Value::Function(func));

@@ -2114,7 +2114,6 @@ impl Compiler {
             global_names: inner_global_rc,
             nonlocal_names: inner_nonlocal_rc,
             is_pure,
-            def_bound_mask: def_bound,
         });
 
         // Compile default values (right-to-left in declaration, left-to-right in slots).
@@ -2224,7 +2223,6 @@ impl Compiler {
             global_names: empty_global,
             nonlocal_names: empty_nonlocal,
             is_pure: false,
-            def_bound_mask: 0,
         });
 
         // Compile base class expressions.
