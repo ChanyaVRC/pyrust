@@ -809,11 +809,16 @@ impl Interpreter {
                 Insn::Unpack(base, src, n) => {
                     let src_val = vm_try!(vm_read(regs, *src, num_locals));
                     let items = vm_try!(iter_values(src_val));
-                    if items.len() != *n as usize {
+                    if items.len() < *n as usize {
                         vm_try!(Err::<(), _>(PyError::Runtime(format!(
                             "not enough values to unpack (expected {}, got {})",
                             n,
                             items.len()
+                        ))));
+                    } else if items.len() > *n as usize {
+                        vm_try!(Err::<(), _>(PyError::Runtime(format!(
+                            "too many values to unpack (expected {})",
+                            n
                         ))));
                     }
                     for (i, v) in items.into_iter().enumerate() {
