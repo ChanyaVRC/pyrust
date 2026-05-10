@@ -21,7 +21,9 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         })
         .collect();
 
+    let num_locals = code.num_locals;
     let insns = pass_thread_jumps(code.insns);
+    let insns = pass_binop_const_fusion(insns, num_locals);
     let insns = pass_dead_code(insns);
     let insns = pass_trivial_nop(insns);
 
@@ -89,6 +91,37 @@ fn pass_thread_jumps(insns: Vec<Insn>) -> Vec<Insn> {
             }
         })
         .collect()
+}
+
+// ─── BinOp-const fusion ────────────────────────────────────────────────────────
+
+/// Fuse `LoadConst(r, c) + BinOp(dst, lhs, op, r)` → `BinOpConst(dst, lhs, op, c)`
+/// when `r` is a temp register (`r >= num_locals`) and `r != dst`.
+///
+/// Temps are write-once in the compiler's SSA-like register allocation, so removing
+/// the `LoadConst` is safe: no other instruction can read `r` after `BinOp` consumes it.
+fn pass_binop_const_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
+    let n = insns.len();
+    let mut transformed = insns;
+    let mut keep = vec![true; n];
+
+    let mut i = 0;
+    while i + 1 < n {
+        if let (Insn::LoadConst(lc_reg, c_idx), Insn::BinOp(dst, lhs, op, rhs)) =
+            (&transformed[i], &transformed[i + 1])
+        {
+            let (lc_reg, c_idx) = (*lc_reg, *c_idx);
+            let (dst, lhs, op, rhs) = (*dst, *lhs, *op, *rhs);
+            if rhs == lc_reg && lc_reg >= num_locals && lc_reg != dst {
+                keep[i] = false;
+                transformed[i + 1] = Insn::BinOpConst(dst, lhs, op, c_idx);
+                i += 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    compact(transformed, &keep)
 }
 
 // ─── Dead code elimination ─────────────────────────────────────────────────────
@@ -240,6 +273,65 @@ mod tests {
                 .collect(),
         );
         crate::compiler::compile_script(&stmts, local_index, false).unwrap()
+    }
+
+    // ── pass_binop_const_fusion ───────────────────────────────────────────────
+
+    #[test]
+    fn binop_const_fusion_fuses_loadconst_binop() {
+        use crate::ast::BinaryOp;
+        // LoadConst(r=5, c=0)  BinOp(dst=1, lhs=0, Add, r=5)  where num_locals=2
+        // r=5 >= num_locals=2, r != dst  → fuse to BinOpConst(1, 0, Add, 0), drop LoadConst
+        let insns = vec![
+            Insn::LoadConst(5, 0), // temp reg 5, const index 0
+            Insn::BinOp(1, 0, BinaryOp::Add, 5),
+            Insn::Return(1),
+        ];
+        let out = pass_binop_const_fusion(insns, 2);
+        assert_eq!(out.len(), 2, "LoadConst should be removed");
+        assert!(
+            matches!(out[0], Insn::BinOpConst(1, 0, BinaryOp::Add, 0)),
+            "BinOp should become BinOpConst"
+        );
+    }
+
+    #[test]
+    fn binop_const_fusion_skips_when_reg_is_local() {
+        use crate::ast::BinaryOp;
+        // r=1 < num_locals=3  → must NOT fuse (register could be a local variable)
+        let insns = vec![
+            Insn::LoadConst(1, 0),
+            Insn::BinOp(2, 0, BinaryOp::Add, 1),
+            Insn::Return(2),
+        ];
+        let out = pass_binop_const_fusion(insns, 3);
+        assert_eq!(out.len(), 3, "no fusion when reg is a local");
+        assert!(matches!(out[0], Insn::LoadConst(1, 0)));
+    }
+
+    #[test]
+    fn binop_const_fusion_skips_when_dst_equals_reg() {
+        use crate::ast::BinaryOp;
+        // dst == lc_reg: result overwrites the constant register → unsafe to remove LoadConst
+        let insns = vec![
+            Insn::LoadConst(5, 0),
+            Insn::BinOp(5, 0, BinaryOp::Add, 5), // dst == rhs == lc_reg
+            Insn::Return(5),
+        ];
+        let out = pass_binop_const_fusion(insns, 2);
+        assert_eq!(out.len(), 3, "no fusion when dst == lc_reg");
+    }
+
+    #[test]
+    fn binop_const_fusion_on_compiled_code() {
+        let code = compile_fn("x = 1\nprint(x + 5)\n");
+        let optimized = optimize(code);
+        // The optimizer should have produced a BinOpConst somewhere in the top-level insns.
+        let has_binopconst = optimized
+            .insns
+            .iter()
+            .any(|i| matches!(i, Insn::BinOpConst(..)));
+        assert!(has_binopconst, "optimizer should emit BinOpConst for x + 5");
     }
 
     // ── pass_thread_jumps ─────────────────────────────────────────────────────

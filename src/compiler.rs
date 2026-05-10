@@ -2872,13 +2872,9 @@ impl Compiler {
                     }
                     let lhs = self.compile_expr(left);
                     let dst = self.ensure_dst(lhs);
-                    if let Some(const_idx) = self.try_literal_const_idx(right) {
-                        self.emit(Insn::BinOpConst(dst, lhs, *op, const_idx));
-                    } else {
-                        let rhs = self.compile_expr(right);
-                        self.emit(Insn::BinOp(dst, lhs, *op, rhs));
-                        self.free_temp(rhs);
-                    }
+                    let rhs = self.compile_expr(right);
+                    self.emit(Insn::BinOp(dst, lhs, *op, rhs));
+                    self.free_temp(rhs);
                     dst
                 }
             },
@@ -2895,13 +2891,9 @@ impl Compiler {
                     let lhs = self.compile_expr(left);
                     let bin_op = cmp_to_binary(*cmp_op);
                     let dst = self.ensure_dst(lhs);
-                    if let Some(const_idx) = self.try_literal_const_idx(right) {
-                        self.emit(Insn::BinOpConst(dst, lhs, bin_op, const_idx));
-                    } else {
-                        let rhs = self.compile_expr(right);
-                        self.emit(Insn::BinOp(dst, lhs, bin_op, rhs));
-                        self.free_temp(rhs);
-                    }
+                    let rhs = self.compile_expr(right);
+                    self.emit(Insn::BinOp(dst, lhs, bin_op, rhs));
+                    self.free_temp(rhs);
                     dst
                 } else {
                     // Chained comparison: a < b < c  →  (a < b) and (b < c)
