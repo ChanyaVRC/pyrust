@@ -86,3 +86,13 @@ print("in-dict", "a" in {"a": 1})
 s = {1, 2, 3, 2, 1}
 print("set-len", len(s))
 print("set-in", 2 in s)
+
+# Bool/int key identity in dicts and sets — Issue #88
+d = {1: "one", True: "bool"}
+print("bool-int-key-overwrite", d)
+print("bool-int-key-len", len(d))
+s = {1, True}
+print("bool-int-set-dedup", len(s))
+d2 = {}
+d2[True] = "x"
+print("bool-key-int-access", d2[1])

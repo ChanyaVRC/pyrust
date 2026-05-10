@@ -947,4 +947,30 @@ result = fact(10)
             Some(Value::int(59))
         );
     }
+
+    fn run_program_result(src: &str) -> crate::error::Result<()> {
+        let tokens = Lexer::new(src).unwrap().into_tokens();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut interpreter = Interpreter::default();
+        interpreter.exec_program(&program, false)
+    }
+
+    #[test]
+    fn math_floor_large_float_returns_bignum() {
+        let interp = run_program("import math\nresult = math.floor(1e100) > 2**62\n");
+        assert_eq!(
+            interp.lookup_name("result").unwrap(),
+            Some(Value::bool_(true))
+        );
+    }
+
+    #[test]
+    fn math_ceil_large_float_returns_bignum() {
+        let interp = run_program("import math\nresult = math.ceil(1e100) > 2**62\n");
+        assert_eq!(
+            interp.lookup_name("result").unwrap(),
+            Some(Value::bool_(true))
+        );
+    }
 }

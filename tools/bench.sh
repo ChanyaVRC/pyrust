@@ -121,9 +121,15 @@ for script in "${SCRIPTS[@]}"; do
   )
   CMDS=("$PYTHON $script" "$PYRUST $script")
 
+  # Probe the base binary before benchmarking — skip it for scripts that
+  # exercise features not yet on the base branch (e.g. tests added in this PR).
   if [[ -n "$BASE_BIN" ]]; then
-    CMD_NAMES+=(--command-name "base:$rel")
-    CMDS+=("$BASE_BIN $script")
+    if "$BASE_BIN" "$script" >/dev/null 2>&1; then
+      CMD_NAMES+=(--command-name "base:$rel")
+      CMDS+=("$BASE_BIN $script")
+    else
+      echo "  [skip base] $rel (base binary returned non-zero)"
+    fi
   fi
 
   hyperfine \

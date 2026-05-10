@@ -129,10 +129,26 @@ impl Interpreter {
                             Ok((k, v))
                         })
                         .collect::<Result<_>>()?;
-                    keyed.sort_by(|(a, _), (b, _)| compare_values(a, b));
+                    let mut sort_err: Option<PyError> = None;
+                    keyed.sort_by(|(a, _), (b, _)| {
+                        if sort_err.is_some() { return std::cmp::Ordering::Equal; }
+                        match compare_values(a, b) {
+                            Ok(ord) => ord,
+                            Err(e) => { sort_err = Some(e); std::cmp::Ordering::Equal }
+                        }
+                    });
+                    if let Some(e) = sort_err { return Err(e); }
                     items = keyed.into_iter().map(|(_, v)| v).collect();
                 } else {
-                    items.sort_by(compare_values);
+                    let mut sort_err: Option<PyError> = None;
+                    items.sort_by(|a, b| {
+                        if sort_err.is_some() { return std::cmp::Ordering::Equal; }
+                        match compare_values(a, b) {
+                            Ok(ord) => ord,
+                            Err(e) => { sort_err = Some(e); std::cmp::Ordering::Equal }
+                        }
+                    });
+                    if let Some(e) = sort_err { return Err(e); }
                 }
                 if reverse {
                     items.reverse();
@@ -175,10 +191,19 @@ impl Interpreter {
                         "{fname}() arg is an empty sequence"
                     )));
                 }
+                let mut result_err: Option<PyError> = None;
                 let result = items.into_iter().reduce(|acc, v| {
-                    let cmp = compare_values(&v, &acc);
-                    if is_max && cmp == std::cmp::Ordering::Greater { v } else if !is_max && cmp == std::cmp::Ordering::Less { v } else { acc }
+                    if result_err.is_some() { return acc; }
+                    match compare_values(&v, &acc) {
+                        Ok(cmp) => {
+                            if is_max && cmp == std::cmp::Ordering::Greater { v }
+                            else if !is_max && cmp == std::cmp::Ordering::Less { v }
+                            else { acc }
+                        }
+                        Err(e) => { result_err = Some(e); acc }
+                    }
                 }).unwrap();
+                if let Some(e) = result_err { return Err(e); }
                 Ok(result)
             }
 
@@ -253,15 +278,46 @@ impl Interpreter {
                         ValueKind::Float(v) => Ok(Value::int(v as i64)),
                         ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
                         ValueKind::Str(s) => s.trim().parse::<i64>().map(Value::int).map_err(|_| {
-                            PyError::Runtime(format!(
-                                "invalid literal for int() with base 10: '{s}'"
-                            ))
+                            PyError::Named(
+                                "ValueError".to_string(),
+                                format!("invalid literal for int() with base 10: '{s}'"),
+                            )
                         }),
                         _ => Err(PyError::Runtime(
                             "int() argument must be a number or string".to_string(),
                         )),
                     },
-                    _ => Err(PyError::Runtime("int() takes at most one argument".to_string())),
+                    2 => {
+                        let base = match args[1].value.kind() {
+                            ValueKind::Int(b) if b >= 2 && b <= 36 => b as u32,
+                            ValueKind::Int(b) => return Err(PyError::Named(
+                                "ValueError".to_string(),
+                                format!("int() base must be >= 2 and <= 36, or 0, not {b}"))),
+                            _ => return Err(PyError::Runtime("int() base must be an integer".to_string())),
+                        };
+                        match args[0].value.kind() {
+                            ValueKind::Str(s) => {
+                                let stripped = s.trim();
+                                let stripped = if base == 16 && (stripped.starts_with("0x") || stripped.starts_with("0X")) {
+                                    &stripped[2..]
+                                } else if base == 2 && (stripped.starts_with("0b") || stripped.starts_with("0B")) {
+                                    &stripped[2..]
+                                } else if base == 8 && (stripped.starts_with("0o") || stripped.starts_with("0O")) {
+                                    &stripped[2..]
+                                } else {
+                                    stripped
+                                };
+                                i64::from_str_radix(stripped, base)
+                                    .map(Value::int)
+                                    .map_err(|_| PyError::Named(
+                                        "ValueError".to_string(),
+                                        format!("invalid literal for int() with base {base}: '{}'", s.trim()),
+                                    ))
+                            }
+                            _ => Err(PyError::Runtime("int() can't convert non-string with explicit base".to_string())),
+                        }
+                    }
+                    _ => Err(PyError::Runtime("int() takes at most two arguments".to_string())),
                 }
             }
 
@@ -320,8 +376,22 @@ impl Interpreter {
                 }
                 let x = value_to_float(&args[0].value, name)?;
                 match name {
-                    "math.floor" => Ok(Value::int(x.floor() as i64)),
-                    "math.ceil" => Ok(Value::int(x.ceil() as i64)),
+                    "math.floor" => {
+                        let f = x.floor();
+                        if f > i64::MAX as f64 || f < i64::MIN as f64 {
+                            Ok(float_to_bigint(f))
+                        } else {
+                            Ok(Value::int(f as i64))
+                        }
+                    }
+                    "math.ceil" => {
+                        let f = x.ceil();
+                        if f > i64::MAX as f64 || f < i64::MIN as f64 {
+                            Ok(float_to_bigint(f))
+                        } else {
+                            Ok(Value::int(f as i64))
+                        }
+                    }
                     "math.sqrt" => Ok(Value::float(x.sqrt())),
                     "math.fabs" => Ok(Value::float(x.abs())),
                     "math.sin" => Ok(Value::float(x.sin())),
@@ -1048,6 +1118,7 @@ impl Interpreter {
         for arg in args {
             match arg.value.kind() {
                 ValueKind::Int(v) => ints.push(v),
+                ValueKind::Bool(b) => ints.push(b as i64),
                 _ => {
                     return Err(PyError::Runtime(
                         "range arguments must be integers".to_string(),

@@ -22,3 +22,15 @@ print("from-math-floor", floor(3.9))
 
 import math as m
 print("import-as", m.pi)
+
+# math.floor / math.ceil edge cases (Issue #97)
+print("floor-normal", math.floor(1.9))
+print("ceil-normal", math.ceil(-2.1))
+print("floor-neg", math.floor(-1.3))
+print("ceil-neg", math.ceil(-2.7))
+
+# Large float → bignum (Issue #97)
+big_floor = math.floor(1e100)
+print("floor-bignum-large", big_floor > 2**62)
+big_ceil = math.ceil(1e100)
+print("ceil-bignum-large", big_ceil > 2**62)

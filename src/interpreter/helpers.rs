@@ -99,26 +99,48 @@ fn eval_binary_float(op: BinaryOp, a: f64, b: f64) -> Option<Result<Value>> {
 /// lexicographically, bools as 0/1.  Incomparable pairs fall back to
 /// `Ordering::Equal` (same as CPython raising TypeError in that case, but we
 /// keep the sort stable rather than panicking).
-fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
+fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
     match (a.kind(), b.kind()) {
-        (ValueKind::Int(x), ValueKind::Int(y)) => x.cmp(&y),
-        (ValueKind::Float(x), ValueKind::Float(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
-        (ValueKind::Int(x), ValueKind::Float(y)) => (x as f64).partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
-        (ValueKind::Float(x), ValueKind::Int(y)) => x.partial_cmp(&(y as f64)).unwrap_or(std::cmp::Ordering::Equal),
-        (ValueKind::Bool(x), ValueKind::Bool(y)) => x.cmp(&y),
-        (ValueKind::Bool(x), ValueKind::Int(y)) => (x as i64).cmp(&y),
-        (ValueKind::Int(x), ValueKind::Bool(y)) => x.cmp(&(y as i64)),
-        (ValueKind::Str(x), ValueKind::Str(y)) => x.cmp(y),
+        (ValueKind::Int(x), ValueKind::Int(y)) => Ok(x.cmp(&y)),
+        (ValueKind::Float(x), ValueKind::Float(y)) => Ok(x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)),
+        (ValueKind::Int(x), ValueKind::Float(y)) => Ok((x as f64).partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)),
+        (ValueKind::Float(x), ValueKind::Int(y)) => Ok(x.partial_cmp(&(y as f64)).unwrap_or(std::cmp::Ordering::Equal)),
+        (ValueKind::Bool(x), ValueKind::Bool(y)) => Ok(x.cmp(&y)),
+        (ValueKind::Bool(x), ValueKind::Int(y)) => Ok((x as i64).cmp(&y)),
+        (ValueKind::Int(x), ValueKind::Bool(y)) => Ok(x.cmp(&(y as i64))),
+        (ValueKind::Str(x), ValueKind::Str(y)) => Ok(x.cmp(y)),
         (ValueKind::Tuple(x), ValueKind::Tuple(y)) => {
             for (a, b) in x.iter().zip(y.iter()) {
-                let ord = compare_values(a, b);
+                let ord = compare_values(a, b)?;
                 if ord != std::cmp::Ordering::Equal {
-                    return ord;
+                    return Ok(ord);
                 }
             }
-            x.len().cmp(&y.len())
+            Ok(x.len().cmp(&y.len()))
         }
-        _ => std::cmp::Ordering::Equal,
+        _ => Err(PyError::Named(
+            "TypeError".to_string(),
+            format!(
+                "'<' not supported between instances of '{}' and '{}'",
+                value_type_name_str(a),
+                value_type_name_str(b),
+            ),
+        )),
+    }
+}
+
+fn value_type_name_str(v: &Value) -> &'static str {
+    match v.kind() {
+        ValueKind::Int(_) | ValueKind::Bool(_) => "int",
+        ValueKind::Float(_) => "float",
+        ValueKind::Str(_) => "str",
+        ValueKind::None => "NoneType",
+        ValueKind::List(_) => "list",
+        ValueKind::Tuple(_) => "tuple",
+        ValueKind::Dict(_) | ValueKind::DictKeysView(_) | ValueKind::DictValuesView(_) | ValueKind::DictItemsView(_) => "dict",
+        ValueKind::Set(_) => "set",
+        ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_) | ValueKind::BoundMethod { .. } => "function",
+        _ => "object",
     }
 }
 
@@ -233,6 +255,7 @@ fn install_exception_builtins(env: &EnvRef) {
     let runtime_error = make_child("RuntimeError");
     let type_error = make_child("TypeError");
     let value_error = make_child("ValueError");
+    let name_error = make_child("NameError");
     let assertion_error = make_child("AssertionError");
     let recursion_error = make_child("RecursionError");
     let not_implemented_error = make_child("NotImplementedError");
@@ -240,6 +263,7 @@ fn install_exception_builtins(env: &EnvRef) {
     let index_error = make_child("IndexError");
     let key_error = make_child("KeyError");
     let attribute_error = make_child("AttributeError");
+    let overflow_error = make_child("OverflowError");
 
     let mut module = env.borrow_mut();
     module
@@ -254,6 +278,9 @@ fn install_exception_builtins(env: &EnvRef) {
     module
         .values
         .insert("ValueError".to_string(), Value::py_class(value_error));
+    module
+        .values
+        .insert("NameError".to_string(), Value::py_class(name_error));
     module
         .values
         .insert("AssertionError".to_string(), Value::py_class(assertion_error));
@@ -275,6 +302,9 @@ fn install_exception_builtins(env: &EnvRef) {
     module
         .values
         .insert("AttributeError".to_string(), Value::py_class(attribute_error));
+    module
+        .values
+        .insert("OverflowError".to_string(), Value::py_class(overflow_error));
 }
 
 fn key_to_value(key: PyKey) -> Value {
@@ -712,6 +742,14 @@ pub(crate) fn compute_def_bound_mask(
         }
     }
     mask
+}
+
+fn float_to_bigint(f: f64) -> Value {
+    use crate::value::PyBigInt;
+    // Convert via the decimal string representation of the f64's integer value.
+    let s = format!("{:.0}", f);
+    let n: PyBigInt = s.parse().unwrap_or_else(|_| PyBigInt::from(0i64));
+    Value::bigint(n)
 }
 
 fn value_to_float(v: &Value, ctx: &str) -> Result<f64> {

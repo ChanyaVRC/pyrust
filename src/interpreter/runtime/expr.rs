@@ -255,11 +255,17 @@ impl Interpreter {
                     }
                 }
             }
-            BinaryOp::BitAnd => self.bitwise_op(&left, &right, |a, b| a & b),
-            BinaryOp::BitOr  => self.bitwise_op(&left, &right, |a, b| a | b),
-            BinaryOp::BitXor => self.bitwise_op(&left, &right, |a, b| a ^ b),
-            BinaryOp::LShift => self.bitwise_op(&left, &right, |a, b| a << (b & 63)),
-            BinaryOp::RShift => self.bitwise_op(&left, &right, |a, b| a >> (b & 63)),
+            BinaryOp::BitAnd => self.bitwise_op(&left, &right, |a, b| Ok(a & b)),
+            BinaryOp::BitOr  => self.bitwise_op(&left, &right, |a, b| Ok(a | b)),
+            BinaryOp::BitXor => self.bitwise_op(&left, &right, |a, b| Ok(a ^ b)),
+            BinaryOp::LShift => self.bitwise_op(&left, &right, |a, b| {
+                if b < 0 { return Err(PyError::Named("ValueError".to_string(), "negative shift count".to_string())); }
+                Ok(a << (b & 63))
+            }),
+            BinaryOp::RShift => self.bitwise_op(&left, &right, |a, b| {
+                if b < 0 { return Err(PyError::Named("ValueError".to_string(), "negative shift count".to_string())); }
+                Ok(a >> (b & 63))
+            }),
             BinaryOp::In => self.eval_in(right, left),
             BinaryOp::NotIn => Ok(Value::bool_(!self.eval_in(right, left)?.truthy())),
             BinaryOp::Is    => Ok(Value::bool_(values_are_identical(&left, &right))),
@@ -475,7 +481,7 @@ impl Interpreter {
         }
     }
 
-    fn bitwise_op(&self, left: &Value, right: &Value, op: impl Fn(i64, i64) -> i64) -> Result<Value> {
+    fn bitwise_op(&self, left: &Value, right: &Value, op: impl Fn(i64, i64) -> Result<i64>) -> Result<Value> {
         let a = match left.kind() {
             ValueKind::Int(v) => v,
             ValueKind::Bool(b) => if b { 1 } else { 0 },
@@ -486,7 +492,7 @@ impl Interpreter {
             ValueKind::Bool(b) => if b { 1 } else { 0 },
             _ => return Err(PyError::Runtime("bitwise op requires integer".to_string())),
         };
-        Ok(Value::int(op(a, b)))
+        Ok(Value::int(op(a, b)?))
     }
 
     fn eval_binary_speculative(
@@ -632,6 +638,7 @@ fn coerce_numeric(v: Value) -> Value {
 }
 
 fn py_ordering(left: &Value, right: &Value) -> Result<std::cmp::Ordering> {
+    use crate::value::{PyBigInt, PyToPrimitive};
     match (left.kind(), right.kind()) {
         (ValueKind::Int(a), ValueKind::Int(b)) => Ok(a.cmp(&b)),
         (ValueKind::Bool(a), ValueKind::Bool(b)) => Ok(a.cmp(&b)),
@@ -646,6 +653,18 @@ fn py_ordering(left: &Value, right: &Value) -> Result<std::cmp::Ordering> {
         (ValueKind::Float(a), ValueKind::Int(b)) => {
             Ok(a.partial_cmp(&(b as f64)).unwrap_or(std::cmp::Ordering::Equal))
         }
+        (ValueKind::BigInt(a), ValueKind::BigInt(b)) => Ok(a.cmp(b)),
+        (ValueKind::BigInt(a), ValueKind::Int(b)) => Ok((*a).cmp(&PyBigInt::from(b))),
+        (ValueKind::Int(a), ValueKind::BigInt(b)) => Ok(PyBigInt::from(a).cmp(b)),
+        (ValueKind::BigInt(a), ValueKind::Float(b)) => Ok(a
+            .to_f64()
+            .and_then(|af| af.partial_cmp(&b))
+            .unwrap_or(std::cmp::Ordering::Equal)),
+        (ValueKind::Float(a), ValueKind::BigInt(b)) => Ok(b
+            .to_f64()
+            .and_then(|bf| a.partial_cmp(&bf))
+            .map(|o| o.reverse())
+            .unwrap_or(std::cmp::Ordering::Equal)),
         (ValueKind::Str(a), ValueKind::Str(b)) => Ok(a.cmp(b)),
         (ValueKind::List(a), ValueKind::List(b)) => {
             for (x, y) in a.iter().zip(b.iter()) {
