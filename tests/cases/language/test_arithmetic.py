@@ -38,3 +38,13 @@ print("hex", 0xFF)
 print("oct", 0o77)
 print("bin", 0b1010)
 print("underscore", 1_000_000)
+
+# Negative shift counts — Issue #90/#91
+try:
+    x = 1 << -1
+except ValueError:
+    print("lshift-neg", "ValueError")
+try:
+    x = 32 >> -1
+except ValueError:
+    print("rshift-neg", "ValueError")
