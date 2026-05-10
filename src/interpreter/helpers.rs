@@ -725,7 +725,7 @@ fn collect_assign_target_names(
 
 pub(crate) fn compute_def_bound_mask(
     params: &[crate::ast::FunctionParam],
-    local_index: &HashMap<String, usize>,
+    local_index: &HashMap<String, crate::bytecode::Reg>,
 ) -> u64 {
     let mut mask: u64 = 0;
     // Only parameters are guaranteed bound at function entry — they are set

@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use crate::ast::{AssignTarget, BinaryOp, CmpOp, Expr, FunctionParam, Stmt, UnaryOp};
 use crate::bytecode::{CellVar, FnCode, FnProto, Insn, Reg};
+use crate::error::PyError;
 use crate::value::{Value, ValueKind};
 
 /// Compile a top-level script body.  All script-level names are locals.
@@ -11,9 +12,9 @@ use crate::value::{Value, ValueKind};
 /// `Insn::PrintExpr` instead of discarding the result.
 pub fn compile_script(
     stmts: &[Stmt],
-    local_index: Rc<HashMap<String, usize>>,
+    local_index: Rc<HashMap<String, Reg>>,
     repl_mode: bool,
-) -> Option<FnCode> {
+) -> Result<FnCode, PyError> {
     // Script-level code cannot have nonlocal, and nothing captures script
     // locals via nonlocal from a nested scope at this level.
     let cell_vars = collect_cell_vars(stmts, &local_index);
@@ -31,7 +32,7 @@ pub fn compile_script(
     } else {
         c.compile_block(stmts);
     }
-    c.finish()
+    c.finish().map_err(PyError::Runtime)
 }
 
 // ─── Cell-variable collection ─────────────────────────────────────────────────
@@ -39,7 +40,7 @@ pub fn compile_script(
 /// Collect names from `local_index` that are referenced as `nonlocal` in any
 /// directly nested `Stmt::Def` body.  These must be stored in the env (not
 /// registers) so that inner closures can share them.
-fn collect_cell_vars(body: &[Stmt], local_index: &HashMap<String, usize>) -> Vec<CellVar> {
+fn collect_cell_vars(body: &[Stmt], local_index: &HashMap<String, Reg>) -> Vec<CellVar> {
     let mut cells: HashSet<String> = HashSet::new();
     collect_cell_vars_in(body, local_index, &mut cells);
     cells.into_iter().collect()
@@ -47,7 +48,7 @@ fn collect_cell_vars(body: &[Stmt], local_index: &HashMap<String, usize>) -> Vec
 
 fn collect_cell_vars_in(
     body: &[Stmt],
-    local_index: &HashMap<String, usize>,
+    local_index: &HashMap<String, Reg>,
     cells: &mut HashSet<String>,
 ) {
     for stmt in body {
@@ -171,7 +172,7 @@ fn collect_cell_vars_in(
 /// live in the env (not registers) and are accessible via `LoadGlobal`.
 fn collect_class_method_outer_refs(
     class_body: &[Stmt],
-    local_index: &HashMap<String, usize>,
+    local_index: &HashMap<String, Reg>,
     cells: &mut HashSet<String>,
 ) {
     // Collect names assigned at class level (they shadow outer names for the
@@ -746,7 +747,7 @@ struct LoopCtx {
 }
 
 struct Compiler {
-    local_index: Rc<HashMap<String, usize>>,
+    local_index: Rc<HashMap<String, Reg>>,
     cell_vars: HashSet<String>,
     insns: Vec<Insn>,
     consts: Vec<Value>,
@@ -760,6 +761,7 @@ struct Compiler {
     max_reg: Reg,
     loops: Vec<LoopCtx>,
     failed: bool,
+    error_msg: Option<String>,
     def_set: u64,
     fn_protos: Vec<FnProto>,
     /// Names of pure (side-effect-free) functions defined in this scope.
@@ -768,7 +770,7 @@ struct Compiler {
 
 impl Compiler {
     fn new(
-        local_index: Rc<HashMap<String, usize>>,
+        local_index: Rc<HashMap<String, Reg>>,
         def_bound_mask: u64,
         cell_vars: Vec<CellVar>,
     ) -> Self {
@@ -776,7 +778,7 @@ impl Compiler {
         let cell_set: HashSet<String> = cell_vars.into_iter().collect();
         // base_temp must cover ALL local_index slots (including cell vars) so
         // that temp registers never overlap with local-variable slot numbers.
-        let base_temp = n as Reg;
+        let base_temp = Reg::try_from(n).unwrap_or(Reg::MAX);
 
         Self {
             local_index,
@@ -791,12 +793,17 @@ impl Compiler {
             iter_depth: 0,
             max_iter: 0,
             max_reg: if n > 0 {
-                (n as Reg).saturating_sub(1)
+                Reg::try_from(n).unwrap_or(Reg::MAX).saturating_sub(1)
             } else {
                 0
             },
             loops: Vec::new(),
-            failed: n > 255,
+            failed: n > Reg::MAX as usize,
+            error_msg: if n > Reg::MAX as usize {
+                Some(format!("too many local variables (max {})", Reg::MAX))
+            } else {
+                None
+            },
             def_set: def_bound_mask,
             fn_protos: Vec::new(),
             pure_locals: HashSet::new(),
@@ -833,6 +840,9 @@ impl Compiler {
         }
         if self.names.len() >= u16::MAX as usize {
             self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg = Some(format!("too many distinct names (max {})", u16::MAX));
+            }
             return 0;
         }
         let idx = self.names.len() as u16;
@@ -864,6 +874,9 @@ impl Compiler {
                 }
                 if self.consts.len() >= u16::MAX as usize {
                     self.failed = true;
+                    if self.error_msg.is_none() {
+                        self.error_msg = Some(format!("too many constants (max {})", u16::MAX));
+                    }
                     return 0;
                 }
                 let idx = self.consts.len() as u16;
@@ -880,6 +893,9 @@ impl Compiler {
         }
         if self.consts.len() >= u16::MAX as usize {
             self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg = Some(format!("too many constants (max {})", u16::MAX));
+            }
             return 0;
         }
         let idx = self.consts.len() as u16;
@@ -891,6 +907,9 @@ impl Compiler {
         let r = self.next_temp;
         if r == Reg::MAX {
             self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg = Some(format!("too many temporaries (max {})", Reg::MAX));
+            }
             return 0;
         }
         self.next_temp += 1;
@@ -948,7 +967,14 @@ impl Compiler {
             | Insn::CmpJumpIfTrueConst(_, _, _, off)
             | Insn::ForCountReg(_, _, _, _, off)
             | Insn::ForCountConst(_, _, _, _, off) => *off = offset,
-            _ => self.failed = true,
+            _ => {
+                self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some(
+                        "internal compiler error: patch_jump on non-jump instruction".to_string(),
+                    );
+                }
+            }
         }
     }
 
@@ -1009,7 +1035,7 @@ impl Compiler {
         if self.is_cell(name) {
             return None;
         }
-        self.local_index.get(name).copied().map(|i| i as Reg)
+        self.local_index.get(name).copied()
     }
 
     fn compile_block(&mut self, stmts: &[Stmt]) {
@@ -1021,16 +1047,26 @@ impl Compiler {
         }
     }
 
-    fn finish(self) -> Option<FnCode> {
+    fn finish(self) -> Result<FnCode, String> {
         if self.failed {
-            return None;
+            return Err(self
+                .error_msg
+                .unwrap_or_else(|| "compilation failed".to_string()));
         }
         let num_regs = if self.max_reg >= self.base_temp || self.base_temp == 0 {
             self.max_reg.saturating_add(1)
         } else {
             self.base_temp
         };
-        Some(FnCode {
+        // Guard against pathological register counts that would OOM at runtime.
+        // Each register slot is one Option<Value>, so 1M slots ~= 8 MB per call frame.
+        const MAX_REGS: u32 = 1 << 20;
+        if num_regs > MAX_REGS {
+            return Err(format!(
+                "function uses too many registers ({num_regs}); max is {MAX_REGS}"
+            ));
+        }
+        Ok(FnCode {
             insns: self.insns,
             consts: self.consts,
             names: self.names,
@@ -1088,6 +1124,9 @@ impl Compiler {
             Stmt::Break => {
                 if self.loops.is_empty() {
                     self.failed = true;
+                    if self.error_msg.is_none() {
+                        self.error_msg = Some("'break' outside loop".to_string());
+                    }
                     return;
                 }
                 let idx = self.emit(Insn::Jump(0));
@@ -1097,6 +1136,9 @@ impl Compiler {
             Stmt::Continue => {
                 if self.loops.is_empty() {
                     self.failed = true;
+                    if self.error_msg.is_none() {
+                        self.error_msg = Some("'continue' outside loop".to_string());
+                    }
                     return;
                 }
                 let last = self.loops.len() - 1;
@@ -1331,14 +1373,17 @@ impl Compiler {
                 }
 
                 let src = self.compile_expr(expr);
-                let n = targets.len() as u8;
+                let n = targets.len() as u32;
                 if n == 0 {
                     self.free_temp(src);
                     return;
                 }
                 let base = self.next_temp;
-                if base as usize + n as usize > 256 {
+                if base.checked_add(n).is_none() {
                     self.failed = true;
+                    if self.error_msg.is_none() {
+                        self.error_msg = Some(format!("too many unpack targets ({})", n));
+                    }
                     return;
                 }
                 self.next_temp = base + n;
@@ -1347,32 +1392,32 @@ impl Compiler {
                 }
                 self.emit(Insn::Unpack(base, src, n));
                 self.free_temp(src);
-                for (i, t) in targets.iter().enumerate() {
+                for (i, t) in (0u32..).zip(targets.iter()) {
                     match t {
                         AssignTarget::Name(name) => {
                             if let Some(reg) = self.local_reg(name) {
-                                self.emit(Insn::Move(reg, base + i as u8));
+                                self.emit(Insn::Move(reg, base + i));
                             } else {
                                 let name_idx = self.intern_name(name);
-                                self.emit(Insn::StoreGlobal(name_idx, base + i as u8));
+                                self.emit(Insn::StoreGlobal(name_idx, base + i));
                             }
                         }
                         AssignTarget::Attr(obj_expr, attr) => {
                             let obj = self.compile_expr(obj_expr);
                             let name_idx = self.intern_name(attr);
-                            self.emit(Insn::SetAttr(obj, name_idx, base + i as u8));
+                            self.emit(Insn::SetAttr(obj, name_idx, base + i));
                             self.free_temp(obj);
                         }
                         AssignTarget::Index(obj_expr, idx_expr) => {
                             let obj = self.compile_expr(obj_expr);
                             let idx = self.compile_expr(idx_expr);
-                            self.emit(Insn::SetItem(obj, idx, base + i as u8));
+                            self.emit(Insn::SetItem(obj, idx, base + i));
                             self.free_temp(idx);
                             self.free_temp(obj);
                         }
                         AssignTarget::Tuple(_) => {
                             // Nested tuple unpack — compile recursively
-                            let tmp = base + i as u8;
+                            let tmp = base + i;
                             self.compile_assign(t, &Expr::Var(format!("__unpack_{}", tmp)));
                         }
                     }
@@ -1462,6 +1507,11 @@ impl Compiler {
             }
             AssignTarget::Tuple(_) => {
                 self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some(
+                        "'tuple' is an illegal expression for augmented assignment".to_string(),
+                    );
+                }
             }
         }
     }
@@ -1884,10 +1934,13 @@ impl Compiler {
                 // local case: for_dst == var_reg, already written — no Move needed
             }
             AssignTarget::Tuple(targets) => {
-                let n = targets.len() as u8;
+                let n = targets.len() as u32;
                 let base = for_dst + 1;
-                if base as usize + n as usize > 256 {
+                if base.checked_add(n).is_none() {
                     self.failed = true;
+                    if self.error_msg.is_none() {
+                        self.error_msg = Some(format!("too many unpack targets ({})", n));
+                    }
                     return;
                 }
                 self.next_temp = base + n;
@@ -1895,18 +1948,22 @@ impl Compiler {
                     self.max_reg = self.next_temp - 1;
                 }
                 self.emit(Insn::Unpack(base, for_dst, n));
-                for (i, t) in targets.iter().enumerate() {
+                for (i, t) in (0u32..).zip(targets.iter()) {
                     match t {
                         AssignTarget::Name(name) => {
                             if let Some(reg) = self.local_reg(name) {
-                                self.emit(Insn::Move(reg, base + i as u8));
+                                self.emit(Insn::Move(reg, base + i));
                             } else {
                                 let name_idx = self.intern_name(name);
-                                self.emit(Insn::StoreGlobal(name_idx, base + i as u8));
+                                self.emit(Insn::StoreGlobal(name_idx, base + i));
                             }
                         }
                         _ => {
                             self.failed = true;
+                            if self.error_msg.is_none() {
+                                self.error_msg =
+                                    Some("unsupported for-loop unpack target".to_string());
+                            }
                             return;
                         }
                     }
@@ -1915,6 +1972,9 @@ impl Compiler {
             }
             _ => {
                 self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some("unsupported for-loop target".to_string());
+                }
                 return;
             }
         }
@@ -2055,6 +2115,9 @@ impl Compiler {
             }
             _ => {
                 self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some("unsupported delete target".to_string());
+                }
             }
         }
     }
@@ -2111,8 +2174,8 @@ impl Compiler {
 
         // Build a compact local_index for the inner function.
         // Parameters come first (preserving declaration order), then body locals.
-        let mut inner_index: HashMap<String, usize> = HashMap::new();
-        let mut slot = 0usize;
+        let mut inner_index: HashMap<String, Reg> = HashMap::new();
+        let mut slot: Reg = 0;
         for param in params {
             if inner_local.contains(&param.name) {
                 inner_index.insert(param.name.clone(), slot);
@@ -2125,7 +2188,7 @@ impl Compiler {
                 slot += 1;
             }
         }
-        let inner_index_rc: Rc<HashMap<String, usize>> = Rc::new(inner_index);
+        let inner_index_rc: Rc<HashMap<String, Reg>> = Rc::new(inner_index);
 
         let def_bound = crate::interpreter::compute_def_bound_mask(params, &inner_index_rc);
         let is_pure = crate::interpreter::is_pure_body(body);
@@ -2143,15 +2206,22 @@ impl Compiler {
         );
         sub.compile_block(body);
         let inner_code = match sub.finish() {
-            Some(c) => c,
-            None => {
+            Ok(c) => c,
+            Err(msg) => {
                 self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some(msg);
+                }
                 return;
             }
         };
 
         if self.fn_protos.len() >= 256 {
             self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg =
+                    Some("too many nested functions in one scope (max 256)".to_string());
+            }
             return;
         }
         let proto_idx = self.fn_protos.len() as u8;
@@ -2179,20 +2249,23 @@ impl Compiler {
         let defs_base = self.next_temp;
         if defs_n > 0 {
             // Reserve slots
-            if self.next_temp as usize + defs_n as usize > 256 {
+            if self.next_temp.checked_add(Reg::from(defs_n)).is_none() {
                 self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some("too many default-value registers".to_string());
+                }
                 return;
             }
-            self.next_temp += defs_n;
+            self.next_temp += Reg::from(defs_n);
             if self.next_temp - 1 > self.max_reg {
                 self.max_reg = self.next_temp - 1;
             }
-            for (slot_i, param_i) in defaults.iter().enumerate() {
+            for (slot_i, param_i) in (0u32..).zip(defaults.iter()) {
                 let def_expr = params[*param_i].default.as_ref().unwrap();
                 let saved = self.next_temp;
                 let r = self.compile_expr(def_expr);
-                if r != defs_base + slot_i as u8 {
-                    self.emit(Insn::Move(defs_base + slot_i as u8, r));
+                if r != defs_base + slot_i {
+                    self.emit(Insn::Move(defs_base + slot_i, r));
                 }
                 self.next_temp = saved;
             }
@@ -2208,8 +2281,12 @@ impl Compiler {
         let mut val_reg = dst;
         for deco_expr in decorators.iter().rev() {
             let frame = self.next_temp;
-            if frame as usize + 2 > 256 {
+            if frame.checked_add(2).is_none() {
                 self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg =
+                        Some("too many registers for decorator application".to_string());
+                }
                 return;
             }
             self.next_temp = frame + 2;
@@ -2241,11 +2318,11 @@ impl Compiler {
         let empty_nonlocal: Rc<HashSet<String>> = Rc::new(HashSet::new());
         let body_local =
             crate::interpreter::collect_local_names(&[], body, &empty_global, &empty_nonlocal);
-        let mut body_index: HashMap<String, usize> = HashMap::new();
-        for (i, loc) in body_local.iter().enumerate() {
+        let mut body_index: HashMap<String, Reg> = HashMap::new();
+        for (i, loc) in (0u32..).zip(body_local.iter()) {
             body_index.insert(loc.clone(), i);
         }
-        let body_index_rc: Rc<HashMap<String, usize>> = Rc::new(body_index);
+        let body_index_rc: Rc<HashMap<String, Reg>> = Rc::new(body_index);
         let cell_vars = collect_cell_vars(body, &body_index_rc);
 
         let mut sub = Compiler::new(Rc::clone(&body_index_rc), 0, cell_vars);
@@ -2253,14 +2330,21 @@ impl Compiler {
         // Add implicit ReturnNone at end of class body
         sub.emit(Insn::ReturnNone);
         let body_code = match sub.finish() {
-            Some(c) => c,
-            None => {
+            Ok(c) => c,
+            Err(msg) => {
                 self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some(msg);
+                }
                 return;
             }
         };
         if self.fn_protos.len() >= 256 {
             self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg =
+                    Some("too many nested classes/functions in one scope (max 256)".to_string());
+            }
             return;
         }
         let proto_idx = self.fn_protos.len() as u8;
@@ -2281,19 +2365,22 @@ impl Compiler {
         let bases_n = bases.len() as u8;
         let bases_base = self.next_temp;
         if bases_n > 0 {
-            if self.next_temp as usize + bases_n as usize > 256 {
+            if self.next_temp.checked_add(Reg::from(bases_n)).is_none() {
                 self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some("too many base class registers".to_string());
+                }
                 return;
             }
-            self.next_temp += bases_n;
+            self.next_temp += Reg::from(bases_n);
             if self.next_temp - 1 > self.max_reg {
                 self.max_reg = self.next_temp - 1;
             }
-            for (i, base_expr) in bases.iter().enumerate() {
+            for (i, base_expr) in (0u32..).zip(bases.iter()) {
                 let saved = self.next_temp;
                 let r = self.compile_expr(base_expr);
-                if r != bases_base + i as u8 {
-                    self.emit(Insn::Move(bases_base + i as u8, r));
+                if r != bases_base + i {
+                    self.emit(Insn::Move(bases_base + i, r));
                 }
                 self.next_temp = saved;
             }
@@ -2311,8 +2398,12 @@ impl Compiler {
         let mut val_reg = dst;
         for deco_expr in decorators.iter().rev() {
             let frame = self.next_temp;
-            if frame as usize + 2 > 256 {
+            if frame.checked_add(2).is_none() {
                 self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg =
+                        Some("too many registers for decorator application".to_string());
+                }
                 return;
             }
             self.next_temp = frame + 2;
@@ -2559,8 +2650,11 @@ impl Compiler {
         // ctx.__exit__(None, None, None)
         let exit_name_idx = self.intern_name("__exit__");
         let exit_frame = self.next_temp;
-        if exit_frame as usize + 4 > 256 {
+        if exit_frame.checked_add(4).is_none() {
             self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg = Some("too many registers for 'with' statement".to_string());
+            }
             return;
         }
         self.next_temp = exit_frame + 4;
@@ -2581,8 +2675,12 @@ impl Compiler {
         self.emit(Insn::LoadExc(exc_tmp));
         // ctx.__exit__(type, exc, None)
         let exit_frame2 = self.next_temp;
-        if exit_frame2 as usize + 4 > 256 {
+        if exit_frame2.checked_add(4).is_none() {
             self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg =
+                    Some("too many registers for 'with' exception handler".to_string());
+            }
             return;
         }
         self.next_temp = exit_frame2 + 4;
@@ -2879,13 +2977,16 @@ impl Compiler {
                 // Best approach: use a "set literal" call: set([items...])
                 let n = items.len() as u8;
                 let frame = self.next_temp;
-                if frame as usize + 1 + n as usize > 256 {
+                if frame.checked_add(1 + Reg::from(n)).is_none() {
                     self.failed = true;
+                    if self.error_msg.is_none() {
+                        self.error_msg = Some("too many elements in set literal".to_string());
+                    }
                     return 0;
                 }
-                self.next_temp = frame + 1 + n;
-                if frame + n > self.max_reg {
-                    self.max_reg = frame + n;
+                self.next_temp = frame + 1 + Reg::from(n);
+                if frame + Reg::from(n) > self.max_reg {
+                    self.max_reg = frame + Reg::from(n);
                 }
                 let set_name_idx = self.intern_name("set");
                 self.emit(Insn::LoadGlobal(frame, set_name_idx));
@@ -2893,16 +2994,19 @@ impl Compiler {
                 let list_r = frame + 1;
                 let saved = self.next_temp;
                 let list_base = self.next_temp;
-                if list_base as usize + n as usize > 256 {
+                if list_base.checked_add(Reg::from(n)).is_none() {
                     self.failed = true;
+                    if self.error_msg.is_none() {
+                        self.error_msg = Some("too many elements in set literal".to_string());
+                    }
                     return 0;
                 }
-                self.next_temp = list_base + n;
-                if list_base + n - 1 > self.max_reg {
-                    self.max_reg = list_base + n - 1;
+                self.next_temp = list_base + Reg::from(n);
+                if list_base + Reg::from(n) - 1 > self.max_reg {
+                    self.max_reg = list_base + Reg::from(n) - 1;
                 }
-                for (i, item) in items.iter().enumerate() {
-                    let slot = list_base + i as u8;
+                for (i, item) in (0u32..).zip(items.iter()) {
+                    let slot = list_base + i;
                     let ns = self.next_temp;
                     let r = self.compile_expr(item);
                     if r != slot {
@@ -2923,18 +3027,21 @@ impl Compiler {
             Expr::Dict(pairs) => {
                 let n = pairs.len() as u8;
                 let base = self.next_temp;
-                let slots_needed = (n as usize).saturating_mul(2);
-                if base as usize + slots_needed > 256 {
+                let slots_needed = Reg::from(n).saturating_mul(2);
+                if base.checked_add(slots_needed).is_none() {
                     self.failed = true;
+                    if self.error_msg.is_none() {
+                        self.error_msg = Some("too many entries in dict literal".to_string());
+                    }
                     return 0;
                 }
-                self.next_temp = base + n.saturating_mul(2);
+                self.next_temp = base + Reg::from(n).saturating_mul(2);
                 if self.next_temp > 0 && self.next_temp - 1 > self.max_reg {
                     self.max_reg = self.next_temp - 1;
                 }
-                for (i, (key_expr, val_expr)) in pairs.iter().enumerate() {
-                    let k_slot = base + (i * 2) as u8;
-                    let v_slot = base + (i * 2 + 1) as u8;
+                for (i, (key_expr, val_expr)) in (0u32..).zip(pairs.iter()) {
+                    let k_slot = base + i * 2;
+                    let v_slot = base + i * 2 + 1;
                     let saved = self.next_temp;
                     let insn_before = self.insns.len();
                     let kr = self.compile_expr(key_expr);
@@ -3013,9 +3120,12 @@ impl Compiler {
 
         let argc = args.len() as u8;
         let func_reg = self.next_temp;
-        let frame_top = func_reg.wrapping_add(1).wrapping_add(argc);
+        let frame_top = func_reg.wrapping_add(1).wrapping_add(Reg::from(argc));
         if frame_top < func_reg {
             self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg = Some("call frame register overflow".to_string());
+            }
             return 0;
         }
         self.next_temp = frame_top;
@@ -3025,8 +3135,8 @@ impl Compiler {
         let saved = self.next_temp;
         self.compile_expr_into(func, func_reg);
         self.next_temp = saved;
-        for (i, arg) in args.iter().enumerate() {
-            let arg_reg = func_reg + 1 + i as u8;
+        for (i, arg) in (0u32..).zip(args.iter()) {
+            let arg_reg = func_reg + 1 + i;
             let saved = self.next_temp;
             let insn_before = self.insns.len();
             let r = self.compile_expr(&arg.value);
@@ -3067,9 +3177,12 @@ impl Compiler {
             if let Some(local) = self.local_reg(name) {
                 let dst = self.next_temp;
                 let abase = dst.wrapping_add(1);
-                let frame_top = abase.wrapping_add(nargs);
+                let frame_top = abase.wrapping_add(Reg::from(nargs));
                 if frame_top < dst {
                     self.failed = true;
+                    if self.error_msg.is_none() {
+                        self.error_msg = Some("call frame register overflow".to_string());
+                    }
                     return 0;
                 }
                 self.next_temp = frame_top;
@@ -3081,9 +3194,12 @@ impl Compiler {
                 // cell / nonlocal — must load via env first
                 let o = self.next_temp;
                 let abase = o.wrapping_add(1);
-                let frame_top = abase.wrapping_add(nargs);
+                let frame_top = abase.wrapping_add(Reg::from(nargs));
                 if frame_top < o {
                     self.failed = true;
+                    if self.error_msg.is_none() {
+                        self.error_msg = Some("call frame register overflow".to_string());
+                    }
                     return 0;
                 }
                 self.next_temp = frame_top;
@@ -3095,9 +3211,12 @@ impl Compiler {
         } else {
             let o = self.next_temp;
             let abase = o.wrapping_add(1);
-            let frame_top = abase.wrapping_add(nargs);
+            let frame_top = abase.wrapping_add(Reg::from(nargs));
             if frame_top < o {
                 self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some("call frame register overflow".to_string());
+                }
                 return 0;
             }
             self.next_temp = frame_top;
@@ -3113,8 +3232,8 @@ impl Compiler {
             self.next_temp = saved;
         }
 
-        for (i, arg) in args.iter().enumerate() {
-            let arg_reg = args_base + i as u8;
+        for (i, arg) in (0u32..).zip(args.iter()) {
+            let arg_reg = args_base + i;
             let saved = self.next_temp;
             let insn_before = self.insns.len();
             let r = self.compile_expr(&arg.value);
@@ -3264,8 +3383,11 @@ impl Compiler {
         let pos_list_reg = self.alloc_temp();
         // Use: pos_list = []  → then extend/append
         let empty_list_base = self.next_temp;
-        if empty_list_base as usize + 1 > 256 {
+        if empty_list_base.checked_add(1).is_none() {
             self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg = Some("call frame register overflow".to_string());
+            }
             return 0;
         }
         self.next_temp = empty_list_base + 1;
@@ -3277,8 +3399,11 @@ impl Compiler {
         // Build kwargs dict
         let kw_dict_reg = self.alloc_temp();
         let empty_dict_base = self.next_temp;
-        if empty_dict_base as usize + 1 > 256 {
+        if empty_dict_base.checked_add(1).is_none() {
             self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg = Some("call frame register overflow".to_string());
+            }
             return 0;
         }
         self.next_temp = empty_dict_base + 1;
@@ -3360,16 +3485,22 @@ impl Compiler {
     fn compile_collection(&mut self, items: &[Expr], is_tuple: bool) -> Reg {
         let n = items.len() as u8;
         let base = self.next_temp;
-        if base as usize + n as usize > 256 {
+        if base.checked_add(Reg::from(n)).is_none() {
             self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg = Some(format!(
+                    "too many elements in {} literal",
+                    if is_tuple { "tuple" } else { "list" }
+                ));
+            }
             return 0;
         }
-        self.next_temp = base + n;
-        if n > 0 && base + n - 1 > self.max_reg {
-            self.max_reg = base + n - 1;
+        self.next_temp = base + Reg::from(n);
+        if n > 0 && base + Reg::from(n) - 1 > self.max_reg {
+            self.max_reg = base + Reg::from(n) - 1;
         }
-        for (i, item) in items.iter().enumerate() {
-            let slot = base + i as u8;
+        for (i, item) in (0u32..).zip(items.iter()) {
+            let slot = base + i;
             let saved = self.next_temp;
             let insn_before = self.insns.len();
             let r = self.compile_expr(item);

@@ -4,7 +4,7 @@ enum IterState {
     Range { cur: i64, stop: i64, step: i64 },
     /// Lazy: reads directly from the source register on each ForIter call.
     /// Avoids the O(n) upfront clone that Materialized would require for List/Tuple.
-    Indexed { reg: u8, pos: usize },
+    Indexed { reg: crate::bytecode::Reg, pos: usize },
 }
 
 impl Interpreter {
@@ -213,24 +213,7 @@ impl Interpreter {
                     if fast { continue; }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = code.consts[*const_idx as usize].clone();
-                    let result = match (l.kind(), op, r.kind()) {
-                        (ValueKind::Int(a), BinaryOp::Add, ValueKind::Int(b)) => {
-                            Value::int(a.wrapping_add(b))
-                        }
-                        (ValueKind::Int(a), BinaryOp::Sub, ValueKind::Int(b)) => {
-                            Value::int(a.wrapping_sub(b))
-                        }
-                        (ValueKind::Int(a), BinaryOp::Mul, ValueKind::Int(b)) => {
-                            Value::int(a.wrapping_mul(b))
-                        }
-                        (ValueKind::Int(a), BinaryOp::Eq, ValueKind::Int(b)) => Value::bool_(a == b),
-                        (ValueKind::Int(a), BinaryOp::Ne, ValueKind::Int(b)) => Value::bool_(a != b),
-                        (ValueKind::Int(a), BinaryOp::Lt, ValueKind::Int(b)) => Value::bool_(a < b),
-                        (ValueKind::Int(a), BinaryOp::Le, ValueKind::Int(b)) => Value::bool_(a <= b),
-                        (ValueKind::Int(a), BinaryOp::Gt, ValueKind::Int(b)) => Value::bool_(a > b),
-                        (ValueKind::Int(a), BinaryOp::Ge, ValueKind::Int(b)) => Value::bool_(a >= b),
-                        _ => vm_try!(self.eval_binary(l, *op, r)),
-                    };
+                    let result = vm_try!(self.eval_binary(l, *op, r));
                     regs[*dst as usize] = Some(result);
                 }
                 Insn::UnaryOp(dst, op, src) => {
@@ -639,14 +622,10 @@ impl Interpreter {
                     // allocation in the common (non-recursive) case.
                     let mut buf = std::mem::take(&mut self.call_arg_buf);
                     buf.clear();
-                    for i in 0..*argc as usize {
+                    for i in 0..crate::bytecode::Reg::from(*argc) {
                         buf.push(ExpandedCallArg {
                             name: None,
-                            value: vm_try!(vm_read(
-                                regs,
-                                *func_reg + 1 + i as u8,
-                                num_locals
-                            )),
+                            value: vm_try!(vm_read(regs, *func_reg + 1 + i, num_locals)),
                         });
                     }
                     let call_result = self.call_function_expanded(func_val, &buf);
@@ -701,14 +680,10 @@ impl Interpreter {
                     let func_val = vm_try!(vm_read(regs, *func_reg, num_locals));
                     let mut buf = std::mem::take(&mut self.call_arg_buf);
                     buf.clear();
-                    for i in 0..*argc as usize {
+                    for i in 0..crate::bytecode::Reg::from(*argc) {
                         buf.push(ExpandedCallArg {
                             name: None,
-                            value: vm_try!(vm_read(
-                                regs,
-                                *func_reg + 1 + i as u8,
-                                num_locals
-                            )),
+                            value: vm_try!(vm_read(regs, *func_reg + 1 + i, num_locals)),
                         });
                     }
                     let call_result = self.call_function_expanded(func_val, &buf);
@@ -717,12 +692,12 @@ impl Interpreter {
                 }
 
                 Insn::CallMethod { dst, obj, name_idx, args_base, nargs } => {
-                    let r = self.exec_call_method(regs, num_locals as u8, *dst, *obj, *name_idx, *args_base, *nargs, code);
+                    let r = self.exec_call_method(regs, num_locals, *dst, *obj, *name_idx, *args_base, *nargs, code);
                     regs[*dst as usize] = Some(vm_try!(r));
                 }
 
                 Insn::CallMethodExpanded { dst, obj, name_idx, pos_list, kw_dict } => {
-                    let r = self.exec_call_method_expanded(regs, num_locals as u8, *dst, *obj, *name_idx, *pos_list, *kw_dict, code);
+                    let r = self.exec_call_method_expanded(regs, num_locals, *dst, *obj, *name_idx, *pos_list, *kw_dict, code);
                     regs[*dst as usize] = Some(vm_try!(r));
                 }
 
@@ -737,25 +712,23 @@ impl Interpreter {
                 // ── Collection builders ──────────────────────────────────
                 Insn::BuildList(dst, base, n) => {
                     let mut items: Vec<Value> = Vec::with_capacity(*n as usize);
-                    for i in 0..*n as usize {
-                        items.push(vm_try!(vm_read(regs, *base + i as u8, num_locals)));
+                    for i in 0..crate::bytecode::Reg::from(*n) {
+                        items.push(vm_try!(vm_read(regs, *base + i, num_locals)));
                     }
                     regs[*dst as usize] = Some(Value::list(items));
                 }
                 Insn::BuildTuple(dst, base, n) => {
                     let mut items = Vec::with_capacity(*n as usize);
-                    for i in 0..*n as usize {
-                        items.push(vm_try!(vm_read(regs, *base + i as u8, num_locals)));
+                    for i in 0..crate::bytecode::Reg::from(*n) {
+                        items.push(vm_try!(vm_read(regs, *base + i, num_locals)));
                     }
                     regs[*dst as usize] = Some(Value::tuple(items));
                 }
                 Insn::BuildDict(dst, base, n) => {
                     let mut dict = indexmap::IndexMap::new();
-                    for i in 0..*n as usize {
-                        let k_val =
-                            vm_try!(vm_read(regs, *base + (i * 2) as u8, num_locals));
-                        let v_val =
-                            vm_try!(vm_read(regs, *base + (i * 2 + 1) as u8, num_locals));
+                    for i in 0..crate::bytecode::Reg::from(*n) {
+                        let k_val = vm_try!(vm_read(regs, *base + i * 2, num_locals));
+                        let v_val = vm_try!(vm_read(regs, *base + i * 2 + 1, num_locals));
                         let key = vm_try!(k_val.to_key().ok_or_else(|| {
                             PyError::Runtime("unhashable type in dict key".to_string())
                         }));
@@ -998,7 +971,7 @@ impl Interpreter {
                     let is_pure = proto.is_pure;
 
                     let mut params = Vec::new();
-                    let mut def_slot = 0u8;
+                    let mut def_slot = 0u32;
                     for i in 0..param_names.len() {
                         let default = if param_has_default[i] {
                             let v =
@@ -1050,7 +1023,7 @@ impl Interpreter {
                     vm_try!(self.run_bytecode(&class_code, &mut class_regs));
                     let mut attrs = HashMap::new();
                     for (attr_name, &slot) in local_index.iter() {
-                        if let Some(val) = class_regs.get(slot).and_then(|v| v.clone()) {
+                        if let Some(val) = class_regs.get(slot as usize).and_then(|v| v.clone()) {
                             attrs.insert(attr_name.clone(), val);
                         }
                     }
@@ -1094,18 +1067,18 @@ impl Interpreter {
     fn exec_call_method(
         &mut self,
         regs: &mut Vec<Option<Value>>,
-        num_locals: u8,
-        _dst: u8,
-        obj: u8,
+        num_locals: crate::bytecode::Reg,
+        _dst: crate::bytecode::Reg,
+        obj: crate::bytecode::Reg,
         name_idx: u16,
-        args_base: u8,
+        args_base: crate::bytecode::Reg,
         nargs: u8,
         code: &crate::bytecode::FnCode,
     ) -> Result<Value> {
         let method = code.names[name_idx as usize].clone();
         let mut args: Vec<Value> = Vec::with_capacity(nargs as usize);
-        for i in 0..nargs as usize {
-            args.push(vm_read(regs, args_base + i as u8, num_locals)?);
+        for i in 0..crate::bytecode::Reg::from(nargs) {
+            args.push(vm_read(regs, args_base + i, num_locals)?);
         }
         // Check if obj is a List, Dict, Tuple, or Str via kind()
         let obj_kind_tag = regs[obj as usize].as_ref().map(|v| match v.kind() {
@@ -1178,12 +1151,12 @@ impl Interpreter {
     fn exec_call_method_expanded(
         &mut self,
         regs: &mut Vec<Option<Value>>,
-        num_locals: u8,
-        _dst: u8,
-        obj: u8,
+        num_locals: crate::bytecode::Reg,
+        _dst: crate::bytecode::Reg,
+        obj: crate::bytecode::Reg,
         name_idx: u16,
-        pos_list: u8,
-        kw_dict: u8,
+        pos_list: crate::bytecode::Reg,
+        kw_dict: crate::bytecode::Reg,
         code: &crate::bytecode::FnCode,
     ) -> Result<Value> {
         let method = code.names[name_idx as usize].clone();
@@ -1320,7 +1293,7 @@ impl Interpreter {
     }
 }
 
-fn vm_read(regs: &[Option<Value>], reg: u8, num_locals: u8) -> crate::interpreter::Result<Value> {
+fn vm_read(regs: &[Option<Value>], reg: crate::bytecode::Reg, num_locals: crate::bytecode::Reg) -> crate::interpreter::Result<Value> {
     match regs[reg as usize].clone() {
         Some(v) => Ok(v),
         None => {

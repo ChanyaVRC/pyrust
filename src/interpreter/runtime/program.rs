@@ -19,18 +19,17 @@ impl Interpreter {
         let empty: HashSet<String> = HashSet::new();
         let local_names =
             crate::interpreter::collect_local_names(&[], program, &empty, &empty);
-        // Reg type is u8, so at most 255 slots. Keep a safety margin so temp
-        // registers don't collide with locals.
+        // Cap script-level fastlocals so the register array stays small.
+        // Scripts with more names than this fall back to all-env mode where names
+        // live in a HashMap rather than a Vec<Option<Value>>.
         const MAX_SCRIPT_LOCALS: usize = 200;
         if local_names.len() > MAX_SCRIPT_LOCALS {
             // Too many locals — fall back to all-env mode.
-            let local_index: Rc<HashMap<String, usize>> = Rc::new(HashMap::new());
+            let local_index: Rc<HashMap<String, crate::bytecode::Reg>> = Rc::new(HashMap::new());
             return self.try_exec_vm_script_with_index(program, local_index, repl_mode);
         }
-        let local_index: Rc<HashMap<String, usize>> = Rc::new(
-            local_names
-                .iter()
-                .enumerate()
+        let local_index: Rc<HashMap<String, crate::bytecode::Reg>> = Rc::new(
+            (0u32..).zip(local_names.iter())
                 .map(|(i, n)| (n.clone(), i))
                 .collect(),
         );
@@ -40,23 +39,22 @@ impl Interpreter {
     fn try_exec_vm_script_with_index(
         &mut self,
         program: &[Stmt],
-        local_index: Rc<HashMap<String, usize>>,
+        local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
         repl_mode: bool,
     ) -> Option<Result<()>> {
-        let code = Rc::new(crate::compiler::compile_script(
-            program,
-            Rc::clone(&local_index),
-            repl_mode,
-        )?);
+        let code = match crate::compiler::compile_script(program, Rc::clone(&local_index), repl_mode) {
+            Ok(c) => Rc::new(c),
+            Err(e) => return Some(Err(e)),
+        };
         let num_regs = code.num_regs as usize;
         let mut regs: Vec<Option<Value>> = vec![None; num_regs];
         self.call_depth += 1;
         let vm_result = self.run_bytecode(&code, &mut regs);
         self.call_depth -= 1;
-        // Write fastlocal registers back to the module env so that imported
+        // Write fastlocals registers back to the module env so that imported
         // modules and post-run inspection can find all names.
         for (name, &idx) in local_index.iter() {
-            if let Some(val) = regs[idx].take() {
+            if let Some(val) = regs[idx as usize].take() {
                 self.assign_name(name.clone(), val);
             }
         }

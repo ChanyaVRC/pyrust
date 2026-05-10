@@ -849,8 +849,8 @@ impl Interpreter {
                 for (param, val) in function.params.iter().zip(param_vals.iter()) {
                     if !code.cell_vars.contains(&param.name) {
                         if let Some(&slot) = function.local_index.get(&param.name) {
-                            if slot < num_regs {
-                                regs[slot] = Some(val.clone());
+                            if (slot as usize) < num_regs {
+                                regs[slot as usize] = Some(val.clone());
                             }
                         }
                     }
@@ -858,8 +858,8 @@ impl Interpreter {
                 // Self-reference for recursive calls (only if not a cell var).
                 if !code.cell_vars.contains(&function.name) {
                     if let Some(&slot) = function.local_index.get(&function.name) {
-                        if slot < num_regs {
-                            regs[slot] = Some(Value::user_function(Rc::clone(&function)));
+                        if (slot as usize) < num_regs {
+                            regs[slot as usize] = Some(Value::user_function(Rc::clone(&function)));
                         }
                     }
                 }
@@ -989,8 +989,8 @@ impl Interpreter {
             for (param, val) in function.params.iter().zip(param_vals.iter()) {
                 if !code.cell_vars.contains(&param.name) {
                     if let Some(&slot) = function.local_index.get(&param.name) {
-                        if slot < num_regs {
-                            regs[slot] = Some(val.clone());
+                        if (slot as usize) < num_regs {
+                            regs[slot as usize] = Some(val.clone());
                         }
                     }
                 }
@@ -998,8 +998,8 @@ impl Interpreter {
             // Self-reference for recursive calls (only if not a cell var).
             if !code.cell_vars.contains(&function.name) {
                 if let Some(&slot) = function.local_index.get(&function.name) {
-                    if slot < num_regs {
-                        regs[slot] = Some(Value::user_function(Rc::clone(&function)));
+                    if (slot as usize) < num_regs {
+                        regs[slot as usize] = Some(Value::user_function(Rc::clone(&function)));
                     }
                 }
             }

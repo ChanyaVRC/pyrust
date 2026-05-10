@@ -948,6 +948,61 @@ result = fact(10)
         );
     }
 
+    #[test]
+    fn function_with_256_locals_executes_correctly() {
+        // Pre-#53 fix: Reg was u8 so 256 locals caused silent wrap-around or panic.
+        // Post-fix: Reg is u32; the 256th slot (index 255) must be readable.
+        let assignments: String = (0..256).map(|i| format!("    v{i} = {i}\n")).collect();
+        let src = format!("def f():\n{assignments}    return v255\nresult = f()\n");
+        let tokens = Lexer::new(&src).unwrap().into_tokens();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut interpreter = Interpreter::default();
+        interpreter.exec_program(&program, false).unwrap();
+        assert_eq!(
+            interpreter.lookup_name("result").unwrap(),
+            Some(Value::int(255))
+        );
+    }
+
+    #[test]
+    fn function_with_300_locals_executes_correctly() {
+        // Confirms that Reg=u32 handles well beyond the old u8 limit.
+        // 300 locals: assign each v_i = i, sum them, check sum(range(300)) = 44850.
+        let assignments: String = (0..300).map(|i| format!("    v{i} = {i}\n")).collect();
+        let mut sum_terms: String = "    s = 0\n".to_string();
+        for i in 0..300 {
+            sum_terms.push_str(&format!("    s = s + v{i}\n"));
+        }
+        let src = format!("def f():\n{assignments}{sum_terms}    return s\nresult = f()\n");
+        let tokens = Lexer::new(&src).unwrap().into_tokens();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut interpreter = Interpreter::default();
+        interpreter.exec_program(&program, false).unwrap();
+        assert_eq!(
+            interpreter.lookup_name("result").unwrap(),
+            Some(Value::int(300 * 299 / 2))
+        );
+    }
+
+    #[test]
+    fn binop_slow_path_float_and_mixed_types_correct() {
+        // Exercises the BinOpConst slow path for non-Int types.
+        // Issue #71 removed dead Int+Int arms from the slow path; the remaining
+        // arms (Float, Str, etc.) must still produce correct results.
+        let interpreter = run_program(
+            "a = 1.5 + 2.5\nb = 10.0 - 3.0\nc = 2.0 * 4.0\nd = 9.0 / 2.0\ne = 'he' + 'llo'\nf = 2 ** 8\ng = 7 % 3\n",
+        );
+        assert_eq!(interpreter.lookup_name("a").unwrap(), Some(Value::float(4.0)));
+        assert_eq!(interpreter.lookup_name("b").unwrap(), Some(Value::float(7.0)));
+        assert_eq!(interpreter.lookup_name("c").unwrap(), Some(Value::float(8.0)));
+        assert_eq!(interpreter.lookup_name("d").unwrap(), Some(Value::float(4.5)));
+        assert_eq!(interpreter.lookup_name("e").unwrap(), Some(Value::string("hello")));
+        assert_eq!(interpreter.lookup_name("f").unwrap(), Some(Value::int(256)));
+        assert_eq!(interpreter.lookup_name("g").unwrap(), Some(Value::int(1)));
+    }
+
     fn run_program_result(src: &str) -> crate::error::Result<()> {
         let tokens = Lexer::new(src).unwrap().into_tokens();
         let mut parser = Parser::new(tokens);
