@@ -206,11 +206,22 @@ impl Interpreter {
             ValueKind::BuiltinFunction("min") | ValueKind::BuiltinFunction("max") => {
                 let is_max = matches!(function.kind(), ValueKind::BuiltinFunction("max"));
                 let fname = if is_max { "max" } else { "min" };
-                reject_keyword_args_expanded(fname, args)?;
-                let items: Vec<Value> = if args.len() == 1 {
-                    iter_values(args[0].value.clone())?
-                } else if args.len() >= 2 {
-                    args.iter().map(|a| a.value.clone()).collect()
+                let key_fn = args.iter().find(|a| a.name.as_deref() == Some("key"))
+                    .map(|a| a.value.clone());
+                for a in args.iter().filter(|a| a.name.is_some()) {
+                    if a.name.as_deref() != Some("key") {
+                        return Err(PyError::Runtime(format!(
+                            "{fname}() got an unexpected keyword argument '{}'",
+                            a.name.as_ref().unwrap()
+                        )));
+                    }
+                }
+                let positional: Vec<&ExpandedCallArg> =
+                    args.iter().filter(|a| a.name.is_none()).collect();
+                let items: Vec<Value> = if positional.len() == 1 {
+                    iter_values(positional[0].value.clone())?
+                } else if positional.len() >= 2 {
+                    positional.iter().map(|a| a.value.clone()).collect()
                 } else {
                     return Err(PyError::Runtime(format!(
                         "{fname}() expected at least one argument"
@@ -221,20 +232,47 @@ impl Interpreter {
                         "{fname}() arg is an empty sequence"
                     )));
                 }
-                let mut result_err: Option<PyError> = None;
-                let result = items.into_iter().reduce(|acc, v| {
-                    if result_err.is_some() { return acc; }
-                    match compare_values(&v, &acc) {
-                        Ok(cmp) => {
-                            if is_max && cmp == std::cmp::Ordering::Greater { v }
-                            else if !is_max && cmp == std::cmp::Ordering::Less { v }
-                            else { acc }
+                if let Some(kfn) = key_fn {
+                    let keyed: Vec<(Value, Value)> = items
+                        .into_iter()
+                        .map(|v| {
+                            let k = self.call_function_expanded(
+                                kfn.clone(),
+                                &[ExpandedCallArg { name: None, value: v.clone() }],
+                            )?;
+                            Ok((k, v))
+                        })
+                        .collect::<Result<_>>()?;
+                    let mut result_err: Option<PyError> = None;
+                    let result = keyed.into_iter().reduce(|acc, item| {
+                        if result_err.is_some() { return acc; }
+                        match compare_values(&item.0, &acc.0) {
+                            Ok(cmp) => {
+                                if is_max && cmp == std::cmp::Ordering::Greater { item }
+                                else if !is_max && cmp == std::cmp::Ordering::Less { item }
+                                else { acc }
+                            }
+                            Err(e) => { result_err = Some(e); acc }
                         }
-                        Err(e) => { result_err = Some(e); acc }
-                    }
-                }).unwrap();
-                if let Some(e) = result_err { return Err(e); }
-                Ok(result)
+                    }).unwrap();
+                    if let Some(e) = result_err { return Err(e); }
+                    Ok(result.1)
+                } else {
+                    let mut result_err: Option<PyError> = None;
+                    let result = items.into_iter().reduce(|acc, v| {
+                        if result_err.is_some() { return acc; }
+                        match compare_values(&v, &acc) {
+                            Ok(cmp) => {
+                                if is_max && cmp == std::cmp::Ordering::Greater { v }
+                                else if !is_max && cmp == std::cmp::Ordering::Less { v }
+                                else { acc }
+                            }
+                            Err(e) => { result_err = Some(e); acc }
+                        }
+                    }).unwrap();
+                    if let Some(e) = result_err { return Err(e); }
+                    Ok(result)
+                }
             }
 
             ValueKind::BuiltinFunction("sum") => {
