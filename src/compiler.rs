@@ -1634,25 +1634,13 @@ impl Compiler {
         match target {
             AssignTarget::Name(name) => {
                 if let Some(reg) = self.local_reg(name) {
-                    if let Some(const_idx) = self.try_literal_const_idx(expr) {
-                        self.emit(Insn::BinOpConst(reg, reg, op, const_idx));
-                    } else {
-                        let rhs = self.compile_expr(expr);
-                        self.emit(Insn::BinOpInPlace(reg, reg, op, rhs));
-                        self.free_temp(rhs);
-                    }
+                    self.emit_aug_binop(reg, op, expr);
                 } else {
                     // cell / global: load, compute, store
                     let name_idx = self.intern_name(name);
                     let lhs = self.alloc_temp();
                     self.emit(Insn::LoadGlobal(lhs, name_idx));
-                    if let Some(const_idx) = self.try_literal_const_idx(expr) {
-                        self.emit(Insn::BinOpConst(lhs, lhs, op, const_idx));
-                    } else {
-                        let rhs = self.compile_expr(expr);
-                        self.emit(Insn::BinOpInPlace(lhs, lhs, op, rhs));
-                        self.free_temp(rhs);
-                    }
+                    self.emit_aug_binop(lhs, op, expr);
                     self.emit(Insn::StoreGlobal(name_idx, lhs));
                     self.free_temp(lhs);
                 }
@@ -1662,13 +1650,7 @@ impl Compiler {
                 let name_idx = self.intern_name(attr);
                 let lhs = self.alloc_temp();
                 self.emit(Insn::GetAttr(lhs, obj, name_idx));
-                if let Some(const_idx) = self.try_literal_const_idx(expr) {
-                    self.emit(Insn::BinOpConst(lhs, lhs, op, const_idx));
-                } else {
-                    let rhs = self.compile_expr(expr);
-                    self.emit(Insn::BinOpInPlace(lhs, lhs, op, rhs));
-                    self.free_temp(rhs);
-                }
+                self.emit_aug_binop(lhs, op, expr);
                 self.emit(Insn::SetAttr(obj, name_idx, lhs));
                 self.free_temp(lhs);
                 self.free_temp(obj);
@@ -1678,13 +1660,7 @@ impl Compiler {
                 let idx = self.compile_expr(idx_expr);
                 let lhs = self.alloc_temp();
                 self.emit(Insn::GetItem(lhs, obj, idx));
-                if let Some(const_idx) = self.try_literal_const_idx(expr) {
-                    self.emit(Insn::BinOpConst(lhs, lhs, op, const_idx));
-                } else {
-                    let rhs = self.compile_expr(expr);
-                    self.emit(Insn::BinOpInPlace(lhs, lhs, op, rhs));
-                    self.free_temp(rhs);
-                }
+                self.emit_aug_binop(lhs, op, expr);
                 self.emit(Insn::SetItem(obj, idx, lhs));
                 self.writeback_container_if_global(obj_expr, obj);
                 self.free_temp(lhs);
@@ -2956,6 +2932,41 @@ impl Compiler {
         }
     }
 
+    fn emit_aug_binop(&mut self, reg: Reg, op: BinaryOp, expr: &Expr) {
+        if let Some(const_idx) = self.try_literal_const_idx(expr) {
+            self.emit(Insn::BinOpConst(reg, reg, op, const_idx));
+        } else {
+            let rhs = self.compile_expr(expr);
+            self.emit(Insn::BinOpInPlace(reg, reg, op, rhs));
+            self.free_temp(rhs);
+        }
+    }
+
+    fn compile_short_circuit(&mut self, left: &Expr, right: &Expr, jump_if_true: bool) -> Reg {
+        let lhs = self.compile_expr(left);
+        let dst = self.ensure_dst(lhs);
+        if dst != lhs {
+            self.emit(Insn::Move(dst, lhs));
+        }
+        let jmp = if jump_if_true {
+            self.emit(Insn::JumpIfTrue(dst, 0))
+        } else {
+            self.emit(Insn::JumpIfFalse(dst, 0))
+        };
+        let saved = self.next_temp;
+        self.compile_expr_into(right, dst);
+        self.next_temp = saved;
+        self.patch_jump(jmp);
+        dst
+    }
+
+    fn compile_literal(&mut self, v: Value) -> Reg {
+        let idx = self.intern_const(v);
+        let dst = self.alloc_temp();
+        self.emit(Insn::LoadConst(dst, idx));
+        dst
+    }
+
     fn compile_expr(&mut self, expr: &Expr) -> Reg {
         if self.failed {
             return 0;
@@ -2966,30 +2977,10 @@ impl Compiler {
                 self.emit(Insn::LoadNone(dst));
                 dst
             }
-            Expr::Int(v) => {
-                let idx = self.intern_const(Value::int(*v));
-                let dst = self.alloc_temp();
-                self.emit(Insn::LoadConst(dst, idx));
-                dst
-            }
-            Expr::Float(v) => {
-                let idx = self.intern_const(Value::float(*v));
-                let dst = self.alloc_temp();
-                self.emit(Insn::LoadConst(dst, idx));
-                dst
-            }
-            Expr::Str(s) => {
-                let idx = self.intern_const(Value::string(s.clone()));
-                let dst = self.alloc_temp();
-                self.emit(Insn::LoadConst(dst, idx));
-                dst
-            }
-            Expr::Bool(b) => {
-                let idx = self.intern_const(Value::bool_(*b));
-                let dst = self.alloc_temp();
-                self.emit(Insn::LoadConst(dst, idx));
-                dst
-            }
+            Expr::Int(v) => self.compile_literal(Value::int(*v)),
+            Expr::Float(v) => self.compile_literal(Value::float(*v)),
+            Expr::Str(s) => self.compile_literal(Value::string(s.clone())),
+            Expr::Bool(b) => self.compile_literal(Value::bool_(*b)),
             Expr::Var(name) => {
                 if let Some(reg) = self.local_reg(name) {
                     let definitely_bound = (reg as usize) < 64 && (self.def_set >> reg) & 1 != 0;
@@ -3013,32 +3004,8 @@ impl Compiler {
                 dst
             }
             Expr::Binary { left, op, right } => match op {
-                BinaryOp::And => {
-                    let lhs = self.compile_expr(left);
-                    let dst = self.ensure_dst(lhs);
-                    if dst != lhs {
-                        self.emit(Insn::Move(dst, lhs));
-                    }
-                    let jmp = self.emit(Insn::JumpIfFalse(dst, 0));
-                    let saved = self.next_temp;
-                    self.compile_expr_into(right, dst);
-                    self.next_temp = saved;
-                    self.patch_jump(jmp);
-                    dst
-                }
-                BinaryOp::Or => {
-                    let lhs = self.compile_expr(left);
-                    let dst = self.ensure_dst(lhs);
-                    if dst != lhs {
-                        self.emit(Insn::Move(dst, lhs));
-                    }
-                    let jmp = self.emit(Insn::JumpIfTrue(dst, 0));
-                    let saved = self.next_temp;
-                    self.compile_expr_into(right, dst);
-                    self.next_temp = saved;
-                    self.patch_jump(jmp);
-                    dst
-                }
+                BinaryOp::And => self.compile_short_circuit(left, right, false),
+                BinaryOp::Or => self.compile_short_circuit(left, right, true),
                 _ => {
                     let lhs = self.compile_expr(left);
                     let dst = self.ensure_dst(lhs);

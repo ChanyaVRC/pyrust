@@ -7,6 +7,60 @@ enum IterState {
     Indexed { reg: crate::bytecode::Reg, pos: usize },
 }
 
+fn int_int_fast(a: i64, b: i64, op: BinaryOp) -> Option<Value> {
+    match op {
+        BinaryOp::Add    => Some(Value::int(a.wrapping_add(b))),
+        BinaryOp::Sub    => Some(Value::int(a.wrapping_sub(b))),
+        BinaryOp::Mul    => Some(Value::int(a.wrapping_mul(b))),
+        BinaryOp::BitAnd => Some(Value::int(a & b)),
+        BinaryOp::BitOr  => Some(Value::int(a | b)),
+        BinaryOp::BitXor => Some(Value::int(a ^ b)),
+        BinaryOp::LShift => if b < 0 { None } else { Some(Value::int(a << (b & 63))) },
+        BinaryOp::RShift => if b < 0 { None } else { Some(Value::int(a >> (b & 63))) },
+        BinaryOp::Eq  => Some(Value::bool_(a == b)),
+        BinaryOp::Ne  => Some(Value::bool_(a != b)),
+        BinaryOp::Lt  => Some(Value::bool_(a < b)),
+        BinaryOp::Le  => Some(Value::bool_(a <= b)),
+        BinaryOp::Gt  => Some(Value::bool_(a > b)),
+        BinaryOp::Ge  => Some(Value::bool_(a >= b)),
+        _ => None,
+    }
+}
+
+fn int_cmp(a: i64, b: i64, op: BinaryOp) -> Option<bool> {
+    match op {
+        BinaryOp::Eq => Some(a == b),
+        BinaryOp::Ne => Some(a != b),
+        BinaryOp::Lt => Some(a < b),
+        BinaryOp::Le => Some(a <= b),
+        BinaryOp::Gt => Some(a > b),
+        BinaryOp::Ge => Some(a >= b),
+        _ => None,
+    }
+}
+
+fn expect_list_mut<'a>(
+    regs: &'a mut Vec<Option<Value>>,
+    reg: u32,
+    op: &str,
+) -> Result<&'a mut Vec<Value>> {
+    regs[reg as usize]
+        .as_mut()
+        .and_then(|v| v.as_list_mut())
+        .ok_or_else(|| PyError::Runtime(format!("{op} on non-list")))
+}
+
+fn expect_dict_mut<'a>(
+    regs: &'a mut Vec<Option<Value>>,
+    reg: u32,
+    op: &str,
+) -> Result<&'a mut indexmap::IndexMap<PyKey, Value>> {
+    regs[reg as usize]
+        .as_mut()
+        .and_then(|v| v.as_dict_mut())
+        .ok_or_else(|| PyError::Runtime(format!("{op} on non-dict")))
+}
+
 impl Interpreter {
     /// Execute compiled bytecode for a user function.
     ///
@@ -126,57 +180,27 @@ impl Interpreter {
 
                 // ── Arithmetic / Logic ───────────────────────────────────
                 Insn::BinOp(dst, lhs, op, rhs) => {
-                    // Fast path: borrow both Int operands to avoid 2× Value clone.
-                    let fast = if let (Some(lv), Some(rv)) = (&regs[*lhs as usize], &regs[*rhs as usize]) {
+                    if let (Some(lv), Some(rv)) = (&regs[*lhs as usize], &regs[*rhs as usize]) {
                         if let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), rv.kind()) {
-                            match op {
-                                BinaryOp::Add    => { regs[*dst as usize] = Some(Value::int(a.wrapping_add(b))); true }
-                                BinaryOp::Sub    => { regs[*dst as usize] = Some(Value::int(a.wrapping_sub(b))); true }
-                                BinaryOp::Mul    => { regs[*dst as usize] = Some(Value::int(a.wrapping_mul(b))); true }
-                                BinaryOp::BitAnd => { regs[*dst as usize] = Some(Value::int(a & b)); true }
-                                BinaryOp::BitOr  => { regs[*dst as usize] = Some(Value::int(a | b)); true }
-                                BinaryOp::BitXor => { regs[*dst as usize] = Some(Value::int(a ^ b)); true }
-                                BinaryOp::LShift => { if b < 0 { false } else { regs[*dst as usize] = Some(Value::int(a << (b & 63))); true } }
-                                BinaryOp::RShift => { if b < 0 { false } else { regs[*dst as usize] = Some(Value::int(a >> (b & 63))); true } }
-                                BinaryOp::Eq  => { regs[*dst as usize] = Some(Value::bool_(a == b)); true }
-                                BinaryOp::Ne  => { regs[*dst as usize] = Some(Value::bool_(a != b)); true }
-                                BinaryOp::Lt  => { regs[*dst as usize] = Some(Value::bool_(a < b)); true }
-                                BinaryOp::Le  => { regs[*dst as usize] = Some(Value::bool_(a <= b)); true }
-                                BinaryOp::Gt  => { regs[*dst as usize] = Some(Value::bool_(a > b)); true }
-                                BinaryOp::Ge  => { regs[*dst as usize] = Some(Value::bool_(a >= b)); true }
-                                _ => false,
+                            if let Some(result) = int_int_fast(a, b, *op) {
+                                regs[*dst as usize] = Some(result);
+                                continue;
                             }
-                        } else { false }
-                    } else { false };
-                    if fast { continue; }
+                        }
+                    }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = vm_try!(vm_read(regs, *rhs, num_locals));
                     regs[*dst as usize] = Some(vm_try!(self.eval_binary(l, *op, r)));
                 }
                 Insn::BinOpInPlace(dst, lhs, op, rhs) => {
-                    // Fast path: borrow both Int operands to avoid 2× Value clone.
-                    let fast = if let (Some(lv), Some(rv)) = (&regs[*lhs as usize], &regs[*rhs as usize]) {
+                    if let (Some(lv), Some(rv)) = (&regs[*lhs as usize], &regs[*rhs as usize]) {
                         if let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), rv.kind()) {
-                            match op {
-                                BinaryOp::Add    => { regs[*dst as usize] = Some(Value::int(a.wrapping_add(b))); true }
-                                BinaryOp::Sub    => { regs[*dst as usize] = Some(Value::int(a.wrapping_sub(b))); true }
-                                BinaryOp::Mul    => { regs[*dst as usize] = Some(Value::int(a.wrapping_mul(b))); true }
-                                BinaryOp::BitAnd => { regs[*dst as usize] = Some(Value::int(a & b)); true }
-                                BinaryOp::BitOr  => { regs[*dst as usize] = Some(Value::int(a | b)); true }
-                                BinaryOp::BitXor => { regs[*dst as usize] = Some(Value::int(a ^ b)); true }
-                                BinaryOp::LShift => { if b < 0 { false } else { regs[*dst as usize] = Some(Value::int(a << (b & 63))); true } }
-                                BinaryOp::RShift => { if b < 0 { false } else { regs[*dst as usize] = Some(Value::int(a >> (b & 63))); true } }
-                                BinaryOp::Eq  => { regs[*dst as usize] = Some(Value::bool_(a == b)); true }
-                                BinaryOp::Ne  => { regs[*dst as usize] = Some(Value::bool_(a != b)); true }
-                                BinaryOp::Lt  => { regs[*dst as usize] = Some(Value::bool_(a < b)); true }
-                                BinaryOp::Le  => { regs[*dst as usize] = Some(Value::bool_(a <= b)); true }
-                                BinaryOp::Gt  => { regs[*dst as usize] = Some(Value::bool_(a > b)); true }
-                                BinaryOp::Ge  => { regs[*dst as usize] = Some(Value::bool_(a >= b)); true }
-                                _ => false,
+                            if let Some(result) = int_int_fast(a, b, *op) {
+                                regs[*dst as usize] = Some(result);
+                                continue;
                             }
-                        } else { false }
-                    } else { false };
-                    if fast { continue; }
+                        }
+                    }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = vm_try!(vm_read(regs, *rhs, num_locals));
                     let result = if *op == BinaryOp::MatMul {
@@ -188,29 +212,16 @@ impl Interpreter {
                     regs[*dst as usize] = Some(result);
                 }
                 Insn::BinOpConst(dst, lhs, op, const_idx) => {
-                    // Fast path: borrow Int operands to avoid 2× Value clone.
-                    let fast = if let Some(lv) = &regs[*lhs as usize] {
-                        if let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), code.consts[*const_idx as usize].kind()) {
-                            match op {
-                                BinaryOp::Add    => { regs[*dst as usize] = Some(Value::int(a.wrapping_add(b))); true }
-                                BinaryOp::Sub    => { regs[*dst as usize] = Some(Value::int(a.wrapping_sub(b))); true }
-                                BinaryOp::Mul    => { regs[*dst as usize] = Some(Value::int(a.wrapping_mul(b))); true }
-                                BinaryOp::Eq     => { regs[*dst as usize] = Some(Value::bool_(a == b)); true }
-                                BinaryOp::Ne     => { regs[*dst as usize] = Some(Value::bool_(a != b)); true }
-                                BinaryOp::Lt     => { regs[*dst as usize] = Some(Value::bool_(a < b)); true }
-                                BinaryOp::Le     => { regs[*dst as usize] = Some(Value::bool_(a <= b)); true }
-                                BinaryOp::Gt     => { regs[*dst as usize] = Some(Value::bool_(a > b)); true }
-                                BinaryOp::Ge     => { regs[*dst as usize] = Some(Value::bool_(a >= b)); true }
-                                BinaryOp::BitAnd => { regs[*dst as usize] = Some(Value::int(a & b)); true }
-                                BinaryOp::BitOr  => { regs[*dst as usize] = Some(Value::int(a | b)); true }
-                                BinaryOp::BitXor => { regs[*dst as usize] = Some(Value::int(a ^ b)); true }
-                                BinaryOp::LShift => { if b < 0 { false } else { regs[*dst as usize] = Some(Value::int(a << (b & 63))); true } }
-                                BinaryOp::RShift => { if b < 0 { false } else { regs[*dst as usize] = Some(Value::int(a >> (b & 63))); true } }
-                                _ => false,
+                    if let Some(lv) = &regs[*lhs as usize] {
+                        if let (ValueKind::Int(a), ValueKind::Int(b)) =
+                            (lv.kind(), code.consts[*const_idx as usize].kind())
+                        {
+                            if let Some(result) = int_int_fast(a, b, *op) {
+                                regs[*dst as usize] = Some(result);
+                                continue;
                             }
-                        } else { false }
-                    } else { false };
-                    if fast { continue; }
+                        }
+                    }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = code.consts[*const_idx as usize].clone();
                     let result = vm_try!(self.eval_binary(l, *op, r));
@@ -463,77 +474,57 @@ impl Interpreter {
                     }
                 }
                 Insn::CmpJumpIfFalse(lhs, op, rhs, offset) => {
-                    let fast = if let (Some(lv), Some(rv)) = (&regs[*lhs as usize], &regs[*rhs as usize]) {
+                    if let (Some(lv), Some(rv)) = (&regs[*lhs as usize], &regs[*rhs as usize]) {
                         if let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), rv.kind()) {
-                            match op {
-                                BinaryOp::Eq => { if !(a == b) { pc = jump_pc!(*offset); } true }
-                                BinaryOp::Ne => { if !(a != b) { pc = jump_pc!(*offset); } true }
-                                BinaryOp::Lt => { if !(a < b)  { pc = jump_pc!(*offset); } true }
-                                BinaryOp::Le => { if !(a <= b) { pc = jump_pc!(*offset); } true }
-                                BinaryOp::Gt => { if !(a > b)  { pc = jump_pc!(*offset); } true }
-                                BinaryOp::Ge => { if !(a >= b) { pc = jump_pc!(*offset); } true }
-                                _ => false,
+                            if let Some(cond) = int_cmp(a, b, *op) {
+                                if !cond { pc = jump_pc!(*offset); }
+                                continue;
                             }
-                        } else { false }
-                    } else { false };
-                    if fast { continue; }
+                        }
+                    }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = vm_try!(vm_read(regs, *rhs, num_locals));
                     if !vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = jump_pc!(*offset); }
                 }
                 Insn::CmpJumpIfTrue(lhs, op, rhs, offset) => {
-                    let fast = if let (Some(lv), Some(rv)) = (&regs[*lhs as usize], &regs[*rhs as usize]) {
+                    if let (Some(lv), Some(rv)) = (&regs[*lhs as usize], &regs[*rhs as usize]) {
                         if let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), rv.kind()) {
-                            match op {
-                                BinaryOp::Eq => { if a == b { pc = jump_pc!(*offset); } true }
-                                BinaryOp::Ne => { if a != b { pc = jump_pc!(*offset); } true }
-                                BinaryOp::Lt => { if a < b  { pc = jump_pc!(*offset); } true }
-                                BinaryOp::Le => { if a <= b { pc = jump_pc!(*offset); } true }
-                                BinaryOp::Gt => { if a > b  { pc = jump_pc!(*offset); } true }
-                                BinaryOp::Ge => { if a >= b { pc = jump_pc!(*offset); } true }
-                                _ => false,
+                            if let Some(cond) = int_cmp(a, b, *op) {
+                                if cond { pc = jump_pc!(*offset); }
+                                continue;
                             }
-                        } else { false }
-                    } else { false };
-                    if fast { continue; }
+                        }
+                    }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = vm_try!(vm_read(regs, *rhs, num_locals));
                     if vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = jump_pc!(*offset); }
                 }
                 Insn::CmpJumpIfFalseConst(lhs, op, const_idx, offset) => {
-                    let fast = if let Some(lv) = &regs[*lhs as usize] {
-                        if let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), code.consts[*const_idx as usize].kind()) {
-                            match op {
-                                BinaryOp::Eq => { if !(a == b) { pc = jump_pc!(*offset); } true }
-                                BinaryOp::Ne => { if !(a != b) { pc = jump_pc!(*offset); } true }
-                                BinaryOp::Lt => { if !(a < b)  { pc = jump_pc!(*offset); } true }
-                                BinaryOp::Le => { if !(a <= b) { pc = jump_pc!(*offset); } true }
-                                BinaryOp::Gt => { if !(a > b)  { pc = jump_pc!(*offset); } true }
-                                BinaryOp::Ge => { if !(a >= b) { pc = jump_pc!(*offset); } true }
-                                _ => false,
+                    if let Some(lv) = &regs[*lhs as usize] {
+                        if let (ValueKind::Int(a), ValueKind::Int(b)) =
+                            (lv.kind(), code.consts[*const_idx as usize].kind())
+                        {
+                            if let Some(cond) = int_cmp(a, b, *op) {
+                                if !cond { pc = jump_pc!(*offset); }
+                                continue;
                             }
-                        } else { false }
-                    } else { false };
-                    if fast { continue; }
+                        }
+                    }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = code.consts[*const_idx as usize].clone();
                     if !vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = jump_pc!(*offset); }
                 }
                 Insn::CmpJumpIfTrueConst(lhs, op, const_idx, offset) => {
-                    let fast = if let Some(lv) = &regs[*lhs as usize] {
-                        if let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), code.consts[*const_idx as usize].kind()) {
-                            match op {
-                                BinaryOp::Eq => { if a == b { pc = jump_pc!(*offset); } true }
-                                BinaryOp::Ne => { if a != b { pc = jump_pc!(*offset); } true }
-                                BinaryOp::Lt => { if a < b  { pc = jump_pc!(*offset); } true }
-                                BinaryOp::Le => { if a <= b { pc = jump_pc!(*offset); } true }
-                                BinaryOp::Gt => { if a > b  { pc = jump_pc!(*offset); } true }
-                                BinaryOp::Ge => { if a >= b { pc = jump_pc!(*offset); } true }
-                                _ => false,
+                    if let Some(lv) = &regs[*lhs as usize] {
+                        if let (ValueKind::Int(a), ValueKind::Int(b)) =
+                            (lv.kind(), code.consts[*const_idx as usize].kind())
+                        {
+                            if let Some(cond) = int_cmp(a, b, *op) {
+                                if cond { pc = jump_pc!(*offset); }
+                                continue;
                             }
-                        } else { false }
-                    } else { false };
-                    if fast { continue; }
+                        }
+                    }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = code.consts[*const_idx as usize].clone();
                     if vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = jump_pc!(*offset); }
@@ -738,62 +729,26 @@ impl Interpreter {
                 }
                 Insn::ListAppend(list_reg, val_reg) => {
                     let val = vm_try!(vm_read(regs, *val_reg, num_locals));
-                    if let Some(ov) = regs[*list_reg as usize].as_mut() {
-                        if let Some(items) = ov.as_list_mut() {
-                            items.push(val);
-                        } else {
-                            vm_try!(Err::<(), _>(PyError::Runtime(
-                                "ListAppend on non-list".to_string(),
-                            )));
-                        }
-                    } else {
-                        vm_try!(Err::<(), _>(PyError::Runtime(
-                            "ListAppend on non-list".to_string(),
-                        )));
-                    }
+                    let items = vm_try!(expect_list_mut(regs, *list_reg, "ListAppend"));
+                    items.push(val);
                 }
                 Insn::ListExtend(list_reg, src_reg) => {
                     let src_val = vm_try!(vm_read(regs, *src_reg, num_locals));
                     let items_to_add = vm_try!(iter_values(src_val));
-                    if let Some(ov) = regs[*list_reg as usize].as_mut() {
-                        if let Some(items) = ov.as_list_mut() {
-                            items.extend(items_to_add);
-                        } else {
-                            vm_try!(Err::<(), _>(PyError::Runtime(
-                                "ListExtend on non-list".to_string(),
-                            )));
-                        }
-                    } else {
-                        vm_try!(Err::<(), _>(PyError::Runtime(
-                            "ListExtend on non-list".to_string(),
-                        )));
-                    }
+                    let items = vm_try!(expect_list_mut(regs, *list_reg, "ListExtend"));
+                    items.extend(items_to_add);
                 }
                 Insn::DictUpdate(dict_reg, src_reg) => {
                     let src_val = vm_try!(vm_read(regs, *src_reg, num_locals));
                     let src_dict = match src_val.kind() {
                         ValueKind::Dict(d) => d.clone(),
-                        _ => {
-                            vm_try!(Err::<(), _>(PyError::Runtime(
-                                "DictUpdate requires a dict argument".to_string(),
-                            )));
-                            unreachable!()
-                        }
+                        _ => vm_try!(Err(PyError::Runtime(
+                            "DictUpdate requires a dict argument".to_string(),
+                        ))),
                     };
-                    if let Some(ov) = regs[*dict_reg as usize].as_mut() {
-                        if let Some(dict) = ov.as_dict_mut() {
-                            for (k, v) in src_dict {
-                                dict.insert(k, v);
-                            }
-                        } else {
-                            vm_try!(Err::<(), _>(PyError::Runtime(
-                                "DictUpdate on non-dict".to_string(),
-                            )));
-                        }
-                    } else {
-                        vm_try!(Err::<(), _>(PyError::Runtime(
-                            "DictUpdate on non-dict".to_string(),
-                        )));
+                    let dict = vm_try!(expect_dict_mut(regs, *dict_reg, "DictUpdate"));
+                    for (k, v) in src_dict {
+                        dict.insert(k, v);
                     }
                 }
 

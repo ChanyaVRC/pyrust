@@ -158,6 +158,32 @@ const TAG_TUPLE_BITS: u64 = 0xFFFD_0000_0000_0000;
 const TAG_LIST_BITS: u64 = 0xFFFE_0000_0000_0000;
 const TAG_OPAQUE_BITS: u64 = 0xFFFF_0000_0000_0000;
 
+// top16() tag values used in match arms and comparisons
+const TAG_FLOAT_MAX: u16 = 0xFFF8; // all top16 values ≤ this are floats
+const TAG_NONE: u16 = 0xFFF9;
+const TAG_BOOL: u16 = 0xFFFA;
+const TAG_INT: u16 = 0xFFFB;
+const TAG_STR: u16 = 0xFFFC;
+const TAG_TUPLE: u16 = 0xFFFD;
+const TAG_LIST: u16 = 0xFFFE;
+const TAG_OPAQUE: u16 = 0xFFFF;
+
+fn format_float(v: f64) -> String {
+    if v.is_nan() {
+        "nan".to_string()
+    } else if v.is_infinite() {
+        if v > 0.0 {
+            "inf".to_string()
+        } else {
+            "-inf".to_string()
+        }
+    } else if v.fract() == 0.0 {
+        format!("{v:.1}")
+    } else {
+        v.to_string()
+    }
+}
+
 #[inline(always)]
 fn top16(bits: u64) -> u16 {
     (bits >> 48) as u16
@@ -554,29 +580,29 @@ impl Value {
     }
 
     pub fn is_bool(&self) -> bool {
-        top16(self.0) == 0xFFFA
+        top16(self.0) == TAG_BOOL
     }
 
     pub fn is_int(&self) -> bool {
-        top16(self.0) == 0xFFFB
-            || (top16(self.0) == 0xFFFF
+        top16(self.0) == TAG_INT
+            || (top16(self.0) == TAG_OPAQUE
                 && matches!(unsafe { &*self.opaque_ptr() }, Opaque::PyBigInt(_)))
     }
 
     pub fn is_float(&self) -> bool {
-        top16(self.0) <= 0xFFF8
+        top16(self.0) <= TAG_FLOAT_MAX
     }
 
     pub fn is_str(&self) -> bool {
-        top16(self.0) == 0xFFFC
+        top16(self.0) == TAG_STR
     }
 
     pub fn is_tuple(&self) -> bool {
-        top16(self.0) == 0xFFFD
+        top16(self.0) == TAG_TUPLE
     }
 
     pub fn is_list(&self) -> bool {
-        top16(self.0) == 0xFFFE
+        top16(self.0) == TAG_LIST
     }
 
     /// Returns a stable identity value for pool-allocated types:
@@ -585,11 +611,11 @@ impl Value {
     /// Returns `None` for Rc-based and primitive types (callers handle those directly).
     pub fn value_id(&self) -> Option<i64> {
         match top16(self.0) {
-            0xFFFD | 0xFFFE => {
+            TAG_TUPLE | TAG_LIST => {
                 let hdr = (self.0 & PAYLOAD_MASK) as *const u8;
                 Some(unsafe { *(hdr.add(24) as *const u64) } as i64)
             }
-            0xFFFC => Some((self.0 & PAYLOAD_MASK) as i64),
+            TAG_STR => Some((self.0 & PAYLOAD_MASK) as i64),
             _ => None,
         }
     }
@@ -673,7 +699,7 @@ impl Value {
     }
 
     pub fn as_opaque(&self) -> Option<&Opaque> {
-        if top16(self.0) == 0xFFFF {
+        if top16(self.0) == TAG_OPAQUE {
             Some(unsafe { &*self.opaque_ptr() })
         } else {
             None
@@ -681,7 +707,7 @@ impl Value {
     }
 
     pub fn as_opaque_mut(&mut self) -> Option<&mut Opaque> {
-        if top16(self.0) == 0xFFFF {
+        if top16(self.0) == TAG_OPAQUE {
             Some(unsafe { &mut *self.opaque_ptr() })
         } else {
             None
@@ -724,8 +750,8 @@ impl Value {
     /// Unified int accessor (handles inline i48 and PyBigInt that fits in i64)
     pub fn as_int(&self) -> Option<i64> {
         match top16(self.0) {
-            0xFFFB => Some(self.as_int_raw()),
-            0xFFFF => {
+            TAG_INT => Some(self.as_int_raw()),
+            TAG_OPAQUE => {
                 if let Opaque::PyBigInt(rc) = unsafe { &*self.opaque_ptr() } {
                     rc.to_i64()
                 } else {
@@ -740,14 +766,14 @@ impl Value {
 
     pub fn kind(&self) -> ValueKind<'_> {
         match top16(self.0) {
-            t if t <= 0xFFF8 => ValueKind::Float(self.as_float_raw()),
-            0xFFF9 => ValueKind::None,
-            0xFFFA => ValueKind::Bool(self.as_bool()),
-            0xFFFB => ValueKind::Int(self.as_int_raw()),
-            0xFFFC => ValueKind::Str(unsafe { self.str_as_str() }),
-            0xFFFD => ValueKind::Tuple(unsafe { &*self.tuple_ptr() }),
-            0xFFFE => ValueKind::List(unsafe { &*self.list_ptr() }),
-            0xFFFF => match unsafe { &*self.opaque_ptr() } {
+            t if t <= TAG_FLOAT_MAX => ValueKind::Float(self.as_float_raw()),
+            TAG_NONE => ValueKind::None,
+            TAG_BOOL => ValueKind::Bool(self.as_bool()),
+            TAG_INT => ValueKind::Int(self.as_int_raw()),
+            TAG_STR => ValueKind::Str(unsafe { self.str_as_str() }),
+            TAG_TUPLE => ValueKind::Tuple(unsafe { &*self.tuple_ptr() }),
+            TAG_LIST => ValueKind::List(unsafe { &*self.list_ptr() }),
+            TAG_OPAQUE => match unsafe { &*self.opaque_ptr() } {
                 Opaque::PyBigInt(rc) => {
                     if let Some(n) = rc.to_i64() {
                         ValueKind::Int(n)
@@ -823,21 +849,7 @@ impl Value {
         match self.kind() {
             ValueKind::Int(v) => v.to_string(),
             ValueKind::BigInt(v) => v.to_string(),
-            ValueKind::Float(v) => {
-                if v.is_nan() {
-                    "nan".to_string()
-                } else if v.is_infinite() {
-                    if v > 0.0 {
-                        "inf".to_string()
-                    } else {
-                        "-inf".to_string()
-                    }
-                } else if v.fract() == 0.0 {
-                    format!("{v:.1}")
-                } else {
-                    v.to_string()
-                }
-            }
+            ValueKind::Float(v) => format_float(v),
             ValueKind::Str(v) => format!("'{}'", escape_str(v)),
             ValueKind::Bool(v) => {
                 if v {
@@ -956,9 +968,9 @@ impl Clone for Value {
     fn clone(&self) -> Self {
         match top16(self.0) {
             // Primitives: just copy bits
-            t if t <= 0xFFFB => Value(self.0),
+            t if t <= TAG_INT => Value(self.0),
             // Str
-            0xFFFC => {
+            TAG_STR => {
                 let hdr = (self.0 & PAYLOAD_MASK) as *mut u32;
                 unsafe {
                     // rc is stored in bits 31:1; increment by 2 (the type bit stays in bit 0).
@@ -970,21 +982,21 @@ impl Clone for Value {
                 Value(self.0) // same bits, 0 allocations
             }
             // Tuple — copy the stored obj_id so the clone shares the same identity
-            0xFFFD => {
+            TAG_TUPLE => {
                 let hdr = (self.0 & PAYLOAD_MASK) as *const u8;
                 let obj_id = unsafe { *(hdr.add(24) as *const u64) };
                 let v = unsafe { &*self.tuple_ptr() };
                 Value::tuple_with_id(v.clone(), obj_id)
             }
             // List — copy the stored obj_id so the clone shares the same identity
-            0xFFFE => {
+            TAG_LIST => {
                 let hdr = (self.0 & PAYLOAD_MASK) as *const u8;
                 let obj_id = unsafe { *(hdr.add(24) as *const u64) };
                 let v = unsafe { &*self.list_ptr() };
                 Value::list_with_id(v.clone(), obj_id)
             }
             // Opaque
-            0xFFFF => {
+            TAG_OPAQUE => {
                 let o = unsafe { &*self.opaque_ptr() };
                 Value::opaque(o.clone())
             }
@@ -998,8 +1010,8 @@ impl Clone for Value {
 impl Drop for Value {
     fn drop(&mut self) {
         match top16(self.0) {
-            t if t <= 0xFFFB => {} // primitives: no heap
-            0xFFFC => unsafe {
+            t if t <= TAG_INT => {} // primitives: no heap
+            TAG_STR => unsafe {
                 let hdr = (self.0 & PAYLOAD_MASK) as *mut u8;
                 let rc_type_ptr = hdr as *mut u32;
                 *rc_type_ptr -= 2; // rc--
@@ -1024,17 +1036,17 @@ impl Drop for Value {
                     }
                 }
             },
-            0xFFFD => unsafe {
+            TAG_TUPLE => unsafe {
                 let hdr = (self.0 & PAYLOAD_MASK) as *mut u8;
                 std::ptr::drop_in_place(hdr as *mut Vec<Value>);
                 pool_vec_hdr_dealloc(hdr);
             },
-            0xFFFE => unsafe {
+            TAG_LIST => unsafe {
                 let hdr = (self.0 & PAYLOAD_MASK) as *mut u8;
                 std::ptr::drop_in_place(hdr as *mut Vec<Value>);
                 pool_vec_hdr_dealloc(hdr);
             },
-            0xFFFF => unsafe {
+            TAG_OPAQUE => unsafe {
                 drop(Box::from_raw(self.opaque_ptr()));
             },
             _ => unreachable!(),
@@ -1123,22 +1135,7 @@ impl fmt::Debug for Value {
 fn key_repr(key: &PyKey) -> String {
     match key {
         PyKey::Int(v) => v.to_string(),
-        PyKey::Float(v) => {
-            let as_f = f64::from_bits(*v);
-            if as_f.is_nan() {
-                "nan".to_string()
-            } else if as_f.is_infinite() {
-                if as_f > 0.0 {
-                    "inf".to_string()
-                } else {
-                    "-inf".to_string()
-                }
-            } else if as_f.fract() == 0.0 {
-                format!("{as_f:.1}")
-            } else {
-                as_f.to_string()
-            }
-        }
+        PyKey::Float(v) => format_float(f64::from_bits(*v)),
         PyKey::Str(v) => format!("'{}'", escape_str(v)),
         PyKey::Bool(v) => {
             if *v {
