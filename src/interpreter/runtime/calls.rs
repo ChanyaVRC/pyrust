@@ -1,3 +1,29 @@
+/// RAII guard that decrements `call_depth` when dropped.
+///
+/// Uses a raw pointer so that `self` remains usable after the guard is created.
+/// Safety: the pointed-to field lives at least as long as `Interpreter`, and
+/// the guard is always dropped before the `Interpreter` is moved or destroyed.
+struct CallDepthGuard(*mut usize);
+
+impl CallDepthGuard {
+    /// Increment `*depth` and return a guard that will decrement it on drop.
+    ///
+    /// # Safety
+    /// The caller must ensure the pointer remains valid for the guard's lifetime.
+    unsafe fn new(depth: *mut usize) -> Self {
+        // SAFETY: caller guarantees the pointer is valid and non-aliased.
+        unsafe { *depth += 1 };
+        Self(depth)
+    }
+}
+
+impl Drop for CallDepthGuard {
+    fn drop(&mut self) {
+        // Safety: same pointer that was valid at construction time.
+        unsafe { *self.0 -= 1 };
+    }
+}
+
 impl Interpreter {
     fn call_function(&mut self, function: Value, args: &[CallArg]) -> Result<Value> {
         let expanded = self.expand_call_args(args)?;
@@ -849,24 +875,38 @@ impl Interpreter {
                 for (param, val) in function.params.iter().zip(param_vals.iter()) {
                     if !code.cell_vars.contains(&param.name) {
                         if let Some(&slot) = function.local_index.get(&param.name) {
-                            if (slot as usize) < num_regs {
-                                regs[slot as usize] = Some(val.clone());
+                            if (slot as usize) >= num_regs {
+                                return Err(PyError::Named(
+                                    "SystemError".to_string(),
+                                    format!(
+                                        "parameter '{}' register index {} out of range (num_regs={})",
+                                        param.name, slot, num_regs
+                                    ),
+                                ));
                             }
+                            regs[slot as usize] = Some(val.clone());
                         }
                     }
                 }
                 // Self-reference for recursive calls (only if not a cell var).
                 if !code.cell_vars.contains(&function.name) {
                     if let Some(&slot) = function.local_index.get(&function.name) {
-                        if (slot as usize) < num_regs {
-                            regs[slot as usize] = Some(Value::user_function(Rc::clone(&function)));
+                        if (slot as usize) >= num_regs {
+                            return Err(PyError::Named(
+                                "SystemError".to_string(),
+                                format!(
+                                    "self-reference register index {} out of range (num_regs={})",
+                                    slot, num_regs
+                                ),
+                            ));
                         }
+                        regs[slot as usize] = Some(Value::user_function(Rc::clone(&function)));
                     }
                 }
 
-                self.call_depth += 1;
+                // Safety: `self` outlives this block; the guard is dropped before `self` moves.
+                let _depth_guard = unsafe { CallDepthGuard::new(&raw mut self.call_depth) };
                 if self.call_depth > MAX_CALL_DEPTH {
-                    self.call_depth -= 1;
                     let exc = self.instantiate_named_exception(
                         "RecursionError",
                         "maximum recursion depth exceeded".to_string(),
@@ -904,7 +944,6 @@ impl Interpreter {
                 if needs_local_env {
                     self.free_env(used_env);
                 }
-                self.call_depth -= 1;
                 let value = vm_result?;
                 if let Some(ck) = cache_key {
                     self.fn_cache.insert(ck, value.clone());
@@ -989,24 +1028,38 @@ impl Interpreter {
             for (param, val) in function.params.iter().zip(param_vals.iter()) {
                 if !code.cell_vars.contains(&param.name) {
                     if let Some(&slot) = function.local_index.get(&param.name) {
-                        if (slot as usize) < num_regs {
-                            regs[slot as usize] = Some(val.clone());
+                        if (slot as usize) >= num_regs {
+                            return Err(PyError::Named(
+                                "SystemError".to_string(),
+                                format!(
+                                    "parameter '{}' register index {} out of range (num_regs={})",
+                                    param.name, slot, num_regs
+                                ),
+                            ));
                         }
+                        regs[slot as usize] = Some(val.clone());
                     }
                 }
             }
             // Self-reference for recursive calls (only if not a cell var).
             if !code.cell_vars.contains(&function.name) {
                 if let Some(&slot) = function.local_index.get(&function.name) {
-                    if (slot as usize) < num_regs {
-                        regs[slot as usize] = Some(Value::user_function(Rc::clone(&function)));
+                    if (slot as usize) >= num_regs {
+                        return Err(PyError::Named(
+                            "SystemError".to_string(),
+                            format!(
+                                "self-reference register index {} out of range (num_regs={})",
+                                slot, num_regs
+                            ),
+                        ));
                     }
+                    regs[slot as usize] = Some(Value::user_function(Rc::clone(&function)));
                 }
             }
 
-            self.call_depth += 1;
+            // Safety: `self` outlives this block; the guard is dropped before `self` moves.
+            let _depth_guard = unsafe { CallDepthGuard::new(&raw mut self.call_depth) };
             if self.call_depth > MAX_CALL_DEPTH {
-                self.call_depth -= 1;
                 let exc = self.instantiate_named_exception(
                     "RecursionError",
                     "maximum recursion depth exceeded".to_string(),
@@ -1044,7 +1097,6 @@ impl Interpreter {
             if needs_local_env {
                 self.free_env(used_env);
             }
-            self.call_depth -= 1;
             return Ok(vm_result?);
         }
 
