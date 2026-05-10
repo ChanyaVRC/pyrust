@@ -891,7 +891,10 @@ impl Value {
     pub fn to_key(&self) -> Option<PyKey> {
         match self.kind() {
             ValueKind::Int(v) => Some(PyKey::Int(v)),
-            ValueKind::BigInt(v) => v.to_i64().map(PyKey::Int).or_else(|| Some(PyKey::Str(v.to_string()))),
+            ValueKind::BigInt(v) => v
+                .to_i64()
+                .map(PyKey::Int)
+                .or_else(|| Some(PyKey::Str(v.to_string()))),
             ValueKind::Float(v) => Some(PyKey::Float(v.to_bits())),
             ValueKind::Str(v) => Some(PyKey::Str(v.to_string())),
             ValueKind::Bool(v) => Some(PyKey::Bool(v)),
