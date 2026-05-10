@@ -323,16 +323,18 @@ impl Interpreter {
                     "math.floor" => {
                         let f = x.floor();
                         if f > i64::MAX as f64 || f < i64::MIN as f64 {
-                            return Err(PyError::Named("OverflowError".to_string(), "integer overflow".to_string()));
+                            Ok(float_to_bigint(f))
+                        } else {
+                            Ok(Value::int(f as i64))
                         }
-                        Ok(Value::int(f as i64))
                     }
                     "math.ceil" => {
                         let f = x.ceil();
                         if f > i64::MAX as f64 || f < i64::MIN as f64 {
-                            return Err(PyError::Named("OverflowError".to_string(), "integer overflow".to_string()));
+                            Ok(float_to_bigint(f))
+                        } else {
+                            Ok(Value::int(f as i64))
                         }
-                        Ok(Value::int(f as i64))
                     }
                     "math.sqrt" => Ok(Value::float(x.sqrt())),
                     "math.fabs" => Ok(Value::float(x.abs())),
