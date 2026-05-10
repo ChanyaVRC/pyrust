@@ -734,6 +734,12 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
         "int" => Some(Value::builtin_function("int")),
         "float" => Some(Value::builtin_function("float")),
         "bool" => Some(Value::builtin_function("bool")),
+        "isinstance" => Some(Value::builtin_function("isinstance")),
+        "type" => Some(Value::builtin_function("type")),
+        "id" => Some(Value::builtin_function("id")),
+        "hasattr" => Some(Value::builtin_function("hasattr")),
+        "getattr" => Some(Value::builtin_function("getattr")),
+        "setattr" => Some(Value::builtin_function("setattr")),
         "__vcall__" => Some(Value::builtin_function("__vcall__")),
         _ => None,
     }
