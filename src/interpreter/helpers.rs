@@ -99,26 +99,48 @@ fn eval_binary_float(op: BinaryOp, a: f64, b: f64) -> Option<Result<Value>> {
 /// lexicographically, bools as 0/1.  Incomparable pairs fall back to
 /// `Ordering::Equal` (same as CPython raising TypeError in that case, but we
 /// keep the sort stable rather than panicking).
-fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
+fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
     match (a.kind(), b.kind()) {
-        (ValueKind::Int(x), ValueKind::Int(y)) => x.cmp(&y),
-        (ValueKind::Float(x), ValueKind::Float(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
-        (ValueKind::Int(x), ValueKind::Float(y)) => (x as f64).partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
-        (ValueKind::Float(x), ValueKind::Int(y)) => x.partial_cmp(&(y as f64)).unwrap_or(std::cmp::Ordering::Equal),
-        (ValueKind::Bool(x), ValueKind::Bool(y)) => x.cmp(&y),
-        (ValueKind::Bool(x), ValueKind::Int(y)) => (x as i64).cmp(&y),
-        (ValueKind::Int(x), ValueKind::Bool(y)) => x.cmp(&(y as i64)),
-        (ValueKind::Str(x), ValueKind::Str(y)) => x.cmp(y),
+        (ValueKind::Int(x), ValueKind::Int(y)) => Ok(x.cmp(&y)),
+        (ValueKind::Float(x), ValueKind::Float(y)) => Ok(x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)),
+        (ValueKind::Int(x), ValueKind::Float(y)) => Ok((x as f64).partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)),
+        (ValueKind::Float(x), ValueKind::Int(y)) => Ok(x.partial_cmp(&(y as f64)).unwrap_or(std::cmp::Ordering::Equal)),
+        (ValueKind::Bool(x), ValueKind::Bool(y)) => Ok(x.cmp(&y)),
+        (ValueKind::Bool(x), ValueKind::Int(y)) => Ok((x as i64).cmp(&y)),
+        (ValueKind::Int(x), ValueKind::Bool(y)) => Ok(x.cmp(&(y as i64))),
+        (ValueKind::Str(x), ValueKind::Str(y)) => Ok(x.cmp(y)),
         (ValueKind::Tuple(x), ValueKind::Tuple(y)) => {
             for (a, b) in x.iter().zip(y.iter()) {
-                let ord = compare_values(a, b);
+                let ord = compare_values(a, b)?;
                 if ord != std::cmp::Ordering::Equal {
-                    return ord;
+                    return Ok(ord);
                 }
             }
-            x.len().cmp(&y.len())
+            Ok(x.len().cmp(&y.len()))
         }
-        _ => std::cmp::Ordering::Equal,
+        _ => Err(PyError::Named(
+            "TypeError".to_string(),
+            format!(
+                "'<' not supported between instances of '{}' and '{}'",
+                value_type_name_str(a),
+                value_type_name_str(b),
+            ),
+        )),
+    }
+}
+
+fn value_type_name_str(v: &Value) -> &'static str {
+    match v.kind() {
+        ValueKind::Int(_) | ValueKind::Bool(_) => "int",
+        ValueKind::Float(_) => "float",
+        ValueKind::Str(_) => "str",
+        ValueKind::None => "NoneType",
+        ValueKind::List(_) => "list",
+        ValueKind::Tuple(_) => "tuple",
+        ValueKind::Dict(_) | ValueKind::DictKeysView(_) | ValueKind::DictValuesView(_) | ValueKind::DictItemsView(_) => "dict",
+        ValueKind::Set(_) => "set",
+        ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_) | ValueKind::BoundMethod { .. } => "function",
+        _ => "object",
     }
 }
 

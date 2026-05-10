@@ -129,10 +129,26 @@ impl Interpreter {
                             Ok((k, v))
                         })
                         .collect::<Result<_>>()?;
-                    keyed.sort_by(|(a, _), (b, _)| compare_values(a, b));
+                    let mut sort_err: Option<PyError> = None;
+                    keyed.sort_by(|(a, _), (b, _)| {
+                        if sort_err.is_some() { return std::cmp::Ordering::Equal; }
+                        match compare_values(a, b) {
+                            Ok(ord) => ord,
+                            Err(e) => { sort_err = Some(e); std::cmp::Ordering::Equal }
+                        }
+                    });
+                    if let Some(e) = sort_err { return Err(e); }
                     items = keyed.into_iter().map(|(_, v)| v).collect();
                 } else {
-                    items.sort_by(compare_values);
+                    let mut sort_err: Option<PyError> = None;
+                    items.sort_by(|a, b| {
+                        if sort_err.is_some() { return std::cmp::Ordering::Equal; }
+                        match compare_values(a, b) {
+                            Ok(ord) => ord,
+                            Err(e) => { sort_err = Some(e); std::cmp::Ordering::Equal }
+                        }
+                    });
+                    if let Some(e) = sort_err { return Err(e); }
                 }
                 if reverse {
                     items.reverse();
@@ -175,10 +191,19 @@ impl Interpreter {
                         "{fname}() arg is an empty sequence"
                     )));
                 }
+                let mut result_err: Option<PyError> = None;
                 let result = items.into_iter().reduce(|acc, v| {
-                    let cmp = compare_values(&v, &acc);
-                    if is_max && cmp == std::cmp::Ordering::Greater { v } else if !is_max && cmp == std::cmp::Ordering::Less { v } else { acc }
+                    if result_err.is_some() { return acc; }
+                    match compare_values(&v, &acc) {
+                        Ok(cmp) => {
+                            if is_max && cmp == std::cmp::Ordering::Greater { v }
+                            else if !is_max && cmp == std::cmp::Ordering::Less { v }
+                            else { acc }
+                        }
+                        Err(e) => { result_err = Some(e); acc }
+                    }
                 }).unwrap();
+                if let Some(e) = result_err { return Err(e); }
                 Ok(result)
             }
 
