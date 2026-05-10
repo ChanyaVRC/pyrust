@@ -28,6 +28,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_binop_const_fusion(insns, num_locals);
     let insns = pass_cmpjump_fusion(insns, num_locals);
     let insns = pass_const_fold(insns, &mut consts);
+    let insns = pass_algebraic_simplify(insns, &mut consts);
     let insns = pass_dead_code(insns);
     let insns = pass_trivial_nop(insns);
 
@@ -376,6 +377,54 @@ fn pass_dead_code(insns: Vec<Insn>) -> Vec<Insn> {
     compact(insns, &reachable)
 }
 
+// ─── Algebraic simplification ──────────────────────────────────────────────────
+
+/// Simplify algebraic identities on integer operands (integers only — float and
+/// string arithmetic may have different identity semantics):
+///
+/// | Pattern                         | Result                     |
+/// |---------------------------------|----------------------------|
+/// | `BinOpConst(dst, lhs, Add, 0)`  | `Move(dst, lhs)`           |
+/// | `BinOpConst(dst, lhs, Sub, 0)`  | `Move(dst, lhs)`           |
+/// | `BinOpConst(dst, lhs, Mul, 1)`  | `Move(dst, lhs)`           |
+/// | `BinOpConst(dst, lhs, Mul, 0)`  | `LoadConst(dst, idx_0)`    |
+/// | `BinOpConst(dst, lhs, Pow, 1)`  | `Move(dst, lhs)`           |
+/// | `BinOpConst(dst, lhs, Pow, 0)`  | `LoadConst(dst, idx_1)`    |
+///
+/// Commutative identities (0+x, 1*x, 0*x) are produced by `pass_binop_const_fusion`
+/// only when the constant is on the right, so we don't need separate cases for them.
+fn pass_algebraic_simplify(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn> {
+    use crate::ast::BinaryOp::*;
+
+    insns
+        .into_iter()
+        .map(|insn| {
+            if let Insn::BinOpConst(dst, lhs, op, c_idx) = insn {
+                let c_val = match consts[c_idx as usize].kind() {
+                    ValueKind::Int(n) => n,
+                    _ => return Insn::BinOpConst(dst, lhs, op, c_idx),
+                };
+                match (op, c_val) {
+                    (Add, 0) | (Sub, 0) | (Mul, 1) | (Pow, 1) => Insn::Move(dst, lhs),
+                    (Mul, 0) => {
+                        let idx = intern_const_in_pool(consts, Value::int(0))
+                            .unwrap_or(c_idx);
+                        Insn::LoadConst(dst, idx)
+                    }
+                    (Pow, 0) => {
+                        let idx = intern_const_in_pool(consts, Value::int(1))
+                            .unwrap_or(c_idx);
+                        Insn::LoadConst(dst, idx)
+                    }
+                    _ => Insn::BinOpConst(dst, lhs, op, c_idx),
+                }
+            } else {
+                insn
+            }
+        })
+        .collect()
+}
+
 // ─── Trivial no-op removal ─────────────────────────────────────────────────────
 
 /// Remove instructions that have no observable effect:
@@ -533,6 +582,76 @@ mod tests {
             .iter()
             .any(|i| matches!(i, Insn::BinOpConst(..)));
         assert!(has_binopconst, "optimizer should fuse LoadConst+BinOp into BinOpConst for n+5");
+    }
+
+    // ── pass_algebraic_simplify ───────────────────────────────────────────────
+
+    #[test]
+    fn algebraic_add_zero_becomes_move() {
+        use crate::ast::BinaryOp;
+        use crate::value::Value;
+        let mut consts = vec![Value::int(0)];
+        let insns = vec![Insn::BinOpConst(2, 1, BinaryOp::Add, 0)];
+        let out = pass_algebraic_simplify(insns, &mut consts);
+        assert!(matches!(out[0], Insn::Move(2, 1)), "x+0 should become Move");
+    }
+
+    #[test]
+    fn algebraic_mul_zero_becomes_loadconst() {
+        use crate::ast::BinaryOp;
+        use crate::value::Value;
+        let mut consts = vec![Value::int(0)];
+        let insns = vec![Insn::BinOpConst(2, 1, BinaryOp::Mul, 0)];
+        let out = pass_algebraic_simplify(insns, &mut consts);
+        assert!(
+            matches!(out[0], Insn::LoadConst(2, _)),
+            "x*0 should become LoadConst(0)"
+        );
+    }
+
+    #[test]
+    fn algebraic_pow_zero_becomes_loadconst_one() {
+        use crate::ast::BinaryOp;
+        use crate::value::Value;
+        let mut consts = vec![Value::int(0)];
+        let insns = vec![Insn::BinOpConst(2, 1, BinaryOp::Pow, 0)];
+        let out = pass_algebraic_simplify(insns, &mut consts);
+        assert!(
+            matches!(out[0], Insn::LoadConst(2, _)),
+            "x**0 should become LoadConst(1)"
+        );
+        let idx = match out[0] { Insn::LoadConst(_, i) => i, _ => panic!() };
+        assert!(matches!(consts[idx as usize].kind(), crate::value::ValueKind::Int(1)));
+    }
+
+    #[test]
+    fn algebraic_skips_float_identity() {
+        use crate::ast::BinaryOp;
+        use crate::value::Value;
+        // 0.0 is int-0-like but we only simplify integer constants.
+        let mut consts = vec![Value::float(0.0)];
+        let insns = vec![Insn::BinOpConst(2, 1, BinaryOp::Add, 0)];
+        let out = pass_algebraic_simplify(insns, &mut consts);
+        // Should NOT simplify float: x + 0.0 has different NaN/inf semantics.
+        assert!(
+            matches!(out[0], Insn::BinOpConst(2, 1, BinaryOp::Add, 0)),
+            "float identity should not be simplified"
+        );
+    }
+
+    #[test]
+    fn algebraic_on_compiled_code() {
+        // x + 0 inside a function — algebraic pass should fold to Move.
+        let code = compile_fn("def f(x):\n    return x + 0\n");
+        let optimized = optimize(code);
+        // After simplification x+0 becomes Move(dst,x), then trivial_nop removes Move(r,r).
+        // Either way, there should be no BinOpConst in the output.
+        let has_binopconst = optimized.fn_protos[0]
+            .code
+            .insns
+            .iter()
+            .any(|i| matches!(i, Insn::BinOpConst(..)));
+        assert!(!has_binopconst, "x+0 should not leave a BinOpConst");
     }
 
     // ── pass_const_fold ───────────────────────────────────────────────────────
