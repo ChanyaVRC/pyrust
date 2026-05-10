@@ -13,7 +13,7 @@ pub type Reg = u32;
 /// Prototype for a nested function or class body.  Created at compile time,
 /// instantiated into a `UserFunction` / class value at runtime via `MakeFunction`
 /// / `MakeClass`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FnProto {
     pub name: String,
     /// Parameter names in declaration order (no defaults — defaults are in registers).
@@ -162,7 +162,7 @@ pub enum Insn {
     DictUpdate(Reg, Reg),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FnCode {
     pub(crate) insns: Vec<Insn>,
     /// Constant pool (literals used in the function body)
