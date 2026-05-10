@@ -521,6 +521,7 @@ impl Interpreter {
                     ValueKind::UserFunction(_) | ValueKind::BoundMethod { .. } => Ok(Value::builtin_function("function")),
                     ValueKind::BuiltinFunction(_) => Ok(Value::builtin_function("builtin_function_or_method")),
                     ValueKind::PyModule(_) => Ok(Value::builtin_function("module")),
+                    ValueKind::BigInt(_) => Ok(Value::builtin_function("int")),
                 }
             }
             ValueKind::BuiltinFunction("id") => {
