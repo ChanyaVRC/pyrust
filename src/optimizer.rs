@@ -196,12 +196,43 @@ fn pass_cmpjump_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
 /// values through `Move(dst, src)`.
 ///
 /// The map is cleared at branch/loop instructions where we cannot guarantee
-/// which path was taken at runtime.
+/// which path was taken at runtime, and also at loop headers (targets of
+/// backward jumps) to avoid incorrectly folding loop conditions.
 fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn> {
+    // Pre-pass: collect every instruction index that is the target of a backward
+    // jump.  At these loop headers the known-constant map must be cleared so we
+    // do not fold values that differ across iterations.
+    let mut loop_headers: HashSet<usize> = HashSet::new();
+    for (i, insn) in insns.iter().enumerate() {
+        let k: Option<i32> = match insn {
+            Insn::Jump(k) => Some(*k),
+            Insn::JumpIfFalse(_, k)
+            | Insn::JumpIfTrue(_, k)
+            | Insn::CmpJumpIfFalse(_, _, _, k)
+            | Insn::CmpJumpIfTrue(_, _, _, k)
+            | Insn::CmpJumpIfFalseConst(_, _, _, k)
+            | Insn::CmpJumpIfTrueConst(_, _, _, k)
+            | Insn::ForIter(_, _, k)
+            | Insn::ForCountReg(_, _, _, _, k)
+            | Insn::ForCountConst(_, _, _, _, k)
+            | Insn::SetupExcept(k) => Some(*k),
+            _ => None,
+        };
+        if let Some(k) = k {
+            if k < 0 {
+                let target = (i as i64 + 1 + k as i64) as usize;
+                loop_headers.insert(target);
+            }
+        }
+    }
+
     let mut known: HashMap<u32, u16> = HashMap::new();
     let mut out = Vec::with_capacity(insns.len());
 
-    for insn in insns {
+    for (i, insn) in insns.into_iter().enumerate() {
+        if loop_headers.contains(&i) {
+            known.clear();
+        }
         match insn {
             Insn::LoadConst(dst, c) => {
                 known.insert(dst, c);
@@ -995,6 +1026,35 @@ mod tests {
         assert!(
             has_10,
             "constant 10 should appear in pool after folding x*2 with x=5"
+        );
+    }
+
+    #[test]
+    fn const_fold_does_not_fold_loop_condition() {
+        use crate::ast::BinaryOp;
+        use crate::value::Value;
+        // Simulates: y = 3; while y > 0: y = y - 1
+        //
+        //  [0] LoadConst(0, 0)              consts[0] = 3   (y_reg = 0)
+        //  [1] BinOpConst(1, 0, Gt, 1)      consts[1] = 0   (loop header — target of Jump at [4])
+        //  [2] JumpIfFalse(1, 2)                             (exit: target = 2+1+2 = 5)
+        //  [3] BinOpConst(0, 0, Sub, 2)     consts[2] = 1
+        //  [4] Jump(-4)                                      (back to [1]: 4+1-4 = 1)
+        //  [5] Return(0)
+        let mut consts = vec![Value::int(3), Value::int(0), Value::int(1)];
+        let insns = vec![
+            Insn::LoadConst(0, 0),
+            Insn::BinOpConst(1, 0, BinaryOp::Gt, 1),
+            Insn::JumpIfFalse(1, 2),
+            Insn::BinOpConst(0, 0, BinaryOp::Sub, 2),
+            Insn::Jump(-4),
+            Insn::Return(0),
+        ];
+        let out = pass_const_fold(insns, &mut consts);
+        // [1] must NOT fold to LoadConst(True) — the loop would become infinite.
+        assert!(
+            matches!(out[1], Insn::BinOpConst(1, 0, BinaryOp::Gt, 1)),
+            "loop condition must not be folded; known map must clear at loop header"
         );
     }
 
