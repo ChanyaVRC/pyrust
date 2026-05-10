@@ -47,3 +47,25 @@ print("list-zero-args", list())
 print("tuple-from-list", tuple([1, 2, 3]))
 print("tuple-from-range", tuple(range(3)))
 print("tuple-zero-args", tuple())
+
+# int(str, base) — Issue #99
+print("int-base2", int("101", 2))
+print("int-base8", int("17", 8))
+print("int-base16", int("ff", 16))
+print("int-base16-upper", int("FF", 16))
+print("int-0x-prefix", int("0xff", 16))
+print("int-0b-prefix", int("0b101", 2))
+print("int-0o-prefix", int("0o17", 8))
+print("int-base36", int("z", 36))
+try:
+    int("42", 37)
+except ValueError:
+    print("int-base-high", "ValueError")
+try:
+    int("42", 1)
+except ValueError:
+    print("int-base-low", "ValueError")
+try:
+    int("xyz", 10)
+except ValueError:
+    print("int-bad-literal", "ValueError")
