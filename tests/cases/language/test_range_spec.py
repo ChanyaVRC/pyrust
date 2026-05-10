@@ -25,3 +25,8 @@ print("range-neg-to-neg", list(range(-1, -5, -1))) # [-1, -2, -3, -4]
 
 print("range-pos-empty", list(range(5, 0, 1)))     # []
 print("range-pos-empty2", list(range(5, 5, 1)))    # []
+
+# range() with bool arguments — Issue #101
+print("range-true", list(range(True)))
+print("range-false-start", list(range(False, 3)))
+print("range-bool-step", list(range(0, 4, True)))
