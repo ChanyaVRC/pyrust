@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use crate::bytecode::{FnCode, FnProto, Insn};
@@ -14,14 +15,14 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         .fn_protos
         .into_iter()
         .map(|mut proto| {
-            let inner = Rc::try_unwrap(proto.code)
-                .unwrap_or_else(|rc| (*rc).clone());
+            let inner = Rc::try_unwrap(proto.code).unwrap_or_else(|rc| (*rc).clone());
             proto.code = Rc::new(optimize_fn_code(inner));
             proto
         })
         .collect();
 
-    let insns = pass_dead_code(code.insns);
+    let insns = pass_thread_jumps(code.insns);
+    let insns = pass_dead_code(insns);
     let insns = pass_trivial_nop(insns);
 
     FnCode {
@@ -34,6 +35,60 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         fn_protos,
         cell_vars: code.cell_vars,
     }
+}
+
+// ─── Jump threading ────────────────────────────────────────────────────────────
+
+/// Thread chains of unconditional `Jump`s so that any jump whose target is
+/// itself a `Jump` is redirected to the chain's final non-`Jump` destination.
+/// Conditional jumps have only their taken-branch target threaded; the
+/// fallthrough path is unchanged.  No instructions are removed in this pass.
+fn pass_thread_jumps(insns: Vec<Insn>) -> Vec<Insn> {
+    // Follow a chain of unconditional Jumps from `start`, returning the index
+    // of the first instruction that is NOT an unconditional Jump.
+    // A visited-set guards against infinite loops (self-referential jumps).
+    fn follow(insns: &[Insn], start: usize) -> usize {
+        let mut pc = start;
+        let mut seen = HashSet::new();
+        loop {
+            if pc >= insns.len() || !seen.insert(pc) {
+                break;
+            }
+            match &insns[pc] {
+                Insn::Jump(k) => pc = (pc as i64 + 1 + *k as i64) as usize,
+                _ => break,
+            }
+        }
+        pc
+    }
+
+    insns
+        .iter()
+        .enumerate()
+        .map(|(i, insn)| {
+            let thread = |k: i32| -> i32 {
+                let raw = (i as i64 + 1 + k as i64) as usize;
+                let final_t = follow(&insns, raw);
+                (final_t as i64 - i as i64 - 1) as i32
+            };
+            use Insn::*;
+            match insn.clone() {
+                Jump(k) => Jump(thread(k)),
+                JumpIfFalse(r, k) => JumpIfFalse(r, thread(k)),
+                JumpIfTrue(r, k) => JumpIfTrue(r, thread(k)),
+                CmpJumpIfFalse(a, op, b, k) => CmpJumpIfFalse(a, op, b, thread(k)),
+                CmpJumpIfTrue(a, op, b, k) => CmpJumpIfTrue(a, op, b, thread(k)),
+                CmpJumpIfFalseConst(r, op, c, k) => CmpJumpIfFalseConst(r, op, c, thread(k)),
+                CmpJumpIfTrueConst(r, op, c, k) => CmpJumpIfTrueConst(r, op, c, thread(k)),
+                ForIter(dst, slot, k) => ForIter(dst, slot, thread(k)),
+                ForCountReg(v, op, stop, step, k) => ForCountReg(v, op, stop, step, thread(k)),
+                ForCountConst(v, op, stop, step, k) => ForCountConst(v, op, stop, step, thread(k)),
+                SetupExcept(k) => SetupExcept(thread(k)),
+                MatchExcept(r, k) => MatchExcept(r, thread(k)),
+                other => other,
+            }
+        })
+        .collect()
 }
 
 // ─── Dead code elimination ─────────────────────────────────────────────────────
@@ -169,7 +224,6 @@ pub(crate) fn rewrite_offsets(insn: Insn, old_i: usize, to_new: &[usize]) -> Ins
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::BinaryOp;
 
     fn compile_fn(src: &str) -> FnCode {
         use crate::{interpreter::collect_local_names, lexer::Lexer, parser::Parser};
@@ -180,9 +234,80 @@ mod tests {
         let empty: HashSet<String> = HashSet::new();
         let names = collect_local_names(&[], &stmts, &empty, &empty);
         let local_index = std::rc::Rc::new(
-            (0u32..).zip(names.iter()).map(|(i, n)| (n.clone(), i)).collect(),
+            (0u32..)
+                .zip(names.iter())
+                .map(|(i, n)| (n.clone(), i))
+                .collect(),
         );
         crate::compiler::compile_script(&stmts, local_index, false).unwrap()
+    }
+
+    // ── pass_thread_jumps ─────────────────────────────────────────────────────
+
+    #[test]
+    fn thread_jumps_collapses_chain() {
+        // [0] Jump(1)  [1] LoadNone(0)  [2] Jump(1)  [3] LoadNone(1)  [4] Return(1)
+        // Jump at 0 targets idx 2 (0+1+1=2). idx 2 is Jump(1) → idx 4.
+        // After threading: Jump at 0 should target 4 directly → offset = 4-(0+1)=3.
+        let insns = vec![
+            Insn::Jump(1),     // 0 → 2
+            Insn::LoadNone(0), // 1
+            Insn::Jump(1),     // 2 → 4
+            Insn::LoadNone(1), // 3
+            Insn::Return(1),   // 4
+        ];
+        let out = pass_thread_jumps(insns);
+        assert!(
+            matches!(out[0], Insn::Jump(3)),
+            "Jump(1) at 0 should be threaded to Jump(3) (target idx 4)"
+        );
+    }
+
+    #[test]
+    fn thread_jumps_handles_self_loop() {
+        // Jump(-1) loops to itself — threading must not infinite-loop.
+        let insns = vec![Insn::Jump(-1)];
+        let out = pass_thread_jumps(insns);
+        assert_eq!(out.len(), 1);
+        assert!(
+            matches!(out[0], Insn::Jump(-1)),
+            "self-loop must be left unchanged"
+        );
+    }
+
+    #[test]
+    fn thread_conditional_jump_through_unconditional() {
+        // [0] JumpIfFalse(r, 1)   [1] Jump(1)   [2] LoadNone(0)   [3] Return(0)
+        // JumpIfFalse at 0 targets 2. idx 2 is Jump(1) targeting idx 4 (past end).
+        // After threading JumpIfFalse should target idx 4 as well.
+        let insns = vec![
+            Insn::JumpIfFalse(0, 1), // 0 → target 2
+            Insn::Jump(1),           // 1 → target 3
+            Insn::LoadNone(0),       // 2
+            Insn::Return(0),         // 3
+        ];
+        let out = pass_thread_jumps(insns);
+        // JumpIfFalse at 0 targeted 2; idx 2 is LoadNone (not a Jump) so no threading there.
+        // JumpIfFalse's target is idx 2 which is NOT a Jump — offset stays 1.
+        assert!(
+            matches!(out[0], Insn::JumpIfFalse(0, 1)),
+            "no chain to thread for the conditional"
+        );
+        // Jump at 1 targets 3 (Return), which is not a Jump.
+        assert!(matches!(out[1], Insn::Jump(1)));
+    }
+
+    #[test]
+    fn thread_jumps_no_change_when_no_chains() {
+        // No jump chains → output equals input.
+        let insns = vec![
+            Insn::LoadNone(0),
+            Insn::JumpIfFalse(0, 1),
+            Insn::LoadNone(1),
+            Insn::Return(0),
+        ];
+        let out = pass_thread_jumps(insns.clone());
+        assert_eq!(out.len(), insns.len());
     }
 
     // ── pass_dead_code ────────────────────────────────────────────────────────
@@ -227,7 +352,10 @@ mod tests {
         ];
         let out = pass_dead_code(insns);
         assert_eq!(out.len(), 2);
-        assert!(matches!(out[0], Insn::Jump(0)), "offset rewritten: 2→1, new offset = 1-(0+1)=0");
+        assert!(
+            matches!(out[0], Insn::Jump(0)),
+            "offset rewritten: 2→1, new offset = 1-(0+1)=0"
+        );
         assert!(matches!(out[1], Insn::Return(1)));
     }
 
@@ -250,7 +378,7 @@ mod tests {
         // Jump(0) is a no-op: it jumps to the next instruction.
         let insns = vec![
             Insn::LoadNone(0),
-            Insn::Jump(0),  // <- should be removed
+            Insn::Jump(0), // <- should be removed
             Insn::Return(0),
         ];
         let out = pass_trivial_nop(insns);
@@ -264,7 +392,7 @@ mod tests {
         // Move(r, r) copies a register into itself — no effect.
         let insns = vec![
             Insn::LoadNone(1),
-            Insn::Move(2, 2),  // <- should be removed
+            Insn::Move(2, 2), // <- should be removed
             Insn::Return(1),
         ];
         let out = pass_trivial_nop(insns);
@@ -280,12 +408,15 @@ mod tests {
         // so new offset = 2 - (1+1) = 0.
         let insns = vec![
             Insn::LoadNone(0),
-            Insn::Jump(1),  // targets idx 3 (Return)
-            Insn::Jump(0),  // no-op, removed
+            Insn::Jump(1), // targets idx 3 (Return)
+            Insn::Jump(0), // no-op, removed
             Insn::Return(0),
         ];
         let out = pass_trivial_nop(insns);
         assert_eq!(out.len(), 3);
-        assert!(matches!(out[1], Insn::Jump(0)), "offset should decrease by 1");
+        assert!(
+            matches!(out[1], Insn::Jump(0)),
+            "offset should decrease by 1"
+        );
     }
 }
