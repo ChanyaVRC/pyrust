@@ -980,44 +980,10 @@ impl Compiler {
 
     /// Try to fuse the last emitted instruction with a conditional jump.
     ///
-    /// If the last instruction is `BinOpConst(cond_reg, lhs, op, c)` or
-    /// `BinOp(cond_reg, lhs, op, rhs)`, replace it with the corresponding
-    /// `CmpJump*` variant (offset=0, to be patched).  Otherwise fall back to
-    /// emitting `JumpIfFalse`/`JumpIfTrue` as normal.
-    ///
-    /// `invert=false` → JumpIfFalse semantics (jump when comparison is false)
-    /// `invert=true`  → JumpIfTrue semantics (jump when comparison is true)
+    /// Emit `JumpIfFalse` or `JumpIfTrue` for `cond_reg` (offset=0, patched later).
+    /// `invert=false` → JumpIfFalse, `invert=true` → JumpIfTrue.
+    /// BinOp/BinOpConst + conditional-jump fusion is handled by the optimizer.
     fn emit_cond_jump(&mut self, cond_reg: Reg, invert: bool) -> usize {
-        // Only fuse when the result register is a temp (not a named local).
-        if cond_reg >= self.base_temp {
-            if let Some(last) = self.insns.last().cloned() {
-                match last {
-                    Insn::BinOpConst(dst, lhs, op, c) if dst == cond_reg => {
-                        let idx = self.insns.len() - 1;
-                        // Free the temp that would have held the bool result.
-                        self.free_temp(cond_reg);
-                        self.insns[idx] = if invert {
-                            Insn::CmpJumpIfTrueConst(lhs, op, c, 0)
-                        } else {
-                            Insn::CmpJumpIfFalseConst(lhs, op, c, 0)
-                        };
-                        return idx;
-                    }
-                    Insn::BinOp(dst, lhs, op, rhs) if dst == cond_reg => {
-                        let idx = self.insns.len() - 1;
-                        self.free_temp(cond_reg);
-                        self.insns[idx] = if invert {
-                            Insn::CmpJumpIfTrue(lhs, op, rhs, 0)
-                        } else {
-                            Insn::CmpJumpIfFalse(lhs, op, rhs, 0)
-                        };
-                        return idx;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        // Fall back: emit a regular conditional jump.
         if invert {
             self.emit(Insn::JumpIfTrue(cond_reg, 0))
         } else {

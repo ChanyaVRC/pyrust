@@ -24,6 +24,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let num_locals = code.num_locals;
     let insns = pass_thread_jumps(code.insns);
     let insns = pass_binop_const_fusion(insns, num_locals);
+    let insns = pass_cmpjump_fusion(insns, num_locals);
     let insns = pass_dead_code(insns);
     let insns = pass_trivial_nop(insns);
 
@@ -120,6 +121,56 @@ fn pass_binop_const_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             }
         }
         i += 1;
+    }
+    compact(transformed, &keep)
+}
+
+// ─── CmpJump fusion ────────────────────────────────────────────────────────────
+
+/// Fuse a comparison result into the following conditional jump:
+/// - `BinOp(r, lhs, op, rhs) + JumpIfFalse(r, k)` → `CmpJumpIfFalse(lhs, op, rhs, k)`
+/// - `BinOp(r, lhs, op, rhs) + JumpIfTrue(r, k)`  → `CmpJumpIfTrue(lhs, op, rhs, k)`
+/// - `BinOpConst(r, lhs, op, c) + JumpIfFalse(r, k)` → `CmpJumpIfFalseConst(lhs, op, c, k)`
+/// - `BinOpConst(r, lhs, op, c) + JumpIfTrue(r, k)`  → `CmpJumpIfTrueConst(lhs, op, c, k)`
+///
+/// Only fuses when `r >= num_locals` (temp register — not a named local).
+fn pass_cmpjump_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
+    let n = insns.len();
+    let mut transformed = insns;
+    let mut keep = vec![true; n];
+
+    let mut i = 0;
+    while i + 1 < n {
+        let fused: Option<Insn> = match (&transformed[i], &transformed[i + 1]) {
+            (Insn::BinOpConst(r, lhs, op, c), Insn::JumpIfFalse(cond, k))
+                if *r == *cond && *r >= num_locals =>
+            {
+                Some(Insn::CmpJumpIfFalseConst(*lhs, *op, *c, *k))
+            }
+            (Insn::BinOpConst(r, lhs, op, c), Insn::JumpIfTrue(cond, k))
+                if *r == *cond && *r >= num_locals =>
+            {
+                Some(Insn::CmpJumpIfTrueConst(*lhs, *op, *c, *k))
+            }
+            (Insn::BinOp(r, lhs, op, rhs), Insn::JumpIfFalse(cond, k))
+                if *r == *cond && *r >= num_locals =>
+            {
+                Some(Insn::CmpJumpIfFalse(*lhs, *op, *rhs, *k))
+            }
+            (Insn::BinOp(r, lhs, op, rhs), Insn::JumpIfTrue(cond, k))
+                if *r == *cond && *r >= num_locals =>
+            {
+                Some(Insn::CmpJumpIfTrue(*lhs, *op, *rhs, *k))
+            }
+            _ => None,
+        };
+        if let Some(new_insn) = fused {
+            keep[i] = false;
+            transformed[i + 1] = new_insn;
+            i += 2;
+        } else {
+            i += 1;
+        }
     }
     compact(transformed, &keep)
 }
@@ -332,6 +383,75 @@ mod tests {
             .iter()
             .any(|i| matches!(i, Insn::BinOpConst(..)));
         assert!(has_binopconst, "optimizer should emit BinOpConst for x + 5");
+    }
+
+    // ── pass_cmpjump_fusion ───────────────────────────────────────────────────
+
+    #[test]
+    fn cmpjump_fuses_binopconst_jumpiffalse() {
+        use crate::ast::BinaryOp;
+        // BinOpConst(r=5, lhs=0, Gt, c=0) + JumpIfFalse(r=5, k=0)
+        // k=0: if-false jumps to old_pos 1+1+0=2 = Return.
+        // After fusion+compaction: CmpJumpIfFalseConst at new_pos 0, Return at new_pos 1.
+        // Rewritten offset: to_new[2]-to_new[1]-1 = 1-0-1 = 0 → same k=0.
+        let insns = vec![
+            Insn::BinOpConst(5, 0, BinaryOp::Gt, 0),
+            Insn::JumpIfFalse(5, 0),
+            Insn::Return(0),
+        ];
+        let out = pass_cmpjump_fusion(insns, 2);
+        assert_eq!(out.len(), 2, "BinOpConst should be removed");
+        assert!(
+            matches!(out[0], Insn::CmpJumpIfFalseConst(0, BinaryOp::Gt, 0, 0)),
+            "should become CmpJumpIfFalseConst with same offset"
+        );
+    }
+
+    #[test]
+    fn cmpjump_fuses_binop_jumpiftrue() {
+        use crate::ast::BinaryOp;
+        // BinOp(r=5, lhs=0, Eq, rhs=1) + JumpIfTrue(r=5, k=0)
+        // → CmpJumpIfTrue(lhs=0, Eq, rhs=1, k=0)
+        let insns = vec![
+            Insn::BinOp(5, 0, BinaryOp::Eq, 1),
+            Insn::JumpIfTrue(5, 0),
+            Insn::Return(0),
+        ];
+        let out = pass_cmpjump_fusion(insns, 2);
+        assert_eq!(out.len(), 2, "BinOp should be removed");
+        assert!(
+            matches!(out[0], Insn::CmpJumpIfTrue(0, BinaryOp::Eq, 1, 0)),
+            "should become CmpJumpIfTrue"
+        );
+    }
+
+    #[test]
+    fn cmpjump_skips_when_reg_is_local() {
+        use crate::ast::BinaryOp;
+        // r=1 < num_locals=3 → no fusion
+        let insns = vec![
+            Insn::BinOpConst(1, 0, BinaryOp::Gt, 0),
+            Insn::JumpIfFalse(1, 1),
+            Insn::Return(0),
+        ];
+        let out = pass_cmpjump_fusion(insns, 3);
+        assert_eq!(out.len(), 3, "no fusion when cond reg is a local");
+    }
+
+    #[test]
+    fn cmpjump_fusion_on_compiled_if() {
+        let code = compile_fn("x = 5\nif x > 3:\n    print(x)\n");
+        let optimized = optimize(code);
+        let has_cmpjump = optimized.insns.iter().any(|i| {
+            matches!(
+                i,
+                Insn::CmpJumpIfFalse(..)
+                    | Insn::CmpJumpIfTrue(..)
+                    | Insn::CmpJumpIfFalseConst(..)
+                    | Insn::CmpJumpIfTrueConst(..)
+            )
+        });
+        assert!(has_cmpjump, "optimizer should fuse comparison into conditional jump");
     }
 
     // ── pass_thread_jumps ─────────────────────────────────────────────────────
