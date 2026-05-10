@@ -1,26 +1,30 @@
-/// RAII guard that decrements `call_depth` when dropped.
-///
-/// Uses a raw pointer so that `self` remains usable after the guard is created.
-/// Safety: the pointed-to field lives at least as long as `Interpreter`, and
-/// the guard is always dropped before the `Interpreter` is moved or destroyed.
-struct CallDepthGuard(*mut usize);
+// Thread-local call depth counter. Using thread_local avoids the split-borrow
+// problem: a guard that holds &mut self.call_depth cannot coexist with a &mut self
+// method call. The thread_local is safe because the interpreter is single-threaded.
+use std::cell::Cell;
+
+thread_local! {
+    static CALL_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+fn call_depth() -> usize {
+    CALL_DEPTH.with(|d| d.get())
+}
+
+// RAII guard: increments the thread-local call depth on creation and decrements
+// it on drop, including on panic, without any unsafe code.
+struct CallDepthGuard;
 
 impl CallDepthGuard {
-    /// Increment `*depth` and return a guard that will decrement it on drop.
-    ///
-    /// # Safety
-    /// The caller must ensure the pointer remains valid for the guard's lifetime.
-    unsafe fn new(depth: *mut usize) -> Self {
-        // SAFETY: caller guarantees the pointer is valid and non-aliased.
-        unsafe { *depth += 1 };
-        Self(depth)
+    fn enter() -> Self {
+        CALL_DEPTH.with(|d| d.set(d.get() + 1));
+        Self
     }
 }
 
 impl Drop for CallDepthGuard {
     fn drop(&mut self) {
-        // Safety: same pointer that was valid at construction time.
-        unsafe { *self.0 -= 1 };
+        CALL_DEPTH.with(|d| d.set(d.get() - 1));
     }
 }
 
@@ -904,9 +908,8 @@ impl Interpreter {
                     }
                 }
 
-                // Safety: `self` outlives this block; the guard is dropped before `self` moves.
-                let _depth_guard = unsafe { CallDepthGuard::new(&raw mut self.call_depth) };
-                if self.call_depth > MAX_CALL_DEPTH {
+                let _depth_guard = CallDepthGuard::enter();
+                if call_depth() > MAX_CALL_DEPTH {
                     let exc = self.instantiate_named_exception(
                         "RecursionError",
                         "maximum recursion depth exceeded".to_string(),
@@ -1057,9 +1060,8 @@ impl Interpreter {
                 }
             }
 
-            // Safety: `self` outlives this block; the guard is dropped before `self` moves.
-            let _depth_guard = unsafe { CallDepthGuard::new(&raw mut self.call_depth) };
-            if self.call_depth > MAX_CALL_DEPTH {
+            let _depth_guard = CallDepthGuard::enter();
+            if call_depth() > MAX_CALL_DEPTH {
                 let exc = self.instantiate_named_exception(
                     "RecursionError",
                     "maximum recursion depth exceeded".to_string(),
