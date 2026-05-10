@@ -1028,4 +1028,10 @@ result = fact(10)
             Some(Value::bool_(true))
         );
     }
+
+    #[test]
+    fn value_is_eight_bytes() {
+        // Issue #64: Value must be a NaN-boxed u64 (8 bytes), not a tagged enum.
+        assert_eq!(std::mem::size_of::<Value>(), 8);
+    }
 }

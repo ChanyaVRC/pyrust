@@ -10,20 +10,30 @@ pub type CellVar = String;
 
 pub type Reg = u32;
 
+/// Static parameter metadata for a function prototype.  Shared via `Rc` so that
+/// `MakeFunction` (which may run on every loop iteration) pays only a refcount
+/// bump instead of cloning four separate `Vec`s.
+#[derive(Debug, Clone)]
+pub struct FnParamSpec {
+    pub names: Vec<String>,
+    pub has_default: Vec<bool>,
+    pub is_args: Vec<bool>,
+    pub is_kwargs: Vec<bool>,
+}
+
 /// Prototype for a nested function or class body.  Created at compile time,
 /// instantiated into a `UserFunction` / class value at runtime via `MakeFunction`
 /// / `MakeClass`.
 #[derive(Debug, Clone)]
 pub struct FnProto {
     pub name: String,
-    /// Parameter names in declaration order (no defaults — defaults are in registers).
-    pub param_names: Vec<String>,
-    /// Which params carry defaults (filled right-to-left, like Python).
-    pub param_has_default: Vec<bool>,
-    pub param_is_args: Vec<bool>,
-    pub param_is_kwargs: Vec<bool>,
+    /// Shared param metadata — `Rc::clone` in `MakeFunction` instead of four `Vec::clone`s.
+    pub param_spec: Rc<FnParamSpec>,
     pub code: Rc<FnCode>,
     pub local_index: Rc<HashMap<String, Reg>>,
+    /// Pre-computed set of local variable names (keys of `local_index`).
+    /// Avoids an O(n) `HashSet` rebuild on every `MakeFunction` call.
+    pub local_names: Rc<HashSet<String>>,
     pub global_names: Rc<HashSet<String>>,
     pub nonlocal_names: Rc<HashSet<String>>,
     pub is_pure: bool,
