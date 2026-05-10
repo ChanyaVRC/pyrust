@@ -29,6 +29,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_cmpjump_fusion(insns, num_locals);
     let insns = pass_const_fold(insns, &mut consts);
     let insns = pass_algebraic_simplify(insns, &mut consts);
+    let insns = pass_unary_fold(insns, num_locals, &mut consts);
     let insns = pass_dead_code(insns);
     let insns = pass_trivial_nop(insns);
 
@@ -425,6 +426,58 @@ fn pass_algebraic_simplify(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Ins
         .collect()
 }
 
+// ─── Unary constant folding ────────────────────────────────────────────────────
+
+/// Fuse `LoadConst(r, c) + UnaryOp(dst, op, r)` → `LoadConst(dst, op(c))`
+/// when `r >= num_locals` (temp register).
+///
+/// Handles `Neg`, `Not`, and `BitNot` applied to integer or float constants.
+fn pass_unary_fold(insns: Vec<Insn>, num_locals: u32, consts: &mut Vec<Value>) -> Vec<Insn> {
+    use crate::ast::UnaryOp;
+
+    let n = insns.len();
+    let mut transformed = insns;
+    let mut keep = vec![true; n];
+
+    let mut i = 0;
+    while i + 1 < n {
+        let fused: Option<(u32, Value)> =
+            match (&transformed[i], &transformed[i + 1]) {
+                (Insn::LoadConst(lc_reg, c_idx), Insn::UnaryOp(dst, op, src))
+                    if *src == *lc_reg && *lc_reg >= num_locals =>
+                {
+                    let c = &consts[*c_idx as usize];
+                    let result = match op {
+                        UnaryOp::Neg => match c.kind() {
+                            ValueKind::Int(n) => Some(Value::int(n.wrapping_neg())),
+                            ValueKind::Float(f) => Some(Value::float(-f)),
+                            _ => None,
+                        },
+                        UnaryOp::Not => Some(Value::bool_(!c.truthy())),
+                        UnaryOp::BitNot => match c.kind() {
+                            ValueKind::Int(n) => Some(Value::int(!n)),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    result.map(|v| (*dst, v))
+                }
+                _ => None,
+            };
+
+        if let Some((dst, val)) = fused {
+            if let Some(new_c) = intern_const_in_pool(consts, val) {
+                keep[i] = false;
+                transformed[i + 1] = Insn::LoadConst(dst, new_c);
+                i += 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    compact(transformed, &keep)
+}
+
 // ─── Trivial no-op removal ─────────────────────────────────────────────────────
 
 /// Remove instructions that have no observable effect:
@@ -582,6 +635,75 @@ mod tests {
             .iter()
             .any(|i| matches!(i, Insn::BinOpConst(..)));
         assert!(has_binopconst, "optimizer should fuse LoadConst+BinOp into BinOpConst for n+5");
+    }
+
+    // ── pass_unary_fold ───────────────────────────────────────────────────────
+
+    #[test]
+    fn unary_fold_neg_int() {
+        use crate::ast::UnaryOp;
+        use crate::value::Value;
+        // LoadConst(r=5, idx=0) [consts[0]=-3]  UnaryOp(dst=1, Neg, r=5)
+        // → LoadConst(dst=1, idx_3)
+        let mut consts = vec![Value::int(-3)];
+        let insns = vec![
+            Insn::LoadConst(5, 0),
+            Insn::UnaryOp(1, UnaryOp::Neg, 5),
+            Insn::Return(1),
+        ];
+        let out = pass_unary_fold(insns, 2, &mut consts);
+        assert_eq!(out.len(), 2, "LoadConst should be removed");
+        assert!(
+            matches!(out[0], Insn::LoadConst(1, _)),
+            "UnaryOp should become LoadConst"
+        );
+        let idx = match out[0] { Insn::LoadConst(_, i) => i, _ => panic!() };
+        assert!(matches!(consts[idx as usize].kind(), crate::value::ValueKind::Int(3)));
+    }
+
+    #[test]
+    fn unary_fold_not_bool() {
+        use crate::ast::UnaryOp;
+        use crate::value::Value;
+        let mut consts = vec![Value::bool_(true)];
+        let insns = vec![
+            Insn::LoadConst(5, 0),
+            Insn::UnaryOp(1, UnaryOp::Not, 5),
+            Insn::Return(1),
+        ];
+        let out = pass_unary_fold(insns, 2, &mut consts);
+        assert_eq!(out.len(), 2, "LoadConst should be removed");
+        let idx = match out[0] { Insn::LoadConst(_, i) => i, _ => panic!() };
+        assert!(matches!(consts[idx as usize].kind(), crate::value::ValueKind::Bool(false)));
+    }
+
+    #[test]
+    fn unary_fold_skips_local_reg() {
+        use crate::ast::UnaryOp;
+        use crate::value::Value;
+        // r=1 < num_locals=3: should not fuse.
+        let mut consts = vec![Value::int(5)];
+        let insns = vec![
+            Insn::LoadConst(1, 0),
+            Insn::UnaryOp(2, UnaryOp::Neg, 1),
+            Insn::Return(2),
+        ];
+        let out = pass_unary_fold(insns, 3, &mut consts);
+        assert_eq!(out.len(), 3, "no fusion for local register");
+    }
+
+    #[test]
+    fn unary_fold_on_compiled_literal() {
+        // -5 is a literal unary-neg in the source; after removing the fold_constant check
+        // from compile_expr, the optimizer should fold it via pass_unary_fold.
+        let code = compile_fn("x = -5\nprint(x)\n");
+        let optimized = optimize(code);
+        // The constant pool should contain -5 (or the LoadConst(-5) folded from Neg+5).
+        let has_neg5 = optimized
+            .consts
+            .iter()
+            .any(|v| matches!(v.kind(), crate::value::ValueKind::Int(-5)));
+        assert!(has_neg5, "constant -5 should appear after unary fold");
     }
 
     // ── pass_algebraic_simplify ───────────────────────────────────────────────
