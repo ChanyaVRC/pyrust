@@ -253,9 +253,10 @@ impl Interpreter {
                         ValueKind::Float(v) => Ok(Value::int(v as i64)),
                         ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
                         ValueKind::Str(s) => s.trim().parse::<i64>().map(Value::int).map_err(|_| {
-                            PyError::Runtime(format!(
-                                "invalid literal for int() with base 10: '{s}'"
-                            ))
+                            PyError::Named(
+                                "ValueError".to_string(),
+                                format!("invalid literal for int() with base 10: '{s}'"),
+                            )
                         }),
                         _ => Err(PyError::Runtime(
                             "int() argument must be a number or string".to_string(),
@@ -283,10 +284,10 @@ impl Interpreter {
                                 };
                                 i64::from_str_radix(stripped, base)
                                     .map(Value::int)
-                                    .map_err(|_| PyError::Runtime(format!(
-                                        "invalid literal for int() with base {base}: '{}'",
-                                        s.trim()
-                                    )))
+                                    .map_err(|_| PyError::Named(
+                                        "ValueError".to_string(),
+                                        format!("invalid literal for int() with base {base}: '{}'", s.trim()),
+                                    ))
                             }
                             _ => Err(PyError::Runtime("int() can't convert non-string with explicit base".to_string())),
                         }
