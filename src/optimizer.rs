@@ -21,8 +21,10 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         })
         .collect();
 
+    let insns = pass_trivial_nop(code.insns);
+
     FnCode {
-        insns: code.insns,
+        insns,
         consts: code.consts,
         names: code.names,
         num_regs: code.num_regs,
@@ -31,6 +33,23 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         fn_protos,
         cell_vars: code.cell_vars,
     }
+}
+
+// ─── Trivial no-op removal ─────────────────────────────────────────────────────
+
+/// Remove instructions that have no observable effect:
+/// - `Jump(0)` — offset 0 means the next instruction; equivalent to falling through
+/// - `Move(r, r)` — a register copied into itself
+fn pass_trivial_nop(insns: Vec<Insn>) -> Vec<Insn> {
+    let keep: Vec<bool> = insns
+        .iter()
+        .map(|insn| match insn {
+            Insn::Jump(0) => false,
+            Insn::Move(dst, src) => dst != src,
+            _ => true,
+        })
+        .collect();
+    compact(insns, &keep)
 }
 
 // ─── Compaction helper ─────────────────────────────────────────────────────────
@@ -89,5 +108,71 @@ pub(crate) fn rewrite_offsets(insn: Insn, old_i: usize, to_new: &[usize]) -> Ins
         SetupExcept(k) => SetupExcept(fix(k)),
         MatchExcept(r, k) => MatchExcept(r, fix(k)),
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::BinaryOp;
+
+    fn compile_fn(src: &str) -> FnCode {
+        use crate::{interpreter::collect_local_names, lexer::Lexer, parser::Parser};
+        use std::collections::HashSet;
+        let tokens = Lexer::new(src).unwrap().into_tokens();
+        let mut parser = Parser::new(tokens);
+        let stmts = parser.parse_program().unwrap();
+        let empty: HashSet<String> = HashSet::new();
+        let names = collect_local_names(&[], &stmts, &empty, &empty);
+        let local_index = std::rc::Rc::new(
+            (0u32..).zip(names.iter()).map(|(i, n)| (n.clone(), i)).collect(),
+        );
+        crate::compiler::compile_script(&stmts, local_index, false).unwrap()
+    }
+
+    // ── pass_trivial_nop ──────────────────────────────────────────────────────
+
+    #[test]
+    fn trivial_nop_removes_jump0() {
+        // Jump(0) is a no-op: it jumps to the next instruction.
+        let insns = vec![
+            Insn::LoadNone(0),
+            Insn::Jump(0),  // <- should be removed
+            Insn::Return(0),
+        ];
+        let out = pass_trivial_nop(insns);
+        assert_eq!(out.len(), 2, "Jump(0) should be removed");
+        assert!(matches!(out[0], Insn::LoadNone(0)));
+        assert!(matches!(out[1], Insn::Return(0)));
+    }
+
+    #[test]
+    fn trivial_nop_removes_self_move() {
+        // Move(r, r) copies a register into itself — no effect.
+        let insns = vec![
+            Insn::LoadNone(1),
+            Insn::Move(2, 2),  // <- should be removed
+            Insn::Return(1),
+        ];
+        let out = pass_trivial_nop(insns);
+        assert_eq!(out.len(), 2, "Move(r, r) should be removed");
+    }
+
+    #[test]
+    fn trivial_nop_fixes_jump_over_removed() {
+        // A Jump that skips over a removed Jump(0) must have its offset decremented.
+        // insns: [0] LoadNone 0   [1] Jump(1)   [2] Jump(0) <removed>   [3] Return 0
+        // Jump(1) at idx 1 targets idx 3 (offset 1 = idx 1 + 1 + 1).
+        // After removing idx 2: Jump(1) at new-idx 1 should target new-idx 2 (old idx 3),
+        // so new offset = 2 - (1+1) = 0.
+        let insns = vec![
+            Insn::LoadNone(0),
+            Insn::Jump(1),  // targets idx 3 (Return)
+            Insn::Jump(0),  // no-op, removed
+            Insn::Return(0),
+        ];
+        let out = pass_trivial_nop(insns);
+        assert_eq!(out.len(), 3);
+        assert!(matches!(out[1], Insn::Jump(0)), "offset should decrease by 1");
     }
 }
