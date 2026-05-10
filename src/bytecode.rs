@@ -113,7 +113,7 @@ pub enum Insn {
     /// R[dst] = {R[base]: R[base+1], R[base+2]: R[base+3], ...}  (n key-value pairs)
     BuildDict(Reg, Reg, u8),
     /// R[base..base+n] = iter_values(R[src])
-    Unpack(Reg, Reg, u8),
+    Unpack(Reg, Reg, u32),
     /// iters[slot] = iter_values(R[src])
     GetIter(u8, Reg),
     /// if iters[slot] exhausted: pc += offset; else R[dst] = next(iters[slot])

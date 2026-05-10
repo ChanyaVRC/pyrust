@@ -19,8 +19,9 @@ impl Interpreter {
         let empty: HashSet<String> = HashSet::new();
         let local_names =
             crate::interpreter::collect_local_names(&[], program, &empty, &empty);
-        // Reg type is u8, so at most 255 slots. Keep a safety margin so temp
-        // registers don't collide with locals.
+        // Cap script-level fastlocals so the register array stays small.
+        // Scripts with more names than this fall back to all-env mode where names
+        // live in a HashMap rather than a Vec<Option<Value>>.
         const MAX_SCRIPT_LOCALS: usize = 200;
         if local_names.len() > MAX_SCRIPT_LOCALS {
             // Too many locals — fall back to all-env mode.
@@ -41,16 +42,10 @@ impl Interpreter {
         local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
         repl_mode: bool,
     ) -> Option<Result<()>> {
-        let code = Rc::new(
-            match crate::compiler::compile_script(
-                program,
-                Rc::clone(&local_index),
-                repl_mode,
-            ) {
-                Ok(c) => c,
-                Err(e) => return Some(Err(e)),
-            },
-        );
+        let code = match crate::compiler::compile_script(program, Rc::clone(&local_index), repl_mode) {
+            Ok(c) => Rc::new(c),
+            Err(e) => return Some(Err(e)),
+        };
         let num_regs = code.num_regs as usize;
         let mut regs: Vec<Option<Value>> = vec![None; num_regs];
         self.call_depth += 1;
