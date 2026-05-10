@@ -6,10 +6,36 @@ impl Interpreter {
     }
 
     pub fn exec_program(&mut self, program: &[Stmt], repl_mode: bool) -> Result<()> {
-        if let Some(result) = self.try_exec_vm_script(program, repl_mode) {
-            return result;
+        let result = if let Some(r) = self.try_exec_vm_script(program, repl_mode) {
+            r
+        } else {
+            Err(PyError::Runtime("compilation failed".to_string()))
+        };
+        // Intercept SystemExit so finally/with handlers run before the process exits.
+        if let Err(PyError::Raised(exc)) = &result {
+            if let ValueKind::PyInstance(inst) = exc.kind() {
+                let class_name = inst.borrow().class.borrow().name.clone();
+                if class_name == "SystemExit" {
+                    // Extract exit code from args[0]; default to 0.
+                    let code = match inst.borrow().attrs.get("args") {
+                        Some(args_val) => match args_val.kind() {
+                            ValueKind::List(args) if !args.is_empty() => {
+                                match args[0].kind() {
+                                    ValueKind::Int(n) => n as i32,
+                                    ValueKind::Bool(b) => b as i32,
+                                    ValueKind::None => 0,
+                                    _ => 1,
+                                }
+                            }
+                            _ => 0,
+                        },
+                        None => 0,
+                    };
+                    std::process::exit(code);
+                }
+            }
         }
-        Err(PyError::Runtime("compilation failed".to_string()))
+        result
     }
 
     fn try_exec_vm_script(&mut self, program: &[Stmt], repl_mode: bool) -> Option<Result<()>> {
