@@ -5,6 +5,14 @@ enum IterState {
     /// Lazy: reads directly from the source register on each ForIter call.
     /// Avoids the O(n) upfront clone that Materialized would require for List/Tuple.
     Indexed { reg: crate::bytecode::Reg, pos: usize },
+    /// Lazy enumerate: yields (counter, item) pairs from pre-materialized items.
+    /// The source is materialised once at GetIter time, but individual tuples are
+    /// built on demand instead of all at once.
+    Enumerate { items: Vec<Value>, pos: usize, counter: i64 },
+    /// Lazy zip: yields row-tuples from pre-materialized parallel sources.
+    Zip { sources: Vec<Vec<Value>>, pos: usize, len: usize },
+    /// Lazy reversed: walks a materialized Vec from end to start without mutating it.
+    ReversedItems { items: Vec<Value>, pos: usize },
 }
 
 fn int_int_fast(a: i64, b: i64, op: BinaryOp) -> Option<Value> {
@@ -818,6 +826,27 @@ impl Interpreter {
                                 }
                                 IterState::Range { cur: start, stop, step }
                             }
+                            ValueKind::Enumerate { source, start } => {
+                                let items = vm_try!(iter_values(source.clone()));
+                                IterState::Enumerate { items, pos: 0, counter: start }
+                            }
+                            ValueKind::Zip { sources } => {
+                                if sources.is_empty() {
+                                    IterState::Materialized(vec![], 0)
+                                } else {
+                                    let mut vecs: Vec<Vec<Value>> = Vec::with_capacity(sources.len());
+                                    for s in sources {
+                                        vecs.push(vm_try!(iter_values(s.clone())));
+                                    }
+                                    let len = vecs.iter().map(|v| v.len()).min().unwrap_or(0);
+                                    IterState::Zip { sources: vecs, pos: 0, len }
+                                }
+                            }
+                            ValueKind::Reversed { source } => {
+                                let items = vm_try!(iter_values(source.clone()));
+                                let len = items.len();
+                                IterState::ReversedItems { items, pos: len }
+                            }
                             _ => {
                                 IterState::Materialized(vm_try!(iter_values(src_val)), 0)
                             }
@@ -863,6 +892,34 @@ impl Interpreter {
                             } else { None };
                             if let Some(v) = v_opt {
                                 *pos += 1;
+                                regs[*dst as usize] = Some(v);
+                            } else {
+                                pc = jump_pc!(*offset);
+                            }
+                        }
+                        Some(IterState::Enumerate { items, pos, counter }) => {
+                            if *pos < items.len() {
+                                let v = Value::tuple(vec![Value::int(*counter), items[*pos].clone()]);
+                                *pos += 1;
+                                *counter += 1;
+                                regs[*dst as usize] = Some(v);
+                            } else {
+                                pc = jump_pc!(*offset);
+                            }
+                        }
+                        Some(IterState::Zip { sources, pos, len }) => {
+                            if *pos < *len {
+                                let row: Vec<Value> = sources.iter().map(|s| s[*pos].clone()).collect();
+                                *pos += 1;
+                                regs[*dst as usize] = Some(Value::tuple(row));
+                            } else {
+                                pc = jump_pc!(*offset);
+                            }
+                        }
+                        Some(IterState::ReversedItems { items, pos }) => {
+                            if *pos > 0 {
+                                *pos -= 1;
+                                let v = items[*pos].clone();
                                 regs[*dst as usize] = Some(v);
                             } else {
                                 pc = jump_pc!(*offset);

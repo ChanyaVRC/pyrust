@@ -676,6 +676,32 @@ fn iter_values(value: Value) -> Result<Vec<Value>> {
             }
             Ok(out)
         }
+        ValueKind::Enumerate { source, start } => {
+            let items = iter_values(source.clone())?;
+            Ok(items
+                .into_iter()
+                .enumerate()
+                .map(|(i, v)| Value::tuple(vec![Value::int(i as i64 + start), v]))
+                .collect())
+        }
+        ValueKind::Zip { sources } => {
+            if sources.is_empty() {
+                return Ok(vec![]);
+            }
+            let mut vecs: Vec<Vec<Value>> = Vec::with_capacity(sources.len());
+            for s in sources {
+                vecs.push(iter_values(s.clone())?);
+            }
+            let len = vecs.iter().map(|v| v.len()).min().unwrap_or(0);
+            Ok((0..len)
+                .map(|i| Value::tuple(vecs.iter().map(|v| v[i].clone()).collect()))
+                .collect())
+        }
+        ValueKind::Reversed { source } => {
+            let mut items = iter_values(source.clone())?;
+            items.reverse();
+            Ok(items)
+        }
         _ => Err(PyError::Runtime("object is not iterable".to_string())),
     }
 }
