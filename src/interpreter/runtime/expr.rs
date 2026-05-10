@@ -632,6 +632,7 @@ fn coerce_numeric(v: Value) -> Value {
 }
 
 fn py_ordering(left: &Value, right: &Value) -> Result<std::cmp::Ordering> {
+    use crate::value::{PyBigInt, PyToPrimitive};
     match (left.kind(), right.kind()) {
         (ValueKind::Int(a), ValueKind::Int(b)) => Ok(a.cmp(&b)),
         (ValueKind::Bool(a), ValueKind::Bool(b)) => Ok(a.cmp(&b)),
@@ -646,6 +647,18 @@ fn py_ordering(left: &Value, right: &Value) -> Result<std::cmp::Ordering> {
         (ValueKind::Float(a), ValueKind::Int(b)) => {
             Ok(a.partial_cmp(&(b as f64)).unwrap_or(std::cmp::Ordering::Equal))
         }
+        (ValueKind::BigInt(a), ValueKind::BigInt(b)) => Ok(a.cmp(b)),
+        (ValueKind::BigInt(a), ValueKind::Int(b)) => Ok((*a).cmp(&PyBigInt::from(b))),
+        (ValueKind::Int(a), ValueKind::BigInt(b)) => Ok(PyBigInt::from(a).cmp(b)),
+        (ValueKind::BigInt(a), ValueKind::Float(b)) => Ok(a
+            .to_f64()
+            .and_then(|af| af.partial_cmp(&b))
+            .unwrap_or(std::cmp::Ordering::Equal)),
+        (ValueKind::Float(a), ValueKind::BigInt(b)) => Ok(b
+            .to_f64()
+            .and_then(|bf| a.partial_cmp(&bf))
+            .map(|o| o.reverse())
+            .unwrap_or(std::cmp::Ordering::Equal)),
         (ValueKind::Str(a), ValueKind::Str(b)) => Ok(a.cmp(b)),
         (ValueKind::List(a), ValueKind::List(b)) => {
             for (x, y) in a.iter().zip(b.iter()) {

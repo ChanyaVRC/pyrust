@@ -9,6 +9,11 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use indexmap::{IndexMap, IndexSet};
+use num_bigint::BigInt;
+use num_traits::{ToPrimitive, Zero};
+
+pub use num_bigint::BigInt as PyBigInt;
+pub use num_traits::ToPrimitive as PyToPrimitive;
 
 static FN_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -148,7 +153,7 @@ fn top16(bits: u64) -> u16 {
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub enum Opaque {
-    BigInt(i64),
+    PyBigInt(Rc<BigInt>),
     Dict(Rc<RefCell<IndexMap<PyKey, Value>>>),
     DictKeysView(Rc<RefCell<IndexMap<PyKey, Value>>>),
     DictValuesView(Rc<RefCell<IndexMap<PyKey, Value>>>),
@@ -173,7 +178,7 @@ pub enum Opaque {
 impl Clone for Opaque {
     fn clone(&self) -> Self {
         match self {
-            Opaque::BigInt(n) => Opaque::BigInt(*n),
+            Opaque::PyBigInt(rc) => Opaque::PyBigInt(Rc::clone(rc)),
             Opaque::Dict(rc) => Opaque::Dict(Rc::clone(rc)),
             Opaque::DictKeysView(rc) => Opaque::DictKeysView(Rc::clone(rc)),
             Opaque::DictValuesView(rc) => Opaque::DictValuesView(Rc::clone(rc)),
@@ -205,6 +210,7 @@ pub enum ValueKind<'a> {
     None,
     Bool(bool),
     Int(i64),
+    BigInt(&'a BigInt),
     Float(f64),
     Str(&'a str),
     List(&'a Vec<Value>),
@@ -350,8 +356,12 @@ impl Value {
         if n >= MIN_I48 && n <= MAX_I48 {
             Value(TAG_INT_BITS | (n as u64 & PAYLOAD_MASK))
         } else {
-            Value::opaque(Opaque::BigInt(n))
+            Value::opaque(Opaque::PyBigInt(Rc::new(BigInt::from(n))))
         }
+    }
+
+    pub fn bigint(n: BigInt) -> Self {
+        Value::opaque(Opaque::PyBigInt(Rc::new(n)))
     }
 
     pub fn float(f: f64) -> Self {
@@ -519,7 +529,7 @@ impl Value {
     pub fn is_int(&self) -> bool {
         top16(self.0) == 0xFFFB
             || (top16(self.0) == 0xFFFF
-                && matches!(unsafe { &*self.opaque_ptr() }, Opaque::BigInt(_)))
+                && matches!(unsafe { &*self.opaque_ptr() }, Opaque::PyBigInt(_)))
     }
 
     pub fn is_float(&self) -> bool {
@@ -665,13 +675,13 @@ impl Value {
         })
     }
 
-    /// Unified int accessor (handles both inline i48 and Opaque::BigInt)
+    /// Unified int accessor (handles inline i48 and PyBigInt that fits in i64)
     pub fn as_int(&self) -> Option<i64> {
         match top16(self.0) {
             0xFFFB => Some(self.as_int_raw()),
             0xFFFF => {
-                if let Opaque::BigInt(n) = unsafe { &*self.opaque_ptr() } {
-                    Some(*n)
+                if let Opaque::PyBigInt(rc) = unsafe { &*self.opaque_ptr() } {
+                    rc.to_i64()
                 } else {
                     None
                 }
@@ -692,7 +702,13 @@ impl Value {
             0xFFFD => ValueKind::Tuple(unsafe { &*self.tuple_ptr() }),
             0xFFFE => ValueKind::List(unsafe { &*self.list_ptr() }),
             0xFFFF => match unsafe { &*self.opaque_ptr() } {
-                Opaque::BigInt(n) => ValueKind::Int(*n),
+                Opaque::PyBigInt(rc) => {
+                    if let Some(n) = rc.to_i64() {
+                        ValueKind::Int(n)
+                    } else {
+                        ValueKind::BigInt(rc.as_ref())
+                    }
+                }
                 // SAFETY: rc.as_ref().as_ptr() yields *mut IndexMap whose lifetime is
                 // bounded by the Rc, which lives at least as long as this &self borrow.
                 // No mutable borrow (borrow_mut) is held concurrently in our single-
@@ -726,6 +742,7 @@ impl Value {
         match self.kind() {
             ValueKind::Bool(v) => v,
             ValueKind::Int(v) => v != 0,
+            ValueKind::BigInt(v) => !v.is_zero(),
             ValueKind::Float(v) => v != 0.0,
             ValueKind::Str(v) => !v.is_empty(),
             ValueKind::None => false,
@@ -759,6 +776,7 @@ impl Value {
     pub fn repr(&self) -> String {
         match self.kind() {
             ValueKind::Int(v) => v.to_string(),
+            ValueKind::BigInt(v) => v.to_string(),
             ValueKind::Float(v) => {
                 if v.is_nan() {
                     "nan".to_string()
@@ -873,6 +891,10 @@ impl Value {
     pub fn to_key(&self) -> Option<PyKey> {
         match self.kind() {
             ValueKind::Int(v) => Some(PyKey::Int(v)),
+            ValueKind::BigInt(v) => v
+                .to_i64()
+                .map(PyKey::Int)
+                .or_else(|| Some(PyKey::Str(v.to_string()))),
             ValueKind::Float(v) => Some(PyKey::Float(v.to_bits())),
             ValueKind::Str(v) => Some(PyKey::Str(v.to_string())),
             ValueKind::Bool(v) => Some(PyKey::Bool(v)),
@@ -980,6 +1002,11 @@ impl PartialEq for Value {
             (ValueKind::Int(a), ValueKind::Float(b)) => (a as f64) == b,
             (ValueKind::Float(a), ValueKind::Int(b)) => a == (b as f64),
             (ValueKind::Float(a), ValueKind::Float(b)) => a == b,
+            (ValueKind::BigInt(a), ValueKind::BigInt(b)) => a == b,
+            (ValueKind::BigInt(a), ValueKind::Int(b)) => *a == BigInt::from(b),
+            (ValueKind::Int(a), ValueKind::BigInt(b)) => BigInt::from(a) == *b,
+            (ValueKind::BigInt(a), ValueKind::Float(b)) => a.to_f64().map_or(false, |af| af == b),
+            (ValueKind::Float(a), ValueKind::BigInt(b)) => b.to_f64().map_or(false, |bf| a == bf),
             (ValueKind::Str(a), ValueKind::Str(b)) => a == b,
             (ValueKind::Bool(a), ValueKind::Bool(b)) => a == b,
             // Python: True == 1 is True

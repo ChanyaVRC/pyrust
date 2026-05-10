@@ -240,6 +240,7 @@ fn install_exception_builtins(env: &EnvRef) {
     let index_error = make_child("IndexError");
     let key_error = make_child("KeyError");
     let attribute_error = make_child("AttributeError");
+    let overflow_error = make_child("OverflowError");
 
     let mut module = env.borrow_mut();
     module
@@ -275,6 +276,9 @@ fn install_exception_builtins(env: &EnvRef) {
     module
         .values
         .insert("AttributeError".to_string(), Value::py_class(attribute_error));
+    module
+        .values
+        .insert("OverflowError".to_string(), Value::py_class(overflow_error));
 }
 
 fn key_to_value(key: PyKey) -> Value {
@@ -709,6 +713,14 @@ pub(crate) fn compute_def_bound_mask(
         }
     }
     mask
+}
+
+fn float_to_bigint(f: f64) -> Value {
+    use crate::value::PyBigInt;
+    // Convert via the decimal string representation of the f64's integer value.
+    let s = format!("{:.0}", f);
+    let n: PyBigInt = s.parse().unwrap_or_else(|_| PyBigInt::from(0i64));
+    Value::bigint(n)
 }
 
 fn value_to_float(v: &Value, ctx: &str) -> Result<f64> {

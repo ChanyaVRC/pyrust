@@ -31,7 +31,7 @@ fn iter_value(v: &Value) -> Result<Vec<Value>> {
 
 fn type_name_of(v: &Value) -> &'static str {
     match v.kind() {
-        ValueKind::Int(_) => "int",
+        ValueKind::Int(_) | ValueKind::BigInt(_) => "int",
         ValueKind::Float(_) => "float",
         ValueKind::Str(_) => "str",
         ValueKind::Bool(_) => "bool",
