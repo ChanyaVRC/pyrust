@@ -165,3 +165,13 @@ try:
         print("with-enter-fail-body-2")
 except ValueError as err:
     print("with-enter-fail-unsuppressed", err)
+
+# Exception-as binding is deleted after handler exits — Issue #93
+try:
+    raise ValueError("test")
+except ValueError as e:
+    pass
+try:
+    print(e)
+except NameError:
+    print("except-as-deleted", "NameError")

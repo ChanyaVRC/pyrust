@@ -445,6 +445,9 @@ impl Interpreter {
                     let name = code.names[*name_idx as usize].clone();
                     self.env.borrow_mut().values.remove(&name);
                 }
+                Insn::DeleteLocal(reg) => {
+                    regs[*reg as usize] = None;
+                }
 
                 // ── Control flow ─────────────────────────────────────────
                 Insn::Jump(offset) => {
@@ -1306,7 +1309,8 @@ fn vm_read(regs: &[Option<Value>], reg: u8, num_locals: u8) -> crate::interprete
         Some(v) => Ok(v),
         None => {
             if reg < num_locals {
-                Err(crate::error::PyError::Runtime(
+                Err(crate::error::PyError::Named(
+                    "NameError".to_string(),
                     "local variable referenced before assignment".to_string(),
                 ))
             } else {

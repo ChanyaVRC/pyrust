@@ -63,6 +63,8 @@ pub enum Insn {
     DeleteItem(Reg, Reg),
     /// del names[name_idx] from current env
     DeleteName(u16),
+    /// Clear local register (del for a fastlocal — sets slot to None so further reads raise)
+    DeleteLocal(Reg),
     /// pc += offset  (offset 0 = next instruction)
     Jump(i32),
     /// if !R[cond].truthy(): pc += offset
