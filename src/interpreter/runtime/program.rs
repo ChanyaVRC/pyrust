@@ -69,7 +69,7 @@ impl Interpreter {
         repl_mode: bool,
     ) -> Option<Result<()>> {
         let code = match crate::compiler::compile_script(program, Rc::clone(&local_index), repl_mode) {
-            Ok(c) => Rc::new(c),
+            Ok(c) => Rc::new(crate::optimizer::optimize(c)),
             Err(e) => return Some(Err(e)),
         };
         let num_regs = code.num_regs as usize;

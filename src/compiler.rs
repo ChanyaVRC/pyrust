@@ -733,7 +733,7 @@ fn fold_constant(expr: &Expr) -> Option<Value> {
     }
 }
 
-fn fold_binop(l: &Value, op: BinaryOp, r: &Value) -> Option<Value> {
+pub(crate) fn fold_binop(l: &Value, op: BinaryOp, r: &Value) -> Option<Value> {
     match (l.kind(), op, r.kind()) {
         (ValueKind::Int(a), BinaryOp::Add, ValueKind::Int(b)) => {
             Some(Value::int(a.wrapping_add(b)))
@@ -1200,44 +1200,10 @@ impl Compiler {
 
     /// Try to fuse the last emitted instruction with a conditional jump.
     ///
-    /// If the last instruction is `BinOpConst(cond_reg, lhs, op, c)` or
-    /// `BinOp(cond_reg, lhs, op, rhs)`, replace it with the corresponding
-    /// `CmpJump*` variant (offset=0, to be patched).  Otherwise fall back to
-    /// emitting `JumpIfFalse`/`JumpIfTrue` as normal.
-    ///
-    /// `invert=false` → JumpIfFalse semantics (jump when comparison is false)
-    /// `invert=true`  → JumpIfTrue semantics (jump when comparison is true)
+    /// Emit `JumpIfFalse` or `JumpIfTrue` for `cond_reg` (offset=0, patched later).
+    /// `invert=false` → JumpIfFalse, `invert=true` → JumpIfTrue.
+    /// BinOp/BinOpConst + conditional-jump fusion is handled by the optimizer.
     fn emit_cond_jump(&mut self, cond_reg: Reg, invert: bool) -> usize {
-        // Only fuse when the result register is a temp (not a named local).
-        if cond_reg >= self.base_temp {
-            if let Some(last) = self.insns.last().cloned() {
-                match last {
-                    Insn::BinOpConst(dst, lhs, op, c) if dst == cond_reg => {
-                        let idx = self.insns.len() - 1;
-                        // Free the temp that would have held the bool result.
-                        self.free_temp(cond_reg);
-                        self.insns[idx] = if invert {
-                            Insn::CmpJumpIfTrueConst(lhs, op, c, 0)
-                        } else {
-                            Insn::CmpJumpIfFalseConst(lhs, op, c, 0)
-                        };
-                        return idx;
-                    }
-                    Insn::BinOp(dst, lhs, op, rhs) if dst == cond_reg => {
-                        let idx = self.insns.len() - 1;
-                        self.free_temp(cond_reg);
-                        self.insns[idx] = if invert {
-                            Insn::CmpJumpIfTrue(lhs, op, rhs, 0)
-                        } else {
-                            Insn::CmpJumpIfFalse(lhs, op, rhs, 0)
-                        };
-                        return idx;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        // Fall back: emit a regular conditional jump.
         if invert {
             self.emit(Insn::JumpIfTrue(cond_reg, 0))
         } else {
@@ -3041,15 +3007,6 @@ impl Compiler {
                 }
             }
             Expr::Unary { op, expr } => {
-                if let Some(val) = fold_constant(&Expr::Unary {
-                    op: *op,
-                    expr: expr.clone(),
-                }) {
-                    let idx = self.intern_const(val);
-                    let dst = self.alloc_temp();
-                    self.emit(Insn::LoadConst(dst, idx));
-                    return dst;
-                }
                 let src = self.compile_expr(expr);
                 let dst = self.ensure_dst(src);
                 self.emit(Insn::UnaryOp(dst, *op, src));
@@ -3083,45 +3040,23 @@ impl Compiler {
                     dst
                 }
                 _ => {
-                    // Constant fold: if both sides are literals, compute at compile time.
-                    if let Some(val) = fold_constant(expr) {
-                        let idx = self.intern_const(val);
-                        let dst = self.alloc_temp();
-                        self.emit(Insn::LoadConst(dst, idx));
-                        return dst;
-                    }
                     let lhs = self.compile_expr(left);
                     let dst = self.ensure_dst(lhs);
-                    if let Some(const_idx) = self.try_literal_const_idx(right) {
-                        self.emit(Insn::BinOpConst(dst, lhs, *op, const_idx));
-                    } else {
-                        let rhs = self.compile_expr(right);
-                        self.emit(Insn::BinOp(dst, lhs, *op, rhs));
-                        self.free_temp(rhs);
-                    }
+                    let rhs = self.compile_expr(right);
+                    self.emit(Insn::BinOp(dst, lhs, *op, rhs));
+                    self.free_temp(rhs);
                     dst
                 }
             },
             Expr::Compare { left, ops } => {
-                // Constant fold: e.g. `1 < 2` at compile time.
-                if let Some(val) = fold_constant(expr) {
-                    let idx = self.intern_const(val);
-                    let dst = self.alloc_temp();
-                    self.emit(Insn::LoadConst(dst, idx));
-                    return dst;
-                }
                 if ops.len() == 1 {
                     let (cmp_op, right) = &ops[0];
                     let lhs = self.compile_expr(left);
                     let bin_op = cmp_to_binary(*cmp_op);
                     let dst = self.ensure_dst(lhs);
-                    if let Some(const_idx) = self.try_literal_const_idx(right) {
-                        self.emit(Insn::BinOpConst(dst, lhs, bin_op, const_idx));
-                    } else {
-                        let rhs = self.compile_expr(right);
-                        self.emit(Insn::BinOp(dst, lhs, bin_op, rhs));
-                        self.free_temp(rhs);
-                    }
+                    let rhs = self.compile_expr(right);
+                    self.emit(Insn::BinOp(dst, lhs, bin_op, rhs));
+                    self.free_temp(rhs);
                     dst
                 } else {
                     // Chained comparison: a < b < c  →  (a < b) and (b < c)

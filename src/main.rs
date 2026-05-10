@@ -4,6 +4,7 @@ mod compiler;
 mod error;
 mod interpreter;
 mod lexer;
+mod optimizer;
 mod parser;
 mod token;
 mod value;
