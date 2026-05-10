@@ -43,17 +43,22 @@ impl Interpreter {
         local_index: Rc<HashMap<String, usize>>,
         repl_mode: bool,
     ) -> Option<Result<()>> {
-        let code = Rc::new(crate::compiler::compile_script(
-            program,
-            Rc::clone(&local_index),
-            repl_mode,
-        )?);
+        let code = Rc::new(
+            match crate::compiler::compile_script(
+                program,
+                Rc::clone(&local_index),
+                repl_mode,
+            ) {
+                Ok(c) => c,
+                Err(e) => return Some(Err(e)),
+            },
+        );
         let num_regs = code.num_regs as usize;
         let mut regs: Vec<Option<Value>> = vec![None; num_regs];
         self.call_depth += 1;
         let vm_result = self.run_bytecode(&code, &mut regs);
         self.call_depth -= 1;
-        // Write fastlocal registers back to the module env so that imported
+        // Write fastlocals registers back to the module env so that imported
         // modules and post-run inspection can find all names.
         for (name, &idx) in local_index.iter() {
             if let Some(val) = regs[idx].take() {

@@ -213,24 +213,7 @@ impl Interpreter {
                     if fast { continue; }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = code.consts[*const_idx as usize].clone();
-                    let result = match (l.kind(), op, r.kind()) {
-                        (ValueKind::Int(a), BinaryOp::Add, ValueKind::Int(b)) => {
-                            Value::int(a.wrapping_add(b))
-                        }
-                        (ValueKind::Int(a), BinaryOp::Sub, ValueKind::Int(b)) => {
-                            Value::int(a.wrapping_sub(b))
-                        }
-                        (ValueKind::Int(a), BinaryOp::Mul, ValueKind::Int(b)) => {
-                            Value::int(a.wrapping_mul(b))
-                        }
-                        (ValueKind::Int(a), BinaryOp::Eq, ValueKind::Int(b)) => Value::bool_(a == b),
-                        (ValueKind::Int(a), BinaryOp::Ne, ValueKind::Int(b)) => Value::bool_(a != b),
-                        (ValueKind::Int(a), BinaryOp::Lt, ValueKind::Int(b)) => Value::bool_(a < b),
-                        (ValueKind::Int(a), BinaryOp::Le, ValueKind::Int(b)) => Value::bool_(a <= b),
-                        (ValueKind::Int(a), BinaryOp::Gt, ValueKind::Int(b)) => Value::bool_(a > b),
-                        (ValueKind::Int(a), BinaryOp::Ge, ValueKind::Int(b)) => Value::bool_(a >= b),
-                        _ => vm_try!(self.eval_binary(l, *op, r)),
-                    };
+                    let result = vm_try!(self.eval_binary(l, *op, r));
                     regs[*dst as usize] = Some(result);
                 }
                 Insn::UnaryOp(dst, op, src) => {

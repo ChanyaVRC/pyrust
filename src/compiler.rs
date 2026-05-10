@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use crate::ast::{AssignTarget, BinaryOp, CmpOp, Expr, FunctionParam, Stmt, UnaryOp};
 use crate::bytecode::{CellVar, FnCode, FnProto, Insn, Reg};
+use crate::error::PyError;
 use crate::value::{Value, ValueKind};
 
 /// Compile a top-level script body.  All script-level names are locals.
@@ -13,7 +14,7 @@ pub fn compile_script(
     stmts: &[Stmt],
     local_index: Rc<HashMap<String, usize>>,
     repl_mode: bool,
-) -> Option<FnCode> {
+) -> Result<FnCode, PyError> {
     // Script-level code cannot have nonlocal, and nothing captures script
     // locals via nonlocal from a nested scope at this level.
     let cell_vars = collect_cell_vars(stmts, &local_index);
@@ -31,7 +32,7 @@ pub fn compile_script(
     } else {
         c.compile_block(stmts);
     }
-    c.finish()
+    c.finish().map_err(PyError::Runtime)
 }
 
 // ─── Cell-variable collection ─────────────────────────────────────────────────
@@ -760,6 +761,7 @@ struct Compiler {
     max_reg: Reg,
     loops: Vec<LoopCtx>,
     failed: bool,
+    error_msg: Option<String>,
     def_set: u64,
     fn_protos: Vec<FnProto>,
     /// Names of pure (side-effect-free) functions defined in this scope.
@@ -797,6 +799,11 @@ impl Compiler {
             },
             loops: Vec::new(),
             failed: n > 255,
+            error_msg: if n > 255 {
+                Some("too many local variables (max 255)".to_string())
+            } else {
+                None
+            },
             def_set: def_bound_mask,
             fn_protos: Vec::new(),
             pure_locals: HashSet::new(),
@@ -891,6 +898,9 @@ impl Compiler {
         let r = self.next_temp;
         if r == Reg::MAX {
             self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg = Some("too many local variables (max 255)".to_string());
+            }
             return 0;
         }
         self.next_temp += 1;
@@ -1021,16 +1031,18 @@ impl Compiler {
         }
     }
 
-    fn finish(self) -> Option<FnCode> {
+    fn finish(self) -> Result<FnCode, String> {
         if self.failed {
-            return None;
+            return Err(self
+                .error_msg
+                .unwrap_or_else(|| "compilation failed".to_string()));
         }
         let num_regs = if self.max_reg >= self.base_temp || self.base_temp == 0 {
             self.max_reg.saturating_add(1)
         } else {
             self.base_temp
         };
-        Some(FnCode {
+        Ok(FnCode {
             insns: self.insns,
             consts: self.consts,
             names: self.names,
@@ -2143,9 +2155,12 @@ impl Compiler {
         );
         sub.compile_block(body);
         let inner_code = match sub.finish() {
-            Some(c) => c,
-            None => {
+            Ok(c) => c,
+            Err(msg) => {
                 self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some(msg);
+                }
                 return;
             }
         };
@@ -2253,9 +2268,12 @@ impl Compiler {
         // Add implicit ReturnNone at end of class body
         sub.emit(Insn::ReturnNone);
         let body_code = match sub.finish() {
-            Some(c) => c,
-            None => {
+            Ok(c) => c,
+            Err(msg) => {
                 self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some(msg);
+                }
                 return;
             }
         };
