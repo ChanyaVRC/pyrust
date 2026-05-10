@@ -1,0 +1,6 @@
+print(min([3, 1, 2], key=lambda x: x))
+print(max([3, 1, 2], key=lambda x: x))
+print(min(["banana", "apple", "cherry"], key=len))
+print(max(["banana", "apple", "cherry"], key=len))
+print(min(3, 1, 2, key=lambda x: -x))
+print(max(3, 1, 2, key=lambda x: -x))
