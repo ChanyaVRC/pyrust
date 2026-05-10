@@ -94,12 +94,29 @@ fn eval_binary_float(op: BinaryOp, a: f64, b: f64) -> Option<Result<Value>> {
     }
 }
 
-/// Total order for Python values used by `sorted()` / `min()` / `max()`.
-/// Mirrors CPython's `<` semantics: numbers by magnitude, strings
-/// lexicographically, bools as 0/1.  Incomparable pairs fall back to
-/// `Ordering::Equal` (same as CPython raising TypeError in that case, but we
-/// keep the sort stable rather than panicking).
+/// Returns the Python type name string for a `Value`, used in error messages.
+fn value_type_name_str(v: &Value) -> &'static str {
+    match v.kind() {
+        ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => "int",
+        ValueKind::Float(_) => "float",
+        ValueKind::Str(_) => "str",
+        ValueKind::None => "NoneType",
+        ValueKind::List(_) => "list",
+        ValueKind::Tuple(_) => "tuple",
+        ValueKind::Dict(_) | ValueKind::DictKeysView(_) | ValueKind::DictValuesView(_) | ValueKind::DictItemsView(_) => "dict",
+        ValueKind::Set(_) => "set",
+        ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_) | ValueKind::BoundMethod { .. } => "function",
+        _ => "object",
+    }
+}
+
+/// Total order for Python values used by `sorted()` / `min()` / `max()` and
+/// comparison operators.  Mirrors CPython's `<` semantics: numbers by
+/// magnitude, strings lexicographically, bools as 0/1, lists and tuples
+/// lexicographically element-by-element.  Incomparable pairs return a
+/// `TypeError`.
 fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
+    use crate::value::{PyBigInt, PyToPrimitive};
     match (a.kind(), b.kind()) {
         (ValueKind::Int(x), ValueKind::Int(y)) => Ok(x.cmp(&y)),
         (ValueKind::Float(x), ValueKind::Float(y)) => Ok(x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)),
@@ -108,7 +125,28 @@ fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
         (ValueKind::Bool(x), ValueKind::Bool(y)) => Ok(x.cmp(&y)),
         (ValueKind::Bool(x), ValueKind::Int(y)) => Ok((x as i64).cmp(&y)),
         (ValueKind::Int(x), ValueKind::Bool(y)) => Ok(x.cmp(&(y as i64))),
+        (ValueKind::BigInt(x), ValueKind::BigInt(y)) => Ok(x.cmp(y)),
+        (ValueKind::BigInt(x), ValueKind::Int(y)) => Ok((*x).cmp(&PyBigInt::from(y))),
+        (ValueKind::Int(x), ValueKind::BigInt(y)) => Ok(PyBigInt::from(x).cmp(y)),
+        (ValueKind::BigInt(x), ValueKind::Float(y)) => Ok(x
+            .to_f64()
+            .and_then(|xf| xf.partial_cmp(&y))
+            .unwrap_or(std::cmp::Ordering::Equal)),
+        (ValueKind::Float(x), ValueKind::BigInt(y)) => Ok(y
+            .to_f64()
+            .and_then(|yf| x.partial_cmp(&yf))
+            .map(|o| o.reverse())
+            .unwrap_or(std::cmp::Ordering::Equal)),
         (ValueKind::Str(x), ValueKind::Str(y)) => Ok(x.cmp(y)),
+        (ValueKind::List(x), ValueKind::List(y)) => {
+            for (a, b) in x.iter().zip(y.iter()) {
+                let ord = compare_values(a, b)?;
+                if ord != std::cmp::Ordering::Equal {
+                    return Ok(ord);
+                }
+            }
+            Ok(x.len().cmp(&y.len()))
+        }
         (ValueKind::Tuple(x), ValueKind::Tuple(y)) => {
             for (a, b) in x.iter().zip(y.iter()) {
                 let ord = compare_values(a, b)?;
@@ -126,21 +164,6 @@ fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
                 value_type_name_str(b),
             ),
         )),
-    }
-}
-
-fn value_type_name_str(v: &Value) -> &'static str {
-    match v.kind() {
-        ValueKind::Int(_) | ValueKind::Bool(_) => "int",
-        ValueKind::Float(_) => "float",
-        ValueKind::Str(_) => "str",
-        ValueKind::None => "NoneType",
-        ValueKind::List(_) => "list",
-        ValueKind::Tuple(_) => "tuple",
-        ValueKind::Dict(_) | ValueKind::DictKeysView(_) | ValueKind::DictValuesView(_) | ValueKind::DictItemsView(_) => "dict",
-        ValueKind::Set(_) => "set",
-        ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_) | ValueKind::BoundMethod { .. } => "function",
-        _ => "object",
     }
 }
 

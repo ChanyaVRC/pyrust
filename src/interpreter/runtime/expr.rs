@@ -442,7 +442,7 @@ impl Interpreter {
     }
 
     fn compare(&self, left: Value, right: Value, cmp: impl Fn(std::cmp::Ordering) -> bool) -> Result<Value> {
-        Ok(Value::bool_(cmp(py_ordering(&left, &right)?)))
+        Ok(Value::bool_(cmp(compare_values(&left, &right)?)))
     }
 
     fn to_pair_number(&self, left: Value, right: Value) -> Result<(f64, f64)> {
@@ -634,59 +634,6 @@ fn coerce_numeric(v: Value) -> Value {
     match v.kind() {
         ValueKind::Bool(b) => Value::int(b as i64),
         _ => v,
-    }
-}
-
-fn py_ordering(left: &Value, right: &Value) -> Result<std::cmp::Ordering> {
-    use crate::value::{PyBigInt, PyToPrimitive};
-    match (left.kind(), right.kind()) {
-        (ValueKind::Int(a), ValueKind::Int(b)) => Ok(a.cmp(&b)),
-        (ValueKind::Bool(a), ValueKind::Bool(b)) => Ok(a.cmp(&b)),
-        (ValueKind::Bool(a), ValueKind::Int(b)) => Ok((a as i64).cmp(&b)),
-        (ValueKind::Int(a), ValueKind::Bool(b)) => Ok(a.cmp(&(b as i64))),
-        (ValueKind::Float(a), ValueKind::Float(b)) => {
-            Ok(a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal))
-        }
-        (ValueKind::Int(a), ValueKind::Float(b)) => {
-            Ok((a as f64).partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal))
-        }
-        (ValueKind::Float(a), ValueKind::Int(b)) => {
-            Ok(a.partial_cmp(&(b as f64)).unwrap_or(std::cmp::Ordering::Equal))
-        }
-        (ValueKind::BigInt(a), ValueKind::BigInt(b)) => Ok(a.cmp(b)),
-        (ValueKind::BigInt(a), ValueKind::Int(b)) => Ok((*a).cmp(&PyBigInt::from(b))),
-        (ValueKind::Int(a), ValueKind::BigInt(b)) => Ok(PyBigInt::from(a).cmp(b)),
-        (ValueKind::BigInt(a), ValueKind::Float(b)) => Ok(a
-            .to_f64()
-            .and_then(|af| af.partial_cmp(&b))
-            .unwrap_or(std::cmp::Ordering::Equal)),
-        (ValueKind::Float(a), ValueKind::BigInt(b)) => Ok(b
-            .to_f64()
-            .and_then(|bf| a.partial_cmp(&bf))
-            .map(|o| o.reverse())
-            .unwrap_or(std::cmp::Ordering::Equal)),
-        (ValueKind::Str(a), ValueKind::Str(b)) => Ok(a.cmp(b)),
-        (ValueKind::List(a), ValueKind::List(b)) => {
-            for (x, y) in a.iter().zip(b.iter()) {
-                let ord = py_ordering(x, y)?;
-                if ord != std::cmp::Ordering::Equal {
-                    return Ok(ord);
-                }
-            }
-            Ok(a.len().cmp(&b.len()))
-        }
-        (ValueKind::Tuple(a), ValueKind::Tuple(b)) => {
-            for (x, y) in a.iter().zip(b.iter()) {
-                let ord = py_ordering(x, y)?;
-                if ord != std::cmp::Ordering::Equal {
-                    return Ok(ord);
-                }
-            }
-            Ok(a.len().cmp(&b.len()))
-        }
-        _ => Err(PyError::Runtime(
-            "'<' not supported between instances of these types".to_string(),
-        )),
     }
 }
 
