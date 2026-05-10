@@ -233,6 +233,7 @@ fn install_exception_builtins(env: &EnvRef) {
     let runtime_error = make_child("RuntimeError");
     let type_error = make_child("TypeError");
     let value_error = make_child("ValueError");
+    let name_error = make_child("NameError");
     let assertion_error = make_child("AssertionError");
     let recursion_error = make_child("RecursionError");
     let not_implemented_error = make_child("NotImplementedError");
@@ -254,6 +255,9 @@ fn install_exception_builtins(env: &EnvRef) {
     module
         .values
         .insert("ValueError".to_string(), Value::py_class(value_error));
+    module
+        .values
+        .insert("NameError".to_string(), Value::py_class(name_error));
     module
         .values
         .insert("AssertionError".to_string(), Value::py_class(assertion_error));
