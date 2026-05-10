@@ -43,6 +43,7 @@ pub fn compile_script(
 fn collect_cell_vars(body: &[Stmt], local_index: &HashMap<String, Reg>) -> Vec<CellVar> {
     let mut cells: HashSet<String> = HashSet::new();
     collect_cell_vars_in(body, local_index, &mut cells);
+    collect_lambda_captures(body, local_index, &mut cells);
     cells.into_iter().collect()
 }
 
@@ -162,6 +163,225 @@ fn collect_cell_vars_in(
             }
             _ => {}
         }
+    }
+}
+
+/// Walk statements looking for `Expr::Lambda` at the current scope level
+/// (not crossing into nested `Def`/`Class` scopes) and promote any outer
+/// fastlocals that the lambda captures into cell vars so they live in the env.
+fn collect_lambda_captures(
+    stmts: &[Stmt],
+    local_index: &HashMap<String, Reg>,
+    cells: &mut HashSet<String>,
+) {
+    for stmt in stmts {
+        lambda_captures_in_stmt(stmt, local_index, cells);
+    }
+}
+
+fn lambda_captures_in_stmt(
+    stmt: &Stmt,
+    local_index: &HashMap<String, Reg>,
+    cells: &mut HashSet<String>,
+) {
+    match stmt {
+        Stmt::Def { .. } | Stmt::Class { .. } => {}
+        Stmt::Assign(_, value) => lambda_captures_in_expr(value, local_index, cells),
+        Stmt::AttrAssign { target, expr, .. } => {
+            lambda_captures_in_expr(target, local_index, cells);
+            lambda_captures_in_expr(expr, local_index, cells);
+        }
+        Stmt::IndexAssign {
+            target,
+            index,
+            expr,
+        } => {
+            lambda_captures_in_expr(target, local_index, cells);
+            lambda_captures_in_expr(index, local_index, cells);
+            lambda_captures_in_expr(expr, local_index, cells);
+        }
+        Stmt::SliceAssign {
+            target,
+            lower,
+            upper,
+            step,
+            expr,
+        } => {
+            lambda_captures_in_expr(target, local_index, cells);
+            for e in [lower, upper, step].iter().flat_map(|o| o.as_deref()) {
+                lambda_captures_in_expr(e, local_index, cells);
+            }
+            lambda_captures_in_expr(expr, local_index, cells);
+        }
+        Stmt::AugAssign { expr, .. } => lambda_captures_in_expr(expr, local_index, cells),
+        Stmt::Return(Some(e)) => lambda_captures_in_expr(e, local_index, cells),
+        Stmt::Return(None) => {}
+        Stmt::Expr(e) => lambda_captures_in_expr(e, local_index, cells),
+        Stmt::If {
+            branches,
+            else_branch,
+        } => {
+            for (cond, body) in branches {
+                lambda_captures_in_expr(cond, local_index, cells);
+                collect_lambda_captures(body, local_index, cells);
+            }
+            if let Some(b) = else_branch {
+                collect_lambda_captures(b, local_index, cells);
+            }
+        }
+        Stmt::While {
+            cond,
+            body,
+            else_branch,
+        } => {
+            lambda_captures_in_expr(cond, local_index, cells);
+            collect_lambda_captures(body, local_index, cells);
+            if let Some(b) = else_branch {
+                collect_lambda_captures(b, local_index, cells);
+            }
+        }
+        Stmt::For {
+            iter,
+            body,
+            else_branch,
+            ..
+        } => {
+            lambda_captures_in_expr(iter, local_index, cells);
+            collect_lambda_captures(body, local_index, cells);
+            if let Some(b) = else_branch {
+                collect_lambda_captures(b, local_index, cells);
+            }
+        }
+        Stmt::Try {
+            body,
+            handlers,
+            else_branch,
+            finally_branch,
+        } => {
+            collect_lambda_captures(body, local_index, cells);
+            for h in handlers {
+                if let Some(e) = &h.kind {
+                    lambda_captures_in_expr(e, local_index, cells);
+                }
+                collect_lambda_captures(&h.body, local_index, cells);
+            }
+            if let Some(b) = else_branch {
+                collect_lambda_captures(b, local_index, cells);
+            }
+            if let Some(b) = finally_branch {
+                collect_lambda_captures(b, local_index, cells);
+            }
+        }
+        Stmt::With { items, body } => {
+            for (e, _) in items {
+                lambda_captures_in_expr(e, local_index, cells);
+            }
+            collect_lambda_captures(body, local_index, cells);
+        }
+        Stmt::Raise {
+            expr: Some(e),
+            cause,
+        } => {
+            lambda_captures_in_expr(e, local_index, cells);
+            if let Some(c) = cause {
+                lambda_captures_in_expr(c, local_index, cells);
+            }
+        }
+        Stmt::Assert { test, msg } => {
+            lambda_captures_in_expr(test, local_index, cells);
+            if let Some(m) = msg {
+                lambda_captures_in_expr(m, local_index, cells);
+            }
+        }
+        Stmt::Delete(exprs) => {
+            for e in exprs {
+                lambda_captures_in_expr(e, local_index, cells);
+            }
+        }
+        Stmt::Import { .. }
+        | Stmt::ImportFrom { .. }
+        | Stmt::Global(_)
+        | Stmt::Nonlocal(_)
+        | Stmt::Pass
+        | Stmt::Break
+        | Stmt::Continue
+        | Stmt::Raise { expr: None, .. } => {}
+    }
+}
+
+fn lambda_captures_in_expr(
+    expr: &Expr,
+    local_index: &HashMap<String, Reg>,
+    cells: &mut HashSet<String>,
+) {
+    match expr {
+        Expr::Lambda { params, body } => {
+            let mut uses = HashSet::new();
+            collect_free_var_reads_in_expr(body, &mut uses);
+            for param in params {
+                uses.remove(param);
+            }
+            for name in uses {
+                if local_index.contains_key(&name) {
+                    cells.insert(name);
+                }
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            lambda_captures_in_expr(left, local_index, cells);
+            lambda_captures_in_expr(right, local_index, cells);
+        }
+        Expr::Unary { expr: e, .. } => lambda_captures_in_expr(e, local_index, cells),
+        Expr::Compare { left, ops } => {
+            lambda_captures_in_expr(left, local_index, cells);
+            for (_, e) in ops {
+                lambda_captures_in_expr(e, local_index, cells);
+            }
+        }
+        Expr::Call { func, args } => {
+            lambda_captures_in_expr(func, local_index, cells);
+            for a in args {
+                lambda_captures_in_expr(&a.value, local_index, cells);
+            }
+        }
+        Expr::Attr { target, .. } => lambda_captures_in_expr(target, local_index, cells),
+        Expr::Index { target, index } => {
+            lambda_captures_in_expr(target, local_index, cells);
+            lambda_captures_in_expr(index, local_index, cells);
+        }
+        Expr::Slice {
+            target,
+            lower,
+            upper,
+            step,
+        } => {
+            lambda_captures_in_expr(target, local_index, cells);
+            for e in [lower, upper, step].iter().flat_map(|o| o.as_deref()) {
+                lambda_captures_in_expr(e, local_index, cells);
+            }
+        }
+        Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
+            for e in items {
+                lambda_captures_in_expr(e, local_index, cells);
+            }
+        }
+        Expr::Dict(pairs) => {
+            for (k, v) in pairs {
+                lambda_captures_in_expr(k, local_index, cells);
+                lambda_captures_in_expr(v, local_index, cells);
+            }
+        }
+        Expr::Ternary { cond, then, else_ } => {
+            lambda_captures_in_expr(cond, local_index, cells);
+            lambda_captures_in_expr(then, local_index, cells);
+            lambda_captures_in_expr(else_, local_index, cells);
+        }
+        Expr::Var(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Str(_)
+        | Expr::Bool(_)
+        | Expr::None => {}
     }
 }
 
