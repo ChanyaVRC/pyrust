@@ -48,10 +48,9 @@ impl Interpreter {
         };
         let num_regs = code.num_regs as usize;
         let mut regs: Vec<Option<Value>> = vec![None; num_regs];
-        self.call_depth += 1;
+        let _depth_guard = CallDepthGuard::enter();
         let vm_result = self.run_bytecode(&code, &mut regs);
-        self.call_depth -= 1;
-        // Write fastlocals registers back to the module env so that imported
+        // Write fastlocal registers back to the module env so that imported
         // modules and post-run inspection can find all names.
         for (name, &idx) in local_index.iter() {
             if let Some(val) = regs[idx as usize].take() {

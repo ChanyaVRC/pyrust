@@ -1,3 +1,33 @@
+// Thread-local call depth counter. Using thread_local avoids the split-borrow
+// problem: a guard that holds &mut self.call_depth cannot coexist with a &mut self
+// method call. The thread_local is safe because the interpreter is single-threaded.
+use std::cell::Cell;
+
+thread_local! {
+    static CALL_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+fn call_depth() -> usize {
+    CALL_DEPTH.with(|d| d.get())
+}
+
+// RAII guard: increments the thread-local call depth on creation and decrements
+// it on drop, including on panic, without any unsafe code.
+struct CallDepthGuard;
+
+impl CallDepthGuard {
+    fn enter() -> Self {
+        CALL_DEPTH.with(|d| d.set(d.get() + 1));
+        Self
+    }
+}
+
+impl Drop for CallDepthGuard {
+    fn drop(&mut self) {
+        CALL_DEPTH.with(|d| d.set(d.get() - 1));
+    }
+}
+
 impl Interpreter {
     fn call_function(&mut self, function: Value, args: &[CallArg]) -> Result<Value> {
         let expanded = self.expand_call_args(args)?;
@@ -849,24 +879,37 @@ impl Interpreter {
                 for (param, val) in function.params.iter().zip(param_vals.iter()) {
                     if !code.cell_vars.contains(&param.name) {
                         if let Some(&slot) = function.local_index.get(&param.name) {
-                            if (slot as usize) < num_regs {
-                                regs[slot as usize] = Some(val.clone());
+                            if (slot as usize) >= num_regs {
+                                return Err(PyError::Named(
+                                    "SystemError".to_string(),
+                                    format!(
+                                        "parameter '{}' register index {} out of range (num_regs={})",
+                                        param.name, slot, num_regs
+                                    ),
+                                ));
                             }
+                            regs[slot as usize] = Some(val.clone());
                         }
                     }
                 }
                 // Self-reference for recursive calls (only if not a cell var).
                 if !code.cell_vars.contains(&function.name) {
                     if let Some(&slot) = function.local_index.get(&function.name) {
-                        if (slot as usize) < num_regs {
-                            regs[slot as usize] = Some(Value::user_function(Rc::clone(&function)));
+                        if (slot as usize) >= num_regs {
+                            return Err(PyError::Named(
+                                "SystemError".to_string(),
+                                format!(
+                                    "self-reference register index {} out of range (num_regs={})",
+                                    slot, num_regs
+                                ),
+                            ));
                         }
+                        regs[slot as usize] = Some(Value::user_function(Rc::clone(&function)));
                     }
                 }
 
-                self.call_depth += 1;
-                if self.call_depth > MAX_CALL_DEPTH {
-                    self.call_depth -= 1;
+                let _depth_guard = CallDepthGuard::enter();
+                if call_depth() > MAX_CALL_DEPTH {
                     let exc = self.instantiate_named_exception(
                         "RecursionError",
                         "maximum recursion depth exceeded".to_string(),
@@ -904,7 +947,6 @@ impl Interpreter {
                 if needs_local_env {
                     self.free_env(used_env);
                 }
-                self.call_depth -= 1;
                 let value = vm_result?;
                 if let Some(ck) = cache_key {
                     self.fn_cache.insert(ck, value.clone());
@@ -989,24 +1031,37 @@ impl Interpreter {
             for (param, val) in function.params.iter().zip(param_vals.iter()) {
                 if !code.cell_vars.contains(&param.name) {
                     if let Some(&slot) = function.local_index.get(&param.name) {
-                        if (slot as usize) < num_regs {
-                            regs[slot as usize] = Some(val.clone());
+                        if (slot as usize) >= num_regs {
+                            return Err(PyError::Named(
+                                "SystemError".to_string(),
+                                format!(
+                                    "parameter '{}' register index {} out of range (num_regs={})",
+                                    param.name, slot, num_regs
+                                ),
+                            ));
                         }
+                        regs[slot as usize] = Some(val.clone());
                     }
                 }
             }
             // Self-reference for recursive calls (only if not a cell var).
             if !code.cell_vars.contains(&function.name) {
                 if let Some(&slot) = function.local_index.get(&function.name) {
-                    if (slot as usize) < num_regs {
-                        regs[slot as usize] = Some(Value::user_function(Rc::clone(&function)));
+                    if (slot as usize) >= num_regs {
+                        return Err(PyError::Named(
+                            "SystemError".to_string(),
+                            format!(
+                                "self-reference register index {} out of range (num_regs={})",
+                                slot, num_regs
+                            ),
+                        ));
                     }
+                    regs[slot as usize] = Some(Value::user_function(Rc::clone(&function)));
                 }
             }
 
-            self.call_depth += 1;
-            if self.call_depth > MAX_CALL_DEPTH {
-                self.call_depth -= 1;
+            let _depth_guard = CallDepthGuard::enter();
+            if call_depth() > MAX_CALL_DEPTH {
                 let exc = self.instantiate_named_exception(
                     "RecursionError",
                     "maximum recursion depth exceeded".to_string(),
@@ -1044,7 +1099,6 @@ impl Interpreter {
             if needs_local_env {
                 self.free_env(used_env);
             }
-            self.call_depth -= 1;
             return Ok(vm_result?);
         }
 

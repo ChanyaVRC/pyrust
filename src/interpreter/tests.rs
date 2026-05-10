@@ -894,10 +894,10 @@ result = fact(10)
         let mut parser = Parser::new(tokens);
         let program = parser.parse_program().unwrap();
         let mut interpreter = Interpreter::default();
-        let depth_before = interpreter.call_depth;
+        let depth_before = call_depth();
         interpreter.exec_program(&program, false).unwrap();
         assert_eq!(
-            interpreter.call_depth, depth_before,
+            call_depth(), depth_before,
             "call_depth must be restored after a runtime error inside a function"
         );
     }
