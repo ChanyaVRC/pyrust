@@ -115,7 +115,7 @@ pub struct UserFunction {
     pub name: String,
     pub params: Vec<UserFunctionParam>,
     pub local_names: NameSet,
-    pub local_index: Rc<HashMap<String, usize>>,
+    pub local_index: Rc<HashMap<String, u32>>,
     pub global_names: NameSet,
     pub nonlocal_names: NameSet,
     pub env: EnvRef,

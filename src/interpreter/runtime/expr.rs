@@ -181,7 +181,7 @@ impl Interpreter {
                 let local_names: std::collections::HashSet<String> =
                     params.iter().cloned().collect();
                 let local_index = Rc::new(
-                    local_names.iter().enumerate().map(|(i, n)| (n.clone(), i)).collect::<HashMap<String, usize>>()
+                    (0u32..).zip(local_names.iter()).map(|(i, n)| (n.clone(), i)).collect::<HashMap<String, crate::bytecode::Reg>>()
                 );
                 let lambda_body = vec![crate::ast::Stmt::Return(Some(*body.clone()))];
                 let func = Rc::new(crate::value::UserFunction {

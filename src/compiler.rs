@@ -12,7 +12,7 @@ use crate::value::{Value, ValueKind};
 /// `Insn::PrintExpr` instead of discarding the result.
 pub fn compile_script(
     stmts: &[Stmt],
-    local_index: Rc<HashMap<String, usize>>,
+    local_index: Rc<HashMap<String, Reg>>,
     repl_mode: bool,
 ) -> Result<FnCode, PyError> {
     // Script-level code cannot have nonlocal, and nothing captures script
@@ -40,7 +40,7 @@ pub fn compile_script(
 /// Collect names from `local_index` that are referenced as `nonlocal` in any
 /// directly nested `Stmt::Def` body.  These must be stored in the env (not
 /// registers) so that inner closures can share them.
-fn collect_cell_vars(body: &[Stmt], local_index: &HashMap<String, usize>) -> Vec<CellVar> {
+fn collect_cell_vars(body: &[Stmt], local_index: &HashMap<String, Reg>) -> Vec<CellVar> {
     let mut cells: HashSet<String> = HashSet::new();
     collect_cell_vars_in(body, local_index, &mut cells);
     cells.into_iter().collect()
@@ -48,7 +48,7 @@ fn collect_cell_vars(body: &[Stmt], local_index: &HashMap<String, usize>) -> Vec
 
 fn collect_cell_vars_in(
     body: &[Stmt],
-    local_index: &HashMap<String, usize>,
+    local_index: &HashMap<String, Reg>,
     cells: &mut HashSet<String>,
 ) {
     for stmt in body {
@@ -172,7 +172,7 @@ fn collect_cell_vars_in(
 /// live in the env (not registers) and are accessible via `LoadGlobal`.
 fn collect_class_method_outer_refs(
     class_body: &[Stmt],
-    local_index: &HashMap<String, usize>,
+    local_index: &HashMap<String, Reg>,
     cells: &mut HashSet<String>,
 ) {
     // Collect names assigned at class level (they shadow outer names for the
@@ -747,7 +747,7 @@ struct LoopCtx {
 }
 
 struct Compiler {
-    local_index: Rc<HashMap<String, usize>>,
+    local_index: Rc<HashMap<String, Reg>>,
     cell_vars: HashSet<String>,
     insns: Vec<Insn>,
     consts: Vec<Value>,
@@ -770,7 +770,7 @@ struct Compiler {
 
 impl Compiler {
     fn new(
-        local_index: Rc<HashMap<String, usize>>,
+        local_index: Rc<HashMap<String, Reg>>,
         def_bound_mask: u64,
         cell_vars: Vec<CellVar>,
     ) -> Self {
@@ -1019,7 +1019,7 @@ impl Compiler {
         if self.is_cell(name) {
             return None;
         }
-        self.local_index.get(name).copied().map(|i| i as Reg)
+        self.local_index.get(name).copied()
     }
 
     fn compile_block(&mut self, stmts: &[Stmt]) {
@@ -1353,38 +1353,38 @@ impl Compiler {
                     self.failed = true;
                     return;
                 }
-                self.next_temp = base + n as Reg;
+                self.next_temp = base + Reg::from(n);
                 if self.next_temp - 1 > self.max_reg {
                     self.max_reg = self.next_temp - 1;
                 }
                 self.emit(Insn::Unpack(base, src, n));
                 self.free_temp(src);
-                for (i, t) in targets.iter().enumerate() {
+                for (i, t) in (0u32..).zip(targets.iter()) {
                     match t {
                         AssignTarget::Name(name) => {
                             if let Some(reg) = self.local_reg(name) {
-                                self.emit(Insn::Move(reg, base + i as Reg));
+                                self.emit(Insn::Move(reg, base + i));
                             } else {
                                 let name_idx = self.intern_name(name);
-                                self.emit(Insn::StoreGlobal(name_idx, base + i as Reg));
+                                self.emit(Insn::StoreGlobal(name_idx, base + i));
                             }
                         }
                         AssignTarget::Attr(obj_expr, attr) => {
                             let obj = self.compile_expr(obj_expr);
                             let name_idx = self.intern_name(attr);
-                            self.emit(Insn::SetAttr(obj, name_idx, base + i as Reg));
+                            self.emit(Insn::SetAttr(obj, name_idx, base + i));
                             self.free_temp(obj);
                         }
                         AssignTarget::Index(obj_expr, idx_expr) => {
                             let obj = self.compile_expr(obj_expr);
                             let idx = self.compile_expr(idx_expr);
-                            self.emit(Insn::SetItem(obj, idx, base + i as Reg));
+                            self.emit(Insn::SetItem(obj, idx, base + i));
                             self.free_temp(idx);
                             self.free_temp(obj);
                         }
                         AssignTarget::Tuple(_) => {
                             // Nested tuple unpack — compile recursively
-                            let tmp = base + i as Reg;
+                            let tmp = base + i;
                             self.compile_assign(t, &Expr::Var(format!("__unpack_{}", tmp)));
                         }
                     }
@@ -1902,19 +1902,19 @@ impl Compiler {
                     self.failed = true;
                     return;
                 }
-                self.next_temp = base + n as Reg;
+                self.next_temp = base + Reg::from(n);
                 if self.next_temp - 1 > self.max_reg {
                     self.max_reg = self.next_temp - 1;
                 }
                 self.emit(Insn::Unpack(base, for_dst, n));
-                for (i, t) in targets.iter().enumerate() {
+                for (i, t) in (0u32..).zip(targets.iter()) {
                     match t {
                         AssignTarget::Name(name) => {
                             if let Some(reg) = self.local_reg(name) {
-                                self.emit(Insn::Move(reg, base + i as Reg));
+                                self.emit(Insn::Move(reg, base + i));
                             } else {
                                 let name_idx = self.intern_name(name);
-                                self.emit(Insn::StoreGlobal(name_idx, base + i as Reg));
+                                self.emit(Insn::StoreGlobal(name_idx, base + i));
                             }
                         }
                         _ => {
@@ -2123,8 +2123,8 @@ impl Compiler {
 
         // Build a compact local_index for the inner function.
         // Parameters come first (preserving declaration order), then body locals.
-        let mut inner_index: HashMap<String, usize> = HashMap::new();
-        let mut slot = 0usize;
+        let mut inner_index: HashMap<String, Reg> = HashMap::new();
+        let mut slot: Reg = 0;
         for param in params {
             if inner_local.contains(&param.name) {
                 inner_index.insert(param.name.clone(), slot);
@@ -2137,7 +2137,7 @@ impl Compiler {
                 slot += 1;
             }
         }
-        let inner_index_rc: Rc<HashMap<String, usize>> = Rc::new(inner_index);
+        let inner_index_rc: Rc<HashMap<String, Reg>> = Rc::new(inner_index);
 
         let def_bound = crate::interpreter::compute_def_bound_mask(params, &inner_index_rc);
         let is_pure = crate::interpreter::is_pure_body(body);
@@ -2198,16 +2198,16 @@ impl Compiler {
                 self.failed = true;
                 return;
             }
-            self.next_temp += defs_n as Reg;
+            self.next_temp += Reg::from(defs_n);
             if self.next_temp - 1 > self.max_reg {
                 self.max_reg = self.next_temp - 1;
             }
-            for (slot_i, param_i) in defaults.iter().enumerate() {
+            for (slot_i, param_i) in (0u32..).zip(defaults.iter()) {
                 let def_expr = params[*param_i].default.as_ref().unwrap();
                 let saved = self.next_temp;
                 let r = self.compile_expr(def_expr);
-                if r != defs_base + slot_i as Reg {
-                    self.emit(Insn::Move(defs_base + slot_i as Reg, r));
+                if r != defs_base + slot_i {
+                    self.emit(Insn::Move(defs_base + slot_i, r));
                 }
                 self.next_temp = saved;
             }
@@ -2256,11 +2256,11 @@ impl Compiler {
         let empty_nonlocal: Rc<HashSet<String>> = Rc::new(HashSet::new());
         let body_local =
             crate::interpreter::collect_local_names(&[], body, &empty_global, &empty_nonlocal);
-        let mut body_index: HashMap<String, usize> = HashMap::new();
-        for (i, loc) in body_local.iter().enumerate() {
+        let mut body_index: HashMap<String, Reg> = HashMap::new();
+        for (i, loc) in (0u32..).zip(body_local.iter()) {
             body_index.insert(loc.clone(), i);
         }
-        let body_index_rc: Rc<HashMap<String, usize>> = Rc::new(body_index);
+        let body_index_rc: Rc<HashMap<String, Reg>> = Rc::new(body_index);
         let cell_vars = collect_cell_vars(body, &body_index_rc);
 
         let mut sub = Compiler::new(Rc::clone(&body_index_rc), 0, cell_vars);
@@ -2303,15 +2303,15 @@ impl Compiler {
                 self.failed = true;
                 return;
             }
-            self.next_temp += bases_n as Reg;
+            self.next_temp += Reg::from(bases_n);
             if self.next_temp - 1 > self.max_reg {
                 self.max_reg = self.next_temp - 1;
             }
-            for (i, base_expr) in bases.iter().enumerate() {
+            for (i, base_expr) in (0u32..).zip(bases.iter()) {
                 let saved = self.next_temp;
                 let r = self.compile_expr(base_expr);
-                if r != bases_base + i as Reg {
-                    self.emit(Insn::Move(bases_base + i as Reg, r));
+                if r != bases_base + i {
+                    self.emit(Insn::Move(bases_base + i, r));
                 }
                 self.next_temp = saved;
             }
@@ -2901,9 +2901,9 @@ impl Compiler {
                     self.failed = true;
                     return 0;
                 }
-                self.next_temp = frame + 1 + n as Reg;
-                if frame + n as Reg > self.max_reg {
-                    self.max_reg = frame + n as Reg;
+                self.next_temp = frame + 1 + Reg::from(n);
+                if frame + Reg::from(n) > self.max_reg {
+                    self.max_reg = frame + Reg::from(n);
                 }
                 let set_name_idx = self.intern_name("set");
                 self.emit(Insn::LoadGlobal(frame, set_name_idx));
@@ -2915,12 +2915,12 @@ impl Compiler {
                     self.failed = true;
                     return 0;
                 }
-                self.next_temp = list_base + n as Reg;
-                if list_base + n as Reg - 1 > self.max_reg {
-                    self.max_reg = list_base + n as Reg - 1;
+                self.next_temp = list_base + Reg::from(n);
+                if list_base + Reg::from(n) - 1 > self.max_reg {
+                    self.max_reg = list_base + Reg::from(n) - 1;
                 }
-                for (i, item) in items.iter().enumerate() {
-                    let slot = list_base + i as Reg;
+                for (i, item) in (0u32..).zip(items.iter()) {
+                    let slot = list_base + i;
                     let ns = self.next_temp;
                     let r = self.compile_expr(item);
                     if r != slot {
@@ -2946,13 +2946,13 @@ impl Compiler {
                     self.failed = true;
                     return 0;
                 }
-                self.next_temp = base + (n as Reg).saturating_mul(2);
+                self.next_temp = base + Reg::from(n).saturating_mul(2);
                 if self.next_temp > 0 && self.next_temp - 1 > self.max_reg {
                     self.max_reg = self.next_temp - 1;
                 }
-                for (i, (key_expr, val_expr)) in pairs.iter().enumerate() {
-                    let k_slot = base + (i * 2) as Reg;
-                    let v_slot = base + (i * 2 + 1) as Reg;
+                for (i, (key_expr, val_expr)) in (0u32..).zip(pairs.iter()) {
+                    let k_slot = base + i * 2;
+                    let v_slot = base + i * 2 + 1;
                     let saved = self.next_temp;
                     let insn_before = self.insns.len();
                     let kr = self.compile_expr(key_expr);
@@ -3031,7 +3031,7 @@ impl Compiler {
 
         let argc = args.len() as u8;
         let func_reg = self.next_temp;
-        let frame_top = func_reg.wrapping_add(1).wrapping_add(argc as Reg);
+        let frame_top = func_reg.wrapping_add(1).wrapping_add(Reg::from(argc));
         if frame_top < func_reg {
             self.failed = true;
             return 0;
@@ -3043,8 +3043,8 @@ impl Compiler {
         let saved = self.next_temp;
         self.compile_expr_into(func, func_reg);
         self.next_temp = saved;
-        for (i, arg) in args.iter().enumerate() {
-            let arg_reg = func_reg + 1 + i as Reg;
+        for (i, arg) in (0u32..).zip(args.iter()) {
+            let arg_reg = func_reg + 1 + i;
             let saved = self.next_temp;
             let insn_before = self.insns.len();
             let r = self.compile_expr(&arg.value);
@@ -3085,7 +3085,7 @@ impl Compiler {
             if let Some(local) = self.local_reg(name) {
                 let dst = self.next_temp;
                 let abase = dst.wrapping_add(1);
-                let frame_top = abase.wrapping_add(nargs as Reg);
+                let frame_top = abase.wrapping_add(Reg::from(nargs));
                 if frame_top < dst {
                     self.failed = true;
                     return 0;
@@ -3099,7 +3099,7 @@ impl Compiler {
                 // cell / nonlocal — must load via env first
                 let o = self.next_temp;
                 let abase = o.wrapping_add(1);
-                let frame_top = abase.wrapping_add(nargs as Reg);
+                let frame_top = abase.wrapping_add(Reg::from(nargs));
                 if frame_top < o {
                     self.failed = true;
                     return 0;
@@ -3131,8 +3131,8 @@ impl Compiler {
             self.next_temp = saved;
         }
 
-        for (i, arg) in args.iter().enumerate() {
-            let arg_reg = args_base + i as Reg;
+        for (i, arg) in (0u32..).zip(args.iter()) {
+            let arg_reg = args_base + i;
             let saved = self.next_temp;
             let insn_before = self.insns.len();
             let r = self.compile_expr(&arg.value);
@@ -3382,12 +3382,12 @@ impl Compiler {
             self.failed = true;
             return 0;
         }
-        self.next_temp = base + n as Reg;
-        if n > 0 && base + n as Reg - 1 > self.max_reg {
-            self.max_reg = base + n as Reg - 1;
+        self.next_temp = base + Reg::from(n);
+        if n > 0 && base + Reg::from(n) - 1 > self.max_reg {
+            self.max_reg = base + Reg::from(n) - 1;
         }
-        for (i, item) in items.iter().enumerate() {
-            let slot = base + i as Reg;
+        for (i, item) in (0u32..).zip(items.iter()) {
+            let slot = base + i;
             let saved = self.next_temp;
             let insn_before = self.insns.len();
             let r = self.compile_expr(item);

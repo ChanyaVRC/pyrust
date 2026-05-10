@@ -23,7 +23,7 @@ pub struct FnProto {
     pub param_is_args: Vec<bool>,
     pub param_is_kwargs: Vec<bool>,
     pub code: Rc<FnCode>,
-    pub local_index: Rc<HashMap<String, usize>>,
+    pub local_index: Rc<HashMap<String, Reg>>,
     pub global_names: Rc<HashSet<String>>,
     pub nonlocal_names: Rc<HashSet<String>>,
     pub is_pure: bool,

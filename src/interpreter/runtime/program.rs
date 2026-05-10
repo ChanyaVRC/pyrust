@@ -24,13 +24,11 @@ impl Interpreter {
         const MAX_SCRIPT_LOCALS: usize = 200;
         if local_names.len() > MAX_SCRIPT_LOCALS {
             // Too many locals — fall back to all-env mode.
-            let local_index: Rc<HashMap<String, usize>> = Rc::new(HashMap::new());
+            let local_index: Rc<HashMap<String, crate::bytecode::Reg>> = Rc::new(HashMap::new());
             return self.try_exec_vm_script_with_index(program, local_index, repl_mode);
         }
-        let local_index: Rc<HashMap<String, usize>> = Rc::new(
-            local_names
-                .iter()
-                .enumerate()
+        let local_index: Rc<HashMap<String, crate::bytecode::Reg>> = Rc::new(
+            (0u32..).zip(local_names.iter())
                 .map(|(i, n)| (n.clone(), i))
                 .collect(),
         );
@@ -40,7 +38,7 @@ impl Interpreter {
     fn try_exec_vm_script_with_index(
         &mut self,
         program: &[Stmt],
-        local_index: Rc<HashMap<String, usize>>,
+        local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
         repl_mode: bool,
     ) -> Option<Result<()>> {
         let code = Rc::new(
@@ -61,7 +59,7 @@ impl Interpreter {
         // Write fastlocals registers back to the module env so that imported
         // modules and post-run inspection can find all names.
         for (name, &idx) in local_index.iter() {
-            if let Some(val) = regs[idx].take() {
+            if let Some(val) = regs[idx as usize].take() {
                 self.assign_name(name.clone(), val);
             }
         }
