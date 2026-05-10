@@ -47,3 +47,17 @@ lst.sort(reverse=True)
 assert lst == [5, 4, 3, 1, 1]
 
 print("split/sort OK")
+
+# sort/min/max TypeError for incompatible types — Issue #104
+try:
+    sorted([1, "a"])
+except TypeError:
+    print("sort-mixed-type", "TypeError")
+try:
+    min(1, "x")
+except TypeError:
+    print("min-mixed-type", "TypeError")
+try:
+    max([1, "a"])
+except TypeError:
+    print("max-mixed-type", "TypeError")
