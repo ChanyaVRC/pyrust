@@ -58,6 +58,7 @@ fn extract_reverse(args: &[Value], kwargs: &IndexMap<PyKey, Value>) -> Result<bo
 }
 
 fn sort_by_cmp(items: &mut Vec<Value>, reverse: bool) -> Result<Value> {
+    let snapshot = items.clone();
     let mut err: Option<PyError> = None;
     items.sort_by(|a, b| {
         if err.is_some() {
@@ -73,6 +74,7 @@ fn sort_by_cmp(items: &mut Vec<Value>, reverse: bool) -> Result<Value> {
         }
     });
     if let Some(e) = err {
+        *items = snapshot;
         return Err(e);
     }
     Ok(Value::none())
@@ -86,6 +88,7 @@ pub fn sort_with_precomputed_keys(
     reverse: bool,
 ) -> Result<Value> {
     debug_assert_eq!(items.len(), keys.len());
+    let snapshot = items.clone();
     let mut keyed: Vec<(Value, Value)> = keys.into_iter().zip(items.iter().cloned()).collect();
     let mut sort_err: Option<PyError> = None;
     keyed.sort_by(|(ka, _), (kb, _)| {
@@ -102,6 +105,7 @@ pub fn sort_with_precomputed_keys(
         }
     });
     if let Some(e) = sort_err {
+        *items = snapshot;
         return Err(e);
     }
     *items = keyed.into_iter().map(|(_, v)| v).collect();

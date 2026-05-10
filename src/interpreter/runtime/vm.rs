@@ -9,9 +9,9 @@ enum IterState {
 
 fn int_int_fast(a: i64, b: i64, op: BinaryOp) -> Option<Value> {
     match op {
-        BinaryOp::Add    => Some(Value::int(a.wrapping_add(b))),
-        BinaryOp::Sub    => Some(Value::int(a.wrapping_sub(b))),
-        BinaryOp::Mul    => Some(Value::int(a.wrapping_mul(b))),
+        BinaryOp::Add    => a.checked_add(b).map(Value::int),
+        BinaryOp::Sub    => a.checked_sub(b).map(Value::int),
+        BinaryOp::Mul    => a.checked_mul(b).map(Value::int),
         BinaryOp::BitAnd => Some(Value::int(a & b)),
         BinaryOp::BitOr  => Some(Value::int(a | b)),
         BinaryOp::BitXor => Some(Value::int(a ^ b)),
@@ -113,6 +113,20 @@ impl Interpreter {
                 }
             };
         }
+        macro_rules! pool_get {
+            ($pool:expr, $idx:expr, $tag:literal) => {
+                match ($pool).get($idx as usize) {
+                    Some(v) => v,
+                    None => {
+                        vm_try!(Err(PyError::Runtime(format!(
+                            "bytecode error: {} index {} out of range (pool size {})",
+                            $tag, $idx, ($pool).len()
+                        ))));
+                        unreachable!()
+                    }
+                }
+            };
+        }
             let Some(insn) = code.insns.get(pc) else {
                 if pc == code.insns.len() {
                     return Ok(Value::none());
@@ -142,14 +156,15 @@ impl Interpreter {
             match insn {
                 // ── Loads ────────────────────────────────────────────────
                 Insn::LoadConst(dst, idx) => {
-                    if let ValueKind::Int(n) = code.consts[*idx as usize].kind() {
+                    let cv = pool_get!(code.consts, *idx, "const");
+                    if let ValueKind::Int(n) = cv.kind() {
                         regs[*dst as usize] = Some(Value::int(n));
                     } else {
-                        regs[*dst as usize] = Some(code.consts[*idx as usize].clone());
+                        regs[*dst as usize] = Some(cv.clone());
                     }
                 }
                 Insn::LoadGlobal(dst, name_idx) => {
-                    let name = &code.names[*name_idx as usize];
+                    let name = pool_get!(code.names, *name_idx, "name");
                     let val = if let Some(v) = vm_try!(self.lookup_name(name)) {
                         v
                     } else {
@@ -160,7 +175,7 @@ impl Interpreter {
                     regs[*dst as usize] = Some(val);
                 }
                 Insn::StoreGlobal(name_idx, src) => {
-                    let name = code.names[*name_idx as usize].clone();
+                    let name = pool_get!(code.names, *name_idx, "name").clone();
                     let val = vm_try!(vm_read(regs, *src, num_locals));
                     self.assign_name(name, val);
                 }
@@ -212,10 +227,9 @@ impl Interpreter {
                     regs[*dst as usize] = Some(result);
                 }
                 Insn::BinOpConst(dst, lhs, op, const_idx) => {
+                    let cv = pool_get!(code.consts, *const_idx, "const");
                     if let Some(lv) = &regs[*lhs as usize] {
-                        if let (ValueKind::Int(a), ValueKind::Int(b)) =
-                            (lv.kind(), code.consts[*const_idx as usize].kind())
-                        {
+                        if let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), cv.kind()) {
                             if let Some(result) = int_int_fast(a, b, *op) {
                                 regs[*dst as usize] = Some(result);
                                 continue;
@@ -223,7 +237,7 @@ impl Interpreter {
                         }
                     }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
-                    let r = code.consts[*const_idx as usize].clone();
+                    let r = cv.clone();
                     let result = vm_try!(self.eval_binary(l, *op, r));
                     regs[*dst as usize] = Some(result);
                 }
@@ -236,19 +250,19 @@ impl Interpreter {
                 // ── Attribute / Index ────────────────────────────────────
                 Insn::GetAttr(dst, obj, name_idx) => {
                     let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
-                    let name = &code.names[*name_idx as usize];
+                    let name = pool_get!(code.names, *name_idx, "name");
                     let result = vm_try!(self.get_attr(obj_val, name));
                     regs[*dst as usize] = Some(result);
                 }
                 Insn::SetAttr(obj, name_idx, val) => {
                     let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
                     let val_val = vm_try!(vm_read(regs, *val, num_locals));
-                    let name = &code.names[*name_idx as usize];
+                    let name = pool_get!(code.names, *name_idx, "name");
                     vm_try!(self.assign_attr(obj_val, name, val_val));
                 }
                 Insn::DeleteAttr(obj, name_idx) => {
                     let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
-                    let name = code.names[*name_idx as usize].clone();
+                    let name = pool_get!(code.names, *name_idx, "name").clone();
                     match obj_val.kind() {
                         ValueKind::PyInstance(inst) => {
                             inst.borrow_mut().attrs.remove(&name);
@@ -372,12 +386,12 @@ impl Interpreter {
                         }).unwrap_or(0);
                         match target_kind {
                             1 => {
-                                let items = regs[*obj as usize].as_mut().unwrap().as_list_mut().unwrap();
+                                let items = vm_try!(expect_list_mut(regs, *obj, "SetItem"));
                                 let i = vm_try!(normalize_index(&idx_val, items.len()));
                                 items[i] = val_val;
                             }
                             2 => {
-                                let dict = regs[*obj as usize].as_mut().unwrap().as_dict_mut().unwrap();
+                                let dict = vm_try!(expect_dict_mut(regs, *obj, "SetItem"));
                                 let key = vm_try!(idx_val.to_key().ok_or_else(|| {
                                     PyError::Runtime("unhashable type".to_string())
                                 }));
@@ -436,7 +450,7 @@ impl Interpreter {
                     }
                 }
                 Insn::DeleteName(name_idx) => {
-                    let name = code.names[*name_idx as usize].clone();
+                    let name = pool_get!(code.names, *name_idx, "name").clone();
                     self.env.borrow_mut().values.remove(&name);
                 }
                 Insn::DeleteLocal(reg) => {
@@ -500,10 +514,9 @@ impl Interpreter {
                     if vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = jump_pc!(*offset); }
                 }
                 Insn::CmpJumpIfFalseConst(lhs, op, const_idx, offset) => {
+                    let cv = pool_get!(code.consts, *const_idx, "const");
                     if let Some(lv) = &regs[*lhs as usize] {
-                        if let (ValueKind::Int(a), ValueKind::Int(b)) =
-                            (lv.kind(), code.consts[*const_idx as usize].kind())
-                        {
+                        if let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), cv.kind()) {
                             if let Some(cond) = int_cmp(a, b, *op) {
                                 if !cond { pc = jump_pc!(*offset); }
                                 continue;
@@ -511,14 +524,13 @@ impl Interpreter {
                         }
                     }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
-                    let r = code.consts[*const_idx as usize].clone();
+                    let r = cv.clone();
                     if !vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = jump_pc!(*offset); }
                 }
                 Insn::CmpJumpIfTrueConst(lhs, op, const_idx, offset) => {
+                    let cv = pool_get!(code.consts, *const_idx, "const");
                     if let Some(lv) = &regs[*lhs as usize] {
-                        if let (ValueKind::Int(a), ValueKind::Int(b)) =
-                            (lv.kind(), code.consts[*const_idx as usize].kind())
-                        {
+                        if let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), cv.kind()) {
                             if let Some(cond) = int_cmp(a, b, *op) {
                                 if cond { pc = jump_pc!(*offset); }
                                 continue;
@@ -526,7 +538,7 @@ impl Interpreter {
                         }
                     }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
-                    let r = code.consts[*const_idx as usize].clone();
+                    let r = cv.clone();
                     if vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = jump_pc!(*offset); }
                 }
 
@@ -769,7 +781,13 @@ impl Interpreter {
                         ))));
                     }
                     for (i, v) in items.into_iter().enumerate() {
-                        regs[*base as usize + i] = Some(v);
+                        let dst = *base as usize + i;
+                        if dst >= regs.len() {
+                            vm_try!(Err(PyError::Runtime(format!(
+                                "Unpack: register {dst} out of range"
+                            ))));
+                        }
+                        regs[dst] = Some(v);
                     }
                 }
 
@@ -792,6 +810,12 @@ impl Interpreter {
                         let src_val = vm_try!(vm_read(regs, *src, num_locals));
                         match src_val.kind() {
                             ValueKind::Range { start, stop, step } => {
+                                if step == 0 {
+                                    vm_try!(Err(PyError::Named(
+                                        "ValueError".to_string(),
+                                        "range() arg 3 must not be zero".to_string(),
+                                    )));
+                                }
                                 IterState::Range { cur: start, stop, step }
                             }
                             _ => {
@@ -850,7 +874,7 @@ impl Interpreter {
                     }
                 }
                 Insn::ForCountReg(var, cmp_op, stop_reg, step_idx, offset) => {
-                    let step = match code.consts[*step_idx as usize].kind() {
+                    let step = match pool_get!(code.consts, *step_idx, "const").kind() {
                         ValueKind::Int(s) => s,
                         _ => unreachable!("ForCountReg step must be Int"),
                     };
@@ -874,11 +898,11 @@ impl Interpreter {
                     }
                 }
                 Insn::ForCountConst(var, cmp_op, stop_idx, step_idx, offset) => {
-                    let step = match code.consts[*step_idx as usize].kind() {
+                    let step = match pool_get!(code.consts, *step_idx, "const").kind() {
                         ValueKind::Int(s) => s,
                         _ => unreachable!("ForCountConst step must be Int"),
                     };
-                    let stop = match code.consts[*stop_idx as usize].kind() {
+                    let stop = match pool_get!(code.consts, *stop_idx, "const").kind() {
                         ValueKind::Int(s) => s,
                         _ => unreachable!("ForCountConst stop must be Int"),
                     };
@@ -903,7 +927,7 @@ impl Interpreter {
                 }
                 Insn::CheckLocal(reg, name_idx) => {
                     if regs[*reg as usize].is_none() {
-                        let name = &code.names[*name_idx as usize];
+                        let name = pool_get!(code.names, *name_idx, "name");
                         vm_try!(Err::<(), _>(crate::error::PyError::Runtime(format!(
                             "cannot access local variable '{}' where it is not associated with a value",
                             name
@@ -913,7 +937,7 @@ impl Interpreter {
 
                 // ── Function / Class creation ────────────────────────────
                 Insn::MakeFunction(dst, proto_idx, defs_base, _defs_n) => {
-                    let proto = &code.fn_protos[*proto_idx as usize];
+                    let proto = pool_get!(code.fn_protos, *proto_idx, "fn_proto");
                     let proto_code = Rc::clone(&proto.code);
                     let proto_name = proto.name.clone();
                     let proto_local_index = Rc::clone(&proto.local_index);
@@ -968,9 +992,9 @@ impl Interpreter {
                     regs[*dst as usize] = Some(Value::user_function(func));
                 }
                 Insn::MakeClass(dst, proto_idx, bases_base, bases_n, name_idx) => {
-                    let class_name = code.names[*name_idx as usize].clone();
+                    let class_name = pool_get!(code.names, *name_idx, "name").clone();
                     let (class_code, local_index) = {
-                        let proto = &code.fn_protos[*proto_idx as usize];
+                        let proto = pool_get!(code.fn_protos, *proto_idx, "fn_proto");
                         (Rc::clone(&proto.code), Rc::clone(&proto.local_index))
                     };
                     let num_class_regs = class_code.num_regs as usize;
@@ -1003,7 +1027,7 @@ impl Interpreter {
 
                 // ── Import ───────────────────────────────────────────────
                 Insn::ImportModule(dst, name_idx) => {
-                    let name = code.names[*name_idx as usize].clone();
+                    let name = pool_get!(code.names, *name_idx, "name").clone();
                     let module = vm_try!(self.load_module(&name));
                     regs[*dst as usize] = Some(module);
                 }
@@ -1030,7 +1054,9 @@ impl Interpreter {
         nargs: u8,
         code: &crate::bytecode::FnCode,
     ) -> Result<Value> {
-        let method = code.names[name_idx as usize].clone();
+        let method = code.names.get(name_idx as usize)
+            .ok_or_else(|| PyError::Runtime(format!("bytecode error: name index {name_idx} out of range")))?
+            .clone();
         let mut args: Vec<Value> = Vec::with_capacity(nargs as usize);
         for i in 0..crate::bytecode::Reg::from(nargs) {
             args.push(vm_read(regs, args_base + i, num_locals)?);
@@ -1114,7 +1140,9 @@ impl Interpreter {
         kw_dict: crate::bytecode::Reg,
         code: &crate::bytecode::FnCode,
     ) -> Result<Value> {
-        let method = code.names[name_idx as usize].clone();
+        let method = code.names.get(name_idx as usize)
+            .ok_or_else(|| PyError::Runtime(format!("bytecode error: name index {name_idx} out of range")))?
+            .clone();
         let pos_items: Vec<Value> = match vm_read(regs, pos_list, num_locals)? {
             v => match v.kind() {
                 ValueKind::List(items) => items.clone(),

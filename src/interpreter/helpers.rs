@@ -20,9 +20,18 @@ pub(crate) enum SpecState {
 /// None if the operation is not applicable to integers (e.g. Str concat).
 fn eval_binary_int(op: BinaryOp, a: i64, b: i64) -> Option<Result<Value>> {
     match op {
-        BinaryOp::Add => Some(Ok(Value::int(a.wrapping_add(b)))),
-        BinaryOp::Sub => Some(Ok(Value::int(a.wrapping_sub(b)))),
-        BinaryOp::Mul => Some(Ok(Value::int(a.wrapping_mul(b)))),
+        BinaryOp::Add => Some(Ok(match a.checked_add(b) {
+            Some(r) => Value::int(r),
+            None => Value::bigint(PyBigInt::from(a) + PyBigInt::from(b)),
+        })),
+        BinaryOp::Sub => Some(Ok(match a.checked_sub(b) {
+            Some(r) => Value::int(r),
+            None => Value::bigint(PyBigInt::from(a) - PyBigInt::from(b)),
+        })),
+        BinaryOp::Mul => Some(Ok(match a.checked_mul(b) {
+            Some(r) => Value::int(r),
+            None => Value::bigint(PyBigInt::from(a) * PyBigInt::from(b)),
+        })),
         BinaryOp::Div => {
             if b == 0 {
                 Some(Err(PyError::Runtime("division by zero".to_string())))

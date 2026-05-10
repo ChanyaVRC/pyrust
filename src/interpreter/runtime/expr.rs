@@ -231,7 +231,7 @@ impl Interpreter {
     fn eval_binary(&mut self, left: Value, op: BinaryOp, right: Value) -> Result<Value> {
         match op {
             BinaryOp::Add => self.add(left, right),
-            BinaryOp::Sub => self.num_op(left, right, |a, b| a - b, |a, b| a - b),
+            BinaryOp::Sub => self.sub(left, right),
             BinaryOp::Mul => self.mul(left, right),
             BinaryOp::MatMul => self.matmul(left, right),
             BinaryOp::Div => self.div(left, right),
@@ -277,7 +277,10 @@ impl Interpreter {
     fn add(&self, left: Value, right: Value) -> Result<Value> {
         match (coerce_numeric(left), coerce_numeric(right)) {
             (l, r) => match (l.kind(), r.kind()) {
-                (ValueKind::Int(a), ValueKind::Int(b)) => Ok(Value::int(a + b)),
+                (ValueKind::Int(a), ValueKind::Int(b)) => Ok(match a.checked_add(b) {
+                    Some(r) => Value::int(r),
+                    None => Value::bigint(PyBigInt::from(a) + PyBigInt::from(b)),
+                }),
                 (ValueKind::Int(a), ValueKind::Float(b)) => Ok(Value::float((a as f64) + b)),
                 (ValueKind::Float(a), ValueKind::Int(b)) => Ok(Value::float(a + (b as f64))),
                 (ValueKind::Float(a), ValueKind::Float(b)) => Ok(Value::float(a + b)),
@@ -297,10 +300,28 @@ impl Interpreter {
         }
     }
 
+    fn sub(&self, left: Value, right: Value) -> Result<Value> {
+        match (coerce_numeric(left), coerce_numeric(right)) {
+            (l, r) => match (l.kind(), r.kind()) {
+                (ValueKind::Int(a), ValueKind::Int(b)) => Ok(match a.checked_sub(b) {
+                    Some(r) => Value::int(r),
+                    None => Value::bigint(PyBigInt::from(a) - PyBigInt::from(b)),
+                }),
+                (ValueKind::Int(a), ValueKind::Float(b)) => Ok(Value::float((a as f64) - b)),
+                (ValueKind::Float(a), ValueKind::Int(b)) => Ok(Value::float(a - (b as f64))),
+                (ValueKind::Float(a), ValueKind::Float(b)) => Ok(Value::float(a - b)),
+                _ => Err(Self::unsupported_binary_operand("-")),
+            }
+        }
+    }
+
     fn mul(&self, left: Value, right: Value) -> Result<Value> {
         match (coerce_numeric(left), coerce_numeric(right)) {
             (l, r) => match (l.kind(), r.kind()) {
-                (ValueKind::Int(a), ValueKind::Int(b)) => Ok(Value::int(a * b)),
+                (ValueKind::Int(a), ValueKind::Int(b)) => Ok(match a.checked_mul(b) {
+                    Some(r) => Value::int(r),
+                    None => Value::bigint(PyBigInt::from(a) * PyBigInt::from(b)),
+                }),
                 (ValueKind::Int(a), ValueKind::Float(b)) => Ok(Value::float((a as f64) * b)),
                 (ValueKind::Float(a), ValueKind::Int(b)) => Ok(Value::float(a * (b as f64))),
                 (ValueKind::Float(a), ValueKind::Float(b)) => Ok(Value::float(a * b)),
@@ -372,25 +393,7 @@ impl Interpreter {
         Err(Self::unsupported_binary_operand("@"))
     }
 
-    fn num_op(
-        &self,
-        left: Value,
-        right: Value,
-        int_op: impl Fn(i64, i64) -> i64,
-        float_op: impl Fn(f64, f64) -> f64,
-    ) -> Result<Value> {
-        match (coerce_numeric(left), coerce_numeric(right)) {
-            (l, r) => match (l.kind(), r.kind()) {
-                (ValueKind::Int(a), ValueKind::Int(b)) => Ok(Value::int(int_op(a, b))),
-                (ValueKind::Int(a), ValueKind::Float(b)) => Ok(Value::float(float_op(a as f64, b))),
-                (ValueKind::Float(a), ValueKind::Int(b)) => Ok(Value::float(float_op(a, b as f64))),
-                (ValueKind::Float(a), ValueKind::Float(b)) => Ok(Value::float(float_op(a, b))),
-                _ => Err(PyError::Runtime(
-                    "unsupported operand types for numeric operation".to_string(),
-                )),
-            }
-        }
-    }
+
 
     fn div(&self, left: Value, right: Value) -> Result<Value> {
         let (a, b) = self.to_pair_number(left, right)?;
