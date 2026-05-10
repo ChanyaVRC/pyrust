@@ -428,32 +428,30 @@ impl Interpreter {
                     ));
                 }
                 let obj = &args[0].value;
-                let type_name = match obj.kind() {
-                    ValueKind::PyInstance(inst) => {
-                        let class = Rc::clone(&inst.borrow().class);
-                        return Ok(Value::py_class(class));
-                    }
-                    ValueKind::Int(_) => "int",
-                    ValueKind::Float(_) => "float",
-                    ValueKind::Str(_) => "str",
-                    ValueKind::Bool(_) => "bool",
-                    ValueKind::None => "NoneType",
-                    ValueKind::List(_) => "list",
-                    ValueKind::Tuple(_) => "tuple",
-                    ValueKind::Dict(_) | ValueKind::DictKeysView(_) | ValueKind::DictValuesView(_) | ValueKind::DictItemsView(_) => "dict",
-                    ValueKind::Set(_) => "set",
-                    ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_) | ValueKind::BoundMethod { .. } => "function",
-                    ValueKind::PyClass(_) => "type",
-                    ValueKind::Range { .. } => "range",
-                    _ => "object",
-                };
-                // Return a synthetic class object named after the type
-                let cls = Rc::new(RefCell::new(PyClass {
-                    name: type_name.to_string(),
-                    base: None,
-                    attrs: HashMap::new(),
-                }));
-                Ok(Value::py_class(cls))
+                // For user-defined class instances return the actual Rc so that
+                // `type(x) is type(x)` works via Rc::ptr_eq in values_are_identical.
+                // For builtin types return a BuiltinFunction value (singleton-like) so
+                // that `type(5) is type(5)` works and isinstance(x, type(x)) succeeds.
+                match obj.kind() {
+                    ValueKind::PyInstance(inst) => Ok(Value::py_class(Rc::clone(&inst.borrow().class))),
+                    ValueKind::PyClass(_) => Ok(Value::builtin_function("type")),
+                    ValueKind::Bool(_) => Ok(Value::builtin_function("bool")),
+                    ValueKind::Int(_) => Ok(Value::builtin_function("int")),
+                    ValueKind::Float(_) => Ok(Value::builtin_function("float")),
+                    ValueKind::Str(_) => Ok(Value::builtin_function("str")),
+                    ValueKind::None => Ok(Value::builtin_function("NoneType")),
+                    ValueKind::List(_) => Ok(Value::builtin_function("list")),
+                    ValueKind::Tuple(_) => Ok(Value::builtin_function("tuple")),
+                    ValueKind::Dict(_) => Ok(Value::builtin_function("dict")),
+                    ValueKind::DictKeysView(_) => Ok(Value::builtin_function("dict_keys")),
+                    ValueKind::DictValuesView(_) => Ok(Value::builtin_function("dict_values")),
+                    ValueKind::DictItemsView(_) => Ok(Value::builtin_function("dict_items")),
+                    ValueKind::Set(_) => Ok(Value::builtin_function("set")),
+                    ValueKind::Range { .. } => Ok(Value::builtin_function("range")),
+                    ValueKind::UserFunction(_) | ValueKind::BoundMethod { .. } => Ok(Value::builtin_function("function")),
+                    ValueKind::BuiltinFunction(_) => Ok(Value::builtin_function("builtin_function_or_method")),
+                    ValueKind::PyModule(_) => Ok(Value::builtin_function("module")),
+                }
             }
             ValueKind::BuiltinFunction("id") => {
                 reject_keyword_args_expanded("id", args)?;
@@ -470,7 +468,7 @@ impl Interpreter {
                     ValueKind::Int(n) => n,
                     ValueKind::Bool(b) => b as i64,
                     ValueKind::None => 0,
-                    _ => args[0].value.pool_ptr_id().unwrap_or(0),
+                    _ => args[0].value.value_id().unwrap_or(0),
                 };
                 Ok(Value::int(id_val))
             }
@@ -526,7 +524,8 @@ impl Interpreter {
                 }
                 let name = match args[1].value.kind() {
                     ValueKind::Str(s) => s.to_string(),
-                    _ => return Err(PyError::Runtime(
+                    _ => return Err(PyError::Named(
+                        "TypeError".to_string(),
                         "setattr(): attribute name must be a string".to_string(),
                     )),
                 };
@@ -538,7 +537,10 @@ impl Interpreter {
                 if args.is_empty() {
                     Ok(Value::dict(indexmap::IndexMap::new()))
                 } else {
-                    Err(PyError::Runtime("dict() with arguments is not yet supported".to_string()))
+                    Err(PyError::Named(
+                        "TypeError".to_string(),
+                        "dict() with arguments is not yet supported".to_string(),
+                    ))
                 }
             }
             ValueKind::BuiltinFunction(name) if name.starts_with("str.") => {

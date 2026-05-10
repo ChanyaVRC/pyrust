@@ -665,6 +665,9 @@ fn values_are_identical(a: &Value, b: &Value) -> bool {
         (ValueKind::PyInstance(x), ValueKind::PyInstance(y)) => Rc::ptr_eq(x, y),
         (ValueKind::PyClass(x), ValueKind::PyClass(y)) => Rc::ptr_eq(x, y),
         (ValueKind::UserFunction(x), ValueKind::UserFunction(y)) => Rc::ptr_eq(x, y),
+        // BuiltinFunction values are singletons by name (static str identity).
+        // This makes `type(5) is type(5)` True since both return the same name tag.
+        (ValueKind::BuiltinFunction(x), ValueKind::BuiltinFunction(y)) => x == y,
         _ => false,
     }
 }

@@ -457,40 +457,31 @@ impl Value {
         Value(TAG_STR_BITS | (ptr as u64 & PAYLOAD_MASK))
     }
 
-    pub fn list(v: Vec<Value>) -> Self {
+    // Shared allocator for list/tuple pool headers. Writes Vec<Value> at offset 0
+    // and the unique obj_id at offset 24, then tags with the supplied tag bits.
+    unsafe fn alloc_seq_hdr(tag_bits: u64, v: Vec<Value>, obj_id: u64) -> Self {
         let hdr = unsafe { pool_vec_hdr_alloc() };
         unsafe {
             std::ptr::write(hdr as *mut Vec<Value>, v);
-            std::ptr::write(hdr.add(24) as *mut u64, next_obj_id());
+            std::ptr::write(hdr.add(24) as *mut u64, obj_id);
         }
-        Value(TAG_LIST_BITS | (hdr as u64 & PAYLOAD_MASK))
+        Value(tag_bits | (hdr as u64 & PAYLOAD_MASK))
+    }
+
+    pub fn list(v: Vec<Value>) -> Self {
+        unsafe { Self::alloc_seq_hdr(TAG_LIST_BITS, v, next_obj_id()) }
     }
 
     fn list_with_id(v: Vec<Value>, obj_id: u64) -> Self {
-        let hdr = unsafe { pool_vec_hdr_alloc() };
-        unsafe {
-            std::ptr::write(hdr as *mut Vec<Value>, v);
-            std::ptr::write(hdr.add(24) as *mut u64, obj_id);
-        }
-        Value(TAG_LIST_BITS | (hdr as u64 & PAYLOAD_MASK))
+        unsafe { Self::alloc_seq_hdr(TAG_LIST_BITS, v, obj_id) }
     }
 
     pub fn tuple(v: Vec<Value>) -> Self {
-        let hdr = unsafe { pool_vec_hdr_alloc() };
-        unsafe {
-            std::ptr::write(hdr as *mut Vec<Value>, v);
-            std::ptr::write(hdr.add(24) as *mut u64, next_obj_id());
-        }
-        Value(TAG_TUPLE_BITS | (hdr as u64 & PAYLOAD_MASK))
+        unsafe { Self::alloc_seq_hdr(TAG_TUPLE_BITS, v, next_obj_id()) }
     }
 
     fn tuple_with_id(v: Vec<Value>, obj_id: u64) -> Self {
-        let hdr = unsafe { pool_vec_hdr_alloc() };
-        unsafe {
-            std::ptr::write(hdr as *mut Vec<Value>, v);
-            std::ptr::write(hdr.add(24) as *mut u64, obj_id);
-        }
-        Value(TAG_TUPLE_BITS | (hdr as u64 & PAYLOAD_MASK))
+        unsafe { Self::alloc_seq_hdr(TAG_TUPLE_BITS, v, obj_id) }
     }
 
     pub fn dict(d: IndexMap<PyKey, Value>) -> Self {
@@ -581,8 +572,8 @@ impl Value {
     /// Returns a stable identity value for pool-allocated types:
     /// - list/tuple: reads the monotonic obj_id stored at hdr+24
     /// - str: uses the pool pointer address directly
-    /// Returns `None` for all other types (Rc-based types use Rc::as_ptr).
-    pub fn pool_ptr_id(&self) -> Option<i64> {
+    /// Returns `None` for Rc-based and primitive types (callers handle those directly).
+    pub fn value_id(&self) -> Option<i64> {
         match top16(self.0) {
             0xFFFD | 0xFFFE => {
                 let hdr = (self.0 & PAYLOAD_MASK) as *const u8;

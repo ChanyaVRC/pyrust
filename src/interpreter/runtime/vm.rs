@@ -625,7 +625,7 @@ impl Interpreter {
                             let maybe_id: Option<i64> = regs
                                 .get((*func_reg + 1) as usize)
                                 .and_then(|o| o.as_ref())
-                                .and_then(|v| v.pool_ptr_id());
+                                .and_then(|v| v.value_id());
                             if let Some(id_val) = maybe_id {
                                 regs[*func_reg as usize] = Some(Value::int(id_val));
                                 continue 'vm;
