@@ -798,9 +798,9 @@ impl Compiler {
                 0
             },
             loops: Vec::new(),
-            failed: n > 255,
-            error_msg: if n > 255 {
-                Some("too many local variables (max 255)".to_string())
+            failed: n > Reg::MAX as usize,
+            error_msg: if n > Reg::MAX as usize {
+                Some(format!("too many local variables (max {})", Reg::MAX))
             } else {
                 None
             },
@@ -899,7 +899,7 @@ impl Compiler {
         if r == Reg::MAX {
             self.failed = true;
             if self.error_msg.is_none() {
-                self.error_msg = Some("too many local variables (max 255)".to_string());
+                self.error_msg = Some(format!("too many local variables (max {})", Reg::MAX));
             }
             return 0;
         }
@@ -1349,11 +1349,11 @@ impl Compiler {
                     return;
                 }
                 let base = self.next_temp;
-                if base as usize + n as usize > 256 {
+                if base as usize + n as usize > Reg::MAX as usize {
                     self.failed = true;
                     return;
                 }
-                self.next_temp = base + n;
+                self.next_temp = base + n as Reg;
                 if self.next_temp - 1 > self.max_reg {
                     self.max_reg = self.next_temp - 1;
                 }
@@ -1363,28 +1363,28 @@ impl Compiler {
                     match t {
                         AssignTarget::Name(name) => {
                             if let Some(reg) = self.local_reg(name) {
-                                self.emit(Insn::Move(reg, base + i as u8));
+                                self.emit(Insn::Move(reg, base + i as Reg));
                             } else {
                                 let name_idx = self.intern_name(name);
-                                self.emit(Insn::StoreGlobal(name_idx, base + i as u8));
+                                self.emit(Insn::StoreGlobal(name_idx, base + i as Reg));
                             }
                         }
                         AssignTarget::Attr(obj_expr, attr) => {
                             let obj = self.compile_expr(obj_expr);
                             let name_idx = self.intern_name(attr);
-                            self.emit(Insn::SetAttr(obj, name_idx, base + i as u8));
+                            self.emit(Insn::SetAttr(obj, name_idx, base + i as Reg));
                             self.free_temp(obj);
                         }
                         AssignTarget::Index(obj_expr, idx_expr) => {
                             let obj = self.compile_expr(obj_expr);
                             let idx = self.compile_expr(idx_expr);
-                            self.emit(Insn::SetItem(obj, idx, base + i as u8));
+                            self.emit(Insn::SetItem(obj, idx, base + i as Reg));
                             self.free_temp(idx);
                             self.free_temp(obj);
                         }
                         AssignTarget::Tuple(_) => {
                             // Nested tuple unpack — compile recursively
-                            let tmp = base + i as u8;
+                            let tmp = base + i as Reg;
                             self.compile_assign(t, &Expr::Var(format!("__unpack_{}", tmp)));
                         }
                     }
@@ -1898,11 +1898,11 @@ impl Compiler {
             AssignTarget::Tuple(targets) => {
                 let n = targets.len() as u8;
                 let base = for_dst + 1;
-                if base as usize + n as usize > 256 {
+                if base as usize + n as usize > Reg::MAX as usize {
                     self.failed = true;
                     return;
                 }
-                self.next_temp = base + n;
+                self.next_temp = base + n as Reg;
                 if self.next_temp - 1 > self.max_reg {
                     self.max_reg = self.next_temp - 1;
                 }
@@ -1911,10 +1911,10 @@ impl Compiler {
                     match t {
                         AssignTarget::Name(name) => {
                             if let Some(reg) = self.local_reg(name) {
-                                self.emit(Insn::Move(reg, base + i as u8));
+                                self.emit(Insn::Move(reg, base + i as Reg));
                             } else {
                                 let name_idx = self.intern_name(name);
-                                self.emit(Insn::StoreGlobal(name_idx, base + i as u8));
+                                self.emit(Insn::StoreGlobal(name_idx, base + i as Reg));
                             }
                         }
                         _ => {
@@ -2194,11 +2194,11 @@ impl Compiler {
         let defs_base = self.next_temp;
         if defs_n > 0 {
             // Reserve slots
-            if self.next_temp as usize + defs_n as usize > 256 {
+            if self.next_temp as usize + defs_n as usize > Reg::MAX as usize {
                 self.failed = true;
                 return;
             }
-            self.next_temp += defs_n;
+            self.next_temp += defs_n as Reg;
             if self.next_temp - 1 > self.max_reg {
                 self.max_reg = self.next_temp - 1;
             }
@@ -2206,8 +2206,8 @@ impl Compiler {
                 let def_expr = params[*param_i].default.as_ref().unwrap();
                 let saved = self.next_temp;
                 let r = self.compile_expr(def_expr);
-                if r != defs_base + slot_i as u8 {
-                    self.emit(Insn::Move(defs_base + slot_i as u8, r));
+                if r != defs_base + slot_i as Reg {
+                    self.emit(Insn::Move(defs_base + slot_i as Reg, r));
                 }
                 self.next_temp = saved;
             }
@@ -2299,19 +2299,19 @@ impl Compiler {
         let bases_n = bases.len() as u8;
         let bases_base = self.next_temp;
         if bases_n > 0 {
-            if self.next_temp as usize + bases_n as usize > 256 {
+            if self.next_temp as usize + bases_n as usize > Reg::MAX as usize {
                 self.failed = true;
                 return;
             }
-            self.next_temp += bases_n;
+            self.next_temp += bases_n as Reg;
             if self.next_temp - 1 > self.max_reg {
                 self.max_reg = self.next_temp - 1;
             }
             for (i, base_expr) in bases.iter().enumerate() {
                 let saved = self.next_temp;
                 let r = self.compile_expr(base_expr);
-                if r != bases_base + i as u8 {
-                    self.emit(Insn::Move(bases_base + i as u8, r));
+                if r != bases_base + i as Reg {
+                    self.emit(Insn::Move(bases_base + i as Reg, r));
                 }
                 self.next_temp = saved;
             }
@@ -2897,13 +2897,13 @@ impl Compiler {
                 // Best approach: use a "set literal" call: set([items...])
                 let n = items.len() as u8;
                 let frame = self.next_temp;
-                if frame as usize + 1 + n as usize > 256 {
+                if frame as usize + 1 + n as usize > Reg::MAX as usize {
                     self.failed = true;
                     return 0;
                 }
-                self.next_temp = frame + 1 + n;
-                if frame + n > self.max_reg {
-                    self.max_reg = frame + n;
+                self.next_temp = frame + 1 + n as Reg;
+                if frame + n as Reg > self.max_reg {
+                    self.max_reg = frame + n as Reg;
                 }
                 let set_name_idx = self.intern_name("set");
                 self.emit(Insn::LoadGlobal(frame, set_name_idx));
@@ -2911,16 +2911,16 @@ impl Compiler {
                 let list_r = frame + 1;
                 let saved = self.next_temp;
                 let list_base = self.next_temp;
-                if list_base as usize + n as usize > 256 {
+                if list_base as usize + n as usize > Reg::MAX as usize {
                     self.failed = true;
                     return 0;
                 }
-                self.next_temp = list_base + n;
-                if list_base + n - 1 > self.max_reg {
-                    self.max_reg = list_base + n - 1;
+                self.next_temp = list_base + n as Reg;
+                if list_base + n as Reg - 1 > self.max_reg {
+                    self.max_reg = list_base + n as Reg - 1;
                 }
                 for (i, item) in items.iter().enumerate() {
-                    let slot = list_base + i as u8;
+                    let slot = list_base + i as Reg;
                     let ns = self.next_temp;
                     let r = self.compile_expr(item);
                     if r != slot {
@@ -2942,17 +2942,17 @@ impl Compiler {
                 let n = pairs.len() as u8;
                 let base = self.next_temp;
                 let slots_needed = (n as usize).saturating_mul(2);
-                if base as usize + slots_needed > 256 {
+                if base as usize + slots_needed > Reg::MAX as usize {
                     self.failed = true;
                     return 0;
                 }
-                self.next_temp = base + n.saturating_mul(2);
+                self.next_temp = base + (n as Reg).saturating_mul(2);
                 if self.next_temp > 0 && self.next_temp - 1 > self.max_reg {
                     self.max_reg = self.next_temp - 1;
                 }
                 for (i, (key_expr, val_expr)) in pairs.iter().enumerate() {
-                    let k_slot = base + (i * 2) as u8;
-                    let v_slot = base + (i * 2 + 1) as u8;
+                    let k_slot = base + (i * 2) as Reg;
+                    let v_slot = base + (i * 2 + 1) as Reg;
                     let saved = self.next_temp;
                     let insn_before = self.insns.len();
                     let kr = self.compile_expr(key_expr);
@@ -3031,7 +3031,7 @@ impl Compiler {
 
         let argc = args.len() as u8;
         let func_reg = self.next_temp;
-        let frame_top = func_reg.wrapping_add(1).wrapping_add(argc);
+        let frame_top = func_reg.wrapping_add(1).wrapping_add(argc as Reg);
         if frame_top < func_reg {
             self.failed = true;
             return 0;
@@ -3044,7 +3044,7 @@ impl Compiler {
         self.compile_expr_into(func, func_reg);
         self.next_temp = saved;
         for (i, arg) in args.iter().enumerate() {
-            let arg_reg = func_reg + 1 + i as u8;
+            let arg_reg = func_reg + 1 + i as Reg;
             let saved = self.next_temp;
             let insn_before = self.insns.len();
             let r = self.compile_expr(&arg.value);
@@ -3085,7 +3085,7 @@ impl Compiler {
             if let Some(local) = self.local_reg(name) {
                 let dst = self.next_temp;
                 let abase = dst.wrapping_add(1);
-                let frame_top = abase.wrapping_add(nargs);
+                let frame_top = abase.wrapping_add(nargs as Reg);
                 if frame_top < dst {
                     self.failed = true;
                     return 0;
@@ -3099,7 +3099,7 @@ impl Compiler {
                 // cell / nonlocal — must load via env first
                 let o = self.next_temp;
                 let abase = o.wrapping_add(1);
-                let frame_top = abase.wrapping_add(nargs);
+                let frame_top = abase.wrapping_add(nargs as Reg);
                 if frame_top < o {
                     self.failed = true;
                     return 0;
@@ -3113,7 +3113,7 @@ impl Compiler {
         } else {
             let o = self.next_temp;
             let abase = o.wrapping_add(1);
-            let frame_top = abase.wrapping_add(nargs);
+            let frame_top = abase.wrapping_add(nargs as Reg);
             if frame_top < o {
                 self.failed = true;
                 return 0;
@@ -3132,7 +3132,7 @@ impl Compiler {
         }
 
         for (i, arg) in args.iter().enumerate() {
-            let arg_reg = args_base + i as u8;
+            let arg_reg = args_base + i as Reg;
             let saved = self.next_temp;
             let insn_before = self.insns.len();
             let r = self.compile_expr(&arg.value);
@@ -3378,16 +3378,16 @@ impl Compiler {
     fn compile_collection(&mut self, items: &[Expr], is_tuple: bool) -> Reg {
         let n = items.len() as u8;
         let base = self.next_temp;
-        if base as usize + n as usize > 256 {
+        if base as usize + n as usize > Reg::MAX as usize {
             self.failed = true;
             return 0;
         }
-        self.next_temp = base + n;
-        if n > 0 && base + n - 1 > self.max_reg {
-            self.max_reg = base + n - 1;
+        self.next_temp = base + n as Reg;
+        if n > 0 && base + n as Reg - 1 > self.max_reg {
+            self.max_reg = base + n as Reg - 1;
         }
         for (i, item) in items.iter().enumerate() {
-            let slot = base + i as u8;
+            let slot = base + i as Reg;
             let saved = self.next_temp;
             let insn_before = self.insns.len();
             let r = self.compile_expr(item);

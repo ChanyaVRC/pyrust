@@ -8,7 +8,7 @@ use crate::value::Value;
 /// These live in the env (not registers) so nested closures can share them.
 pub type CellVar = String;
 
-pub type Reg = u8;
+pub type Reg = u32;
 
 /// Prototype for a nested function or class body.  Created at compile time,
 /// instantiated into a `UserFunction` / class value at runtime via `MakeFunction`
@@ -170,11 +170,11 @@ pub struct FnCode {
     /// Name pool (global variable names and attribute names)
     pub(crate) names: Vec<String>,
     /// Number of registers needed (locals + max temporaries)
-    pub(crate) num_regs: u8,
+    pub(crate) num_regs: u32,
     /// Number of iterator slots needed
     pub(crate) num_iters: u8,
     /// Number of local variable slots (registers 0..num_locals are locals; the rest are temps)
-    pub(crate) num_locals: u8,
+    pub(crate) num_locals: u32,
     /// Nested function / class body prototypes
     pub(crate) fn_protos: Vec<FnProto>,
     /// Variables captured by nested functions (stored in env, not registers).
