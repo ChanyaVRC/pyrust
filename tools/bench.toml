@@ -1,0 +1,30 @@
+# PyRust benchmark configuration
+#
+# [defaults]   — applied to every script that has no override
+# [script]     — per-script overrides; key is the path relative to tests/cases/
+#                using forward slashes on all platforms
+#
+# Available fields per section:
+#   iterations  int    timed runs collected and fed into the trimmed mean
+#   warmup      int    consecutive warm-up runs before timing starts
+#   trim        float  percent of samples dropped from each tail (0–49)
+
+[defaults]
+iterations = 30
+warmup     = 3
+trim       = 10.0
+
+# Performance scripts are CPU-bound tight loops — more iterations give a
+# stable mean without blowing up CI time.
+[script]
+"performance/test_range_loop.py"      = { iterations = 50 }
+"performance/test_range_loop_step.py" = { iterations = 50 }
+"performance/test_while_true.py"      = { iterations = 50 }
+"performance/test_while_cmp.py"       = { iterations = 50 }
+"performance/test_fib_iterative.py"   = { iterations = 40 }
+"performance/test_for_iter.py"        = { iterations = 40 }
+"performance/test_const_fold.py"      = { iterations = 30 }
+
+# Recursive fib is slow — keep it short to avoid CI timeout.
+"performance/test_fib_recursive.py"   = { iterations = 10, warmup = 1 }
+"performance/test_insertion_sort.py"  = { iterations = 15 }
