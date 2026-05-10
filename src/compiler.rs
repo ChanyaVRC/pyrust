@@ -970,7 +970,9 @@ impl Compiler {
             _ => {
                 self.failed = true;
                 if self.error_msg.is_none() {
-                    self.error_msg = Some("internal compiler error: patch_jump on non-jump instruction".to_string());
+                    self.error_msg = Some(
+                        "internal compiler error: patch_jump on non-jump instruction".to_string(),
+                    );
                 }
             }
         }
@@ -1506,7 +1508,9 @@ impl Compiler {
             AssignTarget::Tuple(_) => {
                 self.failed = true;
                 if self.error_msg.is_none() {
-                    self.error_msg = Some("'tuple' is an illegal expression for augmented assignment".to_string());
+                    self.error_msg = Some(
+                        "'tuple' is an illegal expression for augmented assignment".to_string(),
+                    );
                 }
             }
         }
@@ -1957,7 +1961,8 @@ impl Compiler {
                         _ => {
                             self.failed = true;
                             if self.error_msg.is_none() {
-                                self.error_msg = Some("unsupported for-loop unpack target".to_string());
+                                self.error_msg =
+                                    Some("unsupported for-loop unpack target".to_string());
                             }
                             return;
                         }
@@ -2214,7 +2219,8 @@ impl Compiler {
         if self.fn_protos.len() >= 256 {
             self.failed = true;
             if self.error_msg.is_none() {
-                self.error_msg = Some("too many nested functions in one scope (max 256)".to_string());
+                self.error_msg =
+                    Some("too many nested functions in one scope (max 256)".to_string());
             }
             return;
         }
@@ -2278,7 +2284,8 @@ impl Compiler {
             if frame.checked_add(2).is_none() {
                 self.failed = true;
                 if self.error_msg.is_none() {
-                    self.error_msg = Some("too many registers for decorator application".to_string());
+                    self.error_msg =
+                        Some("too many registers for decorator application".to_string());
                 }
                 return;
             }
@@ -2335,7 +2342,8 @@ impl Compiler {
         if self.fn_protos.len() >= 256 {
             self.failed = true;
             if self.error_msg.is_none() {
-                self.error_msg = Some("too many nested classes/functions in one scope (max 256)".to_string());
+                self.error_msg =
+                    Some("too many nested classes/functions in one scope (max 256)".to_string());
             }
             return;
         }
@@ -2393,7 +2401,8 @@ impl Compiler {
             if frame.checked_add(2).is_none() {
                 self.failed = true;
                 if self.error_msg.is_none() {
-                    self.error_msg = Some("too many registers for decorator application".to_string());
+                    self.error_msg =
+                        Some("too many registers for decorator application".to_string());
                 }
                 return;
             }
@@ -2669,7 +2678,8 @@ impl Compiler {
         if exit_frame2.checked_add(4).is_none() {
             self.failed = true;
             if self.error_msg.is_none() {
-                self.error_msg = Some("too many registers for 'with' exception handler".to_string());
+                self.error_msg =
+                    Some("too many registers for 'with' exception handler".to_string());
             }
             return;
         }
