@@ -30,6 +30,9 @@ impl Interpreter {
             }
             ValueKind::PyClass(class) => {
                 let class = Rc::clone(class);
+                if name == "__name__" {
+                    return Ok(Value::string(class.borrow().name.clone()));
+                }
                 if let Some(value) = lookup_class_attr(&class, name) {
                     return Ok(value);
                 }
