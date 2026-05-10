@@ -2353,7 +2353,7 @@ impl Compiler {
         let inner_index_rc: Rc<HashMap<String, Reg>> = Rc::new(inner_index);
 
         let def_bound = crate::interpreter::compute_def_bound_mask(params, &inner_index_rc);
-        let is_pure = crate::interpreter::is_pure_body(body);
+        let is_pure = crate::interpreter::is_pure_body(body, &self.pure_locals);
 
         // Detect cell vars for the inner function.
         let inner_cell_vars = collect_cell_vars(body, &inner_index_rc);

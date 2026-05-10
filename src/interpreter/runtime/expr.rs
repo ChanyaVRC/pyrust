@@ -190,7 +190,7 @@ impl Interpreter {
                     params: params.iter().map(|n| crate::value::UserFunctionParam {
                         name: n.clone(), default: None, is_args: false, is_kwargs: false,
                     }).collect(),
-                    is_pure: is_pure_body(&lambda_body),
+                    is_pure: is_pure_body(&lambda_body, &std::collections::HashSet::new()),
                     local_names: Rc::new(local_names),
                     local_index,
                     global_names: Rc::new(std::collections::HashSet::new()),
