@@ -464,6 +464,156 @@ impl Interpreter {
                 }
                 self.call_function_expanded(func, &expanded)
             }
+            ValueKind::BuiltinFunction("isinstance") => {
+                reject_keyword_args_expanded("isinstance", args)?;
+                if args.len() != 2 {
+                    return Err(PyError::Runtime(
+                        "isinstance() takes exactly 2 arguments".to_string(),
+                    ));
+                }
+                let obj = &args[0].value;
+                let cls = &args[1].value;
+                let result = match (obj.kind(), cls.kind()) {
+                    (ValueKind::PyInstance(inst), ValueKind::PyClass(expected)) => {
+                        class_is_subclass_of(&inst.borrow().class, expected)
+                    }
+                    (ValueKind::Int(_) | ValueKind::Bool(_), ValueKind::BuiltinFunction("int")) => true,
+                    (ValueKind::Float(_), ValueKind::BuiltinFunction("float")) => true,
+                    (ValueKind::Str(_), ValueKind::BuiltinFunction("str")) => true,
+                    (ValueKind::Bool(_), ValueKind::BuiltinFunction("bool")) => true,
+                    (ValueKind::None, ValueKind::BuiltinFunction("NoneType")) => true,
+                    (ValueKind::List(_), ValueKind::BuiltinFunction("list")) => true,
+                    (ValueKind::Tuple(_), ValueKind::BuiltinFunction("tuple")) => true,
+                    (ValueKind::Set(_), ValueKind::BuiltinFunction("set")) => true,
+                    (ValueKind::Dict(_), ValueKind::BuiltinFunction("dict")) => true,
+                    _ => false,
+                };
+                Ok(Value::bool_(result))
+            }
+            ValueKind::BuiltinFunction("type") => {
+                reject_keyword_args_expanded("type", args)?;
+                if args.len() != 1 {
+                    return Err(PyError::Runtime(
+                        "type() takes exactly 1 argument (or 3 for type creation)".to_string(),
+                    ));
+                }
+                let obj = &args[0].value;
+                // For user-defined class instances return the actual Rc so that
+                // `type(x) is type(x)` works via Rc::ptr_eq in values_are_identical.
+                // For builtin types return a BuiltinFunction value (singleton-like) so
+                // that `type(5) is type(5)` works and isinstance(x, type(x)) succeeds.
+                match obj.kind() {
+                    ValueKind::PyInstance(inst) => Ok(Value::py_class(Rc::clone(&inst.borrow().class))),
+                    ValueKind::PyClass(_) => Ok(Value::builtin_function("type")),
+                    ValueKind::Bool(_) => Ok(Value::builtin_function("bool")),
+                    ValueKind::Int(_) => Ok(Value::builtin_function("int")),
+                    ValueKind::Float(_) => Ok(Value::builtin_function("float")),
+                    ValueKind::Str(_) => Ok(Value::builtin_function("str")),
+                    ValueKind::None => Ok(Value::builtin_function("NoneType")),
+                    ValueKind::List(_) => Ok(Value::builtin_function("list")),
+                    ValueKind::Tuple(_) => Ok(Value::builtin_function("tuple")),
+                    ValueKind::Dict(_) => Ok(Value::builtin_function("dict")),
+                    ValueKind::DictKeysView(_) => Ok(Value::builtin_function("dict_keys")),
+                    ValueKind::DictValuesView(_) => Ok(Value::builtin_function("dict_values")),
+                    ValueKind::DictItemsView(_) => Ok(Value::builtin_function("dict_items")),
+                    ValueKind::Set(_) => Ok(Value::builtin_function("set")),
+                    ValueKind::Range { .. } => Ok(Value::builtin_function("range")),
+                    ValueKind::UserFunction(_) | ValueKind::BoundMethod { .. } => Ok(Value::builtin_function("function")),
+                    ValueKind::BuiltinFunction(_) => Ok(Value::builtin_function("builtin_function_or_method")),
+                    ValueKind::PyModule(_) => Ok(Value::builtin_function("module")),
+                    ValueKind::BigInt(_) => Ok(Value::builtin_function("int")),
+                }
+            }
+            ValueKind::BuiltinFunction("id") => {
+                reject_keyword_args_expanded("id", args)?;
+                if args.len() != 1 {
+                    return Err(PyError::Runtime(
+                        "id() takes exactly 1 argument".to_string(),
+                    ));
+                }
+                let id_val: i64 = match args[0].value.kind() {
+                    ValueKind::PyInstance(rc) => Rc::as_ptr(rc) as i64,
+                    ValueKind::PyClass(rc) => Rc::as_ptr(rc) as i64,
+                    ValueKind::PyModule(rc) => Rc::as_ptr(rc) as i64,
+                    ValueKind::UserFunction(rc) => Rc::as_ptr(rc) as i64,
+                    ValueKind::Int(n) => n,
+                    ValueKind::Bool(b) => b as i64,
+                    ValueKind::None => 0,
+                    _ => args[0].value.value_id().unwrap_or(0),
+                };
+                Ok(Value::int(id_val))
+            }
+            ValueKind::BuiltinFunction("hasattr") => {
+                reject_keyword_args_expanded("hasattr", args)?;
+                if args.len() != 2 {
+                    return Err(PyError::Runtime(
+                        "hasattr() takes exactly 2 arguments".to_string(),
+                    ));
+                }
+                let name = match args[1].value.kind() {
+                    ValueKind::Str(s) => s.to_string(),
+                    _ => return Err(PyError::Named(
+                        "TypeError".to_string(),
+                        "hasattr(): attribute name must be a string".to_string(),
+                    )),
+                };
+                let result = match self.get_attr(args[0].value.clone(), &name) {
+                    Ok(_) => true,
+                    Err(PyError::Named(ref cls, _)) if cls == "AttributeError" => false,
+                    Err(e) => return Err(e),
+                };
+                Ok(Value::bool_(result))
+            }
+            ValueKind::BuiltinFunction("getattr") => {
+                reject_keyword_args_expanded("getattr", args)?;
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(PyError::Runtime(
+                        "getattr() takes 2 or 3 arguments".to_string(),
+                    ));
+                }
+                let name = match args[1].value.kind() {
+                    ValueKind::Str(s) => s.to_string(),
+                    _ => return Err(PyError::Named(
+                        "TypeError".to_string(),
+                        "getattr(): attribute name must be a string".to_string(),
+                    )),
+                };
+                match self.get_attr(args[0].value.clone(), &name) {
+                    Ok(v) => Ok(v),
+                    Err(PyError::Named(ref cls, _)) if cls == "AttributeError" && args.len() == 3 => {
+                        Ok(args[2].value.clone())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            ValueKind::BuiltinFunction("setattr") => {
+                reject_keyword_args_expanded("setattr", args)?;
+                if args.len() != 3 {
+                    return Err(PyError::Runtime(
+                        "setattr() takes exactly 3 arguments".to_string(),
+                    ));
+                }
+                let name = match args[1].value.kind() {
+                    ValueKind::Str(s) => s.to_string(),
+                    _ => return Err(PyError::Named(
+                        "TypeError".to_string(),
+                        "setattr(): attribute name must be a string".to_string(),
+                    )),
+                };
+                self.assign_attr(args[0].value.clone(), &name, args[2].value.clone())?;
+                Ok(Value::none())
+            }
+            ValueKind::BuiltinFunction("dict") => {
+                reject_keyword_args_expanded("dict", args)?;
+                if args.is_empty() {
+                    Ok(Value::dict(indexmap::IndexMap::new()))
+                } else {
+                    Err(PyError::Named(
+                        "TypeError".to_string(),
+                        "dict() with arguments is not yet supported".to_string(),
+                    ))
+                }
+            }
             ValueKind::BuiltinFunction(name) if name.starts_with("str.") => {
                 let method = &name[4..];
                 let self_val = args

@@ -619,6 +619,22 @@ impl Interpreter {
                 // ── Calls ────────────────────────────────────────────────
                 Insn::Call(func_reg, argc) => {
                     let func_val = vm_try!(vm_read(regs, *func_reg, num_locals));
+                    // Fast path for id(x): read the pool pointer directly from the
+                    // register without cloning.  Cloning a list/tuple/str creates a
+                    // new allocation, so the pointer seen inside call_function_expanded
+                    // would differ from the original object's address.
+                    if *argc == 1 {
+                        if let ValueKind::BuiltinFunction("id") = func_val.kind() {
+                            let maybe_id: Option<i64> = regs
+                                .get((*func_reg + 1) as usize)
+                                .and_then(|o| o.as_ref())
+                                .and_then(|v| v.value_id());
+                            if let Some(id_val) = maybe_id {
+                                regs[*func_reg as usize] = Some(Value::int(id_val));
+                                continue 'vm;
+                            }
+                        }
+                    }
                     // Reuse the interpreter-level buffer to avoid a per-call heap
                     // allocation in the common (non-recursive) case.
                     let mut buf = std::mem::take(&mut self.call_arg_buf);

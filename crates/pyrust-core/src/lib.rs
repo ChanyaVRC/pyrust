@@ -21,6 +21,21 @@ pub fn next_fn_id() -> u64 {
     FN_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
+// Monotonic counter for list/tuple object identity. Each new allocation gets a
+// unique id stored at hdr+24; clones copy the same id so `id(x) == id(y)` when
+// y is a copy of x, and `id([1]) != id([2])` because they are separate objects.
+thread_local! {
+    static OBJ_ID_COUNTER: Cell<u64> = const { Cell::new(1) };
+}
+
+fn next_obj_id() -> u64 {
+    OBJ_ID_COUNTER.with(|c| {
+        let id = c.get();
+        c.set(id + 1);
+        id
+    })
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // PyKey — hashable subset of Value used as dict/set keys (unchanged)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -284,10 +299,10 @@ unsafe fn pool_b_dealloc(ptr: *mut u8) {
 }
 
 // Pool for Vec<Value> struct headers (list / tuple).
-// Vec<Value> = [ptr: *mut Value][len: usize][cap: usize] = 24 bytes / align 8 on 64-bit.
-// Replacing Box::new(v) with this pool eliminates one system alloc per list creation.
+// Layout: [ptr: *mut Value][len: usize][cap: usize][obj_id: u64] = 32 bytes / align 8.
+// The extra 8 bytes at offset 24 hold a unique monotonic id for id() identity.
 
-const VEC_HDR_SIZE: usize = 24; // size_of::<Vec<Value>>() — asserted in Value impl
+const VEC_HDR_SIZE: usize = 32; // Vec<Value>(24) + obj_id(8) — asserted in Value impl
 const VEC_HDR_ALIGN: usize = 8;
 const POOL_VEC_HDR_CAP: usize = 64;
 
@@ -336,8 +351,9 @@ pub struct Value(u64);
 
 impl Value {
     const _ASSERT_VEC_HDR: () = {
-        assert!(std::mem::size_of::<Vec<Value>>() == VEC_HDR_SIZE);
+        assert!(std::mem::size_of::<Vec<Value>>() == 24); // Vec<Value> must be 24 bytes
         assert!(std::mem::align_of::<Vec<Value>>() == VEC_HDR_ALIGN);
+        assert!(VEC_HDR_SIZE >= 32); // room for obj_id at offset 24
     };
 
     // ── Constructors ─────────────────────────────────────────────────────────
@@ -451,16 +467,31 @@ impl Value {
         Value(TAG_STR_BITS | (ptr as u64 & PAYLOAD_MASK))
     }
 
-    pub fn list(v: Vec<Value>) -> Self {
+    // Shared allocator for list/tuple pool headers. Writes Vec<Value> at offset 0
+    // and the unique obj_id at offset 24, then tags with the supplied tag bits.
+    unsafe fn alloc_seq_hdr(tag_bits: u64, v: Vec<Value>, obj_id: u64) -> Self {
         let hdr = unsafe { pool_vec_hdr_alloc() };
-        unsafe { std::ptr::write(hdr as *mut Vec<Value>, v) };
-        Value(TAG_LIST_BITS | (hdr as u64 & PAYLOAD_MASK))
+        unsafe {
+            std::ptr::write(hdr as *mut Vec<Value>, v);
+            std::ptr::write(hdr.add(24) as *mut u64, obj_id);
+        }
+        Value(tag_bits | (hdr as u64 & PAYLOAD_MASK))
+    }
+
+    pub fn list(v: Vec<Value>) -> Self {
+        unsafe { Self::alloc_seq_hdr(TAG_LIST_BITS, v, next_obj_id()) }
+    }
+
+    fn list_with_id(v: Vec<Value>, obj_id: u64) -> Self {
+        unsafe { Self::alloc_seq_hdr(TAG_LIST_BITS, v, obj_id) }
     }
 
     pub fn tuple(v: Vec<Value>) -> Self {
-        let hdr = unsafe { pool_vec_hdr_alloc() };
-        unsafe { std::ptr::write(hdr as *mut Vec<Value>, v) };
-        Value(TAG_TUPLE_BITS | (hdr as u64 & PAYLOAD_MASK))
+        unsafe { Self::alloc_seq_hdr(TAG_TUPLE_BITS, v, next_obj_id()) }
+    }
+
+    fn tuple_with_id(v: Vec<Value>, obj_id: u64) -> Self {
+        unsafe { Self::alloc_seq_hdr(TAG_TUPLE_BITS, v, obj_id) }
     }
 
     pub fn dict(d: IndexMap<PyKey, Value>) -> Self {
@@ -546,6 +577,21 @@ impl Value {
 
     pub fn is_list(&self) -> bool {
         top16(self.0) == 0xFFFE
+    }
+
+    /// Returns a stable identity value for pool-allocated types:
+    /// - list/tuple: reads the monotonic obj_id stored at hdr+24
+    /// - str: uses the pool pointer address directly
+    /// Returns `None` for Rc-based and primitive types (callers handle those directly).
+    pub fn value_id(&self) -> Option<i64> {
+        match top16(self.0) {
+            0xFFFD | 0xFFFE => {
+                let hdr = (self.0 & PAYLOAD_MASK) as *const u8;
+                Some(unsafe { *(hdr.add(24) as *const u64) } as i64)
+            }
+            0xFFFC => Some((self.0 & PAYLOAD_MASK) as i64),
+            _ => None,
+        }
     }
 
     // ── Private unsafe helpers ───────────────────────────────────────────────
@@ -923,15 +969,19 @@ impl Clone for Value {
                 } // rc++ (bits 31:1)
                 Value(self.0) // same bits, 0 allocations
             }
-            // Tuple
+            // Tuple — copy the stored obj_id so the clone shares the same identity
             0xFFFD => {
+                let hdr = (self.0 & PAYLOAD_MASK) as *const u8;
+                let obj_id = unsafe { *(hdr.add(24) as *const u64) };
                 let v = unsafe { &*self.tuple_ptr() };
-                Value::tuple(v.clone())
+                Value::tuple_with_id(v.clone(), obj_id)
             }
-            // List
+            // List — copy the stored obj_id so the clone shares the same identity
             0xFFFE => {
+                let hdr = (self.0 & PAYLOAD_MASK) as *const u8;
+                let obj_id = unsafe { *(hdr.add(24) as *const u64) };
                 let v = unsafe { &*self.list_ptr() };
-                Value::list(v.clone())
+                Value::list_with_id(v.clone(), obj_id)
             }
             // Opaque
             0xFFFF => {

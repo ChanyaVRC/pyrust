@@ -23,22 +23,25 @@ impl Interpreter {
                 }
 
                 let class_name = class.borrow().name.clone();
-                Err(PyError::Runtime(format!(
-                    "'{}' object has no attribute '{}'",
-                    class_name, name
-                )))
+                Err(PyError::Named(
+                    "AttributeError".to_string(),
+                    format!("'{}' object has no attribute '{}'", class_name, name),
+                ))
             }
             ValueKind::PyClass(class) => {
                 let class = Rc::clone(class);
+                if name == "__name__" {
+                    return Ok(Value::string(class.borrow().name.clone()));
+                }
                 if let Some(value) = lookup_class_attr(&class, name) {
                     return Ok(value);
                 }
 
                 let class_name = class.borrow().name.clone();
-                Err(PyError::Runtime(format!(
-                    "type object '{}' has no attribute '{}'",
-                    class_name, name
-                )))
+                Err(PyError::Named(
+                    "AttributeError".to_string(),
+                    format!("type object '{}' has no attribute '{}'", class_name, name),
+                ))
             }
             ValueKind::PyModule(module) => {
                 let module = Rc::clone(module);
@@ -46,41 +49,55 @@ impl Interpreter {
                     return Ok(value);
                 }
                 let mod_name = module.borrow().name.clone();
-                Err(PyError::Runtime(format!(
-                    "module '{mod_name}' has no attribute '{name}'"
-                )))
+                Err(PyError::Named(
+                    "AttributeError".to_string(),
+                    format!("module '{mod_name}' has no attribute '{name}'"),
+                ))
             }
-            ValueKind::BuiltinFunction("str") => {
-                match name {
-                    "lower"      => Ok(Value::builtin_function("str.lower")),
-                    "upper"      => Ok(Value::builtin_function("str.upper")),
-                    "strip"      => Ok(Value::builtin_function("str.strip")),
-                    "lstrip"     => Ok(Value::builtin_function("str.lstrip")),
-                    "rstrip"     => Ok(Value::builtin_function("str.rstrip")),
-                    "capitalize" => Ok(Value::builtin_function("str.capitalize")),
-                    "split"      => Ok(Value::builtin_function("str.split")),
-                    "join"       => Ok(Value::builtin_function("str.join")),
-                    "replace"    => Ok(Value::builtin_function("str.replace")),
-                    "find"       => Ok(Value::builtin_function("str.find")),
-                    "rfind"      => Ok(Value::builtin_function("str.rfind")),
-                    "index"      => Ok(Value::builtin_function("str.index")),
-                    "rindex"     => Ok(Value::builtin_function("str.rindex")),
-                    "count"      => Ok(Value::builtin_function("str.count")),
-                    "startswith" => Ok(Value::builtin_function("str.startswith")),
-                    "endswith"   => Ok(Value::builtin_function("str.endswith")),
-                    "isdigit"    => Ok(Value::builtin_function("str.isdigit")),
-                    "isalpha"    => Ok(Value::builtin_function("str.isalpha")),
-                    "isalnum"    => Ok(Value::builtin_function("str.isalnum")),
-                    "isspace"    => Ok(Value::builtin_function("str.isspace")),
-                    _ => Err(PyError::Runtime(format!(
-                        "type object 'str' has no attribute '{name}'"
-                    ))),
+            ValueKind::BuiltinFunction(func_name) => {
+                // __name__ is supported on all builtin type/function values so that
+                // `type(x).__name__` works for both builtin and user-defined types.
+                if name == "__name__" {
+                    return Ok(Value::string(func_name));
+                }
+                if func_name == "str" {
+                    match name {
+                        "lower"      => Ok(Value::builtin_function("str.lower")),
+                        "upper"      => Ok(Value::builtin_function("str.upper")),
+                        "strip"      => Ok(Value::builtin_function("str.strip")),
+                        "lstrip"     => Ok(Value::builtin_function("str.lstrip")),
+                        "rstrip"     => Ok(Value::builtin_function("str.rstrip")),
+                        "capitalize" => Ok(Value::builtin_function("str.capitalize")),
+                        "split"      => Ok(Value::builtin_function("str.split")),
+                        "join"       => Ok(Value::builtin_function("str.join")),
+                        "replace"    => Ok(Value::builtin_function("str.replace")),
+                        "find"       => Ok(Value::builtin_function("str.find")),
+                        "rfind"      => Ok(Value::builtin_function("str.rfind")),
+                        "index"      => Ok(Value::builtin_function("str.index")),
+                        "rindex"     => Ok(Value::builtin_function("str.rindex")),
+                        "count"      => Ok(Value::builtin_function("str.count")),
+                        "startswith" => Ok(Value::builtin_function("str.startswith")),
+                        "endswith"   => Ok(Value::builtin_function("str.endswith")),
+                        "isdigit"    => Ok(Value::builtin_function("str.isdigit")),
+                        "isalpha"    => Ok(Value::builtin_function("str.isalpha")),
+                        "isalnum"    => Ok(Value::builtin_function("str.isalnum")),
+                        "isspace"    => Ok(Value::builtin_function("str.isspace")),
+                        _ => Err(PyError::Named(
+                            "AttributeError".to_string(),
+                            format!("type object 'str' has no attribute '{name}'"),
+                        )),
+                    }
+                } else {
+                    Err(PyError::Named(
+                        "AttributeError".to_string(),
+                        format!("type object '{}' has no attribute '{name}'", func_name),
+                    ))
                 }
             }
-            _ => Err(PyError::Runtime(format!(
-                "object has no attribute '{}'",
-                name
-            ))),
+            _ => Err(PyError::Named(
+                "AttributeError".to_string(),
+                format!("object has no attribute '{}'", name),
+            )),
         }
     }
 
