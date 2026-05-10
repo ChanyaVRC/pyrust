@@ -287,6 +287,7 @@ fn install_exception_builtins(env: &EnvRef) {
     let key_error = make_child("KeyError");
     let attribute_error = make_child("AttributeError");
     let overflow_error = make_child("OverflowError");
+    let system_exit = make_child("SystemExit");
 
     let mut module = env.borrow_mut();
     module
@@ -328,6 +329,9 @@ fn install_exception_builtins(env: &EnvRef) {
     module
         .values
         .insert("OverflowError".to_string(), Value::py_class(overflow_error));
+    module
+        .values
+        .insert("SystemExit".to_string(), Value::py_class(system_exit));
 }
 
 fn key_to_value(key: PyKey) -> Value {

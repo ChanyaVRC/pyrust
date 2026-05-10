@@ -382,16 +382,28 @@ impl Interpreter {
             }
 
             ValueKind::BuiltinFunction("sys.exit") => {
-                let code = if args.is_empty() {
-                    0i32
+                reject_keyword_args_expanded("sys.exit", args)?;
+                let arg = if args.is_empty() {
+                    Value::int(0)
                 } else {
-                    reject_keyword_args_expanded("sys.exit", args)?;
-                    match args[0].value.kind() {
-                        ValueKind::Int(n) => n as i32,
-                        _ => 1,
-                    }
+                    args[0].value.clone()
                 };
-                std::process::exit(code);
+                // Raise SystemExit like CPython — lets finally/with handlers run.
+                // Look up the SystemExit class and instantiate it with the original arg
+                // so program.rs can extract the integer exit code without reparsing a string.
+                let class = match lookup_name_in_module(&self.env, "SystemExit") {
+                    Some(v) => match v.kind() {
+                        ValueKind::PyClass(c) => Rc::clone(c),
+                        _ => return Err(PyError::Runtime(
+                            "built-in exception 'SystemExit' is not defined".to_string(),
+                        )),
+                    },
+                    None => return Err(PyError::Runtime(
+                        "built-in exception 'SystemExit' is not defined".to_string(),
+                    )),
+                };
+                let exc = instantiate_exception(class, vec![arg]);
+                return Err(PyError::Raised(exc));
             }
             ValueKind::BuiltinFunction(
                 name @ ("math.floor" | "math.ceil" | "math.sqrt" | "math.fabs" | "math.sin"
