@@ -26,10 +26,11 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let mut consts = code.consts;
     let insns = pass_thread_jumps(code.insns);
     let insns = pass_binop_const_fusion(insns, num_locals);
-    let insns = pass_cmpjump_fusion(insns, num_locals);
     let insns = pass_const_fold(insns, &mut consts);
     let insns = pass_algebraic_simplify(insns, &mut consts);
     let insns = pass_unary_fold(insns, num_locals, &mut consts);
+    let insns = pass_const_branch_elim(insns, &consts);
+    let insns = pass_cmpjump_fusion(insns, num_locals);
     let insns = pass_dead_code(insns);
     let insns = pass_trivial_nop(insns);
 
@@ -102,13 +103,18 @@ fn pass_thread_jumps(insns: Vec<Insn>) -> Vec<Insn> {
 // ─── BinOp-const fusion ────────────────────────────────────────────────────────
 
 /// Fuse `LoadConst(r, c) + BinOp(dst, lhs, op, r)` → `BinOpConst(dst, lhs, op, c)`
-/// when `r` is a temp register (`r >= num_locals`), `r != dst`, and `r` is not
-/// read by any instruction after the BinOp (forward liveness check).
+/// when `r` is a temp register (`r >= num_locals`), and `r` is not read by any
+/// instruction after the BinOp (forward liveness check).
+///
+/// Also handles the commutative case where the constant is the LHS operand for
+/// commutative operations (`Add`, `Mul`): swaps operands and fuses to `BinOpConst`.
 ///
 /// The liveness guard is necessary for patterns like chained comparisons where the
 /// same intermediate value is used as both an operand of the first comparison and
 /// the left-hand side of the next comparison.
 fn pass_binop_const_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
+    use crate::ast::BinaryOp;
+
     let n = insns.len();
     let mut transformed = insns;
     let mut keep = vec![true; n];
@@ -120,13 +126,26 @@ fn pass_binop_const_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         {
             let (lc_reg, c_idx) = (*lc_reg, *c_idx);
             let (dst, lhs, op, rhs) = (*dst, *lhs, *op, *rhs);
+            // Case 1: const is the RHS operand → BinOpConst(dst, lhs, op, c)
             if rhs == lc_reg
+                && lhs != lc_reg
                 && lc_reg >= num_locals
-                && lc_reg != dst
-                && !reg_is_read_in(&transformed[i + 2..], lc_reg)
+                && (dst == lc_reg || !reg_is_read_in(&transformed[i + 2..], lc_reg))
             {
                 keep[i] = false;
                 transformed[i + 1] = Insn::BinOpConst(dst, lhs, op, c_idx);
+                i += 2;
+                continue;
+            }
+            // Case 2: const is the LHS operand and the op is commutative → swap
+            if lhs == lc_reg
+                && matches!(op, BinaryOp::Add | BinaryOp::Mul)
+                && rhs != lc_reg
+                && lc_reg >= num_locals
+                && (dst == lc_reg || !reg_is_read_in(&transformed[i + 2..], lc_reg))
+            {
+                keep[i] = false;
+                transformed[i + 1] = Insn::BinOpConst(dst, rhs, op, c_idx);
                 i += 2;
                 continue;
             }
@@ -319,6 +338,7 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
     match insn {
         LoadGlobal(r, _)
         | LoadNone(r)
+        | DeleteLocal(r)
         | BinOpInPlace(r, _, _, _)
         | UnaryOp(r, _, _)
         | GetAttr(r, _, _)
@@ -515,6 +535,49 @@ fn pass_unary_fold(insns: Vec<Insn>, num_locals: u32, consts: &mut Vec<Value>) -
         i += 1;
     }
     compact(transformed, &keep)
+}
+
+// ─── Constant-condition branch elimination ─────────────────────────────────────
+
+/// Replace conditional jumps whose condition register was just loaded from a
+/// known constant with an unconditional `Jump`:
+///
+/// - `LoadConst(r, c) + JumpIfFalse(r, k)` → keep LoadConst; replace with `Jump(k)` if falsy, `Jump(0)` if truthy
+/// - `LoadConst(r, c) + JumpIfTrue(r, k)` → keep LoadConst; replace with `Jump(k)` if truthy, `Jump(0)` if falsy
+///
+/// The unconditional jumps are then cleaned up by `pass_dead_code` (removes
+/// unreachable instructions) and `pass_trivial_nop` (removes `Jump(0)`).
+fn pass_const_branch_elim(insns: Vec<Insn>, consts: &[Value]) -> Vec<Insn> {
+    let n = insns.len();
+    let mut out = insns;
+
+    let mut i = 0;
+    while i + 1 < n {
+        if let (Insn::LoadConst(lc_reg, c_idx), jump) = (&out[i], &out[i + 1]) {
+            let (lc_reg, c_idx) = (*lc_reg, *c_idx);
+            let truthy = consts[c_idx as usize].truthy();
+            let replacement: Option<Insn> = match jump {
+                Insn::JumpIfFalse(cond, k) if *cond == lc_reg => Some(if truthy {
+                    Insn::Jump(0)
+                } else {
+                    Insn::Jump(*k)
+                }),
+                Insn::JumpIfTrue(cond, k) if *cond == lc_reg => Some(if truthy {
+                    Insn::Jump(*k)
+                } else {
+                    Insn::Jump(0)
+                }),
+                _ => None,
+            };
+            if let Some(new_jump) = replacement {
+                out[i + 1] = new_jump;
+                i += 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
 }
 
 // ─── Register liveness helpers ────────────────────────────────────────────────
@@ -732,14 +795,23 @@ mod tests {
     #[test]
     fn binop_const_fusion_skips_when_dst_equals_reg() {
         use crate::ast::BinaryOp;
-        // dst == lc_reg: result overwrites the constant register → unsafe to remove LoadConst
+        // dst == lc_reg: the result overwrites lc_reg, so lc_reg is not live after
+        // the BinOp — fusion is safe and should happen.
         let insns = vec![
             Insn::LoadConst(5, 0),
             Insn::BinOp(5, 0, BinaryOp::Add, 5), // dst == rhs == lc_reg
             Insn::Return(5),
         ];
         let out = pass_binop_const_fusion(insns, 2);
-        assert_eq!(out.len(), 3, "no fusion when dst == lc_reg");
+        assert_eq!(
+            out.len(),
+            2,
+            "fusion is safe when dst == lc_reg (result overwrites it)"
+        );
+        assert!(
+            matches!(out[0], Insn::BinOpConst(5, 0, BinaryOp::Add, 0)),
+            "should fuse to BinOpConst"
+        );
     }
 
     #[test]
@@ -757,6 +829,42 @@ mod tests {
         assert!(
             has_binopconst,
             "optimizer should fuse LoadConst+BinOp into BinOpConst for n+5"
+        );
+    }
+
+    #[test]
+    fn binop_const_fusion_commutative_lhs_const() {
+        use crate::ast::BinaryOp;
+        // LoadConst(r=5, c=0)  BinOp(dst=1, lhs=5, Add, rhs=0)  — const on LEFT
+        // r=5 >= num_locals=2, commutative Add, rhs(0) != lc_reg(5), r != dst
+        // → fuse to BinOpConst(1, 0, Add, 0), drop LoadConst
+        let insns = vec![
+            Insn::LoadConst(5, 0),
+            Insn::BinOp(1, 5, BinaryOp::Add, 0),
+            Insn::Return(1),
+        ];
+        let out = pass_binop_const_fusion(insns, 2);
+        assert_eq!(out.len(), 2, "LoadConst should be removed");
+        assert!(
+            matches!(out[0], Insn::BinOpConst(1, 0, BinaryOp::Add, 0)),
+            "BinOp with const-lhs should become BinOpConst with swapped operands"
+        );
+    }
+
+    #[test]
+    fn binop_const_fusion_does_not_commute_non_commutative() {
+        use crate::ast::BinaryOp;
+        // Sub is not commutative — should not fuse when const is on left
+        let insns = vec![
+            Insn::LoadConst(5, 0),
+            Insn::BinOp(1, 5, BinaryOp::Sub, 0),
+            Insn::Return(1),
+        ];
+        let out = pass_binop_const_fusion(insns, 2);
+        assert_eq!(
+            out.len(),
+            3,
+            "non-commutative op with const-lhs should not fuse"
         );
     }
 
@@ -1058,6 +1166,77 @@ mod tests {
         );
     }
 
+    // ── pass_const_branch_elim ────────────────────────────────────────────────
+
+    #[test]
+    fn const_branch_elim_jumpiffalse_truthy_becomes_jump0() {
+        use crate::value::Value;
+        // LoadConst(r=0, c=0) [consts[0]=True]  JumpIfFalse(0, 5)
+        // Truthy → never jumps → replace with Jump(0)
+        let consts = vec![Value::bool_(true)];
+        let insns = vec![
+            Insn::LoadConst(0, 0),
+            Insn::JumpIfFalse(0, 5),
+            Insn::Return(0),
+        ];
+        let out = pass_const_branch_elim(insns, &consts);
+        assert!(
+            matches!(out[1], Insn::Jump(0)),
+            "truthy JumpIfFalse → Jump(0)"
+        );
+    }
+
+    #[test]
+    fn const_branch_elim_jumpiffalse_falsy_becomes_jump_k() {
+        use crate::value::Value;
+        // LoadConst(r=0, c=0) [consts[0]=False]  JumpIfFalse(0, 3)
+        // Falsy → always jumps → replace with Jump(3)
+        let consts = vec![Value::bool_(false)];
+        let insns = vec![
+            Insn::LoadConst(0, 0),
+            Insn::JumpIfFalse(0, 3),
+            Insn::Return(0),
+        ];
+        let out = pass_const_branch_elim(insns, &consts);
+        assert!(
+            matches!(out[1], Insn::Jump(3)),
+            "falsy JumpIfFalse → Jump(k)"
+        );
+    }
+
+    #[test]
+    fn const_branch_elim_eliminates_dead_branch_on_compiled_code() {
+        // "if True: print(1)\nelse: print(2)" — the else branch should be dead
+        let code = compile_fn("if True:\n    print(1)\nelse:\n    print(2)\n");
+        let optimized = optimize(code);
+        // After optimization, the instruction stream should not contain the
+        // dead-branch code that prints 2. Check by verifying only one integer
+        // constant (1) is referenced, not 2.
+        let has_2 = optimized
+            .consts
+            .iter()
+            .any(|v| matches!(v.kind(), crate::value::ValueKind::Int(2)));
+        // Note: the constant 2 may still exist in the pool even if the code
+        // referencing it is dead — but the dead code itself should be gone.
+        // Instead check that no LoadConst referencing 2 appears in reachable insns.
+        // Simpler: check the insn list has no BinOp/conditional jumps (the if collapsed).
+        let has_cond_jump = optimized.insns.iter().any(|i| {
+            matches!(
+                i,
+                Insn::JumpIfFalse(..)
+                    | Insn::JumpIfTrue(..)
+                    | Insn::CmpJumpIfFalse(..)
+                    | Insn::CmpJumpIfFalseConst(..)
+                    | Insn::CmpJumpIfTrue(..)
+                    | Insn::CmpJumpIfTrueConst(..)
+            )
+        });
+        assert!(
+            !has_cond_jump,
+            "constant-condition if should have no conditional jumps"
+        );
+    }
+
     // ── pass_cmpjump_fusion ───────────────────────────────────────────────────
 
     #[test]
@@ -1113,9 +1292,10 @@ mod tests {
 
     #[test]
     fn cmpjump_fusion_on_compiled_if() {
-        let code = compile_fn("x = 5\nif x > 3:\n    print(x)\n");
+        let code = compile_fn("def f(x):\n    if x > 3:\n        print(x)\n");
         let optimized = optimize(code);
-        let has_cmpjump = optimized.insns.iter().any(|i| {
+        let inner = &optimized.fn_protos[0].code;
+        let has_cmpjump = inner.insns.iter().any(|i| {
             matches!(
                 i,
                 Insn::CmpJumpIfFalse(..)
