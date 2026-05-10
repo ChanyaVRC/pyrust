@@ -1,7 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::bytecode::{FnCode, FnProto, Insn};
+use crate::value::{Value, ValueKind};
 
 /// Optimize a compiled `FnCode` and all nested function prototypes.
 /// Applies a sequence of peephole passes over each instruction list.
@@ -21,17 +22,25 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         })
         .collect();
 
+    let num_locals = code.num_locals;
+    let mut consts = code.consts;
     let insns = pass_thread_jumps(code.insns);
+    let insns = pass_binop_const_fusion(insns, num_locals);
+    let insns = pass_const_fold(insns, &mut consts);
+    let insns = pass_algebraic_simplify(insns, &mut consts);
+    let insns = pass_unary_fold(insns, num_locals, &mut consts);
+    let insns = pass_const_branch_elim(insns, &consts);
+    let insns = pass_cmpjump_fusion(insns, num_locals);
     let insns = pass_dead_code(insns);
     let insns = pass_trivial_nop(insns);
 
     FnCode {
         insns,
-        consts: code.consts,
+        consts,
         names: code.names,
         num_regs: code.num_regs,
         num_iters: code.num_iters,
-        num_locals: code.num_locals,
+        num_locals,
         fn_protos,
         cell_vars: code.cell_vars,
     }
@@ -91,6 +100,287 @@ fn pass_thread_jumps(insns: Vec<Insn>) -> Vec<Insn> {
         .collect()
 }
 
+// ─── BinOp-const fusion ────────────────────────────────────────────────────────
+
+/// Fuse `LoadConst(r, c) + BinOp(dst, lhs, op, r)` → `BinOpConst(dst, lhs, op, c)`
+/// when `r` is a temp register (`r >= num_locals`), and `r` is not read by any
+/// instruction after the BinOp (forward liveness check).
+///
+/// Also handles the commutative case where the constant is the LHS operand for
+/// commutative operations (`Add`, `Mul`): swaps operands and fuses to `BinOpConst`.
+///
+/// The liveness guard is necessary for patterns like chained comparisons where the
+/// same intermediate value is used as both an operand of the first comparison and
+/// the left-hand side of the next comparison.
+fn pass_binop_const_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
+    use crate::ast::BinaryOp;
+
+    let n = insns.len();
+    let mut transformed = insns;
+    let mut keep = vec![true; n];
+
+    let mut i = 0;
+    while i + 1 < n {
+        if let (Insn::LoadConst(lc_reg, c_idx), Insn::BinOp(dst, lhs, op, rhs)) =
+            (&transformed[i], &transformed[i + 1])
+        {
+            let (lc_reg, c_idx) = (*lc_reg, *c_idx);
+            let (dst, lhs, op, rhs) = (*dst, *lhs, *op, *rhs);
+            // Case 1: const is the RHS operand → BinOpConst(dst, lhs, op, c)
+            if rhs == lc_reg
+                && lhs != lc_reg
+                && lc_reg >= num_locals
+                && (dst == lc_reg || !reg_is_read_in(&transformed[i + 2..], lc_reg))
+            {
+                keep[i] = false;
+                transformed[i + 1] = Insn::BinOpConst(dst, lhs, op, c_idx);
+                i += 2;
+                continue;
+            }
+            // Case 2: const is the LHS operand and the op is commutative → swap
+            if lhs == lc_reg
+                && matches!(op, BinaryOp::Add | BinaryOp::Mul)
+                && rhs != lc_reg
+                && lc_reg >= num_locals
+                && (dst == lc_reg || !reg_is_read_in(&transformed[i + 2..], lc_reg))
+            {
+                keep[i] = false;
+                transformed[i + 1] = Insn::BinOpConst(dst, rhs, op, c_idx);
+                i += 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    compact(transformed, &keep)
+}
+
+// ─── CmpJump fusion ────────────────────────────────────────────────────────────
+
+/// Fuse a comparison result into the following conditional jump:
+/// - `BinOp(r, lhs, op, rhs) + JumpIfFalse(r, k)` → `CmpJumpIfFalse(lhs, op, rhs, k)`
+/// - `BinOp(r, lhs, op, rhs) + JumpIfTrue(r, k)`  → `CmpJumpIfTrue(lhs, op, rhs, k)`
+/// - `BinOpConst(r, lhs, op, c) + JumpIfFalse(r, k)` → `CmpJumpIfFalseConst(lhs, op, c, k)`
+/// - `BinOpConst(r, lhs, op, c) + JumpIfTrue(r, k)`  → `CmpJumpIfTrueConst(lhs, op, c, k)`
+///
+/// Only fuses when `r >= num_locals` (temp register — not a named local).
+fn pass_cmpjump_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
+    let n = insns.len();
+    let mut transformed = insns;
+    let mut keep = vec![true; n];
+
+    let mut i = 0;
+    while i + 1 < n {
+        let fused: Option<Insn> = match (&transformed[i], &transformed[i + 1]) {
+            (Insn::BinOpConst(r, lhs, op, c), Insn::JumpIfFalse(cond, k))
+                if *r == *cond && *r >= num_locals =>
+            {
+                Some(Insn::CmpJumpIfFalseConst(*lhs, *op, *c, *k))
+            }
+            (Insn::BinOpConst(r, lhs, op, c), Insn::JumpIfTrue(cond, k))
+                if *r == *cond && *r >= num_locals =>
+            {
+                Some(Insn::CmpJumpIfTrueConst(*lhs, *op, *c, *k))
+            }
+            (Insn::BinOp(r, lhs, op, rhs), Insn::JumpIfFalse(cond, k))
+                if *r == *cond && *r >= num_locals =>
+            {
+                Some(Insn::CmpJumpIfFalse(*lhs, *op, *rhs, *k))
+            }
+            (Insn::BinOp(r, lhs, op, rhs), Insn::JumpIfTrue(cond, k))
+                if *r == *cond && *r >= num_locals =>
+            {
+                Some(Insn::CmpJumpIfTrue(*lhs, *op, *rhs, *k))
+            }
+            _ => None,
+        };
+        if let Some(new_insn) = fused {
+            keep[i] = false;
+            transformed[i + 1] = new_insn;
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    compact(transformed, &keep)
+}
+
+// ─── Constant folding ──────────────────────────────────────────────────────────
+
+/// Forward dataflow constant folding.
+///
+/// Tracks registers whose values are statically known (`known: reg → const_idx`).
+/// When both operands of a `BinOp` or `BinOpConst` are known, replace the
+/// instruction with a `LoadConst` of the folded result.  Also propagates known
+/// values through `Move(dst, src)`.
+///
+/// The map is cleared at branch/loop instructions where we cannot guarantee
+/// which path was taken at runtime, and also at loop headers (targets of
+/// backward jumps) to avoid incorrectly folding loop conditions.
+fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn> {
+    // Pre-pass: collect every instruction index that is the target of a backward
+    // jump.  At these loop headers the known-constant map must be cleared so we
+    // do not fold values that differ across iterations.
+    let mut loop_headers: HashSet<usize> = HashSet::new();
+    for (i, insn) in insns.iter().enumerate() {
+        let k: Option<i32> = match insn {
+            Insn::Jump(k) => Some(*k),
+            Insn::JumpIfFalse(_, k)
+            | Insn::JumpIfTrue(_, k)
+            | Insn::CmpJumpIfFalse(_, _, _, k)
+            | Insn::CmpJumpIfTrue(_, _, _, k)
+            | Insn::CmpJumpIfFalseConst(_, _, _, k)
+            | Insn::CmpJumpIfTrueConst(_, _, _, k)
+            | Insn::ForIter(_, _, k)
+            | Insn::ForCountReg(_, _, _, _, k)
+            | Insn::ForCountConst(_, _, _, _, k)
+            | Insn::SetupExcept(k) => Some(*k),
+            _ => None,
+        };
+        if let Some(k) = k {
+            if k < 0 {
+                let target = (i as i64 + 1 + k as i64) as usize;
+                loop_headers.insert(target);
+            }
+        }
+    }
+
+    let mut known: HashMap<u32, u16> = HashMap::new();
+    let mut out = Vec::with_capacity(insns.len());
+
+    for (i, insn) in insns.into_iter().enumerate() {
+        if loop_headers.contains(&i) {
+            known.clear();
+        }
+        match insn {
+            Insn::LoadConst(dst, c) => {
+                known.insert(dst, c);
+                out.push(Insn::LoadConst(dst, c));
+            }
+            Insn::Move(dst, src) => {
+                match known.get(&src).copied() {
+                    Some(c) => {
+                        known.insert(dst, c);
+                    }
+                    None => {
+                        known.remove(&dst);
+                    }
+                }
+                out.push(Insn::Move(dst, src));
+            }
+            Insn::BinOp(dst, lhs, op, rhs) => {
+                let folded = known.get(&lhs).and_then(|&cl| {
+                    known.get(&rhs).and_then(|&cr| {
+                        crate::compiler::fold_binop(&consts[cl as usize], op, &consts[cr as usize])
+                            .and_then(|v| intern_const_in_pool(consts, v))
+                    })
+                });
+                if let Some(nc) = folded {
+                    known.insert(dst, nc);
+                    out.push(Insn::LoadConst(dst, nc));
+                } else {
+                    known.remove(&dst);
+                    out.push(Insn::BinOp(dst, lhs, op, rhs));
+                }
+            }
+            Insn::BinOpConst(dst, lhs, op, c) => {
+                let folded = known.get(&lhs).and_then(|&cl| {
+                    crate::compiler::fold_binop(&consts[cl as usize], op, &consts[c as usize])
+                        .and_then(|v| intern_const_in_pool(consts, v))
+                });
+                if let Some(nc) = folded {
+                    known.insert(dst, nc);
+                    out.push(Insn::LoadConst(dst, nc));
+                } else {
+                    known.remove(&dst);
+                    out.push(Insn::BinOpConst(dst, lhs, op, c));
+                }
+            }
+            // Branch/loop/raise: clear the map — values may differ per path.
+            insn @ (Insn::Jump(_)
+            | Insn::JumpIfFalse(..)
+            | Insn::JumpIfTrue(..)
+            | Insn::CmpJumpIfFalse(..)
+            | Insn::CmpJumpIfTrue(..)
+            | Insn::CmpJumpIfFalseConst(..)
+            | Insn::CmpJumpIfTrueConst(..)
+            | Insn::ForIter(..)
+            | Insn::ForCountReg(..)
+            | Insn::ForCountConst(..)
+            | Insn::SetupExcept(_)
+            | Insn::MatchExcept(..)
+            | Insn::Return(_)
+            | Insn::ReturnNone
+            | Insn::RaiseValue(_)
+            | Insn::RaiseFrom(..)
+            | Insn::RaiseReRaise
+            | Insn::RaiseAssert(_)
+            | Insn::Unpack(..)) => {
+                known.clear();
+                out.push(insn);
+            }
+            // Any other instruction: invalidate dst if we can identify it.
+            insn => {
+                if let Some(dst) = writable_dst(&insn) {
+                    known.remove(&dst);
+                }
+                out.push(insn);
+            }
+        }
+    }
+    out
+}
+
+/// Return the single destination register of `insn`, if any.
+/// Used to precisely invalidate the `known` map without clearing it entirely.
+fn writable_dst(insn: &Insn) -> Option<u32> {
+    use Insn::*;
+    match insn {
+        LoadGlobal(r, _)
+        | LoadNone(r)
+        | DeleteLocal(r)
+        | BinOpInPlace(r, _, _, _)
+        | UnaryOp(r, _, _)
+        | GetAttr(r, _, _)
+        | GetItem(r, _, _)
+        | Call(r, _)
+        | CallMemo(r, _)
+        | BuildList(r, _, _)
+        | BuildTuple(r, _, _)
+        | BuildDict(r, _, _)
+        | MakeFunction(r, _, _, _)
+        | ImportModule(r, _)
+        | LoadExc(r)
+        | MakeClass(r, _, _, _, _) => Some(*r),
+        CallMethod { dst, .. } | CallMethodExpanded { dst, .. } => Some(*dst),
+        _ => None,
+    }
+}
+
+/// Look up or insert `val` in the const pool; return its index.
+/// Returns `None` if the pool is full (>= u16::MAX entries).
+fn intern_const_in_pool(consts: &mut Vec<Value>, val: Value) -> Option<u16> {
+    // Type-exact linear scan to avoid Bool/Int key collisions.
+    for (i, existing) in consts.iter().enumerate() {
+        let same = match (existing.kind(), val.kind()) {
+            (ValueKind::Int(a), ValueKind::Int(b)) => a == b,
+            (ValueKind::Float(a), ValueKind::Float(b)) => a.to_bits() == b.to_bits(),
+            (ValueKind::Bool(a), ValueKind::Bool(b)) => a == b,
+            (ValueKind::None, ValueKind::None) => true,
+            _ => false,
+        };
+        if same {
+            return Some(i as u16);
+        }
+    }
+    if consts.len() >= u16::MAX as usize {
+        return None;
+    }
+    let idx = consts.len() as u16;
+    consts.push(val);
+    Some(idx)
+}
+
 // ─── Dead code elimination ─────────────────────────────────────────────────────
 
 /// Remove instructions that are unreachable from `pc = 0`.
@@ -143,6 +433,232 @@ fn pass_dead_code(insns: Vec<Insn>) -> Vec<Insn> {
     }
 
     compact(insns, &reachable)
+}
+
+// ─── Algebraic simplification ──────────────────────────────────────────────────
+
+/// Simplify algebraic identities on integer operands (integers only — float and
+/// string arithmetic may have different identity semantics):
+///
+/// | Pattern                         | Result                     |
+/// |---------------------------------|----------------------------|
+/// | `BinOpConst(dst, lhs, Add, 0)`  | `Move(dst, lhs)`           |
+/// | `BinOpConst(dst, lhs, Sub, 0)`  | `Move(dst, lhs)`           |
+/// | `BinOpConst(dst, lhs, Mul, 1)`  | `Move(dst, lhs)`           |
+/// | `BinOpConst(dst, lhs, Mul, 0)`  | `LoadConst(dst, idx_0)`    |
+/// | `BinOpConst(dst, lhs, Pow, 1)`  | `Move(dst, lhs)`           |
+/// | `BinOpConst(dst, lhs, Pow, 0)`  | `LoadConst(dst, idx_1)`    |
+///
+/// Commutative identities (0+x, 1*x, 0*x) are produced by `pass_binop_const_fusion`
+/// only when the constant is on the right, so we don't need separate cases for them.
+fn pass_algebraic_simplify(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn> {
+    use crate::ast::BinaryOp::*;
+
+    insns
+        .into_iter()
+        .map(|insn| {
+            if let Insn::BinOpConst(dst, lhs, op, c_idx) = insn {
+                let c_val = match consts[c_idx as usize].kind() {
+                    ValueKind::Int(n) => n,
+                    _ => return Insn::BinOpConst(dst, lhs, op, c_idx),
+                };
+                match (op, c_val) {
+                    (Add, 0) | (Sub, 0) | (Mul, 1) | (Pow, 1) => Insn::Move(dst, lhs),
+                    (Mul, 0) => {
+                        let idx = intern_const_in_pool(consts, Value::int(0)).unwrap_or(c_idx);
+                        Insn::LoadConst(dst, idx)
+                    }
+                    (Pow, 0) => {
+                        let idx = intern_const_in_pool(consts, Value::int(1)).unwrap_or(c_idx);
+                        Insn::LoadConst(dst, idx)
+                    }
+                    _ => Insn::BinOpConst(dst, lhs, op, c_idx),
+                }
+            } else {
+                insn
+            }
+        })
+        .collect()
+}
+
+// ─── Unary constant folding ────────────────────────────────────────────────────
+
+/// Fuse `LoadConst(r, c) + UnaryOp(dst, op, r)` → `LoadConst(dst, op(c))`
+/// when `r >= num_locals` (temp register).
+///
+/// Handles `Neg`, `Not`, and `BitNot` applied to integer or float constants.
+fn pass_unary_fold(insns: Vec<Insn>, num_locals: u32, consts: &mut Vec<Value>) -> Vec<Insn> {
+    use crate::ast::UnaryOp;
+
+    let n = insns.len();
+    let mut transformed = insns;
+    let mut keep = vec![true; n];
+
+    let mut i = 0;
+    while i + 1 < n {
+        let fused: Option<(u32, Value)> = match (&transformed[i], &transformed[i + 1]) {
+            (Insn::LoadConst(lc_reg, c_idx), Insn::UnaryOp(dst, op, src))
+                if *src == *lc_reg
+                    && *lc_reg >= num_locals
+                    // When dst==lc_reg the fusion overwrites lc_reg with the result,
+                    // so any later read of lc_reg will see the correct folded value.
+                    // When dst!=lc_reg, lc_reg would become uninitialized after removal.
+                    && (*dst == *lc_reg || !reg_is_read_in(&transformed[i + 2..], *lc_reg)) =>
+            {
+                let c = &consts[*c_idx as usize];
+                let result = match op {
+                    UnaryOp::Neg => match c.kind() {
+                        ValueKind::Int(n) => Some(Value::int(n.wrapping_neg())),
+                        ValueKind::Float(f) => Some(Value::float(-f)),
+                        _ => None,
+                    },
+                    UnaryOp::Not => Some(Value::bool_(!c.truthy())),
+                    UnaryOp::BitNot => match c.kind() {
+                        ValueKind::Int(n) => Some(Value::int(!n)),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                result.map(|v| (*dst, v))
+            }
+            _ => None,
+        };
+
+        if let Some((dst, val)) = fused {
+            if let Some(new_c) = intern_const_in_pool(consts, val) {
+                keep[i] = false;
+                transformed[i + 1] = Insn::LoadConst(dst, new_c);
+                i += 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    compact(transformed, &keep)
+}
+
+// ─── Constant-condition branch elimination ─────────────────────────────────────
+
+/// Replace conditional jumps whose condition register was just loaded from a
+/// known constant with an unconditional `Jump`:
+///
+/// - `LoadConst(r, c) + JumpIfFalse(r, k)` → keep LoadConst; replace with `Jump(k)` if falsy, `Jump(0)` if truthy
+/// - `LoadConst(r, c) + JumpIfTrue(r, k)` → keep LoadConst; replace with `Jump(k)` if truthy, `Jump(0)` if falsy
+///
+/// The unconditional jumps are then cleaned up by `pass_dead_code` (removes
+/// unreachable instructions) and `pass_trivial_nop` (removes `Jump(0)`).
+fn pass_const_branch_elim(insns: Vec<Insn>, consts: &[Value]) -> Vec<Insn> {
+    let n = insns.len();
+    let mut out = insns;
+
+    let mut i = 0;
+    while i + 1 < n {
+        if let (Insn::LoadConst(lc_reg, c_idx), jump) = (&out[i], &out[i + 1]) {
+            let (lc_reg, c_idx) = (*lc_reg, *c_idx);
+            let truthy = consts[c_idx as usize].truthy();
+            let replacement: Option<Insn> = match jump {
+                Insn::JumpIfFalse(cond, k) if *cond == lc_reg => Some(if truthy {
+                    Insn::Jump(0)
+                } else {
+                    Insn::Jump(*k)
+                }),
+                Insn::JumpIfTrue(cond, k) if *cond == lc_reg => Some(if truthy {
+                    Insn::Jump(*k)
+                } else {
+                    Insn::Jump(0)
+                }),
+                _ => None,
+            };
+            if let Some(new_jump) = replacement {
+                out[i + 1] = new_jump;
+                i += 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+// ─── Register liveness helpers ────────────────────────────────────────────────
+
+/// Returns `true` if register `r` is read by any instruction in `insns`.
+/// Used as a forward liveness guard before removing a `LoadConst` that produced `r`.
+fn reg_is_read_in(insns: &[Insn], r: u32) -> bool {
+    insns.iter().any(|insn| insn_reads_reg(insn, r))
+}
+
+/// Returns `true` if `insn` reads the value of register `r`.
+fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
+    use Insn::*;
+    match insn {
+        // No register sources.
+        LoadConst(..) | LoadGlobal(..) | LoadNone(..) | LoadExc(..) | ImportModule(..)
+        | DeleteName(..) | DeleteLocal(..) | Jump(..) | SetupExcept(..) | PopExcept | EndExcept
+        | ReturnNone | RaiseReRaise | ForIter(..) | ForCountConst(..) => false,
+
+        // One source register.
+        StoreGlobal(_, s)
+        | Move(_, s)
+        | UnaryOp(_, _, s)
+        | Return(s)
+        | PrintExpr(s)
+        | RaiseValue(s)
+        | RaiseAssert(s)
+        | JumpIfFalse(s, _)
+        | JumpIfTrue(s, _)
+        | GetIter(_, s)
+        | Unpack(_, s, _)
+        | CheckLocal(s, _)
+        | GetAttr(_, s, _)
+        | DeleteAttr(s, _)
+        | BinOpConst(_, s, _, _)
+        | CmpJumpIfFalseConst(s, _, _, _)
+        | CmpJumpIfTrueConst(s, _, _, _)
+        | MatchExcept(s, _) => *s == r,
+
+        // Two source registers.
+        BinOp(_, a, _, b)
+        | BinOpInPlace(_, a, _, b)
+        | CmpJumpIfFalse(a, _, b, _)
+        | CmpJumpIfTrue(a, _, b, _)
+        | RaiseFrom(a, b)
+        | ListAppend(a, b)
+        | ListExtend(a, b)
+        | DictUpdate(a, b)
+        | GetItem(_, a, b)
+        | DeleteItem(a, b) => *a == r || *b == r,
+
+        SetAttr(obj, _, val) => *obj == r || *val == r,
+        ForCountReg(_, _, stop, _, _) => *stop == r,
+
+        // Three source registers.
+        SetItem(a, b, c) => *a == r || *b == r || *c == r,
+
+        // Range-based: func + args live in consecutive registers.
+        Call(base, argc) | CallMemo(base, argc) => r >= *base && r <= *base + *argc as u32,
+        BuildList(_, base, n) | BuildTuple(_, base, n) | BuildDict(_, base, n) => {
+            r >= *base && r < *base + *n as u32
+        }
+
+        CallMethod {
+            obj,
+            args_base,
+            nargs,
+            ..
+        } => *obj == r || (r >= *args_base && r < *args_base + *nargs as u32),
+        CallMethodExpanded {
+            obj,
+            pos_list,
+            kw_dict,
+            ..
+        } => *obj == r || *pos_list == r || *kw_dict == r,
+
+        MakeFunction(_, _, defs_base, defs_n) => r >= *defs_base && r < *defs_base + *defs_n as u32,
+        MakeClass(_, _, bases_base, bases_n, _) => {
+            r >= *bases_base && r < *bases_base + *bases_n as u32
+        }
+    }
 }
 
 // ─── Trivial no-op removal ─────────────────────────────────────────────────────
@@ -240,6 +756,558 @@ mod tests {
                 .collect(),
         );
         crate::compiler::compile_script(&stmts, local_index, false).unwrap()
+    }
+
+    // ── pass_binop_const_fusion ───────────────────────────────────────────────
+
+    #[test]
+    fn binop_const_fusion_fuses_loadconst_binop() {
+        use crate::ast::BinaryOp;
+        // LoadConst(r=5, c=0)  BinOp(dst=1, lhs=0, Add, r=5)  where num_locals=2
+        // r=5 >= num_locals=2, r != dst  → fuse to BinOpConst(1, 0, Add, 0), drop LoadConst
+        let insns = vec![
+            Insn::LoadConst(5, 0), // temp reg 5, const index 0
+            Insn::BinOp(1, 0, BinaryOp::Add, 5),
+            Insn::Return(1),
+        ];
+        let out = pass_binop_const_fusion(insns, 2);
+        assert_eq!(out.len(), 2, "LoadConst should be removed");
+        assert!(
+            matches!(out[0], Insn::BinOpConst(1, 0, BinaryOp::Add, 0)),
+            "BinOp should become BinOpConst"
+        );
+    }
+
+    #[test]
+    fn binop_const_fusion_skips_when_reg_is_local() {
+        use crate::ast::BinaryOp;
+        // r=1 < num_locals=3  → must NOT fuse (register could be a local variable)
+        let insns = vec![
+            Insn::LoadConst(1, 0),
+            Insn::BinOp(2, 0, BinaryOp::Add, 1),
+            Insn::Return(2),
+        ];
+        let out = pass_binop_const_fusion(insns, 3);
+        assert_eq!(out.len(), 3, "no fusion when reg is a local");
+        assert!(matches!(out[0], Insn::LoadConst(1, 0)));
+    }
+
+    #[test]
+    fn binop_const_fusion_skips_when_dst_equals_reg() {
+        use crate::ast::BinaryOp;
+        // dst == lc_reg: the result overwrites lc_reg, so lc_reg is not live after
+        // the BinOp — fusion is safe and should happen.
+        let insns = vec![
+            Insn::LoadConst(5, 0),
+            Insn::BinOp(5, 0, BinaryOp::Add, 5), // dst == rhs == lc_reg
+            Insn::Return(5),
+        ];
+        let out = pass_binop_const_fusion(insns, 2);
+        assert_eq!(
+            out.len(),
+            2,
+            "fusion is safe when dst == lc_reg (result overwrites it)"
+        );
+        assert!(
+            matches!(out[0], Insn::BinOpConst(5, 0, BinaryOp::Add, 0)),
+            "should fuse to BinOpConst"
+        );
+    }
+
+    #[test]
+    fn binop_const_fusion_on_compiled_code() {
+        // Use a function argument so the lhs is not a compile-time constant.
+        // pass_binop_const_fusion should still fuse LoadConst(r,5)+BinOp(dst,n,Add,r)
+        // → BinOpConst(dst,n,Add,5), which pass_const_fold cannot fold further.
+        let code = compile_fn("def f(n):\n    return n + 5\n");
+        let optimized = optimize(code);
+        let has_binopconst = optimized.fn_protos[0]
+            .code
+            .insns
+            .iter()
+            .any(|i| matches!(i, Insn::BinOpConst(..)));
+        assert!(
+            has_binopconst,
+            "optimizer should fuse LoadConst+BinOp into BinOpConst for n+5"
+        );
+    }
+
+    #[test]
+    fn binop_const_fusion_commutative_lhs_const() {
+        use crate::ast::BinaryOp;
+        // LoadConst(r=5, c=0)  BinOp(dst=1, lhs=5, Add, rhs=0)  — const on LEFT
+        // r=5 >= num_locals=2, commutative Add, rhs(0) != lc_reg(5), r != dst
+        // → fuse to BinOpConst(1, 0, Add, 0), drop LoadConst
+        let insns = vec![
+            Insn::LoadConst(5, 0),
+            Insn::BinOp(1, 5, BinaryOp::Add, 0),
+            Insn::Return(1),
+        ];
+        let out = pass_binop_const_fusion(insns, 2);
+        assert_eq!(out.len(), 2, "LoadConst should be removed");
+        assert!(
+            matches!(out[0], Insn::BinOpConst(1, 0, BinaryOp::Add, 0)),
+            "BinOp with const-lhs should become BinOpConst with swapped operands"
+        );
+    }
+
+    #[test]
+    fn binop_const_fusion_does_not_commute_non_commutative() {
+        use crate::ast::BinaryOp;
+        // Sub is not commutative — should not fuse when const is on left
+        let insns = vec![
+            Insn::LoadConst(5, 0),
+            Insn::BinOp(1, 5, BinaryOp::Sub, 0),
+            Insn::Return(1),
+        ];
+        let out = pass_binop_const_fusion(insns, 2);
+        assert_eq!(
+            out.len(),
+            3,
+            "non-commutative op with const-lhs should not fuse"
+        );
+    }
+
+    // ── pass_unary_fold ───────────────────────────────────────────────────────
+
+    #[test]
+    fn unary_fold_neg_int() {
+        use crate::ast::UnaryOp;
+        use crate::value::Value;
+        // LoadConst(r=5, idx=0) [consts[0]=-3]  UnaryOp(dst=1, Neg, r=5)
+        // → LoadConst(dst=1, idx_3)
+        let mut consts = vec![Value::int(-3)];
+        let insns = vec![
+            Insn::LoadConst(5, 0),
+            Insn::UnaryOp(1, UnaryOp::Neg, 5),
+            Insn::Return(1),
+        ];
+        let out = pass_unary_fold(insns, 2, &mut consts);
+        assert_eq!(out.len(), 2, "LoadConst should be removed");
+        assert!(
+            matches!(out[0], Insn::LoadConst(1, _)),
+            "UnaryOp should become LoadConst"
+        );
+        let idx = match out[0] {
+            Insn::LoadConst(_, i) => i,
+            _ => panic!(),
+        };
+        assert!(matches!(
+            consts[idx as usize].kind(),
+            crate::value::ValueKind::Int(3)
+        ));
+    }
+
+    #[test]
+    fn unary_fold_not_bool() {
+        use crate::ast::UnaryOp;
+        use crate::value::Value;
+        let mut consts = vec![Value::bool_(true)];
+        let insns = vec![
+            Insn::LoadConst(5, 0),
+            Insn::UnaryOp(1, UnaryOp::Not, 5),
+            Insn::Return(1),
+        ];
+        let out = pass_unary_fold(insns, 2, &mut consts);
+        assert_eq!(out.len(), 2, "LoadConst should be removed");
+        let idx = match out[0] {
+            Insn::LoadConst(_, i) => i,
+            _ => panic!(),
+        };
+        assert!(matches!(
+            consts[idx as usize].kind(),
+            crate::value::ValueKind::Bool(false)
+        ));
+    }
+
+    #[test]
+    fn unary_fold_skips_local_reg() {
+        use crate::ast::UnaryOp;
+        use crate::value::Value;
+        // r=1 < num_locals=3: should not fuse.
+        let mut consts = vec![Value::int(5)];
+        let insns = vec![
+            Insn::LoadConst(1, 0),
+            Insn::UnaryOp(2, UnaryOp::Neg, 1),
+            Insn::Return(2),
+        ];
+        let out = pass_unary_fold(insns, 3, &mut consts);
+        assert_eq!(out.len(), 3, "no fusion for local register");
+    }
+
+    #[test]
+    fn unary_fold_on_compiled_literal() {
+        // -5 is a literal unary-neg in the source; after removing the fold_constant check
+        // from compile_expr, the optimizer should fold it via pass_unary_fold.
+        let code = compile_fn("x = -5\nprint(x)\n");
+        let optimized = optimize(code);
+        // The constant pool should contain -5 (or the LoadConst(-5) folded from Neg+5).
+        let has_neg5 = optimized
+            .consts
+            .iter()
+            .any(|v| matches!(v.kind(), crate::value::ValueKind::Int(-5)));
+        assert!(has_neg5, "constant -5 should appear after unary fold");
+    }
+
+    // ── pass_algebraic_simplify ───────────────────────────────────────────────
+
+    #[test]
+    fn algebraic_add_zero_becomes_move() {
+        use crate::ast::BinaryOp;
+        use crate::value::Value;
+        let mut consts = vec![Value::int(0)];
+        let insns = vec![Insn::BinOpConst(2, 1, BinaryOp::Add, 0)];
+        let out = pass_algebraic_simplify(insns, &mut consts);
+        assert!(matches!(out[0], Insn::Move(2, 1)), "x+0 should become Move");
+    }
+
+    #[test]
+    fn algebraic_mul_zero_becomes_loadconst() {
+        use crate::ast::BinaryOp;
+        use crate::value::Value;
+        let mut consts = vec![Value::int(0)];
+        let insns = vec![Insn::BinOpConst(2, 1, BinaryOp::Mul, 0)];
+        let out = pass_algebraic_simplify(insns, &mut consts);
+        assert!(
+            matches!(out[0], Insn::LoadConst(2, _)),
+            "x*0 should become LoadConst(0)"
+        );
+    }
+
+    #[test]
+    fn algebraic_pow_zero_becomes_loadconst_one() {
+        use crate::ast::BinaryOp;
+        use crate::value::Value;
+        let mut consts = vec![Value::int(0)];
+        let insns = vec![Insn::BinOpConst(2, 1, BinaryOp::Pow, 0)];
+        let out = pass_algebraic_simplify(insns, &mut consts);
+        assert!(
+            matches!(out[0], Insn::LoadConst(2, _)),
+            "x**0 should become LoadConst(1)"
+        );
+        let idx = match out[0] {
+            Insn::LoadConst(_, i) => i,
+            _ => panic!(),
+        };
+        assert!(matches!(
+            consts[idx as usize].kind(),
+            crate::value::ValueKind::Int(1)
+        ));
+    }
+
+    #[test]
+    fn algebraic_skips_float_identity() {
+        use crate::ast::BinaryOp;
+        use crate::value::Value;
+        // 0.0 is int-0-like but we only simplify integer constants.
+        let mut consts = vec![Value::float(0.0)];
+        let insns = vec![Insn::BinOpConst(2, 1, BinaryOp::Add, 0)];
+        let out = pass_algebraic_simplify(insns, &mut consts);
+        // Should NOT simplify float: x + 0.0 has different NaN/inf semantics.
+        assert!(
+            matches!(out[0], Insn::BinOpConst(2, 1, BinaryOp::Add, 0)),
+            "float identity should not be simplified"
+        );
+    }
+
+    #[test]
+    fn algebraic_on_compiled_code() {
+        // x + 0 inside a function — algebraic pass should fold to Move.
+        let code = compile_fn("def f(x):\n    return x + 0\n");
+        let optimized = optimize(code);
+        // After simplification x+0 becomes Move(dst,x), then trivial_nop removes Move(r,r).
+        // Either way, there should be no BinOpConst in the output.
+        let has_binopconst = optimized.fn_protos[0]
+            .code
+            .insns
+            .iter()
+            .any(|i| matches!(i, Insn::BinOpConst(..)));
+        assert!(!has_binopconst, "x+0 should not leave a BinOpConst");
+    }
+
+    // ── pass_const_fold ───────────────────────────────────────────────────────
+
+    #[test]
+    fn const_fold_binopconst_with_known_lhs() {
+        use crate::ast::BinaryOp;
+        use crate::value::Value;
+        // LoadConst(r0, 0)  [consts[0]=5]
+        // BinOpConst(r1, r0, Add, 1)  [consts[1]=3]
+        // → LoadConst(r1, 2)  [consts[2]=8]
+        let mut consts = vec![Value::int(5), Value::int(3)];
+        let insns = vec![
+            Insn::LoadConst(0, 0),                    // r0 = 5
+            Insn::BinOpConst(1, 0, BinaryOp::Add, 1), // r1 = r0 + 3
+            Insn::Return(1),
+        ];
+        let out = pass_const_fold(insns, &mut consts);
+        assert!(
+            matches!(out[1], Insn::LoadConst(1, _)),
+            "BinOpConst with known lhs should be folded to LoadConst"
+        );
+        let folded_idx = match out[1] {
+            Insn::LoadConst(_, i) => i,
+            _ => panic!(),
+        };
+        assert!(matches!(
+            consts[folded_idx as usize].kind(),
+            crate::value::ValueKind::Int(8)
+        ));
+    }
+
+    #[test]
+    fn const_fold_binop_with_both_known() {
+        use crate::ast::BinaryOp;
+        use crate::value::Value;
+        let mut consts = vec![Value::int(10), Value::int(2)];
+        let insns = vec![
+            Insn::LoadConst(0, 0),               // r0 = 10
+            Insn::LoadConst(1, 1),               // r1 = 2
+            Insn::BinOp(2, 0, BinaryOp::Mul, 1), // r2 = r0 * r1
+            Insn::Return(2),
+        ];
+        let out = pass_const_fold(insns, &mut consts);
+        assert!(
+            matches!(out[2], Insn::LoadConst(2, _)),
+            "BinOp with both operands known should fold to LoadConst"
+        );
+        let idx = match out[2] {
+            Insn::LoadConst(_, i) => i,
+            _ => panic!(),
+        };
+        assert!(matches!(
+            consts[idx as usize].kind(),
+            crate::value::ValueKind::Int(20)
+        ));
+    }
+
+    #[test]
+    fn const_fold_propagates_through_move() {
+        use crate::ast::BinaryOp;
+        use crate::value::Value;
+        // LoadConst(t, idx_5)  Move(x, t)  BinOpConst(y, x, Add, idx_3)
+        // After propagation: known[x]=idx_5, fold BinOpConst to LoadConst(y, idx_8)
+        let mut consts = vec![Value::int(5), Value::int(3)];
+        let insns = vec![
+            Insn::LoadConst(5, 0),                    // temp=5 (reg 5)
+            Insn::Move(0, 5),                         // x = temp
+            Insn::BinOpConst(1, 0, BinaryOp::Add, 1), // y = x + 3
+            Insn::Return(1),
+        ];
+        let out = pass_const_fold(insns, &mut consts);
+        assert!(
+            matches!(out[2], Insn::LoadConst(1, _)),
+            "BinOpConst should fold after Move propagates known value"
+        );
+    }
+
+    #[test]
+    fn const_fold_clears_at_branch() {
+        use crate::ast::BinaryOp;
+        use crate::value::Value;
+        // LoadConst(r0, idx_5)  JumpIfFalse(r0, 0)  BinOpConst(r1, r0, Add, idx_3)
+        // After the branch, known is cleared, so BinOpConst should NOT fold.
+        let mut consts = vec![Value::int(5), Value::int(3)];
+        let insns = vec![
+            Insn::LoadConst(0, 0),
+            Insn::JumpIfFalse(0, 0),
+            Insn::BinOpConst(1, 0, BinaryOp::Add, 1),
+            Insn::Return(1),
+        ];
+        let out = pass_const_fold(insns, &mut consts);
+        assert!(
+            matches!(out[2], Insn::BinOpConst(1, 0, BinaryOp::Add, 1)),
+            "no folding after a branch clears known map"
+        );
+    }
+
+    #[test]
+    fn const_fold_on_compiled_chain() {
+        // x = 5; y = x * 2 — the optimizer should fold y to 10
+        let code = compile_fn("x = 5\ny = x * 2\nprint(y)\n");
+        let optimized = optimize(code);
+        // After folding, the constant pool should contain 10
+        let has_10 = optimized
+            .consts
+            .iter()
+            .any(|v| matches!(v.kind(), crate::value::ValueKind::Int(10)));
+        assert!(
+            has_10,
+            "constant 10 should appear in pool after folding x*2 with x=5"
+        );
+    }
+
+    #[test]
+    fn const_fold_does_not_fold_loop_condition() {
+        use crate::ast::BinaryOp;
+        use crate::value::Value;
+        // Simulates: y = 3; while y > 0: y = y - 1
+        //
+        //  [0] LoadConst(0, 0)              consts[0] = 3   (y_reg = 0)
+        //  [1] BinOpConst(1, 0, Gt, 1)      consts[1] = 0   (loop header — target of Jump at [4])
+        //  [2] JumpIfFalse(1, 2)                             (exit: target = 2+1+2 = 5)
+        //  [3] BinOpConst(0, 0, Sub, 2)     consts[2] = 1
+        //  [4] Jump(-4)                                      (back to [1]: 4+1-4 = 1)
+        //  [5] Return(0)
+        let mut consts = vec![Value::int(3), Value::int(0), Value::int(1)];
+        let insns = vec![
+            Insn::LoadConst(0, 0),
+            Insn::BinOpConst(1, 0, BinaryOp::Gt, 1),
+            Insn::JumpIfFalse(1, 2),
+            Insn::BinOpConst(0, 0, BinaryOp::Sub, 2),
+            Insn::Jump(-4),
+            Insn::Return(0),
+        ];
+        let out = pass_const_fold(insns, &mut consts);
+        // [1] must NOT fold to LoadConst(True) — the loop would become infinite.
+        assert!(
+            matches!(out[1], Insn::BinOpConst(1, 0, BinaryOp::Gt, 1)),
+            "loop condition must not be folded; known map must clear at loop header"
+        );
+    }
+
+    // ── pass_const_branch_elim ────────────────────────────────────────────────
+
+    #[test]
+    fn const_branch_elim_jumpiffalse_truthy_becomes_jump0() {
+        use crate::value::Value;
+        // LoadConst(r=0, c=0) [consts[0]=True]  JumpIfFalse(0, 5)
+        // Truthy → never jumps → replace with Jump(0)
+        let consts = vec![Value::bool_(true)];
+        let insns = vec![
+            Insn::LoadConst(0, 0),
+            Insn::JumpIfFalse(0, 5),
+            Insn::Return(0),
+        ];
+        let out = pass_const_branch_elim(insns, &consts);
+        assert!(
+            matches!(out[1], Insn::Jump(0)),
+            "truthy JumpIfFalse → Jump(0)"
+        );
+    }
+
+    #[test]
+    fn const_branch_elim_jumpiffalse_falsy_becomes_jump_k() {
+        use crate::value::Value;
+        // LoadConst(r=0, c=0) [consts[0]=False]  JumpIfFalse(0, 3)
+        // Falsy → always jumps → replace with Jump(3)
+        let consts = vec![Value::bool_(false)];
+        let insns = vec![
+            Insn::LoadConst(0, 0),
+            Insn::JumpIfFalse(0, 3),
+            Insn::Return(0),
+        ];
+        let out = pass_const_branch_elim(insns, &consts);
+        assert!(
+            matches!(out[1], Insn::Jump(3)),
+            "falsy JumpIfFalse → Jump(k)"
+        );
+    }
+
+    #[test]
+    fn const_branch_elim_eliminates_dead_branch_on_compiled_code() {
+        // "if True: print(1)\nelse: print(2)" — the else branch should be dead
+        let code = compile_fn("if True:\n    print(1)\nelse:\n    print(2)\n");
+        let optimized = optimize(code);
+        // After optimization, the instruction stream should not contain the
+        // dead-branch code that prints 2. Check by verifying only one integer
+        // constant (1) is referenced, not 2.
+        let has_2 = optimized
+            .consts
+            .iter()
+            .any(|v| matches!(v.kind(), crate::value::ValueKind::Int(2)));
+        // Note: the constant 2 may still exist in the pool even if the code
+        // referencing it is dead — but the dead code itself should be gone.
+        // Instead check that no LoadConst referencing 2 appears in reachable insns.
+        // Simpler: check the insn list has no BinOp/conditional jumps (the if collapsed).
+        let has_cond_jump = optimized.insns.iter().any(|i| {
+            matches!(
+                i,
+                Insn::JumpIfFalse(..)
+                    | Insn::JumpIfTrue(..)
+                    | Insn::CmpJumpIfFalse(..)
+                    | Insn::CmpJumpIfFalseConst(..)
+                    | Insn::CmpJumpIfTrue(..)
+                    | Insn::CmpJumpIfTrueConst(..)
+            )
+        });
+        assert!(
+            !has_cond_jump,
+            "constant-condition if should have no conditional jumps"
+        );
+    }
+
+    // ── pass_cmpjump_fusion ───────────────────────────────────────────────────
+
+    #[test]
+    fn cmpjump_fuses_binopconst_jumpiffalse() {
+        use crate::ast::BinaryOp;
+        // BinOpConst(r=5, lhs=0, Gt, c=0) + JumpIfFalse(r=5, k=0)
+        // k=0: if-false jumps to old_pos 1+1+0=2 = Return.
+        // After fusion+compaction: CmpJumpIfFalseConst at new_pos 0, Return at new_pos 1.
+        // Rewritten offset: to_new[2]-to_new[1]-1 = 1-0-1 = 0 → same k=0.
+        let insns = vec![
+            Insn::BinOpConst(5, 0, BinaryOp::Gt, 0),
+            Insn::JumpIfFalse(5, 0),
+            Insn::Return(0),
+        ];
+        let out = pass_cmpjump_fusion(insns, 2);
+        assert_eq!(out.len(), 2, "BinOpConst should be removed");
+        assert!(
+            matches!(out[0], Insn::CmpJumpIfFalseConst(0, BinaryOp::Gt, 0, 0)),
+            "should become CmpJumpIfFalseConst with same offset"
+        );
+    }
+
+    #[test]
+    fn cmpjump_fuses_binop_jumpiftrue() {
+        use crate::ast::BinaryOp;
+        // BinOp(r=5, lhs=0, Eq, rhs=1) + JumpIfTrue(r=5, k=0)
+        // → CmpJumpIfTrue(lhs=0, Eq, rhs=1, k=0)
+        let insns = vec![
+            Insn::BinOp(5, 0, BinaryOp::Eq, 1),
+            Insn::JumpIfTrue(5, 0),
+            Insn::Return(0),
+        ];
+        let out = pass_cmpjump_fusion(insns, 2);
+        assert_eq!(out.len(), 2, "BinOp should be removed");
+        assert!(
+            matches!(out[0], Insn::CmpJumpIfTrue(0, BinaryOp::Eq, 1, 0)),
+            "should become CmpJumpIfTrue"
+        );
+    }
+
+    #[test]
+    fn cmpjump_skips_when_reg_is_local() {
+        use crate::ast::BinaryOp;
+        // r=1 < num_locals=3 → no fusion
+        let insns = vec![
+            Insn::BinOpConst(1, 0, BinaryOp::Gt, 0),
+            Insn::JumpIfFalse(1, 1),
+            Insn::Return(0),
+        ];
+        let out = pass_cmpjump_fusion(insns, 3);
+        assert_eq!(out.len(), 3, "no fusion when cond reg is a local");
+    }
+
+    #[test]
+    fn cmpjump_fusion_on_compiled_if() {
+        let code = compile_fn("def f(x):\n    if x > 3:\n        print(x)\n");
+        let optimized = optimize(code);
+        let inner = &optimized.fn_protos[0].code;
+        let has_cmpjump = inner.insns.iter().any(|i| {
+            matches!(
+                i,
+                Insn::CmpJumpIfFalse(..)
+                    | Insn::CmpJumpIfTrue(..)
+                    | Insn::CmpJumpIfFalseConst(..)
+                    | Insn::CmpJumpIfTrueConst(..)
+            )
+        });
+        assert!(
+            has_cmpjump,
+            "optimizer should fuse comparison into conditional jump"
+        );
     }
 
     // ── pass_thread_jumps ─────────────────────────────────────────────────────
