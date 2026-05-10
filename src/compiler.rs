@@ -778,7 +778,7 @@ impl Compiler {
         let cell_set: HashSet<String> = cell_vars.into_iter().collect();
         // base_temp must cover ALL local_index slots (including cell vars) so
         // that temp registers never overlap with local-variable slot numbers.
-        let base_temp = n as Reg;
+        let base_temp = Reg::try_from(n).unwrap_or(Reg::MAX);
 
         Self {
             local_index,
@@ -793,7 +793,7 @@ impl Compiler {
             iter_depth: 0,
             max_iter: 0,
             max_reg: if n > 0 {
-                (n as Reg).saturating_sub(1)
+                Reg::try_from(n).unwrap_or(Reg::MAX).saturating_sub(1)
             } else {
                 0
             },
@@ -3113,7 +3113,7 @@ impl Compiler {
         } else {
             let o = self.next_temp;
             let abase = o.wrapping_add(1);
-            let frame_top = abase.wrapping_add(nargs as Reg);
+            let frame_top = abase.wrapping_add(Reg::from(nargs));
             if frame_top < o {
                 self.failed = true;
                 return 0;
