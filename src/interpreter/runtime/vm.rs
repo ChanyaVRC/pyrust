@@ -136,8 +136,8 @@ impl Interpreter {
                                 BinaryOp::BitAnd => { regs[*dst as usize] = Some(Value::int(a & b)); true }
                                 BinaryOp::BitOr  => { regs[*dst as usize] = Some(Value::int(a | b)); true }
                                 BinaryOp::BitXor => { regs[*dst as usize] = Some(Value::int(a ^ b)); true }
-                                BinaryOp::LShift => { regs[*dst as usize] = Some(Value::int(a << (b & 63))); true }
-                                BinaryOp::RShift => { regs[*dst as usize] = Some(Value::int(a >> (b & 63))); true }
+                                BinaryOp::LShift => { if b < 0 { false } else { regs[*dst as usize] = Some(Value::int(a << (b & 63))); true } }
+                                BinaryOp::RShift => { if b < 0 { false } else { regs[*dst as usize] = Some(Value::int(a >> (b & 63))); true } }
                                 BinaryOp::Eq  => { regs[*dst as usize] = Some(Value::bool_(a == b)); true }
                                 BinaryOp::Ne  => { regs[*dst as usize] = Some(Value::bool_(a != b)); true }
                                 BinaryOp::Lt  => { regs[*dst as usize] = Some(Value::bool_(a < b)); true }
@@ -164,8 +164,8 @@ impl Interpreter {
                                 BinaryOp::BitAnd => { regs[*dst as usize] = Some(Value::int(a & b)); true }
                                 BinaryOp::BitOr  => { regs[*dst as usize] = Some(Value::int(a | b)); true }
                                 BinaryOp::BitXor => { regs[*dst as usize] = Some(Value::int(a ^ b)); true }
-                                BinaryOp::LShift => { regs[*dst as usize] = Some(Value::int(a << (b & 63))); true }
-                                BinaryOp::RShift => { regs[*dst as usize] = Some(Value::int(a >> (b & 63))); true }
+                                BinaryOp::LShift => { if b < 0 { false } else { regs[*dst as usize] = Some(Value::int(a << (b & 63))); true } }
+                                BinaryOp::RShift => { if b < 0 { false } else { regs[*dst as usize] = Some(Value::int(a >> (b & 63))); true } }
                                 BinaryOp::Eq  => { regs[*dst as usize] = Some(Value::bool_(a == b)); true }
                                 BinaryOp::Ne  => { regs[*dst as usize] = Some(Value::bool_(a != b)); true }
                                 BinaryOp::Lt  => { regs[*dst as usize] = Some(Value::bool_(a < b)); true }
@@ -204,8 +204,8 @@ impl Interpreter {
                                 BinaryOp::BitAnd => { regs[*dst as usize] = Some(Value::int(a & b)); true }
                                 BinaryOp::BitOr  => { regs[*dst as usize] = Some(Value::int(a | b)); true }
                                 BinaryOp::BitXor => { regs[*dst as usize] = Some(Value::int(a ^ b)); true }
-                                BinaryOp::LShift => { regs[*dst as usize] = Some(Value::int(a.wrapping_shl(b as u32))); true }
-                                BinaryOp::RShift => { regs[*dst as usize] = Some(Value::int(a >> b.clamp(0, 63))); true }
+                                BinaryOp::LShift => { if b < 0 { false } else { regs[*dst as usize] = Some(Value::int(a << (b & 63))); true } }
+                                BinaryOp::RShift => { if b < 0 { false } else { regs[*dst as usize] = Some(Value::int(a >> (b & 63))); true } }
                                 _ => false,
                             }
                         } else { false }
