@@ -730,6 +730,7 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
         "list" => Some(Value::builtin_function("list")),
         "tuple" => Some(Value::builtin_function("tuple")),
         "set" => Some(Value::builtin_function("set")),
+        "dict" => Some(Value::builtin_function("dict")),
         "str" => Some(Value::builtin_function("str")),
         "int" => Some(Value::builtin_function("int")),
         "float" => Some(Value::builtin_function("float")),

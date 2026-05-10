@@ -412,6 +412,10 @@ impl Interpreter {
                     (ValueKind::Str(_), ValueKind::BuiltinFunction("str")) => true,
                     (ValueKind::Bool(_), ValueKind::BuiltinFunction("bool")) => true,
                     (ValueKind::None, ValueKind::BuiltinFunction("NoneType")) => true,
+                    (ValueKind::List(_), ValueKind::BuiltinFunction("list")) => true,
+                    (ValueKind::Tuple(_), ValueKind::BuiltinFunction("tuple")) => true,
+                    (ValueKind::Set(_), ValueKind::BuiltinFunction("set")) => true,
+                    (ValueKind::Dict(_), ValueKind::BuiltinFunction("dict")) => true,
                     _ => false,
                 };
                 Ok(Value::bool_(result))
@@ -466,8 +470,7 @@ impl Interpreter {
                     ValueKind::Int(n) => n,
                     ValueKind::Bool(b) => b as i64,
                     ValueKind::None => 0,
-                    // For other types, return a stable but imprecise id
-                    _ => 0,
+                    _ => args[0].value.pool_ptr_id().unwrap_or(0),
                 };
                 Ok(Value::int(id_val))
             }
@@ -480,11 +483,16 @@ impl Interpreter {
                 }
                 let name = match args[1].value.kind() {
                     ValueKind::Str(s) => s.to_string(),
-                    _ => return Err(PyError::Runtime(
+                    _ => return Err(PyError::Named(
+                        "TypeError".to_string(),
                         "hasattr(): attribute name must be a string".to_string(),
                     )),
                 };
-                let result = self.get_attr(args[0].value.clone(), &name).is_ok();
+                let result = match self.get_attr(args[0].value.clone(), &name) {
+                    Ok(_) => true,
+                    Err(PyError::Named(ref cls, _)) if cls == "AttributeError" => false,
+                    Err(e) => return Err(e),
+                };
                 Ok(Value::bool_(result))
             }
             ValueKind::BuiltinFunction("getattr") => {
@@ -496,13 +504,16 @@ impl Interpreter {
                 }
                 let name = match args[1].value.kind() {
                     ValueKind::Str(s) => s.to_string(),
-                    _ => return Err(PyError::Runtime(
+                    _ => return Err(PyError::Named(
+                        "TypeError".to_string(),
                         "getattr(): attribute name must be a string".to_string(),
                     )),
                 };
                 match self.get_attr(args[0].value.clone(), &name) {
                     Ok(v) => Ok(v),
-                    Err(_) if args.len() == 3 => Ok(args[2].value.clone()),
+                    Err(PyError::Named(ref cls, _)) if cls == "AttributeError" && args.len() == 3 => {
+                        Ok(args[2].value.clone())
+                    }
                     Err(e) => Err(e),
                 }
             }
@@ -521,6 +532,14 @@ impl Interpreter {
                 };
                 self.assign_attr(args[0].value.clone(), &name, args[2].value.clone())?;
                 Ok(Value::none())
+            }
+            ValueKind::BuiltinFunction("dict") => {
+                reject_keyword_args_expanded("dict", args)?;
+                if args.is_empty() {
+                    Ok(Value::dict(indexmap::IndexMap::new()))
+                } else {
+                    Err(PyError::Runtime("dict() with arguments is not yet supported".to_string()))
+                }
             }
             ValueKind::BuiltinFunction(name) if name.starts_with("str.") => {
                 let method = &name[4..];
