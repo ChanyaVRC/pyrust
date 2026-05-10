@@ -513,7 +513,7 @@ fn fold_constant(expr: &Expr) -> Option<Value> {
     }
 }
 
-fn fold_binop(l: &Value, op: BinaryOp, r: &Value) -> Option<Value> {
+pub(crate) fn fold_binop(l: &Value, op: BinaryOp, r: &Value) -> Option<Value> {
     match (l.kind(), op, r.kind()) {
         (ValueKind::Int(a), BinaryOp::Add, ValueKind::Int(b)) => {
             Some(Value::int(a.wrapping_add(b)))
@@ -2787,15 +2787,6 @@ impl Compiler {
                 }
             }
             Expr::Unary { op, expr } => {
-                if let Some(val) = fold_constant(&Expr::Unary {
-                    op: *op,
-                    expr: expr.clone(),
-                }) {
-                    let idx = self.intern_const(val);
-                    let dst = self.alloc_temp();
-                    self.emit(Insn::LoadConst(dst, idx));
-                    return dst;
-                }
                 let src = self.compile_expr(expr);
                 let dst = self.ensure_dst(src);
                 self.emit(Insn::UnaryOp(dst, *op, src));
@@ -2829,13 +2820,6 @@ impl Compiler {
                     dst
                 }
                 _ => {
-                    // Constant fold: if both sides are literals, compute at compile time.
-                    if let Some(val) = fold_constant(expr) {
-                        let idx = self.intern_const(val);
-                        let dst = self.alloc_temp();
-                        self.emit(Insn::LoadConst(dst, idx));
-                        return dst;
-                    }
                     let lhs = self.compile_expr(left);
                     let dst = self.ensure_dst(lhs);
                     let rhs = self.compile_expr(right);
@@ -2845,13 +2829,6 @@ impl Compiler {
                 }
             },
             Expr::Compare { left, ops } => {
-                // Constant fold: e.g. `1 < 2` at compile time.
-                if let Some(val) = fold_constant(expr) {
-                    let idx = self.intern_const(val);
-                    let dst = self.alloc_temp();
-                    self.emit(Insn::LoadConst(dst, idx));
-                    return dst;
-                }
                 if ops.len() == 1 {
                     let (cmp_op, right) = &ops[0];
                     let lhs = self.compile_expr(left);

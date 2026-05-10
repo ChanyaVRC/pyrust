@@ -1,7 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::bytecode::{FnCode, FnProto, Insn};
+use crate::value::{Value, ValueKind};
 
 /// Optimize a compiled `FnCode` and all nested function prototypes.
 /// Applies a sequence of peephole passes over each instruction list.
@@ -22,19 +23,21 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         .collect();
 
     let num_locals = code.num_locals;
+    let mut consts = code.consts;
     let insns = pass_thread_jumps(code.insns);
     let insns = pass_binop_const_fusion(insns, num_locals);
     let insns = pass_cmpjump_fusion(insns, num_locals);
+    let insns = pass_const_fold(insns, &mut consts);
     let insns = pass_dead_code(insns);
     let insns = pass_trivial_nop(insns);
 
     FnCode {
         insns,
-        consts: code.consts,
+        consts,
         names: code.names,
         num_regs: code.num_regs,
         num_iters: code.num_iters,
-        num_locals: code.num_locals,
+        num_locals,
         fn_protos,
         cell_vars: code.cell_vars,
     }
@@ -173,6 +176,150 @@ fn pass_cmpjump_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         }
     }
     compact(transformed, &keep)
+}
+
+// ─── Constant folding ──────────────────────────────────────────────────────────
+
+/// Forward dataflow constant folding.
+///
+/// Tracks registers whose values are statically known (`known: reg → const_idx`).
+/// When both operands of a `BinOp` or `BinOpConst` are known, replace the
+/// instruction with a `LoadConst` of the folded result.  Also propagates known
+/// values through `Move(dst, src)`.
+///
+/// The map is cleared at branch/loop instructions where we cannot guarantee
+/// which path was taken at runtime.
+fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn> {
+    let mut known: HashMap<u32, u16> = HashMap::new();
+    let mut out = Vec::with_capacity(insns.len());
+
+    for insn in insns {
+        match insn {
+            Insn::LoadConst(dst, c) => {
+                known.insert(dst, c);
+                out.push(Insn::LoadConst(dst, c));
+            }
+            Insn::Move(dst, src) => {
+                match known.get(&src).copied() {
+                    Some(c) => { known.insert(dst, c); }
+                    None => { known.remove(&dst); }
+                }
+                out.push(Insn::Move(dst, src));
+            }
+            Insn::BinOp(dst, lhs, op, rhs) => {
+                let folded = known.get(&lhs).and_then(|&cl| {
+                    known.get(&rhs).and_then(|&cr| {
+                        crate::compiler::fold_binop(
+                            &consts[cl as usize], op, &consts[cr as usize],
+                        )
+                        .and_then(|v| intern_const_in_pool(consts, v))
+                    })
+                });
+                if let Some(nc) = folded {
+                    known.insert(dst, nc);
+                    out.push(Insn::LoadConst(dst, nc));
+                } else {
+                    known.remove(&dst);
+                    out.push(Insn::BinOp(dst, lhs, op, rhs));
+                }
+            }
+            Insn::BinOpConst(dst, lhs, op, c) => {
+                let folded = known.get(&lhs).and_then(|&cl| {
+                    crate::compiler::fold_binop(
+                        &consts[cl as usize], op, &consts[c as usize],
+                    )
+                    .and_then(|v| intern_const_in_pool(consts, v))
+                });
+                if let Some(nc) = folded {
+                    known.insert(dst, nc);
+                    out.push(Insn::LoadConst(dst, nc));
+                } else {
+                    known.remove(&dst);
+                    out.push(Insn::BinOpConst(dst, lhs, op, c));
+                }
+            }
+            // Branch/loop/raise: clear the map — values may differ per path.
+            insn @ (Insn::Jump(_)
+            | Insn::JumpIfFalse(..)
+            | Insn::JumpIfTrue(..)
+            | Insn::CmpJumpIfFalse(..)
+            | Insn::CmpJumpIfTrue(..)
+            | Insn::CmpJumpIfFalseConst(..)
+            | Insn::CmpJumpIfTrueConst(..)
+            | Insn::ForIter(..)
+            | Insn::ForCountReg(..)
+            | Insn::ForCountConst(..)
+            | Insn::SetupExcept(_)
+            | Insn::MatchExcept(..)
+            | Insn::Return(_)
+            | Insn::ReturnNone
+            | Insn::RaiseValue(_)
+            | Insn::RaiseFrom(..)
+            | Insn::RaiseReRaise
+            | Insn::RaiseAssert(_)
+            | Insn::Unpack(..)) => {
+                known.clear();
+                out.push(insn);
+            }
+            // Any other instruction: invalidate dst if we can identify it.
+            insn => {
+                if let Some(dst) = writable_dst(&insn) {
+                    known.remove(&dst);
+                }
+                out.push(insn);
+            }
+        }
+    }
+    out
+}
+
+/// Return the single destination register of `insn`, if any.
+/// Used to precisely invalidate the `known` map without clearing it entirely.
+fn writable_dst(insn: &Insn) -> Option<u32> {
+    use Insn::*;
+    match insn {
+        LoadGlobal(r, _)
+        | LoadNone(r)
+        | BinOpInPlace(r, _, _, _)
+        | UnaryOp(r, _, _)
+        | GetAttr(r, _, _)
+        | GetItem(r, _, _)
+        | Call(r, _)
+        | CallMemo(r, _)
+        | BuildList(r, _, _)
+        | BuildTuple(r, _, _)
+        | BuildDict(r, _, _)
+        | MakeFunction(r, _, _, _)
+        | ImportModule(r, _)
+        | LoadExc(r)
+        | MakeClass(r, _, _, _, _) => Some(*r),
+        CallMethod { dst, .. } | CallMethodExpanded { dst, .. } => Some(*dst),
+        _ => None,
+    }
+}
+
+/// Look up or insert `val` in the const pool; return its index.
+/// Returns `None` if the pool is full (>= u16::MAX entries).
+fn intern_const_in_pool(consts: &mut Vec<Value>, val: Value) -> Option<u16> {
+    // Type-exact linear scan to avoid Bool/Int key collisions.
+    for (i, existing) in consts.iter().enumerate() {
+        let same = match (existing.kind(), val.kind()) {
+            (ValueKind::Int(a), ValueKind::Int(b)) => a == b,
+            (ValueKind::Float(a), ValueKind::Float(b)) => a.to_bits() == b.to_bits(),
+            (ValueKind::Bool(a), ValueKind::Bool(b)) => a == b,
+            (ValueKind::None, ValueKind::None) => true,
+            _ => false,
+        };
+        if same {
+            return Some(i as u16);
+        }
+    }
+    if consts.len() >= u16::MAX as usize {
+        return None;
+    }
+    let idx = consts.len() as u16;
+    consts.push(val);
+    Some(idx)
 }
 
 // ─── Dead code elimination ─────────────────────────────────────────────────────
@@ -375,14 +522,114 @@ mod tests {
 
     #[test]
     fn binop_const_fusion_on_compiled_code() {
-        let code = compile_fn("x = 1\nprint(x + 5)\n");
+        // Use a function argument so the lhs is not a compile-time constant.
+        // pass_binop_const_fusion should still fuse LoadConst(r,5)+BinOp(dst,n,Add,r)
+        // → BinOpConst(dst,n,Add,5), which pass_const_fold cannot fold further.
+        let code = compile_fn("def f(n):\n    return n + 5\n");
         let optimized = optimize(code);
-        // The optimizer should have produced a BinOpConst somewhere in the top-level insns.
-        let has_binopconst = optimized
+        let has_binopconst = optimized.fn_protos[0]
+            .code
             .insns
             .iter()
             .any(|i| matches!(i, Insn::BinOpConst(..)));
-        assert!(has_binopconst, "optimizer should emit BinOpConst for x + 5");
+        assert!(has_binopconst, "optimizer should fuse LoadConst+BinOp into BinOpConst for n+5");
+    }
+
+    // ── pass_const_fold ───────────────────────────────────────────────────────
+
+    #[test]
+    fn const_fold_binopconst_with_known_lhs() {
+        use crate::ast::BinaryOp;
+        use crate::value::Value;
+        // LoadConst(r0, 0)  [consts[0]=5]
+        // BinOpConst(r1, r0, Add, 1)  [consts[1]=3]
+        // → LoadConst(r1, 2)  [consts[2]=8]
+        let mut consts = vec![Value::int(5), Value::int(3)];
+        let insns = vec![
+            Insn::LoadConst(0, 0), // r0 = 5
+            Insn::BinOpConst(1, 0, BinaryOp::Add, 1), // r1 = r0 + 3
+            Insn::Return(1),
+        ];
+        let out = pass_const_fold(insns, &mut consts);
+        assert!(
+            matches!(out[1], Insn::LoadConst(1, _)),
+            "BinOpConst with known lhs should be folded to LoadConst"
+        );
+        let folded_idx = match out[1] { Insn::LoadConst(_, i) => i, _ => panic!() };
+        assert!(matches!(consts[folded_idx as usize].kind(), crate::value::ValueKind::Int(8)));
+    }
+
+    #[test]
+    fn const_fold_binop_with_both_known() {
+        use crate::ast::BinaryOp;
+        use crate::value::Value;
+        let mut consts = vec![Value::int(10), Value::int(2)];
+        let insns = vec![
+            Insn::LoadConst(0, 0), // r0 = 10
+            Insn::LoadConst(1, 1), // r1 = 2
+            Insn::BinOp(2, 0, BinaryOp::Mul, 1), // r2 = r0 * r1
+            Insn::Return(2),
+        ];
+        let out = pass_const_fold(insns, &mut consts);
+        assert!(
+            matches!(out[2], Insn::LoadConst(2, _)),
+            "BinOp with both operands known should fold to LoadConst"
+        );
+        let idx = match out[2] { Insn::LoadConst(_, i) => i, _ => panic!() };
+        assert!(matches!(consts[idx as usize].kind(), crate::value::ValueKind::Int(20)));
+    }
+
+    #[test]
+    fn const_fold_propagates_through_move() {
+        use crate::ast::BinaryOp;
+        use crate::value::Value;
+        // LoadConst(t, idx_5)  Move(x, t)  BinOpConst(y, x, Add, idx_3)
+        // After propagation: known[x]=idx_5, fold BinOpConst to LoadConst(y, idx_8)
+        let mut consts = vec![Value::int(5), Value::int(3)];
+        let insns = vec![
+            Insn::LoadConst(5, 0), // temp=5 (reg 5)
+            Insn::Move(0, 5),      // x = temp
+            Insn::BinOpConst(1, 0, BinaryOp::Add, 1), // y = x + 3
+            Insn::Return(1),
+        ];
+        let out = pass_const_fold(insns, &mut consts);
+        assert!(
+            matches!(out[2], Insn::LoadConst(1, _)),
+            "BinOpConst should fold after Move propagates known value"
+        );
+    }
+
+    #[test]
+    fn const_fold_clears_at_branch() {
+        use crate::ast::BinaryOp;
+        use crate::value::Value;
+        // LoadConst(r0, idx_5)  JumpIfFalse(r0, 0)  BinOpConst(r1, r0, Add, idx_3)
+        // After the branch, known is cleared, so BinOpConst should NOT fold.
+        let mut consts = vec![Value::int(5), Value::int(3)];
+        let insns = vec![
+            Insn::LoadConst(0, 0),
+            Insn::JumpIfFalse(0, 0),
+            Insn::BinOpConst(1, 0, BinaryOp::Add, 1),
+            Insn::Return(1),
+        ];
+        let out = pass_const_fold(insns, &mut consts);
+        assert!(
+            matches!(out[2], Insn::BinOpConst(1, 0, BinaryOp::Add, 1)),
+            "no folding after a branch clears known map"
+        );
+    }
+
+    #[test]
+    fn const_fold_on_compiled_chain() {
+        // x = 5; y = x * 2 — the optimizer should fold y to 10
+        let code = compile_fn("x = 5\ny = x * 2\nprint(y)\n");
+        let optimized = optimize(code);
+        // After folding, the constant pool should contain 10
+        let has_10 = optimized
+            .consts
+            .iter()
+            .any(|v| matches!(v.kind(), crate::value::ValueKind::Int(10)));
+        assert!(has_10, "constant 10 should appear in pool after folding x*2 with x=5");
     }
 
     // ── pass_cmpjump_fusion ───────────────────────────────────────────────────
