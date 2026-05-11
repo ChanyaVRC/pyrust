@@ -28,14 +28,29 @@ pub fn call(method: &str, src: &Value, args: &[Value]) -> Result<Value> {
         "split" => split(src, s, args),
         "rsplit" => rsplit(src, s, args),
         "join" => join(s, args),
+        "splitlines" => str_splitlines(s, args),
+        "partition" => str_partition(s, args),
+        "rpartition" => str_rpartition(s, args),
         // Stripping
         "strip" => Ok(Value::string(strip_chars(s, args, true, true))),
         "lstrip" => Ok(Value::string(strip_chars(s, args, true, false))),
         "rstrip" => Ok(Value::string(strip_chars(s, args, false, true))),
+        // Prefix/suffix removal
+        "removeprefix" => str_removeprefix(s, args),
+        "removesuffix" => str_removesuffix(s, args),
+        // Justification / padding
+        "center" => str_center(s, args),
+        "ljust" => str_ljust(s, args),
+        "rjust" => str_rjust(s, args),
+        "zfill" => str_zfill(s, args),
+        "expandtabs" => str_expandtabs(s, args),
         // Case
         "upper" => Ok(Value::string(s.to_uppercase())),
         "lower" => Ok(Value::string(s.to_lowercase())),
+        "casefold" => Ok(Value::string(s.to_lowercase())),
         "capitalize" => Ok(Value::string(capitalize(s))),
+        "swapcase" => Ok(Value::string(swapcase(s))),
+        "title" => Ok(Value::string(titlecase(s))),
         // Searching
         "find" => str_find(s, args, false),
         "rfind" => str_rfind(s, args, false),
@@ -57,11 +72,424 @@ pub fn call(method: &str, src: &Value, args: &[Value]) -> Result<Value> {
         "isspace" => Ok(Value::bool_(
             !s.is_empty() && s.chars().all(|c| c.is_whitespace()),
         )),
+        "isdecimal" => Ok(Value::bool_(
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.general_category() == GeneralCategory::DecimalNumber),
+        )),
+        "isnumeric" => Ok(Value::bool_(
+            !s.is_empty() && s.chars().all(is_python_numeric),
+        )),
+        "islower" => Ok(Value::bool_(str_islower(s))),
+        "isupper" => Ok(Value::bool_(str_isupper(s))),
+        "istitle" => Ok(Value::bool_(str_istitle(s))),
+        "isascii" => Ok(Value::bool_(s.is_ascii())),
+        "isidentifier" => Ok(Value::bool_(str_isidentifier(s))),
+        "isprintable" => Ok(Value::bool_(s.chars().all(|c| !c.is_control()))),
         _ => Err(PyError::Runtime(format!(
             "'str' object has no attribute '{method}'"
         ))),
     }
 }
+
+// ─── New method implementations ──────────────────────────────────────────────
+
+fn str_require_str_arg<'a>(args: &'a [Value], method: &str) -> Result<&'a str> {
+    match args.first().map(|v| v.kind()) {
+        Some(ValueKind::Str(s)) => Ok(s),
+        _ => Err(PyError::Runtime(format!(
+            "str.{method}() requires a str argument"
+        ))),
+    }
+}
+
+fn str_require_int_arg(args: &[Value], method: &str) -> Result<i64> {
+    match args.first().map(|v| v.kind()) {
+        Some(ValueKind::Int(n)) => Ok(n),
+        Some(ValueKind::Bool(b)) => Ok(b as i64),
+        _ => Err(PyError::Runtime(format!(
+            "str.{method}() requires an integer argument"
+        ))),
+    }
+}
+
+fn fill_char_arg(args: &[Value]) -> Result<char> {
+    match args.get(1).map(|v| v.kind()) {
+        None => Ok(' '),
+        Some(ValueKind::Str(s)) => {
+            let mut chars = s.chars();
+            match (chars.next(), chars.next()) {
+                (Some(c), None) => Ok(c),
+                _ => Err(PyError::Named(
+                    "TypeError".to_string(),
+                    "The fill character must be exactly one character long".to_string(),
+                )),
+            }
+        }
+        _ => Err(PyError::Named(
+            "TypeError".to_string(),
+            "The fill character must be a str".to_string(),
+        )),
+    }
+}
+
+fn str_center(s: &str, args: &[Value]) -> Result<Value> {
+    let width = str_require_int_arg(args, "center")? as usize;
+    let fill = fill_char_arg(args)?;
+    let char_len = s.chars().count();
+    if char_len >= width {
+        return Ok(Value::string(s));
+    }
+    let marg = width - char_len;
+    // CPython formula: left = marg//2 + (marg & width & 1)
+    let left_pad = marg / 2 + (marg & width & 1);
+    let right_pad = marg - left_pad;
+    let mut out = String::with_capacity(s.len() + marg * fill.len_utf8());
+    for _ in 0..left_pad {
+        out.push(fill);
+    }
+    out.push_str(s);
+    for _ in 0..right_pad {
+        out.push(fill);
+    }
+    Ok(Value::string(out))
+}
+
+fn str_ljust(s: &str, args: &[Value]) -> Result<Value> {
+    let width = str_require_int_arg(args, "ljust")? as usize;
+    let fill = fill_char_arg(args)?;
+    let char_len = s.chars().count();
+    if char_len >= width {
+        return Ok(Value::string(s));
+    }
+    let pad = width - char_len;
+    let mut out = String::with_capacity(s.len() + pad * fill.len_utf8());
+    out.push_str(s);
+    for _ in 0..pad {
+        out.push(fill);
+    }
+    Ok(Value::string(out))
+}
+
+fn str_rjust(s: &str, args: &[Value]) -> Result<Value> {
+    let width = str_require_int_arg(args, "rjust")? as usize;
+    let fill = fill_char_arg(args)?;
+    let char_len = s.chars().count();
+    if char_len >= width {
+        return Ok(Value::string(s));
+    }
+    let pad = width - char_len;
+    let mut out = String::with_capacity(s.len() + pad * fill.len_utf8());
+    for _ in 0..pad {
+        out.push(fill);
+    }
+    out.push_str(s);
+    Ok(Value::string(out))
+}
+
+fn str_zfill(s: &str, args: &[Value]) -> Result<Value> {
+    let width = str_require_int_arg(args, "zfill")? as usize;
+    let char_len = s.chars().count();
+    if char_len >= width {
+        return Ok(Value::string(s));
+    }
+    let pad = width - char_len;
+    let mut out = String::with_capacity(s.len() + pad);
+    // Preserve leading sign character
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c @ ('+' | '-')) => {
+            out.push(c);
+            for _ in 0..pad {
+                out.push('0');
+            }
+            out.push_str(chars.as_str());
+        }
+        Some(first) => {
+            for _ in 0..pad {
+                out.push('0');
+            }
+            out.push(first);
+            out.push_str(chars.as_str());
+        }
+        None => {
+            for _ in 0..pad {
+                out.push('0');
+            }
+        }
+    }
+    Ok(Value::string(out))
+}
+
+fn str_expandtabs(s: &str, args: &[Value]) -> Result<Value> {
+    let tabsize = match args.first().map(|v| v.kind()) {
+        None => 8i64,
+        Some(ValueKind::Int(n)) => n,
+        Some(ValueKind::Bool(b)) => b as i64,
+        _ => {
+            return Err(PyError::Runtime(
+                "str.expandtabs() tabsize must be an integer".to_string(),
+            ));
+        }
+    };
+    let tabsize = tabsize.max(0) as usize;
+    let mut out = String::with_capacity(s.len());
+    let mut col: usize = 0;
+    for c in s.chars() {
+        match c {
+            '\t' => {
+                if tabsize == 0 {
+                    // tab with size 0 is removed
+                } else {
+                    let spaces = tabsize - (col % tabsize);
+                    for _ in 0..spaces {
+                        out.push(' ');
+                    }
+                    col += spaces;
+                }
+            }
+            '\n' | '\r' => {
+                out.push(c);
+                col = 0;
+            }
+            _ => {
+                out.push(c);
+                col += 1;
+            }
+        }
+    }
+    Ok(Value::string(out))
+}
+
+fn str_partition(s: &str, args: &[Value]) -> Result<Value> {
+    let sep = str_require_str_arg(args, "partition")?;
+    if sep.is_empty() {
+        return Err(PyError::Named(
+            "ValueError".to_string(),
+            "empty separator".to_string(),
+        ));
+    }
+    let (before, found_sep, after) = match s.find(sep) {
+        Some(pos) => (&s[..pos], sep, &s[pos + sep.len()..]),
+        None => (s, "", ""),
+    };
+    Ok(Value::tuple(vec![
+        Value::string(before),
+        Value::string(found_sep),
+        Value::string(after),
+    ]))
+}
+
+fn str_rpartition(s: &str, args: &[Value]) -> Result<Value> {
+    let sep = str_require_str_arg(args, "rpartition")?;
+    if sep.is_empty() {
+        return Err(PyError::Named(
+            "ValueError".to_string(),
+            "empty separator".to_string(),
+        ));
+    }
+    let (before, found_sep, after) = match s.rfind(sep) {
+        Some(pos) => (&s[..pos], sep, &s[pos + sep.len()..]),
+        None => ("", "", s),
+    };
+    Ok(Value::tuple(vec![
+        Value::string(before),
+        Value::string(found_sep),
+        Value::string(after),
+    ]))
+}
+
+fn str_splitlines(s: &str, args: &[Value]) -> Result<Value> {
+    let keepends = match args.first().map(|v| v.kind()) {
+        None => false,
+        Some(ValueKind::Bool(b)) => b,
+        Some(ValueKind::Int(n)) => n != 0,
+        _ => {
+            return Err(PyError::Runtime(
+                "str.splitlines() keepends must be bool or int".to_string(),
+            ));
+        }
+    };
+    let mut lines: Vec<Value> = Vec::new();
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut start = 0;
+    let mut i = 0;
+    while i < len {
+        let b = bytes[i];
+        // Detect line endings: \r\n, \r, \n, \x0b, \x0c, \x1c, \x1d, \x1e, \x85,  ,
+        let eol_len: usize;
+        let is_eol = match b {
+            b'\n' | b'\x0b' | b'\x0c' | b'\x1c' | b'\x1d' | b'\x1e' => {
+                eol_len = 1;
+                true
+            }
+            b'\r' => {
+                if i + 1 < len && bytes[i + 1] == b'\n' {
+                    eol_len = 2;
+                } else {
+                    eol_len = 1;
+                }
+                true
+            }
+            0xC2 if i + 1 < len && bytes[i + 1] == 0x85 => {
+                // U+0085 NEXT LINE encoded as UTF-8: 0xC2 0x85
+                eol_len = 2;
+                true
+            }
+            0xE2 if i + 2 < len
+                && bytes[i + 1] == 0x80
+                && (bytes[i + 2] == 0xA8 || bytes[i + 2] == 0xA9) =>
+            {
+                // U+2028 LINE SEPARATOR / U+2029 PARAGRAPH SEPARATOR: 0xE2 0x80 0xA8/0xA9
+                eol_len = 3;
+                true
+            }
+            _ => {
+                eol_len = 0;
+                false
+            }
+        };
+        if is_eol {
+            let end = if keepends { i + eol_len } else { i };
+            lines.push(Value::string(&s[start..end]));
+            i += eol_len;
+            start = i;
+        } else {
+            i += 1;
+        }
+    }
+    // Trailing non-empty segment (no trailing newline)
+    if start < len {
+        lines.push(Value::string(&s[start..]));
+    }
+    Ok(Value::list(lines))
+}
+
+fn str_removeprefix(s: &str, args: &[Value]) -> Result<Value> {
+    let prefix = str_require_str_arg(args, "removeprefix")?;
+    if s.starts_with(prefix) {
+        Ok(Value::string(&s[prefix.len()..]))
+    } else {
+        Ok(Value::string(s))
+    }
+}
+
+fn str_removesuffix(s: &str, args: &[Value]) -> Result<Value> {
+    let suffix = str_require_str_arg(args, "removesuffix")?;
+    if s.ends_with(suffix) {
+        Ok(Value::string(&s[..s.len() - suffix.len()]))
+    } else {
+        Ok(Value::string(s))
+    }
+}
+
+fn swapcase(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_uppercase() {
+            out.extend(c.to_lowercase());
+        } else if c.is_lowercase() {
+            out.extend(c.to_uppercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn titlecase(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_cased = false;
+    for c in s.chars() {
+        if c.is_alphabetic() {
+            if prev_cased {
+                out.extend(c.to_lowercase());
+            } else {
+                out.extend(c.to_uppercase());
+            }
+            prev_cased = true;
+        } else {
+            out.push(c);
+            prev_cased = false;
+        }
+    }
+    out
+}
+
+fn str_islower(s: &str) -> bool {
+    let mut has_cased = false;
+    for c in s.chars() {
+        if c.is_uppercase() {
+            return false;
+        }
+        if c.is_lowercase() {
+            has_cased = true;
+        }
+    }
+    has_cased
+}
+
+fn str_isupper(s: &str) -> bool {
+    let mut has_cased = false;
+    for c in s.chars() {
+        if c.is_lowercase() {
+            return false;
+        }
+        if c.is_uppercase() {
+            has_cased = true;
+        }
+    }
+    has_cased
+}
+
+fn str_istitle(s: &str) -> bool {
+    let mut prev_cased = false;
+    let mut has_cased = false;
+    for c in s.chars() {
+        if c.is_uppercase() {
+            if prev_cased {
+                return false; // uppercase after cased (must follow non-cased)
+            }
+            prev_cased = true;
+            has_cased = true;
+        } else if c.is_lowercase() {
+            if !prev_cased {
+                return false; // lowercase after non-cased
+            }
+            prev_cased = true;
+            has_cased = true;
+        } else {
+            prev_cased = false;
+        }
+    }
+    has_cased
+}
+
+fn str_isidentifier(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let mut chars = s.chars();
+    let first = chars.next().unwrap();
+    if !first.is_alphabetic() && first != '_' {
+        return false;
+    }
+    chars.all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// Python's str.isnumeric(): includes Nd (decimal), No (other number like fractions,
+/// superscript), and Nl (letter number). For ASCII this is the same as isdigit.
+fn is_python_numeric(c: char) -> bool {
+    matches!(
+        c.general_category(),
+        GeneralCategory::DecimalNumber
+            | GeneralCategory::OtherNumber
+            | GeneralCategory::LetterNumber
+    )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 /// Python's str.isdigit(): Unicode Nd (DecimalNumber) category plus superscript/subscript digits.
 fn is_python_digit(c: char) -> bool {
