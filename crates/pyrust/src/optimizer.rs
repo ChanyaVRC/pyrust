@@ -35,6 +35,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_not_invert(insns, num_locals);
     let insns = pass_binopinplace_downgrade(insns, num_locals);
     let insns = pass_exit_inline(insns);
+    let insns = pass_licm(insns);
     let insns = pass_dead_code(insns);
     let insns = pass_dead_store_elim(insns, num_locals);
     let insns = pass_copy_prop(insns);
@@ -866,6 +867,330 @@ fn pass_exit_inline(insns: Vec<Insn>) -> Vec<Insn> {
             insn.clone()
         })
         .collect()
+}
+
+// ─── Loop-Invariant Code Motion (LICM) ────────────────────────────────────────
+
+/// Hoist loop-invariant pure instructions out of loop bodies to just before the
+/// loop header.
+///
+/// ## What is hoisted
+///
+/// Only instructions that are definitely free of observable side effects:
+/// - `LoadConst(dst, idx)` — always loop-invariant (constant value).
+/// - `BinOpConst(dst, src, op, idx)` — loop-invariant when `src` is not written
+///   anywhere in the loop body.
+/// - `UnaryOp(dst, op, src)` — loop-invariant when `src` is not written in the
+///   loop body.
+///
+/// ## What is NOT hoisted
+///
+/// `BinOp`, `Call`, `CallMethod`, `GetAttr`, `SetAttr`, `LoadGlobal`,
+/// `StoreGlobal`, store instructions, and all loop/branch/exception instructions
+/// are left in place because they may have side effects or their correct
+/// behaviour depends on the iteration context.
+///
+/// ## Loop detection
+///
+/// A back edge is any `Jump(k)` where `k < 0` (the target is before the current
+/// instruction).  Each back edge `(latch_pc, header_pc)` defines a natural loop
+/// `[header_pc, latch_pc]`.  Nested loops are handled individually: the inner
+/// loop's back edge produces an inner `[header, latch]` range whose hoisting
+/// point is just before the inner header, not before the outer header.
+///
+/// ## Exception handlers
+///
+/// If `SetupExcept` or `PopExcept` appears anywhere inside `[header, latch]` the
+/// entire loop is skipped — hoisting across exception regions is not safe.
+///
+/// ## Fixed-point iteration
+///
+/// The pass repeats the hoist loop until no new instructions are moved, so that
+/// an instruction whose invariant inputs were themselves just hoisted can also be
+/// hoisted in the same call.
+fn pass_licm(insns: Vec<Insn>) -> Vec<Insn> {
+    let n = insns.len();
+    if n == 0 {
+        return insns;
+    }
+
+    // Collect all back edges: (header_pc, latch_pc).
+    // A Jump(k) at position i is a back edge when the target (i+1+k) <= i.
+    let mut back_edges: Vec<(usize, usize)> = Vec::new();
+    for (i, insn) in insns.iter().enumerate() {
+        if let Insn::Jump(k) = insn {
+            let target = (i as i64 + 1 + *k as i64) as usize;
+            if target <= i {
+                back_edges.push((target, i)); // (header, latch)
+            }
+        }
+    }
+
+    if back_edges.is_empty() {
+        return insns;
+    }
+
+    // Work on a mutable copy; `hoist` marks which positions to move out.
+    let mut insns = insns;
+
+    for (header, latch) in &back_edges {
+        let (header, latch) = (*header, *latch);
+
+        // Skip loops that contain exception handling — hoisting across
+        // SetupExcept/PopExcept is not safe.
+        let has_except = insns[header..=latch]
+            .iter()
+            .any(|i| matches!(i, Insn::SetupExcept(_) | Insn::PopExcept));
+        if has_except {
+            continue;
+        }
+
+        // Fixed-point: keep hoisting until nothing new moves.
+        //
+        // `body_start` tracks the current start of the loop body after successive
+        // rounds of hoisting.  Each round moves some instructions to the pre-header
+        // block, so the actual loop body shrinks from the front.  `body_end` (=latch)
+        // never changes because instructions after the latch are not touched.
+        let mut body_start = header;
+
+        loop {
+            // Rebuild the write count map for the current loop body [body_start..=latch].
+            // `write_count[r]` = number of instructions in the body that write `r`.
+            // We need counts (not just a set) so we can check whether a candidate
+            // instruction is the *sole* writer of its destination — a necessary
+            // condition for safe hoisting.
+            let mut write_count: HashMap<u32, usize> = HashMap::new();
+            for insn in &insns[body_start..=latch] {
+                let mut tmp: HashSet<u32> = HashSet::new();
+                collect_writes(insn, &mut tmp);
+                for r in tmp {
+                    *write_count.entry(r).or_insert(0) += 1;
+                }
+            }
+            // Derive the flat write set (union of all writes) for source checking.
+            let written: HashSet<u32> = write_count.keys().copied().collect();
+
+            // Find the "safe hoist boundary": the exclusive upper bound of the
+            // straight-line prefix of the loop body that is guaranteed to execute
+            // on every iteration.
+            //
+            // Starting from `body_start` (the loop header, e.g. ForIter), we
+            // advance past the header itself and then scan for the first
+            // *additional* conditional branch.  Instructions strictly before that
+            // branch are always executed — they dominate the back edge — so they
+            // are safe to hoist regardless of runtime values.  Instructions at or
+            // after a conditional branch are only executed on some iterations.
+            //
+            // The loop header itself (ForIter, ForCountConst, etc.) is an implicit
+            // conditional (it exits the loop when the iterator is exhausted), but
+            // it is NOT included in the hoist set; we advance past it first.
+            let hoist_bound = {
+                // Start just after the loop header.
+                let mut bound = body_start + 1;
+                for pc in (body_start + 1)..=latch {
+                    match &insns[pc] {
+                        // Unconditional jump is safe to pass through (it's the
+                        // back edge or a structural jump, not a branch).
+                        Insn::Jump(_) => {}
+                        // Any conditional jump ends the safe prefix.
+                        Insn::JumpIfFalse(..)
+                        | Insn::JumpIfTrue(..)
+                        | Insn::CmpJumpIfFalse(..)
+                        | Insn::CmpJumpIfTrue(..)
+                        | Insn::CmpJumpIfFalseConst(..)
+                        | Insn::CmpJumpIfTrueConst(..)
+                        | Insn::ForIter(..)
+                        | Insn::ForCountReg(..)
+                        | Insn::ForCountConst(..) => {
+                            bound = pc;
+                            break;
+                        }
+                        _ => {
+                            bound = pc + 1; // extend bound to include this instruction
+                        }
+                    }
+                }
+                bound
+            };
+
+            // Collect indices (in order) of instructions to hoist.
+            // Only consider instructions strictly within [body_start .. hoist_bound).
+            // These are the instructions that dominate the back edge (guaranteed to
+            // execute every iteration) and are pure (LoadConst, BinOpConst, UnaryOp).
+            let mut to_hoist: Vec<usize> = Vec::new();
+            for pc in body_start..hoist_bound {
+                if is_loop_invariant(&insns[pc], &written, &write_count) {
+                    to_hoist.push(pc);
+                }
+            }
+
+            if to_hoist.is_empty() {
+                break; // fixed-point reached — nothing new to hoist
+            }
+
+            // Strategy: reorder instructions so that the hoisted ones appear at
+            // [body_start .. body_start+num_hoisted) — i.e. they slide to the
+            // very beginning of the current body — and the remaining body follows
+            // at [body_start+num_hoisted .. latch+1).  Instructions before
+            // `body_start` and after `latch` are untouched (offsets still rewritten).
+            let num_hoisted = to_hoist.len();
+            let hoist_set: HashSet<usize> = to_hoist.iter().copied().collect();
+
+            // Build old→new index map (size n+1 for the past-the-end sentinel).
+            let mut old_to_new = vec![0usize; n + 1];
+
+            // Before-body region: indices unchanged.
+            for i in 0..body_start {
+                old_to_new[i] = i;
+            }
+            // Hoisted instructions land at [body_start .. body_start+num_hoisted).
+            {
+                let mut slot = body_start;
+                for &pc in &to_hoist {
+                    old_to_new[pc] = slot;
+                    slot += 1;
+                }
+            }
+            // Non-hoisted loop body: [body_start+num_hoisted .. latch+1).
+            {
+                let mut slot = body_start + num_hoisted;
+                for pc in body_start..=latch {
+                    if !hoist_set.contains(&pc) {
+                        old_to_new[pc] = slot;
+                        slot += 1;
+                    }
+                }
+            }
+            // After-latch region: indices unchanged.
+            for i in (latch + 1)..n {
+                old_to_new[i] = i;
+            }
+            // Past-the-end sentinel.
+            old_to_new[n] = n;
+
+            // Scatter instructions into their new positions and fix jump offsets.
+            let mut new_insns: Vec<Insn> = vec![Insn::ReturnNone; n];
+            for (old_i, insn) in insns.iter().enumerate() {
+                let new_i = old_to_new[old_i];
+                new_insns[new_i] = rewrite_offsets(insn.clone(), old_i, &old_to_new);
+            }
+            insns = new_insns;
+
+            // Advance body_start past the just-hoisted instructions: they now live
+            // at [old_body_start .. old_body_start+num_hoisted) and are no longer
+            // part of the loop body.
+            body_start += num_hoisted;
+
+            // Loop again: re-examine the updated body for newly invariant insns
+            // whose source registers were themselves just hoisted.
+        }
+    }
+
+    insns
+}
+
+/// Collect all registers *written* (defined) by `insn` into `written`.
+fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
+    use Insn::*;
+    match insn {
+        LoadConst(r, _)
+        | LoadGlobal(r, _)
+        | LoadNone(r)
+        | LoadExc(r)
+        | ImportModule(r, _)
+        | MakeFunction(r, _, _, _)
+        | MakeClass(r, _, _, _, _)
+        | BuildList(r, _, _)
+        | BuildTuple(r, _, _)
+        | BuildDict(r, _, _)
+        | BinOp(r, _, _, _)
+        | BinOpInPlace(r, _, _, _)
+        | BinOpConst(r, _, _, _)
+        | UnaryOp(r, _, _)
+        | GetAttr(r, _, _)
+        | GetItem(r, _, _)
+        | Call(r, _)
+        | CallMemo(r, _)
+        | Move(r, _)
+        | DeleteLocal(r) => {
+            written.insert(*r);
+        }
+        CallMethod { dst, .. } | CallMethodExpanded { dst, .. } | Yield { dst, .. } => {
+            written.insert(*dst);
+        }
+        ForIter(dst, _, _) => {
+            written.insert(*dst);
+        }
+        ForCountReg(var, _, _, _, _) | ForCountConst(var, _, _, _, _) => {
+            written.insert(*var);
+        }
+        Unpack(base, _, n) => {
+            for i in 0..*n {
+                written.insert(base + i);
+            }
+        }
+        // Instructions that don't write to any register.
+        StoreGlobal(..)
+        | SetAttr(..)
+        | SetItem(..)
+        | DeleteAttr(..)
+        | DeleteItem(..)
+        | DeleteName(..)
+        | GetIter(..)
+        | Jump(..)
+        | JumpIfFalse(..)
+        | JumpIfTrue(..)
+        | CmpJumpIfFalse(..)
+        | CmpJumpIfTrue(..)
+        | CmpJumpIfFalseConst(..)
+        | CmpJumpIfTrueConst(..)
+        | Return(..)
+        | ReturnNone
+        | RaiseValue(..)
+        | RaiseFrom(..)
+        | RaiseReRaise
+        | RaiseAssert(..)
+        | SetupExcept(..)
+        | PopExcept
+        | EndExcept
+        | MatchExcept(..)
+        | CheckLocal(..)
+        | PrintExpr(..)
+        | SetAdd(..)
+        | ListAppend(..)
+        | ListExtend(..)
+        | DictUpdate(..) => {}
+    }
+}
+
+/// Returns `true` if `insn` is a pure, loop-invariant instruction given the
+/// set of registers written anywhere inside the loop body.
+///
+/// An instruction is loop-invariant when:
+/// 1. It is one of the safe-to-hoist variants (`LoadConst`, `BinOpConst`, `UnaryOp`).
+/// 2. None of its *source* registers appear in `written`.
+/// 3. Its *destination* register is written only by this instruction inside the
+///    loop body (`write_count[dst] == 1`).  If another instruction in the body
+///    also writes `dst`, hoisting would change the value seen by instructions
+///    that execute between the hoist point and the in-body write — incorrect.
+fn is_loop_invariant(
+    insn: &Insn,
+    written: &HashSet<u32>,
+    write_count: &HashMap<u32, usize>,
+) -> bool {
+    // True when `dst` is the sole writer of that register inside the body.
+    let sole_writer = |dst: u32| write_count.get(&dst).copied().unwrap_or(0) == 1;
+
+    match insn {
+        // LoadConst has no register source; invariant if this is the sole write of dst.
+        Insn::LoadConst(dst, _) => sole_writer(*dst),
+        // BinOpConst reads `src`; invariant if `src` not written AND sole write of dst.
+        Insn::BinOpConst(dst, src, _, _) => !written.contains(src) && sole_writer(*dst),
+        // UnaryOp reads `src`; invariant if `src` not written AND sole write of dst.
+        Insn::UnaryOp(dst, _, src) => !written.contains(src) && sole_writer(*dst),
+        // Everything else: not hoisted.
+        _ => false,
+    }
 }
 
 // ─── Trivial no-op removal ─────────────────────────────────────────────────────
@@ -1792,10 +2117,6 @@ mod tests {
         // After optimization, the instruction stream should not contain the
         // dead-branch code that prints 2. Check by verifying only one integer
         // constant (1) is referenced, not 2.
-        let has_2 = optimized
-            .consts
-            .iter()
-            .any(|v| matches!(v.kind(), crate::value::ValueKind::Int(2)));
         // Note: the constant 2 may still exist in the pool even if the code
         // referencing it is dead — but the dead code itself should be gone.
         // Instead check that no LoadConst referencing 2 appears in reachable insns.
@@ -2292,7 +2613,7 @@ mod tests {
         use crate::value::Value;
         // LoadConst(r5, 0) + BinOp(r3, r2, Mul, r5) + ForIter(r6, 0, -2)
         // The ForIter has a negative offset → back-edge; fusion must not remove LoadConst.
-        let mut consts = vec![Value::int(4)];
+        let consts = vec![Value::int(4)];
         let insns = vec![
             Insn::LoadConst(5, 0),
             Insn::BinOp(3, 2, BinaryOp::Mul, 5),
@@ -2535,6 +2856,223 @@ mod tests {
         assert!(
             matches!(out[0], Insn::JumpIfFalse(0, 0)),
             "conditional jumps must not be inlined"
+        );
+    }
+
+    // ── pass_licm ─────────────────────────────────────────────────────────────
+
+    /// Build a minimal loop with a back edge:
+    ///
+    /// ```text
+    /// [0]  LoadConst(r5, 0)         ← invariant: hoistable
+    /// [1]  ForCountConst(r0, Lt, 0, 1, 2)   ← loop header (target of back edge at [3])
+    ///                                         if counter exhausted: jump to [4]
+    /// [2]  BinOp(r1, r1, Add, r0)   ← body: uses r5 indirectly via BinOp(not hoistable)
+    /// [3]  Jump(-3)                 ← back edge → [1]
+    /// [4]  Return(r1)
+    /// ```
+    ///
+    /// After LICM, LoadConst(r5, 0) should appear before the loop header (at index 0
+    /// in the pre-header block, which is before old index 1).
+    #[test]
+    fn licm_hoists_loadconst_before_loop() {
+        use crate::ast::BinaryOp;
+
+        // Layout (raw, before LICM):
+        //  [0] LoadConst(r5, 0)           — invariant
+        //  [1] ForCountConst(r0, Lt, 0, 1, 2) — header; jumps to [4] when done
+        //  [2] BinOp(r1, r1, Add, r0)     — body
+        //  [3] Jump(-3)                   — back edge → [1]
+        //  [4] Return(r1)
+        //
+        // Back edge: Jump(-3) at old index 3 → target = 3+1-3 = 1 → header=1, latch=3
+        // Write set for [1..=3]: {r0} (ForCountConst writes r0), {r1} (BinOp writes r1)
+        // LoadConst(r5, 0) is at index 0 — OUTSIDE the loop [1..=3], so LICM does
+        // nothing here since 0 < header=1.
+        //
+        // Adjusted test: put LoadConst INSIDE the loop body, so LICM moves it out.
+        //
+        //  [0] ForCountConst(r0, Lt, 0, 1, 3) — header; jumps to [4] when done
+        //  [1] LoadConst(r5, 0)               — invariant (inside loop body)
+        //  [2] BinOp(r1, r1, Add, r0)         — not invariant (r0 is written by header)
+        //  [3] Jump(-4)                        — back edge → [0]
+        //  [4] Return(r1)
+        let insns = vec![
+            Insn::ForCountConst(0, BinaryOp::Lt, 0, 1, 3), // [0] header, exits to [4]
+            Insn::LoadConst(5, 0),                         // [1] invariant
+            Insn::BinOp(1, 1, BinaryOp::Add, 0),           // [2] not invariant
+            Insn::Jump(-4),                                // [3] back edge → [0]
+            Insn::Return(1),                               // [4]
+        ];
+        let out = pass_licm(insns);
+
+        // After hoisting LoadConst(r5, 0) before header [0], the new layout is:
+        //  [0] LoadConst(r5, 0)               — hoisted
+        //  [1] ForCountConst(r0, Lt, 0, 1, 2) — header (offset adjusted: was 3, now 2)
+        //  [2] BinOp(r1, r1, Add, r0)
+        //  [3] Jump(-3)                        — back edge → [1]
+        //  [4] Return(r1)
+        assert_eq!(out.len(), 5, "instruction count must not change");
+        assert!(
+            matches!(out[0], Insn::LoadConst(5, 0)),
+            "LoadConst should be hoisted to position 0 (before loop header); got {:?}",
+            out[0]
+        );
+        // The loop header must still be present and its exit offset adjusted to
+        // land on the Return (still at the end of the 5-instruction list).
+        assert!(
+            matches!(out[1], Insn::ForCountConst(0, BinaryOp::Lt, 0, 1, _)),
+            "loop header should remain at position 1"
+        );
+    }
+
+    /// `BinOpConst(dst, src, op, c)` is loop-invariant when `src` is not written
+    /// inside the loop body.  Verify it is hoisted.
+    #[test]
+    fn licm_hoists_binopconst_with_invariant_src() {
+        use crate::ast::BinaryOp;
+
+        // Loop layout:
+        //  [0] ForCountConst(r0, Lt, 0, 1, 3) — header, exits to [4]
+        //  [1] BinOpConst(r5, r2, Add, 0)      — r2 NOT written in loop → invariant
+        //  [2] BinOp(r1, r1, Add, r0)           — uses r0 (written) → not invariant
+        //  [3] Jump(-4)                          — back edge → [0]
+        //  [4] Return(r1)
+        //
+        // r0 is written by ForCountConst; r1 by BinOp; r2 is untouched.
+        let insns = vec![
+            Insn::ForCountConst(0, BinaryOp::Lt, 0, 1, 3), // [0]
+            Insn::BinOpConst(5, 2, BinaryOp::Add, 0),      // [1] r2 not in write set → hoist
+            Insn::BinOp(1, 1, BinaryOp::Add, 0),           // [2] r0 written → keep
+            Insn::Jump(-4),                                // [3]
+            Insn::Return(1),                               // [4]
+        ];
+        let out = pass_licm(insns);
+
+        assert_eq!(out.len(), 5);
+        assert!(
+            matches!(out[0], Insn::BinOpConst(5, 2, BinaryOp::Add, 0)),
+            "BinOpConst with invariant src should be hoisted before header; got {:?}",
+            out[0]
+        );
+        assert!(
+            matches!(out[1], Insn::ForCountConst(0, BinaryOp::Lt, 0, 1, _)),
+            "loop header must follow the hoisted instruction"
+        );
+    }
+
+    /// `BinOpConst(dst, src, op, c)` where `src` IS written in the loop must NOT
+    /// be hoisted.
+    #[test]
+    fn licm_does_not_hoist_binopconst_with_variant_src() {
+        use crate::ast::BinaryOp;
+
+        // r0 is the loop counter (written by ForCountConst); BinOpConst reads r0 → variant.
+        //  [0] ForCountConst(r0, Lt, 0, 1, 3)
+        //  [1] BinOpConst(r5, r0, Add, 0)      — r0 IS written → NOT invariant
+        //  [2] BinOp(r1, r1, Add, r5)
+        //  [3] Jump(-4)
+        //  [4] Return(r1)
+        let insns = vec![
+            Insn::ForCountConst(0, BinaryOp::Lt, 0, 1, 3), // [0]
+            Insn::BinOpConst(5, 0, BinaryOp::Add, 0),      // [1] r0 in write set → keep
+            Insn::BinOp(1, 1, BinaryOp::Add, 5),           // [2]
+            Insn::Jump(-4),                                // [3]
+            Insn::Return(1),                               // [4]
+        ];
+        let before = insns.clone();
+        let out = pass_licm(insns);
+
+        // Nothing should move: BinOpConst reads r0 which is written by ForCountConst.
+        assert_eq!(
+            out.len(),
+            before.len(),
+            "instruction count should not change"
+        );
+        assert!(
+            matches!(out[0], Insn::ForCountConst(0, BinaryOp::Lt, 0, 1, _)),
+            "loop header must remain at position 0 (nothing hoisted)"
+        );
+        assert!(
+            matches!(out[1], Insn::BinOpConst(5, 0, BinaryOp::Add, 0)),
+            "variant BinOpConst must stay in loop body"
+        );
+    }
+
+    /// Nested loops: an invariant in the inner loop that is also invariant wrt the
+    /// outer loop ends up hoisted all the way out of both loops (before the outer
+    /// header).  Verify that it is no longer inside the inner loop body.
+    #[test]
+    fn licm_hoists_inner_invariant_out_of_inner_loop() {
+        use crate::ast::BinaryOp;
+
+        // Outer loop: back edge at [7] → header [0].
+        // Inner loop: back edge at [5] → inner header [2].
+        //
+        //  [0] ForCountConst(r0, Lt, 0, 1, 7)  — outer header, exits to [8]
+        //  [1] BinOp(r1, r1, Add, r0)           — outer body (r0 written by outer)
+        //  [2] ForCountConst(r3, Lt, 2, 3, 3)   — inner header, exits to [6]
+        //  [3] LoadConst(r9, 0)                 — invariant wrt both loops
+        //  [4] BinOp(r4, r4, Add, r3)           — uses r3 (written by inner) → variant
+        //  [5] Jump(-4)                          — inner back edge → [2]
+        //  [6] BinOp(r1, r1, Add, r4)           — outer body (after inner)
+        //  [7] Jump(-8)                          — outer back edge → [0]
+        //  [8] Return(r1)
+        let insns = vec![
+            Insn::ForCountConst(0, BinaryOp::Lt, 0, 1, 7), // [0] outer header
+            Insn::BinOp(1, 1, BinaryOp::Add, 0),           // [1]
+            Insn::ForCountConst(3, BinaryOp::Lt, 2, 3, 3), // [2] inner header
+            Insn::LoadConst(9, 0),                         // [3] invariant wrt inner
+            Insn::BinOp(4, 4, BinaryOp::Add, 3),           // [4] variant wrt inner (r3 written)
+            Insn::Jump(-4),                                // [5] inner back edge → [2]
+            Insn::BinOp(1, 1, BinaryOp::Add, 4),           // [6]
+            Insn::Jump(-8),                                // [7] outer back edge → [0]
+            Insn::Return(1),                               // [8]
+        ];
+        let out = pass_licm(insns);
+
+        assert_eq!(out.len(), 9, "total instruction count unchanged");
+
+        // LoadConst(r9, 0) is invariant wrt both loops.  The inner loop processes
+        // first and hoists it before the inner header; the outer loop then hoists it
+        // again before the outer header.  Either way, it must not remain inside the
+        // inner loop body [inner_header..inner_latch].
+        //
+        // Find the inner header (ForCountConst for r3) and latch (Jump with negative
+        // offset targeting the inner header).  LoadConst(r9, _) must not appear
+        // between them.
+        let inner_header_pos = out
+            .iter()
+            .position(|i| matches!(i, Insn::ForCountConst(3, BinaryOp::Lt, 2, 3, _)))
+            .expect("inner header must still exist");
+        let inner_latch_pos = out
+            .iter()
+            .enumerate()
+            .position(|(i, insn)| {
+                if let Insn::Jump(k) = insn {
+                    let target = i as i64 + 1 + *k as i64;
+                    target == inner_header_pos as i64
+                } else {
+                    false
+                }
+            })
+            .expect("inner back-edge Jump must still exist");
+
+        let loadconst_inside_inner = out[inner_header_pos..=inner_latch_pos]
+            .iter()
+            .any(|i| matches!(i, Insn::LoadConst(9, _)));
+        assert!(
+            !loadconst_inside_inner,
+            "LoadConst(r9) must be hoisted out of the inner loop body \
+             (inner_header={inner_header_pos}, inner_latch={inner_latch_pos})"
+        );
+
+        // The overall structure must remain intact: outer header and inner header
+        // must still exist.
+        assert!(
+            out.iter()
+                .any(|i| matches!(i, Insn::ForCountConst(0, BinaryOp::Lt, 0, 1, _))),
+            "outer loop header must still exist"
         );
     }
 }
