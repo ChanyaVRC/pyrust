@@ -34,6 +34,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_not_invert(insns, num_locals);
     let insns = pass_binopinplace_downgrade(insns, num_locals);
     let insns = pass_dead_code(insns);
+    let insns = pass_copy_prop(insns);
     let insns = pass_trivial_nop(insns);
     let (insns, consts) = pass_compact_consts(insns, consts);
 
@@ -344,6 +345,8 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         LoadGlobal(r, _)
         | LoadNone(r)
         | DeleteLocal(r)
+        | BinOp(r, _, _, _)
+        | BinOpConst(r, _, _, _)
         | BinOpInPlace(r, _, _, _)
         | UnaryOp(r, _, _)
         | GetAttr(r, _, _)
@@ -804,6 +807,155 @@ fn pass_not_invert(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
 }
 
 // ─── Trivial no-op removal ─────────────────────────────────────────────────────
+
+// ─── Copy propagation ─────────────────────────────────────────────────────────
+
+/// Eliminate `Move(dst, src)` instructions by substituting `src` for all reads
+/// of `dst` within the same basic block.
+///
+/// Algorithm (forward dataflow within basic blocks):
+/// 1. Maintain a `copies` map: `dst → canonical_src`.
+/// 2. At each jump target (instruction reachable from >1 predecessor), clear
+///    `copies` — we cannot guarantee what was in `src` on all incoming paths.
+/// 3. For each instruction: substitute reads of any key in `copies` with the
+///    canonical source, kill entries whose key or value is overwritten, and
+///    record new `Move(dst, src)` pairs.
+///
+/// After substitution, `Move(r, r)` becomes trivial and is removed by the
+/// subsequent `pass_trivial_nop`.
+///
+/// Reference: GCC `-ftree-copy-prop`; Shi/Gregg/Beatty/Ertl *VEE'05*.
+fn pass_copy_prop(insns: Vec<Insn>) -> Vec<Insn> {
+    use std::collections::HashMap;
+
+    let n = insns.len();
+    if n == 0 {
+        return insns;
+    }
+
+    // Step 1: mark all jump target indices so we can reset copies there.
+    let mut is_target = vec![false; n + 1];
+    is_target[0] = true; // entry point is always a target
+    for (i, insn) in insns.iter().enumerate() {
+        let offset: Option<i32> = match insn {
+            Insn::Jump(k)
+            | Insn::JumpIfFalse(_, k)
+            | Insn::JumpIfTrue(_, k)
+            | Insn::ForIter(_, _, k)
+            | Insn::ForCountReg(_, _, _, _, k)
+            | Insn::ForCountConst(_, _, _, _, k)
+            | Insn::CmpJumpIfFalse(_, _, _, k)
+            | Insn::CmpJumpIfTrue(_, _, _, k)
+            | Insn::CmpJumpIfFalseConst(_, _, _, k)
+            | Insn::CmpJumpIfTrueConst(_, _, _, k)
+            | Insn::SetupExcept(k)
+            | Insn::MatchExcept(_, k) => Some(*k),
+            _ => None,
+        };
+        if let Some(k) = offset {
+            let target = (i as i64 + 1 + k as i64) as usize;
+            if target <= n {
+                is_target[target] = true;
+            }
+        }
+    }
+
+    // Step 2: forward pass.
+    let s = |copies: &HashMap<u32, u32>, r: u32| -> u32 { *copies.get(&r).unwrap_or(&r) };
+
+    let mut copies: HashMap<u32, u32> = HashMap::new();
+    let mut result: Vec<Insn> = Vec::with_capacity(n);
+
+    for (i, insn) in insns.into_iter().enumerate() {
+        if is_target[i] {
+            copies.clear();
+        }
+
+        // Substitute source registers and collect the (possibly modified) instruction.
+        let insn = match insn {
+            Insn::Move(dst, src) => Insn::Move(dst, s(&copies, src)),
+            Insn::Return(src) => Insn::Return(s(&copies, src)),
+            Insn::PrintExpr(v) => Insn::PrintExpr(s(&copies, v)),
+            Insn::RaiseValue(v) => Insn::RaiseValue(s(&copies, v)),
+            Insn::RaiseAssert(v) => Insn::RaiseAssert(s(&copies, v)),
+            Insn::RaiseFrom(exc, cause) => Insn::RaiseFrom(s(&copies, exc), s(&copies, cause)),
+            Insn::JumpIfFalse(cond, k) => Insn::JumpIfFalse(s(&copies, cond), k),
+            Insn::JumpIfTrue(cond, k) => Insn::JumpIfTrue(s(&copies, cond), k),
+            Insn::UnaryOp(dst, op, src) => Insn::UnaryOp(dst, op, s(&copies, src)),
+            Insn::BinOp(dst, lhs, op, rhs) => {
+                Insn::BinOp(dst, s(&copies, lhs), op, s(&copies, rhs))
+            }
+            Insn::BinOpInPlace(dst, lhs, op, rhs) => {
+                Insn::BinOpInPlace(dst, s(&copies, lhs), op, s(&copies, rhs))
+            }
+            Insn::BinOpConst(dst, lhs, op, c) => Insn::BinOpConst(dst, s(&copies, lhs), op, c),
+            Insn::CmpJumpIfFalse(lhs, op, rhs, k) => {
+                Insn::CmpJumpIfFalse(s(&copies, lhs), op, s(&copies, rhs), k)
+            }
+            Insn::CmpJumpIfTrue(lhs, op, rhs, k) => {
+                Insn::CmpJumpIfTrue(s(&copies, lhs), op, s(&copies, rhs), k)
+            }
+            Insn::CmpJumpIfFalseConst(lhs, op, c, k) => {
+                Insn::CmpJumpIfFalseConst(s(&copies, lhs), op, c, k)
+            }
+            Insn::CmpJumpIfTrueConst(lhs, op, c, k) => {
+                Insn::CmpJumpIfTrueConst(s(&copies, lhs), op, c, k)
+            }
+            // In-place mutation instructions: substitute only the VALUE arg, not the
+            // container/receiver — substituting the receiver would redirect the
+            // mutation to the original allocation (copy propagation is only valid for
+            // reads; deep-copied containers are independent allocations).
+            Insn::ListAppend(lst, val) => Insn::ListAppend(lst, s(&copies, val)),
+            Insn::ListExtend(lst, src) => Insn::ListExtend(lst, s(&copies, src)),
+            Insn::DictUpdate(dct, other) => Insn::DictUpdate(dct, s(&copies, other)),
+            Insn::SetAttr(obj, n, val) => Insn::SetAttr(obj, n, s(&copies, val)),
+            Insn::DeleteAttr(obj, n) => Insn::DeleteAttr(obj, n),
+            Insn::SetItem(obj, idx, val) => Insn::SetItem(obj, s(&copies, idx), s(&copies, val)),
+            Insn::DeleteItem(obj, idx) => Insn::DeleteItem(obj, s(&copies, idx)),
+            Insn::GetAttr(dst, obj, n) => Insn::GetAttr(dst, s(&copies, obj), n),
+            Insn::GetItem(dst, obj, idx) => Insn::GetItem(dst, s(&copies, obj), s(&copies, idx)),
+            Insn::GetIter(slot, src) => Insn::GetIter(slot, s(&copies, src)),
+            Insn::Unpack(dst, src, n) => Insn::Unpack(dst, s(&copies, src), n),
+            Insn::CheckLocal(r, n) => Insn::CheckLocal(s(&copies, r), n),
+            Insn::MatchExcept(r, k) => Insn::MatchExcept(s(&copies, r), k),
+            Insn::ForCountReg(var, op, stop, step_idx, k) => {
+                Insn::ForCountReg(var, op, s(&copies, stop), step_idx, k)
+            }
+            Insn::StoreGlobal(n, src) => Insn::StoreGlobal(n, s(&copies, src)),
+            // Call/BuildList/BuildTuple/etc. use a base register for a range of args;
+            // do not substitute the base register as that would misalign the arg block.
+            other => other,
+        };
+
+        // Kill map entries: any key or value that == dst is stale after a write.
+        if let Some(dst) = writable_dst(&insn) {
+            copies.retain(|k, v| *k != dst && *v != dst);
+        }
+        // LoadConst writes dst (not in writable_dst so handled here).
+        if let Insn::LoadConst(dst, _) = &insn {
+            copies.retain(|k, v| *k != *dst && *v != *dst);
+        }
+        // Unpack writes dst..dst+n; kill the entire range.
+        if let Insn::Unpack(dst, _, n) = &insn {
+            let lo = *dst;
+            let hi = dst + n;
+            copies.retain(|k, v| (*k < lo || *k >= hi) && (*v < lo || *v >= hi));
+        }
+        // Move(dst, src): kill stale aliases THEN record the new copy.
+        // Killing is necessary because overwriting `dst` invalidates any
+        // existing alias that names `dst` as its source (e.g. `x → dst`).
+        if let Insn::Move(dst, src) = &insn {
+            copies.retain(|k, v| *k != *dst && *v != *dst);
+            let canonical = *copies.get(src).unwrap_or(src);
+            if dst != &canonical {
+                copies.insert(*dst, canonical);
+            }
+        }
+
+        result.push(insn);
+    }
+    result
+}
 
 fn pass_trivial_nop(insns: Vec<Insn>) -> Vec<Insn> {
     let keep: Vec<bool> = insns
@@ -1954,5 +2106,73 @@ mod tests {
             "LoadConst must not be removed when a back-edge is present"
         );
         let _ = consts; // suppress unused warning
+    }
+
+    // ── pass_copy_prop ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn copy_prop_eliminates_move() {
+        use crate::ast::BinaryOp;
+        let insns = vec![
+            Insn::LoadConst(0, 0),
+            Insn::Move(1, 0),
+            Insn::BinOp(2, 1, BinaryOp::Add, 3),
+            Insn::Return(2),
+        ];
+        let out = pass_copy_prop(insns);
+        assert!(
+            matches!(out[2], Insn::BinOp(2, 0, BinaryOp::Add, 3)),
+            "r1 should be substituted with r0 in BinOp"
+        );
+    }
+
+    #[test]
+    fn copy_prop_kills_alias_on_move_overwrite() {
+        let insns = vec![
+            Insn::LoadConst(0, 0),
+            Insn::LoadConst(2, 1),
+            Insn::Move(1, 0),
+            Insn::Move(0, 2),
+            Insn::Return(1),
+        ];
+        let out = pass_copy_prop(insns);
+        assert!(
+            matches!(out[4], Insn::Return(1)),
+            "r1 alias must be killed when r0 is overwritten"
+        );
+    }
+
+    #[test]
+    fn copy_prop_kills_alias_on_binop_write() {
+        use crate::ast::BinaryOp;
+        let insns = vec![
+            Insn::LoadConst(0, 0),
+            Insn::LoadConst(2, 1),
+            Insn::Move(1, 0),
+            Insn::BinOp(0, 0, BinaryOp::Add, 2),
+            Insn::Return(1),
+        ];
+        let out = pass_copy_prop(insns);
+        assert!(
+            matches!(out[4], Insn::Return(1)),
+            "r1→r0 alias must be killed when BinOp writes r0"
+        );
+    }
+
+    #[test]
+    fn copy_prop_does_not_substitute_dict_update_receiver() {
+        let insns = vec![
+            Insn::BuildDict(2, 3, 0),
+            Insn::Move(5, 2),
+            Insn::BuildDict(4, 3, 0),
+            Insn::Move(6, 4),
+            Insn::DictUpdate(5, 6),
+            Insn::Return(5),
+        ];
+        let out = pass_copy_prop(insns);
+        assert!(
+            matches!(out[4], Insn::DictUpdate(5, 4)),
+            "DictUpdate: receiver unchanged, src substituted"
+        );
     }
 }
