@@ -1131,12 +1131,13 @@ impl Interpreter {
         for i in 0..crate::bytecode::Reg::from(nargs) {
             args.push(vm_read(regs, args_base + i, num_locals)?);
         }
-        // Check if obj is a List, Dict, Tuple, or Str via kind()
+        // Check if obj is a List, Dict, Tuple, Str, or Set via kind()
         let obj_kind_tag = regs[obj as usize].as_ref().map(|v| match v.kind() {
             ValueKind::List(_) => 1u8,
             ValueKind::Dict(_) => 2u8,
             ValueKind::Tuple(_) => 3u8,
             ValueKind::Str(_) => 4u8,
+            ValueKind::Set(_) => 5u8,
             _ => 0u8,
         }).unwrap_or(0);
 
@@ -1183,6 +1184,13 @@ impl Interpreter {
                 if let Some(v) = &regs[obj as usize] {
                     pyrust_builtins::string::call(&method, v, &args)
                 } else { unreachable!() }
+            }
+            5 => {
+                let set = regs[obj as usize]
+                    .as_mut()
+                    .and_then(|v| v.as_set_mut())
+                    .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
+                pyrust_builtins::set::call(&method, set, &args)
             }
             _ => {
                 let obj_val = vm_read(regs, obj, num_locals)?;
@@ -1231,6 +1239,7 @@ impl Interpreter {
             ValueKind::Dict(_) => 2u8,
             ValueKind::Tuple(_) => 3u8,
             ValueKind::Str(_) => 4u8,
+            ValueKind::Set(_) => 5u8,
             _ => 0u8,
         }).unwrap_or(0);
 
@@ -1322,6 +1331,13 @@ impl Interpreter {
                 if let Some(v) = &regs[obj as usize] {
                     pyrust_builtins::string::call(&method, v, &pos_items)
                 } else { unreachable!() }
+            }
+            5 => {
+                let set = regs[obj as usize]
+                    .as_mut()
+                    .and_then(|v| v.as_set_mut())
+                    .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
+                pyrust_builtins::set::call(&method, set, &pos_items)
             }
             _ => {
                 let obj_val = vm_read(regs, obj, num_locals)?;
