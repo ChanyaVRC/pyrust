@@ -200,6 +200,11 @@ impl Interpreter {
                 });
                 Ok(Value::user_function(func))
             }
+            Expr::ListComp { .. } | Expr::DictComp { .. } | Expr::SetComp { .. } => {
+                Err(PyError::Runtime(
+                    "comprehensions are only supported in compiled (bytecode) mode".to_string(),
+                ))
+            }
         }
     }
 

@@ -749,6 +749,17 @@ impl Interpreter {
                     }
                     regs[*dst as usize] = Some(Value::dict(dict));
                 }
+                Insn::SetAdd(set_reg, val_reg) => {
+                    let val = vm_try!(vm_read(regs, *val_reg, num_locals));
+                    let key = vm_try!(val.to_key().ok_or_else(|| PyError::Runtime(
+                        "unhashable type in set comprehension".to_string()
+                    )));
+                    let set = vm_try!(regs[*set_reg as usize]
+                        .as_mut()
+                        .and_then(|v| v.as_set_mut())
+                        .ok_or_else(|| PyError::Runtime("SetAdd: not a set".to_string())));
+                    set.insert(key);
+                }
                 Insn::ListAppend(list_reg, val_reg) => {
                     let val = vm_try!(vm_read(regs, *val_reg, num_locals));
                     let items = vm_try!(expect_list_mut(regs, *list_reg, "ListAppend"));

@@ -768,6 +768,16 @@ impl Value {
         })
     }
 
+    pub fn as_set_mut(&mut self) -> Option<&mut IndexSet<PyKey>> {
+        self.as_opaque_mut().and_then(|o| {
+            if let Opaque::Set(s) = o {
+                Some(s)
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn as_dict_mut(&mut self) -> Option<&mut IndexMap<PyKey, Value>> {
         self.as_opaque_mut().and_then(|o| {
             if let Opaque::Dict(rc) = o {
