@@ -173,6 +173,9 @@ pub enum Insn {
     ListExtend(Reg, Reg),
     /// R[dict].update(R[src])  — in-place dict merge
     DictUpdate(Reg, Reg),
+    /// Suspend the generator and yield R[src] to the caller.
+    /// The result of the yield expression (sent value) is placed in R[dst].
+    Yield { src: Reg, dst: Reg },
 }
 
 #[derive(Debug, Clone)]
@@ -192,4 +195,7 @@ pub struct FnCode {
     pub(crate) fn_protos: Vec<FnProto>,
     /// Variables captured by nested functions (stored in env, not registers).
     pub(crate) cell_vars: Vec<CellVar>,
+    /// True if this function body contains at least one `Yield` instruction.
+    /// The VM creates a generator object instead of executing immediately.
+    pub(crate) is_generator: bool,
 }

@@ -49,6 +49,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         num_locals,
         fn_protos,
         cell_vars: code.cell_vars,
+        is_generator: code.is_generator,
     }
 }
 
@@ -774,6 +775,9 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         MakeClass(_, _, bases_base, bases_n, _) => {
             r >= *bases_base && r < *bases_base + *bases_n as u32
         }
+
+        // Yield reads src and writes dst.
+        Yield { src, dst: _ } => *src == r,
     }
 }
 

@@ -253,6 +253,10 @@ pub enum Opaque {
         class: Rc<RefCell<PyClass>>,
         obj_class: Rc<RefCell<PyClass>>,
     },
+    /// A live generator object.  The concrete execution state (registers, pc,
+    /// iterator slots, etc.) is stored as a type-erased `Box<dyn Any>` so that
+    /// `pyrust-core` does not need to depend on `pyrust`'s bytecode types.
+    Generator(Rc<RefCell<Box<dyn std::any::Any>>>),
 }
 
 impl Clone for Opaque {
@@ -302,6 +306,7 @@ impl Clone for Opaque {
                 class: Rc::clone(class),
                 obj_class: Rc::clone(obj_class),
             },
+            Opaque::Generator(state) => Opaque::Generator(Rc::clone(state)),
         }
     }
 }
@@ -362,6 +367,7 @@ pub enum ValueKind<'a> {
         class: &'a Rc<RefCell<PyClass>>,
         obj_class: &'a Rc<RefCell<PyClass>>,
     },
+    Generator(&'a Rc<RefCell<Box<dyn std::any::Any>>>),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -687,6 +693,12 @@ impl Value {
         Value::opaque(Opaque::SuperProxyClass { class, obj_class })
     }
 
+    /// Create a generator value.  `state` is the type-erased `GeneratorFrame`
+    /// managed by the VM.
+    pub fn generator(state: Box<dyn std::any::Any>) -> Self {
+        Value::opaque(Opaque::Generator(Rc::new(RefCell::new(state))))
+    }
+
     fn opaque(o: Opaque) -> Self {
         let ptr = Box::into_raw(Box::new(o)) as u64;
         Value(TAG_OPAQUE_BITS | (ptr & PAYLOAD_MASK))
@@ -947,6 +959,7 @@ impl Value {
                 Opaque::SuperProxyClass { class, obj_class } => {
                     ValueKind::SuperProxyClass { class, obj_class }
                 }
+                Opaque::Generator(state) => ValueKind::Generator(state),
             },
             _ => unreachable!(),
         }
@@ -984,6 +997,7 @@ impl Value {
             ValueKind::ClassBoundMethod { .. } => true,
             ValueKind::SuperProxy { .. } => true,
             ValueKind::SuperProxyClass { .. } => true,
+            ValueKind::Generator(_) => true,
         }
     }
 
@@ -1109,6 +1123,7 @@ impl Value {
             ValueKind::SuperProxyClass { class, .. } => {
                 format!("<super: <class '{}'>>", class.borrow().name)
             }
+            ValueKind::Generator(_) => "<generator object>".to_string(),
         }
     }
 
@@ -1412,6 +1427,9 @@ pub enum PyError {
     /// The VM converts this to a proper PyInstance before propagating.
     Named(String, String), // (class_name, message)
     Raised(Value),
+    /// Internal: used to unwind the VM call stack when a generator yields.
+    /// Never observed outside the generator machinery.
+    GeneratorYield(Value),
 }
 
 impl fmt::Display for PyError {
@@ -1422,6 +1440,9 @@ impl fmt::Display for PyError {
             PyError::Runtime(s) => write!(f, "Runtime error: {s}"),
             PyError::Named(cls, s) => write!(f, "{cls}: {s}"),
             PyError::Raised(value) => write!(f, "Uncaught exception: {}", value.repr()),
+            PyError::GeneratorYield(value) => {
+                write!(f, "internal: generator yielded {}", value.repr())
+            }
         }
     }
 }

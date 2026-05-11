@@ -92,6 +92,7 @@ pub enum Token {
     Global,
     Nonlocal,
     Return,
+    Yield,
     Break,
     Continue,
     Pass,

@@ -1,3 +1,34 @@
+/// Heap-allocated state for a built-in iterable wrapped by `iter()`.
+/// Stored type-erased inside `Value::generator()` via `Box<dyn Any>`,
+/// the same slot used for GeneratorFrame.  resume_generator() checks
+/// which concrete type it has by downcasting.
+pub(crate) struct NativeIterFrame {
+    pub(crate) items: Vec<Value>,
+    pub(crate) pos: usize,
+}
+
+/// Heap-allocated execution state for a suspended generator.
+/// Stored type-erased inside `Value::generator()` via `Box<dyn Any>`.
+pub(crate) struct GeneratorFrame {
+    pub(crate) code: Rc<crate::bytecode::FnCode>,
+    pub(crate) regs: Vec<Option<Value>>,
+    pub(crate) iters: Vec<Option<IterState>>,
+    pub(crate) exc_handlers: Vec<usize>,
+    /// Program counter for the NEXT instruction to execute on resumption.
+    pub(crate) pc: usize,
+    pub(crate) done: bool,
+    /// The environment (closure captures) active when the generator was created.
+    pub(crate) saved_env: EnvRef,
+}
+
+// Thread-local used to pass generator suspension state back from the VM loop
+// to the resume_generator() caller without an extra return value or RefCell on
+// the hot path.  Set immediately before `return Err(GeneratorYield(...))`.
+thread_local! {
+    static GEN_SAVE: std::cell::RefCell<Option<(Vec<Option<IterState>>, Vec<usize>, usize)>>
+        = const { std::cell::RefCell::new(None) };
+}
+
 #[derive(Clone)]
 enum IterState {
     Materialized(Vec<Value>, usize),
@@ -83,13 +114,84 @@ impl Interpreter {
         code: &crate::bytecode::FnCode,
         regs: &mut [Option<Value>],
     ) -> Result<Value> {
+        self.run_bytecode_inner(
+            code,
+            regs,
+            vec![None; code.num_iters as usize],
+            Vec::new(),
+            0,
+        )
+    }
+
+    /// Resume (or initialise) a generator by executing from `frame.pc` until
+    /// the next yield or completion.  Returns:
+    /// - `Ok(val)`  — generator returned (StopIteration); frame.done = true
+    /// - `Err(GeneratorYield(val))` — generator yielded; frame updated in-place
+    /// - `Err(other)` — propagating exception
+    pub(crate) fn resume_generator(&mut self, frame: &mut GeneratorFrame) -> Result<Value> {
+        if frame.done {
+            return Err(PyError::Named(
+                "StopIteration".to_string(),
+                String::new(),
+            ));
+        }
+
+        // Swap the saved env in.
+        let previous_env = std::mem::replace(&mut self.env, Rc::clone(&frame.saved_env));
+
+        let result = self.run_bytecode_inner(
+            &frame.code.clone(),
+            &mut frame.regs,
+            std::mem::take(&mut frame.iters),
+            std::mem::take(&mut frame.exc_handlers),
+            frame.pc,
+        );
+
+        // Restore env.
+        self.env = previous_env;
+
+        match result {
+            Err(PyError::GeneratorYield(val)) => {
+                // Retrieve the saved state from the thread-local.
+                let saved = GEN_SAVE.with(|cell| cell.borrow_mut().take());
+                if let Some((saved_iters, saved_handlers, saved_pc)) = saved {
+                    frame.iters = saved_iters;
+                    frame.exc_handlers = saved_handlers;
+                    frame.pc = saved_pc;
+                } else {
+                    unreachable!("GEN_SAVE must be set before every GeneratorYield");
+                }
+                Err(PyError::GeneratorYield(val))
+            }
+            Ok(_return_val) => {
+                // Generator returned normally (fell off end or hit explicit `return`).
+                // Signal exhaustion as StopIteration so ForIter and call_next handle it uniformly.
+                frame.done = true;
+                Err(PyError::Named("StopIteration".to_string(), String::new()))
+            }
+            Err(e) => {
+                // Propagating exception or other error.
+                frame.done = true;
+                Err(e)
+            }
+        }
+    }
+
+    fn run_bytecode_inner(
+        &mut self,
+        code: &crate::bytecode::FnCode,
+        regs: &mut [Option<Value>],
+        iters_init: Vec<Option<IterState>>,
+        exc_handlers_init: Vec<usize>,
+        start_pc: usize,
+    ) -> Result<Value> {
         use crate::bytecode::Insn;
         use std::collections::HashMap;
         let num_locals = code.num_locals;
 
-        let mut iters: Vec<Option<IterState>> = vec![None; code.num_iters as usize];
-        let mut exc_handlers: Vec<usize> = Vec::new();
-        let mut pc: usize = 0;
+        let mut iters: Vec<Option<IterState>> = iters_init;
+        let mut exc_handlers: Vec<usize> = exc_handlers_init;
+        let mut pc: usize = start_pc;
 
         'vm: loop {
         // Dispatch errors through the active exception handler stack.
@@ -833,6 +935,28 @@ impl Interpreter {
                     }
                 }
 
+                // ── Generator yield ──────────────────────────────────────
+                Insn::Yield { src, dst } => {
+                    // Suspend the generator.  pc has already been incremented
+                    // past this instruction, so resumption continues at pc.
+                    let yielded = vm_try!(vm_read(regs, *src, num_locals));
+                    // Pre-fill dst with None: this is the sent value that the
+                    // yield expression evaluates to on resumption.  Proper
+                    // send() support would overwrite this in resume_generator.
+                    regs[*dst as usize] = Some(Value::none());
+                    // Save current iters/exc_handlers/pc to the thread-local
+                    // so that resume_generator() can write them back into the
+                    // GeneratorFrame after we unwind.
+                    GEN_SAVE.with(|cell| {
+                        *cell.borrow_mut() = Some((
+                            iters.clone(),
+                            exc_handlers.clone(),
+                            pc, // already past the Yield instruction
+                        ));
+                    });
+                    return Err(PyError::GeneratorYield(yielded));
+                }
+
                 // ── Unpack ───────────────────────────────────────────────
                 Insn::Unpack(base, src, n) => {
                     let src_val = vm_try!(vm_read(regs, *src, num_locals));
@@ -907,6 +1031,10 @@ impl Interpreter {
                                 let items = vm_try!(iter_values(source.clone()));
                                 let len = items.len();
                                 IterState::ReversedItems { items, pos: len }
+                            }
+                            ValueKind::Generator(_) => {
+                                // A generator is its own iterator.
+                                IterState::UserDefined(src_val)
                             }
                             ValueKind::PyInstance(inst) => {
                                 let inst_rc = Rc::clone(inst);
@@ -1014,22 +1142,56 @@ impl Interpreter {
                         Some(IterState::UserDefined(iter_obj)) => {
                             // Call __next__() on the iterator object; stop on StopIteration.
                             let iter_val = iter_obj.clone();
-                            let next_result = if let ValueKind::PyInstance(inst) = iter_val.kind() {
-                                let inst_rc = Rc::clone(inst);
-                                let class = Rc::clone(&inst_rc.borrow().class);
-                                if let Some(method_val) = lookup_class_attr(&class, "__next__") {
-                                    if let ValueKind::UserFunction(f) = method_val.kind() {
-                                        let func = Rc::clone(f);
-                                        Some(self.call_user_function_expanded(
-                                            func,
-                                            &[],
-                                            &[Value::py_instance(inst_rc)],
-                                        ))
+                            let next_result: Option<Result<Value>> =
+                                if let ValueKind::Generator(state_rc) = iter_val.kind() {
+                                    let state_rc = Rc::clone(state_rc);
+                                    let mut borrow = state_rc.borrow_mut();
+                                    if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
+                                        // Built-in iterator created by iter().
+                                        if native.pos >= native.items.len() {
+                                            Some(Err(PyError::Named(
+                                                "StopIteration".to_string(),
+                                                String::new(),
+                                            )))
+                                        } else {
+                                            let item = native.items[native.pos].clone();
+                                            native.pos += 1;
+                                            Some(Ok(item))
+                                        }
+                                    } else if let Some(frame) = borrow.downcast_mut::<GeneratorFrame>() {
+                                        // Resume the generator.
+                                        if frame.done {
+                                            Some(Err(PyError::Named(
+                                                "StopIteration".to_string(),
+                                                String::new(),
+                                            )))
+                                        } else {
+                                            Some(self.resume_generator(frame))
+                                        }
+                                    } else {
+                                        Some(Err(PyError::Runtime(
+                                            "invalid generator state".to_string(),
+                                        )))
+                                    }
+                                } else if let ValueKind::PyInstance(inst) = iter_val.kind() {
+                                    let inst_rc = Rc::clone(inst);
+                                    let class = Rc::clone(&inst_rc.borrow().class);
+                                    if let Some(method_val) = lookup_class_attr(&class, "__next__") {
+                                        if let ValueKind::UserFunction(f) = method_val.kind() {
+                                            let func = Rc::clone(f);
+                                            Some(self.call_user_function_expanded(
+                                                func,
+                                                &[],
+                                                &[Value::py_instance(inst_rc)],
+                                            ))
+                                        } else { None }
                                     } else { None }
-                                } else { None }
-                            } else { None };
+                                } else { None };
                             match next_result {
                                 Some(Ok(val)) => {
+                                    regs[*dst as usize] = Some(val);
+                                }
+                                Some(Err(PyError::GeneratorYield(val))) => {
                                     regs[*dst as usize] = Some(val);
                                 }
                                 Some(Err(PyError::Raised(exc))) => {
@@ -1049,6 +1211,11 @@ impl Interpreter {
                                     } else {
                                         vm_try!(Err(PyError::Raised(exc)));
                                     }
+                                }
+                                Some(Err(PyError::Named(ref cls, _)))
+                                    if cls == "StopIteration" =>
+                                {
+                                    pc = jump_pc!(*offset);
                                 }
                                 Some(Err(e)) => { vm_try!(Err(e)); }
                                 None => {
@@ -1540,6 +1707,7 @@ mod vm_tests {
             num_locals: 0,
             fn_protos: vec![],
             cell_vars: vec![],
+            is_generator: false,
         }
     }
 

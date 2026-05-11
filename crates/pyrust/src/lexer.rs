@@ -471,6 +471,7 @@ fn lex_ident_or_keyword(chars: &[char], start: usize) -> (Token, usize) {
         "global" => Token::Global,
         "nonlocal" => Token::Nonlocal,
         "return" => Token::Return,
+        "yield" => Token::Yield,
         "break" => Token::Break,
         "continue" => Token::Continue,
         "pass" => Token::Pass,

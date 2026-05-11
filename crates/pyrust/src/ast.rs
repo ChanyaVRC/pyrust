@@ -209,6 +209,10 @@ pub enum Expr {
         target: String,
         value: Box<Expr>,
     },
+    /// `yield` or `yield expr` — only valid inside a generator function
+    Yield(Option<Box<Expr>>),
+    /// `yield from expr`
+    YieldFrom(Box<Expr>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

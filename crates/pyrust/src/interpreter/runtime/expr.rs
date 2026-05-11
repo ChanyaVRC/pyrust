@@ -248,6 +248,14 @@ impl Interpreter {
                 }
                 Ok(Value::string(result))
             }
+            // yield / yield from are only valid inside generator functions; the
+            // compiler ensures they are only reachable through the bytecode VM
+            // path, never through the tree-walking eval_expr path.
+            Expr::Yield(_) | Expr::YieldFrom(_) => {
+                Err(PyError::Runtime(
+                    "yield outside generator function".to_string(),
+                ))
+            }
         }
     }
 
@@ -993,6 +1001,8 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
         "classmethod" => Some(Value::builtin_function("classmethod")),
         "staticmethod" => Some(Value::builtin_function("staticmethod")),
         "super" => Some(Value::builtin_function("super")),
+        "next" => Some(Value::builtin_function("next")),
+        "iter" => Some(Value::builtin_function("iter")),
         _ => None,
     }
 }

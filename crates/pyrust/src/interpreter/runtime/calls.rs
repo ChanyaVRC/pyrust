@@ -363,7 +363,7 @@ impl Interpreter {
                 reject_keyword_args_expanded("list", args)?;
                 match args.len() {
                     0 => Ok(Value::list(vec![])),
-                    1 => Ok(Value::list(iter_values(args[0].value.clone())?)),
+                    1 => Ok(Value::list(self.collect_iterable(args[0].value.clone())?)),
                     _ => Err(PyError::Runtime("list() takes at most one argument".to_string())),
                 }
             }
@@ -372,7 +372,7 @@ impl Interpreter {
                 reject_keyword_args_expanded("tuple", args)?;
                 match args.len() {
                     0 => Ok(Value::tuple(vec![])),
-                    1 => Ok(Value::tuple(iter_values(args[0].value.clone())?)),
+                    1 => Ok(Value::tuple(self.collect_iterable(args[0].value.clone())?)),
                     _ => Err(PyError::Runtime("tuple() takes at most one argument".to_string())),
                 }
             }
@@ -382,7 +382,7 @@ impl Interpreter {
                 match args.len() {
                     0 => Ok(Value::set(indexmap::IndexSet::new())),
                     1 => {
-                        let items = iter_values(args[0].value.clone())?;
+                        let items = self.collect_iterable(args[0].value.clone())?;
                         let mut set = indexmap::IndexSet::new();
                         for item in items {
                             let key = item.to_key().ok_or_else(|| {
@@ -712,6 +712,7 @@ impl Interpreter {
                     ValueKind::Reversed { .. } => Ok(Value::builtin_function("reversed")),
                     ValueKind::ClassMethod(_) | ValueKind::StaticMethod(_) => Ok(Value::builtin_function("function")),
                     ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => Ok(Value::builtin_function("super")),
+                    ValueKind::Generator(_) => Ok(Value::builtin_function("generator")),
                 }
             }
             ValueKind::BuiltinFunction("id") => {
@@ -1582,6 +1583,65 @@ impl Interpreter {
                 }
             }
 
+            ValueKind::BuiltinFunction("next") => {
+                reject_keyword_args_expanded("next", args)?;
+                if args.is_empty() || args.len() > 2 {
+                    return Err(PyError::Runtime(
+                        "next() takes 1 or 2 arguments".to_string(),
+                    ));
+                }
+                let gen_val = args[0].value.clone();
+                let default_val = if args.len() == 2 {
+                    Some(args[1].value.clone())
+                } else {
+                    None
+                };
+                self.call_next(gen_val, default_val)
+            }
+
+            ValueKind::BuiltinFunction("iter") => {
+                reject_keyword_args_expanded("iter", args)?;
+                if args.len() != 1 {
+                    return Err(PyError::Runtime(
+                        "iter() takes exactly one argument".to_string(),
+                    ));
+                }
+                let val = args[0].value.clone();
+                match val.kind() {
+                    // Generators are their own iterators.
+                    ValueKind::Generator(_) => Ok(val),
+                    // User-defined objects: call __iter__().
+                    ValueKind::PyInstance(inst) => {
+                        let inst_rc = Rc::clone(inst);
+                        let class = Rc::clone(&inst_rc.borrow().class);
+                        if let Some(method_val) = lookup_class_attr(&class, "__iter__")
+                            && let ValueKind::UserFunction(f) = method_val.kind()
+                        {
+                            let func = Rc::clone(f);
+                            self.call_user_function_expanded(
+                                func,
+                                &[],
+                                &[Value::py_instance(inst_rc)],
+                            )
+                        } else if lookup_class_attr(&class, "__next__").is_some() {
+                            // Already an iterator (has __next__ but no separate __iter__).
+                            Ok(val)
+                        } else {
+                            Err(PyError::Named(
+                                "TypeError".to_string(),
+                                format!("'{}' object is not iterable", class.borrow().name),
+                            ))
+                        }
+                    }
+                    // Built-in iterables: materialise into a NativeIterFrame so that
+                    // next() works on the returned value.
+                    _ => {
+                        let items = iter_values(val)?;
+                        Ok(Value::generator(Box::new(NativeIterFrame { items, pos: 0 })))
+                    }
+                }
+            }
+
             ValueKind::PyInstance(inst) => {
                 let inst_rc = Rc::clone(inst);
                 let class = Rc::clone(&inst_rc.borrow().class);
@@ -1603,6 +1663,142 @@ impl Interpreter {
                 ))
             }
             _ => Err(PyError::Runtime("object is not callable".to_string())),
+        }
+    }
+
+    /// Collect all values from an iterable (including generators) into a Vec.
+    fn collect_iterable(&mut self, val: Value) -> Result<Vec<Value>> {
+        if let ValueKind::Generator(state_rc) = val.kind() {
+            let state_rc = Rc::clone(state_rc);
+
+            // Fast path: NativeIterFrame — drain remaining items in one shot.
+            {
+                let mut borrow = state_rc.borrow_mut();
+                if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
+                    let remaining: Vec<Value> = native.items[native.pos..].to_vec();
+                    native.pos = native.items.len();
+                    return Ok(remaining);
+                }
+            }
+
+            // GeneratorFrame path: drive the generator to exhaustion.
+            let mut items = Vec::new();
+            loop {
+                let mut borrow = state_rc.borrow_mut();
+                let frame = borrow
+                    .downcast_mut::<GeneratorFrame>()
+                    .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;
+                if frame.done {
+                    break;
+                }
+                match self.resume_generator(frame) {
+                    Err(PyError::GeneratorYield(yielded)) => {
+                        drop(borrow);
+                        items.push(yielded);
+                    }
+                    Err(PyError::Named(ref cls, _)) if cls == "StopIteration" => {
+                        break;
+                    }
+                    Err(e) => return Err(e),
+                    Ok(_) => unreachable!("resume_generator always returns Err"),
+                }
+            }
+            Ok(items)
+        } else {
+            iter_values(val)
+        }
+    }
+
+    /// Call next() on a generator or any object with __next__.
+    fn call_next(&mut self, val: Value, default: Option<Value>) -> Result<Value> {
+        if let ValueKind::Generator(state_rc) = val.kind() {
+            let state_rc = Rc::clone(state_rc);
+
+            // Fast path: NativeIterFrame (no VM required).
+            {
+                let mut borrow = state_rc.borrow_mut();
+                if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
+                    if native.pos >= native.items.len() {
+                        return if let Some(d) = default {
+                            Ok(d)
+                        } else {
+                            Err(PyError::Named("StopIteration".to_string(), String::new()))
+                        };
+                    }
+                    let item = native.items[native.pos].clone();
+                    native.pos += 1;
+                    return Ok(item);
+                }
+            }
+
+            // GeneratorFrame path.
+            let mut borrow = state_rc.borrow_mut();
+            let frame = borrow
+                .downcast_mut::<GeneratorFrame>()
+                .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;
+            if frame.done {
+                drop(borrow);
+                return if let Some(d) = default {
+                    Ok(d)
+                } else {
+                    Err(PyError::Named("StopIteration".to_string(), String::new()))
+                };
+            }
+            match self.resume_generator(frame) {
+                Err(PyError::GeneratorYield(yielded)) => Ok(yielded),
+                Err(PyError::Named(ref cls, _)) if cls == "StopIteration" => {
+                    drop(borrow);
+                    if let Some(d) = default {
+                        Ok(d)
+                    } else {
+                        Err(PyError::Named("StopIteration".to_string(), String::new()))
+                    }
+                }
+                Err(e) => Err(e),
+                Ok(_) => unreachable!("resume_generator always returns Err"),
+            }
+        } else if let ValueKind::PyInstance(inst) = val.kind() {
+            let inst_rc = Rc::clone(inst);
+            let class = Rc::clone(&inst_rc.borrow().class);
+            if let Some(method_val) = lookup_class_attr(&class, "__next__")
+                && let ValueKind::UserFunction(f) = method_val.kind()
+            {
+                let func = Rc::clone(f);
+                match self.call_user_function_expanded(func, &[], &[Value::py_instance(inst_rc)]) {
+                    Ok(v) => Ok(v),
+                    Err(PyError::Raised(exc)) => {
+                        let is_stop = match exc.kind() {
+                            ValueKind::PyInstance(i) => {
+                                i.borrow().class.borrow().name == "StopIteration"
+                            }
+                            _ => false,
+                        };
+                        if is_stop {
+                            if let Some(d) = default {
+                                Ok(d)
+                            } else {
+                                Err(PyError::Raised(exc))
+                            }
+                        } else {
+                            Err(PyError::Raised(exc))
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
+            } else {
+                Err(PyError::Named(
+                    "TypeError".to_string(),
+                    format!(
+                        "'{}' object is not an iterator",
+                        class.borrow().name
+                    ),
+                ))
+            }
+        } else {
+            Err(PyError::Named(
+                "TypeError".to_string(),
+                format!("'{}' object is not an iterator", value_type_name_str(&val)),
+            ))
         }
     }
 
@@ -1890,6 +2086,26 @@ impl Interpreter {
                         }
                         regs[slot as usize] = Some(Value::user_function(Rc::clone(&function)));
                     }
+
+                // Generator function: create a frame rather than executing.
+                if code.is_generator {
+                    // Restore env before capturing it into the frame.
+                    let gen_env = std::mem::replace(&mut self.env, previous_env);
+                    if !needs_local_env {
+                        // No local env was allocated; use the function's own env.
+                        // (gen_env == function.env here)
+                    }
+                    let frame = GeneratorFrame {
+                        code: Rc::clone(&code),
+                        regs,
+                        iters: vec![None; code.num_iters as usize],
+                        exc_handlers: Vec::new(),
+                        pc: 0,
+                        done: false,
+                        saved_env: gen_env,
+                    };
+                    return Ok(Value::generator(Box::new(frame)));
+                }
 
                 let vm_result = self.run_bytecode(&code, &mut regs);
 
