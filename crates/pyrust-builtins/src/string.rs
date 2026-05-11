@@ -47,7 +47,7 @@ pub fn call(method: &str, src: &Value, args: &[Value]) -> Result<Value> {
         // Case
         "upper" => Ok(Value::string(s.to_uppercase())),
         "lower" => Ok(Value::string(s.to_lowercase())),
-        "casefold" => Ok(Value::string(s.to_lowercase())),
+        "casefold" => Ok(Value::string(unicode_casefold(s))),
         "capitalize" => Ok(Value::string(capitalize(s))),
         "swapcase" => Ok(Value::string(swapcase(s))),
         "title" => Ok(Value::string(titlecase(s))),
@@ -85,7 +85,7 @@ pub fn call(method: &str, src: &Value, args: &[Value]) -> Result<Value> {
         "istitle" => Ok(Value::bool_(str_istitle(s))),
         "isascii" => Ok(Value::bool_(s.is_ascii())),
         "isidentifier" => Ok(Value::bool_(str_isidentifier(s))),
-        "isprintable" => Ok(Value::bool_(s.chars().all(|c| !c.is_control()))),
+        "isprintable" => Ok(Value::bool_(s.chars().all(is_printable))),
         _ => Err(PyError::Runtime(format!(
             "'str' object has no attribute '{method}'"
         ))),
@@ -134,7 +134,7 @@ fn fill_char_arg(args: &[Value]) -> Result<char> {
 }
 
 fn str_center(s: &str, args: &[Value]) -> Result<Value> {
-    let width = str_require_int_arg(args, "center")? as usize;
+    let width = str_require_int_arg(args, "center")?.max(0) as usize;
     let fill = fill_char_arg(args)?;
     let char_len = s.chars().count();
     if char_len >= width {
@@ -156,7 +156,7 @@ fn str_center(s: &str, args: &[Value]) -> Result<Value> {
 }
 
 fn str_ljust(s: &str, args: &[Value]) -> Result<Value> {
-    let width = str_require_int_arg(args, "ljust")? as usize;
+    let width = str_require_int_arg(args, "ljust")?.max(0) as usize;
     let fill = fill_char_arg(args)?;
     let char_len = s.chars().count();
     if char_len >= width {
@@ -172,7 +172,7 @@ fn str_ljust(s: &str, args: &[Value]) -> Result<Value> {
 }
 
 fn str_rjust(s: &str, args: &[Value]) -> Result<Value> {
-    let width = str_require_int_arg(args, "rjust")? as usize;
+    let width = str_require_int_arg(args, "rjust")?.max(0) as usize;
     let fill = fill_char_arg(args)?;
     let char_len = s.chars().count();
     if char_len >= width {
@@ -188,7 +188,7 @@ fn str_rjust(s: &str, args: &[Value]) -> Result<Value> {
 }
 
 fn str_zfill(s: &str, args: &[Value]) -> Result<Value> {
-    let width = str_require_int_arg(args, "zfill")? as usize;
+    let width = str_require_int_arg(args, "zfill")?.max(0) as usize;
     let char_len = s.chars().count();
     if char_len >= width {
         return Ok(Value::string(s));
@@ -382,6 +382,49 @@ fn str_removesuffix(s: &str, args: &[Value]) -> Result<Value> {
     } else {
         Ok(Value::string(s))
     }
+}
+
+/// CPython `str.isprintable` semantics: printable unless in Control, Format,
+/// Surrogate, PrivateUse, Unassigned, or Separator (except ASCII space U+0020).
+fn is_printable(c: char) -> bool {
+    if c == ' ' {
+        return true;
+    }
+    !matches!(
+        c.general_category(),
+        GeneralCategory::Control
+            | GeneralCategory::Format
+            | GeneralCategory::Surrogate
+            | GeneralCategory::PrivateUse
+            | GeneralCategory::Unassigned
+            | GeneralCategory::SpaceSeparator
+            | GeneralCategory::LineSeparator
+            | GeneralCategory::ParagraphSeparator
+    )
+}
+
+/// Unicode full case-folding (CaseFolding.txt status F and S).
+/// Handles multi-char expansions (ß→ss, ligatures) that Rust's `to_lowercase` misses.
+fn unicode_casefold(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            'ß' => out.push_str("ss"),
+            'ẞ' => out.push_str("ss"),
+            'ﬀ' => out.push_str("ff"),
+            'ﬁ' => out.push_str("fi"),
+            'ﬂ' => out.push_str("fl"),
+            'ﬃ' => out.push_str("ffi"),
+            'ﬄ' => out.push_str("ffl"),
+            'ﬅ' | 'ﬆ' => out.push_str("st"),
+            _ => {
+                for lc in c.to_lowercase() {
+                    out.push(lc);
+                }
+            }
+        }
+    }
+    out
 }
 
 fn swapcase(s: &str) -> String {

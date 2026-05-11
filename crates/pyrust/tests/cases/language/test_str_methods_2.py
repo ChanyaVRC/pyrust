@@ -1,6 +1,10 @@
 # casefold — for ASCII identical to lower()
 assert "Hello WORLD".casefold() == "hello world"
 assert "".casefold() == ""
+# casefold — Unicode special cases (ß→ss, ligatures)
+assert "ß".casefold() == "ss"
+assert "Straße".casefold() == "strasse"
+assert "ﬁle".casefold() == "file"
 
 # center — CPython places extra pad on the right for even width, left for odd:
 # marg = width - len, left = marg//2 + (marg & width & 1)
@@ -8,16 +12,19 @@ assert "hi".center(6) == "  hi  "
 assert "hi".center(5) == "  hi "
 assert "hi".center(6, "*") == "**hi**"
 assert "hello".center(3) == "hello"  # width < len → unchanged
+assert "hi".center(-5) == "hi"       # negative width → unchanged
 
 # ljust
 assert "hi".ljust(5) == "hi   "
 assert "hi".ljust(5, "-") == "hi---"
 assert "hello".ljust(3) == "hello"
+assert "hi".ljust(-3) == "hi"        # negative width → unchanged
 
 # rjust
 assert "hi".rjust(5) == "   hi"
 assert "hi".rjust(5, "0") == "000hi"
 assert "hello".rjust(3) == "hello"
+assert "hi".rjust(-3) == "hi"        # negative width → unchanged
 
 # zfill
 assert "42".zfill(5) == "00042"
@@ -25,6 +32,7 @@ assert "-42".zfill(6) == "-00042"
 assert "+42".zfill(6) == "+00042"
 assert "42".zfill(2) == "42"
 assert "".zfill(3) == "000"
+assert "42".zfill(-1) == "42"        # negative width → unchanged
 
 # expandtabs
 assert "a\tb".expandtabs() == "a       b"
@@ -129,5 +137,10 @@ assert "hello".isprintable()
 assert "".isprintable()
 assert not "\n".isprintable()
 assert not "\t".isprintable()
+assert not chr(0).isprintable()           # null control character
+assert not " ".isprintable()      # line separator (Zl)
+assert not " ".isprintable()      # paragraph separator (Zp)
+assert not "­".isprintable()      # soft hyphen (Cf / format)
+assert " ".isprintable()               # ASCII space is printable
 
 print("str methods 2 OK")
