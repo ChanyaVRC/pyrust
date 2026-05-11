@@ -40,6 +40,8 @@ These are statement forms that are not currently represented in the token set, p
 - [x] Alias handling such as `import x as y`
 - [ ] Relative imports
 - [ ] Broader standard library (only `math` and `sys` currently)
+- [ ] `math` module gaps: `tau`, `degrees`, `radians`, `gcd`, `lcm`, `factorial`, `comb`, `perm`, `isqrt`, `trunc`, `fmod`, `modf`, `remainder`, `fsum`, `isclose`, `isfinite`, `copysign`, `hypot`, `dist`, `cbrt`, `exp2`, `expm1`, `log1p`, `acosh`, `asinh`, `atanh`, `cosh`, `sinh`, `tanh`, `erf`, `erfc`, `gamma`, `lgamma`
+- [ ] `sys` module gaps: `sys.version`, `sys.platform`, `sys.stdin`/`stdout`/`stderr`, `sys.modules`
 
 3. Context-management statements
 
@@ -198,6 +200,9 @@ PyRust currently exposes only a very small built-in surface.
 - [x] `enumerate`, `zip`, `sorted`, `reversed`
 - [ ] `repr`, `issubclass`, `iter`, `next`, `any`, `all`
 - [ ] Numeric: `round`, `divmod`, `pow`, `hash`, `chr`, `ord`, `bin`, `oct`, `hex`
+- [ ] Introspection: `callable`, `delattr`, `globals`, `locals`, `vars`, `ascii`, `format`
+- [ ] Higher-order: `map`, `filter`
+- [ ] Types: `frozenset`, `complex`, `bytearray`, `bytes`, `memoryview`
 - [ ] I/O: `open`, `input`
 
 3. Runtime value types not yet modeled directly
@@ -227,13 +232,21 @@ The current container support is useful but still shallow compared with Python.
 
 - [ ] Richer string literal syntax (bytes, raw strings, triple-quoted, f-strings)
 - [x] String methods: `split`, `rsplit`, `join`, `strip`, `lstrip`, `rstrip`, `upper`, `lower`, `capitalize`, `replace`, `find`, `rfind`, `index`, `rindex`, `count`, `startswith`, `endswith`, `isdigit`, `isalpha`, `isalnum`, `isspace`
+- [ ] String methods not yet implemented: `casefold`, `center`, `ljust`, `rjust`, `zfill`, `expandtabs`, `encode`, `format`, `format_map`, `maketrans`, `translate`, `partition`, `rpartition`, `splitlines`, `removeprefix`, `removesuffix`, `swapcase`, `title`, `islower`, `isupper`, `istitle`, `isascii`, `isdecimal`, `isnumeric`, `isidentifier`, `isprintable`
+- [ ] Richer string literal syntax (bytes, raw strings, triple-quoted, f-strings)
 - [ ] Escape-sequence coverage review (e.g. `\N{name}`, `\uXXXX`)
 
-4. Tuples and sets
+4. Sets
 
-- [ ] Hashability rules involving tuples and sets
+- [ ] Set methods: `add`, `remove`, `discard`, `pop`, `clear`, `copy`, `union`, `intersection`, `difference`, `symmetric_difference`, `issubset`, `issuperset`, `isdisjoint`, `update`, `intersection_update`, `difference_update`, `symmetric_difference_update`
+- [ ] `frozenset` type and its methods (same read-only subset)
+- [ ] Hashability rules involving tuples nested in sets/dicts
 
-5. Iteration model
+5. Tuples
+
+- [x] `index`, `count` implemented
+
+6. Iteration model
 
 - [ ] Iterator protocol support instead of only eagerly materializing iterable values
 - [ ] Custom iterable objects

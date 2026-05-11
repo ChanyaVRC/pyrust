@@ -95,7 +95,9 @@ A tiny Python-like interpreter implemented in Rust.
 
 ### `math` module
 
-`floor`, `ceil`, `sqrt`, `fabs`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `log(x[, base])`, `log2`, `log10`, `pow`, `isnan`, `isinf`, `pi`, `e`, `inf`, `nan`
+Implemented: `floor`, `ceil`, `sqrt`, `fabs`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `log(x[, base])`, `log2`, `log10`, `pow`, `isnan`, `isinf`, `pi`, `e`, `inf`, `nan`
+
+Not yet implemented: `tau`, `degrees`, `radians`, trigonometric hyperbolic functions (`sinh`, `cosh`, `tanh`, …), `gcd`, `lcm`, `factorial`, `comb`, `isqrt`, `trunc`, `fsum`, `hypot`, `isclose`, `isfinite`, and others. See [REMAINING_WORK.md](REMAINING_WORK.md) for the full list.
 
 ### Optimizer passes
 
@@ -141,6 +143,7 @@ This is a minimal educational interpreter, not a full CPython implementation.
 Current limitations:
 
 - No comprehensions or generator expressions
+- `set` literals are supported but set methods (`add`, `remove`, `union`, etc.) are not yet implemented
 - No `async`/`await`, `yield`, `yield from`
 - No `match` / `case`
 - Import system supports `math` and `sys` built-ins and user `.py` files; relative imports and most stdlib modules are not available
