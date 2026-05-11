@@ -334,11 +334,10 @@ impl Interpreter {
             {
                 let func = Rc::clone(f);
                 let self_val = Value::py_instance(Rc::clone(inst));
-                return Some(self.call_user_function_expanded(
-                    func,
-                    &[],
-                    &[self_val, left.clone()],
-                ));
+                match self.call_user_function_expanded(func, &[], &[self_val, left.clone()]) {
+                    Ok(v) if is_not_implemented(&v) => {}
+                    result => return Some(result),
+                }
             }
         }
         None
