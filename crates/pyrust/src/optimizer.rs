@@ -3683,10 +3683,11 @@ mod tests {
             "back-edge offset adjusted"
         );
         // Accumulator init value = 0 (= (-1 + 1) * 3 = start * K for range(10))
-        let acc_init_in_consts = consts
-            .iter()
-            .any(|v| matches!(v.kind(), ValueKind::Int(0)));
-        assert!(acc_init_in_consts, "const 0 added for accumulator init ((-1+1)*3=0)");
+        let acc_init_in_consts = consts.iter().any(|v| matches!(v.kind(), ValueKind::Int(0)));
+        assert!(
+            acc_init_in_consts,
+            "const 0 added for accumulator init ((-1+1)*3=0)"
+        );
     }
 
     #[test]
