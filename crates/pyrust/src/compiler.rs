@@ -3536,8 +3536,7 @@ impl Compiler {
                             self.emit(Insn::Move(frame + 1, val_r));
                         }
                         self.free_temp(val_r);
-                        let empty_r =
-                            self.compile_literal(Value::string(String::new()));
+                        let empty_r = self.compile_literal(Value::string(String::new()));
                         if empty_r != frame + 2 {
                             self.emit(Insn::Move(frame + 2, empty_r));
                         }
