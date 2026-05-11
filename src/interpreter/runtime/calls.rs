@@ -89,31 +89,13 @@ impl Interpreter {
                 } else {
                     0i64
                 };
-                let items = iter_values(args[0].value.clone())?;
-                Ok(Value::list(
-                    items
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, v)| Value::tuple(vec![Value::int(i as i64 + start), v]))
-                        .collect(),
-                ))
+                Ok(Value::lazy_enumerate(args[0].value.clone(), start))
             }
 
             ValueKind::BuiltinFunction("zip") => {
                 reject_keyword_args_expanded("zip", args)?;
-                if args.is_empty() {
-                    return Ok(Value::list(vec![]));
-                }
-                let mut iters: Vec<Vec<Value>> = Vec::with_capacity(args.len());
-                for arg in args {
-                    iters.push(iter_values(arg.value.clone())?);
-                }
-                let len = iters.iter().map(|v| v.len()).min().unwrap_or(0);
-                Ok(Value::list(
-                    (0..len)
-                        .map(|i| Value::tuple(iters.iter().map(|it| it[i].clone()).collect()))
-                        .collect(),
-                ))
+                let sources = args.iter().map(|a| a.value.clone()).collect();
+                Ok(Value::lazy_zip(sources))
             }
 
             ValueKind::BuiltinFunction("reversed") => {
@@ -123,9 +105,7 @@ impl Interpreter {
                         "reversed() takes exactly one argument".to_string(),
                     ));
                 }
-                let mut items = iter_values(args[0].value.clone())?;
-                items.reverse();
-                Ok(Value::list(items))
+                Ok(Value::lazy_reversed(args[0].value.clone()))
             }
 
             ValueKind::BuiltinFunction("sorted") => {
@@ -602,6 +582,9 @@ impl Interpreter {
                     ValueKind::BuiltinFunction(_) => Ok(Value::builtin_function("builtin_function_or_method")),
                     ValueKind::PyModule(_) => Ok(Value::builtin_function("module")),
                     ValueKind::BigInt(_) => Ok(Value::builtin_function("int")),
+                    ValueKind::Enumerate { .. } => Ok(Value::builtin_function("enumerate")),
+                    ValueKind::Zip { .. } => Ok(Value::builtin_function("zip")),
+                    ValueKind::Reversed { .. } => Ok(Value::builtin_function("reversed")),
                 }
             }
             ValueKind::BuiltinFunction("id") => {

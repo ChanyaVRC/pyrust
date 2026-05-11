@@ -50,6 +50,9 @@ fn type_name_of(v: &Value) -> &'static str {
         ValueKind::DictKeysView(_) => "dict_keys",
         ValueKind::DictValuesView(_) => "dict_values",
         ValueKind::DictItemsView(_) => "dict_items",
+        ValueKind::Enumerate { .. } => "enumerate",
+        ValueKind::Zip { .. } => "zip",
+        ValueKind::Reversed { .. } => "list_reverseiterator",
     }
 }
 

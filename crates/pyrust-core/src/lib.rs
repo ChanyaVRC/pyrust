@@ -214,6 +214,16 @@ pub enum Opaque {
         function: Rc<UserFunction>,
         receiver: Rc<RefCell<PyInstance>>,
     },
+    Enumerate {
+        source: Value,
+        start: i64,
+    },
+    Zip {
+        sources: Vec<Value>,
+    },
+    Reversed {
+        source: Value,
+    },
 }
 
 impl Clone for Opaque {
@@ -238,6 +248,16 @@ impl Clone for Opaque {
             Opaque::BoundMethod { function, receiver } => Opaque::BoundMethod {
                 function: Rc::clone(function),
                 receiver: Rc::clone(receiver),
+            },
+            Opaque::Enumerate { source, start } => Opaque::Enumerate {
+                source: source.clone(),
+                start: *start,
+            },
+            Opaque::Zip { sources } => Opaque::Zip {
+                sources: sources.clone(),
+            },
+            Opaque::Reversed { source } => Opaque::Reversed {
+                source: source.clone(),
             },
         }
     }
@@ -274,6 +294,16 @@ pub enum ValueKind<'a> {
     BoundMethod {
         function: &'a Rc<UserFunction>,
         receiver: &'a Rc<RefCell<PyInstance>>,
+    },
+    Enumerate {
+        source: &'a Value,
+        start: i64,
+    },
+    Zip {
+        sources: &'a Vec<Value>,
+    },
+    Reversed {
+        source: &'a Value,
     },
 }
 
@@ -568,6 +598,18 @@ impl Value {
         Value::opaque(Opaque::BoundMethod { function, receiver })
     }
 
+    pub fn lazy_enumerate(source: Value, start: i64) -> Self {
+        Value::opaque(Opaque::Enumerate { source, start })
+    }
+
+    pub fn lazy_zip(sources: Vec<Value>) -> Self {
+        Value::opaque(Opaque::Zip { sources })
+    }
+
+    pub fn lazy_reversed(source: Value) -> Self {
+        Value::opaque(Opaque::Reversed { source })
+    }
+
     fn opaque(o: Opaque) -> Self {
         let ptr = Box::into_raw(Box::new(o)) as u64;
         Value(TAG_OPAQUE_BITS | (ptr & PAYLOAD_MASK))
@@ -803,6 +845,12 @@ impl Value {
                 Opaque::BoundMethod { function, receiver } => {
                     ValueKind::BoundMethod { function, receiver }
                 }
+                Opaque::Enumerate { source, start } => ValueKind::Enumerate {
+                    source,
+                    start: *start,
+                },
+                Opaque::Zip { sources } => ValueKind::Zip { sources },
+                Opaque::Reversed { source } => ValueKind::Reversed { source },
             },
             _ => unreachable!(),
         }
@@ -832,6 +880,9 @@ impl Value {
             ValueKind::BoundMethod { .. } => true,
             ValueKind::PyModule(_) => true,
             ValueKind::Tuple(v) => !v.is_empty(),
+            ValueKind::Enumerate { .. } => true,
+            ValueKind::Zip { .. } => true,
+            ValueKind::Reversed { .. } => true,
         }
     }
 
@@ -943,6 +994,9 @@ impl Value {
                     format!("({inner})")
                 }
             }
+            ValueKind::Enumerate { .. } => "<enumerate object>".to_string(),
+            ValueKind::Zip { .. } => "<zip object>".to_string(),
+            ValueKind::Reversed { .. } => "<list_reverseiterator object>".to_string(),
         }
     }
 
