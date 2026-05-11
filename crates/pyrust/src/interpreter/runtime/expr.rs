@@ -445,6 +445,11 @@ impl Interpreter {
     }
 
     fn compare(&self, left: Value, right: Value, cmp: impl Fn(std::cmp::Ordering) -> bool) -> Result<Value> {
+        if matches!(left.kind(), ValueKind::Float(f) if f.is_nan())
+            || matches!(right.kind(), ValueKind::Float(f) if f.is_nan())
+        {
+            return Ok(Value::bool_(false));
+        }
         Ok(Value::bool_(cmp(compare_values(&left, &right)?)))
     }
 
