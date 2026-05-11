@@ -837,11 +837,8 @@ impl Interpreter {
             }
             ValueKind::BuiltinFunction("format") => {
                 reject_keyword_args_expanded("format", args)?;
-                match args.len() {
-                    1 => {
-                        let s = args[0].value.to_py_str();
-                        Ok(Value::string(s))
-                    }
+                let (value, spec) = match args.len() {
+                    1 => (args[0].value.clone(), String::new()),
                     2 => {
                         let value = args[0].value.clone();
                         let spec = match args[1].value.kind() {
@@ -852,12 +849,41 @@ impl Interpreter {
                                 ))
                             }
                         };
-                        apply_format_spec(&value, &spec)
+                        (value, spec)
                     }
-                    _ => Err(PyError::Runtime(
-                        "format() takes 1 or 2 arguments".to_string(),
-                    )),
+                    _ => {
+                        return Err(PyError::Runtime(
+                            "format() takes 1 or 2 arguments".to_string(),
+                        ))
+                    }
+                };
+                // Dispatch __format__(spec) for user instances.
+                if let ValueKind::PyInstance(instance) = value.kind() {
+                    let instance_rc = Rc::clone(instance);
+                    let class = Rc::clone(&instance_rc.borrow().class);
+                    if let Some(method_val) = lookup_class_attr(&class, "__format__")
+                        && let ValueKind::UserFunction(f) = method_val.kind()
+                    {
+                        let func = Rc::clone(f);
+                        let spec_val = Value::string(spec.clone());
+                        let result = self.call_user_function_expanded(
+                            func,
+                            &[],
+                            &[Value::py_instance(instance_rc), spec_val],
+                        )?;
+                        return match result.kind() {
+                            ValueKind::Str(_) => Ok(result),
+                            _ => Err(PyError::Named(
+                                "TypeError".to_string(),
+                                format!(
+                                    "__format__ must return a str, not {}",
+                                    value_type_name_str(&result)
+                                ),
+                            )),
+                        };
+                    }
                 }
+                apply_format_spec(&value, &spec)
             }
 
             ValueKind::BuiltinFunction("repr") => {

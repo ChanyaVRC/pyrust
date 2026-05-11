@@ -3524,19 +3524,25 @@ impl Compiler {
                         self.next_temp = frame + 1;
                         frame
                     } else {
-                        // str(val) — convert to string
+                        // format(val, "") — dispatch __format__("") per Python semantics
                         let frame = self.next_temp;
-                        if frame + 1 > self.max_reg {
-                            self.max_reg = frame + 1;
+                        if frame + 2 > self.max_reg {
+                            self.max_reg = frame + 2;
                         }
-                        self.next_temp = frame + 2;
-                        let str_idx = self.intern_name("str");
-                        self.emit(Insn::LoadGlobal(frame, str_idx));
+                        self.next_temp = frame + 3;
+                        let fmt_idx = self.intern_name("format");
+                        self.emit(Insn::LoadGlobal(frame, fmt_idx));
                         if val_r != frame + 1 {
                             self.emit(Insn::Move(frame + 1, val_r));
                         }
                         self.free_temp(val_r);
-                        self.emit(Insn::Call(frame, 1));
+                        let empty_r =
+                            self.compile_literal(Value::string(String::new()));
+                        if empty_r != frame + 2 {
+                            self.emit(Insn::Move(frame + 2, empty_r));
+                        }
+                        self.free_temp(empty_r);
+                        self.emit(Insn::Call(frame, 2));
                         self.next_temp = frame + 1;
                         frame
                     }
