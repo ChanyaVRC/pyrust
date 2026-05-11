@@ -1,9 +1,9 @@
 use crate::ast::{
-    AssignTarget, BinaryOp, CallArg, CmpOp, CompClause, ExceptHandler, Expr, FunctionParam, Stmt,
-    UnaryOp,
+    AssignTarget, BinaryOp, CallArg, CmpOp, CompClause, ExceptHandler, Expr, FStringPart,
+    FunctionParam, Stmt, UnaryOp,
 };
 use crate::error::{PyError, Result};
-use crate::token::Token;
+use crate::token::{FStringPart as LexFStringPart, Token};
 
 pub struct Parser {
     tokens: Vec<Token>,
@@ -1207,6 +1207,11 @@ impl Parser {
                 }
                 Ok(Expr::Str(s))
             }
+            Some(Token::FString(lex_parts)) => {
+                self.bump();
+                let parts = self.parse_fstring_parts(lex_parts)?;
+                Ok(Expr::FString(parts))
+            }
             Some(Token::True) => {
                 self.bump();
                 Ok(Expr::Bool(true))
@@ -1432,6 +1437,41 @@ impl Parser {
                 | None
         )
     }
+
+    /// Convert lexer-level `FStringPart`s into AST-level `FStringPart`s by
+    /// running a sub-parser on each raw expression source string.
+    fn parse_fstring_parts(&self, lex_parts: Vec<LexFStringPart>) -> Result<Vec<FStringPart>> {
+        let mut ast_parts = Vec::new();
+        for lp in lex_parts {
+            match lp {
+                LexFStringPart::Literal(s) => {
+                    ast_parts.push(FStringPart::Literal(s));
+                }
+                LexFStringPart::Expr {
+                    src,
+                    conversion,
+                    format_spec,
+                } => {
+                    let expr = parse_expr_str(&src)?;
+                    ast_parts.push(FStringPart::Expr {
+                        expr: Box::new(expr),
+                        conversion,
+                        format_spec,
+                    });
+                }
+            }
+        }
+        Ok(ast_parts)
+    }
+}
+
+/// Parse a single expression from a raw source string (used for f-string sub-expressions).
+fn parse_expr_str(src: &str) -> Result<Expr> {
+    let lexer = crate::lexer::Lexer::new(src)?;
+    let tokens = lexer.into_tokens();
+    let mut p = Parser::new(tokens);
+    let expr = p.parse_expr()?;
+    Ok(expr)
 }
 
 fn expr_to_assign_target(expr: &Expr) -> Result<AssignTarget> {

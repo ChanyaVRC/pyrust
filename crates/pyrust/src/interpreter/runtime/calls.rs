@@ -835,6 +835,31 @@ impl Interpreter {
                 // First argument is the class itself (not an instance)
                 self.call_user_function_expanded(function, args, &[Value::py_class(class)])
             }
+            ValueKind::BuiltinFunction("format") => {
+                reject_keyword_args_expanded("format", args)?;
+                match args.len() {
+                    1 => {
+                        let s = args[0].value.to_py_str();
+                        Ok(Value::string(s))
+                    }
+                    2 => {
+                        let value = args[0].value.clone();
+                        let spec = match args[1].value.kind() {
+                            ValueKind::Str(s) => s.to_string(),
+                            _ => {
+                                return Err(PyError::Runtime(
+                                    "format spec must be a string".to_string(),
+                                ))
+                            }
+                        };
+                        apply_format_spec(&value, &spec)
+                    }
+                    _ => Err(PyError::Runtime(
+                        "format() takes 1 or 2 arguments".to_string(),
+                    )),
+                }
+            }
+
             ValueKind::BuiltinFunction("repr") => {
                 reject_keyword_args_expanded("repr", args)?;
                 if args.len() != 1 {
@@ -2086,4 +2111,367 @@ impl Interpreter {
             .and_then(|rc| Rc::clone(rc).downcast::<FnCode>().ok())
     }
 
+}
+
+/// Apply a Python format spec string to a `Value` and return the formatted string.
+/// Supports common numeric specs: `d`, `f`, `e`, `g`, `x`, `X`, `o`, `b`, `s`,
+/// with optional width, fill/align, sign, and precision.
+fn apply_format_spec(value: &Value, spec: &str) -> Result<Value> {
+    if spec.is_empty() {
+        return Ok(Value::string(value.to_py_str()));
+    }
+
+    // Parse the format spec.  We support the most common subset:
+    //   [[fill]align][sign][#][0][width][.precision][type]
+    // where align is <, >, ^; sign is +, -, ' '; type is one of s d f e g x X o b.
+    let chars: Vec<char> = spec.chars().collect();
+    let len = chars.len();
+    let mut pos = 0;
+
+    // fill + align
+    let (fill, align) = if len >= 2 && matches!(chars[1], '<' | '>' | '^') {
+        let f = chars[0];
+        let a = chars[1];
+        pos += 2;
+        (f, Some(a))
+    } else if len >= 1 && matches!(chars[0], '<' | '>' | '^') {
+        let a = chars[0];
+        pos += 1;
+        (' ', Some(a))
+    } else {
+        (' ', None)
+    };
+
+    // sign
+    let sign = if pos < len && matches!(chars[pos], '+' | '-' | ' ') {
+        let s = chars[pos];
+        pos += 1;
+        Some(s)
+    } else {
+        None
+    };
+
+    // alternate form '#'
+    let alt = if pos < len && chars[pos] == '#' {
+        pos += 1;
+        true
+    } else {
+        false
+    };
+
+    // zero-padding '0'
+    let zero_pad = if pos < len && chars[pos] == '0' {
+        pos += 1;
+        true
+    } else {
+        false
+    };
+    let fill = if zero_pad && align.is_none() { '0' } else { fill };
+
+    // width
+    let width_start = pos;
+    while pos < len && chars[pos].is_ascii_digit() {
+        pos += 1;
+    }
+    let width: usize = if pos > width_start {
+        chars[width_start..pos]
+            .iter()
+            .collect::<String>()
+            .parse()
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    // precision
+    let precision = if pos < len && chars[pos] == '.' {
+        pos += 1;
+        let prec_start = pos;
+        while pos < len && chars[pos].is_ascii_digit() {
+            pos += 1;
+        }
+        if pos > prec_start {
+            Some(
+                chars[prec_start..pos]
+                    .iter()
+                    .collect::<String>()
+                    .parse::<usize>()
+                    .unwrap_or(6),
+            )
+        } else {
+            Some(6)
+        }
+    } else {
+        None
+    };
+
+    // type char
+    let type_char = if pos < len { Some(chars[pos]) } else { None };
+
+    // Format the value into a raw string (without width/alignment).
+    let raw = match type_char {
+        None | Some('s') => match value.kind() {
+            ValueKind::Str(s) => {
+                let s = s.to_string();
+                match precision {
+                    Some(p) => s.chars().take(p).collect(),
+                    None => s,
+                }
+            }
+            _ => value.to_py_str(),
+        },
+        Some('d') => match value.kind() {
+            ValueKind::Int(n) => format_int_with_sign(n, sign),
+            ValueKind::Bool(b) => format_int_with_sign(if b { 1 } else { 0 }, sign),
+            _ => return Err(PyError::Named(
+                "ValueError".to_string(),
+                format!("unknown format code 'd' for object of type '{}'", value_type_name_str(value)),
+            )),
+        },
+        Some('f') | Some('F') => {
+            let prec = precision.unwrap_or(6);
+            let f = fmt_value_to_float(value)?;
+            let s = if type_char == Some('F') {
+                format!("{:.prec$}", f).to_uppercase()
+            } else {
+                format!("{:.prec$}", f)
+            };
+            apply_sign_str(s, f, sign)
+        }
+        Some('e') | Some('E') => {
+            let prec = precision.unwrap_or(6);
+            let f = fmt_value_to_float(value)?;
+            let s = if type_char == Some('E') {
+                format!("{:.prec$E}", f)
+            } else {
+                format!("{:.prec$e}", f)
+            };
+            // Python uses e+XX not e+0XX — Rust uses two digits for small exponents.
+            // Normalise to match Python's format.
+            normalise_exp_str(s, f, sign)
+        }
+        Some('g') | Some('G') => {
+            let prec = precision.unwrap_or(6);
+            let prec = if prec == 0 { 1 } else { prec };
+            let f = fmt_value_to_float(value)?;
+            let s = format_g(f, prec, type_char == Some('G'));
+            apply_sign_str(s, f, sign)
+        }
+        Some('%') => {
+            let prec = precision.unwrap_or(6);
+            let f = fmt_value_to_float(value)?;
+            format!("{:.prec$}%", f * 100.0)
+        }
+        Some('x') => match value.kind() {
+            ValueKind::Int(n) => {
+                let s = if n < 0 {
+                    format!("-{:x}", (-n) as u64)
+                } else {
+                    format!("{:x}", n as u64)
+                };
+                if alt { format!("0x{s}") } else { s }
+            }
+            ValueKind::Bool(b) => {
+                let n: i64 = if b { 1 } else { 0 };
+                if alt { format!("0x{n:x}") } else { format!("{n:x}") }
+            }
+            _ => return Err(PyError::Named(
+                "ValueError".to_string(),
+                format!("unknown format code 'x' for object of type '{}'", value_type_name_str(value)),
+            )),
+        },
+        Some('X') => match value.kind() {
+            ValueKind::Int(n) => {
+                let s = if n < 0 {
+                    format!("-{:X}", (-n) as u64)
+                } else {
+                    format!("{:X}", n as u64)
+                };
+                if alt { format!("0X{s}") } else { s }
+            }
+            ValueKind::Bool(b) => {
+                let n: i64 = if b { 1 } else { 0 };
+                if alt { format!("0X{n:X}") } else { format!("{n:X}") }
+            }
+            _ => return Err(PyError::Named(
+                "ValueError".to_string(),
+                format!("unknown format code 'X' for object of type '{}'", value_type_name_str(value)),
+            )),
+        },
+        Some('o') => match value.kind() {
+            ValueKind::Int(n) => {
+                let s = if n < 0 {
+                    format!("-{:o}", (-n) as u64)
+                } else {
+                    format!("{:o}", n as u64)
+                };
+                if alt { format!("0o{s}") } else { s }
+            }
+            ValueKind::Bool(b) => {
+                let n: i64 = if b { 1 } else { 0 };
+                if alt { format!("0o{n:o}") } else { format!("{n:o}") }
+            }
+            _ => return Err(PyError::Named(
+                "ValueError".to_string(),
+                format!("unknown format code 'o' for object of type '{}'", value_type_name_str(value)),
+            )),
+        },
+        Some('b') => match value.kind() {
+            ValueKind::Int(n) => {
+                let s = if n < 0 {
+                    format!("-{:b}", (-n) as u64)
+                } else {
+                    format!("{:b}", n as u64)
+                };
+                if alt { format!("0b{s}") } else { s }
+            }
+            ValueKind::Bool(b) => {
+                let n: i64 = if b { 1 } else { 0 };
+                if alt { format!("0b{n:b}") } else { format!("{n:b}") }
+            }
+            _ => return Err(PyError::Named(
+                "ValueError".to_string(),
+                format!("unknown format code 'b' for object of type '{}'", value_type_name_str(value)),
+            )),
+        },
+        Some(other) => {
+            return Err(PyError::Named(
+                "ValueError".to_string(),
+                format!("unknown format code '{other}' for object of type '{}'", value_type_name_str(value)),
+            ))
+        }
+    };
+
+    // Apply width / alignment.
+    if width == 0 || raw.chars().count() >= width {
+        return Ok(Value::string(raw));
+    }
+    let pad = width - raw.chars().count();
+    let effective_align = align.unwrap_or(if matches!(type_char, Some('d' | 'f' | 'e' | 'E' | 'g' | 'G' | 'x' | 'X' | 'o' | 'b') | None) && !matches!(value.kind(), ValueKind::Str(_)) {
+        '>'
+    } else {
+        '<'
+    });
+    let padded = match effective_align {
+        '>' => {
+            let mut s = fill.to_string().repeat(pad);
+            s.push_str(&raw);
+            s
+        }
+        '^' => {
+            let left = pad / 2;
+            let right = pad - left;
+            let mut s = fill.to_string().repeat(left);
+            s.push_str(&raw);
+            s.push_str(&fill.to_string().repeat(right));
+            s
+        }
+        _ => {
+            // '<' or default
+            let mut s = raw;
+            s.push_str(&fill.to_string().repeat(pad));
+            s
+        }
+    };
+    Ok(Value::string(padded))
+}
+
+fn fmt_value_to_float(value: &Value) -> Result<f64> {
+    match value.kind() {
+        ValueKind::Float(f) => Ok(f),
+        ValueKind::Int(n) => Ok(n as f64),
+        ValueKind::Bool(b) => Ok(if b { 1.0 } else { 0.0 }),
+        _ => Err(PyError::Named(
+            "TypeError".to_string(),
+            format!("must be real number, not {}", value_type_name_str(value)),
+        )),
+    }
+}
+
+fn format_int_with_sign(n: i64, sign: Option<char>) -> String {
+    match sign {
+        Some('+') => {
+            if n >= 0 { format!("+{n}") } else { format!("{n}") }
+        }
+        Some(' ') => {
+            if n >= 0 { format!(" {n}") } else { format!("{n}") }
+        }
+        _ => format!("{n}"),
+    }
+}
+
+fn apply_sign_str(s: String, f: f64, sign: Option<char>) -> String {
+    match sign {
+        Some('+') if f >= 0.0 && !s.starts_with('-') => format!("+{s}"),
+        Some(' ') if f >= 0.0 && !s.starts_with('-') => format!(" {s}"),
+        _ => s,
+    }
+}
+
+fn normalise_exp_str(s: String, f: f64, sign: Option<char>) -> String {
+    // Rust: 1.23e5; Python: 1.23e+05 — adjust exponent format.
+    let s = if let Some(e_pos) = s.find('e').or_else(|| s.find('E')) {
+        let (mantissa, exp_part) = s.split_at(e_pos);
+        let e_char = &exp_part[..1];
+        let exp_digits = &exp_part[1..];
+        // exp_digits starts with optional sign then digits
+        let (exp_sign, exp_num) = if exp_digits.starts_with('+') || exp_digits.starts_with('-') {
+            (&exp_digits[..1], &exp_digits[1..])
+        } else {
+            ("+", exp_digits)
+        };
+        // Python always uses at least 2 digits for the exponent (e.g. e+05 not e+5).
+        let exp_num_padded = if exp_num.len() < 2 {
+            format!("0{exp_num}")
+        } else {
+            exp_num.to_string()
+        };
+        format!("{mantissa}{e_char}{exp_sign}{exp_num_padded}")
+    } else {
+        s
+    };
+    apply_sign_str(s, f, sign)
+}
+
+fn format_g(f: f64, prec: usize, upper: bool) -> String {
+    // Python's %g: use exponential notation if exponent < -4 or >= precision.
+    if f == 0.0 {
+        return "0".to_string();
+    }
+    let exp = f.abs().log10().floor() as i32;
+    if exp < -(4_i32) || exp >= prec as i32 {
+        // Use exponential notation.
+        let sig_digits = prec.saturating_sub(1);
+        let s = if upper {
+            format!("{:.sig_digits$E}", f)
+        } else {
+            format!("{:.sig_digits$e}", f)
+        };
+        // Trim trailing zeros from mantissa, then normalise exponent.
+        trim_g_trailing_zeros(normalise_exp_str(s, f, None))
+    } else {
+        // Fixed notation.  sig_digits significant figures.
+        let decimal_digits = if exp >= 0 {
+            prec.saturating_sub(exp as usize + 1)
+        } else {
+            prec + (-exp - 1) as usize
+        };
+        let s = format!("{:.decimal_digits$}", f);
+        trim_g_trailing_zeros(s)
+    }
+}
+
+fn trim_g_trailing_zeros(s: String) -> String {
+    // Trim trailing zeros after decimal point (but keep 'e' part intact).
+    let (mantissa, exp_part) = if let Some(e_pos) = s.find('e').or_else(|| s.find('E')) {
+        (&s[..e_pos], &s[e_pos..])
+    } else {
+        (s.as_str(), "")
+    };
+    if mantissa.contains('.') {
+        let trimmed = mantissa.trim_end_matches('0').trim_end_matches('.');
+        format!("{trimmed}{exp_part}")
+    } else {
+        s
+    }
 }

@@ -224,6 +224,30 @@ impl Interpreter {
                 self.assign_name(target.clone(), val.clone());
                 Ok(val)
             }
+            Expr::FString(parts) => {
+                use crate::ast::FStringPart;
+                let mut result = String::new();
+                for part in parts {
+                    match part {
+                        FStringPart::Literal(s) => result.push_str(s),
+                        FStringPart::Expr { expr, conversion, format_spec } => {
+                            let val = self.eval_expr(expr)?;
+                            let converted = match conversion {
+                                Some('r') => Value::string(val.repr()),
+                                Some('a') => Value::string(val.repr()),
+                                _ => val,
+                            };
+                            let formatted = if let Some(spec) = format_spec {
+                                apply_format_spec(&converted, spec)?
+                            } else {
+                                Value::string(converted.to_py_str())
+                            };
+                            result.push_str(formatted.as_str().unwrap_or(""));
+                        }
+                    }
+                }
+                Ok(Value::string(result))
+            }
         }
     }
 
@@ -948,6 +972,7 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
         "setattr" => Some(Value::builtin_function("setattr")),
         "__vcall__" => Some(Value::builtin_function("__vcall__")),
         "repr" => Some(Value::builtin_function("repr")),
+        "format" => Some(Value::builtin_function("format")),
         "any" => Some(Value::builtin_function("any")),
         "all" => Some(Value::builtin_function("all")),
         "map" => Some(Value::builtin_function("map")),

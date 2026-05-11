@@ -1005,6 +1005,13 @@ fn is_pure_expr(expr: &Expr, pure_fns: &std::collections::HashSet<String>) -> bo
         Expr::ListComp { .. } | Expr::DictComp { .. } | Expr::SetComp { .. } => false,
         // Walrus has a side effect (assignment).
         Expr::Named { .. } => false,
+        Expr::FString(parts) => {
+            use crate::ast::FStringPart;
+            parts.iter().all(|p| match p {
+                FStringPart::Literal(_) => true,
+                FStringPart::Expr { expr, .. } => is_pure_expr(expr, pure_fns),
+            })
+        }
     }
 }
 

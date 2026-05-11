@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use crate::ast::{AssignTarget, BinaryOp, CmpOp, CompClause, Expr, FunctionParam, Stmt, UnaryOp};
+use crate::ast::{
+    AssignTarget, BinaryOp, CmpOp, CompClause, Expr, FStringPart, FunctionParam, Stmt, UnaryOp,
+};
 use crate::bytecode::{CellVar, FnCode, FnParamSpec, FnProto, Insn, Reg};
 use crate::error::PyError;
 use crate::value::{Value, ValueKind};
@@ -396,6 +398,13 @@ fn lambda_captures_in_expr(
             lambda_captures_in_expr(else_, local_index, cells);
         }
         Expr::Named { value, .. } => lambda_captures_in_expr(value, local_index, cells),
+        Expr::FString(parts) => {
+            for part in parts {
+                if let FStringPart::Expr { expr, .. } = part {
+                    lambda_captures_in_expr(expr, local_index, cells);
+                }
+            }
+        }
         Expr::Var(_)
         | Expr::Int(_)
         | Expr::Float(_)
@@ -692,6 +701,13 @@ fn collect_free_var_reads_in_expr(expr: &Expr, uses: &mut HashSet<String>) {
         }
         Expr::Lambda { body, .. } => collect_free_var_reads_in_expr(body, uses),
         Expr::Named { value, .. } => collect_free_var_reads_in_expr(value, uses),
+        Expr::FString(parts) => {
+            for part in parts {
+                if let FStringPart::Expr { expr, .. } = part {
+                    collect_free_var_reads_in_expr(expr, uses);
+                }
+            }
+        }
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::None => {}
     }
 }
@@ -3414,23 +3430,130 @@ impl Compiler {
             Expr::DictComp { key, val, clauses } => self.compile_dict_comp(key, val, clauses),
             Expr::SetComp { elt, clauses } => self.compile_set_comp(elt, clauses),
             Expr::Named { target, value } => {
-                // Compile the value expression.
                 let val_reg = self.compile_expr(value);
-                // Assign to the named variable.
                 if let Some(reg) = self.local_reg(target) {
                     if val_reg != reg {
                         self.emit(Insn::Move(reg, val_reg));
                     }
                     self.mark_def(reg);
                 } else {
-                    // cell var / global / nonlocal — store through env
                     let name_idx = self.intern_name(target);
                     self.emit(Insn::StoreGlobal(name_idx, val_reg));
                 }
-                // The walrus expression evaluates to the assigned value.
                 val_reg
             }
+            Expr::FString(parts) => self.compile_fstring(parts),
         }
+    }
+
+    /// Compile an f-string into a series of str-conversions concatenated with `+`.
+    fn compile_fstring(&mut self, parts: &[FStringPart]) -> Reg {
+        if parts.is_empty() {
+            return self.compile_literal(Value::string(String::new()));
+        }
+
+        // Compile each part into a string register.
+        let mut part_regs: Vec<Reg> = Vec::new();
+        for part in parts {
+            let r = match part {
+                FStringPart::Literal(s) => self.compile_literal(Value::string(s.clone())),
+                FStringPart::Expr {
+                    expr,
+                    conversion,
+                    format_spec,
+                } => {
+                    let val_r = self.compile_expr(expr);
+                    // Apply conversion flag first.
+                    let val_r = match conversion {
+                        Some('r') => {
+                            // repr(val)
+                            let frame = self.next_temp;
+                            if frame + 1 > self.max_reg {
+                                self.max_reg = frame + 1;
+                            }
+                            self.next_temp = frame + 2;
+                            let repr_idx = self.intern_name("repr");
+                            self.emit(Insn::LoadGlobal(frame, repr_idx));
+                            if val_r != frame + 1 {
+                                self.emit(Insn::Move(frame + 1, val_r));
+                            }
+                            self.free_temp(val_r);
+                            self.emit(Insn::Call(frame, 1));
+                            self.next_temp = frame + 1;
+                            frame
+                        }
+                        Some('a') => {
+                            // ascii() approximated as repr() (not in builtins, use repr)
+                            let frame = self.next_temp;
+                            if frame + 1 > self.max_reg {
+                                self.max_reg = frame + 1;
+                            }
+                            self.next_temp = frame + 2;
+                            let repr_idx = self.intern_name("repr");
+                            self.emit(Insn::LoadGlobal(frame, repr_idx));
+                            if val_r != frame + 1 {
+                                self.emit(Insn::Move(frame + 1, val_r));
+                            }
+                            self.free_temp(val_r);
+                            self.emit(Insn::Call(frame, 1));
+                            self.next_temp = frame + 1;
+                            frame
+                        }
+                        _ => val_r,
+                    };
+                    // Apply format spec if present.
+                    if let Some(spec) = format_spec {
+                        // format(val, spec)
+                        let frame = self.next_temp;
+                        if frame + 2 > self.max_reg {
+                            self.max_reg = frame + 2;
+                        }
+                        self.next_temp = frame + 3;
+                        let fmt_idx = self.intern_name("format");
+                        self.emit(Insn::LoadGlobal(frame, fmt_idx));
+                        if val_r != frame + 1 {
+                            self.emit(Insn::Move(frame + 1, val_r));
+                        }
+                        self.free_temp(val_r);
+                        let spec_r = self.compile_literal(Value::string(spec.clone()));
+                        if spec_r != frame + 2 {
+                            self.emit(Insn::Move(frame + 2, spec_r));
+                        }
+                        self.free_temp(spec_r);
+                        self.emit(Insn::Call(frame, 2));
+                        self.next_temp = frame + 1;
+                        frame
+                    } else {
+                        // str(val) — convert to string
+                        let frame = self.next_temp;
+                        if frame + 1 > self.max_reg {
+                            self.max_reg = frame + 1;
+                        }
+                        self.next_temp = frame + 2;
+                        let str_idx = self.intern_name("str");
+                        self.emit(Insn::LoadGlobal(frame, str_idx));
+                        if val_r != frame + 1 {
+                            self.emit(Insn::Move(frame + 1, val_r));
+                        }
+                        self.free_temp(val_r);
+                        self.emit(Insn::Call(frame, 1));
+                        self.next_temp = frame + 1;
+                        frame
+                    }
+                }
+            };
+            part_regs.push(r);
+        }
+
+        // Concatenate all parts with BinOp(Add).
+        let mut acc = part_regs[0];
+        for &r in &part_regs[1..] {
+            let dst = self.ensure_dst(acc);
+            self.emit(Insn::BinOp(dst, acc, BinaryOp::Add, r));
+            self.free_temp(r);
+            acc = dst;
+        }
+        acc
     }
 
     // ── Comprehension compilation ──────────────────────────────────────────────

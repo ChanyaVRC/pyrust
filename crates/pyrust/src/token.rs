@@ -1,8 +1,22 @@
+/// One segment of an f-string literal.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FStringPart {
+    /// Plain text fragment (already escape-processed).
+    Literal(String),
+    /// Raw source text for the expression, plus optional conversion flag and format spec.
+    Expr {
+        src: String,
+        conversion: Option<char>,
+        format_spec: Option<String>,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     Int(i64),
     Float(f64),
     Str(String),
+    FString(Vec<FStringPart>),
     Ident(String),
     // Arithmetic
     Plus,
