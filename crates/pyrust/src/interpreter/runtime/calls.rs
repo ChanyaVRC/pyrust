@@ -832,6 +832,460 @@ impl Interpreter {
                 Ok(Value::bool_(is_callable))
             }
 
+            ValueKind::BuiltinFunction("round") => {
+                reject_keyword_args_expanded("round", args)?;
+                if args.is_empty() || args.len() > 2 {
+                    return Err(PyError::Runtime(
+                        "round() takes 1 or 2 arguments".to_string(),
+                    ));
+                }
+                let ndigits: Option<i32> = if args.len() == 2 {
+                    match args[1].value.kind() {
+                        ValueKind::Int(n) => Some(n as i32),
+                        ValueKind::None => None,
+                        _ => return Err(PyError::Named(
+                            "TypeError".to_string(),
+                            "round() ndigits must be an integer or None".to_string(),
+                        )),
+                    }
+                } else {
+                    None
+                };
+                match args[0].value.kind() {
+                    ValueKind::Int(v) => {
+                        // round(int) always returns int
+                        Ok(Value::int(v))
+                    }
+                    ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
+                    ValueKind::Float(v) => {
+                        match ndigits {
+                            None => {
+                                // round to nearest even int
+                                let rounded = py_round_half_even(v);
+                                Ok(Value::int(rounded))
+                            }
+                            Some(n) => {
+                                if n >= 0 {
+                                    let factor = 10f64.powi(n);
+                                    Ok(Value::float(py_round_half_even_f64(v * factor) / factor))
+                                } else {
+                                    let factor = 10f64.powi(-n);
+                                    Ok(Value::float(py_round_half_even_f64(v / factor) * factor))
+                                }
+                            }
+                        }
+                    }
+                    _ => Err(PyError::Named(
+                        "TypeError".to_string(),
+                        "round() argument must be a number".to_string(),
+                    )),
+                }
+            }
+
+            ValueKind::BuiltinFunction("divmod") => {
+                reject_keyword_args_expanded("divmod", args)?;
+                if args.len() != 2 {
+                    return Err(PyError::Runtime(
+                        "divmod() takes exactly 2 arguments".to_string(),
+                    ));
+                }
+                match (args[0].value.kind(), args[1].value.kind()) {
+                    (ValueKind::Int(a), ValueKind::Int(b)) => {
+                        if b == 0 {
+                            return Err(PyError::Named(
+                                "ZeroDivisionError".to_string(),
+                                "integer division or modulo by zero".to_string(),
+                            ));
+                        }
+                        let modulo = py_mod_i64(a, b);
+                        let quotient = (a - modulo) / b;
+                        Ok(Value::tuple(vec![Value::int(quotient), Value::int(modulo)]))
+                    }
+                    (ValueKind::Bool(a), ValueKind::Bool(b)) => {
+                        let a = a as i64;
+                        let b = b as i64;
+                        if b == 0 {
+                            return Err(PyError::Named(
+                                "ZeroDivisionError".to_string(),
+                                "integer division or modulo by zero".to_string(),
+                            ));
+                        }
+                        let modulo = py_mod_i64(a, b);
+                        let quotient = (a - modulo) / b;
+                        Ok(Value::tuple(vec![Value::int(quotient), Value::int(modulo)]))
+                    }
+                    _ => {
+                        let a = value_to_float(&args[0].value, "divmod")?;
+                        let b = value_to_float(&args[1].value, "divmod")?;
+                        if b == 0.0 {
+                            return Err(PyError::Named(
+                                "ZeroDivisionError".to_string(),
+                                "float divmod()".to_string(),
+                            ));
+                        }
+                        let quotient = (a / b).floor();
+                        let modulo = a - b * quotient;
+                        Ok(Value::tuple(vec![Value::float(quotient), Value::float(modulo)]))
+                    }
+                }
+            }
+
+            ValueKind::BuiltinFunction("pow") => {
+                reject_keyword_args_expanded("pow", args)?;
+                if args.len() < 2 || args.len() > 3 {
+                    return Err(PyError::Runtime(
+                        "pow() takes 2 or 3 arguments".to_string(),
+                    ));
+                }
+                if args.len() == 3 {
+                    // 3-argument pow: integer only
+                    let base = match args[0].value.kind() {
+                        ValueKind::Int(v) => v,
+                        ValueKind::Bool(b) => b as i64,
+                        _ => return Err(PyError::Named(
+                            "TypeError".to_string(),
+                            "pow() 3-argument form requires integers".to_string(),
+                        )),
+                    };
+                    let exp = match args[1].value.kind() {
+                        ValueKind::Int(v) => v,
+                        ValueKind::Bool(b) => b as i64,
+                        _ => return Err(PyError::Named(
+                            "TypeError".to_string(),
+                            "pow() 3-argument form requires integers".to_string(),
+                        )),
+                    };
+                    let modulus = match args[2].value.kind() {
+                        ValueKind::Int(v) => v,
+                        ValueKind::Bool(b) => b as i64,
+                        _ => return Err(PyError::Named(
+                            "TypeError".to_string(),
+                            "pow() 3-argument form requires integers".to_string(),
+                        )),
+                    };
+                    if modulus == 0 {
+                        return Err(PyError::Named(
+                            "ValueError".to_string(),
+                            "pow() 3rd argument cannot be 0".to_string(),
+                        ));
+                    }
+                    if exp < 0 {
+                        return Err(PyError::Named(
+                            "ValueError".to_string(),
+                            "pow() 2nd argument cannot be negative when 3rd argument specified".to_string(),
+                        ));
+                    }
+                    // Use modular exponentiation
+                    let result = modpow_i64(base, exp as u64, modulus);
+                    Ok(Value::int(result))
+                } else {
+                    // 2-argument pow
+                    match (args[0].value.kind(), args[1].value.kind()) {
+                        (ValueKind::Int(a), ValueKind::Int(b)) if b >= 0 => {
+                            Ok(Value::int(a.wrapping_pow(b as u32)))
+                        }
+                        (ValueKind::Bool(a), ValueKind::Int(b)) if b >= 0 => {
+                            Ok(Value::int((a as i64).wrapping_pow(b as u32)))
+                        }
+                        _ => {
+                            let a = value_to_float(&args[0].value, "pow")?;
+                            let b = value_to_float(&args[1].value, "pow")?;
+                            Ok(Value::float(a.powf(b)))
+                        }
+                    }
+                }
+            }
+
+            ValueKind::BuiltinFunction("hash") => {
+                reject_keyword_args_expanded("hash", args)?;
+                if args.len() != 1 {
+                    return Err(PyError::Runtime(
+                        "hash() takes exactly one argument".to_string(),
+                    ));
+                }
+                let hash_val = match args[0].value.kind() {
+                    ValueKind::Int(v) => v,
+                    ValueKind::Bool(b) => b as i64,
+                    ValueKind::Float(v) => {
+                        // CPython: if float == int, hash equals int hash
+                        if v.fract() == 0.0 && v.is_finite() {
+                            v as i64
+                        } else {
+                            // Simple bit-cast hash for non-integer floats
+                            v.to_bits() as i64
+                        }
+                    }
+                    ValueKind::Str(s) => {
+                        // FNV-1a hash
+                        let mut h: u64 = 14695981039346656037u64;
+                        for b in s.bytes() {
+                            h ^= b as u64;
+                            h = h.wrapping_mul(1099511628211u64);
+                        }
+                        h as i64
+                    }
+                    ValueKind::None => 0,
+                    ValueKind::Tuple(items) => {
+                        // Simple tuple hash: combine element hashes
+                        let mut h: i64 = 3527539;
+                        for item in items {
+                            let item_hash = match item.kind() {
+                                ValueKind::Int(v) => v,
+                                ValueKind::Bool(b) => b as i64,
+                                ValueKind::Float(fv) => {
+                                    if fv.fract() == 0.0 && fv.is_finite() { fv as i64 }
+                                    else { fv.to_bits() as i64 }
+                                }
+                                ValueKind::Str(s) => {
+                                    let mut sh: u64 = 14695981039346656037u64;
+                                    for byte in s.bytes() {
+                                        sh ^= byte as u64;
+                                        sh = sh.wrapping_mul(1099511628211u64);
+                                    }
+                                    sh as i64
+                                }
+                                ValueKind::None => 0,
+                                _ => return Err(PyError::Named(
+                                    "TypeError".to_string(),
+                                    "unhashable type in tuple".to_string(),
+                                )),
+                            };
+                            h = h.wrapping_mul(1000003).wrapping_add(item_hash);
+                        }
+                        h
+                    }
+                    ValueKind::List(_) => return Err(PyError::Named(
+                        "TypeError".to_string(),
+                        "unhashable type: 'list'".to_string(),
+                    )),
+                    ValueKind::Dict(_) => return Err(PyError::Named(
+                        "TypeError".to_string(),
+                        "unhashable type: 'dict'".to_string(),
+                    )),
+                    ValueKind::Set(_) => return Err(PyError::Named(
+                        "TypeError".to_string(),
+                        "unhashable type: 'set'".to_string(),
+                    )),
+                    _ => return Err(PyError::Named(
+                        "TypeError".to_string(),
+                        "unhashable type".to_string(),
+                    )),
+                };
+                Ok(Value::int(hash_val))
+            }
+
+            ValueKind::BuiltinFunction("chr") => {
+                reject_keyword_args_expanded("chr", args)?;
+                if args.len() != 1 {
+                    return Err(PyError::Runtime(
+                        "chr() takes exactly one argument".to_string(),
+                    ));
+                }
+                let code_point = match args[0].value.kind() {
+                    ValueKind::Int(v) => v,
+                    ValueKind::Bool(b) => b as i64,
+                    _ => return Err(PyError::Named(
+                        "TypeError".to_string(),
+                        "an integer is required (got type {})".to_string(),
+                    )),
+                };
+                if code_point < 0 || code_point > 1114111 {
+                    return Err(PyError::Named(
+                        "ValueError".to_string(),
+                        format!("chr() arg not in range(0x110000): {code_point}"),
+                    ));
+                }
+                let ch = char::from_u32(code_point as u32).ok_or_else(|| {
+                    PyError::Named(
+                        "ValueError".to_string(),
+                        format!("chr() arg not in range(0x110000): {code_point}"),
+                    )
+                })?;
+                Ok(Value::string(ch.to_string()))
+            }
+
+            ValueKind::BuiltinFunction("ord") => {
+                reject_keyword_args_expanded("ord", args)?;
+                if args.len() != 1 {
+                    return Err(PyError::Runtime(
+                        "ord() takes exactly one argument".to_string(),
+                    ));
+                }
+                match args[0].value.kind() {
+                    ValueKind::Str(s) => {
+                        let mut chars = s.chars();
+                        let first = chars.next();
+                        let second = chars.next();
+                        match (first, second) {
+                            (Some(c), None) => Ok(Value::int(c as i64)),
+                            (None, _) => Err(PyError::Named(
+                                "TypeError".to_string(),
+                                "ord() expected a character, but string of length 0 found".to_string(),
+                            )),
+                            (Some(_), Some(_)) => Err(PyError::Named(
+                                "TypeError".to_string(),
+                                format!("ord() expected a character, but string of length {} found", s.chars().count()),
+                            )),
+                        }
+                    }
+                    _ => Err(PyError::Named(
+                        "TypeError".to_string(),
+                        "ord() expected string of length 1, but got non-string".to_string(),
+                    )),
+                }
+            }
+
+            ValueKind::BuiltinFunction("bin") => {
+                reject_keyword_args_expanded("bin", args)?;
+                if args.len() != 1 {
+                    return Err(PyError::Runtime(
+                        "bin() takes exactly one argument".to_string(),
+                    ));
+                }
+                match args[0].value.kind() {
+                    ValueKind::Int(v) => {
+                        if v < 0 {
+                            Ok(Value::string(format!("-0b{:b}", -v)))
+                        } else {
+                            Ok(Value::string(format!("0b{:b}", v)))
+                        }
+                    }
+                    ValueKind::Bool(b) => Ok(Value::string(if b { "0b1".to_string() } else { "0b0".to_string() })),
+                    _ => Err(PyError::Named(
+                        "TypeError".to_string(),
+                        "'{}' object cannot be interpreted as an integer".to_string(),
+                    )),
+                }
+            }
+
+            ValueKind::BuiltinFunction("oct") => {
+                reject_keyword_args_expanded("oct", args)?;
+                if args.len() != 1 {
+                    return Err(PyError::Runtime(
+                        "oct() takes exactly one argument".to_string(),
+                    ));
+                }
+                match args[0].value.kind() {
+                    ValueKind::Int(v) => {
+                        if v < 0 {
+                            Ok(Value::string(format!("-0o{:o}", -v)))
+                        } else {
+                            Ok(Value::string(format!("0o{:o}", v)))
+                        }
+                    }
+                    ValueKind::Bool(b) => Ok(Value::string(if b { "0o1".to_string() } else { "0o0".to_string() })),
+                    _ => Err(PyError::Named(
+                        "TypeError".to_string(),
+                        "'{}' object cannot be interpreted as an integer".to_string(),
+                    )),
+                }
+            }
+
+            ValueKind::BuiltinFunction("hex") => {
+                reject_keyword_args_expanded("hex", args)?;
+                if args.len() != 1 {
+                    return Err(PyError::Runtime(
+                        "hex() takes exactly one argument".to_string(),
+                    ));
+                }
+                match args[0].value.kind() {
+                    ValueKind::Int(v) => {
+                        if v < 0 {
+                            Ok(Value::string(format!("-0x{:x}", -v)))
+                        } else {
+                            Ok(Value::string(format!("0x{:x}", v)))
+                        }
+                    }
+                    ValueKind::Bool(b) => Ok(Value::string(if b { "0x1".to_string() } else { "0x0".to_string() })),
+                    _ => Err(PyError::Named(
+                        "TypeError".to_string(),
+                        "'{}' object cannot be interpreted as an integer".to_string(),
+                    )),
+                }
+            }
+
+            ValueKind::BuiltinFunction("issubclass") => {
+                reject_keyword_args_expanded("issubclass", args)?;
+                if args.len() != 2 {
+                    return Err(PyError::Runtime(
+                        "issubclass() takes exactly 2 arguments".to_string(),
+                    ));
+                }
+                let cls = match args[0].value.kind() {
+                    ValueKind::PyClass(c) => Rc::clone(c),
+                    _ => return Err(PyError::Named(
+                        "TypeError".to_string(),
+                        "issubclass() arg 1 must be a class".to_string(),
+                    )),
+                };
+                let result = match args[1].value.kind() {
+                    ValueKind::PyClass(expected) => {
+                        class_is_subclass_of(&cls, expected)
+                    }
+                    ValueKind::Tuple(items) => {
+                        let mut found = false;
+                        for item in items {
+                            if let ValueKind::PyClass(expected) = item.kind() {
+                                if class_is_subclass_of(&cls, expected) {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        }
+                        found
+                    }
+                    _ => return Err(PyError::Named(
+                        "TypeError".to_string(),
+                        "issubclass() arg 2 must be a class or tuple of classes".to_string(),
+                    )),
+                };
+                Ok(Value::bool_(result))
+            }
+
+            ValueKind::BuiltinFunction("delattr") => {
+                reject_keyword_args_expanded("delattr", args)?;
+                if args.len() != 2 {
+                    return Err(PyError::Runtime(
+                        "delattr() takes exactly 2 arguments".to_string(),
+                    ));
+                }
+                let name = match args[1].value.kind() {
+                    ValueKind::Str(s) => s.to_string(),
+                    _ => return Err(PyError::Named(
+                        "TypeError".to_string(),
+                        "delattr(): attribute name must be a string".to_string(),
+                    )),
+                };
+                match args[0].value.kind() {
+                    ValueKind::PyInstance(instance) => {
+                        let instance = Rc::clone(instance);
+                        if instance.borrow_mut().attrs.remove(&name).is_none() {
+                            let class_name = instance.borrow().class.borrow().name.clone();
+                            return Err(PyError::Named(
+                                "AttributeError".to_string(),
+                                format!("'{}' object has no attribute '{}'", class_name, name),
+                            ));
+                        }
+                        Ok(Value::none())
+                    }
+                    ValueKind::PyClass(class) => {
+                        let class = Rc::clone(class);
+                        if class.borrow_mut().attrs.remove(&name).is_none() {
+                            let class_name = class.borrow().name.clone();
+                            return Err(PyError::Named(
+                                "AttributeError".to_string(),
+                                format!("type object '{}' has no attribute '{}'", class_name, name),
+                            ));
+                        }
+                        Ok(Value::none())
+                    }
+                    _ => Err(PyError::Named(
+                        "AttributeError".to_string(),
+                        "delattr() object has no writable attributes".to_string(),
+                    )),
+                }
+            }
+
             _ => Err(PyError::Runtime("object is not callable".to_string())),
         }
     }

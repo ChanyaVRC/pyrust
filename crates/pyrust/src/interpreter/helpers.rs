@@ -296,6 +296,7 @@ fn install_exception_builtins(env: &EnvRef) {
     let key_error = make_child("KeyError");
     let attribute_error = make_child("AttributeError");
     let overflow_error = make_child("OverflowError");
+    let zero_division_error = make_child("ZeroDivisionError");
     let system_exit = make_child("SystemExit");
 
     let mut module = env.borrow_mut();
@@ -338,6 +339,9 @@ fn install_exception_builtins(env: &EnvRef) {
     module
         .values
         .insert("OverflowError".to_string(), Value::py_class(overflow_error));
+    module
+        .values
+        .insert("ZeroDivisionError".to_string(), Value::py_class(zero_division_error));
     module
         .values
         .insert("SystemExit".to_string(), Value::py_class(system_exit));
@@ -1000,6 +1004,64 @@ fn is_pure_stmt(stmt: &Stmt, pure_fns: &std::collections::HashSet<String>) -> bo
         Stmt::Def { .. } | Stmt::Class { .. } => true,
         Stmt::Pass | Stmt::Break | Stmt::Continue => true,
     }
+}
+
+/// Round a float to the nearest integer using banker's rounding (round half to even),
+/// matching CPython's `round(x)` with no ndigits argument.
+fn py_round_half_even(v: f64) -> i64 {
+    let floor = v.floor();
+    let diff = v - floor;
+    if diff < 0.5 {
+        floor as i64
+    } else if diff > 0.5 {
+        (floor + 1.0) as i64
+    } else {
+        // Exactly 0.5: round to even
+        let floor_i = floor as i64;
+        if floor_i % 2 == 0 {
+            floor_i
+        } else {
+            floor_i + 1
+        }
+    }
+}
+
+/// Round a float to nearest using banker's rounding, returning f64.
+/// Used by round(x, n) for float inputs.
+fn py_round_half_even_f64(v: f64) -> f64 {
+    let floor = v.floor();
+    let diff = v - floor;
+    if diff < 0.5 {
+        floor
+    } else if diff > 0.5 {
+        floor + 1.0
+    } else {
+        // Exactly 0.5: round to even
+        let floor_i = floor as i64;
+        if floor_i % 2 == 0 {
+            floor
+        } else {
+            floor + 1.0
+        }
+    }
+}
+
+/// Modular exponentiation: (base^exp) % modulus for i64.
+fn modpow_i64(base: i64, exp: u64, modulus: i64) -> i64 {
+    if modulus == 1 {
+        return 0;
+    }
+    let mut result: i64 = 1;
+    let mut base = ((base % modulus) + modulus) % modulus;
+    let mut exp = exp;
+    while exp > 0 {
+        if exp % 2 == 1 {
+            result = (result * base) % modulus;
+        }
+        exp >>= 1;
+        base = (base * base) % modulus;
+    }
+    result
 }
 
 
