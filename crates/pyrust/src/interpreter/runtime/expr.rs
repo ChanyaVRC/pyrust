@@ -944,6 +944,17 @@ fn iter_values(value: Value) -> Result<Vec<Value>> {
             items.reverse();
             Ok(items)
         }
+        ValueKind::Generator(state_rc) => {
+            // Drain a NativeIterFrame (created by iter() on builtins) into a Vec.
+            let mut borrow = state_rc.borrow_mut();
+            if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
+                let remaining = native.items[native.pos..].to_vec();
+                native.pos = native.items.len();
+                Ok(remaining)
+            } else {
+                Err(PyError::Runtime("object is not iterable".to_string()))
+            }
+        }
         _ => Err(PyError::Runtime("object is not iterable".to_string())),
     }
 }

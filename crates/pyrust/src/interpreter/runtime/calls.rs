@@ -1636,7 +1636,12 @@ impl Interpreter {
                     // Built-in iterables: materialise into a NativeIterFrame so that
                     // next() works on the returned value.
                     _ => {
-                        let items = iter_values(val)?;
+                        let items = iter_values(val.clone()).map_err(|_| {
+                            PyError::Named(
+                                "TypeError".to_string(),
+                                format!("'{}' object is not iterable", value_type_name_str(&val)),
+                            )
+                        })?;
                         Ok(Value::generator(Box::new(NativeIterFrame { items, pos: 0 })))
                     }
                 }
@@ -1701,6 +1706,45 @@ impl Interpreter {
                     }
                     Err(e) => return Err(e),
                     Ok(_) => unreachable!("resume_generator always returns Err"),
+                }
+            }
+            Ok(items)
+        } else if let ValueKind::PyInstance(inst) = val.kind() {
+            // Get iterator via __iter__ (or use self if it only has __next__).
+            let iterator = {
+                let inst_rc = Rc::clone(inst);
+                let class = Rc::clone(&inst_rc.borrow().class);
+                if let Some(method_val) = lookup_class_attr(&class, "__iter__")
+                    && let ValueKind::UserFunction(f) = method_val.kind()
+                {
+                    let func = Rc::clone(f);
+                    self.call_user_function_expanded(
+                        func,
+                        &[],
+                        &[Value::py_instance(inst_rc)],
+                    )?
+                } else if lookup_class_attr(&class, "__next__").is_some() {
+                    val.clone()
+                } else {
+                    return Err(PyError::Named(
+                        "TypeError".to_string(),
+                        format!("'{}' object is not iterable", class.borrow().name),
+                    ));
+                }
+            };
+            let mut items = Vec::new();
+            loop {
+                match self.call_next(iterator.clone(), None) {
+                    Ok(item) => items.push(item),
+                    Err(PyError::Named(ref cls, _)) if cls == "StopIteration" => break,
+                    Err(PyError::Raised(ref exc)) => {
+                        let is_stop = matches!(exc.kind(),
+                            ValueKind::PyInstance(i) if i.borrow().class.borrow().name == "StopIteration"
+                        );
+                        if is_stop { break; }
+                        return Err(PyError::Raised(exc.clone()));
+                    }
+                    Err(e) => return Err(e),
                 }
             }
             Ok(items)
