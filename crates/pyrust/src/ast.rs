@@ -30,6 +30,8 @@ pub enum AssignTarget {
     Index(Box<Expr>, Box<Expr>),
     /// Unpack: a, b, c = ...
     Tuple(Vec<AssignTarget>),
+    /// Starred target inside a Tuple: *name or *_ — only valid inside Tuple
+    Starred(Box<AssignTarget>),
 }
 
 #[derive(Debug, Clone)]

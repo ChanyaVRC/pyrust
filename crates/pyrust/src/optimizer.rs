@@ -401,7 +401,8 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn> {
             | Insn::RaiseFrom(..)
             | Insn::RaiseReRaise
             | Insn::RaiseAssert(_)
-            | Insn::Unpack(..)) => {
+            | Insn::Unpack(..)
+            | Insn::UnpackEx { .. }) => {
                 known.clear();
                 out.push(insn);
             }
@@ -786,6 +787,9 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
 
         // Yield reads src and writes dst.
         Yield { src, dst: _ } => *src == r,
+
+        // UnpackEx reads src.
+        UnpackEx { src, .. } => *src == r,
     }
 }
 
@@ -1863,6 +1867,17 @@ fn pass_copy_prop(insns: Vec<Insn>) -> Vec<Insn> {
             Insn::GetItem(dst, obj, idx) => Insn::GetItem(dst, s(&copies, obj), s(&copies, idx)),
             Insn::GetIter(slot, src) => Insn::GetIter(slot, s(&copies, src)),
             Insn::Unpack(dst, src, n) => Insn::Unpack(dst, s(&copies, src), n),
+            Insn::UnpackEx {
+                src,
+                before,
+                after,
+                dst_base,
+            } => Insn::UnpackEx {
+                src: s(&copies, src),
+                before,
+                after,
+                dst_base,
+            },
             Insn::CheckLocal(r, n) => Insn::CheckLocal(s(&copies, r), n),
             Insn::MatchExcept(r, k) => Insn::MatchExcept(s(&copies, r), k),
             Insn::ForCountReg(var, op, stop, step_idx, k) => {
@@ -1886,6 +1901,18 @@ fn pass_copy_prop(insns: Vec<Insn>) -> Vec<Insn> {
         if let Insn::Unpack(dst, _, n) = &insn {
             let lo = *dst;
             let hi = dst + n;
+            copies.retain(|k, v| (*k < lo || *k >= hi) && (*v < lo || *v >= hi));
+        }
+        // UnpackEx writes dst_base..dst_base+before+1+after; kill the entire range.
+        if let Insn::UnpackEx {
+            before,
+            after,
+            dst_base,
+            ..
+        } = &insn
+        {
+            let lo = *dst_base;
+            let hi = dst_base + *before as u32 + 1 + *after as u32;
             copies.retain(|k, v| (*k < lo || *k >= hi) && (*v < lo || *v >= hi));
         }
         // Move(dst, src): kill stale aliases THEN record the new copy.

@@ -963,6 +963,9 @@ fn collect_written_target(target: &AssignTarget, names: &mut HashSet<String>) {
                 collect_written_target(t, names);
             }
         }
+        AssignTarget::Starred(inner) => {
+            collect_written_target(inner, names);
+        }
         _ => {}
     }
 }
@@ -1134,6 +1137,9 @@ impl Compiler {
                 for t in targets {
                     self.mark_target_def(t);
                 }
+            }
+            AssignTarget::Starred(inner) => {
+                self.mark_target_def(inner);
             }
             _ => {}
         }
@@ -1653,7 +1659,50 @@ impl Compiler {
                 }
             }
             AssignTarget::Tuple(targets) => {
-                // Fast path: matching tuple literal
+                // Check if any target is starred.
+                let star_pos = targets
+                    .iter()
+                    .position(|t| matches!(t, AssignTarget::Starred(_)));
+
+                if let Some(star_idx) = star_pos {
+                    // Extended unpack: a, *b, c = seq
+                    let before = star_idx as u8;
+                    let after = (targets.len() - star_idx - 1) as u8;
+                    // Total destination registers: before + 1 (starred list) + after
+                    let total = targets.len() as u32;
+                    let src = self.compile_expr(expr);
+                    let base = self.next_temp;
+                    if base.checked_add(total).is_none() {
+                        self.failed = true;
+                        if self.error_msg.is_none() {
+                            self.error_msg = Some(format!("too many unpack targets ({})", total));
+                        }
+                        return;
+                    }
+                    self.next_temp = base + total;
+                    if self.next_temp - 1 > self.max_reg {
+                        self.max_reg = self.next_temp - 1;
+                    }
+                    self.emit(Insn::UnpackEx {
+                        src,
+                        before,
+                        after,
+                        dst_base: base,
+                    });
+                    self.free_temp(src);
+                    // Store results: targets[i] → R[base + i], where targets[star_idx] is the starred list
+                    for (i, t) in (0u32..).zip(targets.iter()) {
+                        let inner = match t {
+                            AssignTarget::Starred(inner) => inner.as_ref(),
+                            other => other,
+                        };
+                        self.compile_store_unpack_target(inner, base + i);
+                    }
+                    self.next_temp = base;
+                    return;
+                }
+
+                // No starred target — fast path: matching tuple literal
                 if let Expr::Tuple(exprs) = expr
                     && exprs.len() == targets.len()
                     && !targets.is_empty()
@@ -1751,6 +1800,15 @@ impl Compiler {
                             let tmp = base + i;
                             self.compile_assign(t, &Expr::Var(format!("__unpack_{}", tmp)));
                         }
+                        AssignTarget::Starred(_) => {
+                            // Should not happen (handled above); treat as error
+                            self.failed = true;
+                            if self.error_msg.is_none() {
+                                self.error_msg = Some(
+                                    "unexpected starred target in non-extended unpack".to_string(),
+                                );
+                            }
+                        }
                     }
                 }
                 self.next_temp = base;
@@ -1771,6 +1829,48 @@ impl Compiler {
                 self.free_temp(val);
                 self.free_temp(idx);
                 self.free_temp(obj);
+            }
+            AssignTarget::Starred(_) => {
+                // Standalone starred target (validated away by parser; should not reach here)
+                self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg =
+                        Some("starred assignment target must be in a list or tuple".to_string());
+                }
+            }
+        }
+    }
+
+    /// Store the value in `src_reg` into `target` (a non-starred inner target).
+    fn compile_store_unpack_target(&mut self, target: &AssignTarget, src_reg: Reg) {
+        match target {
+            AssignTarget::Name(name) => {
+                if let Some(reg) = self.local_reg(name) {
+                    if reg != src_reg {
+                        self.emit(Insn::Move(reg, src_reg));
+                    }
+                } else {
+                    let name_idx = self.intern_name(name);
+                    self.emit(Insn::StoreGlobal(name_idx, src_reg));
+                }
+            }
+            AssignTarget::Attr(obj_expr, attr) => {
+                let obj = self.compile_expr(obj_expr);
+                let name_idx = self.intern_name(attr);
+                self.emit(Insn::SetAttr(obj, name_idx, src_reg));
+                self.free_temp(obj);
+            }
+            AssignTarget::Index(obj_expr, idx_expr) => {
+                let obj = self.compile_expr(obj_expr);
+                let idx = self.compile_expr(idx_expr);
+                self.emit(Insn::SetItem(obj, idx, src_reg));
+                self.free_temp(idx);
+                self.free_temp(obj);
+            }
+            AssignTarget::Tuple(_) | AssignTarget::Starred(_) => {
+                // Nested unpack — compile recursively using a temp var name trick
+                let tmp_name = format!("__unpack_{}", src_reg);
+                self.compile_assign(target, &Expr::Var(tmp_name));
             }
         }
     }
@@ -1812,7 +1912,7 @@ impl Compiler {
                 self.free_temp(idx);
                 self.free_temp(obj);
             }
-            AssignTarget::Tuple(_) => {
+            AssignTarget::Tuple(_) | AssignTarget::Starred(_) => {
                 self.failed = true;
                 if self.error_msg.is_none() {
                     self.error_msg = Some(
@@ -2245,37 +2345,71 @@ impl Compiler {
                 // local case: for_dst == var_reg, already written — no Move needed
             }
             AssignTarget::Tuple(targets) => {
+                let star_pos = targets
+                    .iter()
+                    .position(|t| matches!(t, AssignTarget::Starred(_)));
                 let n = targets.len() as u32;
                 let base = for_dst + 1;
-                if base.checked_add(n).is_none() {
-                    self.failed = true;
-                    if self.error_msg.is_none() {
-                        self.error_msg = Some(format!("too many unpack targets ({})", n));
-                    }
-                    return;
-                }
-                self.next_temp = base + n;
-                if self.next_temp - 1 > self.max_reg {
-                    self.max_reg = self.next_temp - 1;
-                }
-                self.emit(Insn::Unpack(base, for_dst, n));
-                for (i, t) in (0u32..).zip(targets.iter()) {
-                    match t {
-                        AssignTarget::Name(name) => {
-                            if let Some(reg) = self.local_reg(name) {
-                                self.emit(Insn::Move(reg, base + i));
-                            } else {
-                                let name_idx = self.intern_name(name);
-                                self.emit(Insn::StoreGlobal(name_idx, base + i));
-                            }
+
+                if let Some(star_idx) = star_pos {
+                    // Extended unpack: for a, *b, c in ...
+                    let before = star_idx as u8;
+                    let after = (targets.len() - star_idx - 1) as u8;
+                    if base.checked_add(n).is_none() {
+                        self.failed = true;
+                        if self.error_msg.is_none() {
+                            self.error_msg = Some(format!("too many unpack targets ({})", n));
                         }
-                        _ => {
-                            self.failed = true;
-                            if self.error_msg.is_none() {
-                                self.error_msg =
-                                    Some("unsupported for-loop unpack target".to_string());
+                        return;
+                    }
+                    self.next_temp = base + n;
+                    if self.next_temp - 1 > self.max_reg {
+                        self.max_reg = self.next_temp - 1;
+                    }
+                    self.emit(Insn::UnpackEx {
+                        src: for_dst,
+                        before,
+                        after,
+                        dst_base: base,
+                    });
+                    for (i, t) in (0u32..).zip(targets.iter()) {
+                        let inner = match t {
+                            AssignTarget::Starred(inner) => inner.as_ref(),
+                            other => other,
+                        };
+                        self.compile_store_unpack_target(inner, base + i);
+                    }
+                } else {
+                    if base.checked_add(n).is_none() {
+                        self.failed = true;
+                        if self.error_msg.is_none() {
+                            self.error_msg = Some(format!("too many unpack targets ({})", n));
+                        }
+                        return;
+                    }
+                    self.next_temp = base + n;
+                    if self.next_temp - 1 > self.max_reg {
+                        self.max_reg = self.next_temp - 1;
+                    }
+                    self.emit(Insn::Unpack(base, for_dst, n));
+                    for (i, t) in (0u32..).zip(targets.iter()) {
+                        match t {
+                            AssignTarget::Name(name) => {
+                                if let Some(reg) = self.local_reg(name) {
+                                    self.emit(Insn::Move(reg, base + i));
+                                } else {
+                                    let name_idx = self.intern_name(name);
+                                    self.emit(Insn::StoreGlobal(name_idx, base + i));
+                                }
                             }
-                            return;
+                            _ => {
+                                self.failed = true;
+                                if self.error_msg.is_none() {
+                                    self.error_msg =
+                                        Some("unsupported for-loop unpack target".to_string());
+                                }
+                                return;
+                            }
                         }
                     }
                 }

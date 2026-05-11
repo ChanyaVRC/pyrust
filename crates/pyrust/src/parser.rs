@@ -101,27 +101,64 @@ impl Parser {
     }
 
     fn parse_expr_stmt(&mut self) -> Result<Stmt> {
-        // Parse a comma-separated list (possible tuple or unpack target)
-        let first = self.parse_expr()?;
+        // Detect starred assignment target at the start: *name, ... = rhs
+        // We need to check if the first token is Star before parsing as an expression,
+        // since *name is not a valid expression.
+        let first_is_star = self.is(&Token::Star);
 
-        // Check for more comma-separated items (tuple or unpack target)
-        let targets = if self.is(&Token::Comma) {
-            let mut items = vec![first];
+        // Parse a comma-separated list (possible tuple or unpack target).
+        // If the first token is Star, parse the inner name as a starred assign target item.
+        let (first_expr, first_starred) = if first_is_star {
+            // *name, ... = rhs  — parse as starred target
+            self.bump(); // consume *
+            let inner = self.parse_postfix()?;
+            (inner, true)
+        } else {
+            (self.parse_expr()?, false)
+        };
+
+        // Check for more comma-separated items (tuple or unpack target).
+        // We track whether any item is starred (via a parallel bool vec).
+        let (targets, starred_flags) = if self.is(&Token::Comma) {
+            let mut items = vec![first_expr];
+            let mut flags = vec![first_starred];
             while self.is(&Token::Comma) {
                 self.bump();
                 if self.at_stmt_end() {
                     break;
                 }
-                items.push(self.parse_expr()?);
+                if self.is(&Token::Star) {
+                    self.bump(); // consume *
+                    let inner = self.parse_postfix()?;
+                    items.push(inner);
+                    flags.push(true);
+                } else {
+                    items.push(self.parse_expr()?);
+                    flags.push(false);
+                }
             }
-            items
+            (items, flags)
         } else {
-            vec![first]
+            (vec![first_expr], vec![first_starred])
         };
 
         // Assignment: = rhs
         if self.is(&Token::Assign) {
-            self.bump();
+            // Validate starred flags: at most one starred item
+            let star_count = starred_flags.iter().filter(|&&s| s).count();
+            if star_count > 1 {
+                return Err(PyError::Parse(
+                    "multiple starred expressions in assignment".to_string(),
+                ));
+            }
+            // If there's a starred item but only one item total and no commas, it's not
+            // a valid assignment target (e.g. standalone `*a = x` is invalid).
+            if star_count == 1 && targets.len() == 1 {
+                return Err(PyError::Parse(
+                    "starred assignment target must be in a list or tuple".to_string(),
+                ));
+            }
+            self.bump(); // consume =
             // Parse the RHS; collect commas so "a, b = 1, 2" gives rhs=Tuple([1,2])
             let rhs_first = self.parse_expr()?;
             let rhs = if self.is(&Token::Comma) {
@@ -137,7 +174,9 @@ impl Parser {
             } else {
                 rhs_first
             };
-            if targets.len() == 1 {
+
+            // Convert targets+flags into AssignTargets
+            if targets.len() == 1 && !starred_flags[0] {
                 return match &targets[0] {
                     Expr::Var(name) => Ok(Stmt::Assign(AssignTarget::Name(name.clone()), rhs)),
                     Expr::Attr { target, name } => Ok(Stmt::AttrAssign {
@@ -163,19 +202,25 @@ impl Parser {
                         expr: rhs,
                     }),
                     Expr::Tuple(elems) => {
-                        let targets: Result<Vec<AssignTarget>> =
-                            elems.iter().map(expr_to_assign_target).collect();
-                        Ok(Stmt::Assign(AssignTarget::Tuple(targets?), rhs))
+                        let assign_targets =
+                            exprs_to_assign_targets(elems, &vec![false; elems.len()])?;
+                        Ok(Stmt::Assign(AssignTarget::Tuple(assign_targets), rhs))
                     }
                     _ => Err(PyError::Parse(
                         "cannot assign to this expression".to_string(),
                     )),
                 };
             }
-            // Multi-target: tuple unpack
-            let assign_targets: Result<Vec<AssignTarget>> =
-                targets.iter().map(expr_to_assign_target).collect();
-            return Ok(Stmt::Assign(AssignTarget::Tuple(assign_targets?), rhs));
+            // Multi-target or starred tuple unpack
+            let assign_targets = exprs_to_assign_targets(&targets, &starred_flags)?;
+            return Ok(Stmt::Assign(AssignTarget::Tuple(assign_targets), rhs));
+        }
+
+        // Starred item outside assignment is invalid
+        if starred_flags.iter().any(|&s| s) {
+            return Err(PyError::Parse(
+                "starred expression is not valid in this context".to_string(),
+            ));
         }
 
         // Augmented assignment: += -= etc.
@@ -442,21 +487,8 @@ impl Parser {
 
     fn parse_for(&mut self) -> Result<Stmt> {
         self.expect(&Token::For)?;
-        // Parse possibly-tuple target
-        let first = self.expect_ident("for loop variable")?;
-        let target = if self.is(&Token::Comma) {
-            let mut names = vec![AssignTarget::Name(first)];
-            while self.is(&Token::Comma) {
-                self.bump();
-                if self.is(&Token::In) {
-                    break;
-                }
-                names.push(AssignTarget::Name(self.expect_ident("for loop variable")?));
-            }
-            AssignTarget::Tuple(names)
-        } else {
-            AssignTarget::Name(first)
-        };
+        // Parse possibly-tuple target, supporting starred items like `for a, *b in ...`
+        let target = self.parse_for_target()?;
         self.expect(&Token::In)?;
         let iter = self.parse_expr()?;
         self.expect(&Token::Colon)?;
@@ -468,6 +500,59 @@ impl Parser {
             body,
             else_branch,
         })
+    }
+
+    /// Parse a for-loop target, which may be a single name, a tuple of names,
+    /// or a starred-name target like `a, *b, c` or `a, *b`.
+    fn parse_for_target(&mut self) -> Result<AssignTarget> {
+        // Parse the first item; may be starred
+        let (first, first_starred) = if self.is(&Token::Star) {
+            self.bump();
+            let name = self.expect_ident("for loop starred variable")?;
+            (AssignTarget::Name(name), true)
+        } else {
+            let name = self.expect_ident("for loop variable")?;
+            (AssignTarget::Name(name), false)
+        };
+
+        if !self.is(&Token::Comma) {
+            if first_starred {
+                return Err(PyError::Parse(
+                    "starred assignment target must be in a list or tuple".to_string(),
+                ));
+            }
+            return Ok(first);
+        }
+
+        // Multiple items: build a tuple target
+        let first_target = if first_starred {
+            AssignTarget::Starred(Box::new(first))
+        } else {
+            first
+        };
+        let mut names: Vec<AssignTarget> = vec![first_target];
+        let mut star_count = if first_starred { 1 } else { 0 };
+
+        while self.is(&Token::Comma) {
+            self.bump();
+            if self.is(&Token::In) {
+                break;
+            }
+            if self.is(&Token::Star) {
+                self.bump();
+                let name = self.expect_ident("for loop starred variable")?;
+                star_count += 1;
+                if star_count > 1 {
+                    return Err(PyError::Parse(
+                        "multiple starred expressions in assignment".to_string(),
+                    ));
+                }
+                names.push(AssignTarget::Starred(Box::new(AssignTarget::Name(name))));
+            } else {
+                names.push(AssignTarget::Name(self.expect_ident("for loop variable")?));
+            }
+        }
+        Ok(AssignTarget::Tuple(names))
     }
 
     fn parse_optional_else(&mut self) -> Result<Option<Vec<Stmt>>> {
@@ -1495,14 +1580,36 @@ fn expr_to_assign_target(expr: &Expr) -> Result<AssignTarget> {
         Expr::Attr { target, name } => Ok(AssignTarget::Attr(target.clone(), name.clone())),
         Expr::Index { target, index } => Ok(AssignTarget::Index(target.clone(), index.clone())),
         Expr::Tuple(items) => {
-            let targets: Result<Vec<AssignTarget>> =
-                items.iter().map(expr_to_assign_target).collect();
-            Ok(AssignTarget::Tuple(targets?))
+            let flags = vec![false; items.len()];
+            let targets = exprs_to_assign_targets(items, &flags)?;
+            Ok(AssignTarget::Tuple(targets))
         }
         _ => Err(PyError::Parse(
             "cannot assign to this expression".to_string(),
         )),
     }
+}
+
+/// Convert a parallel list of expressions and starred-flags into AssignTargets.
+/// `starred[i] == true` means item `i` should be wrapped in `AssignTarget::Starred`.
+fn exprs_to_assign_targets(exprs: &[Expr], starred: &[bool]) -> Result<Vec<AssignTarget>> {
+    assert_eq!(exprs.len(), starred.len());
+    let star_count = starred.iter().filter(|&&s| s).count();
+    if star_count > 1 {
+        return Err(PyError::Parse(
+            "multiple starred expressions in assignment".to_string(),
+        ));
+    }
+    let mut targets = Vec::with_capacity(exprs.len());
+    for (expr, &is_starred) in exprs.iter().zip(starred.iter()) {
+        let base = expr_to_assign_target(expr)?;
+        if is_starred {
+            targets.push(AssignTarget::Starred(Box::new(base)));
+        } else {
+            targets.push(base);
+        }
+    }
+    Ok(targets)
 }
 
 fn cmp_op_to_binary(op: CmpOp) -> BinaryOp {

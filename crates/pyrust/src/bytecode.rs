@@ -129,6 +129,16 @@ pub enum Insn {
     BuildDict(Reg, Reg, u8),
     /// R[base..base+n] = iter_values(R[src])
     Unpack(Reg, Reg, u32),
+    /// Extended unpack: R[src] is an iterable; store first `before` elements into
+    /// R[dst_base..dst_base+before-1], the middle as a list into R[dst_base+before],
+    /// and the last `after` elements into R[dst_base+before+1..dst_base+before+after].
+    /// Raises ValueError if len(iterable) < before + after.
+    UnpackEx {
+        src: Reg,
+        before: u8,
+        after: u8,
+        dst_base: Reg,
+    },
     /// iters[slot] = iter_values(R[src])
     GetIter(u8, Reg),
     /// if iters[slot] exhausted: pc += offset; else R[dst] = next(iters[slot])
