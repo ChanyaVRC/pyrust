@@ -165,6 +165,8 @@ pub enum Insn {
     MakeClass(Reg, u8, Reg, u8, u16),
     /// Print R[src] if not None (REPL expression output).
     PrintExpr(Reg),
+    /// R[set].insert(R[val])  — in-place add for set comprehension construction
+    SetAdd(Reg, Reg),
     /// R[list].push(R[val])  — in-place append for variadic call construction
     ListAppend(Reg, Reg),
     /// R[list].extend(iter(R[src]))  — in-place extend

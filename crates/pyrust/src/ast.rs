@@ -131,6 +131,22 @@ pub enum Expr {
     Tuple(Vec<Expr>),
     Dict(Vec<(Expr, Expr)>),
     Set(Vec<Expr>),
+    /// `[elt for target in iter (if cond)?  (for target2 in iter2 ...)*]`
+    ListComp {
+        elt: Box<Expr>,
+        clauses: Vec<CompClause>,
+    },
+    /// `{key: val for target in iter ...}`
+    DictComp {
+        key: Box<Expr>,
+        val: Box<Expr>,
+        clauses: Vec<CompClause>,
+    },
+    /// `{elt for target in iter ...}`
+    SetComp {
+        elt: Box<Expr>,
+        clauses: Vec<CompClause>,
+    },
     Unary {
         op: UnaryOp,
         expr: Box<Expr>,
@@ -209,6 +225,14 @@ pub enum BinaryOp {
     NotIn,
     Is,
     IsNot,
+}
+
+/// A single `for target in iter (if cond)?` clause inside a comprehension.
+#[derive(Debug, Clone)]
+pub struct CompClause {
+    pub target: AssignTarget,
+    pub iter: Expr,
+    pub cond: Option<Expr>,
 }
 
 /// Comparison operators (used in chained comparisons)

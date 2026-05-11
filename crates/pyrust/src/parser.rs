@@ -1,5 +1,6 @@
 use crate::ast::{
-    AssignTarget, BinaryOp, CallArg, CmpOp, ExceptHandler, Expr, FunctionParam, Stmt, UnaryOp,
+    AssignTarget, BinaryOp, CallArg, CmpOp, CompClause, ExceptHandler, Expr, FunctionParam, Stmt,
+    UnaryOp,
 };
 use crate::error::{PyError, Result};
 use crate::token::Token;
@@ -1241,21 +1242,65 @@ impl Parser {
 
     fn parse_list_literal(&mut self) -> Result<Expr> {
         self.expect(&Token::LBracket)?;
-        let mut items = Vec::new();
-        if !self.is(&Token::RBracket) {
-            loop {
-                items.push(self.parse_expr()?);
-                if self.is(&Token::RBracket) {
-                    break;
-                }
-                self.expect(&Token::Comma)?;
-                if self.is(&Token::RBracket) {
-                    break;
-                }
+        if self.is(&Token::RBracket) {
+            self.bump();
+            return Ok(Expr::List(vec![]));
+        }
+        let first = self.parse_expr()?;
+        // Detect list comprehension: [expr for ...]
+        if self.is(&Token::For) {
+            let clauses = self.parse_comp_clauses()?;
+            self.expect(&Token::RBracket)?;
+            return Ok(Expr::ListComp {
+                elt: Box::new(first),
+                clauses,
+            });
+        }
+        let mut items = vec![first];
+        while self.is(&Token::Comma) {
+            self.bump();
+            if self.is(&Token::RBracket) {
+                break;
             }
+            items.push(self.parse_expr()?);
         }
         self.expect(&Token::RBracket)?;
         Ok(Expr::List(items))
+    }
+
+    /// Parse one or more comprehension clauses: `for target in iter (if cond)? ...`
+    fn parse_comp_clauses(&mut self) -> Result<Vec<CompClause>> {
+        let mut clauses = Vec::new();
+        while self.is(&Token::For) {
+            self.bump(); // consume `for`
+            // Parse possibly-tuple target (same as for-loop)
+            let first = self.expect_ident("comprehension variable")?;
+            let target = if self.is(&Token::Comma) {
+                let mut names = vec![AssignTarget::Name(first)];
+                while self.is(&Token::Comma) {
+                    self.bump();
+                    if self.is(&Token::In) {
+                        break;
+                    }
+                    names.push(AssignTarget::Name(
+                        self.expect_ident("comprehension variable")?,
+                    ));
+                }
+                AssignTarget::Tuple(names)
+            } else {
+                AssignTarget::Name(first)
+            };
+            self.expect(&Token::In)?;
+            let iter = self.parse_or()?; // parse iterable (no comma-list at this level)
+            let cond = if self.is(&Token::If) {
+                self.bump();
+                Some(self.parse_or()?)
+            } else {
+                None
+            };
+            clauses.push(CompClause { target, iter, cond });
+        }
+        Ok(clauses)
     }
 
     fn parse_dict_or_set_literal(&mut self) -> Result<Expr> {
@@ -1266,9 +1311,19 @@ impl Parser {
         }
         let first = self.parse_expr()?;
         if self.is(&Token::Colon) {
-            // Dict
+            // Dict or dict comprehension
             self.bump();
             let val = self.parse_expr()?;
+            if self.is(&Token::For) {
+                // Dict comprehension: {key: val for ...}
+                let clauses = self.parse_comp_clauses()?;
+                self.expect(&Token::RBrace)?;
+                return Ok(Expr::DictComp {
+                    key: Box::new(first),
+                    val: Box::new(val),
+                    clauses,
+                });
+            }
             let mut items = vec![(first, val)];
             while self.is(&Token::Comma) {
                 self.bump();
@@ -1283,7 +1338,16 @@ impl Parser {
             self.expect(&Token::RBrace)?;
             Ok(Expr::Dict(items))
         } else {
-            // Set
+            // Set or set comprehension
+            if self.is(&Token::For) {
+                // Set comprehension: {elt for ...}
+                let clauses = self.parse_comp_clauses()?;
+                self.expect(&Token::RBrace)?;
+                return Ok(Expr::SetComp {
+                    elt: Box::new(first),
+                    clauses,
+                });
+            }
             let mut items = vec![first];
             while self.is(&Token::Comma) {
                 self.bump();

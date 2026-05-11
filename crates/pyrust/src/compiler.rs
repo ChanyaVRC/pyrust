@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use crate::ast::{AssignTarget, BinaryOp, CmpOp, Expr, FunctionParam, Stmt, UnaryOp};
+use crate::ast::{AssignTarget, BinaryOp, CmpOp, CompClause, Expr, FunctionParam, Stmt, UnaryOp};
 use crate::bytecode::{CellVar, FnCode, FnParamSpec, FnProto, Insn, Reg};
 use crate::error::PyError;
 use crate::value::{Value, ValueKind};
@@ -371,6 +371,25 @@ fn lambda_captures_in_expr(
                 lambda_captures_in_expr(v, local_index, cells);
             }
         }
+        Expr::ListComp { elt, clauses } | Expr::SetComp { elt, clauses } => {
+            for clause in clauses {
+                lambda_captures_in_expr(&clause.iter, local_index, cells);
+                if let Some(c) = &clause.cond {
+                    lambda_captures_in_expr(c, local_index, cells);
+                }
+            }
+            lambda_captures_in_expr(elt, local_index, cells);
+        }
+        Expr::DictComp { key, val, clauses } => {
+            for clause in clauses {
+                lambda_captures_in_expr(&clause.iter, local_index, cells);
+                if let Some(c) = &clause.cond {
+                    lambda_captures_in_expr(c, local_index, cells);
+                }
+            }
+            lambda_captures_in_expr(key, local_index, cells);
+            lambda_captures_in_expr(val, local_index, cells);
+        }
         Expr::Ternary { cond, then, else_ } => {
             lambda_captures_in_expr(cond, local_index, cells);
             lambda_captures_in_expr(then, local_index, cells);
@@ -645,6 +664,25 @@ fn collect_free_var_reads_in_expr(expr: &Expr, uses: &mut HashSet<String>) {
                 collect_free_var_reads_in_expr(k, uses);
                 collect_free_var_reads_in_expr(v, uses);
             }
+        }
+        Expr::ListComp { elt, clauses } | Expr::SetComp { elt, clauses } => {
+            for clause in clauses {
+                collect_free_var_reads_in_expr(&clause.iter, uses);
+                if let Some(c) = &clause.cond {
+                    collect_free_var_reads_in_expr(c, uses);
+                }
+            }
+            collect_free_var_reads_in_expr(elt, uses);
+        }
+        Expr::DictComp { key, val, clauses } => {
+            for clause in clauses {
+                collect_free_var_reads_in_expr(&clause.iter, uses);
+                if let Some(c) = &clause.cond {
+                    collect_free_var_reads_in_expr(c, uses);
+                }
+            }
+            collect_free_var_reads_in_expr(key, uses);
+            collect_free_var_reads_in_expr(val, uses);
         }
         Expr::Ternary { cond, then, else_ } => {
             collect_free_var_reads_in_expr(cond, uses);
@@ -3244,7 +3282,187 @@ impl Compiler {
                     .collect();
                 self.compile_lambda(&fp, body)
             }
+            Expr::ListComp { elt, clauses } => self.compile_list_comp(elt, clauses),
+            Expr::DictComp { key, val, clauses } => self.compile_dict_comp(key, val, clauses),
+            Expr::SetComp { elt, clauses } => self.compile_set_comp(elt, clauses),
         }
+    }
+
+    // ── Comprehension compilation ──────────────────────────────────────────────
+
+    /// Emit the nested for+if loop structure shared by all comprehension kinds.
+    ///
+    /// `acc` is the accumulator register (already initialised with an empty
+    /// list/dict/set).  For each element that passes all filters, `emit_body` is
+    /// called with `(compiler, item_reg, acc_reg)` to append/insert the value.
+    fn compile_comp_loops(
+        &mut self,
+        clauses: &[CompClause],
+        acc: Reg,
+        emit_body: &mut impl FnMut(&mut Self, Reg),
+    ) {
+        if clauses.is_empty() {
+            return;
+        }
+        let clause = &clauses[0];
+
+        let iter_slot = self.alloc_iter();
+        let src = self.compile_expr(&clause.iter);
+        self.emit(Insn::GetIter(iter_slot, src));
+        self.free_temp(src);
+
+        let loop_start = self.pc();
+
+        // Choose a destination register for the loop variable.
+        let item_reg = if let AssignTarget::Name(n) = &clause.target {
+            self.local_reg(n).unwrap_or_else(|| self.alloc_temp())
+        } else {
+            self.alloc_temp()
+        };
+
+        let exit_jmp = self.emit(Insn::ForIter(item_reg, iter_slot, 0));
+
+        // Assign loop variable (same logic as compile_for).
+        match &clause.target {
+            AssignTarget::Name(name) => {
+                if self.local_reg(name).is_none() {
+                    let name_idx = self.intern_name(name);
+                    self.emit(Insn::StoreGlobal(name_idx, item_reg));
+                    // item_reg is a temp that was just stored; keep it alive for body use.
+                }
+            }
+            AssignTarget::Tuple(targets) => {
+                let n = targets.len() as u32;
+                let base = item_reg + 1;
+                self.next_temp = base + n;
+                if self.next_temp - 1 > self.max_reg {
+                    self.max_reg = self.next_temp - 1;
+                }
+                self.emit(Insn::Unpack(base, item_reg, n));
+                for (i, t) in (0u32..).zip(targets.iter()) {
+                    match t {
+                        AssignTarget::Name(name) => {
+                            if let Some(reg) = self.local_reg(name) {
+                                self.emit(Insn::Move(reg, base + i));
+                            } else {
+                                let name_idx = self.intern_name(name);
+                                self.emit(Insn::StoreGlobal(name_idx, base + i));
+                            }
+                        }
+                        _ => {
+                            self.failed = true;
+                            if self.error_msg.is_none() {
+                                self.error_msg =
+                                    Some("unsupported comprehension unpack target".to_string());
+                            }
+                            return;
+                        }
+                    }
+                }
+                self.next_temp = item_reg;
+            }
+            _ => {
+                self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some("unsupported comprehension target".to_string());
+                }
+                return;
+            }
+        }
+
+        // Optional `if` filter.
+        let skip_jmp = if let Some(cond) = &clause.cond {
+            let cond_reg = self.compile_expr(cond);
+            let j = self.emit(Insn::JumpIfFalse(cond_reg, 0));
+            self.free_temp(cond_reg);
+            Some(j)
+        } else {
+            None
+        };
+
+        // Recurse for nested clauses, or emit the accumulator body.
+        if clauses.len() > 1 {
+            self.compile_comp_loops(&clauses[1..], acc, emit_body);
+        } else {
+            emit_body(self, acc);
+        }
+
+        // Patch the `if` skip jump.
+        if let Some(j) = skip_jmp {
+            self.patch_jump(j);
+        }
+
+        // Jump back to loop top.
+        let back_from = self.pc() as i32 + 1;
+        let back_offset = loop_start as i32 - back_from;
+        self.emit(Insn::Jump(back_offset));
+
+        self.patch_jump(exit_jmp);
+        self.free_iter();
+        if let AssignTarget::Name(_) = &clause.target {
+            if item_reg >= self.base_temp {
+                self.free_temp(item_reg);
+            }
+        } else {
+            self.free_temp(item_reg);
+        }
+    }
+
+    fn compile_list_comp(&mut self, elt: &Expr, clauses: &[CompClause]) -> Reg {
+        // Allocate the result register first (before any loop temps).
+        let acc = self.alloc_temp();
+        self.emit(Insn::BuildList(acc, acc, 0));
+
+        // Save/restore next_temp around the loop body so temps don't accumulate.
+        let saved_temp = self.next_temp;
+
+        self.compile_comp_loops(clauses, acc, &mut |this, acc_reg| {
+            let val = this.compile_expr(elt);
+            this.emit(Insn::ListAppend(acc_reg, val));
+            this.free_temp(val);
+            this.next_temp = saved_temp;
+        });
+
+        acc
+    }
+
+    fn compile_dict_comp(&mut self, key: &Expr, val: &Expr, clauses: &[CompClause]) -> Reg {
+        let acc = self.alloc_temp();
+        // BuildDict with 0 pairs → empty dict.
+        self.emit(Insn::BuildDict(acc, acc, 0));
+
+        let saved_temp = self.next_temp;
+
+        self.compile_comp_loops(clauses, acc, &mut |this, acc_reg| {
+            let k = this.compile_expr(key);
+            let v = this.compile_expr(val);
+            this.emit(Insn::SetItem(acc_reg, k, v));
+            this.free_temp(v);
+            this.free_temp(k);
+            this.next_temp = saved_temp;
+        });
+
+        acc
+    }
+
+    fn compile_set_comp(&mut self, elt: &Expr, clauses: &[CompClause]) -> Reg {
+        // Build an empty set via set() call.
+        let acc = self.alloc_temp();
+        let set_name_idx = self.intern_name("set");
+        self.emit(Insn::LoadGlobal(acc, set_name_idx));
+        // Call set() with zero args: Call(acc, 0) — result in acc.
+        self.emit(Insn::Call(acc, 0));
+
+        let saved_temp = self.next_temp;
+
+        self.compile_comp_loops(clauses, acc, &mut |this, acc_reg| {
+            let val = this.compile_expr(elt);
+            this.emit(Insn::SetAdd(acc_reg, val));
+            this.free_temp(val);
+            this.next_temp = saved_temp;
+        });
+
+        acc
     }
 
     fn compile_call(&mut self, func: &Expr, args: &[crate::ast::CallArg]) -> Reg {

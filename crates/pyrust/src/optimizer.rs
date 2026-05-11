@@ -750,6 +750,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | CmpJumpIfFalse(a, _, b, _)
         | CmpJumpIfTrue(a, _, b, _)
         | RaiseFrom(a, b)
+        | SetAdd(a, b)
         | ListAppend(a, b)
         | ListExtend(a, b)
         | DictUpdate(a, b)
@@ -1064,6 +1065,7 @@ fn pass_copy_prop(insns: Vec<Insn>) -> Vec<Insn> {
             // container/receiver — substituting the receiver would redirect the
             // mutation to the original allocation (copy propagation is only valid for
             // reads; deep-copied containers are independent allocations).
+            Insn::SetAdd(st, val) => Insn::SetAdd(st, s(&copies, val)),
             Insn::ListAppend(lst, val) => Insn::ListAppend(lst, s(&copies, val)),
             Insn::ListExtend(lst, src) => Insn::ListExtend(lst, s(&copies, src)),
             Insn::DictUpdate(dct, other) => Insn::DictUpdate(dct, s(&copies, other)),

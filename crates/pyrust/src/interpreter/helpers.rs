@@ -918,6 +918,9 @@ fn is_pure_expr(expr: &Expr, pure_fns: &std::collections::HashSet<String>) -> bo
                 && upper.as_deref().map_or(true, |e| is_pure_expr(e, pure_fns))
                 && step.as_deref().map_or(true, |e| is_pure_expr(e, pure_fns))
         }
+        // Comprehensions involve iteration (GetIter, ForIter) which may call
+        // __iter__/__next__ — conservatively treat as impure.
+        Expr::ListComp { .. } | Expr::DictComp { .. } | Expr::SetComp { .. } => false,
     }
 }
 
