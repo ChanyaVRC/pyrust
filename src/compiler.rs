@@ -2353,7 +2353,10 @@ impl Compiler {
         let inner_index_rc: Rc<HashMap<String, Reg>> = Rc::new(inner_index);
 
         let def_bound = crate::interpreter::compute_def_bound_mask(params, &inner_index_rc);
-        let is_pure = crate::interpreter::is_pure_body(body, &self.pure_locals);
+        // Include `name` so self-recursive calls are treated as pure (fixpoint assumption).
+        let mut pure_fns_with_self = self.pure_locals.clone();
+        pure_fns_with_self.insert(name.to_string());
+        let is_pure = crate::interpreter::is_pure_body(body, &pure_fns_with_self);
 
         // Detect cell vars for the inner function.
         let inner_cell_vars = collect_cell_vars(body, &inner_index_rc);
@@ -2366,6 +2369,16 @@ impl Compiler {
             def_bound,
             inner_cell_vars.clone(),
         );
+        if is_pure {
+            // Seed the inner compiler with the function's own name so that
+            // direct self-recursive calls are compiled as CallMemo rather than
+            // Call.  This lets the VM return from the fn_cache on repeated
+            // invocations without re-entering call_function_expanded at all,
+            // making recursive pure functions (e.g. fib) substantially faster.
+            // This is sound: a pure function calling only itself (and other
+            // pure things) is itself pure, satisfying the fixpoint assumption.
+            sub.pure_locals.insert(name.to_string());
+        }
         sub.compile_block(body);
         let inner_code = match sub.finish() {
             Ok(c) => c,

@@ -892,6 +892,7 @@ fn is_pure_expr(expr: &Expr, pure_fns: &std::collections::HashSet<String>) -> bo
         Expr::Call { func, args } => {
             // Only direct calls to named callees can be pure.
             if let Expr::Var(name) = func.as_ref() {
+                // Known-impure builtins (I/O, process control) → always impure.
                 if IMPURE_BUILTINS.contains(&name.as_str()) {
                     return false;
                 }
