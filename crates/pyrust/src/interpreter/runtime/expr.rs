@@ -952,10 +952,16 @@ fn iter_values(value: Value) -> Result<Vec<Value>> {
                 native.pos = native.items.len();
                 Ok(remaining)
             } else {
-                Err(PyError::Runtime("object is not iterable".to_string()))
+                Err(PyError::Named(
+                    "TypeError".to_string(),
+                    "object is not iterable".to_string(),
+                ))
             }
         }
-        _ => Err(PyError::Runtime("object is not iterable".to_string())),
+        _ => Err(PyError::Named(
+            "TypeError".to_string(),
+            format!("'{}' object is not iterable", value_type_name_str(&value)),
+        )),
     }
 }
 
