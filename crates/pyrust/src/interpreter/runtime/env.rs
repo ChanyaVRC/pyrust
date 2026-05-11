@@ -267,6 +267,40 @@ impl Interpreter {
         }
     }
 
+    fn delete_attr(&mut self, target: Value, name: &str) -> Result<()> {
+        match target.kind() {
+            ValueKind::PyInstance(instance) => {
+                let class = { Rc::clone(&instance.borrow().class) };
+                if let Some(class_val) = lookup_class_attr(&class, name) {
+                    if let ValueKind::Property { fdel, .. } = class_val.kind() {
+                        let fdel = Rc::clone(fdel);
+                        return if fdel.is_none() {
+                            Err(PyError::Named(
+                                "AttributeError".to_string(),
+                                format!("property '{}' has no deleter", name),
+                            ))
+                        } else {
+                            let deleter = (*fdel).clone();
+                            self.call_function_expanded(
+                                deleter,
+                                &[ExpandedCallArg {
+                                    name: None,
+                                    value: Value::py_instance(Rc::clone(&instance)),
+                                }],
+                            )?;
+                            Ok(())
+                        };
+                    }
+                }
+                instance.borrow_mut().attrs.remove(name);
+                Ok(())
+            }
+            _ => Err(PyError::Runtime(
+                "can only delete attributes of class instances".to_string(),
+            )),
+        }
+    }
+
     fn load_module(&mut self, name: &str) -> Result<Value> {
         if let Some(cached) = self.module_cache.borrow().get(name).cloned() {
             return Ok(cached);

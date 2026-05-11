@@ -390,17 +390,8 @@ impl Interpreter {
                 }
                 Insn::DeleteAttr(obj, name_idx) => {
                     let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
-                    let name = pool_get!(code.names, *name_idx, "name").clone();
-                    match obj_val.kind() {
-                        ValueKind::PyInstance(inst) => {
-                            inst.borrow_mut().attrs.remove(&name);
-                        }
-                        _ => {
-                            vm_try!(Err(PyError::Runtime(
-                                "can only delete attributes of class instances".to_string(),
-                            )));
-                        }
-                    }
+                    let name = pool_get!(code.names, *name_idx, "name");
+                    vm_try!(self.delete_attr(obj_val, name));
                 }
                 Insn::GetItem(dst, obj, idx) => {
                     // Fast path: List/Tuple indexed by Int — borrow idx, avoid clone.
