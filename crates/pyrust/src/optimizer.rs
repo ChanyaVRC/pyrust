@@ -32,6 +32,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_const_branch_elim(insns, &consts);
     let insns = pass_cmpjump_fusion(insns, num_locals);
     let insns = pass_not_invert(insns, num_locals);
+    let insns = pass_binopinplace_downgrade(insns, num_locals);
     let insns = pass_dead_code(insns);
     let insns = pass_trivial_nop(insns);
     let (insns, consts) = pass_compact_consts(insns, consts);
@@ -668,6 +669,47 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
             r >= *bases_base && r < *bases_base + *bases_n as u32
         }
     }
+}
+
+// ─── BinOpInPlace → BinOp downgrade ───────────────────────────────────────────
+
+/// Replace `BinOpInPlace(dst, lhs, op, rhs)` with `BinOp(dst, lhs, op, rhs)`
+/// when `lhs` is a temp register that is dead after this instruction.
+///
+/// ## Why this helps
+///
+/// `BinOpInPlace` dispatches `__i<op>__` (e.g. `__iadd__`) first and falls back
+/// to `__<op>__` on failure.  For immutable built-in types (int, float, str) the
+/// `__iadd__` lookup always fails, adding a method-resolution step per execution.
+/// Downgrading to plain `BinOp` skips that wasted dispatch.
+///
+/// ## Guards
+///
+/// - `lhs >= num_locals`: restrict to temp registers.  Named locals (0..num_locals)
+///   can hold user-defined objects with custom `__iadd__`; downgrading those would
+///   silently change semantics.
+/// - `!reg_is_read_in(&insns[i+1..], lhs)`: `lhs` must be dead after this
+///   instruction.  If `lhs` is live, the in-place semantics (writing back the
+///   result to `lhs`) may matter to downstream reads — but since we emit `BinOp`
+///   which writes to `dst`, this is only safe when `lhs` is not read further.
+///   (If `dst == lhs` the result is in the same register either way.)
+///
+/// Reference: GCC algebraic simplification; classical augmented-assignment lowering.
+fn pass_binopinplace_downgrade(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
+    insns
+        .iter()
+        .enumerate()
+        .map(|(i, insn)| {
+            if let Insn::BinOpInPlace(dst, lhs, op, rhs) = insn {
+                if *lhs >= num_locals
+                    && (*dst == *lhs || !reg_is_read_in(&insns[i + 1..], *lhs))
+                {
+                    return Insn::BinOp(*dst, *lhs, *op, *rhs);
+                }
+            }
+            insn.clone()
+        })
+        .collect()
 }
 
 // ─── Trivial no-op removal ─────────────────────────────────────────────────────
@@ -1798,6 +1840,68 @@ mod tests {
         assert!(
             matches!(out[0], Insn::JumpIfTrue(0, _)),
             "JumpIfFalse(not r0) should become JumpIfTrue(r0)"
+        );
+    }
+
+    // ── pass_binopinplace_downgrade ───────────────────────────────────────────
+
+    #[test]
+    fn binopinplace_downgrades_dead_temp_lhs() {
+        use crate::ast::BinaryOp;
+        // BinOpInPlace(dst=2, lhs=5, Add, rhs=1); r5 not read after → BinOp
+        let insns = vec![
+            Insn::BinOpInPlace(2, 5, BinaryOp::Add, 1),
+            Insn::Return(2),
+        ];
+        let out = pass_binopinplace_downgrade(insns, 2);
+        assert!(
+            matches!(out[0], Insn::BinOp(2, 5, BinaryOp::Add, 1)),
+            "BinOpInPlace with dead temp lhs should become BinOp"
+        );
+    }
+
+    #[test]
+    fn binopinplace_skips_local_lhs() {
+        use crate::ast::BinaryOp;
+        // lhs=1 < num_locals=3 → user object may have __iadd__, must not downgrade
+        let insns = vec![
+            Insn::BinOpInPlace(2, 1, BinaryOp::Add, 0),
+            Insn::Return(2),
+        ];
+        let out = pass_binopinplace_downgrade(insns, 3);
+        assert!(
+            matches!(out[0], Insn::BinOpInPlace(2, 1, BinaryOp::Add, 0)),
+            "BinOpInPlace with local lhs must not be downgraded"
+        );
+    }
+
+    #[test]
+    fn binopinplace_skips_live_lhs() {
+        use crate::ast::BinaryOp;
+        // lhs=5 is read after by Return(5) → live, must not downgrade
+        let insns = vec![
+            Insn::BinOpInPlace(2, 5, BinaryOp::Add, 1),
+            Insn::Return(5),
+        ];
+        let out = pass_binopinplace_downgrade(insns, 2);
+        assert!(
+            matches!(out[0], Insn::BinOpInPlace(2, 5, BinaryOp::Add, 1)),
+            "BinOpInPlace with live lhs must not be downgraded"
+        );
+    }
+
+    #[test]
+    fn binopinplace_downgrades_dst_equals_lhs() {
+        use crate::ast::BinaryOp;
+        // dst == lhs: result lands in same register, always safe to downgrade
+        let insns = vec![
+            Insn::BinOpInPlace(5, 5, BinaryOp::Mul, 1),
+            Insn::Return(5),
+        ];
+        let out = pass_binopinplace_downgrade(insns, 2);
+        assert!(
+            matches!(out[0], Insn::BinOp(5, 5, BinaryOp::Mul, 1)),
+            "BinOpInPlace(dst==lhs) should always downgrade to BinOp"
         );
     }
 }
