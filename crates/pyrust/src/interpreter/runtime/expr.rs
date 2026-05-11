@@ -40,23 +40,38 @@ impl Interpreter {
             Expr::Unary { op, expr } => {
                 let value = self.eval_expr(expr)?;
                 match op {
-                    UnaryOp::Neg => match value.kind() {
-                        ValueKind::Int(v) => Ok(Value::int(-v)),
-                        ValueKind::Float(v) => Ok(Value::float(-v)),
-                        _ => Err(PyError::Runtime("bad operand type for unary -".to_string())),
-                    },
+                    UnaryOp::Neg => {
+                        if let Some(r) = self.try_dunder_unary(&value, "__neg__") {
+                            return r;
+                        }
+                        match value.kind() {
+                            ValueKind::Int(v) => Ok(Value::int(-v)),
+                            ValueKind::Float(v) => Ok(Value::float(-v)),
+                            _ => Err(PyError::Runtime("bad operand type for unary -".to_string())),
+                        }
+                    }
                     UnaryOp::Not => Ok(Value::bool_(!value.truthy())),
-                    UnaryOp::BitNot => match value.kind() {
-                        ValueKind::Int(v) => Ok(Value::int(!v)),
-                        ValueKind::Bool(b) => Ok(Value::int(if b { -2 } else { -1 })),
-                        _ => Err(PyError::Runtime("bad operand type for unary ~: use integer".to_string())),
-                    },
-                    UnaryOp::Pos => match value.kind() {
-                        ValueKind::Int(v) => Ok(Value::int(v)),
-                        ValueKind::Float(v) => Ok(Value::float(v)),
-                        ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
-                        _ => Err(PyError::Runtime("bad operand type for unary +".to_string())),
-                    },
+                    UnaryOp::BitNot => {
+                        if let Some(r) = self.try_dunder_unary(&value, "__invert__") {
+                            return r;
+                        }
+                        match value.kind() {
+                            ValueKind::Int(v) => Ok(Value::int(!v)),
+                            ValueKind::Bool(b) => Ok(Value::int(if b { -2 } else { -1 })),
+                            _ => Err(PyError::Runtime("bad operand type for unary ~: use integer".to_string())),
+                        }
+                    }
+                    UnaryOp::Pos => {
+                        if let Some(r) = self.try_dunder_unary(&value, "__pos__") {
+                            return r;
+                        }
+                        match value.kind() {
+                            ValueKind::Int(v) => Ok(Value::int(v)),
+                            ValueKind::Float(v) => Ok(Value::float(v)),
+                            ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
+                            _ => Err(PyError::Runtime("bad operand type for unary +".to_string())),
+                        }
+                    }
                 }
             }
             Expr::Binary { left, op, right } => match op {
@@ -257,22 +272,148 @@ impl Interpreter {
         }
     }
 
+    /// Try to call a binary dunder method on `left` (named `method`), then on
+    /// `right` (named `rmethod`).  Returns `Some(result)` if a dunder was found
+    /// and called, or `None` if neither operand has the method.
+    fn try_dunder_binary(
+        &mut self,
+        left: &Value,
+        right: &Value,
+        method: &str,
+        rmethod: &str,
+    ) -> Option<Result<Value>> {
+        if let ValueKind::PyInstance(inst) = left.kind() {
+            let class = Rc::clone(&inst.borrow().class);
+            if let Some(m) = lookup_class_attr(&class, method)
+                && let ValueKind::UserFunction(f) = m.kind()
+            {
+                let func = Rc::clone(f);
+                let self_val = Value::py_instance(Rc::clone(inst));
+                return Some(self.call_user_function_expanded(
+                    func,
+                    &[],
+                    &[self_val, right.clone()],
+                ));
+            }
+        }
+        if let ValueKind::PyInstance(inst) = right.kind() {
+            let class = Rc::clone(&inst.borrow().class);
+            if let Some(m) = lookup_class_attr(&class, rmethod)
+                && let ValueKind::UserFunction(f) = m.kind()
+            {
+                let func = Rc::clone(f);
+                let self_val = Value::py_instance(Rc::clone(inst));
+                return Some(self.call_user_function_expanded(
+                    func,
+                    &[],
+                    &[self_val, left.clone()],
+                ));
+            }
+        }
+        None
+    }
+
+    /// Try to call a unary dunder method on a PyInstance.
+    fn try_dunder_unary(&mut self, val: &Value, method: &str) -> Option<Result<Value>> {
+        if let ValueKind::PyInstance(inst) = val.kind() {
+            let class = Rc::clone(&inst.borrow().class);
+            if let Some(m) = lookup_class_attr(&class, method)
+                && let ValueKind::UserFunction(f) = m.kind()
+            {
+                let func = Rc::clone(f);
+                let self_val = Value::py_instance(Rc::clone(inst));
+                return Some(self.call_user_function_expanded(func, &[], &[self_val]));
+            }
+        }
+        None
+    }
+
     fn eval_binary(&mut self, left: Value, op: BinaryOp, right: Value) -> Result<Value> {
         match op {
-            BinaryOp::Add => self.add(left, right),
-            BinaryOp::Sub => self.sub(left, right),
-            BinaryOp::Mul => self.mul(left, right),
-            BinaryOp::MatMul => self.matmul(left, right),
-            BinaryOp::Div => self.div(left, right),
-            BinaryOp::FloorDiv => self.floor_div(left, right),
-            BinaryOp::Mod => self.modulo(left, right),
-            BinaryOp::Eq => Ok(Value::bool_(left == right)),
-            BinaryOp::Ne => Ok(Value::bool_(left != right)),
-            BinaryOp::Lt => self.compare(left, right, |o| o.is_lt()),
-            BinaryOp::Le => self.compare(left, right, |o| o.is_le()),
-            BinaryOp::Gt => self.compare(left, right, |o| o.is_gt()),
-            BinaryOp::Ge => self.compare(left, right, |o| o.is_ge()),
+            BinaryOp::Add => {
+                if let Some(r) = self.try_dunder_binary(&left, &right, "__add__", "__radd__") {
+                    return r;
+                }
+                self.add(left, right)
+            }
+            BinaryOp::Sub => {
+                if let Some(r) = self.try_dunder_binary(&left, &right, "__sub__", "__rsub__") {
+                    return r;
+                }
+                self.sub(left, right)
+            }
+            BinaryOp::Mul => {
+                if let Some(r) = self.try_dunder_binary(&left, &right, "__mul__", "__rmul__") {
+                    return r;
+                }
+                self.mul(left, right)
+            }
+            BinaryOp::MatMul => {
+                if let Some(r) = self.try_dunder_binary(&left, &right, "__matmul__", "__rmatmul__") {
+                    return r;
+                }
+                self.matmul(left, right)
+            }
+            BinaryOp::Div => {
+                if let Some(r) = self.try_dunder_binary(&left, &right, "__truediv__", "__rtruediv__") {
+                    return r;
+                }
+                self.div(left, right)
+            }
+            BinaryOp::FloorDiv => {
+                if let Some(r) = self.try_dunder_binary(&left, &right, "__floordiv__", "__rfloordiv__") {
+                    return r;
+                }
+                self.floor_div(left, right)
+            }
+            BinaryOp::Mod => {
+                if let Some(r) = self.try_dunder_binary(&left, &right, "__mod__", "__rmod__") {
+                    return r;
+                }
+                self.modulo(left, right)
+            }
+            BinaryOp::Eq => {
+                if let Some(r) = self.try_dunder_binary(&left, &right, "__eq__", "__eq__") {
+                    return r;
+                }
+                // No __eq__ defined: fall back to identity (pointer) equality, which is
+                // Python's default for user objects that don't override __eq__.
+                Ok(Value::bool_(left == right))
+            }
+            BinaryOp::Ne => {
+                if let Some(r) = self.try_dunder_binary(&left, &right, "__ne__", "__ne__") {
+                    return r;
+                }
+                Ok(Value::bool_(left != right))
+            }
+            BinaryOp::Lt => {
+                if let Some(r) = self.try_dunder_binary(&left, &right, "__lt__", "__gt__") {
+                    return r;
+                }
+                self.compare(left, right, |o| o.is_lt())
+            }
+            BinaryOp::Le => {
+                if let Some(r) = self.try_dunder_binary(&left, &right, "__le__", "__ge__") {
+                    return r;
+                }
+                self.compare(left, right, |o| o.is_le())
+            }
+            BinaryOp::Gt => {
+                if let Some(r) = self.try_dunder_binary(&left, &right, "__gt__", "__lt__") {
+                    return r;
+                }
+                self.compare(left, right, |o| o.is_gt())
+            }
+            BinaryOp::Ge => {
+                if let Some(r) = self.try_dunder_binary(&left, &right, "__ge__", "__le__") {
+                    return r;
+                }
+                self.compare(left, right, |o| o.is_ge())
+            }
             BinaryOp::Pow => {
+                if let Some(r) = self.try_dunder_binary(&left, &right, "__pow__", "__rpow__") {
+                    return r;
+                }
                 match (left.kind(), right.kind()) {
                     (ValueKind::Int(a), ValueKind::Int(b)) if b >= 0 => {
                         Ok(Value::int(a.wrapping_pow(b as u32)))
@@ -284,17 +425,42 @@ impl Interpreter {
                     }
                 }
             }
-            BinaryOp::BitAnd => self.bitwise_op(&left, &right, |a, b| Ok(a & b)),
-            BinaryOp::BitOr  => self.bitwise_op(&left, &right, |a, b| Ok(a | b)),
-            BinaryOp::BitXor => self.bitwise_op(&left, &right, |a, b| Ok(a ^ b)),
-            BinaryOp::LShift => self.bitwise_op(&left, &right, |a, b| {
-                if b < 0 { return Err(PyError::Named("ValueError".to_string(), "negative shift count".to_string())); }
-                Ok(a << (b & 63))
-            }),
-            BinaryOp::RShift => self.bitwise_op(&left, &right, |a, b| {
-                if b < 0 { return Err(PyError::Named("ValueError".to_string(), "negative shift count".to_string())); }
-                Ok(a >> (b & 63))
-            }),
+            BinaryOp::BitAnd => {
+                if let Some(r) = self.try_dunder_binary(&left, &right, "__and__", "__rand__") {
+                    return r;
+                }
+                self.bitwise_op(&left, &right, |a, b| Ok(a & b))
+            }
+            BinaryOp::BitOr => {
+                if let Some(r) = self.try_dunder_binary(&left, &right, "__or__", "__ror__") {
+                    return r;
+                }
+                self.bitwise_op(&left, &right, |a, b| Ok(a | b))
+            }
+            BinaryOp::BitXor => {
+                if let Some(r) = self.try_dunder_binary(&left, &right, "__xor__", "__rxor__") {
+                    return r;
+                }
+                self.bitwise_op(&left, &right, |a, b| Ok(a ^ b))
+            }
+            BinaryOp::LShift => {
+                if let Some(r) = self.try_dunder_binary(&left, &right, "__lshift__", "__rlshift__") {
+                    return r;
+                }
+                self.bitwise_op(&left, &right, |a, b| {
+                    if b < 0 { return Err(PyError::Named("ValueError".to_string(), "negative shift count".to_string())); }
+                    Ok(a << (b & 63))
+                })
+            }
+            BinaryOp::RShift => {
+                if let Some(r) = self.try_dunder_binary(&left, &right, "__rshift__", "__rrshift__") {
+                    return r;
+                }
+                self.bitwise_op(&left, &right, |a, b| {
+                    if b < 0 { return Err(PyError::Named("ValueError".to_string(), "negative shift count".to_string())); }
+                    Ok(a >> (b & 63))
+                })
+            }
             BinaryOp::In => self.eval_in(right, left),
             BinaryOp::NotIn => Ok(Value::bool_(!self.eval_in(right, left)?.truthy())),
             BinaryOp::Is    => Ok(Value::bool_(values_are_identical(&left, &right))),
@@ -655,6 +821,21 @@ impl Interpreter {
                     }
                     _ => Ok(Value::bool_(false)),
                 }
+            }
+            ValueKind::PyInstance(inst) => {
+                let inst_rc = Rc::clone(inst);
+                let class = Rc::clone(&inst_rc.borrow().class);
+                if let Some(method_val) = lookup_class_attr(&class, "__contains__")
+                    && let ValueKind::UserFunction(f) = method_val.kind()
+                {
+                    let func = Rc::clone(f);
+                    let self_val = Value::py_instance(inst_rc);
+                    return self.call_user_function_expanded(func, &[], &[self_val, item]);
+                }
+                Err(PyError::Named(
+                    "TypeError".to_string(),
+                    format!("argument of type '{}' is not iterable", class.borrow().name),
+                ))
             }
             _ => Err(PyError::Runtime("argument of type is not iterable".to_string())),
         }

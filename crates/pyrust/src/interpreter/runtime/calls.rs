@@ -44,7 +44,43 @@ impl Interpreter {
                 let print_options = self.parse_print_options_expanded(args)?;
                 let mut rendered = Vec::with_capacity(print_options.values.len());
                 for value in print_options.values {
-                    rendered.push(value.to_py_str());
+                    let s = if let ValueKind::PyInstance(inst) = value.kind() {
+                        let inst_rc = Rc::clone(inst);
+                        let class = Rc::clone(&inst_rc.borrow().class);
+                        // Exception instances use the built-in formatting.
+                        if is_exception_class(&class) {
+                            value.to_py_str()
+                        } else {
+                            let mut found = None;
+                            for dunder in &["__str__", "__repr__"] {
+                                if let Some(method_val) = lookup_class_attr(&class, dunder)
+                                    && let ValueKind::UserFunction(f) = method_val.kind()
+                                {
+                                    let func = Rc::clone(f);
+                                    let result = self.call_user_function_expanded(
+                                        func,
+                                        &[],
+                                        &[Value::py_instance(Rc::clone(&inst_rc))],
+                                    )?;
+                                    found = Some(match result.kind() {
+                                        ValueKind::Str(s) => s.to_string(),
+                                        _ => return Err(PyError::Named(
+                                            "TypeError".to_string(),
+                                            format!("{dunder} returned non-string"),
+                                        )),
+                                    });
+                                    break;
+                                }
+                            }
+                            found.unwrap_or_else(|| {
+                                let class_name = class.borrow().name.clone();
+                                format!("<{class_name} object>")
+                            })
+                        }
+                    } else {
+                        value.to_py_str()
+                    };
+                    rendered.push(s);
                 }
                 print!("{}{}", rendered.join(&print_options.sep), print_options.end);
                 Ok(Value::none())
@@ -203,7 +239,29 @@ impl Interpreter {
                         "abs() takes exactly one argument".to_string(),
                     ));
                 }
-                match args[0].value.kind() {
+                let val = args[0].value.clone();
+                if let ValueKind::PyInstance(inst) = val.kind() {
+                    let inst_rc = Rc::clone(inst);
+                    let class = Rc::clone(&inst_rc.borrow().class);
+                    if let Some(method_val) = lookup_class_attr(&class, "__abs__")
+                        && let ValueKind::UserFunction(f) = method_val.kind()
+                    {
+                        let func = Rc::clone(f);
+                        return self.call_user_function_expanded(
+                            func,
+                            &[],
+                            &[Value::py_instance(inst_rc)],
+                        );
+                    }
+                    return Err(PyError::Named(
+                        "TypeError".to_string(),
+                        format!(
+                            "bad operand type for abs(): '{}'",
+                            class.borrow().name
+                        ),
+                    ));
+                }
+                match val.kind() {
                     ValueKind::Int(v) => Ok(Value::int(v.abs())),
                     ValueKind::Float(v) => Ok(Value::float(v.abs())),
                     ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
@@ -342,7 +400,40 @@ impl Interpreter {
                 reject_keyword_args_expanded("str", args)?;
                 match args.len() {
                     0 => Ok(Value::string(String::new())),
-                    1 => Ok(Value::string(args[0].value.to_py_str())),
+                    1 => {
+                        let val = args[0].value.clone();
+                        // Try __str__ on PyInstance, fall back to __repr__, then default.
+                        // Exception instances use the built-in to_py_str() formatting.
+                        if let ValueKind::PyInstance(inst) = val.kind() {
+                            let inst_rc = Rc::clone(inst);
+                            let class = Rc::clone(&inst_rc.borrow().class);
+                            if is_exception_class(&class) {
+                                return Ok(Value::string(val.to_py_str()));
+                            }
+                            for dunder in &["__str__", "__repr__"] {
+                                if let Some(method_val) = lookup_class_attr(&class, dunder)
+                                    && let ValueKind::UserFunction(f) = method_val.kind()
+                                {
+                                    let func = Rc::clone(f);
+                                    let result = self.call_user_function_expanded(
+                                        func,
+                                        &[],
+                                        &[Value::py_instance(Rc::clone(&inst_rc))],
+                                    )?;
+                                    return match result.kind() {
+                                        ValueKind::Str(_) => Ok(result),
+                                        _ => Err(PyError::Named(
+                                            "TypeError".to_string(),
+                                            format!("{dunder} returned non-string"),
+                                        )),
+                                    };
+                                }
+                            }
+                            let class_name = class.borrow().name.clone();
+                            return Ok(Value::string(format!("<{class_name} object>")));
+                        }
+                        Ok(Value::string(val.to_py_str()))
+                    }
                     _ => Err(PyError::Runtime("str() takes at most one argument".to_string())),
                 }
             }

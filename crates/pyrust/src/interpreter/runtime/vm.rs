@@ -253,7 +253,22 @@ impl Interpreter {
                         // Dispatch __bool__ for instances before falling back to truthy().
                         Value::bool_(!vm_try!(self.truthy_value(&val)))
                     } else {
-                        vm_try!(vm_eval_unary(*op, val))
+                        // Try dunder methods on PyInstance before the built-in path.
+                        let dunder = match op {
+                            UnaryOp::Neg => Some("__neg__"),
+                            UnaryOp::Pos => Some("__pos__"),
+                            UnaryOp::BitNot => Some("__invert__"),
+                            UnaryOp::Not => None,
+                        };
+                        if let Some(dunder_name) = dunder {
+                            if let Some(r) = self.try_dunder_unary(&val, dunder_name) {
+                                vm_try!(r)
+                            } else {
+                                vm_try!(vm_eval_unary(*op, val))
+                            }
+                        } else {
+                            vm_try!(vm_eval_unary(*op, val))
+                        }
                     };
                     regs[*dst as usize] = Some(result);
                 }
