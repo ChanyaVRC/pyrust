@@ -255,9 +255,7 @@ impl Lexer {
                 }
                 ')' => {
                     self.tokens.push(Token::RParen);
-                    if paren_depth > 0 {
-                        paren_depth -= 1;
-                    }
+                    paren_depth = paren_depth.saturating_sub(1);
                     pos += 1;
                 }
                 '[' => {
@@ -267,9 +265,7 @@ impl Lexer {
                 }
                 ']' => {
                     self.tokens.push(Token::RBracket);
-                    if paren_depth > 0 {
-                        paren_depth -= 1;
-                    }
+                    paren_depth = paren_depth.saturating_sub(1);
                     pos += 1;
                 }
                 '{' => {
@@ -279,9 +275,7 @@ impl Lexer {
                 }
                 '}' => {
                     self.tokens.push(Token::RBrace);
-                    if paren_depth > 0 {
-                        paren_depth -= 1;
-                    }
+                    paren_depth = paren_depth.saturating_sub(1);
                     pos += 1;
                 }
                 ',' => {

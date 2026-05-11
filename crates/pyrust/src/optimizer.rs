@@ -198,7 +198,7 @@ fn pass_fold_const_tuple(insns: Vec<Insn>, num_locals: u32, consts: &mut Vec<Val
     while i < n {
         if let Insn::BuildTuple(dst, base, argc) = transformed[i] {
             let argc = argc as usize;
-            if argc >= 1 && argc <= 16 && i >= argc {
+            if (1..=16).contains(&argc) && i >= argc {
                 // Check that insns[i-argc .. i] are LoadConst(base+j, c_j) for j in 0..argc
                 // and that all base+j >= num_locals.
                 let mut all_match = true;
@@ -330,11 +330,11 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn> {
             | Insn::SetupExcept(k) => Some(*k),
             _ => None,
         };
-        if let Some(k) = k {
-            if k < 0 {
-                let target = (i as i64 + 1 + k as i64) as usize;
-                loop_headers.insert(target);
-            }
+        if let Some(k) = k
+            && k < 0
+        {
+            let target = (i as i64 + 1 + k as i64) as usize;
+            loop_headers.insert(target);
         }
     }
 
@@ -627,13 +627,13 @@ fn pass_unary_fold(insns: Vec<Insn>, num_locals: u32, consts: &mut Vec<Value>) -
             _ => None,
         };
 
-        if let Some((dst, val)) = fused {
-            if let Some(new_c) = intern_const_in_pool(consts, val) {
-                keep[i] = false;
-                transformed[i + 1] = Insn::LoadConst(dst, new_c);
-                i += 2;
-                continue;
-            }
+        if let Some((dst, val)) = fused
+            && let Some(new_c) = intern_const_in_pool(consts, val)
+        {
+            keep[i] = false;
+            transformed[i + 1] = Insn::LoadConst(dst, new_c);
+            i += 2;
+            continue;
         }
         i += 1;
     }
@@ -819,10 +819,11 @@ fn pass_binopinplace_downgrade(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         .iter()
         .enumerate()
         .map(|(i, insn)| {
-            if let Insn::BinOpInPlace(dst, lhs, op, rhs) = insn {
-                if *lhs >= num_locals && (*dst == *lhs || !reg_is_read_in(&insns[i + 1..], *lhs)) {
-                    return Insn::BinOp(*dst, *lhs, *op, *rhs);
-                }
+            if let Insn::BinOpInPlace(dst, lhs, op, rhs) = insn
+                && *lhs >= num_locals
+                && (*dst == *lhs || !reg_is_read_in(&insns[i + 1..], *lhs))
+            {
+                return Insn::BinOp(*dst, *lhs, *op, *rhs);
             }
             insn.clone()
         })
@@ -831,13 +832,13 @@ fn pass_binopinplace_downgrade(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
 
 // ─── Trivial no-op removal ─────────────────────────────────────────────────────
 
-/// Remove instructions that have no observable effect:
-/// - `Jump(0)` — offset 0 means the next instruction; equivalent to falling through
-/// - `Move(r, r)` — a register copied into itself
+// Remove instructions that have no observable effect:
+// - `Jump(0)` — offset 0 means the next instruction; equivalent to falling through
+// - `Move(r, r)` — a register copied into itself
 // ─── NOT-inversion ─────────────────────────────────────────────────────────────
 
 /// Absorb `UnaryOp(r, Not, src)` into the following conditional jump by
-/// inverting the branch sense, eliminating the boolean intermediate register.
+///   inverting the branch sense, eliminating the boolean intermediate register.
 ///
 /// ## Patterns
 ///

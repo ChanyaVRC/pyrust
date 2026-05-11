@@ -59,9 +59,8 @@ fn run_file(path: &str) -> Result<()> {
 
 fn last_line_is_indented(buf: &str) -> bool {
     buf.lines()
-        .filter(|l| !l.trim().is_empty())
-        .last()
-        .map(|l| l.starts_with(|c: char| c == ' ' || c == '\t'))
+        .rfind(|l| !l.trim().is_empty())
+        .map(|l| l.starts_with([' ', '\t']))
         .unwrap_or(false)
 }
 

@@ -92,8 +92,8 @@ impl Interpreter {
             }
             Expr::Index { target, index } => {
                 let index_value = self.eval_expr(index)?;
-                if let Expr::Var(name) = target.as_ref() {
-                    if let Some(env) = self.resolve_name_env(name) {
+                if let Expr::Var(name) = target.as_ref()
+                    && let Some(env) = self.resolve_name_env(name) {
                         let result: Option<Result<Value>> = {
                             let borrowed = env.borrow();
                             let col = if let Some(fl) = &borrowed.fastlocals {
@@ -132,7 +132,6 @@ impl Interpreter {
                             return r;
                         }
                     }
-                }
                 let target_value = self.eval_expr(target)?;
                 self.eval_index(target_value, index_value)
             }
@@ -232,8 +231,8 @@ impl Interpreter {
             ValueKind::PyInstance(inst) => {
                 let inst_rc = Rc::clone(inst);
                 let class = Rc::clone(&inst_rc.borrow().class);
-                if let Some(method_val) = lookup_class_attr(&class, "__getitem__") {
-                    if let ValueKind::UserFunction(f) = method_val.kind() {
+                if let Some(method_val) = lookup_class_attr(&class, "__getitem__")
+                    && let ValueKind::UserFunction(f) = method_val.kind() {
                         let func = Rc::clone(f);
                         return self.call_user_function_expanded(
                             func,
@@ -241,7 +240,6 @@ impl Interpreter {
                             &[Value::py_instance(inst_rc)],
                         );
                     }
-                }
                 Err(PyError::Named(
                     "TypeError".to_string(),
                     format!(
@@ -301,8 +299,8 @@ impl Interpreter {
     }
 
     fn add(&self, left: Value, right: Value) -> Result<Value> {
-        match (coerce_numeric(left), coerce_numeric(right)) {
-            (l, r) => match (l.kind(), r.kind()) {
+        let (l, r) = (coerce_numeric(left), coerce_numeric(right));
+        match (l.kind(), r.kind()) {
                 (ValueKind::Int(a), ValueKind::Int(b)) => Ok(match a.checked_add(b) {
                     Some(r) => Value::int(r),
                     None => Value::bigint(PyBigInt::from(a) + PyBigInt::from(b)),
@@ -322,59 +320,56 @@ impl Interpreter {
                     Ok(Value::tuple(out))
                 }
                 _ => Err(Self::unsupported_binary_operand("+")),
-            }
         }
     }
 
     fn sub(&self, left: Value, right: Value) -> Result<Value> {
-        match (coerce_numeric(left), coerce_numeric(right)) {
-            (l, r) => match (l.kind(), r.kind()) {
-                (ValueKind::Int(a), ValueKind::Int(b)) => Ok(match a.checked_sub(b) {
-                    Some(r) => Value::int(r),
-                    None => Value::bigint(PyBigInt::from(a) - PyBigInt::from(b)),
-                }),
-                (ValueKind::Int(a), ValueKind::Float(b)) => Ok(Value::float((a as f64) - b)),
-                (ValueKind::Float(a), ValueKind::Int(b)) => Ok(Value::float(a - (b as f64))),
-                (ValueKind::Float(a), ValueKind::Float(b)) => Ok(Value::float(a - b)),
-                _ => Err(Self::unsupported_binary_operand("-")),
-            }
+        let (l, r) = (coerce_numeric(left), coerce_numeric(right));
+        match (l.kind(), r.kind()) {
+            (ValueKind::Int(a), ValueKind::Int(b)) => Ok(match a.checked_sub(b) {
+                Some(r) => Value::int(r),
+                None => Value::bigint(PyBigInt::from(a) - PyBigInt::from(b)),
+            }),
+            (ValueKind::Int(a), ValueKind::Float(b)) => Ok(Value::float((a as f64) - b)),
+            (ValueKind::Float(a), ValueKind::Int(b)) => Ok(Value::float(a - (b as f64))),
+            (ValueKind::Float(a), ValueKind::Float(b)) => Ok(Value::float(a - b)),
+            _ => Err(Self::unsupported_binary_operand("-")),
         }
     }
 
     fn mul(&self, left: Value, right: Value) -> Result<Value> {
-        match (coerce_numeric(left), coerce_numeric(right)) {
-            (l, r) => match (l.kind(), r.kind()) {
-                (ValueKind::Int(a), ValueKind::Int(b)) => Ok(match a.checked_mul(b) {
-                    Some(r) => Value::int(r),
-                    None => Value::bigint(PyBigInt::from(a) * PyBigInt::from(b)),
-                }),
-                (ValueKind::Int(a), ValueKind::Float(b)) => Ok(Value::float((a as f64) * b)),
-                (ValueKind::Float(a), ValueKind::Int(b)) => Ok(Value::float(a * (b as f64))),
-                (ValueKind::Float(a), ValueKind::Float(b)) => Ok(Value::float(a * b)),
-                (ValueKind::Str(text), ValueKind::Int(n)) => {
-                    if n <= 0 { Ok(Value::string(String::new())) }
-                    else { Ok(Value::string(text.repeat(n as usize))) }
-                }
-                (ValueKind::Int(n), ValueKind::Str(text)) => {
-                    if n <= 0 { Ok(Value::string(String::new())) }
-                    else { Ok(Value::string(text.repeat(n as usize))) }
-                }
-                (ValueKind::List(items), ValueKind::Int(n)) => {
-                    if n <= 0 { return Ok(Value::list(Vec::new())); }
-                    let n = n as usize;
-                    let mut out = Vec::with_capacity(items.len() * n);
-                    for _ in 0..n { out.extend_from_slice(items); }
-                    Ok(Value::list(out))
-                }
-                (ValueKind::Int(n), ValueKind::List(items)) => {
-                    if n <= 0 { return Ok(Value::list(Vec::new())); }
-                    let n = n as usize;
-                    let mut out = Vec::with_capacity(items.len() * n);
-                    for _ in 0..n { out.extend_from_slice(items); }
-                    Ok(Value::list(out))
-                }
-                _ => Err(Self::unsupported_binary_operand("*")),
+        let (l, r) = (coerce_numeric(left), coerce_numeric(right));
+        match (l.kind(), r.kind()) {
+            (ValueKind::Int(a), ValueKind::Int(b)) => Ok(match a.checked_mul(b) {
+                Some(r) => Value::int(r),
+                None => Value::bigint(PyBigInt::from(a) * PyBigInt::from(b)),
+            }),
+            (ValueKind::Int(a), ValueKind::Float(b)) => Ok(Value::float((a as f64) * b)),
+            (ValueKind::Float(a), ValueKind::Int(b)) => Ok(Value::float(a * (b as f64))),
+            (ValueKind::Float(a), ValueKind::Float(b)) => Ok(Value::float(a * b)),
+            (ValueKind::Str(text), ValueKind::Int(n)) => {
+                if n <= 0 { Ok(Value::string(String::new())) }
+                else { Ok(Value::string(text.repeat(n as usize))) }
             }
+            (ValueKind::Int(n), ValueKind::Str(text)) => {
+                if n <= 0 { Ok(Value::string(String::new())) }
+                else { Ok(Value::string(text.repeat(n as usize))) }
+            }
+            (ValueKind::List(items), ValueKind::Int(n)) => {
+                if n <= 0 { return Ok(Value::list(Vec::new())); }
+                let n = n as usize;
+                let mut out = Vec::with_capacity(items.len() * n);
+                for _ in 0..n { out.extend_from_slice(items); }
+                Ok(Value::list(out))
+            }
+            (ValueKind::Int(n), ValueKind::List(items)) => {
+                if n <= 0 { return Ok(Value::list(Vec::new())); }
+                let n = n as usize;
+                let mut out = Vec::with_capacity(items.len() * n);
+                for _ in 0..n { out.extend_from_slice(items); }
+                Ok(Value::list(out))
+            }
+            _ => Err(Self::unsupported_binary_operand("*")),
         }
     }
 
@@ -549,19 +544,17 @@ impl Interpreter {
         if let Some(SpecState::Specialized(spec_tag)) = self.spec_cache.get(&site_id) {
             let spec_tag = *spec_tag;
             if spec_tag == BinopTypeTag::Int {
-                if let (ValueKind::Int(a), ValueKind::Int(b)) = (left.kind(), right.kind()) {
-                    if let Some(result) = eval_binary_int(op, a, b) {
+                if let (ValueKind::Int(a), ValueKind::Int(b)) = (left.kind(), right.kind())
+                    && let Some(result) = eval_binary_int(op, a, b) {
                         return result;
                     }
-                }
                 // Type mismatch — deoptimize.
                 self.spec_cache.insert(site_id, SpecState::Megamorphic);
             } else if spec_tag == BinopTypeTag::Float {
-                if let (ValueKind::Float(a), ValueKind::Float(b)) = (left.kind(), right.kind()) {
-                    if let Some(result) = eval_binary_float(op, a, b) {
+                if let (ValueKind::Float(a), ValueKind::Float(b)) = (left.kind(), right.kind())
+                    && let Some(result) = eval_binary_float(op, a, b) {
                         return result;
                     }
-                }
                 self.spec_cache.insert(site_id, SpecState::Megamorphic);
             }
         }
@@ -640,7 +633,7 @@ impl Interpreter {
                     ValueKind::Tuple(kv) if kv.len() == 2 => {
                         let key = kv[0].to_key().ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
                         let map = rc.borrow();
-                        Ok(Value::bool_(map.get(&key).map_or(false, |v| v == &kv[1])))
+                        Ok(Value::bool_(map.get(&key).is_some_and(|v| v == &kv[1])))
                     }
                     _ => Ok(Value::bool_(false)),
                 }

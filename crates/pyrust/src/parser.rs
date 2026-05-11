@@ -164,7 +164,7 @@ impl Parser {
                     }),
                     Expr::Tuple(elems) => {
                         let targets: Result<Vec<AssignTarget>> =
-                            elems.iter().map(|e| expr_to_assign_target(e)).collect();
+                            elems.iter().map(expr_to_assign_target).collect();
                         Ok(Stmt::Assign(AssignTarget::Tuple(targets?), rhs))
                     }
                     _ => Err(PyError::Parse(
@@ -174,7 +174,7 @@ impl Parser {
             }
             // Multi-target: tuple unpack
             let assign_targets: Result<Vec<AssignTarget>> =
-                targets.iter().map(|e| expr_to_assign_target(e)).collect();
+                targets.iter().map(expr_to_assign_target).collect();
             return Ok(Stmt::Assign(AssignTarget::Tuple(assign_targets?), rhs));
         }
 
@@ -1426,7 +1426,7 @@ fn expr_to_assign_target(expr: &Expr) -> Result<AssignTarget> {
         Expr::Index { target, index } => Ok(AssignTarget::Index(target.clone(), index.clone())),
         Expr::Tuple(items) => {
             let targets: Result<Vec<AssignTarget>> =
-                items.iter().map(|e| expr_to_assign_target(e)).collect();
+                items.iter().map(expr_to_assign_target).collect();
             Ok(AssignTarget::Tuple(targets?))
         }
         _ => Err(PyError::Parse(

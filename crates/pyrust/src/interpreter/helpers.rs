@@ -425,12 +425,11 @@ fn lookup_name_in_enclosing_local_env(env: &EnvRef, name: &str) -> Result<Option
 #[inline]
 fn env_assign_local(env: &EnvRef, name: &str, value: Value) {
     let mut borrowed = env.borrow_mut();
-    if let Some(fl) = &mut borrowed.fastlocals {
-        if let Some(&idx) = fl.index.get(name) {
+    if let Some(fl) = &mut borrowed.fastlocals
+        && let Some(&idx) = fl.index.get(name) {
             fl.slots[idx] = Some(value);
             return;
         }
-    }
     borrowed.values.insert(name.to_string(), value);
 }
 
@@ -467,8 +466,8 @@ fn find_env_for_name(env: &EnvRef, name: &str) -> Option<EnvRef> {
 
 fn lookup_name_in_env(env: &EnvRef, name: &str) -> Result<Option<Value>> {
     let borrowed = env.borrow();
-    if let Some(fl) = &borrowed.fastlocals {
-        if let Some(&idx) = fl.index.get(name) {
+    if let Some(fl) = &borrowed.fastlocals
+        && let Some(&idx) = fl.index.get(name) {
             return if idx < 64 && fl.def_bound_mask & (1u64 << idx) != 0 {
                 // Definitely-bound slot — skip the None check (analogous to CPython LOAD_FAST).
                 Ok(Some(fl.slots[idx].as_ref().unwrap().clone()))
@@ -482,7 +481,6 @@ fn lookup_name_in_env(env: &EnvRef, name: &str) -> Result<Option<Value>> {
                 }
             };
         }
-    }
     let value = borrowed.values.get(name).cloned();
     let is_local_name = borrowed.local_names.contains(name);
     let parent = borrowed.parent.clone();
@@ -608,11 +606,10 @@ fn collect_local_names_from_block(
             } => {
                 collect_local_names_from_block(body, names, global_names, nonlocal_names);
                 for handler in handlers {
-                    if let Some(name) = &handler.name {
-                        if !global_names.contains(name) && !nonlocal_names.contains(name) {
+                    if let Some(name) = &handler.name
+                        && !global_names.contains(name) && !nonlocal_names.contains(name) {
                             names.insert(name.clone());
                         }
-                    }
                     collect_local_names_from_block(
                         &handler.body,
                         names,
@@ -775,11 +772,10 @@ pub(crate) fn compute_def_bound_mask(
     // unwrap.  The parameter-only subset is sufficient to eliminate the
     // None check for the most frequently read locals in hot inner loops.
     for param in params {
-        if let Some(&idx) = local_index.get(&param.name) {
-            if idx < 64 {
+        if let Some(&idx) = local_index.get(&param.name)
+            && idx < 64 {
                 mask |= 1u64 << idx;
             }
-        }
     }
     mask
 }
@@ -842,7 +838,7 @@ fn make_math_module() -> Value {
 
 fn make_sys_module() -> Value {
     let mut attrs: HashMap<String, Value> = HashMap::new();
-    attrs.insert("version".to_string(), Value::string("PyRust 0.2".to_string()));
+    attrs.insert("version".to_string(), Value::string("PyRust 0.2"));
     attrs.insert("argv".to_string(), Value::list(Vec::new()));
     attrs.insert("exit".to_string(), Value::builtin_function("sys.exit"));
     Value::py_module(Rc::new(RefCell::new(PyModule {
@@ -918,9 +914,9 @@ fn is_pure_expr(expr: &Expr, pure_fns: &std::collections::HashSet<String>) -> bo
         }
         Expr::Slice { target, lower, upper, step } => {
             is_pure_expr(target, pure_fns)
-                && lower.as_deref().map_or(true, |e| is_pure_expr(e, pure_fns))
-                && upper.as_deref().map_or(true, |e| is_pure_expr(e, pure_fns))
-                && step.as_deref().map_or(true, |e| is_pure_expr(e, pure_fns))
+                && lower.as_deref().is_none_or(|e| is_pure_expr(e, pure_fns))
+                && upper.as_deref().is_none_or(|e| is_pure_expr(e, pure_fns))
+                && step.as_deref().is_none_or(|e| is_pure_expr(e, pure_fns))
         }
         // Comprehensions involve iteration (GetIter, ForIter) which may call
         // __iter__/__next__ — conservatively treat as impure.
@@ -959,11 +955,11 @@ fn is_pure_stmt(stmt: &Stmt, pure_fns: &std::collections::HashSet<String>) -> bo
         Stmt::Return(None) => true,
         Stmt::Assert { test, msg } => {
             is_pure_expr(test, pure_fns)
-                && msg.as_ref().map_or(true, |e| is_pure_expr(e, pure_fns))
+                && msg.as_ref().is_none_or(|e| is_pure_expr(e, pure_fns))
         }
         Stmt::Raise { expr, cause } => {
-            expr.as_ref().map_or(true, |e| is_pure_expr(e, pure_fns))
-                && cause.as_ref().map_or(true, |e| is_pure_expr(e, pure_fns))
+            expr.as_ref().is_none_or(|e| is_pure_expr(e, pure_fns))
+                && cause.as_ref().is_none_or(|e| is_pure_expr(e, pure_fns))
         }
 
         // Control flow: recurse into sub-blocks.
@@ -973,31 +969,31 @@ fn is_pure_stmt(stmt: &Stmt, pure_fns: &std::collections::HashSet<String>) -> bo
                 .all(|(cond, blk)| is_pure_expr(cond, pure_fns) && is_pure_body(blk, pure_fns))
                 && else_branch
                     .as_deref()
-                    .map_or(true, |b| is_pure_body(b, pure_fns))
+                    .is_none_or(|b| is_pure_body(b, pure_fns))
         }
         Stmt::While { cond, body, else_branch } => {
             is_pure_expr(cond, pure_fns)
                 && is_pure_body(body, pure_fns)
                 && else_branch
                     .as_deref()
-                    .map_or(true, |b| is_pure_body(b, pure_fns))
+                    .is_none_or(|b| is_pure_body(b, pure_fns))
         }
         Stmt::For { iter, body, else_branch, .. } => {
             is_pure_expr(iter, pure_fns)
                 && is_pure_body(body, pure_fns)
                 && else_branch
                     .as_deref()
-                    .map_or(true, |b| is_pure_body(b, pure_fns))
+                    .is_none_or(|b| is_pure_body(b, pure_fns))
         }
         Stmt::Try { body, handlers, else_branch, finally_branch } => {
             is_pure_body(body, pure_fns)
                 && handlers.iter().all(|h| is_pure_body(&h.body, pure_fns))
                 && else_branch
                     .as_deref()
-                    .map_or(true, |b| is_pure_body(b, pure_fns))
+                    .is_none_or(|b| is_pure_body(b, pure_fns))
                 && finally_branch
                     .as_deref()
-                    .map_or(true, |b| is_pure_body(b, pure_fns))
+                    .is_none_or(|b| is_pure_body(b, pure_fns))
         }
 
         // Nested definitions don't execute side effects at definition time.

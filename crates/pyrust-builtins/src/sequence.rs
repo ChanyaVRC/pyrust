@@ -2,7 +2,6 @@ use pyrust_core::{PyError, Result, Value, ValueKind};
 
 /// Common Sequence Operations — index and count.
 /// These apply to both list (Vec<Value>) and tuple (Vec<Value>).
-
 pub fn seq_index(items: &[Value], args: &[Value], type_name: &str) -> Result<Value> {
     let target = args.first().ok_or_else(|| {
         PyError::Runtime(format!("{type_name}.index() requires at least 1 argument"))
@@ -47,7 +46,7 @@ pub fn seq_count(items: &[Value], args: &[Value], type_name: &str) -> Result<Val
 pub fn normalise_index(idx: i64, len: usize) -> usize {
     if idx < 0 {
         let from_end = (-idx) as usize;
-        if from_end > len { 0 } else { len - from_end }
+        len.saturating_sub(from_end)
     } else {
         idx as usize
     }

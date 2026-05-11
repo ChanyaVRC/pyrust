@@ -1,8 +1,6 @@
 impl Interpreter {
     pub fn with_script_dir(dir: PathBuf) -> Self {
-        let mut interp = Self::default();
-        interp.script_dir = Some(dir);
-        interp
+        Self { script_dir: Some(dir), ..Default::default() }
     }
 
     pub fn exec_program(&mut self, program: &[Stmt], repl_mode: bool) -> Result<()> {
@@ -12,8 +10,8 @@ impl Interpreter {
             Err(PyError::Runtime("compilation failed".to_string()))
         };
         // Intercept SystemExit so finally/with handlers run before the process exits.
-        if let Err(PyError::Raised(exc)) = &result {
-            if let ValueKind::PyInstance(inst) = exc.kind() {
+        if let Err(PyError::Raised(exc)) = &result
+            && let ValueKind::PyInstance(inst) = exc.kind() {
                 let class_name = inst.borrow().class.borrow().name.clone();
                 if class_name == "SystemExit" {
                     // Extract exit code from args[0]; default to 0.
@@ -34,7 +32,6 @@ impl Interpreter {
                     std::process::exit(code);
                 }
             }
-        }
         result
     }
 

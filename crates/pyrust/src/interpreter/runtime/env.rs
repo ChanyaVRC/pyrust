@@ -185,9 +185,11 @@ impl Interpreter {
                 let tokens = Lexer::new(&src)?;
                 let program = Parser::new(tokens.into_tokens()).parse_program()?;
                 // Subinterpreter shares the same module_cache so results are visible to parent
-                let mut sub = Interpreter::default();
-                sub.script_dir = self.script_dir.clone();
-                sub.module_cache = Rc::clone(&self.module_cache);
+                let mut sub = Interpreter {
+                    script_dir: self.script_dir.clone(),
+                    module_cache: Rc::clone(&self.module_cache),
+                    ..Default::default()
+                };
                 // call_depth is thread_local — sub-interpreter automatically shares the same counter
                 sub.exec_program(&program, false)?;
                 // Harvest all top-level bindings as module attrs
@@ -228,12 +230,11 @@ impl Interpreter {
             module_env(&self.env).borrow_mut().values.insert(name, value);
             return;
         }
-        if is_nonlocal {
-            if let Some(env) = find_enclosing_local_env_for_name(&self.env, &name) {
+        if is_nonlocal
+            && let Some(env) = find_enclosing_local_env_for_name(&self.env, &name) {
                 env_assign_local(&env, &name, value);
                 return;
             }
-        }
         env_assign_local(&self.env, &name, value);
     }
 
@@ -292,8 +293,8 @@ impl Interpreter {
             let inst_rc = Rc::clone(inst);
             let class = Rc::clone(&inst_rc.borrow().class);
             // Try __bool__ first.
-            if let Some(method_val) = lookup_class_attr(&class, "__bool__") {
-                if let ValueKind::UserFunction(f) = method_val.kind() {
+            if let Some(method_val) = lookup_class_attr(&class, "__bool__")
+                && let ValueKind::UserFunction(f) = method_val.kind() {
                     let func = Rc::clone(f);
                     let result = self.call_user_function_expanded(
                         func,
@@ -309,10 +310,9 @@ impl Interpreter {
                         )),
                     };
                 }
-            }
             // Fall back to __len__.
-            if let Some(method_val) = lookup_class_attr(&class, "__len__") {
-                if let ValueKind::UserFunction(f) = method_val.kind() {
+            if let Some(method_val) = lookup_class_attr(&class, "__len__")
+                && let ValueKind::UserFunction(f) = method_val.kind() {
                     let func = Rc::clone(f);
                     let result = self.call_user_function_expanded(
                         func,
@@ -328,7 +328,6 @@ impl Interpreter {
                         )),
                     };
                 }
-            }
             // No __bool__ or __len__: always truthy.
             return Ok(true);
         }

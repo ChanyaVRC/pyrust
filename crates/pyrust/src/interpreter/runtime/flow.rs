@@ -94,12 +94,11 @@ impl Interpreter {
     /// If `key` is a 3-element tuple produced by the slice compiler, unpack it.
     /// Returns `Some((lo, hi, step))` where each is `None` for a missing bound.
     pub(crate) fn unpack_slice_key(key: &Value) -> Option<(Option<Value>, Option<Value>, Option<Value>)> {
-        if let ValueKind::Tuple(elems) = key.kind() {
-            if elems.len() == 3 {
+        if let ValueKind::Tuple(elems) = key.kind()
+            && elems.len() == 3 {
                 let opt = |v: &Value| if v.is_none() { None } else { Some(v.clone()) };
                 return Some((opt(&elems[0]), opt(&elems[1]), opt(&elems[2])));
             }
-        }
         None
     }
 
