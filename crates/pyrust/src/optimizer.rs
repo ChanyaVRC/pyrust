@@ -31,6 +31,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_unary_fold(insns, num_locals, &mut consts);
     let insns = pass_const_branch_elim(insns, &consts);
     let insns = pass_cmpjump_fusion(insns, num_locals);
+    let insns = pass_not_invert(insns, num_locals);
     let insns = pass_dead_code(insns);
     let insns = pass_trivial_nop(insns);
     let (insns, consts) = pass_compact_consts(insns, consts);
@@ -674,6 +675,69 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
 /// Remove instructions that have no observable effect:
 /// - `Jump(0)` — offset 0 means the next instruction; equivalent to falling through
 /// - `Move(r, r)` — a register copied into itself
+// ─── NOT-inversion ─────────────────────────────────────────────────────────────
+
+/// Absorb `UnaryOp(r, Not, src)` into the following conditional jump by
+/// inverting the branch sense, eliminating the boolean intermediate register.
+///
+/// ## Patterns
+///
+/// ```text
+/// UnaryOp(r, Not, src) + JumpIfFalse(r, k)  →  JumpIfTrue(src, k)
+/// UnaryOp(r, Not, src) + JumpIfTrue(r, k)   →  JumpIfFalse(src, k)
+/// ```
+///
+/// ## Guards
+/// - `r >= num_locals`: only fuse temp registers (named locals could be inspected
+///   after the branch, e.g. in closures).
+/// - `!reg_is_read_in(&insns[i+2..], r)`: `r` must be dead after the jump;
+///   the liveness check reuses the existing `reg_is_read_in` helper.
+///
+/// ## Correctness
+/// `not x` returns `bool`; the branch only tests truthiness.  Because
+/// `bool(not x)` has the same truthiness as `not x`, inverting the branch
+/// and removing the `UnaryOp` is semantically equivalent.
+///
+/// Reference: Lua `lcode.c` `jumponcond()`.
+fn pass_not_invert(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
+    use crate::ast::UnaryOp;
+
+    let n = insns.len();
+    let mut transformed = insns;
+    let mut keep = vec![true; n];
+
+    let mut i = 0;
+    while i + 1 < n {
+        let fused: Option<Insn> = match (&transformed[i], &transformed[i + 1]) {
+            (Insn::UnaryOp(r, UnaryOp::Not, src), Insn::JumpIfFalse(cond, k))
+                if *r == *cond
+                    && *r >= num_locals
+                    && !reg_is_read_in(&transformed[i + 2..], *r) =>
+            {
+                Some(Insn::JumpIfTrue(*src, *k))
+            }
+            (Insn::UnaryOp(r, UnaryOp::Not, src), Insn::JumpIfTrue(cond, k))
+                if *r == *cond
+                    && *r >= num_locals
+                    && !reg_is_read_in(&transformed[i + 2..], *r) =>
+            {
+                Some(Insn::JumpIfFalse(*src, *k))
+            }
+            _ => None,
+        };
+        if let Some(new_insn) = fused {
+            keep[i] = false;
+            transformed[i + 1] = new_insn;
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    compact(transformed, &keep)
+}
+
+// ─── Trivial no-op removal ─────────────────────────────────────────────────────
+
 fn pass_trivial_nop(insns: Vec<Insn>) -> Vec<Insn> {
     let keep: Vec<bool> = insns
         .iter()
@@ -1643,6 +1707,97 @@ mod tests {
         assert!(
             !has_2,
             "orphaned constant 2 should be removed by pool compaction"
+        );
+    }
+
+    // ── pass_not_invert ───────────────────────────────────────────────────────
+
+    #[test]
+    fn not_invert_jumpiffalse_becomes_jumpiftrue() {
+        use crate::ast::UnaryOp;
+        // [0] UnaryOp(r=5, Not, src=0)   keep=false
+        // [1] JumpIfFalse(5, k=1)         target = 1+1+1 = 3 (past-end sentinel)
+        // [2] Return(0)
+        // After fusion: [0] JumpIfTrue(0, 1)  [1] Return(0)
+        // Offset rewrite: old_target=3, to_new[3]=2, new_src=to_new[1]=0 → k=2-0-1=1
+        let insns = vec![
+            Insn::UnaryOp(5, UnaryOp::Not, 0),
+            Insn::JumpIfFalse(5, 1),
+            Insn::Return(0),
+        ];
+        let out = pass_not_invert(insns, 2);
+        assert_eq!(out.len(), 2, "UnaryOp should be removed");
+        assert!(
+            matches!(out[0], Insn::JumpIfTrue(0, 1)),
+            "JumpIfFalse(not x) should become JumpIfTrue(x)"
+        );
+    }
+
+    #[test]
+    fn not_invert_jumpiftrue_becomes_jumpiffalse() {
+        use crate::ast::UnaryOp;
+        // Same layout; k=1 → past-end target.
+        let insns = vec![
+            Insn::UnaryOp(5, UnaryOp::Not, 0),
+            Insn::JumpIfTrue(5, 1),
+            Insn::Return(0),
+        ];
+        let out = pass_not_invert(insns, 2);
+        assert_eq!(out.len(), 2, "UnaryOp should be removed");
+        assert!(
+            matches!(out[0], Insn::JumpIfFalse(0, 1)),
+            "JumpIfTrue(not x) should become JumpIfFalse(x)"
+        );
+    }
+
+    #[test]
+    fn not_invert_skips_when_reg_is_local() {
+        use crate::ast::UnaryOp;
+        // r=1 < num_locals=3 → must not fuse
+        let insns = vec![
+            Insn::UnaryOp(1, UnaryOp::Not, 0),
+            Insn::JumpIfFalse(1, 1),
+            Insn::Return(0),
+        ];
+        let out = pass_not_invert(insns, 3);
+        assert_eq!(out.len(), 3, "no fusion when r is a local");
+    }
+
+    #[test]
+    fn not_invert_skips_when_reg_read_after() {
+        use crate::ast::UnaryOp;
+        // r=5 is read again after the branch → must not fuse
+        let insns = vec![
+            Insn::UnaryOp(5, UnaryOp::Not, 0),
+            Insn::JumpIfFalse(5, 0),
+            Insn::Return(5), // reads r=5 → live
+        ];
+        let out = pass_not_invert(insns, 2);
+        assert_eq!(out.len(), 3, "no fusion when r is live after branch");
+    }
+
+    #[test]
+    fn not_invert_fuses_when_reg_not_reused() {
+        use crate::ast::UnaryOp;
+        // Build a case where the Not result register (r=5) is genuinely dead after
+        // the branch: src=0 (x), result=5, jump target uses a different register.
+        //
+        // [0] UnaryOp(5, Not, 0)   r5 = not r0
+        // [1] JumpIfFalse(5, 1)    if r5 false: jump past-end
+        // [2] Move(2, 0)           r2 = r0  (r5 not read here)
+        // [3] Return(2)
+        let insns = vec![
+            Insn::UnaryOp(5, UnaryOp::Not, 0),
+            Insn::JumpIfFalse(5, 1),
+            Insn::Move(2, 0),
+            Insn::Return(2),
+        ];
+        let out = pass_not_invert(insns, 2);
+        // UnaryOp should be removed; JumpIfFalse→JumpIfTrue
+        assert_eq!(out.len(), 3, "UnaryOp should be removed");
+        assert!(
+            matches!(out[0], Insn::JumpIfTrue(0, _)),
+            "JumpIfFalse(not r0) should become JumpIfTrue(r0)"
         );
     }
 }
