@@ -753,6 +753,17 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
         "map" => Some(Value::builtin_function("map")),
         "filter" => Some(Value::builtin_function("filter")),
         "callable" => Some(Value::builtin_function("callable")),
+        "round" => Some(Value::builtin_function("round")),
+        "divmod" => Some(Value::builtin_function("divmod")),
+        "pow" => Some(Value::builtin_function("pow")),
+        "hash" => Some(Value::builtin_function("hash")),
+        "chr" => Some(Value::builtin_function("chr")),
+        "ord" => Some(Value::builtin_function("ord")),
+        "bin" => Some(Value::builtin_function("bin")),
+        "oct" => Some(Value::builtin_function("oct")),
+        "hex" => Some(Value::builtin_function("hex")),
+        "issubclass" => Some(Value::builtin_function("issubclass")),
+        "delattr" => Some(Value::builtin_function("delattr")),
         _ => None,
     }
 }
