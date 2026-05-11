@@ -780,6 +780,16 @@ impl Value {
         })
     }
 
+    pub fn as_set_mut(&mut self) -> Option<&mut IndexSet<PyKey>> {
+        self.as_opaque_mut().and_then(|o| {
+            if let Opaque::Set(s) = o {
+                Some(s)
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn get_dict_rc(&self) -> Option<&Rc<RefCell<IndexMap<PyKey, Value>>>> {
         self.as_opaque().and_then(|o| {
             if let Opaque::Dict(rc) = o {
