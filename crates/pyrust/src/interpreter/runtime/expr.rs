@@ -857,12 +857,39 @@ impl Interpreter {
             ValueKind::PyInstance(inst) => {
                 let inst_rc = Rc::clone(inst);
                 let class = Rc::clone(&inst_rc.borrow().class);
-                if let Some(method_val) = lookup_class_attr(&class, "__contains__")
-                    && let ValueKind::UserFunction(f) = method_val.kind()
+                if let Some(method_val) = lookup_class_attr(&class, "__contains__") {
+                    if let ValueKind::UserFunction(f) = method_val.kind() {
+                        let func = Rc::clone(f);
+                        let self_val = Value::py_instance(inst_rc);
+                        let result = self.call_user_function_expanded(func, &[], &[self_val, item])?;
+                        return Ok(Value::bool_(result.truthy()));
+                    } else {
+                        return Err(PyError::Named(
+                            "TypeError".to_string(),
+                            format!("argument of type '{}' is not iterable", class.borrow().name),
+                        ));
+                    }
+                }
+                // No __contains__: fall back to __iter__ if available.
+                if let Some(iter_method) = lookup_class_attr(&class, "__iter__")
+                    && let ValueKind::UserFunction(f) = iter_method.kind()
                 {
                     let func = Rc::clone(f);
-                    let self_val = Value::py_instance(inst_rc);
-                    return self.call_user_function_expanded(func, &[], &[self_val, item]);
+                    let iter_obj = self
+                        .call_user_function_expanded(func, &[], &[Value::py_instance(Rc::clone(&inst_rc))])?;
+                    loop {
+                        match self.call_next(iter_obj.clone(), None) {
+                            Ok(elem) => {
+                                if elem == item {
+                                    return Ok(Value::bool_(true));
+                                }
+                            }
+                            Err(PyError::Named(ref cls, _)) if cls == "StopIteration" => {
+                                return Ok(Value::bool_(false));
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
                 }
                 Err(PyError::Named(
                     "TypeError".to_string(),
