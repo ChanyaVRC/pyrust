@@ -1,5 +1,5 @@
 use crate::error::{PyError, Result};
-use crate::token::Token;
+use crate::token::{FStringPart, Token};
 
 pub struct Lexer {
     tokens: Vec<Token>,
@@ -97,9 +97,19 @@ impl Lexer {
                     pos = next;
                 }
                 'a'..='z' | 'A'..='Z' | '_' => {
-                    let (tok, next) = lex_ident_or_keyword(&chars, pos);
-                    self.tokens.push(tok);
-                    pos = next;
+                    // Check for f-string prefix: f" or f' (or F" / F')
+                    if (c == 'f' || c == 'F')
+                        && matches!(chars.get(pos + 1), Some('"') | Some('\''))
+                    {
+                        let quote = chars[pos + 1];
+                        let (tok, next) = lex_fstring(&chars, pos + 2, quote)?;
+                        self.tokens.push(tok);
+                        pos = next;
+                    } else {
+                        let (tok, next) = lex_ident_or_keyword(&chars, pos);
+                        self.tokens.push(tok);
+                        pos = next;
+                    }
                 }
                 '"' | '\'' => {
                     let (tok, next) = lex_string(&chars, pos)?;
@@ -538,6 +548,213 @@ fn lex_string(chars: &[char], start: usize) -> Result<(Token, usize)> {
     }
 
     Err(PyError::Lex("unterminated string literal".to_string()))
+}
+
+/// Lex an f-string starting just after the opening quote character.
+/// `quote` is the quote char (`"` or `'`).
+/// Returns `(Token::FString(parts), next_pos)`.
+fn lex_fstring(chars: &[char], start: usize, quote: char) -> Result<(Token, usize)> {
+    let mut parts: Vec<FStringPart> = Vec::new();
+    let mut pos = start;
+    let mut literal = String::new();
+
+    while let Some(&c) = chars.get(pos) {
+        if c == quote {
+            // End of f-string.
+            if !literal.is_empty() {
+                parts.push(FStringPart::Literal(literal));
+            }
+            return Ok((Token::FString(parts), pos + 1));
+        }
+        if c == '{' {
+            // Check for escaped {{ → literal {
+            if chars.get(pos + 1) == Some(&'{') {
+                literal.push('{');
+                pos += 2;
+                continue;
+            }
+            // Start of an expression.
+            if !literal.is_empty() {
+                parts.push(FStringPart::Literal(std::mem::take(&mut literal)));
+            }
+            pos += 1; // skip '{'
+            let (src, conversion, format_spec, next) = lex_fstring_expr(chars, pos)?;
+            parts.push(FStringPart::Expr {
+                src,
+                conversion,
+                format_spec,
+            });
+            pos = next;
+            continue;
+        }
+        if c == '}' {
+            // Check for escaped }} → literal }
+            if chars.get(pos + 1) == Some(&'}') {
+                literal.push('}');
+                pos += 2;
+                continue;
+            }
+            return Err(PyError::Lex("single '}' in f-string".to_string()));
+        }
+        if c == '\\' {
+            pos += 1;
+            let escaped = chars
+                .get(pos)
+                .copied()
+                .ok_or_else(|| PyError::Lex("unterminated escape in f-string".to_string()))?;
+            literal.push(map_escape(escaped)?);
+            pos += 1;
+            continue;
+        }
+        literal.push(c);
+        pos += 1;
+    }
+    Err(PyError::Lex("unterminated f-string".to_string()))
+}
+
+/// Parse the expression inside `{...}` of an f-string.
+/// `pos` points to the first character after the opening `{`.
+/// Returns `(expr_src, conversion, format_spec, next_pos)` where
+/// `next_pos` is just after the closing `}`.
+fn lex_fstring_expr(
+    chars: &[char],
+    start: usize,
+) -> Result<(String, Option<char>, Option<String>, usize)> {
+    let mut pos = start;
+    let mut depth = 0usize; // brace depth (for nested dicts/sets in expr)
+    let mut src = String::new();
+
+    // Collect the expression source, stopping at `}` (depth==0), `!`, or `:` that
+    // are NOT inside nested brackets.
+    let mut paren_depth = 0usize; // () [] depth
+
+    loop {
+        match chars.get(pos).copied() {
+            None => return Err(PyError::Lex("unterminated f-string expression".to_string())),
+            Some('}') if depth == 0 && paren_depth == 0 => {
+                // End of expression with no conversion or format spec.
+                let expr_src = src.trim().to_string();
+                return Ok((expr_src, None, None, pos + 1));
+            }
+            Some('{') => {
+                depth += 1;
+                src.push('{');
+                pos += 1;
+            }
+            Some('}') => {
+                depth -= 1;
+                src.push('}');
+                pos += 1;
+            }
+            Some('(') | Some('[') => {
+                paren_depth += 1;
+                src.push(chars[pos]);
+                pos += 1;
+            }
+            Some(')') | Some(']') => {
+                paren_depth = paren_depth.saturating_sub(1);
+                src.push(chars[pos]);
+                pos += 1;
+            }
+            // Conversion flag: !r, !s, !a — only at top level
+            Some('!') if depth == 0 && paren_depth == 0 => {
+                let expr_src = src.trim().to_string();
+                pos += 1; // skip '!'
+                let conv = chars.get(pos).copied().ok_or_else(|| {
+                    PyError::Lex("expected conversion flag after '!'".to_string())
+                })?;
+                if !matches!(conv, 'r' | 's' | 'a') {
+                    return Err(PyError::Lex(format!("unknown conversion flag '{conv}'")));
+                }
+                pos += 1; // skip conversion char
+                // Now check for format spec or closing }
+                let format_spec = if chars.get(pos) == Some(&':') {
+                    pos += 1;
+                    Some(lex_format_spec(chars, &mut pos)?)
+                } else {
+                    None
+                };
+                if chars.get(pos) != Some(&'}') {
+                    return Err(PyError::Lex(
+                        "expected '}' to close f-string expression".to_string(),
+                    ));
+                }
+                return Ok((expr_src, Some(conv), format_spec, pos + 1));
+            }
+            // Format spec: : — only at top level
+            Some(':') if depth == 0 && paren_depth == 0 => {
+                let expr_src = src.trim().to_string();
+                pos += 1; // skip ':'
+                let spec = lex_format_spec(chars, &mut pos)?;
+                if chars.get(pos) != Some(&'}') {
+                    return Err(PyError::Lex(
+                        "expected '}' to close f-string expression".to_string(),
+                    ));
+                }
+                return Ok((expr_src, None, Some(spec), pos + 1));
+            }
+            // Quoted strings inside the expression (so we don't mis-interpret their contents)
+            Some(q @ ('"' | '\'')) => {
+                src.push(q);
+                pos += 1;
+                while let Some(&sc) = chars.get(pos) {
+                    pos += 1;
+                    if sc == q {
+                        src.push(sc);
+                        break;
+                    }
+                    if sc == '\\' {
+                        if let Some(&esc) = chars.get(pos) {
+                            src.push('\\');
+                            src.push(esc);
+                            pos += 1;
+                        }
+                    } else {
+                        src.push(sc);
+                    }
+                }
+            }
+            Some(other) => {
+                src.push(other);
+                pos += 1;
+            }
+        }
+    }
+}
+
+/// Collect format spec characters until we hit `}` (at depth 0).
+/// On return `pos` points to the `}`.
+fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<String> {
+    let mut spec = String::new();
+    let mut depth = 0usize;
+    loop {
+        match chars.get(*pos).copied() {
+            None => {
+                return Err(PyError::Lex(
+                    "unterminated f-string format spec".to_string(),
+                ));
+            }
+            Some('{') => {
+                depth += 1;
+                spec.push('{');
+                *pos += 1;
+            }
+            Some('}') if depth > 0 => {
+                depth -= 1;
+                spec.push('}');
+                *pos += 1;
+            }
+            Some('}') => {
+                // closing } of the expression — leave pos pointing at it
+                break;
+            }
+            Some(c) => {
+                spec.push(c);
+                *pos += 1;
+            }
+        }
+    }
+    Ok(spec)
 }
 
 fn map_escape(c: char) -> Result<char> {

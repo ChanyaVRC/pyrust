@@ -119,6 +119,20 @@ pub enum Stmt {
     },
 }
 
+/// One part of a parsed f-string.
+#[derive(Debug, Clone)]
+pub enum FStringPart {
+    /// A literal text fragment.
+    Literal(String),
+    /// An embedded expression with optional conversion flag (`!r`/`!s`/`!a`)
+    /// and optional format spec (e.g. `.2f`).
+    Expr {
+        expr: Box<Expr>,
+        conversion: Option<char>,
+        format_spec: Option<String>,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub enum Expr {
     Int(i64),
@@ -126,6 +140,8 @@ pub enum Expr {
     Str(String),
     Bool(bool),
     None,
+    /// An f-string: `f"Hello, {name}!"`
+    FString(Vec<FStringPart>),
     Var(String),
     List(Vec<Expr>),
     Tuple(Vec<Expr>),
