@@ -1034,6 +1034,7 @@ result = fact(10)
         assert_eq!(interpreter.lookup_name("g").unwrap(), Some(Value::int(1)));
     }
 
+    #[allow(dead_code)]
     fn run_program_result(src: &str) -> crate::error::Result<()> {
         let tokens = Lexer::new(src).unwrap().into_tokens();
         let mut parser = Parser::new(tokens);
