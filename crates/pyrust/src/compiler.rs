@@ -3629,10 +3629,13 @@ impl Compiler {
 
     fn compile_short_circuit(&mut self, left: &Expr, right: &Expr, jump_if_true: bool) -> Reg {
         let lhs = self.compile_expr(left);
-        let dst = self.ensure_dst(lhs);
-        if dst != lhs {
-            self.emit(Insn::Move(dst, lhs));
-        }
+        // Always copy to a fresh temp so the JumpIf tests the copy, not `lhs`
+        // itself. This prevents the optimizer from fusing BinOp(lhs,lhs,...)+
+        // JumpIfFalse(lhs) → CmpJumpIfFalse, which would leave `lhs` holding
+        // the original (pre-BinOp) value after the jump instead of False/True.
+        let dst = self.alloc_temp();
+        self.emit(Insn::Move(dst, lhs));
+        self.free_temp(lhs);
         let jmp = if jump_if_true {
             self.emit(Insn::JumpIfTrue(dst, 0))
         } else {
