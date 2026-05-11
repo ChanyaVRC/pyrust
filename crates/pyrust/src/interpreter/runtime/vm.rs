@@ -297,7 +297,7 @@ impl Interpreter {
                 Insn::LoadNone(dst) => {
                     regs[*dst as usize] = Some(Value::none());
                 }
-                Insn::Move(dst, src) => {
+                Insn::Move(dst, src) | Insn::CopyReg(dst, src) => {
                     if let Some(v) = &regs[*src as usize]
                         && let ValueKind::Int(n) = v.kind() {
                             regs[*dst as usize] = Some(Value::int(n));

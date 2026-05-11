@@ -36,6 +36,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_binopinplace_downgrade(insns, num_locals);
     let insns = pass_exit_inline(insns);
     let insns = pass_licm(insns);
+    let insns = pass_cse(insns);
     let insns = pass_dead_code(insns);
     let insns = pass_dead_store_elim(insns, num_locals);
     let insns = pass_copy_prop(insns);
@@ -445,6 +446,8 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         ForIter(dst, _, _) => Some(*dst),
         ForCountReg(var, _, _, _, _) => Some(*var),
         ForCountConst(var, _, _, _, _) => Some(*var),
+        // CopyReg is emitted by the CSE pass; it writes to dst just like Move.
+        CopyReg(r, _) => Some(*r),
         _ => None,
     }
 }
@@ -717,6 +720,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         // One source register.
         StoreGlobal(_, s)
         | Move(_, s)
+        | CopyReg(_, s)
         | UnaryOp(_, _, s)
         | Return(s)
         | PrintExpr(s)
@@ -1112,6 +1116,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | Call(r, _)
         | CallMemo(r, _)
         | Move(r, _)
+        | CopyReg(r, _)
         | DeleteLocal(r) => {
             written.insert(*r);
         }
@@ -1275,7 +1280,7 @@ fn reg_is_read_before_next_write(insns: &[Insn], r: u32) -> bool {
             return false;
         }
         if matches!(insn, Insn::LoadConst(dst, _) | Insn::LoadNone(dst) | Insn::LoadGlobal(dst, _)
-                         | Insn::Move(dst, _) if *dst == r)
+                         | Insn::Move(dst, _) | Insn::CopyReg(dst, _) if *dst == r)
         {
             return false;
         }
@@ -1306,6 +1311,7 @@ fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             | Insn::LoadNone(r)
             | Insn::LoadGlobal(r, _)
             | Insn::Move(r, _)
+            | Insn::CopyReg(r, _)
             | Insn::BinOp(r, _, _, _)
             | Insn::BinOpConst(r, _, _, _)
             | Insn::UnaryOp(r, _, _)
@@ -1328,6 +1334,223 @@ fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
     }
 
     compact(insns, &keep)
+}
+
+// ─── Common subexpression elimination ─────────────────────────────────────────
+
+/// Eliminate redundant computations within each basic block.
+///
+/// Within a straight-line sequence of instructions (a *basic block* — no jumps
+/// in or out), if two instructions compute exactly the same value from the same
+/// inputs, the second one is redundant.  This pass replaces the second with
+/// `CopyReg(dst2, dst1)`, pointing `dst2` at the already-computed result.
+///
+/// ## Tracked expressions
+///
+/// Only *pure* instruction forms are tracked:
+/// - `LoadConst(dst, idx)` — two loads of the same pool entry are identical.
+/// - `BinOpConst(dst, src, op, idx)` — same operator, same source register,
+///   same constant operand.
+/// - `UnaryOp(dst, op, src)` — same operator, same source register.
+///
+/// `BinOp` is intentionally excluded: it could invoke user-defined `__add__`
+/// which may have side effects.
+///
+/// ## CSE key and invalidation
+///
+/// The *CSE key* for a tracked instruction is `(discriminant, src_regs..., const_idx)`.
+/// The map is cleared at every basic-block boundary (any branch, jump, or
+/// exception instruction, as well as any instruction that is a jump *target*).
+///
+/// Whenever any register `r` is written by any instruction (whether tracked or
+/// not), every CSE table entry whose key contains `r` as a source operand is
+/// removed.  This prevents stale entries from matching if an input was mutated
+/// between the two computations.
+///
+/// ## Interaction with later passes
+///
+/// The emitted `CopyReg` instructions are subsequently cleaned up by
+/// `pass_dead_store_elim` (if the original dst is never read) and
+/// `pass_trivial_nop` (if dst == src, which cannot happen here but is guarded
+/// for safety).  `pass_copy_prop` does *not* chase through `CopyReg` — that
+/// keeps the pass order simple and avoids invalidating other CSE entries.
+///
+/// Reference: Aho, Lam, Sethi, Ullman *Compilers* §9.1 (available expressions);
+/// Kennedy *A Survey of Data-Flow Analysis Techniques* §3 (CSE).
+fn pass_cse(insns: Vec<Insn>) -> Vec<Insn> {
+    use std::collections::HashMap;
+
+    /// Discriminator tag for a CSE key — keeps `LoadConst`, `BinOpConst`, and
+    /// `UnaryOp` entries distinct even if their integer fields happen to overlap.
+    #[derive(Eq, PartialEq, Hash, Clone)]
+    enum CseKey {
+        /// `LoadConst(_, idx)` — two loads of the same pool entry.
+        LoadConst(u16),
+        /// `BinOpConst(_, src, op, idx)`.
+        BinOpConst(u32, crate::ast::BinaryOp, u16),
+        /// `UnaryOp(_, op, src)`.
+        UnaryOp(crate::ast::UnaryOp, u32),
+    }
+
+    let n = insns.len();
+    if n == 0 {
+        return insns;
+    }
+
+    // Pre-pass: mark every instruction that is a jump target so we can clear
+    // the CSE table at basic-block boundaries.
+    let mut is_bb_start = vec![false; n + 1];
+    is_bb_start[0] = true;
+    for (i, insn) in insns.iter().enumerate() {
+        let k: Option<i32> = match insn {
+            Insn::Jump(k)
+            | Insn::JumpIfFalse(_, k)
+            | Insn::JumpIfTrue(_, k)
+            | Insn::CmpJumpIfFalse(_, _, _, k)
+            | Insn::CmpJumpIfTrue(_, _, _, k)
+            | Insn::CmpJumpIfFalseConst(_, _, _, k)
+            | Insn::CmpJumpIfTrueConst(_, _, _, k)
+            | Insn::ForIter(_, _, k)
+            | Insn::ForCountReg(_, _, _, _, k)
+            | Insn::ForCountConst(_, _, _, _, k)
+            | Insn::SetupExcept(k)
+            | Insn::MatchExcept(_, k) => Some(*k),
+            _ => None,
+        };
+        if let Some(k) = k {
+            let target = (i as i64 + 1 + k as i64) as usize;
+            if target <= n {
+                is_bb_start[target] = true;
+            }
+        }
+    }
+
+    // `table`: CSE key → (original dst register that holds the result).
+    let mut table: HashMap<CseKey, u32> = HashMap::new();
+    let mut result: Vec<Insn> = Vec::with_capacity(n);
+
+    for (i, insn) in insns.into_iter().enumerate() {
+        // Clear CSE state at basic-block boundaries.
+        if is_bb_start[i] {
+            table.clear();
+        }
+
+        // Build the CSE key for this instruction, if it is a tracked pure form.
+        let key: Option<(CseKey, u32)> = match &insn {
+            Insn::LoadConst(dst, idx) => Some((CseKey::LoadConst(*idx), *dst)),
+            Insn::BinOpConst(dst, src, op, idx) => {
+                Some((CseKey::BinOpConst(*src, *op, *idx), *dst))
+            }
+            Insn::UnaryOp(dst, op, src) => Some((CseKey::UnaryOp(*op, *src), *dst)),
+            _ => None,
+        };
+
+        // Determine which register (if any) this instruction writes to, so we
+        // can evict stale CSE table entries BEFORE the match check.  Eviction
+        // must happen regardless of whether the instruction is later replaced
+        // by a CopyReg, because the CopyReg itself still writes to `dst`.
+        let written_reg: Option<u32> = match &insn {
+            Insn::LoadConst(r, _) | Insn::LoadNone(r) | Insn::LoadGlobal(r, _) => Some(*r),
+            // Move writes its destination register; must evict stale CSE entries
+            // that recorded `prev_dst == dst` from an earlier computation.
+            Insn::Move(dst, _) => Some(*dst),
+            Insn::Unpack(base, _, n) => {
+                // Handled separately below; use sentinel None here.
+                let _ = (base, n);
+                None
+            }
+            _ => writable_dst(&insn),
+        };
+
+        // Evict stale entries: any entry whose *output* register is being
+        // overwritten is no longer valid.  Also evict entries whose *input*
+        // register is being overwritten (their computed value is now stale).
+        // We do this BEFORE the CSE match check so the new entry (if any) is
+        // not immediately invalidated by its own write.
+        if let Insn::Unpack(base, _, n) = &insn {
+            let lo = *base;
+            let hi = base + n;
+            table.retain(|k, prev_dst| {
+                if *prev_dst >= lo && *prev_dst < hi {
+                    return false;
+                }
+                match k {
+                    CseKey::LoadConst(_) => true,
+                    CseKey::BinOpConst(src, _, _) => *src < lo || *src >= hi,
+                    CseKey::UnaryOp(_, src) => *src < lo || *src >= hi,
+                }
+            });
+        } else if let Some(w) = written_reg {
+            table.retain(|k, prev_dst| {
+                if *prev_dst == w {
+                    return false;
+                }
+                match k {
+                    CseKey::LoadConst(_) => true,
+                    CseKey::BinOpConst(src, _, _) => *src != w,
+                    CseKey::UnaryOp(_, src) => *src != w,
+                }
+            });
+        }
+
+        // Check for a previous matching computation.
+        let replaced = if let Some((ref k, dst)) = key {
+            if let Some(&prev_dst) = table.get(k) {
+                if prev_dst != dst {
+                    // Replace this instruction with a register copy from the
+                    // earlier result.  The original instruction is discarded.
+                    result.push(Insn::CopyReg(dst, prev_dst));
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if !replaced {
+            // Record the expression in the CSE table.  Eviction already happened
+            // above before the match check, so the new entry will not be removed.
+            if let Some((k, dst)) = key {
+                table.insert(k, dst);
+            }
+
+            result.push(insn);
+        }
+
+        // After a basic-block-terminating instruction, clear the table so the
+        // next block starts fresh.  (We also clear at the *start* of targets via
+        // is_bb_start, but this handles the fall-through path of conditionals.)
+        let is_terminator = matches!(
+            result.last().unwrap(),
+            Insn::Jump(_)
+                | Insn::JumpIfFalse(..)
+                | Insn::JumpIfTrue(..)
+                | Insn::CmpJumpIfFalse(..)
+                | Insn::CmpJumpIfTrue(..)
+                | Insn::CmpJumpIfFalseConst(..)
+                | Insn::CmpJumpIfTrueConst(..)
+                | Insn::ForIter(..)
+                | Insn::ForCountReg(..)
+                | Insn::ForCountConst(..)
+                | Insn::SetupExcept(_)
+                | Insn::MatchExcept(..)
+                | Insn::Return(_)
+                | Insn::ReturnNone
+                | Insn::RaiseValue(_)
+                | Insn::RaiseFrom(..)
+                | Insn::RaiseReRaise
+                | Insn::RaiseAssert(_)
+        );
+        if is_terminator {
+            table.clear();
+        }
+    }
+
+    result
 }
 
 // ─── Trivial no-op removal ─────────────────────────────────────────────────────
@@ -1398,6 +1621,10 @@ fn pass_copy_prop(insns: Vec<Insn>) -> Vec<Insn> {
         // Substitute source registers and collect the (possibly modified) instruction.
         let insn = match insn {
             Insn::Move(dst, src) => Insn::Move(dst, s(&copies, src)),
+            // CopyReg: substitute the source register (may itself be an alias) but do
+            // NOT record a new copy-propagation alias — downstream passes should see
+            // CopyReg as an opaque assignment, not a transparent rename.
+            Insn::CopyReg(dst, src) => Insn::CopyReg(dst, s(&copies, src)),
             Insn::Return(src) => Insn::Return(s(&copies, src)),
             Insn::PrintExpr(v) => Insn::PrintExpr(s(&copies, v)),
             Insn::RaiseValue(v) => Insn::RaiseValue(s(&copies, v)),
@@ -1487,7 +1714,7 @@ fn pass_trivial_nop(insns: Vec<Insn>) -> Vec<Insn> {
         .iter()
         .map(|insn| match insn {
             Insn::Jump(0) => false,
-            Insn::Move(dst, src) => dst != src,
+            Insn::Move(dst, src) | Insn::CopyReg(dst, src) => dst != src,
             _ => true,
         })
         .collect();
@@ -3073,6 +3300,138 @@ mod tests {
             out.iter()
                 .any(|i| matches!(i, Insn::ForCountConst(0, BinaryOp::Lt, 0, 1, _))),
             "outer loop header must still exist"
+        );
+    }
+
+    // ── pass_cse ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cse_duplicate_loadconst_becomes_copyreg() {
+        // Two loads of the same constant index → second becomes CopyReg.
+        // LoadConst(r2, 0)  LoadConst(r3, 0)  Return(r2)
+        // Expected: LoadConst(r2, 0)  CopyReg(r3, r2)  Return(r2)
+        let insns = vec![
+            Insn::LoadConst(2, 0),
+            Insn::LoadConst(3, 0), // duplicate
+            Insn::Return(2),
+        ];
+        let out = pass_cse(insns);
+        assert_eq!(out.len(), 3, "instruction count unchanged");
+        assert!(
+            matches!(out[0], Insn::LoadConst(2, 0)),
+            "first LoadConst must be kept"
+        );
+        assert!(
+            matches!(out[1], Insn::CopyReg(3, 2)),
+            "second LoadConst should become CopyReg(r3, r2)"
+        );
+    }
+
+    #[test]
+    fn cse_duplicate_binopconst_becomes_copyreg() {
+        use crate::ast::BinaryOp;
+        // BinOpConst(r4, r0, Add, 1)  …  BinOpConst(r5, r0, Add, 1)
+        // The second should become CopyReg(r5, r4).
+        let insns = vec![
+            Insn::BinOpConst(4, 0, BinaryOp::Add, 1),
+            Insn::BinOpConst(5, 0, BinaryOp::Add, 1), // duplicate
+            Insn::Return(4),
+        ];
+        let out = pass_cse(insns);
+        assert_eq!(out.len(), 3);
+        assert!(
+            matches!(out[0], Insn::BinOpConst(4, 0, BinaryOp::Add, 1)),
+            "first BinOpConst must be kept"
+        );
+        assert!(
+            matches!(out[1], Insn::CopyReg(5, 4)),
+            "second BinOpConst should become CopyReg(r5, r4)"
+        );
+    }
+
+    #[test]
+    fn cse_intervening_write_invalidates_entry() {
+        use crate::ast::BinaryOp;
+        // BinOpConst(r4, r0, Add, 1)
+        // LoadConst(r0, 2)        ← writes r0, the input of the BinOpConst
+        // BinOpConst(r5, r0, Add, 1)   ← r0 is now a different value; NOT a duplicate
+        let insns = vec![
+            Insn::BinOpConst(4, 0, BinaryOp::Add, 1),
+            Insn::LoadConst(0, 2), // clobbers r0
+            Insn::BinOpConst(5, 0, BinaryOp::Add, 1),
+            Insn::Return(4),
+        ];
+        let out = pass_cse(insns);
+        assert_eq!(out.len(), 4, "no elimination when input clobbered");
+        assert!(
+            matches!(out[2], Insn::BinOpConst(5, 0, BinaryOp::Add, 1)),
+            "second BinOpConst must not be replaced after input clobber"
+        );
+    }
+
+    #[test]
+    fn cse_does_not_cross_basic_block_boundary() {
+        use crate::ast::BinaryOp;
+        // LoadConst(r2, 0)
+        // JumpIfFalse(r1, 0)   ← ends basic block; target is next instruction
+        // LoadConst(r3, 0)     ← same const, but different basic block → NOT replaced
+        // Return(r2)
+        let insns = vec![
+            Insn::LoadConst(2, 0),
+            Insn::JumpIfFalse(1, 0), // offset 0 → target = idx 2
+            Insn::LoadConst(3, 0),   // idx 2 is a BB start (jump target)
+            Insn::Return(2),
+        ];
+        let out = pass_cse(insns);
+        // The third instruction (idx 2) is a BB start, so the CSE table is cleared
+        // before it is processed; the second LoadConst(r3, 0) must NOT be replaced.
+        assert!(
+            matches!(out[2], Insn::LoadConst(3, 0)),
+            "CSE must not cross basic-block boundary"
+        );
+    }
+
+    #[test]
+    fn cse_unary_op_duplicate_becomes_copyreg() {
+        use crate::ast::UnaryOp;
+        // UnaryOp(r4, Neg, r0)  UnaryOp(r5, Neg, r0)  → second becomes CopyReg(r5, r4)
+        let insns = vec![
+            Insn::UnaryOp(4, UnaryOp::Neg, 0),
+            Insn::UnaryOp(5, UnaryOp::Neg, 0), // duplicate
+            Insn::Return(4),
+        ];
+        let out = pass_cse(insns);
+        assert_eq!(out.len(), 3);
+        assert!(
+            matches!(out[0], Insn::UnaryOp(4, UnaryOp::Neg, 0)),
+            "first UnaryOp must be kept"
+        );
+        assert!(
+            matches!(out[1], Insn::CopyReg(5, 4)),
+            "second UnaryOp should become CopyReg(r5, r4)"
+        );
+    }
+
+    #[test]
+    fn cse_output_clobber_invalidates_entry() {
+        // If the output register of a CSE candidate is overwritten, subsequent
+        // identical computations cannot be replaced by a CopyReg pointing to it.
+        //
+        // LoadConst(r2, 0)        ← r2 holds consts[0]
+        // LoadNone(r2)            ← clobbers r2; CSE entry for consts[0] removed
+        // LoadConst(r3, 0)        ← must NOT be replaced by CopyReg(r3, r2)
+        // Return(r3)
+        let insns = vec![
+            Insn::LoadConst(2, 0),
+            Insn::LoadNone(2), // clobbers the output register r2
+            Insn::LoadConst(3, 0),
+            Insn::Return(3),
+        ];
+        let out = pass_cse(insns);
+        assert_eq!(out.len(), 4, "no elimination when output clobbered");
+        assert!(
+            matches!(out[2], Insn::LoadConst(3, 0)),
+            "LoadConst must not be replaced after its output register is clobbered"
         );
     }
 }
