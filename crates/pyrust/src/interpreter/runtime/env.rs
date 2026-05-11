@@ -84,6 +84,37 @@ impl Interpreter {
                     format!("super(): parent class has no attribute '{name}'"),
                 ))
             }
+            ValueKind::SuperProxyClass { class, obj_class } => {
+                let class = Rc::clone(class);
+                let obj_class = Rc::clone(obj_class);
+                // classmethod super(): look up from class's parent and bind to obj_class
+                let parent = class.borrow().base.clone();
+                let Some(parent_class) = parent else {
+                    return Err(PyError::Named(
+                        "AttributeError".to_string(),
+                        format!("super(): '{}' has no base class", class.borrow().name),
+                    ));
+                };
+                if let Some(value) = lookup_class_attr(&parent_class, name) {
+                    return Ok(match value.kind() {
+                        ValueKind::UserFunction(f) => {
+                            // Regular method accessed via super in classmethod context —
+                            // return the raw function (rare, but valid).
+                            Value::user_function(Rc::clone(f))
+                        }
+                        ValueKind::ClassMethod(f) => {
+                            // classmethod: bind to the concrete subclass
+                            Value::class_bound_method(Rc::clone(f), obj_class)
+                        }
+                        ValueKind::StaticMethod(f) => Value::user_function(Rc::clone(f)),
+                        _ => value,
+                    });
+                }
+                Err(PyError::Named(
+                    "AttributeError".to_string(),
+                    format!("super(): parent class has no attribute '{name}'"),
+                ))
+            }
             ValueKind::PyModule(module) => {
                 let module = Rc::clone(module);
                 if let Some(value) = module.borrow().attrs.get(name).cloned() {
@@ -303,7 +334,10 @@ impl Interpreter {
                     )?;
                     return match result.kind() {
                         ValueKind::Bool(b) => Ok(b),
-                        ValueKind::Int(n) => Ok(n != 0),
+                        ValueKind::Int(_) => Err(PyError::Named(
+                            "TypeError".to_string(),
+                            "__bool__ should return bool, not int".to_string(),
+                        )),
                         _ => Err(PyError::Named(
                             "TypeError".to_string(),
                             "__bool__ should return bool".to_string(),

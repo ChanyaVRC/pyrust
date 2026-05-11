@@ -620,7 +620,7 @@ impl Interpreter {
                     ValueKind::Zip { .. } => Ok(Value::builtin_function("zip")),
                     ValueKind::Reversed { .. } => Ok(Value::builtin_function("reversed")),
                     ValueKind::ClassMethod(_) | ValueKind::StaticMethod(_) => Ok(Value::builtin_function("function")),
-                    ValueKind::SuperProxy { .. } => Ok(Value::builtin_function("super")),
+                    ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => Ok(Value::builtin_function("super")),
                 }
             }
             ValueKind::BuiltinFunction("id") => {
@@ -868,7 +868,9 @@ impl Interpreter {
                     | ValueKind::BuiltinFunction(_)
                     | ValueKind::BoundMethod { .. }
                     | ValueKind::ClassBoundMethod { .. }
-                    | ValueKind::PyClass(_) => true,
+                    | ValueKind::PyClass(_)
+                    | ValueKind::ClassMethod(_)
+                    | ValueKind::StaticMethod(_) => true,
                     ValueKind::PyInstance(inst) => {
                         let class = Rc::clone(&inst.borrow().class);
                         lookup_class_attr(&class, "__call__").is_some()
@@ -1379,13 +1381,34 @@ impl Interpreter {
                         "super() first argument must be a class".to_string(),
                     )),
                 };
-                let instance = match inst_val.kind() {
-                    ValueKind::PyInstance(i) => Rc::clone(i),
-                    _ => return Err(PyError::Runtime(
+                match inst_val.kind() {
+                    ValueKind::PyInstance(i) => {
+                        let instance = Rc::clone(i);
+                        // Bug #199: validate instance is an instance of class
+                        if !class_is_subclass_of(&instance.borrow().class, &class) {
+                            return Err(PyError::Named(
+                                "TypeError".to_string(),
+                                "super(type, obj): obj must be an instance or subtype of type".to_string(),
+                            ));
+                        }
+                        Ok(Value::super_proxy(class, instance))
+                    }
+                    ValueKind::PyClass(obj_class) => {
+                        // Bug #197: classmethod case — second arg is a class
+                        let obj_class = Rc::clone(obj_class);
+                        // Validate obj_class is a subclass of class
+                        if !class_is_subclass_of(&obj_class, &class) {
+                            return Err(PyError::Named(
+                                "TypeError".to_string(),
+                                "super(type, obj): obj must be an instance or subtype of type".to_string(),
+                            ));
+                        }
+                        Ok(Value::super_proxy_class(class, obj_class))
+                    }
+                    _ => Err(PyError::Runtime(
                         "super() second argument must be a class instance".to_string(),
                     )),
-                };
-                Ok(Value::super_proxy(class, instance))
+                }
             }
 
             ValueKind::PyInstance(inst) => {

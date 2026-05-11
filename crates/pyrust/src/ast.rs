@@ -188,6 +188,11 @@ pub enum Expr {
         upper: Option<Box<Expr>>,
         step: Option<Box<Expr>>,
     },
+    /// Walrus operator: `target := value`
+    Named {
+        target: String,
+        value: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

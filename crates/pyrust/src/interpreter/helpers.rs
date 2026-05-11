@@ -564,13 +564,24 @@ fn collect_local_names_from_block(
             | Stmt::IndexAssign { .. }
             | Stmt::SliceAssign { .. }
             | Stmt::Delete(_)
-            | Stmt::Assert { .. }
-            | Stmt::Expr(_)
             | Stmt::Raise { .. }
-            | Stmt::Return(_)
             | Stmt::Break
             | Stmt::Continue
             | Stmt::Pass => {}
+            // Walk expressions for walrus operator targets.
+            Stmt::Expr(e) => {
+                collect_walrus_targets_in_expr(e, names, global_names, nonlocal_names);
+            }
+            Stmt::Return(Some(e)) => {
+                collect_walrus_targets_in_expr(e, names, global_names, nonlocal_names);
+            }
+            Stmt::Return(None) => {}
+            Stmt::Assert { test, msg } => {
+                collect_walrus_targets_in_expr(test, names, global_names, nonlocal_names);
+                if let Some(m) = msg {
+                    collect_walrus_targets_in_expr(m, names, global_names, nonlocal_names);
+                }
+            }
             Stmt::With { items, body } => {
                 for (_, alias) in items {
                     if let Some(target) = alias {
@@ -583,7 +594,8 @@ fn collect_local_names_from_block(
                 branches,
                 else_branch,
             } => {
-                for (_, branch) in branches {
+                for (cond, branch) in branches {
+                    collect_walrus_targets_in_expr(cond, names, global_names, nonlocal_names);
                     collect_local_names_from_block(branch, names, global_names, nonlocal_names);
                 }
                 if let Some(branch) = else_branch {
@@ -591,8 +603,11 @@ fn collect_local_names_from_block(
                 }
             }
             Stmt::While {
-                body, else_branch, ..
+                cond,
+                body,
+                else_branch,
             } => {
+                collect_walrus_targets_in_expr(cond, names, global_names, nonlocal_names);
                 collect_local_names_from_block(body, names, global_names, nonlocal_names);
                 if let Some(branch) = else_branch {
                     collect_local_names_from_block(branch, names, global_names, nonlocal_names);
@@ -626,10 +641,11 @@ fn collect_local_names_from_block(
             }
             Stmt::For {
                 target,
+                iter,
                 body,
                 else_branch,
-                ..
             } => {
+                collect_walrus_targets_in_expr(iter, names, global_names, nonlocal_names);
                 collect_assign_target_names(target, names, global_names, nonlocal_names);
                 collect_local_names_from_block(body, names, global_names, nonlocal_names);
                 if let Some(branch) = else_branch {
@@ -736,6 +752,72 @@ fn values_are_identical(a: &Value, b: &Value) -> bool {
         // This makes `type(5) is type(5)` True since both return the same name tag.
         (ValueKind::BuiltinFunction(x), ValueKind::BuiltinFunction(y)) => x == y,
         _ => false,
+    }
+}
+
+/// Walk an expression tree and collect names bound by walrus operators (`:=`).
+fn collect_walrus_targets_in_expr(
+    expr: &Expr,
+    names: &mut std::collections::HashSet<String>,
+    global_names: &std::collections::HashSet<String>,
+    nonlocal_names: &std::collections::HashSet<String>,
+) {
+    match expr {
+        Expr::Named { target, value } => {
+            if !global_names.contains(target) && !nonlocal_names.contains(target) {
+                names.insert(target.clone());
+            }
+            collect_walrus_targets_in_expr(value, names, global_names, nonlocal_names);
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_walrus_targets_in_expr(left, names, global_names, nonlocal_names);
+            collect_walrus_targets_in_expr(right, names, global_names, nonlocal_names);
+        }
+        Expr::Unary { expr: e, .. } => {
+            collect_walrus_targets_in_expr(e, names, global_names, nonlocal_names);
+        }
+        Expr::Compare { left, ops } => {
+            collect_walrus_targets_in_expr(left, names, global_names, nonlocal_names);
+            for (_, e) in ops {
+                collect_walrus_targets_in_expr(e, names, global_names, nonlocal_names);
+            }
+        }
+        Expr::Call { func, args } => {
+            collect_walrus_targets_in_expr(func, names, global_names, nonlocal_names);
+            for a in args {
+                collect_walrus_targets_in_expr(&a.value, names, global_names, nonlocal_names);
+            }
+        }
+        Expr::Ternary { cond, then, else_ } => {
+            collect_walrus_targets_in_expr(cond, names, global_names, nonlocal_names);
+            collect_walrus_targets_in_expr(then, names, global_names, nonlocal_names);
+            collect_walrus_targets_in_expr(else_, names, global_names, nonlocal_names);
+        }
+        Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
+            for e in items {
+                collect_walrus_targets_in_expr(e, names, global_names, nonlocal_names);
+            }
+        }
+        Expr::Dict(pairs) => {
+            for (k, v) in pairs {
+                collect_walrus_targets_in_expr(k, names, global_names, nonlocal_names);
+                collect_walrus_targets_in_expr(v, names, global_names, nonlocal_names);
+            }
+        }
+        Expr::Index { target, index } => {
+            collect_walrus_targets_in_expr(target, names, global_names, nonlocal_names);
+            collect_walrus_targets_in_expr(index, names, global_names, nonlocal_names);
+        }
+        Expr::Attr { target, .. } => {
+            collect_walrus_targets_in_expr(target, names, global_names, nonlocal_names);
+        }
+        Expr::Slice { target, lower, upper, step } => {
+            collect_walrus_targets_in_expr(target, names, global_names, nonlocal_names);
+            for e in [lower, upper, step].iter().flat_map(|o| o.as_deref()) {
+                collect_walrus_targets_in_expr(e, names, global_names, nonlocal_names);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -921,6 +1003,8 @@ fn is_pure_expr(expr: &Expr, pure_fns: &std::collections::HashSet<String>) -> bo
         // Comprehensions involve iteration (GetIter, ForIter) which may call
         // __iter__/__next__ — conservatively treat as impure.
         Expr::ListComp { .. } | Expr::DictComp { .. } | Expr::SetComp { .. } => false,
+        // Walrus has a side effect (assignment).
+        Expr::Named { .. } => false,
     }
 }
 

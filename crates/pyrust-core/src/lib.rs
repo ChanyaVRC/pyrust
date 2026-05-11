@@ -246,6 +246,13 @@ pub enum Opaque {
         class: Rc<RefCell<PyClass>>,
         instance: Rc<RefCell<PyInstance>>,
     },
+    /// Proxy returned by `super(cls, cls_instance)` where the second argument is
+    /// a class (used in classmethods). Attribute lookup starts from `cls`'s parent
+    /// and binds as a `ClassBoundMethod` to `obj_class`.
+    SuperProxyClass {
+        class: Rc<RefCell<PyClass>>,
+        obj_class: Rc<RefCell<PyClass>>,
+    },
 }
 
 impl Clone for Opaque {
@@ -290,6 +297,10 @@ impl Clone for Opaque {
             Opaque::SuperProxy { class, instance } => Opaque::SuperProxy {
                 class: Rc::clone(class),
                 instance: Rc::clone(instance),
+            },
+            Opaque::SuperProxyClass { class, obj_class } => Opaque::SuperProxyClass {
+                class: Rc::clone(class),
+                obj_class: Rc::clone(obj_class),
             },
         }
     }
@@ -346,6 +357,10 @@ pub enum ValueKind<'a> {
     SuperProxy {
         class: &'a Rc<RefCell<PyClass>>,
         instance: &'a Rc<RefCell<PyInstance>>,
+    },
+    SuperProxyClass {
+        class: &'a Rc<RefCell<PyClass>>,
+        obj_class: &'a Rc<RefCell<PyClass>>,
     },
 }
 
@@ -668,6 +683,10 @@ impl Value {
         Value::opaque(Opaque::SuperProxy { class, instance })
     }
 
+    pub fn super_proxy_class(class: Rc<RefCell<PyClass>>, obj_class: Rc<RefCell<PyClass>>) -> Self {
+        Value::opaque(Opaque::SuperProxyClass { class, obj_class })
+    }
+
     fn opaque(o: Opaque) -> Self {
         let ptr = Box::into_raw(Box::new(o)) as u64;
         Value(TAG_OPAQUE_BITS | (ptr & PAYLOAD_MASK))
@@ -925,6 +944,9 @@ impl Value {
                     ValueKind::ClassBoundMethod { function, class }
                 }
                 Opaque::SuperProxy { class, instance } => ValueKind::SuperProxy { class, instance },
+                Opaque::SuperProxyClass { class, obj_class } => {
+                    ValueKind::SuperProxyClass { class, obj_class }
+                }
             },
             _ => unreachable!(),
         }
@@ -961,6 +983,7 @@ impl Value {
             ValueKind::StaticMethod(_) => true,
             ValueKind::ClassBoundMethod { .. } => true,
             ValueKind::SuperProxy { .. } => true,
+            ValueKind::SuperProxyClass { .. } => true,
         }
     }
 
@@ -1081,6 +1104,9 @@ impl Value {
                 format!("<bound method {}.{}>", class.borrow().name, function.name)
             }
             ValueKind::SuperProxy { class, .. } => {
+                format!("<super: <class '{}'>>", class.borrow().name)
+            }
+            ValueKind::SuperProxyClass { class, .. } => {
                 format!("<super: <class '{}'>>", class.borrow().name)
             }
         }

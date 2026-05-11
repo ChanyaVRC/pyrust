@@ -395,6 +395,7 @@ fn lambda_captures_in_expr(
             lambda_captures_in_expr(then, local_index, cells);
             lambda_captures_in_expr(else_, local_index, cells);
         }
+        Expr::Named { value, .. } => lambda_captures_in_expr(value, local_index, cells),
         Expr::Var(_)
         | Expr::Int(_)
         | Expr::Float(_)
@@ -690,6 +691,7 @@ fn collect_free_var_reads_in_expr(expr: &Expr, uses: &mut HashSet<String>) {
             collect_free_var_reads_in_expr(else_, uses);
         }
         Expr::Lambda { body, .. } => collect_free_var_reads_in_expr(body, uses),
+        Expr::Named { value, .. } => collect_free_var_reads_in_expr(value, uses),
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::None => {}
     }
 }
@@ -767,6 +769,7 @@ fn fold_constant(expr: &Expr) -> Option<Value> {
             }
             Some(Value::bool_(true))
         }
+        Expr::Named { .. } => None,
         _ => None,
     }
 }
@@ -950,6 +953,8 @@ fn expr_is_invariant(expr: &Expr, written: &HashSet<String>) -> bool {
             expr_is_invariant(left, written) && expr_is_invariant(right, written)
         }
         Expr::Unary { expr, .. } => expr_is_invariant(expr, written),
+        // NamedExpr has a side effect (assignment), never invariant
+        Expr::Named { .. } => false,
         _ => false,
     }
 }
@@ -3408,6 +3413,23 @@ impl Compiler {
             Expr::ListComp { elt, clauses } => self.compile_list_comp(elt, clauses),
             Expr::DictComp { key, val, clauses } => self.compile_dict_comp(key, val, clauses),
             Expr::SetComp { elt, clauses } => self.compile_set_comp(elt, clauses),
+            Expr::Named { target, value } => {
+                // Compile the value expression.
+                let val_reg = self.compile_expr(value);
+                // Assign to the named variable.
+                if let Some(reg) = self.local_reg(target) {
+                    if val_reg != reg {
+                        self.emit(Insn::Move(reg, val_reg));
+                    }
+                    self.mark_def(reg);
+                } else {
+                    // cell var / global / nonlocal — store through env
+                    let name_idx = self.intern_name(target);
+                    self.emit(Insn::StoreGlobal(name_idx, val_reg));
+                }
+                // The walrus expression evaluates to the assigned value.
+                val_reg
+            }
         }
     }
 
