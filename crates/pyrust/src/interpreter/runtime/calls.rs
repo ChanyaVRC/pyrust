@@ -612,13 +612,17 @@ impl Interpreter {
                     ValueKind::DictItemsView(_) => Ok(Value::builtin_function("dict_items")),
                     ValueKind::Set(_) => Ok(Value::builtin_function("set")),
                     ValueKind::Range { .. } => Ok(Value::builtin_function("range")),
-                    ValueKind::UserFunction(_) | ValueKind::BoundMethod { .. } => Ok(Value::builtin_function("function")),
+                    ValueKind::UserFunction(_)
+                    | ValueKind::BoundMethod { .. }
+                    | ValueKind::ClassBoundMethod { .. } => Ok(Value::builtin_function("function")),
                     ValueKind::BuiltinFunction(_) => Ok(Value::builtin_function("builtin_function_or_method")),
                     ValueKind::PyModule(_) => Ok(Value::builtin_function("module")),
                     ValueKind::BigInt(_) => Ok(Value::builtin_function("int")),
                     ValueKind::Enumerate { .. } => Ok(Value::builtin_function("enumerate")),
                     ValueKind::Zip { .. } => Ok(Value::builtin_function("zip")),
                     ValueKind::Reversed { .. } => Ok(Value::builtin_function("reversed")),
+                    ValueKind::ClassMethod(_) | ValueKind::StaticMethod(_) => Ok(Value::builtin_function("function")),
+                    ValueKind::SuperProxy { .. } => Ok(Value::builtin_function("super")),
                 }
             }
             ValueKind::BuiltinFunction("id") => {
@@ -735,6 +739,12 @@ impl Interpreter {
                 let function = Rc::clone(function);
                 let receiver = Rc::clone(receiver);
                 self.call_user_function_expanded(function, args, &[Value::py_instance(receiver)])
+            }
+            ValueKind::ClassBoundMethod { function, class } => {
+                let function = Rc::clone(function);
+                let class = Rc::clone(class);
+                // First argument is the class itself (not an instance)
+                self.call_user_function_expanded(function, args, &[Value::py_class(class)])
             }
             ValueKind::BuiltinFunction("repr") => {
                 reject_keyword_args_expanded("repr", args)?;
@@ -860,6 +870,7 @@ impl Interpreter {
                     ValueKind::UserFunction(_)
                     | ValueKind::BuiltinFunction(_)
                     | ValueKind::BoundMethod { .. }
+                    | ValueKind::ClassBoundMethod { .. }
                     | ValueKind::PyClass(_) => true,
                     ValueKind::PyInstance(inst) => {
                         let class = Rc::clone(&inst.borrow().class);
@@ -916,6 +927,21 @@ impl Interpreter {
                     _ => Err(PyError::Named(
                         "TypeError".to_string(),
                         "round() argument must be a number".to_string(),
+                    )),
+                }
+            }
+
+            ValueKind::BuiltinFunction("classmethod") => {
+                reject_keyword_args_expanded("classmethod", args)?;
+                if args.len() != 1 {
+                    return Err(PyError::Runtime(
+                        "classmethod() takes exactly one argument".to_string(),
+                    ));
+                }
+                match args[0].value.kind() {
+                    ValueKind::UserFunction(f) => Ok(Value::class_method(Rc::clone(f))),
+                    _ => Err(PyError::Runtime(
+                        "classmethod() argument must be a function".to_string(),
                     )),
                 }
             }
@@ -1322,6 +1348,48 @@ impl Interpreter {
                         "delattr() object has no writable attributes".to_string(),
                     )),
                 }
+            }
+
+            ValueKind::BuiltinFunction("staticmethod") => {
+                reject_keyword_args_expanded("staticmethod", args)?;
+                if args.len() != 1 {
+                    return Err(PyError::Runtime(
+                        "staticmethod() takes exactly one argument".to_string(),
+                    ));
+                }
+                match args[0].value.kind() {
+                    ValueKind::UserFunction(f) => Ok(Value::static_method(Rc::clone(f))),
+                    _ => Err(PyError::Runtime(
+                        "staticmethod() argument must be a function".to_string(),
+                    )),
+                }
+            }
+
+            // `super(cls, instance)` — two-argument form only.
+            // Zero-argument `super()` (implicit __class__ cell) is not supported;
+            // users must pass both arguments explicitly.
+            ValueKind::BuiltinFunction("super") => {
+                reject_keyword_args_expanded("super", args)?;
+                if args.len() != 2 {
+                    return Err(PyError::Runtime(
+                        "super() requires exactly 2 arguments: super(CurrentClass, self)".to_string(),
+                    ));
+                }
+                let cls_val = args[0].value.clone();
+                let inst_val = args[1].value.clone();
+                let class = match cls_val.kind() {
+                    ValueKind::PyClass(c) => Rc::clone(c),
+                    _ => return Err(PyError::Runtime(
+                        "super() first argument must be a class".to_string(),
+                    )),
+                };
+                let instance = match inst_val.kind() {
+                    ValueKind::PyInstance(i) => Rc::clone(i),
+                    _ => return Err(PyError::Runtime(
+                        "super() second argument must be a class instance".to_string(),
+                    )),
+                };
+                Ok(Value::super_proxy(class, instance))
             }
 
             ValueKind::PyInstance(inst) => {
