@@ -352,9 +352,8 @@ impl Interpreter {
                             }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = vm_try!(vm_read(regs, *rhs, num_locals));
-                    let result = if *op == BinaryOp::MatMul {
-                        if let Some(v) = vm_try!(self.try_inplace_matmul(l.clone(), r.clone())) { v }
-                        else { vm_try!(self.eval_binary(l, BinaryOp::MatMul, r)) }
+                    let result = if let Some(v) = vm_try!(self.try_inplace_op(l.clone(), *op, r.clone())) {
+                        v
                     } else {
                         vm_try!(self.eval_binary(l, *op, r))
                     };
@@ -370,7 +369,11 @@ impl Interpreter {
                             }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = cv.clone();
-                    let result = vm_try!(self.eval_binary(l, *op, r));
+                    let result = if let Some(v) = vm_try!(self.try_inplace_op(l.clone(), *op, r.clone())) {
+                        v
+                    } else {
+                        vm_try!(self.eval_binary(l, *op, r))
+                    };
                     regs[*dst as usize] = Some(result);
                 }
                 Insn::UnaryOp(dst, op, src) => {
