@@ -702,6 +702,136 @@ impl Interpreter {
                 let receiver = Rc::clone(receiver);
                 self.call_user_function_expanded(function, args, &[Value::py_instance(receiver)])
             }
+            ValueKind::BuiltinFunction("repr") => {
+                reject_keyword_args_expanded("repr", args)?;
+                if args.len() != 1 {
+                    return Err(PyError::Runtime(
+                        "repr() takes exactly one argument".to_string(),
+                    ));
+                }
+                let obj = args[0].value.clone();
+                // Check for user-defined __repr__ method on instances.
+                if let ValueKind::PyInstance(instance) = obj.kind() {
+                    let instance_rc = Rc::clone(instance);
+                    let class = Rc::clone(&instance_rc.borrow().class);
+                    if let Some(method_val) = lookup_class_attr(&class, "__repr__") {
+                        if let ValueKind::UserFunction(f) = method_val.kind() {
+                            let func = Rc::clone(f);
+                            let result = self.call_user_function_expanded(
+                                func,
+                                &[],
+                                &[Value::py_instance(instance_rc)],
+                            )?;
+                            return match result.kind() {
+                                ValueKind::Str(_) => Ok(result),
+                                _ => Err(PyError::Named(
+                                    "TypeError".to_string(),
+                                    "__repr__ returned non-string".to_string(),
+                                )),
+                            };
+                        }
+                    }
+                }
+                Ok(Value::string(obj.repr()))
+            }
+
+            ValueKind::BuiltinFunction("any") => {
+                reject_keyword_args_expanded("any", args)?;
+                if args.len() != 1 {
+                    return Err(PyError::Runtime(
+                        "any() takes exactly one argument".to_string(),
+                    ));
+                }
+                let items = iter_values(args[0].value.clone())?;
+                for item in items {
+                    if item.truthy() {
+                        return Ok(Value::bool_(true));
+                    }
+                }
+                Ok(Value::bool_(false))
+            }
+
+            ValueKind::BuiltinFunction("all") => {
+                reject_keyword_args_expanded("all", args)?;
+                if args.len() != 1 {
+                    return Err(PyError::Runtime(
+                        "all() takes exactly one argument".to_string(),
+                    ));
+                }
+                let items = iter_values(args[0].value.clone())?;
+                for item in items {
+                    if !item.truthy() {
+                        return Ok(Value::bool_(false));
+                    }
+                }
+                Ok(Value::bool_(true))
+            }
+
+            ValueKind::BuiltinFunction("map") => {
+                reject_keyword_args_expanded("map", args)?;
+                if args.len() != 2 {
+                    return Err(PyError::Runtime(
+                        "map() takes exactly 2 arguments".to_string(),
+                    ));
+                }
+                let func = args[0].value.clone();
+                let items = iter_values(args[1].value.clone())?;
+                let mut result = Vec::with_capacity(items.len());
+                for item in items {
+                    let mapped = self.call_function_expanded(
+                        func.clone(),
+                        &[ExpandedCallArg { name: None, value: item }],
+                    )?;
+                    result.push(mapped);
+                }
+                Ok(Value::list(result))
+            }
+
+            ValueKind::BuiltinFunction("filter") => {
+                reject_keyword_args_expanded("filter", args)?;
+                if args.len() != 2 {
+                    return Err(PyError::Runtime(
+                        "filter() takes exactly 2 arguments".to_string(),
+                    ));
+                }
+                let func = args[0].value.clone();
+                let items = iter_values(args[1].value.clone())?;
+                let use_identity = func.is_none();
+                let mut result = Vec::new();
+                for item in items {
+                    let keep = if use_identity {
+                        item.truthy()
+                    } else {
+                        let test = self.call_function_expanded(
+                            func.clone(),
+                            &[ExpandedCallArg { name: None, value: item.clone() }],
+                        )?;
+                        test.truthy()
+                    };
+                    if keep {
+                        result.push(item);
+                    }
+                }
+                Ok(Value::list(result))
+            }
+
+            ValueKind::BuiltinFunction("callable") => {
+                reject_keyword_args_expanded("callable", args)?;
+                if args.len() != 1 {
+                    return Err(PyError::Runtime(
+                        "callable() takes exactly one argument".to_string(),
+                    ));
+                }
+                let is_callable = matches!(
+                    args[0].value.kind(),
+                    ValueKind::UserFunction(_)
+                        | ValueKind::BuiltinFunction(_)
+                        | ValueKind::BoundMethod { .. }
+                        | ValueKind::PyClass(_)
+                );
+                Ok(Value::bool_(is_callable))
+            }
+
             _ => Err(PyError::Runtime("object is not callable".to_string())),
         }
     }
