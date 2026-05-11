@@ -225,6 +225,27 @@ pub enum Opaque {
     Reversed {
         source: Value,
     },
+    /// A @classmethod-decorated function stored in a class's attribute dict.
+    /// When accessed through an instance or class, binding produces a
+    /// `ClassBoundMethod` with the class as the receiver.
+    ClassMethod(Rc<UserFunction>),
+    /// A @staticmethod-decorated function stored in a class's attribute dict.
+    /// When accessed, the raw `UserFunction` is returned with no binding.
+    StaticMethod(Rc<UserFunction>),
+    /// A classmethod bound to a specific class (the first argument will be `cls`).
+    ClassBoundMethod {
+        function: Rc<UserFunction>,
+        class: Rc<RefCell<PyClass>>,
+    },
+    /// Proxy returned by `super(cls, instance)`. Attribute lookup on this proxy
+    /// starts from `cls`'s parent class and binds to `instance`.
+    ///
+    /// Note: zero-argument `super()` (CPython's implicit `__class__` cell) is not
+    /// supported. Use the two-argument form `super(CurrentClass, self)` explicitly.
+    SuperProxy {
+        class: Rc<RefCell<PyClass>>,
+        instance: Rc<RefCell<PyInstance>>,
+    },
 }
 
 impl Clone for Opaque {
@@ -259,6 +280,16 @@ impl Clone for Opaque {
             },
             Opaque::Reversed { source } => Opaque::Reversed {
                 source: source.clone(),
+            },
+            Opaque::ClassMethod(f) => Opaque::ClassMethod(Rc::clone(f)),
+            Opaque::StaticMethod(f) => Opaque::StaticMethod(Rc::clone(f)),
+            Opaque::ClassBoundMethod { function, class } => Opaque::ClassBoundMethod {
+                function: Rc::clone(function),
+                class: Rc::clone(class),
+            },
+            Opaque::SuperProxy { class, instance } => Opaque::SuperProxy {
+                class: Rc::clone(class),
+                instance: Rc::clone(instance),
             },
         }
     }
@@ -305,6 +336,16 @@ pub enum ValueKind<'a> {
     },
     Reversed {
         source: &'a Value,
+    },
+    ClassMethod(&'a Rc<UserFunction>),
+    StaticMethod(&'a Rc<UserFunction>),
+    ClassBoundMethod {
+        function: &'a Rc<UserFunction>,
+        class: &'a Rc<RefCell<PyClass>>,
+    },
+    SuperProxy {
+        class: &'a Rc<RefCell<PyClass>>,
+        instance: &'a Rc<RefCell<PyInstance>>,
     },
 }
 
@@ -611,6 +652,22 @@ impl Value {
         Value::opaque(Opaque::Reversed { source })
     }
 
+    pub fn class_method(f: Rc<UserFunction>) -> Self {
+        Value::opaque(Opaque::ClassMethod(f))
+    }
+
+    pub fn static_method(f: Rc<UserFunction>) -> Self {
+        Value::opaque(Opaque::StaticMethod(f))
+    }
+
+    pub fn class_bound_method(function: Rc<UserFunction>, class: Rc<RefCell<PyClass>>) -> Self {
+        Value::opaque(Opaque::ClassBoundMethod { function, class })
+    }
+
+    pub fn super_proxy(class: Rc<RefCell<PyClass>>, instance: Rc<RefCell<PyInstance>>) -> Self {
+        Value::opaque(Opaque::SuperProxy { class, instance })
+    }
+
     fn opaque(o: Opaque) -> Self {
         let ptr = Box::into_raw(Box::new(o)) as u64;
         Value(TAG_OPAQUE_BITS | (ptr & PAYLOAD_MASK))
@@ -768,16 +825,6 @@ impl Value {
         })
     }
 
-    pub fn as_set_mut(&mut self) -> Option<&mut IndexSet<PyKey>> {
-        self.as_opaque_mut().and_then(|o| {
-            if let Opaque::Set(s) = o {
-                Some(s)
-            } else {
-                None
-            }
-        })
-    }
-
     pub fn as_dict_mut(&mut self) -> Option<&mut IndexMap<PyKey, Value>> {
         self.as_opaque_mut().and_then(|o| {
             if let Opaque::Dict(rc) = o {
@@ -862,6 +909,12 @@ impl Value {
                 },
                 Opaque::Zip { sources } => ValueKind::Zip { sources },
                 Opaque::Reversed { source } => ValueKind::Reversed { source },
+                Opaque::ClassMethod(f) => ValueKind::ClassMethod(f),
+                Opaque::StaticMethod(f) => ValueKind::StaticMethod(f),
+                Opaque::ClassBoundMethod { function, class } => {
+                    ValueKind::ClassBoundMethod { function, class }
+                }
+                Opaque::SuperProxy { class, instance } => ValueKind::SuperProxy { class, instance },
             },
             _ => unreachable!(),
         }
@@ -894,6 +947,10 @@ impl Value {
             ValueKind::Enumerate { .. } => true,
             ValueKind::Zip { .. } => true,
             ValueKind::Reversed { .. } => true,
+            ValueKind::ClassMethod(_) => true,
+            ValueKind::StaticMethod(_) => true,
+            ValueKind::ClassBoundMethod { .. } => true,
+            ValueKind::SuperProxy { .. } => true,
         }
     }
 
@@ -1008,6 +1065,14 @@ impl Value {
             ValueKind::Enumerate { .. } => "<enumerate object>".to_string(),
             ValueKind::Zip { .. } => "<zip object>".to_string(),
             ValueKind::Reversed { .. } => "<list_reverseiterator object>".to_string(),
+            ValueKind::ClassMethod(f) => format!("<classmethod '{}'>", f.name),
+            ValueKind::StaticMethod(f) => format!("<staticmethod '{}'>", f.name),
+            ValueKind::ClassBoundMethod { function, class } => {
+                format!("<bound method {}.{}>", class.borrow().name, function.name)
+            }
+            ValueKind::SuperProxy { class, .. } => {
+                format!("<super: <class '{}'>>", class.borrow().name)
+            }
         }
     }
 

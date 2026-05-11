@@ -785,6 +785,9 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
         "hex" => Some(Value::builtin_function("hex")),
         "issubclass" => Some(Value::builtin_function("issubclass")),
         "delattr" => Some(Value::builtin_function("delattr")),
+        "classmethod" => Some(Value::builtin_function("classmethod")),
+        "staticmethod" => Some(Value::builtin_function("staticmethod")),
+        "super" => Some(Value::builtin_function("super")),
         _ => None,
     }
 }

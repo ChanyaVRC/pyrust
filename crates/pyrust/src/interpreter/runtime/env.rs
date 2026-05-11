@@ -13,10 +13,16 @@ impl Interpreter {
                 let class = { Rc::clone(&instance.borrow().class) };
                 if let Some(value) = lookup_class_attr(&class, name) {
                     return Ok(match value.kind() {
-                        ValueKind::UserFunction(_) => {
-                            if let ValueKind::UserFunction(f) = value.kind() {
-                                Value::bound_method(Rc::clone(f), instance)
-                            } else { unreachable!() }
+                        ValueKind::UserFunction(f) => {
+                            Value::bound_method(Rc::clone(f), instance)
+                        }
+                        ValueKind::ClassMethod(f) => {
+                            // classmethod: bind the class (not the instance) as first argument
+                            Value::class_bound_method(Rc::clone(f), Rc::clone(&class))
+                        }
+                        ValueKind::StaticMethod(f) => {
+                            // staticmethod: return the raw function, no binding
+                            Value::user_function(Rc::clone(f))
                         }
                         _ => value,
                     });
@@ -34,13 +40,48 @@ impl Interpreter {
                     return Ok(Value::string(class.borrow().name.clone()));
                 }
                 if let Some(value) = lookup_class_attr(&class, name) {
-                    return Ok(value);
+                    return Ok(match value.kind() {
+                        ValueKind::ClassMethod(f) => {
+                            // classmethod accessed on a class: bind the class as first argument
+                            Value::class_bound_method(Rc::clone(f), Rc::clone(&class))
+                        }
+                        ValueKind::StaticMethod(f) => Value::user_function(Rc::clone(f)),
+                        _ => value,
+                    });
                 }
 
                 let class_name = class.borrow().name.clone();
                 Err(PyError::Named(
                     "AttributeError".to_string(),
                     format!("type object '{}' has no attribute '{}'", class_name, name),
+                ))
+            }
+            ValueKind::SuperProxy { class, instance } => {
+                let class = Rc::clone(class);
+                let instance = Rc::clone(instance);
+                // Look up the method starting from class's parent (skip class itself)
+                let parent = class.borrow().base.clone();
+                let Some(parent_class) = parent else {
+                    return Err(PyError::Named(
+                        "AttributeError".to_string(),
+                        format!("super(): '{}' has no base class", class.borrow().name),
+                    ));
+                };
+                if let Some(value) = lookup_class_attr(&parent_class, name) {
+                    return Ok(match value.kind() {
+                        ValueKind::UserFunction(f) => {
+                            Value::bound_method(Rc::clone(f), instance)
+                        }
+                        ValueKind::ClassMethod(f) => {
+                            Value::class_bound_method(Rc::clone(f), parent_class)
+                        }
+                        ValueKind::StaticMethod(f) => Value::user_function(Rc::clone(f)),
+                        _ => value,
+                    });
+                }
+                Err(PyError::Named(
+                    "AttributeError".to_string(),
+                    format!("super(): parent class has no attribute '{name}'"),
                 ))
             }
             ValueKind::PyModule(module) => {
