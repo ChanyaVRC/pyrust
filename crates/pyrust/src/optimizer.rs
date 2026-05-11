@@ -1140,6 +1140,16 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
                 written.insert(base + i);
             }
         }
+        UnpackEx {
+            dst_base,
+            before,
+            after,
+            ..
+        } => {
+            for i in 0..(*before as u32 + 1 + *after as u32) {
+                written.insert(dst_base + i);
+            }
+        }
         // Instructions that don't write to any register.
         StoreGlobal(..)
         | SetAttr(..)

@@ -119,7 +119,9 @@ impl Parser {
 
         // Check for more comma-separated items (tuple or unpack target).
         // We track whether any item is starred (via a parallel bool vec).
+        let mut had_comma = false;
         let (targets, starred_flags) = if self.is(&Token::Comma) {
+            had_comma = true;
             let mut items = vec![first_expr];
             let mut flags = vec![first_starred];
             while self.is(&Token::Comma) {
@@ -151,9 +153,8 @@ impl Parser {
                     "multiple starred expressions in assignment".to_string(),
                 ));
             }
-            // If there's a starred item but only one item total and no commas, it's not
-            // a valid assignment target (e.g. standalone `*a = x` is invalid).
-            if star_count == 1 && targets.len() == 1 {
+            // Standalone `*a = x` is invalid, but `*a, = x` (trailing comma) is valid.
+            if star_count == 1 && targets.len() == 1 && !had_comma {
                 return Err(PyError::Parse(
                     "starred assignment target must be in a list or tuple".to_string(),
                 ));
