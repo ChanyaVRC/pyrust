@@ -713,6 +713,8 @@ impl Interpreter {
                     ValueKind::ClassMethod(_) | ValueKind::StaticMethod(_) => Ok(Value::builtin_function("function")),
                     ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => Ok(Value::builtin_function("super")),
                     ValueKind::Generator(_) => Ok(Value::builtin_function("generator")),
+                    ValueKind::Property { .. }
+                    | ValueKind::PropertyAccessorPartial { .. } => Ok(Value::builtin_function("property")),
                 }
             }
             ValueKind::BuiltinFunction("id") => {
@@ -1042,7 +1044,8 @@ impl Interpreter {
                     | ValueKind::ClassBoundMethod { .. }
                     | ValueKind::PyClass(_)
                     | ValueKind::ClassMethod(_)
-                    | ValueKind::StaticMethod(_) => true,
+                    | ValueKind::StaticMethod(_)
+                    | ValueKind::PropertyAccessorPartial { .. } => true,
                     ValueKind::PyInstance(inst) => {
                         let class = Rc::clone(&inst.borrow().class);
                         lookup_class_attr(&class, "__call__").is_some()
@@ -1533,6 +1536,58 @@ impl Interpreter {
                         "staticmethod() argument must be a function".to_string(),
                     )),
                 }
+            }
+
+            // Calling prop.setter(fn), prop.deleter(fn), or prop.getter(fn).
+            // Returns a new Property with the respective slot replaced.
+            ValueKind::PropertyAccessorPartial { slot, fget, fset, fdel } => {
+                reject_keyword_args_expanded("property accessor", args)?;
+                if args.len() != 1 {
+                    return Err(PyError::Runtime(
+                        "property accessor takes exactly one argument".to_string(),
+                    ));
+                }
+                let new_fn = args[0].value.clone();
+                let (fget_val, fset_val, fdel_val) = match slot {
+                    0 => (new_fn,           (**fset).clone(), (**fdel).clone()),
+                    1 => ((**fget).clone(), new_fn,           (**fdel).clone()),
+                    2 => ((**fget).clone(), (**fset).clone(), new_fn          ),
+                    _ => unreachable!(),
+                };
+                Ok(Value::property(fget_val, fset_val, fdel_val))
+            }
+
+            // property(fget=None, fset=None, fdel=None, doc=None)
+            ValueKind::BuiltinFunction("property") => {
+                // Accept up to 4 positional args (fget, fset, fdel, doc) or keyword args.
+                if args.len() > 4 {
+                    return Err(PyError::Runtime(
+                        "property() takes at most 4 arguments".to_string(),
+                    ));
+                }
+                let mut fget = Value::none();
+                let mut fset = Value::none();
+                let mut fdel = Value::none();
+                for (i, arg) in args.iter().enumerate() {
+                    let name_ref = arg.name.as_deref();
+                    let idx = match name_ref {
+                        None => i,
+                        Some("fget") => 0,
+                        Some("fset") => 1,
+                        Some("fdel") => 2,
+                        Some("doc") => 3,
+                        Some(k) => return Err(PyError::Runtime(
+                            format!("property() got unexpected keyword argument '{k}'"),
+                        )),
+                    };
+                    match idx {
+                        0 => fget = arg.value.clone(),
+                        1 => fset = arg.value.clone(),
+                        2 => fdel = arg.value.clone(),
+                        _ => {} // doc: ignore
+                    }
+                }
+                Ok(Value::property(fget, fset, fdel))
             }
 
             // `super(cls, instance)` — two-argument form only.

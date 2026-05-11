@@ -257,6 +257,23 @@ pub enum Opaque {
     /// iterator slots, etc.) is stored as a type-erased `Box<dyn Any>` so that
     /// `pyrust-core` does not need to depend on `pyrust`'s bytecode types.
     Generator(Rc<RefCell<Box<dyn std::any::Any>>>),
+    /// A @property descriptor.  Each field is either a callable `Value` or
+    /// `Value::none()` (meaning "not set").
+    Property {
+        fget: Rc<Value>,
+        fset: Rc<Value>,
+        fdel: Rc<Value>,
+    },
+    /// Intermediate callable returned by `prop.setter`, `prop.getter`, or
+    /// `prop.deleter`.  Calling it with a function returns a new `Property`
+    /// with that accessor replaced.
+    PropertyAccessorPartial {
+        /// Which slot to replace: 0 = fget, 1 = fset, 2 = fdel.
+        slot: u8,
+        fget: Rc<Value>,
+        fset: Rc<Value>,
+        fdel: Rc<Value>,
+    },
 }
 
 impl Clone for Opaque {
@@ -307,6 +324,22 @@ impl Clone for Opaque {
                 obj_class: Rc::clone(obj_class),
             },
             Opaque::Generator(state) => Opaque::Generator(Rc::clone(state)),
+            Opaque::Property { fget, fset, fdel } => Opaque::Property {
+                fget: Rc::clone(fget),
+                fset: Rc::clone(fset),
+                fdel: Rc::clone(fdel),
+            },
+            Opaque::PropertyAccessorPartial {
+                slot,
+                fget,
+                fset,
+                fdel,
+            } => Opaque::PropertyAccessorPartial {
+                slot: *slot,
+                fget: Rc::clone(fget),
+                fset: Rc::clone(fset),
+                fdel: Rc::clone(fdel),
+            },
         }
     }
 }
@@ -368,6 +401,17 @@ pub enum ValueKind<'a> {
         obj_class: &'a Rc<RefCell<PyClass>>,
     },
     Generator(&'a Rc<RefCell<Box<dyn std::any::Any>>>),
+    Property {
+        fget: &'a Rc<Value>,
+        fset: &'a Rc<Value>,
+        fdel: &'a Rc<Value>,
+    },
+    PropertyAccessorPartial {
+        slot: u8,
+        fget: &'a Rc<Value>,
+        fset: &'a Rc<Value>,
+        fdel: &'a Rc<Value>,
+    },
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -699,6 +743,46 @@ impl Value {
         Value::opaque(Opaque::Generator(Rc::new(RefCell::new(state))))
     }
 
+    /// Create a `@property` descriptor value.  Pass `Value::none()` for any
+    /// accessor that is not set.
+    pub fn property(fget: Value, fset: Value, fdel: Value) -> Self {
+        Value::opaque(Opaque::Property {
+            fget: Rc::new(fget),
+            fset: Rc::new(fset),
+            fdel: Rc::new(fdel),
+        })
+    }
+
+    /// Returned by `prop.setter(fn)` — creates a new Property with fset replaced.
+    pub fn property_setter_partial(fget: Value, fdel: Value) -> Self {
+        Value::opaque(Opaque::PropertyAccessorPartial {
+            slot: 1,
+            fget: Rc::new(fget),
+            fset: Rc::new(Value::none()),
+            fdel: Rc::new(fdel),
+        })
+    }
+
+    /// Returned by `prop.deleter(fn)` — creates a new Property with fdel replaced.
+    pub fn property_deleter_partial(fget: Value, fset: Value) -> Self {
+        Value::opaque(Opaque::PropertyAccessorPartial {
+            slot: 2,
+            fget: Rc::new(fget),
+            fset: Rc::new(fset),
+            fdel: Rc::new(Value::none()),
+        })
+    }
+
+    /// Returned by `prop.getter(fn)` — creates a new Property with fget replaced.
+    pub fn property_getter_partial(fset: Value, fdel: Value) -> Self {
+        Value::opaque(Opaque::PropertyAccessorPartial {
+            slot: 0,
+            fget: Rc::new(Value::none()),
+            fset: Rc::new(fset),
+            fdel: Rc::new(fdel),
+        })
+    }
+
     fn opaque(o: Opaque) -> Self {
         let ptr = Box::into_raw(Box::new(o)) as u64;
         Value(TAG_OPAQUE_BITS | (ptr & PAYLOAD_MASK))
@@ -960,6 +1044,18 @@ impl Value {
                     ValueKind::SuperProxyClass { class, obj_class }
                 }
                 Opaque::Generator(state) => ValueKind::Generator(state),
+                Opaque::Property { fget, fset, fdel } => ValueKind::Property { fget, fset, fdel },
+                Opaque::PropertyAccessorPartial {
+                    slot,
+                    fget,
+                    fset,
+                    fdel,
+                } => ValueKind::PropertyAccessorPartial {
+                    slot: *slot,
+                    fget,
+                    fset,
+                    fdel,
+                },
             },
             _ => unreachable!(),
         }
@@ -998,6 +1094,8 @@ impl Value {
             ValueKind::SuperProxy { .. } => true,
             ValueKind::SuperProxyClass { .. } => true,
             ValueKind::Generator(_) => true,
+            ValueKind::Property { .. } => true,
+            ValueKind::PropertyAccessorPartial { .. } => true,
         }
     }
 
@@ -1124,6 +1222,8 @@ impl Value {
                 format!("<super: <class '{}'>>", class.borrow().name)
             }
             ValueKind::Generator(_) => "<generator object>".to_string(),
+            ValueKind::Property { .. } => "<property object>".to_string(),
+            ValueKind::PropertyAccessorPartial { .. } => "<property accessor partial>".to_string(),
         }
     }
 

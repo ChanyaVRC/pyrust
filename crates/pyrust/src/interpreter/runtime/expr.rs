@@ -1000,6 +1000,7 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
         "delattr" => Some(Value::builtin_function("delattr")),
         "classmethod" => Some(Value::builtin_function("classmethod")),
         "staticmethod" => Some(Value::builtin_function("staticmethod")),
+        "property" => Some(Value::builtin_function("property")),
         "super" => Some(Value::builtin_function("super")),
         "next" => Some(Value::builtin_function("next")),
         "iter" => Some(Value::builtin_function("iter")),
