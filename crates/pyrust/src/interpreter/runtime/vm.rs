@@ -298,7 +298,7 @@ impl Interpreter {
                                     if j >= 0 && (j as usize) < items.len() {
                                         regs[*dst as usize] = Some(items[j as usize].clone());
                                     } else {
-                                        vm_try!(Err(PyError::Runtime("index out of range".into())));
+                                        vm_try!(Err(PyError::Named("IndexError".into(), "list index out of range".into())));
                                     }
                                     handled = true;
                                 }
@@ -308,7 +308,7 @@ impl Interpreter {
                                     if j >= 0 && (j as usize) < items.len() {
                                         regs[*dst as usize] = Some(items[j as usize].clone());
                                     } else {
-                                        vm_try!(Err(PyError::Runtime("index out of range".into())));
+                                        vm_try!(Err(PyError::Named("IndexError".into(), "tuple index out of range".into())));
                                     }
                                     handled = true;
                                 }

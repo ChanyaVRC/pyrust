@@ -128,8 +128,9 @@ pub fn pop(items: &mut Vec<Value>, args: &[Value]) -> Result<Value> {
     }
     let pos = normalise_index(idx, items.len());
     if pos >= items.len() {
-        return Err(PyError::Runtime(
-            "list.pop() index out of range".to_string(),
+        return Err(PyError::Named(
+            "IndexError".to_string(),
+            "pop index out of range".to_string(),
         ));
     }
     Ok(items.remove(pos))
