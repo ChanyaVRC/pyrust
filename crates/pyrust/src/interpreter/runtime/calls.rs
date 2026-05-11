@@ -64,6 +64,36 @@ impl Interpreter {
                     ValueKind::Set(items) => items.len() as i64,
                     ValueKind::Dict(items) => items.len() as i64,
                     ValueKind::Range { start, stop, step } => range_len(start, stop, step),
+                    ValueKind::PyInstance(inst) => {
+                        let inst_rc = Rc::clone(inst);
+                        let class = Rc::clone(&inst_rc.borrow().class);
+                        if let Some(method_val) = lookup_class_attr(&class, "__len__") {
+                            if let ValueKind::UserFunction(f) = method_val.kind() {
+                                let func = Rc::clone(f);
+                                let result = self.call_user_function_expanded(
+                                    func,
+                                    &[],
+                                    &[Value::py_instance(inst_rc)],
+                                )?;
+                                match result.kind() {
+                                    ValueKind::Int(n) if n >= 0 => n,
+                                    ValueKind::Int(_) => return Err(PyError::Named(
+                                        "ValueError".to_string(),
+                                        "__len__() should return >= 0".to_string(),
+                                    )),
+                                    ValueKind::Bool(b) => if b { 1 } else { 0 },
+                                    _ => return Err(PyError::Named(
+                                        "TypeError".to_string(),
+                                        "__len__ returned non-int".to_string(),
+                                    )),
+                                }
+                            } else {
+                                return Err(PyError::Runtime("object has no len()".to_string()));
+                            }
+                        } else {
+                            return Err(PyError::Runtime("object has no len()".to_string()));
+                        }
+                    }
                     _ => {
                         return Err(PyError::Runtime("object has no len()".to_string()));
                     }
@@ -394,7 +424,11 @@ impl Interpreter {
                 reject_keyword_args_expanded("bool", args)?;
                 match args.len() {
                     0 => Ok(Value::bool_(false)),
-                    1 => Ok(Value::bool_(args[0].value.truthy())),
+                    1 => {
+                        let val = args[0].value.clone();
+                        let result = self.truthy_value(&val)?;
+                        Ok(Value::bool_(result))
+                    }
                     _ => Err(PyError::Runtime("bool() takes at most one argument".to_string())),
                 }
             }
@@ -822,13 +856,17 @@ impl Interpreter {
                         "callable() takes exactly one argument".to_string(),
                     ));
                 }
-                let is_callable = matches!(
-                    args[0].value.kind(),
+                let is_callable = match args[0].value.kind() {
                     ValueKind::UserFunction(_)
-                        | ValueKind::BuiltinFunction(_)
-                        | ValueKind::BoundMethod { .. }
-                        | ValueKind::PyClass(_)
-                );
+                    | ValueKind::BuiltinFunction(_)
+                    | ValueKind::BoundMethod { .. }
+                    | ValueKind::PyClass(_) => true,
+                    ValueKind::PyInstance(inst) => {
+                        let class = Rc::clone(&inst.borrow().class);
+                        lookup_class_attr(&class, "__call__").is_some()
+                    }
+                    _ => false,
+                };
                 Ok(Value::bool_(is_callable))
             }
 
@@ -1286,6 +1324,27 @@ impl Interpreter {
                 }
             }
 
+            ValueKind::PyInstance(inst) => {
+                let inst_rc = Rc::clone(inst);
+                let class = Rc::clone(&inst_rc.borrow().class);
+                if let Some(method_val) = lookup_class_attr(&class, "__call__") {
+                    if let ValueKind::UserFunction(f) = method_val.kind() {
+                        let func = Rc::clone(f);
+                        return self.call_user_function_expanded(
+                            func,
+                            args,
+                            &[Value::py_instance(inst_rc)],
+                        );
+                    }
+                }
+                Err(PyError::Named(
+                    "TypeError".to_string(),
+                    format!(
+                        "'{}' object is not callable",
+                        class.borrow().name
+                    ),
+                ))
+            }
             _ => Err(PyError::Runtime("object is not callable".to_string())),
         }
     }

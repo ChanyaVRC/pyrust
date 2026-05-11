@@ -245,4 +245,53 @@ impl Interpreter {
         }
     }
 
+    /// Like `Value::truthy()` but dispatches `__bool__` / `__len__` for instances.
+    fn truthy_value(&mut self, value: &Value) -> Result<bool> {
+        if let ValueKind::PyInstance(inst) = value.kind() {
+            let inst_rc = Rc::clone(inst);
+            let class = Rc::clone(&inst_rc.borrow().class);
+            // Try __bool__ first.
+            if let Some(method_val) = lookup_class_attr(&class, "__bool__") {
+                if let ValueKind::UserFunction(f) = method_val.kind() {
+                    let func = Rc::clone(f);
+                    let result = self.call_user_function_expanded(
+                        func,
+                        &[],
+                        &[Value::py_instance(inst_rc)],
+                    )?;
+                    return match result.kind() {
+                        ValueKind::Bool(b) => Ok(b),
+                        ValueKind::Int(n) => Ok(n != 0),
+                        _ => Err(PyError::Named(
+                            "TypeError".to_string(),
+                            "__bool__ should return bool".to_string(),
+                        )),
+                    };
+                }
+            }
+            // Fall back to __len__.
+            if let Some(method_val) = lookup_class_attr(&class, "__len__") {
+                if let ValueKind::UserFunction(f) = method_val.kind() {
+                    let func = Rc::clone(f);
+                    let result = self.call_user_function_expanded(
+                        func,
+                        &[],
+                        &[Value::py_instance(inst_rc)],
+                    )?;
+                    return match result.kind() {
+                        ValueKind::Int(n) => Ok(n != 0),
+                        ValueKind::Bool(b) => Ok(b),
+                        _ => Err(PyError::Named(
+                            "TypeError".to_string(),
+                            "__len__ returned non-int".to_string(),
+                        )),
+                    };
+                }
+            }
+            // No __bool__ or __len__: always truthy.
+            return Ok(true);
+        }
+        Ok(value.truthy())
+    }
+
 }

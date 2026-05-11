@@ -3336,6 +3336,11 @@ impl Compiler {
                     }
                     return 0;
                 }
+                // Always ensure base (the destination register) is tracked in max_reg,
+                // even for an empty dict where slots_needed == 0.
+                if base > self.max_reg {
+                    self.max_reg = base;
+                }
                 self.next_temp = base + Reg::from(n).saturating_mul(2);
                 if self.next_temp > 0 && self.next_temp - 1 > self.max_reg {
                     self.max_reg = self.next_temp - 1;
