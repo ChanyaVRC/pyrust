@@ -35,6 +35,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_not_invert(insns, num_locals);
     let insns = pass_binopinplace_downgrade(insns, num_locals);
     let insns = pass_dead_code(insns);
+    let insns = pass_dead_store_elim(insns, num_locals);
     let insns = pass_copy_prop(insns);
     let insns = pass_trivial_nop(insns);
     let (insns, consts) = pass_compact_consts(insns, consts);
@@ -763,9 +764,10 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
 
         // Range-based: func + args live in consecutive registers.
         Call(base, argc) | CallMemo(base, argc) => r >= *base && r <= *base + *argc as u32,
-        BuildList(_, base, n) | BuildTuple(_, base, n) | BuildDict(_, base, n) => {
-            r >= *base && r < *base + *n as u32
-        }
+        BuildList(_, base, n) | BuildTuple(_, base, n) => r >= *base && r < *base + *n as u32,
+        // BuildDict stores n key-value PAIRS — each pair occupies 2 registers,
+        // so the live range is base .. base + 2*n (not base + n).
+        BuildDict(_, base, n) => r >= *base && r < *base + 2 * *n as u32,
 
         CallMethod {
             obj,
@@ -890,6 +892,77 @@ fn pass_not_invert(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         }
     }
     compact(transformed, &keep)
+}
+
+// ─── Dead store elimination ────────────────────────────────────────────────────
+
+/// Is register `r` read by any instruction in `insns` before the first
+/// instruction that writes `r`?  This is strictly more precise than
+/// `reg_is_read_in` for dead-store analysis: it stops as soon as it sees a
+/// write to `r`, because that write kills any previous value.
+fn reg_is_read_before_next_write(insns: &[Insn], r: u32) -> bool {
+    for insn in insns {
+        if insn_reads_reg(insn, r) {
+            return true;
+        }
+        // Stop at the next write to r (the old value is dead from here on).
+        if writable_dst(insn) == Some(r) {
+            return false;
+        }
+        if matches!(insn, Insn::LoadConst(dst, _) | Insn::LoadNone(dst) | Insn::LoadGlobal(dst, _)
+                         | Insn::Move(dst, _) if *dst == r)
+        {
+            return false;
+        }
+    }
+    false
+}
+
+/// Remove writes to temp registers whose stored value is never read before
+/// the next write to the same register.
+///
+/// ## Safety restrictions
+///
+/// - Only temp registers (`>= num_locals`) are considered; named locals may
+///   escape via closures.
+/// - Only *pure* instructions are removed: `LoadConst`, `LoadNone`,
+///   `LoadGlobal`, `Move`, `BinOp`, `BinOpConst`, `UnaryOp`.  Instructions
+///   with potential side effects (`Call`, `GetAttr`, `BinOpInPlace`, …) are
+///   always preserved.
+/// - A back-edge guard (`slice_has_back_edge`) prevents removing a store that
+///   is the initial value consumed by a later loop iteration.
+fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
+    let n = insns.len();
+    let mut keep = vec![true; n];
+
+    for i in 0..n {
+        let dst = match &insns[i] {
+            Insn::LoadConst(r, _)
+            | Insn::LoadNone(r)
+            | Insn::LoadGlobal(r, _)
+            | Insn::Move(r, _)
+            | Insn::BinOp(r, _, _, _)
+            | Insn::BinOpConst(r, _, _, _)
+            | Insn::UnaryOp(r, _, _)
+                if *r >= num_locals =>
+            {
+                *r
+            }
+            _ => continue,
+        };
+
+        // Conservative: skip if a back-edge could carry the value into the
+        // next loop iteration (the forward scan below would miss that use).
+        if slice_has_back_edge(&insns[i + 1..]) {
+            continue;
+        }
+
+        if !reg_is_read_before_next_write(&insns[i + 1..], dst) {
+            keep[i] = false;
+        }
+    }
+
+    compact(insns, &keep)
 }
 
 // ─── Trivial no-op removal ─────────────────────────────────────────────────────
@@ -2306,5 +2379,71 @@ mod tests {
             "should not fold when base register is a local"
         );
         assert!(matches!(out[2], Insn::BuildTuple(5, 1, 2)));
+    }
+
+    // ── pass_dead_store_elim ──────────────────────────────────────────────────
+
+    #[test]
+    fn dse_removes_overwritten_load_const() {
+        // LoadConst(r2, 0) immediately overwritten by LoadConst(r2, 1); first is dead.
+        let insns = vec![
+            Insn::LoadConst(2, 0), // dead — r2 written again before any read
+            Insn::LoadConst(2, 1), // live — r2 used by Return
+            Insn::Return(2),
+        ];
+        let out = pass_dead_store_elim(insns, 2);
+        assert_eq!(out.len(), 2, "dead LoadConst should be removed");
+        assert!(matches!(out[0], Insn::LoadConst(2, 1)));
+        assert!(matches!(out[1], Insn::Return(2)));
+    }
+
+    #[test]
+    fn dse_keeps_store_that_is_read() {
+        // LoadConst(r2, 0) is read by Return — must be kept.
+        let insns = vec![Insn::LoadConst(2, 0), Insn::Return(2)];
+        let out = pass_dead_store_elim(insns, 2);
+        assert_eq!(out.len(), 2, "live LoadConst must not be removed");
+    }
+
+    #[test]
+    fn dse_keeps_local_register_writes() {
+        // Register r0 < num_locals=2 — locals must not be eliminated.
+        let insns = vec![
+            Insn::LoadConst(0, 0), // local reg — keep even if "dead"
+            Insn::LoadConst(0, 1), // overwrites r0
+            Insn::Return(0),
+        ];
+        let out = pass_dead_store_elim(insns, 2);
+        assert_eq!(out.len(), 3, "local register writes must not be removed");
+    }
+
+    #[test]
+    fn dse_skips_when_back_edge_present() {
+        // LoadConst(r2, 0) followed by a loop back-edge — conservatively kept.
+        let insns = vec![
+            Insn::LoadConst(2, 0), // candidate, but back-edge below
+            Insn::Jump(-1),        // back-edge (negative offset)
+        ];
+        let out = pass_dead_store_elim(insns, 2);
+        assert_eq!(
+            out.len(),
+            2,
+            "must not remove store when back-edge is present"
+        );
+    }
+
+    #[test]
+    fn dse_removes_dead_move() {
+        use crate::ast::BinaryOp;
+        // Move(r3, r2) followed immediately by BinOp(r3, ...) — Move is dead.
+        let insns = vec![
+            Insn::LoadConst(2, 0),
+            Insn::Move(3, 2),                    // dead — r3 overwritten below
+            Insn::BinOp(3, 2, BinaryOp::Add, 2), // overwrites r3
+            Insn::Return(3),
+        ];
+        let out = pass_dead_store_elim(insns, 2);
+        assert_eq!(out.len(), 3, "dead Move should be removed");
+        assert!(matches!(out[1], Insn::BinOp(3, 2, BinaryOp::Add, 2)));
     }
 }
