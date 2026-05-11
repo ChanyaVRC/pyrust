@@ -65,4 +65,27 @@ assert not (x > y)
 assert 3 in x
 assert 5 not in x
 
+# __radd__: when both __add__ and __radd__ are defined, int + obj uses __radd__
+class Addable:
+    def __init__(self, v):
+        self.v = v
+    def __add__(self, other):
+        return Addable(self.v + other)
+    def __radd__(self, other):
+        return Addable(other + self.v)
+
+a = Addable(10)
+assert (a + 5).v == 15
+result = 5 + a
+assert result.v == 15
+
+# No __eq__ defined: falls back to identity comparison
+class Bare:
+    pass
+
+b1 = Bare()
+b2 = Bare()
+assert b1 == b1
+assert b1 != b2
+
 print("dunder arithmetic OK")

@@ -343,7 +343,12 @@ impl Interpreter {
                 }
                 self.mul(left, right)
             }
-            BinaryOp::MatMul => self.matmul(left, right),
+            BinaryOp::MatMul => {
+                if let Some(r) = self.try_dunder_binary(&left, &right, "__matmul__", "__rmatmul__") {
+                    return r;
+                }
+                self.matmul(left, right)
+            }
             BinaryOp::Div => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__truediv__", "__rtruediv__") {
                     return r;
@@ -366,7 +371,8 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__eq__", "__eq__") {
                     return r;
                 }
-                // Default: identity comparison for PyInstance, value equality otherwise
+                // No __eq__ defined: fall back to identity (pointer) equality, which is
+                // Python's default for user objects that don't override __eq__.
                 Ok(Value::bool_(left == right))
             }
             BinaryOp::Ne => {
