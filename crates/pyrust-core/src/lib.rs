@@ -214,9 +214,16 @@ pub enum Opaque {
         function: Rc<UserFunction>,
         receiver: Rc<RefCell<PyInstance>>,
     },
-    Enumerate { source: Value, start: i64 },
-    Zip { sources: Vec<Value> },
-    Reversed { source: Value },
+    Enumerate {
+        source: Value,
+        start: i64,
+    },
+    Zip {
+        sources: Vec<Value>,
+    },
+    Reversed {
+        source: Value,
+    },
 }
 
 impl Clone for Opaque {
@@ -288,9 +295,16 @@ pub enum ValueKind<'a> {
         function: &'a Rc<UserFunction>,
         receiver: &'a Rc<RefCell<PyInstance>>,
     },
-    Enumerate { source: &'a Value, start: i64 },
-    Zip { sources: &'a Vec<Value> },
-    Reversed { source: &'a Value },
+    Enumerate {
+        source: &'a Value,
+        start: i64,
+    },
+    Zip {
+        sources: &'a Vec<Value>,
+    },
+    Reversed {
+        source: &'a Value,
+    },
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -831,9 +845,10 @@ impl Value {
                 Opaque::BoundMethod { function, receiver } => {
                     ValueKind::BoundMethod { function, receiver }
                 }
-                Opaque::Enumerate { source, start } => {
-                    ValueKind::Enumerate { source, start: *start }
-                }
+                Opaque::Enumerate { source, start } => ValueKind::Enumerate {
+                    source,
+                    start: *start,
+                },
                 Opaque::Zip { sources } => ValueKind::Zip { sources },
                 Opaque::Reversed { source } => ValueKind::Reversed { source },
             },
