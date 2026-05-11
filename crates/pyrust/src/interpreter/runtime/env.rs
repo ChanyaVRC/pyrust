@@ -1,16 +1,40 @@
 impl Interpreter {
-    fn get_attr(&self, target: Value, name: &str) -> Result<Value> {
+    fn get_attr(&mut self, target: Value, name: &str) -> Result<Value> {
         match target.kind() {
             ValueKind::PyInstance(instance) => {
                 let instance = Rc::clone(instance);
                 if name == "__class__" {
                     return Ok(Value::py_class(Rc::clone(&instance.borrow().class)));
                 }
+
+                // Check the class first for data descriptors (Property).  A data
+                // descriptor takes priority over instance __dict__ — matching CPython.
+                let class = { Rc::clone(&instance.borrow().class) };
+                if let Some(class_val) = lookup_class_attr(&class, name) {
+                    if let ValueKind::Property { fget, .. } = class_val.kind() {
+                        let fget = Rc::clone(fget);
+                        return if fget.is_none() {
+                            Err(PyError::Named(
+                                "AttributeError".to_string(),
+                                format!("property '{}' has no getter", name),
+                            ))
+                        } else {
+                            let getter = (*fget).clone();
+                            self.call_function_expanded(
+                                getter,
+                                &[ExpandedCallArg {
+                                    name: None,
+                                    value: Value::py_instance(Rc::clone(&instance)),
+                                }],
+                            )
+                        };
+                    }
+                }
+
                 if let Some(value) = instance.borrow().attrs.get(name).cloned() {
                     return Ok(value);
                 }
 
-                let class = { Rc::clone(&instance.borrow().class) };
                 if let Some(value) = lookup_class_attr(&class, name) {
                     return Ok(match value.kind() {
                         ValueKind::UserFunction(f) => {
@@ -115,6 +139,33 @@ impl Interpreter {
                     format!("super(): parent class has no attribute '{name}'"),
                 ))
             }
+            // Access .setter / .deleter / .getter on a property descriptor itself.
+            // These return a new property with the respective accessor replaced.
+            ValueKind::Property { fget, fset, fdel } => {
+                let fget_val = (**fget).clone();
+                let fset_val = (**fset).clone();
+                let fdel_val = (**fdel).clone();
+                match name {
+                    "setter" => {
+                        // Return a builtin-callable that takes (new_fset) and returns
+                        // a new Property with fget preserved.
+                        Ok(Value::property_setter_partial(fget_val, fdel_val))
+                    }
+                    "deleter" => {
+                        Ok(Value::property_deleter_partial(fget_val, fset_val))
+                    }
+                    "getter" => {
+                        Ok(Value::property_getter_partial(fset_val, fdel_val))
+                    }
+                    "fget" => Ok(fget_val),
+                    "fset" => Ok(fset_val),
+                    "fdel" => Ok(fdel_val),
+                    _ => Err(PyError::Named(
+                        "AttributeError".to_string(),
+                        format!("property object has no attribute '{name}'"),
+                    )),
+                }
+            }
             ValueKind::PyModule(module) => {
                 let module = Rc::clone(module);
                 if let Some(value) = module.borrow().attrs.get(name).cloned() {
@@ -173,9 +224,35 @@ impl Interpreter {
         }
     }
 
-    fn assign_attr(&self, target: Value, name: &str, value: Value) -> Result<()> {
+    fn assign_attr(&mut self, target: Value, name: &str, value: Value) -> Result<()> {
         match target.kind() {
             ValueKind::PyInstance(instance) => {
+                // Check for a property descriptor in the class chain.
+                let class = { Rc::clone(&instance.borrow().class) };
+                if let Some(class_val) = lookup_class_attr(&class, name) {
+                    if let ValueKind::Property { fset, .. } = class_val.kind() {
+                        let fset = Rc::clone(fset);
+                        return if fset.is_none() {
+                            Err(PyError::Named(
+                                "AttributeError".to_string(),
+                                format!("property '{}' has no setter", name),
+                            ))
+                        } else {
+                            let setter = (*fset).clone();
+                            self.call_function_expanded(
+                                setter,
+                                &[
+                                    ExpandedCallArg {
+                                        name: None,
+                                        value: Value::py_instance(Rc::clone(&instance)),
+                                    },
+                                    ExpandedCallArg { name: None, value },
+                                ],
+                            )?;
+                            Ok(())
+                        };
+                    }
+                }
                 instance.borrow_mut().attrs.insert(name.to_string(), value);
                 Ok(())
             }
@@ -187,6 +264,40 @@ impl Interpreter {
                 "object has no writable attribute '{}'",
                 name
             ))),
+        }
+    }
+
+    fn delete_attr(&mut self, target: Value, name: &str) -> Result<()> {
+        match target.kind() {
+            ValueKind::PyInstance(instance) => {
+                let class = { Rc::clone(&instance.borrow().class) };
+                if let Some(class_val) = lookup_class_attr(&class, name) {
+                    if let ValueKind::Property { fdel, .. } = class_val.kind() {
+                        let fdel = Rc::clone(fdel);
+                        return if fdel.is_none() {
+                            Err(PyError::Named(
+                                "AttributeError".to_string(),
+                                format!("property '{}' has no deleter", name),
+                            ))
+                        } else {
+                            let deleter = (*fdel).clone();
+                            self.call_function_expanded(
+                                deleter,
+                                &[ExpandedCallArg {
+                                    name: None,
+                                    value: Value::py_instance(Rc::clone(&instance)),
+                                }],
+                            )?;
+                            Ok(())
+                        };
+                    }
+                }
+                instance.borrow_mut().attrs.remove(name);
+                Ok(())
+            }
+            _ => Err(PyError::Runtime(
+                "can only delete attributes of class instances".to_string(),
+            )),
         }
     }
 
