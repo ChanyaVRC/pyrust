@@ -938,21 +938,20 @@ impl Interpreter {
                 // ── Function / Class creation ────────────────────────────
                 Insn::MakeFunction(dst, proto_idx, defs_base, _defs_n) => {
                     let proto = pool_get!(code.fn_protos, *proto_idx, "fn_proto");
+                    // Rc bumps only — no Vec clones for param metadata or local_names.
                     let proto_code = Rc::clone(&proto.code);
                     let proto_name = proto.name.clone();
                     let proto_local_index = Rc::clone(&proto.local_index);
+                    let proto_local_names = Rc::clone(&proto.local_names);
                     let proto_global_names = Rc::clone(&proto.global_names);
                     let proto_nonlocal_names = Rc::clone(&proto.nonlocal_names);
-                    let param_names = proto.param_names.clone();
-                    let param_has_default = proto.param_has_default.clone();
-                    let param_is_args = proto.param_is_args.clone();
-                    let param_is_kwargs = proto.param_is_kwargs.clone();
+                    let param_spec = Rc::clone(&proto.param_spec);
                     let is_pure = proto.is_pure;
 
-                    let mut params = Vec::new();
+                    let mut params = Vec::with_capacity(param_spec.names.len());
                     let mut def_slot = 0u32;
-                    for i in 0..param_names.len() {
-                        let default = if param_has_default[i] {
+                    for i in 0..param_spec.names.len() {
+                        let default = if param_spec.has_default[i] {
                             let v =
                                 vm_try!(vm_read(regs, *defs_base + def_slot, num_locals));
                             def_slot += 1;
@@ -961,10 +960,10 @@ impl Interpreter {
                             None
                         };
                         params.push(UserFunctionParam {
-                            name: param_names[i].clone(),
+                            name: param_spec.names[i].clone(),
                             default,
-                            is_args: param_is_args[i],
-                            is_kwargs: param_is_kwargs[i],
+                            is_args: param_spec.is_args[i],
+                            is_kwargs: param_spec.is_kwargs[i],
                         });
                     }
                     // Validate that every nonlocal name resolves to an enclosing local scope.
@@ -981,7 +980,7 @@ impl Interpreter {
                         id: crate::value::next_fn_id(),
                         name: proto_name,
                         params,
-                        local_names: Rc::new(proto_local_index.keys().cloned().collect()),
+                        local_names: proto_local_names,
                         local_index: proto_local_index,
                         global_names: proto_global_names,
                         nonlocal_names: proto_nonlocal_names,

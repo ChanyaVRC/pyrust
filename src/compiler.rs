@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ast::{AssignTarget, BinaryOp, CmpOp, Expr, FunctionParam, Stmt, UnaryOp};
-use crate::bytecode::{CellVar, FnCode, FnProto, Insn, Reg};
+use crate::bytecode::{CellVar, FnCode, FnParamSpec, FnProto, Insn, Reg};
 use crate::error::PyError;
 use crate::value::{Value, ValueKind};
 
@@ -2353,7 +2353,7 @@ impl Compiler {
         let inner_index_rc: Rc<HashMap<String, Reg>> = Rc::new(inner_index);
 
         let def_bound = crate::interpreter::compute_def_bound_mask(params, &inner_index_rc);
-        let is_pure = crate::interpreter::is_pure_body(body);
+        let is_pure = crate::interpreter::is_pure_body(body, &self.pure_locals);
 
         // Detect cell vars for the inner function.
         let inner_cell_vars = collect_cell_vars(body, &inner_index_rc);
@@ -2387,14 +2387,18 @@ impl Compiler {
             return;
         }
         let proto_idx = self.fn_protos.len() as u8;
+        let local_names = Rc::new(inner_index_rc.keys().cloned().collect::<HashSet<_>>());
         self.fn_protos.push(FnProto {
             name: name.to_string(),
-            param_names: params.iter().map(|p| p.name.clone()).collect(),
-            param_has_default: params.iter().map(|p| p.default.is_some()).collect(),
-            param_is_args: params.iter().map(|p| p.is_args).collect(),
-            param_is_kwargs: params.iter().map(|p| p.is_kwargs).collect(),
+            param_spec: Rc::new(FnParamSpec {
+                names: params.iter().map(|p| p.name.clone()).collect(),
+                has_default: params.iter().map(|p| p.default.is_some()).collect(),
+                is_args: params.iter().map(|p| p.is_args).collect(),
+                is_kwargs: params.iter().map(|p| p.is_kwargs).collect(),
+            }),
             code: Rc::new(inner_code),
             local_index: inner_index_rc,
+            local_names,
             global_names: inner_global_rc,
             nonlocal_names: inner_nonlocal_rc,
             is_pure,
@@ -2510,14 +2514,18 @@ impl Compiler {
             return;
         }
         let proto_idx = self.fn_protos.len() as u8;
+        let local_names = Rc::new(body_index_rc.keys().cloned().collect::<HashSet<_>>());
         self.fn_protos.push(FnProto {
             name: name.to_string(),
-            param_names: vec![],
-            param_has_default: vec![],
-            param_is_args: vec![],
-            param_is_kwargs: vec![],
+            param_spec: Rc::new(FnParamSpec {
+                names: vec![],
+                has_default: vec![],
+                is_args: vec![],
+                is_kwargs: vec![],
+            }),
             code: Rc::new(body_code),
             local_index: body_index_rc,
+            local_names,
             global_names: empty_global,
             nonlocal_names: empty_nonlocal,
             is_pure: false,
@@ -3176,7 +3184,6 @@ impl Compiler {
                         }
                     }
                     self.next_temp = saved;
-                    let saved = self.next_temp;
                     let insn_before = self.insns.len();
                     let vr = self.compile_expr(val_expr);
                     if vr != v_slot {

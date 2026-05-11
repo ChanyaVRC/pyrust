@@ -887,28 +887,23 @@ impl Interpreter {
                     positional_index += 1;
                 }
             }
-            // Resolve all parameter values (apply defaults where needed).
-            let mut param_vals: Vec<Value> = Vec::with_capacity(function.params.len());
+            // Resolve defaults: fill any still-empty bound_args slots in-place.
             for (index, param) in function.params.iter().enumerate() {
-                let value = if let Some(v) = &bound_args[index] {
-                    v.clone()
-                } else {
-                    param.default.clone().ok_or_else(|| {
+                if bound_args[index].is_none() {
+                    bound_args[index] = Some(param.default.clone().ok_or_else(|| {
                         PyError::Runtime(format!(
                             "{}() missing required positional argument: '{}'",
                             function.name, param.name
                         ))
-                    })?
-                };
-                param_vals.push(value);
+                    })?);
+                }
             }
 
-            // Memoization: if the function is pure and all args are hashable,
-            // check the cache before building a call frame.
+            // Memoization: build cache key by borrowing from bound_args — no extra clone.
             let cache_key: Option<(u64, Vec<PyKey>)> = if function.is_pure {
-                param_vals
+                bound_args
                     .iter()
-                    .map(|v| v.to_key())
+                    .map(|v| v.as_ref().unwrap().to_key())
                     .collect::<Option<Vec<PyKey>>>()
                     .map(|keys| (function.id, keys))
             } else {
@@ -925,39 +920,6 @@ impl Interpreter {
                 let num_regs = code.num_regs as usize;
                 let mut regs: Vec<Option<Value>> = vec![None; num_regs];
 
-                // Bind non-cell params into register file using fastlocals slot indices.
-                for (param, val) in function.params.iter().zip(param_vals.iter()) {
-                    if !code.cell_vars.contains(&param.name) {
-                        if let Some(&slot) = function.local_index.get(&param.name) {
-                            if (slot as usize) >= num_regs {
-                                return Err(PyError::Named(
-                                    "SystemError".to_string(),
-                                    format!(
-                                        "parameter '{}' register index {} out of range (num_regs={})",
-                                        param.name, slot, num_regs
-                                    ),
-                                ));
-                            }
-                            regs[slot as usize] = Some(val.clone());
-                        }
-                    }
-                }
-                // Self-reference for recursive calls (only if not a cell var).
-                if !code.cell_vars.contains(&function.name) {
-                    if let Some(&slot) = function.local_index.get(&function.name) {
-                        if (slot as usize) >= num_regs {
-                            return Err(PyError::Named(
-                                "SystemError".to_string(),
-                                format!(
-                                    "self-reference register index {} out of range (num_regs={})",
-                                    slot, num_regs
-                                ),
-                            ));
-                        }
-                        regs[slot as usize] = Some(Value::user_function(Rc::clone(&function)));
-                    }
-                }
-
                 let _depth_guard = CallDepthGuard::enter();
                 if call_depth() > MAX_CALL_DEPTH {
                     let exc = self.instantiate_named_exception(
@@ -972,6 +934,8 @@ impl Interpreter {
                     || !function.nonlocal_names.is_empty()
                     || !code.cell_vars.is_empty();
 
+                // Bind params: move each value from bound_args into a register or env
+                // cell — one pass, zero extra clones.
                 let previous_env = if needs_local_env {
                     let local_env = self.alloc_env(Some(Rc::clone(&function.env)));
                     {
@@ -979,17 +943,59 @@ impl Interpreter {
                         e.local_names = Rc::clone(&function.local_names);
                         e.global_names = Rc::clone(&function.global_names);
                         e.nonlocal_names = Rc::clone(&function.nonlocal_names);
-                        // Store cell var params in the env so inner closures can capture them.
-                        for (param, val) in function.params.iter().zip(param_vals.iter()) {
+                        for (param, slot) in function.params.iter().zip(bound_args.iter_mut()) {
+                            let val = slot.take().unwrap();
                             if code.cell_vars.contains(&param.name) {
-                                e.values.insert(param.name.clone(), val.clone());
+                                e.values.insert(param.name.clone(), val);
+                            } else if let Some(&reg) = function.local_index.get(&param.name) {
+                                if reg as usize >= num_regs {
+                                    return Err(PyError::Named(
+                                        "SystemError".to_string(),
+                                        format!(
+                                            "parameter '{}' register index {} out of range (num_regs={})",
+                                            param.name, reg, num_regs
+                                        ),
+                                    ));
+                                }
+                                regs[reg as usize] = Some(val);
                             }
                         }
                     }
                     std::mem::replace(&mut self.env, local_env)
                 } else {
+                    for (param, slot) in function.params.iter().zip(bound_args.iter_mut()) {
+                        let val = slot.take().unwrap();
+                        if let Some(&reg) = function.local_index.get(&param.name) {
+                            if reg as usize >= num_regs {
+                                return Err(PyError::Named(
+                                    "SystemError".to_string(),
+                                    format!(
+                                        "parameter '{}' register index {} out of range (num_regs={})",
+                                        param.name, reg, num_regs
+                                    ),
+                                ));
+                            }
+                            regs[reg as usize] = Some(val);
+                        }
+                    }
                     std::mem::replace(&mut self.env, Rc::clone(&function.env))
                 };
+
+                // Self-reference for recursive calls (only if not a cell var).
+                if !code.cell_vars.contains(&function.name) {
+                    if let Some(&slot) = function.local_index.get(&function.name) {
+                        if slot as usize >= num_regs {
+                            return Err(PyError::Named(
+                                "SystemError".to_string(),
+                                format!(
+                                    "self-reference register index {} out of range (num_regs={})",
+                                    slot, num_regs
+                                ),
+                            ));
+                        }
+                        regs[slot as usize] = Some(Value::user_function(Rc::clone(&function)));
+                    }
+                }
 
                 let vm_result = self.run_bytecode(&code, &mut regs);
 
