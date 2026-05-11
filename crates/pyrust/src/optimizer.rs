@@ -23,6 +23,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         .collect();
 
     let num_locals = code.num_locals;
+    let mut num_regs = code.num_regs;
     let mut consts = code.consts;
     let insns = pass_thread_jumps(code.insns);
     let insns = pass_binop_const_fusion(insns, num_locals);
@@ -30,6 +31,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_const_fold(insns, &mut consts);
     let insns = pass_algebraic_simplify(insns, &mut consts);
     let insns = pass_unary_fold(insns, num_locals, &mut consts);
+    let insns = pass_ivsr(insns, &mut consts, &mut num_regs);
     let insns = pass_const_branch_elim(insns, &consts);
     let insns = pass_cmpjump_fusion(insns, num_locals);
     let insns = pass_not_invert(insns, num_locals);
@@ -47,7 +49,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         insns,
         consts,
         names: code.names,
-        num_regs: code.num_regs,
+        num_regs,
         num_iters: code.num_iters,
         num_locals,
         fn_protos,
@@ -1551,6 +1553,199 @@ fn pass_cse(insns: Vec<Insn>) -> Vec<Insn> {
     }
 
     result
+}
+
+// ─── Induction variable strength reduction ─────────────────────────────────────
+
+/// Replace `BinOpConst(r_dst, r_iv, Mul, c_K)` inside a `ForCountConst` loop body
+/// with a running accumulator, turning a multiply-per-iteration into an add-per-iteration.
+///
+/// ## Pattern (preconditions)
+///
+/// - Loop is `ForCountConst(iv, Lt, stop_c, step_c, k_exit)` with `consts[step_c] == 1`.
+/// - The instruction immediately before the loop header is `LoadConst(iv, c_pre)` where
+///   `consts[c_pre]` is an integer (the pre-loop value `start − step`).
+/// - The loop body `[h+1, latch)` contains exactly one `BinOpConst(r_dst, iv, Mul, c_K)`.
+/// - `r_dst != iv` (no clobbering the induction variable).
+/// - No jump in the body targets the loop header `h` (no `continue` jumps back mid-body
+///   and skipping the accumulator increment).
+///
+/// ## Transformation
+///
+/// ```text
+/// // Before
+/// LoadConst(iv, c_pre)                             // iv = start − 1
+/// ForCountConst(iv, Lt, stop_c, c_1, k_exit)
+///     BinOpConst(r_dst, iv, Mul, c_K)
+///     …
+/// Jump(k_back)
+///
+/// // After (two instructions inserted; offsets rewritten)
+/// LoadConst(iv, c_pre)
+/// LoadConst(r_acc, c_init)                         // r_acc = (start−1)*K  (NEW)
+/// ForCountConst(iv, Lt, stop_c, c_1, k_exit)
+///     Move(r_dst, r_acc)                           // replaced
+///     …
+///     BinOpConst(r_acc, r_acc, Add, c_K)           // r_acc += K  (NEW)
+/// Jump(k_back)
+/// ```
+///
+/// Only one `BinOpConst` per loop is strength-reduced per invocation.  For multiple
+/// patterns in the same loop, run the optimizer a second time (handled by
+/// `optimize_fn_code` running the full pipeline once).
+fn pass_ivsr(insns: Vec<Insn>, consts: &mut Vec<Value>, num_regs: &mut u32) -> Vec<Insn> {
+    use crate::ast::BinaryOp;
+
+    let n = insns.len();
+    if n < 3 {
+        return insns;
+    }
+
+    for h in 0..n {
+        // Must be ForCountConst with Lt and step=1
+        let (iv, step_c) = match &insns[h] {
+            Insn::ForCountConst(v, BinaryOp::Lt, _, sc, _) => (*v, *sc),
+            _ => continue,
+        };
+        let step_int = match consts.get(step_c as usize) {
+            Some(v) => match v.kind() {
+                ValueKind::Int(1) => 1i64,
+                _ => continue,
+            },
+            _ => continue,
+        };
+        let _ = step_int; // always 1; kept for readability
+
+        // The instruction before the header must initialise iv: LoadConst(iv, c_pre)
+        if h == 0 {
+            continue;
+        }
+        let iv_init_val = match &insns[h - 1] {
+            Insn::LoadConst(r, c) if *r == iv => match consts.get(*c as usize) {
+                Some(v) => match v.kind() {
+                    ValueKind::Int(i) => i,
+                    _ => continue,
+                },
+                None => continue,
+            },
+            _ => continue,
+        };
+
+        // Find the back-edge: a Jump targeting header h
+        let latch = match (h + 1..n).find(|&l| {
+            if let Insn::Jump(k) = &insns[l] {
+                (l as i64 + 1 + *k as i64) as usize == h
+            } else {
+                false
+            }
+        }) {
+            Some(l) => l,
+            None => continue,
+        };
+
+        // Safety: no jump inside the body targets the header (no continue-to-header)
+        let has_continue = (h + 1..latch).any(|i| {
+            let target = match &insns[i] {
+                Insn::Jump(k)
+                | Insn::JumpIfFalse(_, k)
+                | Insn::JumpIfTrue(_, k)
+                | Insn::CmpJumpIfFalse(_, _, _, k)
+                | Insn::CmpJumpIfTrue(_, _, _, k)
+                | Insn::CmpJumpIfFalseConst(_, _, _, k)
+                | Insn::CmpJumpIfTrueConst(_, _, _, k) => Some((i as i64 + 1 + *k as i64) as usize),
+                _ => None,
+            };
+            target == Some(h)
+        });
+        if has_continue {
+            continue;
+        }
+
+        // Skip loops with exception handling
+        if (h + 1..latch).any(|i| matches!(insns[i], Insn::SetupExcept(_) | Insn::PopExcept)) {
+            continue;
+        }
+
+        // Find the first BinOpConst(r_dst, iv, Mul, c_K) in the body
+        let (b, r_dst, c_k) = match (h + 1..latch).find_map(|i| match &insns[i] {
+            Insn::BinOpConst(dst, src, BinaryOp::Mul, ck) if *src == iv && *dst != iv => {
+                Some((i, *dst, *ck))
+            }
+            _ => None,
+        }) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        let k_val = match consts.get(c_k as usize) {
+            Some(v) => match v.kind() {
+                ValueKind::Int(k) => k,
+                _ => continue,
+            },
+            None => continue,
+        };
+
+        // ForCountConst increments iv BEFORE the body runs, so the first body
+        // execution sees iv = iv_init_val + 1 (= range start).  The accumulator
+        // must equal that value * K on entry to the body, not iv_init_val * K.
+        let acc_init = (iv_init_val + 1) * k_val;
+        let c_acc_init = {
+            if let Some(idx) = consts
+                .iter()
+                .position(|v| matches!(v.kind(), ValueKind::Int(i) if i == acc_init))
+            {
+                idx as u16
+            } else {
+                let idx = consts.len() as u16;
+                consts.push(Value::int(acc_init));
+                idx
+            }
+        };
+
+        // Allocate a fresh accumulator register
+        let r_acc = *num_regs;
+        *num_regs += 1;
+
+        // Build old→new position map:
+        //   [0, h)          : unchanged
+        //   [h, latch)      : +1  (LoadConst inserted before h)
+        //   [latch, n]      : +2  (LoadConst before h AND BinOpConst before latch)
+        let old_to_new: Vec<usize> = (0..=n)
+            .map(|i| {
+                if i < h {
+                    i
+                } else if i < latch {
+                    i + 1
+                } else {
+                    i + 2
+                }
+            })
+            .collect();
+
+        // Rebuild the instruction list
+        let mut new_insns: Vec<Insn> = Vec::with_capacity(n + 2);
+        for i in 0..n {
+            // Insert accumulator initialisation before the loop header
+            if i == h {
+                new_insns.push(Insn::LoadConst(r_acc, c_acc_init));
+            }
+            // Insert accumulator increment before the back-edge jump
+            if i == latch {
+                new_insns.push(Insn::BinOpConst(r_acc, r_acc, BinaryOp::Add, c_k));
+            }
+            // Replace the multiplication or rewrite offsets for everything else
+            let insn = if i == b {
+                Insn::Move(r_dst, r_acc)
+            } else {
+                rewrite_offsets(insns[i].clone(), i, &old_to_new)
+            };
+            new_insns.push(insn);
+        }
+
+        return new_insns; // one reduction per pass invocation
+    }
+
+    insns
 }
 
 // ─── Trivial no-op removal ─────────────────────────────────────────────────────
@@ -3433,5 +3628,100 @@ mod tests {
             matches!(out[2], Insn::LoadConst(3, 0)),
             "LoadConst must not be replaced after its output register is clobbered"
         );
+    }
+
+    // ── pass_ivsr ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn ivsr_replaces_induction_var_mul_with_accumulator() {
+        use crate::ast::BinaryOp;
+        // Simulates: for i in range(10): r_dst = i * 3
+        //
+        // [0] LoadConst(r_iv=2, c_neg1=0)        iv init = start - step = -1
+        // [1] ForCountConst(2, Lt, c_10=1, c_1=2, k_exit=2)  → jumps to [4]
+        // [2] BinOpConst(r_dst=3, 2, Mul, c_3=3)
+        // [3] Jump(-3)                             back to [1]
+        // [4] Return(3)
+        let mut consts = vec![Value::int(-1), Value::int(10), Value::int(1), Value::int(3)];
+        let mut num_regs = 4u32;
+        let insns = vec![
+            Insn::LoadConst(2, 0),
+            Insn::ForCountConst(2, BinaryOp::Lt, 1, 2, 2),
+            Insn::BinOpConst(3, 2, BinaryOp::Mul, 3),
+            Insn::Jump(-3),
+            Insn::Return(3),
+        ];
+        let out = pass_ivsr(insns, &mut consts, &mut num_regs);
+
+        // Expected (7 instructions): LoadConst(iv), LoadConst(acc), ForCountConst,
+        //   Move(dst, acc), BinOpConst(acc += K), Jump(back), Return
+        assert_eq!(out.len(), 7, "two instructions inserted");
+        assert_eq!(num_regs, 5, "one new register allocated");
+        // [1] = LoadConst(r_acc=4, c_neg3)  — acc init = -1 * 3 = -3
+        assert!(
+            matches!(out[1], Insn::LoadConst(4, _)),
+            "accumulator init inserted before loop header"
+        );
+        // [2] = ForCountConst — exit offset now points to [6] (was [4])
+        assert!(
+            matches!(out[2], Insn::ForCountConst(2, BinaryOp::Lt, 1, 2, 3)),
+            "ForCountConst exit offset adjusted (2 → 3)"
+        );
+        // [3] = Move(r_dst, r_acc)
+        assert!(
+            matches!(out[3], Insn::Move(3, 4)),
+            "BinOpConst replaced by Move(dst, acc)"
+        );
+        // [4] = BinOpConst(r_acc, r_acc, Add, c_K)
+        assert!(
+            matches!(out[4], Insn::BinOpConst(4, 4, BinaryOp::Add, 3)),
+            "accumulator increment inserted before back-edge"
+        );
+        // [5] = Jump — back-edge: old offset -3 (h=1, latch=3), new = h+1 - (latch+2) - 1 = 2-5-1 = -4
+        assert!(
+            matches!(out[5], Insn::Jump(-4)),
+            "back-edge offset adjusted"
+        );
+        // Accumulator init value = 0 (= (-1 + 1) * 3 = start * K for range(10))
+        let acc_init_in_consts = consts.iter().any(|v| matches!(v.kind(), ValueKind::Int(0)));
+        assert!(
+            acc_init_in_consts,
+            "const 0 added for accumulator init ((-1+1)*3=0)"
+        );
+    }
+
+    #[test]
+    fn ivsr_skips_when_step_not_one() {
+        use crate::ast::BinaryOp;
+        // step = 2 → not eligible
+        let mut consts = vec![Value::int(-2), Value::int(10), Value::int(2), Value::int(3)];
+        let mut num_regs = 4u32;
+        let insns = vec![
+            Insn::LoadConst(2, 0),
+            Insn::ForCountConst(2, BinaryOp::Lt, 1, 2, 2), // step_c=2 → consts[2]=2 ≠ 1
+            Insn::BinOpConst(3, 2, BinaryOp::Mul, 3),
+            Insn::Jump(-3),
+            Insn::Return(3),
+        ];
+        let out = pass_ivsr(insns, &mut consts, &mut num_regs);
+        assert_eq!(out.len(), 5, "not eligible: step ≠ 1");
+        assert_eq!(num_regs, 4, "no new register allocated");
+    }
+
+    #[test]
+    fn ivsr_skips_when_mul_uses_non_induction_var() {
+        use crate::ast::BinaryOp;
+        // BinOpConst uses r_other=5, not r_iv=2 → not eligible
+        let mut consts = vec![Value::int(-1), Value::int(10), Value::int(1), Value::int(3)];
+        let mut num_regs = 6u32;
+        let insns = vec![
+            Insn::LoadConst(2, 0),
+            Insn::ForCountConst(2, BinaryOp::Lt, 1, 2, 2),
+            Insn::BinOpConst(3, 5, BinaryOp::Mul, 3), // r_src=5 ≠ iv=2
+            Insn::Jump(-3),
+            Insn::Return(3),
+        ];
+        let out = pass_ivsr(insns, &mut consts, &mut num_regs);
+        assert_eq!(out.len(), 5, "not eligible: src ≠ iv");
     }
 }
