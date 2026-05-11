@@ -1972,8 +1972,13 @@ impl Compiler {
             self.patch_jump(idx);
         }
         self.free_temp(subj);
-        // def_set: only variables defined in ALL arms are definitely bound.
-        self.def_set = pre_def_set;
+        // Variables defined in every arm are definitely bound after the match.
+        let all_define = if all_arm_def_sets.is_empty() {
+            0
+        } else {
+            all_arm_def_sets.iter().fold(!0u64, |acc, &s| acc & s)
+        };
+        self.def_set = pre_def_set | all_define;
     }
 
     /// Emit code that tests whether register `subj` matches `pattern`.
@@ -2207,7 +2212,24 @@ impl Compiler {
                 }
             }
             Pattern::Class { cls, kwargs } => {
-                // For each keyword: get attr from subject, match sub-pattern.
+                // isinstance(subj, cls) check must come FIRST so that attribute
+                // access is never attempted on a subject of the wrong type.
+                let isinstance_name_idx = self.intern_name("isinstance");
+                let isinstance_fn = self.alloc_temp();
+                self.emit(Insn::LoadGlobal(isinstance_fn, isinstance_name_idx));
+                let arg0 = self.alloc_temp();
+                self.emit(Insn::Move(arg0, subj));
+                let cls_r = self.compile_expr(cls);
+                let arg1 = self.alloc_temp();
+                self.emit(Insn::Move(arg1, cls_r));
+                self.free_temp(cls_r);
+                self.emit(Insn::Call(isinstance_fn, 2));
+                self.free_temp(arg1);
+                self.free_temp(arg0);
+                let jmp = self.emit(Insn::JumpIfFalse(isinstance_fn, 0));
+                fail_patches.push(jmp);
+                self.free_temp(isinstance_fn);
+                // Now check each keyword attribute.
                 for (attr_name, attr_pat) in kwargs {
                     let name_idx = self.intern_name(attr_name);
                     let attr_r = self.alloc_temp();
@@ -2218,25 +2240,6 @@ impl Compiler {
                         return;
                     }
                 }
-                // Optionally check isinstance(subj, cls).
-                // For class patterns we do an isinstance check.
-                let isinstance_name_idx = self.intern_name("isinstance");
-                let isinstance_fn = self.alloc_temp();
-                self.emit(Insn::LoadGlobal(isinstance_fn, isinstance_name_idx));
-                let arg0 = self.alloc_temp();
-                self.emit(Insn::Move(arg0, subj));
-                let cls_r = self.compile_expr(cls);
-                // Move cls_r to arg1 position (next after arg0).
-                // Since arg0 = arg0 and cls_r may not be arg0+1, move:
-                let arg1 = self.alloc_temp();
-                self.emit(Insn::Move(arg1, cls_r));
-                self.free_temp(cls_r);
-                self.emit(Insn::Call(isinstance_fn, 2));
-                self.free_temp(arg1);
-                self.free_temp(arg0);
-                let jmp = self.emit(Insn::JumpIfFalse(isinstance_fn, 0));
-                fail_patches.push(jmp);
-                self.free_temp(isinstance_fn);
             }
         }
     }

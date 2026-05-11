@@ -126,4 +126,34 @@ assert no_match == "untouched"
 match = 5
 assert match == 5
 
+# --- Class patterns ---
+class Point:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+p = Point(1, 2)
+match p:
+    case Point(x=px, y=py):
+        class_matched = True
+assert class_matched is True
+assert px == 1
+assert py == 2
+
+# Class pattern: non-matching type falls through
+match 42:
+    case Point(x=px2, y=py2):
+        assert False, "should not match"
+    case _:
+        type_fallthrough = True
+assert type_fallthrough is True
+
+# Capture in every arm is definitely bound after the match
+match 10:
+    case 10:
+        result = "ten"
+    case _:
+        result = "other"
+assert result == "ten"
+
 print("match OK")
