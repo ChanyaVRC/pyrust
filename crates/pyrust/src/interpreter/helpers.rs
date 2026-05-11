@@ -1012,6 +1012,8 @@ fn is_pure_expr(expr: &Expr, pure_fns: &std::collections::HashSet<String>) -> bo
                 FStringPart::Expr { expr, .. } => is_pure_expr(expr, pure_fns),
             })
         }
+        // yield/yield from always have side effects (generator suspension).
+        Expr::Yield(_) | Expr::YieldFrom(_) => false,
     }
 }
 

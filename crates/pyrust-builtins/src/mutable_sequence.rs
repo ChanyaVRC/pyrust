@@ -57,6 +57,7 @@ fn type_name_of(v: &Value) -> &'static str {
         | ValueKind::StaticMethod(_)
         | ValueKind::ClassBoundMethod { .. } => "function",
         ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => "super",
+        ValueKind::Generator(_) => "generator",
     }
 }
 

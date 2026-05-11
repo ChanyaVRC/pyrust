@@ -707,6 +707,21 @@ impl Parser {
     // parse_primary
 
     fn parse_expr(&mut self) -> Result<Expr> {
+        // Yield / yield from
+        if self.is(&Token::Yield) {
+            self.bump(); // consume `yield`
+            if self.is(&Token::From) {
+                self.bump(); // consume `from`
+                let iter = self.parse_expr()?;
+                return Ok(Expr::YieldFrom(Box::new(iter)));
+            }
+            // bare `yield` or `yield expr`
+            if self.at_stmt_end() {
+                return Ok(Expr::Yield(None));
+            }
+            let val = self.parse_expr()?;
+            return Ok(Expr::Yield(Some(Box::new(val))));
+        }
         // Lambda
         if self.is(&Token::Lambda) {
             return self.parse_lambda();

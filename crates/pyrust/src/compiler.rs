@@ -411,6 +411,9 @@ fn lambda_captures_in_expr(
         | Expr::Str(_)
         | Expr::Bool(_)
         | Expr::None => {}
+        Expr::Yield(Some(e)) => lambda_captures_in_expr(e, local_index, cells),
+        Expr::Yield(None) => {}
+        Expr::YieldFrom(e) => lambda_captures_in_expr(e, local_index, cells),
     }
 }
 
@@ -709,6 +712,9 @@ fn collect_free_var_reads_in_expr(expr: &Expr, uses: &mut HashSet<String>) {
             }
         }
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::None => {}
+        Expr::Yield(Some(e)) => collect_free_var_reads_in_expr(e, uses),
+        Expr::Yield(None) => {}
+        Expr::YieldFrom(e) => collect_free_var_reads_in_expr(e, uses),
     }
 }
 
@@ -1367,6 +1373,7 @@ impl Compiler {
                 "function uses too many registers ({num_regs}); max is {MAX_REGS}"
             ));
         }
+        let is_generator = self.insns.iter().any(|i| matches!(i, Insn::Yield { .. }));
         Ok(FnCode {
             insns: self.insns,
             consts: self.consts,
@@ -1376,6 +1383,7 @@ impl Compiler {
             num_locals: self.base_temp,
             fn_protos: self.fn_protos,
             cell_vars: self.cell_vars.into_iter().collect(),
+            is_generator,
         })
     }
 
@@ -3443,6 +3451,62 @@ impl Compiler {
                 val_reg
             }
             Expr::FString(parts) => self.compile_fstring(parts),
+
+            Expr::Yield(val_expr) => {
+                // Compile the yielded value (or None if bare `yield`).
+                let src = if let Some(e) = val_expr {
+                    self.compile_expr(e)
+                } else {
+                    let r = self.alloc_temp();
+                    self.emit(Insn::LoadNone(r));
+                    r
+                };
+                let dst = self.alloc_temp();
+                self.emit(Insn::Yield { src, dst });
+                self.free_temp(src);
+                dst
+            }
+
+            Expr::YieldFrom(iter_expr) => {
+                // yield from iter_expr:
+                // 1. Evaluate the iterable
+                // 2. Call iter() on it (GetIter)
+                // 3. Loop: next item = ForIter; yield each item; loop back
+                // 4. Result of yield from is None (we don't propagate StopIteration value)
+                let iter_slot = self.alloc_iter();
+                let iter_src = self.compile_expr(iter_expr);
+                self.emit(Insn::GetIter(iter_slot, iter_src));
+                self.free_temp(iter_src);
+
+                // item register
+                let item_reg = self.alloc_temp();
+                let loop_start = self.pc();
+                // ForIter: if exhausted jump forward by offset (to be patched)
+                let exit_patch = self.emit(Insn::ForIter(item_reg, iter_slot, 0));
+
+                // yield item_reg; ignore sent value
+                let sent_reg = self.alloc_temp();
+                self.emit(Insn::Yield {
+                    src: item_reg,
+                    dst: sent_reg,
+                });
+                self.free_temp(sent_reg);
+
+                // jump back to ForIter
+                let back_from = self.pc() as i32 + 1;
+                let back_offset = loop_start as i32 - back_from;
+                self.emit(Insn::Jump(back_offset));
+
+                // Patch the ForIter exit
+                self.patch_jump(exit_patch);
+                self.free_temp(item_reg);
+                self.free_iter();
+
+                // Result of `yield from` is None
+                let result = self.alloc_temp();
+                self.emit(Insn::LoadNone(result));
+                result
+            }
         }
     }
 
