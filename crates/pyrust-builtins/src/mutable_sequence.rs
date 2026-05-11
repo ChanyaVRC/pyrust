@@ -24,7 +24,7 @@ fn iter_value(v: &Value) -> Result<Vec<Value>> {
         }
         _ => Err(PyError::Runtime(format!(
             "'{}' object is not iterable",
-            type_name_of(&v)
+            type_name_of(v)
         ))),
     }
 }
@@ -108,7 +108,7 @@ pub fn insert(items: &mut Vec<Value>, args: &[Value]) -> Result<Value> {
     let len = items.len();
     let pos = if idx < 0 {
         let from_end = (-idx) as usize;
-        if from_end >= len { 0 } else { len - from_end }
+        len.saturating_sub(from_end)
     } else {
         (idx as usize).min(len)
     };
@@ -152,7 +152,7 @@ pub fn remove(items: &mut Vec<Value>, args: &[Value]) -> Result<Value> {
     Ok(Value::none())
 }
 
-pub fn reverse(items: &mut Vec<Value>, _args: &[Value]) -> Result<Value> {
+pub fn reverse(items: &mut [Value], _args: &[Value]) -> Result<Value> {
     items.reverse();
     Ok(Value::none())
 }

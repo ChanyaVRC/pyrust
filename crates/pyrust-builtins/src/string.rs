@@ -368,8 +368,8 @@ fn str_splitlines(s: &str, args: &[Value]) -> Result<Value> {
 
 fn str_removeprefix(s: &str, args: &[Value]) -> Result<Value> {
     let prefix = str_require_str_arg(args, "removeprefix")?;
-    if s.starts_with(prefix) {
-        Ok(Value::string(&s[prefix.len()..]))
+    if let Some(stripped) = s.strip_prefix(prefix) {
+        Ok(Value::string(stripped))
     } else {
         Ok(Value::string(s))
     }
@@ -377,8 +377,8 @@ fn str_removeprefix(s: &str, args: &[Value]) -> Result<Value> {
 
 fn str_removesuffix(s: &str, args: &[Value]) -> Result<Value> {
     let suffix = str_require_str_arg(args, "removesuffix")?;
-    if s.ends_with(suffix) {
-        Ok(Value::string(&s[..s.len() - suffix.len()]))
+    if let Some(stripped) = s.strip_suffix(suffix) {
+        Ok(Value::string(stripped))
     } else {
         Ok(Value::string(s))
     }
@@ -962,7 +962,7 @@ fn strip_chars(s: &str, args: &[Value], left: bool, right: bool) -> String {
 }
 
 /// Parse (sep, maxsplit) from split/rsplit args.
-fn split_args<'a>(args: &'a [Value]) -> Result<(Option<&'a str>, i64)> {
+fn split_args(args: &[Value]) -> Result<(Option<&str>, i64)> {
     let sep = match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(s)) => Some(s),
         Some(ValueKind::None) | None => None,
@@ -1056,7 +1056,7 @@ fn str_slice_args(s: &str, args: &[Value]) -> Result<(usize, usize)> {
 fn normalise_char_idx(idx: i64, len: usize) -> usize {
     if idx < 0 {
         let from_end = (-idx) as usize;
-        if from_end > len { 0 } else { len - from_end }
+        len.saturating_sub(from_end)
     } else {
         idx as usize
     }

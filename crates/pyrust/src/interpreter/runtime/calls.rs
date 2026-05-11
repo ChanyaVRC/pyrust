@@ -258,8 +258,8 @@ impl Interpreter {
                         if result_err.is_some() { return acc; }
                         match compare_values(&item.0, &acc.0) {
                             Ok(cmp) => {
-                                if is_max && cmp == std::cmp::Ordering::Greater { item }
-                                else if !is_max && cmp == std::cmp::Ordering::Less { item }
+                                if (is_max && cmp == std::cmp::Ordering::Greater)
+                                    || (!is_max && cmp == std::cmp::Ordering::Less) { item }
                                 else { acc }
                             }
                             Err(e) => { result_err = Some(e); acc }
@@ -273,8 +273,8 @@ impl Interpreter {
                         if result_err.is_some() { return acc; }
                         match compare_values(&v, &acc) {
                             Ok(cmp) => {
-                                if is_max && cmp == std::cmp::Ordering::Greater { v }
-                                else if !is_max && cmp == std::cmp::Ordering::Less { v }
+                                if (is_max && cmp == std::cmp::Ordering::Greater)
+                                    || (!is_max && cmp == std::cmp::Ordering::Less) { v }
                                 else { acc }
                             }
                             Err(e) => { result_err = Some(e); acc }
@@ -367,7 +367,7 @@ impl Interpreter {
                     },
                     2 => {
                         let base = match args[1].value.kind() {
-                            ValueKind::Int(b) if b >= 2 && b <= 36 => b as u32,
+                            ValueKind::Int(b) if (2..=36).contains(&b) => b as u32,
                             ValueKind::Int(b) => return Err(PyError::Named(
                                 "ValueError".to_string(),
                                 format!("int() base must be >= 2 and <= 36, or 0, not {b}"))),
@@ -376,11 +376,9 @@ impl Interpreter {
                         match args[0].value.kind() {
                             ValueKind::Str(s) => {
                                 let stripped = s.trim();
-                                let stripped = if base == 16 && (stripped.starts_with("0x") || stripped.starts_with("0X")) {
-                                    &stripped[2..]
-                                } else if base == 2 && (stripped.starts_with("0b") || stripped.starts_with("0B")) {
-                                    &stripped[2..]
-                                } else if base == 8 && (stripped.starts_with("0o") || stripped.starts_with("0O")) {
+                                let stripped = if (base == 16 && (stripped.starts_with("0x") || stripped.starts_with("0X")))
+                                    || (base == 2 && (stripped.starts_with("0b") || stripped.starts_with("0B")))
+                                    || (base == 8 && (stripped.starts_with("0o") || stripped.starts_with("0O"))) {
                                     &stripped[2..]
                                 } else {
                                     stripped
@@ -455,7 +453,7 @@ impl Interpreter {
                     )),
                 };
                 let exc = instantiate_exception(class, vec![arg]);
-                return Err(PyError::Raised(exc));
+                Err(PyError::Raised(exc))
             }
             ValueKind::BuiltinFunction(
                 name @ ("math.floor" | "math.ceil" | "math.sqrt" | "math.fabs" | "math.sin"
@@ -758,8 +756,8 @@ impl Interpreter {
                 if let ValueKind::PyInstance(instance) = obj.kind() {
                     let instance_rc = Rc::clone(instance);
                     let class = Rc::clone(&instance_rc.borrow().class);
-                    if let Some(method_val) = lookup_class_attr(&class, "__repr__") {
-                        if let ValueKind::UserFunction(f) = method_val.kind() {
+                    if let Some(method_val) = lookup_class_attr(&class, "__repr__")
+                        && let ValueKind::UserFunction(f) = method_val.kind() {
                             let func = Rc::clone(f);
                             let result = self.call_user_function_expanded(
                                 func,
@@ -774,7 +772,6 @@ impl Interpreter {
                                 )),
                             };
                         }
-                    }
                 }
                 Ok(Value::string(obj.repr()))
             }
@@ -1153,7 +1150,7 @@ impl Interpreter {
                         "an integer is required (got type {})".to_string(),
                     )),
                 };
-                if code_point < 0 || code_point > 1114111 {
+                if !(0..=1114111).contains(&code_point) {
                     return Err(PyError::Named(
                         "ValueError".to_string(),
                         format!("chr() arg not in range(0x110000): {code_point}"),
@@ -1289,12 +1286,11 @@ impl Interpreter {
                     ValueKind::Tuple(items) => {
                         let mut found = false;
                         for item in items {
-                            if let ValueKind::PyClass(expected) = item.kind() {
-                                if class_is_subclass_of(&cls, expected) {
+                            if let ValueKind::PyClass(expected) = item.kind()
+                                && class_is_subclass_of(&cls, expected) {
                                     found = true;
                                     break;
                                 }
-                            }
                         }
                         found
                     }
@@ -1395,8 +1391,8 @@ impl Interpreter {
             ValueKind::PyInstance(inst) => {
                 let inst_rc = Rc::clone(inst);
                 let class = Rc::clone(&inst_rc.borrow().class);
-                if let Some(method_val) = lookup_class_attr(&class, "__call__") {
-                    if let ValueKind::UserFunction(f) = method_val.kind() {
+                if let Some(method_val) = lookup_class_attr(&class, "__call__")
+                    && let ValueKind::UserFunction(f) = method_val.kind() {
                         let func = Rc::clone(f);
                         return self.call_user_function_expanded(
                             func,
@@ -1404,7 +1400,6 @@ impl Interpreter {
                             &[Value::py_instance(inst_rc)],
                         );
                     }
-                }
                 Err(PyError::Named(
                     "TypeError".to_string(),
                     format!(
@@ -1616,11 +1611,10 @@ impl Interpreter {
             } else {
                 None
             };
-            if let Some(ref ck) = cache_key {
-                if let Some(cached) = self.fn_cache.get(ck).cloned() {
+            if let Some(ref ck) = cache_key
+                && let Some(cached) = self.fn_cache.get(ck).cloned() {
                     return Ok(cached);
                 }
-            }
 
             // Tier-0: register-VM path — try compiled bytecode before any env allocation.
             if let Some(code) = self.get_or_compile_bytecode(&function) {
@@ -1689,8 +1683,8 @@ impl Interpreter {
                 };
 
                 // Self-reference for recursive calls (only if not a cell var).
-                if !code.cell_vars.contains(&function.name) {
-                    if let Some(&slot) = function.local_index.get(&function.name) {
+                if !code.cell_vars.contains(&function.name)
+                    && let Some(&slot) = function.local_index.get(&function.name) {
                         if slot as usize >= num_regs {
                             return Err(PyError::Named(
                                 "SystemError".to_string(),
@@ -1702,7 +1696,6 @@ impl Interpreter {
                         }
                         regs[slot as usize] = Some(Value::user_function(Rc::clone(&function)));
                     }
-                }
 
                 let vm_result = self.run_bytecode(&code, &mut regs);
 
@@ -1746,11 +1739,10 @@ impl Interpreter {
             } else if param.is_kwargs {
                 let mut dict: indexmap::IndexMap<crate::value::PyKey, Value> = indexmap::IndexMap::new();
                 for (k, v) in &keyword_vals {
-                    if !consumed_keywords.contains(k) {
-                        if let Some(key) = Value::string(k.clone()).to_key() {
+                    if !consumed_keywords.contains(k)
+                        && let Some(key) = Value::string(k.clone()).to_key() {
                             dict.insert(key, v.clone());
                         }
-                    }
                 }
                 Value::dict(dict)
             } else {
@@ -1803,8 +1795,8 @@ impl Interpreter {
 
             // Bind non-cell params into register file using fastlocals slot indices.
             for (param, val) in function.params.iter().zip(param_vals.iter()) {
-                if !code.cell_vars.contains(&param.name) {
-                    if let Some(&slot) = function.local_index.get(&param.name) {
+                if !code.cell_vars.contains(&param.name)
+                    && let Some(&slot) = function.local_index.get(&param.name) {
                         if (slot as usize) >= num_regs {
                             return Err(PyError::Named(
                                 "SystemError".to_string(),
@@ -1816,11 +1808,10 @@ impl Interpreter {
                         }
                         regs[slot as usize] = Some(val.clone());
                     }
-                }
             }
             // Self-reference for recursive calls (only if not a cell var).
-            if !code.cell_vars.contains(&function.name) {
-                if let Some(&slot) = function.local_index.get(&function.name) {
+            if !code.cell_vars.contains(&function.name)
+                && let Some(&slot) = function.local_index.get(&function.name) {
                     if (slot as usize) >= num_regs {
                         return Err(PyError::Named(
                             "SystemError".to_string(),
@@ -1832,7 +1823,6 @@ impl Interpreter {
                     }
                     regs[slot as usize] = Some(Value::user_function(Rc::clone(&function)));
                 }
-            }
 
             let _depth_guard = CallDepthGuard::enter();
             if call_depth() > MAX_CALL_DEPTH {
@@ -1873,7 +1863,7 @@ impl Interpreter {
             if needs_local_env {
                 self.free_env(used_env);
             }
-            return Ok(vm_result?);
+            return vm_result;
         }
 
         // All user functions must have precompiled bytecode

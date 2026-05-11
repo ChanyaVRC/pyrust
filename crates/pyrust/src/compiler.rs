@@ -808,10 +808,10 @@ pub(crate) fn fold_binop(l: &Value, op: BinaryOp, r: &Value) -> Option<Value> {
         (ValueKind::Int(a), BinaryOp::BitAnd, ValueKind::Int(b)) => Some(Value::int(a & b)),
         (ValueKind::Int(a), BinaryOp::BitOr, ValueKind::Int(b)) => Some(Value::int(a | b)),
         (ValueKind::Int(a), BinaryOp::BitXor, ValueKind::Int(b)) => Some(Value::int(a ^ b)),
-        (ValueKind::Int(a), BinaryOp::LShift, ValueKind::Int(b)) if b >= 0 && b < 64 => {
+        (ValueKind::Int(a), BinaryOp::LShift, ValueKind::Int(b)) if (0..64).contains(&b) => {
             Some(Value::int(a.wrapping_shl(b as u32)))
         }
-        (ValueKind::Int(a), BinaryOp::RShift, ValueKind::Int(b)) if b >= 0 && b < 64 => {
+        (ValueKind::Int(a), BinaryOp::RShift, ValueKind::Int(b)) if (0..64).contains(&b) => {
             Some(Value::int(a >> b))
         }
         (ValueKind::Float(a), BinaryOp::Add, ValueKind::Float(b)) => Some(Value::float(a + b)),
@@ -873,7 +873,7 @@ fn stmt_has_continue(s: &Stmt) -> bool {
             else_branch,
         } => {
             branches.iter().any(|(_, b)| body_has_continue(b))
-                || else_branch.as_deref().map_or(false, body_has_continue)
+                || else_branch.as_deref().is_some_and(body_has_continue)
         }
         Stmt::While { .. } | Stmt::For { .. } => false,
         _ => false,
@@ -1145,23 +1145,21 @@ impl Compiler {
         // skip the hash-map fast path for booleans to avoid the two kinds colliding in
         // the constant pool.  Use the type-exact linear scan for them instead.
         let is_bool = matches!(val.kind(), ValueKind::Bool(_));
-        if !is_bool {
-            if let Some(key) = val.to_key() {
-                if let Some(&idx) = self.const_index.get(&key) {
-                    return idx;
-                }
-                if self.consts.len() >= u16::MAX as usize {
-                    self.failed = true;
-                    if self.error_msg.is_none() {
-                        self.error_msg = Some(format!("too many constants (max {})", u16::MAX));
-                    }
-                    return 0;
-                }
-                let idx = self.consts.len() as u16;
-                self.const_index.insert(key, idx);
-                self.consts.push(val);
+        if !is_bool && let Some(key) = val.to_key() {
+            if let Some(&idx) = self.const_index.get(&key) {
                 return idx;
             }
+            if self.consts.len() >= u16::MAX as usize {
+                self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some(format!("too many constants (max {})", u16::MAX));
+                }
+                return 0;
+            }
+            let idx = self.consts.len() as u16;
+            self.const_index.insert(key, idx);
+            self.consts.push(val);
+            return idx;
         }
         // Non-hashable constants and booleans: type-exact linear scan.
         for (i, v) in self.consts.iter().enumerate() {
@@ -1376,11 +1374,11 @@ impl Compiler {
     /// to the env.  Called after SetItem/SetSlice on a container that was loaded
     /// via LoadGlobal (which creates a copy, so the mutation must be committed).
     fn writeback_container_if_global(&mut self, container_expr: &Expr, obj_reg: Reg) {
-        if let Expr::Var(name) = container_expr {
-            if self.local_reg(name).is_none() {
-                let name_idx = self.intern_name(name);
-                self.emit(Insn::StoreGlobal(name_idx, obj_reg));
-            }
+        if let Expr::Var(name) = container_expr
+            && self.local_reg(name).is_none()
+        {
+            let name_idx = self.intern_name(name);
+            self.emit(Insn::StoreGlobal(name_idx, obj_reg));
         }
     }
 
@@ -1474,10 +1472,10 @@ impl Compiler {
             }
             Stmt::AugAssign { target, op, expr } => {
                 self.compile_aug_assign(target, *op, expr);
-                if let AssignTarget::Name(name) = target {
-                    if let Some(reg) = self.local_reg(name) {
-                        self.mark_def(reg);
-                    }
+                if let AssignTarget::Name(name) = target
+                    && let Some(reg) = self.local_reg(name)
+                {
+                    self.mark_def(reg);
                 }
             }
             Stmt::AttrAssign { target, name, expr } => {
@@ -1627,51 +1625,52 @@ impl Compiler {
             }
             AssignTarget::Tuple(targets) => {
                 // Fast path: matching tuple literal
-                if let Expr::Tuple(exprs) = expr {
-                    if exprs.len() == targets.len() && !targets.is_empty() {
-                        let mut target_regs: Vec<Option<Reg>> = Vec::with_capacity(targets.len());
-                        let mut all_name_locals = true;
-                        for t in targets.iter() {
-                            match t {
-                                AssignTarget::Name(name) => {
-                                    target_regs.push(self.local_reg(name));
-                                    if self.local_reg(name).is_none() {
-                                        // cell or global — can still do fast path with temps
-                                        all_name_locals = false;
-                                    }
-                                }
-                                _ => {
+                if let Expr::Tuple(exprs) = expr
+                    && exprs.len() == targets.len()
+                    && !targets.is_empty()
+                {
+                    let mut target_regs: Vec<Option<Reg>> = Vec::with_capacity(targets.len());
+                    let mut all_name_locals = true;
+                    for t in targets.iter() {
+                        match t {
+                            AssignTarget::Name(name) => {
+                                target_regs.push(self.local_reg(name));
+                                if self.local_reg(name).is_none() {
+                                    // cell or global — can still do fast path with temps
                                     all_name_locals = false;
-                                    target_regs.push(None);
+                                }
+                            }
+                            _ => {
+                                all_name_locals = false;
+                                target_regs.push(None);
+                            }
+                        }
+                    }
+                    // If ALL are simple name→local, use the original fast path
+                    if all_name_locals && target_regs.iter().all(|r| r.is_some()) {
+                        let saved_next = self.next_temp;
+                        let mut temps: Vec<Reg> = Vec::with_capacity(exprs.len());
+                        for rhs_expr in exprs.iter() {
+                            let r = self.compile_expr(rhs_expr);
+                            let tmp = if r < self.base_temp {
+                                let t = self.alloc_temp();
+                                self.emit(Insn::Move(t, r));
+                                t
+                            } else {
+                                r
+                            };
+                            temps.push(tmp);
+                        }
+                        if !self.failed {
+                            for (dst_reg, src_tmp) in target_regs.iter().zip(temps.iter()) {
+                                let dst = dst_reg.unwrap();
+                                if *src_tmp != dst {
+                                    self.emit(Insn::Move(dst, *src_tmp));
                                 }
                             }
                         }
-                        // If ALL are simple name→local, use the original fast path
-                        if all_name_locals && target_regs.iter().all(|r| r.is_some()) {
-                            let saved_next = self.next_temp;
-                            let mut temps: Vec<Reg> = Vec::with_capacity(exprs.len());
-                            for rhs_expr in exprs.iter() {
-                                let r = self.compile_expr(rhs_expr);
-                                let tmp = if r < self.base_temp {
-                                    let t = self.alloc_temp();
-                                    self.emit(Insn::Move(t, r));
-                                    t
-                                } else {
-                                    r
-                                };
-                                temps.push(tmp);
-                            }
-                            if !self.failed {
-                                for (dst_reg, src_tmp) in target_regs.iter().zip(temps.iter()) {
-                                    let dst = dst_reg.unwrap();
-                                    if *src_tmp != dst {
-                                        self.emit(Insn::Move(dst, *src_tmp));
-                                    }
-                                }
-                            }
-                            self.next_temp = saved_next;
-                            return;
-                        }
+                        self.next_temp = saved_next;
+                        return;
                     }
                 }
 
@@ -1883,10 +1882,11 @@ impl Compiler {
 
         let is_infinite = matches!(cond, Expr::Bool(true) | Expr::Int(1));
 
-        if !is_infinite && !body_has_continue(body) {
-            if self.try_compile_while_range(cond, body, else_branch) {
-                return;
-            }
+        if !is_infinite
+            && !body_has_continue(body)
+            && self.try_compile_while_range(cond, body, else_branch)
+        {
+            return;
         }
 
         let is_licm = !is_infinite && {
@@ -2795,7 +2795,7 @@ impl Compiler {
         }
 
         // Normal exit from try body:
-        if let Some(_) = inner_handler_patch {
+        if inner_handler_patch.is_some() {
             self.emit(Insn::PopExcept);
         }
         // Compile else branch (normal path only)

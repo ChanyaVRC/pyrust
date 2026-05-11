@@ -467,7 +467,7 @@ impl Value {
     pub fn int(n: i64) -> Self {
         const MAX_I48: i64 = (1 << 47) - 1;
         const MIN_I48: i64 = -(1 << 47);
-        if n >= MIN_I48 && n <= MAX_I48 {
+        if (MIN_I48..=MAX_I48).contains(&n) {
             Value(TAG_INT_BITS | (n as u64 & PAYLOAD_MASK))
         } else {
             Value::opaque(Opaque::PyBigInt(Rc::new(BigInt::from(n))))
@@ -708,7 +708,7 @@ impl Value {
     /// Returns a stable identity value for pool-allocated types:
     /// - list/tuple: reads the monotonic obj_id stored at hdr+24
     /// - str: uses the pool pointer address directly
-    /// Returns `None` for Rc-based and primitive types (callers handle those directly).
+    ///   Returns `None` for Rc-based and primitive types (callers handle those directly).
     pub fn value_id(&self) -> Option<i64> {
         match top16(self.0) {
             TAG_TUPLE | TAG_LIST => {
@@ -1207,8 +1207,8 @@ impl PartialEq for Value {
             (ValueKind::BigInt(a), ValueKind::BigInt(b)) => a == b,
             (ValueKind::BigInt(a), ValueKind::Int(b)) => *a == BigInt::from(b),
             (ValueKind::Int(a), ValueKind::BigInt(b)) => BigInt::from(a) == *b,
-            (ValueKind::BigInt(a), ValueKind::Float(b)) => a.to_f64().map_or(false, |af| af == b),
-            (ValueKind::Float(a), ValueKind::BigInt(b)) => b.to_f64().map_or(false, |bf| a == bf),
+            (ValueKind::BigInt(a), ValueKind::Float(b)) => a.to_f64() == Some(b),
+            (ValueKind::Float(a), ValueKind::BigInt(b)) => b.to_f64() == Some(a),
             (ValueKind::Str(a), ValueKind::Str(b)) => a == b,
             (ValueKind::Bool(a), ValueKind::Bool(b)) => a == b,
             // Python: True == 1 is True
@@ -1306,7 +1306,7 @@ fn class_chain_contains_exception(class: &Rc<RefCell<PyClass>>) -> bool {
 
 fn exception_args(instance: &Rc<RefCell<PyInstance>>) -> Vec<Value> {
     match instance.borrow().attrs.get("args").map(|v| v.kind()) {
-        Some(ValueKind::List(args)) => args.iter().cloned().collect(),
+        Some(ValueKind::List(args)) => args.to_vec(),
         _ => Vec::new(),
     }
 }
