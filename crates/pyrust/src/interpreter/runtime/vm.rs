@@ -4,6 +4,8 @@ enum IterState {
     Range { cur: i64, stop: i64, step: i64 },
     /// Lazy: reads directly from the source register on each ForIter call.
     /// Avoids the O(n) upfront clone that Materialized would require for List/Tuple.
+    /// Behaves like CPython's list_iterator: checks pos < len each tick; no
+    /// mutation detection (appending extends iteration, removing shortens it).
     Indexed { reg: crate::bytecode::Reg, pos: usize },
     /// Lazy enumerate: yields (counter, item) pairs from pre-materialized items.
     /// The source is materialised once at GetIter time, but individual tuples are
