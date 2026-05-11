@@ -712,6 +712,21 @@ impl Parser {
             return self.parse_lambda();
         }
         let expr = self.parse_or()?;
+        // Walrus operator: NAME := expr
+        if self.is(&Token::Walrus) {
+            if let Expr::Var(name) = expr {
+                self.bump(); // consume :=
+                let value = self.parse_expr()?;
+                return Ok(Expr::Named {
+                    target: name,
+                    value: Box::new(value),
+                });
+            } else {
+                return Err(PyError::Parse(
+                    "walrus operator ':=' requires a name on the left-hand side".to_string(),
+                ));
+            }
+        }
         // Ternary: expr if cond else other
         if self.is(&Token::If) {
             self.bump();

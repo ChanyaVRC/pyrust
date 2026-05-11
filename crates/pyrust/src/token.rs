@@ -43,6 +43,7 @@ pub enum Token {
     RBrace,
     Comma,
     Colon,
+    Walrus, // :=
     Semicolon,
     Dot,
     Arrow, // ->

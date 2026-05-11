@@ -204,6 +204,11 @@ impl Interpreter {
                     "comprehensions are only supported in compiled (bytecode) mode".to_string(),
                 ))
             }
+            Expr::Named { target, value } => {
+                let val = self.eval_expr(value)?;
+                self.assign_name(target.clone(), val.clone());
+                Ok(val)
+            }
         }
     }
 
