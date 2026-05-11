@@ -1809,13 +1809,13 @@ fn vm_eval_unary(op: UnaryOp, val: Value) -> Result<Value> {
         UnaryOp::Neg => match val.kind() {
             ValueKind::Int(v) => Ok(Value::int(-v)),
             ValueKind::Float(v) => Ok(Value::float(-v)),
-            _ => Err(PyError::Runtime("bad operand type for unary -".to_string())),
+            _ => Err(PyError::Named("TypeError".to_string(), "bad operand type for unary -".to_string())),
         },
         UnaryOp::Not => Ok(Value::bool_(!val.truthy())),
         UnaryOp::BitNot => match val.kind() {
             ValueKind::Int(v) => Ok(Value::int(!v)),
             ValueKind::Bool(b) => Ok(Value::int(if b { -2 } else { -1 })),
-            _ => Err(PyError::Runtime(
+            _ => Err(PyError::Named("TypeError".to_string(),
                 "bad operand type for unary ~: use integer".to_string(),
             )),
         },
@@ -1823,7 +1823,7 @@ fn vm_eval_unary(op: UnaryOp, val: Value) -> Result<Value> {
             ValueKind::Int(v) => Ok(Value::int(v)),
             ValueKind::Float(v) => Ok(Value::float(v)),
             ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
-            _ => Err(PyError::Runtime("bad operand type for unary +".to_string())),
+            _ => Err(PyError::Named("TypeError".to_string(), "bad operand type for unary +".to_string())),
         },
     }
 }

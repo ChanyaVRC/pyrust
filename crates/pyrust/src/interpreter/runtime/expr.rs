@@ -1,6 +1,6 @@
 impl Interpreter {
     fn unsupported_binary_operand(op: &str) -> PyError {
-        PyError::Runtime(format!("unsupported operand types for {op}"))
+        PyError::Named("TypeError".to_string(), format!("unsupported operand type(s) for {op}"))
     }
 
     fn eval_expr(&mut self, expr: &Expr) -> Result<Value> {
@@ -47,10 +47,10 @@ impl Interpreter {
                         match value.kind() {
                             ValueKind::Int(v) => Ok(Value::int(-v)),
                             ValueKind::Float(v) => Ok(Value::float(-v)),
-                            _ => Err(PyError::Runtime("bad operand type for unary -".to_string())),
+                            _ => Err(PyError::Named("TypeError".to_string(), "bad operand type for unary -".to_string())),
                         }
                     }
-                    UnaryOp::Not => Ok(Value::bool_(!value.truthy())),
+                    UnaryOp::Not => Ok(Value::bool_(!self.truthy_value(&value)?)),
                     UnaryOp::BitNot => {
                         if let Some(r) = self.try_dunder_unary(&value, "__invert__") {
                             return r;
@@ -58,7 +58,7 @@ impl Interpreter {
                         match value.kind() {
                             ValueKind::Int(v) => Ok(Value::int(!v)),
                             ValueKind::Bool(b) => Ok(Value::int(if b { -2 } else { -1 })),
-                            _ => Err(PyError::Runtime("bad operand type for unary ~: use integer".to_string())),
+                            _ => Err(PyError::Named("TypeError".to_string(), "bad operand type for unary ~: use integer".to_string())),
                         }
                     }
                     UnaryOp::Pos => {
@@ -69,7 +69,7 @@ impl Interpreter {
                             ValueKind::Int(v) => Ok(Value::int(v)),
                             ValueKind::Float(v) => Ok(Value::float(v)),
                             ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
-                            _ => Err(PyError::Runtime("bad operand type for unary +".to_string())),
+                            _ => Err(PyError::Named("TypeError".to_string(), "bad operand type for unary +".to_string())),
                         }
                     }
                 }
@@ -321,11 +321,10 @@ impl Interpreter {
             {
                 let func = Rc::clone(f);
                 let self_val = Value::py_instance(Rc::clone(inst));
-                return Some(self.call_user_function_expanded(
-                    func,
-                    &[],
-                    &[self_val, right.clone()],
-                ));
+                match self.call_user_function_expanded(func, &[], &[self_val, right.clone()]) {
+                    Ok(v) if is_not_implemented(&v) => {}
+                    result => return Some(result),
+                }
             }
         }
         if let ValueKind::PyInstance(inst) = right.kind() {
@@ -408,8 +407,6 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__eq__", "__eq__") {
                     return r;
                 }
-                // No __eq__ defined: fall back to identity (pointer) equality, which is
-                // Python's default for user objects that don't override __eq__.
                 Ok(Value::bool_(left == right))
             }
             BinaryOp::Ne => {
@@ -686,7 +683,7 @@ impl Interpreter {
             ValueKind::Int(v) => Ok(v as f64),
             ValueKind::Float(v) => Ok(v),
             ValueKind::Bool(b) => Ok(if b { 1.0 } else { 0.0 }),
-            _ => Err(PyError::Runtime("expected number".to_string())),
+            _ => Err(PyError::Named("TypeError".to_string(), "expected number".to_string())),
         }
     }
 
@@ -717,12 +714,12 @@ impl Interpreter {
         let a = match left.kind() {
             ValueKind::Int(v) => v,
             ValueKind::Bool(b) => if b { 1 } else { 0 },
-            _ => return Err(PyError::Runtime("bitwise op requires integer".to_string())),
+            _ => return Err(PyError::Named("TypeError".to_string(), "bitwise op requires integer".to_string())),
         };
         let b = match right.kind() {
             ValueKind::Int(v) => v,
             ValueKind::Bool(b) => if b { 1 } else { 0 },
-            _ => return Err(PyError::Runtime("bitwise op requires integer".to_string())),
+            _ => return Err(PyError::Named("TypeError".to_string(), "bitwise op requires integer".to_string())),
         };
         Ok(Value::int(op(a, b)?))
     }
@@ -902,6 +899,10 @@ impl Interpreter {
 
 }
 
+fn is_not_implemented(v: &Value) -> bool {
+    matches!(v.kind(), ValueKind::NotImplemented)
+}
+
 fn coerce_numeric(v: Value) -> Value {
     match v.kind() {
         ValueKind::Bool(b) => Value::int(b as i64),
@@ -1048,6 +1049,7 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
         "super" => Some(Value::builtin_function("super")),
         "next" => Some(Value::builtin_function("next")),
         "iter" => Some(Value::builtin_function("iter")),
+        "NotImplemented" => Some(Value::not_implemented()),
         _ => None,
     }
 }

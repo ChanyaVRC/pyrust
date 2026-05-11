@@ -274,6 +274,9 @@ pub enum Opaque {
         fset: Rc<Value>,
         fdel: Rc<Value>,
     },
+    /// The `NotImplemented` singleton.  Returned by binary dunder methods to
+    /// signal that the operation is not supported for the given operand types.
+    NotImplemented,
 }
 
 impl Clone for Opaque {
@@ -340,6 +343,7 @@ impl Clone for Opaque {
                 fset: Rc::clone(fset),
                 fdel: Rc::clone(fdel),
             },
+            Opaque::NotImplemented => Opaque::NotImplemented,
         }
     }
 }
@@ -412,6 +416,7 @@ pub enum ValueKind<'a> {
         fset: &'a Rc<Value>,
         fdel: &'a Rc<Value>,
     },
+    NotImplemented,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -687,6 +692,10 @@ impl Value {
 
     pub fn builtin_function(name: &'static str) -> Self {
         Value::opaque(Opaque::BuiltinFunction(name))
+    }
+
+    pub fn not_implemented() -> Self {
+        Value::opaque(Opaque::NotImplemented)
     }
 
     pub fn py_class(c: Rc<RefCell<PyClass>>) -> Self {
@@ -1056,6 +1065,7 @@ impl Value {
                     fset,
                     fdel,
                 },
+                Opaque::NotImplemented => ValueKind::NotImplemented,
             },
             _ => unreachable!(),
         }
@@ -1096,6 +1106,7 @@ impl Value {
             ValueKind::Generator(_) => true,
             ValueKind::Property { .. } => true,
             ValueKind::PropertyAccessorPartial { .. } => true,
+            ValueKind::NotImplemented => true,
         }
     }
 
@@ -1224,6 +1235,7 @@ impl Value {
             ValueKind::Generator(_) => "<generator object>".to_string(),
             ValueKind::Property { .. } => "<property object>".to_string(),
             ValueKind::PropertyAccessorPartial { .. } => "<property accessor partial>".to_string(),
+            ValueKind::NotImplemented => "NotImplemented".to_string(),
         }
     }
 

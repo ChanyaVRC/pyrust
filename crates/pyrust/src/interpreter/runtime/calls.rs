@@ -715,6 +715,7 @@ impl Interpreter {
                     ValueKind::Generator(_) => Ok(Value::builtin_function("generator")),
                     ValueKind::Property { .. }
                     | ValueKind::PropertyAccessorPartial { .. } => Ok(Value::builtin_function("property")),
+                    ValueKind::NotImplemented => Ok(Value::builtin_function("NotImplementedType")),
                 }
             }
             ValueKind::BuiltinFunction("id") => {
