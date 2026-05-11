@@ -180,6 +180,11 @@ pub enum Insn {
     /// Suspend the generator and yield R[src] to the caller.
     /// The result of the yield expression (sent value) is placed in R[dst].
     Yield { src: Reg, dst: Reg },
+    /// Self-tail-call: reuse current frame by resetting params from R[args_base..args_base+nargs]
+    /// and jumping back to pc=0.  Emitted by the optimizer when Call(r,n)+Return(r) is detected
+    /// and the callee is the same function as the one being executed.  Falls back to a normal
+    /// call+return if the callee turns out to be a different function at runtime.
+    TailCall { args_base: Reg, nargs: u8 },
 }
 
 #[derive(Debug, Clone)]

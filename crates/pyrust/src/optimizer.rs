@@ -43,6 +43,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_dead_store_elim(insns, num_locals);
     let insns = pass_copy_prop(insns);
     let insns = pass_trivial_nop(insns);
+    let insns = pass_self_tail_call(insns);
     let (insns, consts) = pass_compact_consts(insns, consts);
 
     FnCode {
@@ -504,7 +505,8 @@ fn pass_dead_code(insns: Vec<Insn>) -> Vec<Insn> {
             | Insn::RaiseValue(_)
             | Insn::RaiseReRaise
             | Insn::RaiseFrom(_, _)
-            | Insn::RaiseAssert(_) => {}
+            | Insn::RaiseAssert(_)
+            | Insn::TailCall { .. } => {}
 
             Insn::JumpIfFalse(_, k) | Insn::JumpIfTrue(_, k) => {
                 queue.push(pc + 1);
@@ -761,6 +763,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
 
         // Range-based: func + args live in consecutive registers.
         Call(base, argc) | CallMemo(base, argc) => r >= *base && r <= *base + *argc as u32,
+        TailCall { args_base, nargs } => r >= *args_base && r < *args_base + *nargs as u32,
         BuildList(_, base, n) | BuildTuple(_, base, n) => r >= *base && r < *base + *n as u32,
         // BuildDict stores n key-value PAIRS — each pair occupies 2 registers,
         // so the live range is base .. base + 2*n (not base + n).
@@ -1166,7 +1169,8 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | SetAdd(..)
         | ListAppend(..)
         | ListExtend(..)
-        | DictUpdate(..) => {}
+        | DictUpdate(..)
+        | TailCall { .. } => {}
     }
 }
 
@@ -2062,6 +2066,77 @@ pub(crate) fn rewrite_offsets(insn: Insn, old_i: usize, to_new: &[usize]) -> Ins
         MatchExcept(r, k) => MatchExcept(r, fix(k)),
         other => other,
     }
+}
+
+// ─── Self-tail-call optimisation ──────────────────────────────────────────────
+
+/// Replace `Call(r, n) + Return(r)` pairs with `TailCall { args_base: r+1, nargs: n }`.
+///
+/// ## What this enables
+///
+/// When the VM encounters `TailCall`, it checks whether the callee is the same
+/// function that is currently executing.  If it is, it resets the parameter
+/// registers in the current frame and jumps to pc=0 instead of allocating a new
+/// stack frame, turning O(n) stack growth into O(1).
+///
+/// If the callee turns out to be a *different* function at runtime (e.g. the name
+/// was rebound), the VM falls back to a normal call+return, so correctness is
+/// preserved in all cases.
+///
+/// ## Pattern
+///
+/// ```text
+/// Call(r, n)    ← result lands in r
+/// Return(r)     ← immediately returned
+/// ```
+/// →
+/// ```text
+/// TailCall { args_base: r + 1, nargs: n }
+/// ```
+///
+/// The args to the call are in `R[r+1 .. r+1+n]` (per the `Call` convention);
+/// `TailCall` stores only `args_base` and `nargs` — the function register `r`
+/// itself is not needed because the VM already knows the current function.
+///
+/// ## Guards
+///
+/// - The pair must be adjacent (no instructions between `Call` and `Return`).
+/// - The `Return` must return exactly the register that `Call` wrote (`func_reg`).
+/// - Generators are excluded: a generator frame cannot be "restarted" in the same
+///   way (but the is_generator flag is not available here, so we rely on the VM's
+///   generator guard).
+fn pass_self_tail_call(insns: Vec<Insn>) -> Vec<Insn> {
+    let n = insns.len();
+    if n < 2 {
+        return insns;
+    }
+    let mut transformed = insns;
+    let mut keep = vec![true; n];
+
+    let mut i = 0;
+    while i + 1 < n {
+        let replace: Option<Insn> = match (&transformed[i], &transformed[i + 1]) {
+            // Match both Call and CallMemo — pure functions use CallMemo but are
+            // still valid candidates for self-tail-call optimisation.
+            (
+                &Insn::Call(func_reg, nargs) | &Insn::CallMemo(func_reg, nargs),
+                &Insn::Return(ret_reg),
+            ) if func_reg == ret_reg => Some(Insn::TailCall {
+                args_base: func_reg + 1,
+                nargs,
+            }),
+            _ => None,
+        };
+        if let Some(tail_insn) = replace {
+            // Replace Call/CallMemo with TailCall, drop the Return.
+            transformed[i] = tail_insn;
+            keep[i + 1] = false;
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    compact(transformed, &keep)
 }
 
 #[cfg(test)]
@@ -3723,5 +3798,104 @@ mod tests {
         ];
         let out = pass_ivsr(insns, &mut consts, &mut num_regs);
         assert_eq!(out.len(), 5, "not eligible: src ≠ iv");
+    }
+
+    // ── pass_self_tail_call ───────────────────────────────────────────────────
+
+    #[test]
+    fn self_tail_call_fuses_call_return() {
+        // Call(func_reg=2, nargs=2) + Return(2) → TailCall { args_base: 3, nargs: 2 }
+        // The Return is dropped; one instruction remains.
+        let insns = vec![Insn::Call(2, 2), Insn::Return(2)];
+        let out = pass_self_tail_call(insns);
+        assert_eq!(out.len(), 1, "Return should be dropped");
+        assert!(
+            matches!(
+                out[0],
+                Insn::TailCall {
+                    args_base: 3,
+                    nargs: 2
+                }
+            ),
+            "Call+Return should become TailCall with args_base=func_reg+1"
+        );
+    }
+
+    #[test]
+    fn self_tail_call_skips_when_return_uses_different_reg() {
+        // Call writes to r2, but Return reads r3 → not a tail call pattern.
+        let insns = vec![
+            Insn::Call(2, 2),
+            Insn::Return(3), // different register
+        ];
+        let out = pass_self_tail_call(insns);
+        assert_eq!(
+            out.len(),
+            2,
+            "no fusion when Return reads a different register"
+        );
+        assert!(matches!(out[0], Insn::Call(2, 2)));
+        assert!(matches!(out[1], Insn::Return(3)));
+    }
+
+    #[test]
+    fn self_tail_call_skips_when_not_adjacent() {
+        // Call is NOT immediately followed by Return.
+        let insns = vec![
+            Insn::Call(2, 1),
+            Insn::Move(0, 2), // intervening instruction
+            Insn::Return(0),
+        ];
+        let out = pass_self_tail_call(insns);
+        assert_eq!(
+            out.len(),
+            3,
+            "no fusion when Call and Return are not adjacent"
+        );
+        assert!(matches!(out[0], Insn::Call(2, 1)));
+    }
+
+    #[test]
+    fn self_tail_call_nargs_zero() {
+        // Call(func_reg=0, nargs=0) + Return(0) → TailCall { args_base: 1, nargs: 0 }
+        let insns = vec![Insn::Call(0, 0), Insn::Return(0)];
+        let out = pass_self_tail_call(insns);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(
+            out[0],
+            Insn::TailCall {
+                args_base: 1,
+                nargs: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn self_tail_call_on_compiled_factorial() {
+        // def factorial(n, acc=1):
+        //     if n <= 1: return acc
+        //     return factorial(n - 1, acc * n)
+        let code = compile_fn(
+            "def factorial(n, acc=1):\n    if n <= 1:\n        return acc\n    return factorial(n - 1, acc * n)\n",
+        );
+        let optimized = optimize(code);
+        let inner = &optimized.fn_protos[0].code;
+        let has_tailcall = inner
+            .insns
+            .iter()
+            .any(|i| matches!(i, Insn::TailCall { .. }));
+        assert!(
+            has_tailcall,
+            "recursive tail call in factorial should be optimised to TailCall"
+        );
+        // There should be no Call+Return pair left — the optimiser fused them all.
+        let has_plain_call = inner
+            .insns
+            .iter()
+            .any(|i| matches!(i, Insn::Call(..) | Insn::CallMemo(..)));
+        assert!(
+            !has_plain_call,
+            "after TCO all recursive calls should be TailCall, not Call/CallMemo"
+        );
     }
 }
