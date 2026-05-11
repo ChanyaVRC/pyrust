@@ -4,7 +4,7 @@ enum IterState {
     Range { cur: i64, stop: i64, step: i64 },
     /// Lazy: reads directly from the source register on each ForIter call.
     /// Avoids the O(n) upfront clone that Materialized would require for List/Tuple.
-    Indexed { reg: crate::bytecode::Reg, pos: usize },
+    Indexed { reg: crate::bytecode::Reg, pos: usize, initial_len: usize },
     /// Lazy enumerate: yields (counter, item) pairs from pre-materialized items.
     /// The source is materialised once at GetIter time, but individual tuples are
     /// built on demand instead of all at once.
@@ -813,7 +813,14 @@ impl Interpreter {
                     } else { false };
 
                     let state = if is_list_or_tuple_local {
-                        IterState::Indexed { reg: *src, pos: 0 }
+                        let initial_len = if let Some(v) = &regs[*src as usize] {
+                            match v.kind() {
+                                ValueKind::List(items) => items.len(),
+                                ValueKind::Tuple(items) => items.len(),
+                                _ => 0,
+                            }
+                        } else { 0 };
+                        IterState::Indexed { reg: *src, pos: 0, initial_len }
                     } else {
                         let src_val = vm_try!(vm_read(regs, *src, num_locals));
                         match src_val.kind() {
@@ -876,13 +883,23 @@ impl Interpreter {
                                 regs[*dst as usize] = Some(v);
                             }
                         }
-                        Some(IterState::Indexed { reg, pos }) => {
+                        Some(IterState::Indexed { reg, pos, initial_len }) => {
                             let src = *reg as usize;
                             let cur_pos = *pos;
                             let v_opt: Option<Value> = if let Some(rv) = &regs[src] {
                                 match rv.kind() {
-                                    ValueKind::List(items) if cur_pos < items.len() => {
-                                        Some(items[cur_pos].clone())
+                                    ValueKind::List(items) => {
+                                        if items.len() != *initial_len {
+                                            return Err(PyError::Named(
+                                                "RuntimeError".to_string(),
+                                                "list changed size during iteration".to_string(),
+                                            ));
+                                        }
+                                        if cur_pos < items.len() {
+                                            Some(items[cur_pos].clone())
+                                        } else {
+                                            None
+                                        }
                                     }
                                     ValueKind::Tuple(items) if cur_pos < items.len() => {
                                         Some(items[cur_pos].clone())
