@@ -874,10 +874,23 @@ impl Interpreter {
             for (index, param) in function.params.iter().enumerate() {
                 if bound_args[index].is_none() {
                     bound_args[index] = Some(param.default.clone().ok_or_else(|| {
-                        PyError::Runtime(format!(
-                            "{}() missing required positional argument: '{}'",
-                            function.name, param.name
-                        ))
+                        if param.is_keyword_only {
+                            PyError::Named(
+                                "TypeError".to_string(),
+                                format!(
+                                    "{}() missing 1 required keyword-only argument: '{}'",
+                                    function.name, param.name
+                                ),
+                            )
+                        } else {
+                            PyError::Named(
+                                "TypeError".to_string(),
+                                format!(
+                                    "{}() missing required positional argument: '{}'",
+                                    function.name, param.name
+                                ),
+                            )
+                        }
                     })?);
                 }
             }
@@ -1040,11 +1053,22 @@ impl Interpreter {
                     v
                 } else if let Some(d) = &param.default {
                     d.clone()
+                } else if param.is_keyword_only {
+                    return Err(PyError::Named(
+                        "TypeError".to_string(),
+                        format!(
+                            "{}() missing 1 required keyword-only argument: '{}'",
+                            function.name, param.name
+                        ),
+                    ));
                 } else {
-                    return Err(PyError::Runtime(format!(
-                        "{}() missing required argument: '{}'",
-                        function.name, param.name
-                    )));
+                    return Err(PyError::Named(
+                        "TypeError".to_string(),
+                        format!(
+                            "{}() missing required argument: '{}'",
+                            function.name, param.name
+                        ),
+                    ));
                 }
             };
             param_vals.push(value);

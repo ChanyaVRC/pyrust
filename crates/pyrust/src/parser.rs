@@ -248,6 +248,7 @@ impl Parser {
         let mut seen_default = false;
         let mut seen_args = false;
         let mut seen_kwargs = false;
+        let mut seen_star = false; // bare * or *args seen — params after are keyword-only
 
         if self.is(&Token::RParen) {
             return Ok(params);
@@ -273,10 +274,12 @@ impl Parser {
                     default,
                     is_args: false,
                     is_kwargs: true,
+                    is_keyword_only: false,
                 });
                 seen_kwargs = true;
             } else if self.is(&Token::Star) {
                 self.bump();
+                seen_star = true;
                 if self.is(&Token::Comma) || self.is(&Token::RParen) {
                     // bare * separator: keyword-only follows
                 } else {
@@ -286,6 +289,7 @@ impl Parser {
                         default: None,
                         is_args: true,
                         is_kwargs: false,
+                        is_keyword_only: false,
                     });
                     seen_args = true;
                 }
@@ -303,7 +307,7 @@ impl Parser {
                             seen_default = true;
                             Some(self.parse_expr()?)
                         } else {
-                            if seen_default && !seen_args {
+                            if seen_default && !seen_args && !seen_star {
                                 return Err(PyError::Parse(
                                     "non-default argument follows default argument".to_string(),
                                 ));
@@ -315,6 +319,7 @@ impl Parser {
                             default,
                             is_args: false,
                             is_kwargs: false,
+                            is_keyword_only: seen_star,
                         });
                     }
                     other => {

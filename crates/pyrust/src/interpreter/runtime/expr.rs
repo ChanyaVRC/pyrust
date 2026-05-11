@@ -188,7 +188,7 @@ impl Interpreter {
                     id: crate::value::next_fn_id(),
                     name: "<lambda>".to_string(),
                     params: params.iter().map(|n| crate::value::UserFunctionParam {
-                        name: n.clone(), default: None, is_args: false, is_kwargs: false,
+                        name: n.clone(), default: None, is_args: false, is_kwargs: false, is_keyword_only: false,
                     }).collect(),
                     is_pure: is_pure_body(&lambda_body, &std::collections::HashSet::new()),
                     local_names: Rc::new(local_names),

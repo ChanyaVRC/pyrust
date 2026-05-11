@@ -19,6 +19,7 @@ pub struct FnParamSpec {
     pub has_default: Vec<bool>,
     pub is_args: Vec<bool>,
     pub is_kwargs: Vec<bool>,
+    pub is_keyword_only: Vec<bool>,
 }
 
 /// Prototype for a nested function or class body.  Created at compile time,
