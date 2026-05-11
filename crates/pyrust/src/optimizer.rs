@@ -133,6 +133,7 @@ fn pass_binop_const_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             if rhs == lc_reg
                 && lhs != lc_reg
                 && lc_reg >= num_locals
+                && !slice_has_back_edge(&transformed[i + 2..])
                 && (dst == lc_reg || !reg_is_read_in(&transformed[i + 2..], lc_reg))
             {
                 keep[i] = false;
@@ -145,6 +146,7 @@ fn pass_binop_const_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 && matches!(op, BinaryOp::Add | BinaryOp::Mul)
                 && rhs != lc_reg
                 && lc_reg >= num_locals
+                && !slice_has_back_edge(&transformed[i + 2..])
                 && (dst == lc_reg || !reg_is_read_in(&transformed[i + 2..], lc_reg))
             {
                 keep[i] = false;
@@ -510,6 +512,7 @@ fn pass_unary_fold(insns: Vec<Insn>, num_locals: u32, consts: &mut Vec<Value>) -
             (Insn::LoadConst(lc_reg, c_idx), Insn::UnaryOp(dst, op, src))
                 if *src == *lc_reg
                     && *lc_reg >= num_locals
+                    && !slice_has_back_edge(&transformed[i + 2..])
                     // When dst==lc_reg the fusion overwrites lc_reg with the result,
                     // so any later read of lc_reg will see the correct folded value.
                     // When dst!=lc_reg, lc_reg would become uninitialized after removal.
@@ -593,6 +596,30 @@ fn pass_const_branch_elim(insns: Vec<Insn>, consts: &[Value]) -> Vec<Insn> {
 // ─── Register liveness helpers ────────────────────────────────────────────────
 
 /// Returns `true` if register `r` is read by any instruction in `insns`.
+/// Returns `true` if `insns` contains a backward jump (negative offset).
+///
+/// A back-edge means the slice re-enters an earlier instruction, so a forward
+/// liveness scan alone cannot prove a register is dead — the register may be
+/// read on the next loop iteration.  Passes that would remove a `LoadConst`
+/// based solely on `reg_is_read_in` must guard with this check.
+fn slice_has_back_edge(insns: &[Insn]) -> bool {
+    insns.iter().any(|insn| {
+        matches!(insn,
+            Insn::Jump(k)
+            | Insn::JumpIfFalse(_, k)
+            | Insn::JumpIfTrue(_, k)
+            | Insn::ForIter(_, _, k)
+            | Insn::ForCountReg(_, _, _, _, k)
+            | Insn::ForCountConst(_, _, _, _, k)
+            | Insn::CmpJumpIfFalse(_, _, _, k)
+            | Insn::CmpJumpIfTrue(_, _, _, k)
+            | Insn::CmpJumpIfFalseConst(_, _, _, k)
+            | Insn::CmpJumpIfTrueConst(_, _, _, k)
+            if *k < 0
+        )
+    })
+}
+
 /// Used as a forward liveness guard before removing a `LoadConst` that produced `r`.
 fn reg_is_read_in(insns: &[Insn], r: u32) -> bool {
     insns.iter().any(|insn| insn_reads_reg(insn, r))
@@ -1889,5 +1916,43 @@ mod tests {
             matches!(out[0], Insn::BinOp(5, 5, BinaryOp::Mul, 1)),
             "BinOpInPlace(dst==lhs) should always downgrade to BinOp"
         );
+    }
+
+    // ── slice_has_back_edge ────────────────────────────────────────────────────
+
+    #[test]
+    fn back_edge_detected_on_negative_jump() {
+        // Jump(-2) is a backward edge
+        let insns = vec![Insn::Jump(-2)];
+        assert!(slice_has_back_edge(&insns));
+    }
+
+    #[test]
+    fn no_back_edge_in_forward_only_slice() {
+        // All jumps are non-negative → no back-edge
+        let insns = vec![Insn::JumpIfFalse(0, 1), Insn::Return(0)];
+        assert!(!slice_has_back_edge(&insns));
+    }
+
+    #[test]
+    fn binop_const_fusion_skips_when_back_edge_present() {
+        use crate::ast::BinaryOp;
+        use crate::value::Value;
+        // LoadConst(r5, 0) + BinOp(r3, r2, Mul, r5) + ForIter(r6, 0, -2)
+        // The ForIter has a negative offset → back-edge; fusion must not remove LoadConst.
+        let mut consts = vec![Value::int(4)];
+        let insns = vec![
+            Insn::LoadConst(5, 0),
+            Insn::BinOp(3, 2, BinaryOp::Mul, 5),
+            Insn::ForIter(6, 0, -2),
+            Insn::Return(3),
+        ];
+        let out = pass_binop_const_fusion(insns, 2);
+        // LoadConst must survive — r5 is live on the back-edge
+        assert!(
+            matches!(out[0], Insn::LoadConst(5, 0)),
+            "LoadConst must not be removed when a back-edge is present"
+        );
+        let _ = consts; // suppress unused warning
     }
 }
