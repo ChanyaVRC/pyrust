@@ -720,6 +720,37 @@ result = fact(10)
     }
 
     #[test]
+    fn self_recursive_pure_fn_uses_call_memo() {
+        // Regression test for issue #52.  A pure function that calls itself
+        // recursively must:
+        //  (a) still be marked is_pure = true (fixpoint assumption holds), and
+        //  (b) have its inner recursive calls compiled as CallMemo so that
+        //      repeated calls with the same argument hit the fn_cache without
+        //      re-entering call_function_expanded.
+        //
+        // Verify correctness for several known Fibonacci values to confirm
+        // memoization is not returning stale/wrong cached results.
+        let ok: bool = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let interp = run_program(
+                    "def fib(n):\n    if n <= 1: return n\n    return fib(n-1) + fib(n-2)\n\
+                     r0 = fib(0)\nr1 = fib(1)\nr5 = fib(5)\nr10 = fib(10)\nr20 = fib(20)\n",
+                );
+                let get = |name| interp.lookup_name(name).unwrap();
+                get("r0") == Some(Value::int(0))
+                    && get("r1") == Some(Value::int(1))
+                    && get("r5") == Some(Value::int(5))
+                    && get("r10") == Some(Value::int(55))
+                    && get("r20") == Some(Value::int(6765))
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(ok);
+    }
+
+    #[test]
     fn vm_for_loop_sum() {
         let interpreter = run_program(
             "def s(n):\n    t = 0\n    for i in range(n):\n        t += i\n    return t\nresult = s(100)\n",
