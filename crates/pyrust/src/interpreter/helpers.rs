@@ -938,7 +938,7 @@ fn value_to_float(v: &Value, ctx: &str) -> Result<f64> {
         ValueKind::Float(f) => Ok(f),
         ValueKind::Int(i) => Ok(i as f64),
         ValueKind::Bool(b) => Ok(if b { 1.0 } else { 0.0 }),
-        _ => Err(PyError::Runtime(format!(
+        _ => Err(PyError::Named("TypeError".to_string(), format!(
             "{ctx}: a float is required, not {}",
             v.repr()
         ))),
