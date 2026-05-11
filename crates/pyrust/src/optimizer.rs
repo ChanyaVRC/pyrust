@@ -353,6 +353,13 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | LoadExc(r)
         | MakeClass(r, _, _, _, _) => Some(*r),
         CallMethod { dst, .. } | CallMethodExpanded { dst, .. } => Some(*dst),
+        // Loop instructions write to their first register on each iteration.
+        // Without these arms, pass_const_fold would fail to invalidate the
+        // known-constant map entry for the destination, producing stale folds
+        // if the blanket known.clear() at loop instructions were ever removed.
+        ForIter(dst, _, _) => Some(*dst),
+        ForCountReg(var, _, _, _, _) => Some(*var),
+        ForCountConst(var, _, _, _, _) => Some(*var),
         _ => None,
     }
 }
