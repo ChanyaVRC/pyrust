@@ -964,6 +964,21 @@ struct LoopCtx {
     /// Indices of Jump(0) instructions emitted for `continue` when continue_target
     /// was None; fixed up once continue_target is established.
     continue_patches: Vec<usize>,
+    /// Depth of `Compiler::except_cleanups` at the point this loop was entered.
+    /// `break` and `continue` must emit cleanups for entries above this depth.
+    cleanup_depth: usize,
+}
+
+/// Describes the cleanup that must be emitted before an early exit
+/// (`break`, `continue`, or `return`) that crosses a guarded block boundary.
+#[derive(Clone)]
+enum EarlyExitCleanup {
+    /// Inside a try-body that has an active `SetupExcept` on the handler stack.
+    /// Early exit must emit `PopExcept` then optionally inline the finally block.
+    TryBody { finally_stmts: Option<Vec<Stmt>> },
+    /// Inside an except-handler body where `active_exception` is set.
+    /// Early exit must emit `EndExcept` then optionally inline the finally block.
+    ExceptBody { finally_stmts: Option<Vec<Stmt>> },
 }
 
 struct Compiler {
@@ -980,6 +995,10 @@ struct Compiler {
     max_iter: u8,
     max_reg: Reg,
     loops: Vec<LoopCtx>,
+    /// Stack of cleanup actions needed by early exits (`break`/`continue`/`return`)
+    /// that cross a `try`/`except` boundary.  Entries are pushed when entering a
+    /// guarded block and popped when leaving it normally.
+    except_cleanups: Vec<EarlyExitCleanup>,
     failed: bool,
     error_msg: Option<String>,
     def_set: u64,
@@ -1018,6 +1037,7 @@ impl Compiler {
                 0
             },
             loops: Vec::new(),
+            except_cleanups: Vec::new(),
             failed: n > Reg::MAX as usize,
             error_msg: if n > Reg::MAX as usize {
                 Some(format!("too many local variables (max {})", Reg::MAX))
@@ -1233,6 +1253,44 @@ impl Compiler {
         }
     }
 
+    /// Emit cleanup instructions for all `EarlyExitCleanup` entries in
+    /// `self.except_cleanups[from_depth..]`, iterating innermost-first (i.e.
+    /// from the top of the stack downward).
+    ///
+    /// Called before `break`, `continue`, or `return` to unwind any active
+    /// `try`/`except` guards that the early exit crosses.
+    fn emit_early_exit_cleanups(&mut self, from_depth: usize) {
+        if self.except_cleanups.len() <= from_depth {
+            return;
+        }
+        // Clone to avoid borrow-checker conflicts when `compile_block` borrows
+        // `self` mutably while we still hold a reference to the cleanup vec.
+        let cleanups: Vec<EarlyExitCleanup> = self.except_cleanups[from_depth..]
+            .iter()
+            .rev()
+            .cloned()
+            .collect();
+        for cleanup in cleanups {
+            if self.failed {
+                return;
+            }
+            match cleanup {
+                EarlyExitCleanup::TryBody { finally_stmts } => {
+                    self.emit(Insn::PopExcept);
+                    if let Some(stmts) = finally_stmts {
+                        self.compile_block(&stmts);
+                    }
+                }
+                EarlyExitCleanup::ExceptBody { finally_stmts } => {
+                    self.emit(Insn::EndExcept);
+                    if let Some(stmts) = finally_stmts {
+                        self.compile_block(&stmts);
+                    }
+                }
+            }
+        }
+    }
+
     fn finish(self) -> Result<FnCode, String> {
         if self.failed {
             return Err(self
@@ -1315,6 +1373,12 @@ impl Compiler {
                     }
                     return;
                 }
+                let last = self.loops.len() - 1;
+                let depth = self.loops[last].cleanup_depth;
+                self.emit_early_exit_cleanups(depth);
+                if self.failed {
+                    return;
+                }
                 let idx = self.emit(Insn::Jump(0));
                 let last = self.loops.len() - 1;
                 self.loops[last].break_patches.push(idx);
@@ -1325,6 +1389,12 @@ impl Compiler {
                     if self.error_msg.is_none() {
                         self.error_msg = Some("'continue' outside loop".to_string());
                     }
+                    return;
+                }
+                let last = self.loops.len() - 1;
+                let depth = self.loops[last].cleanup_depth;
+                self.emit_early_exit_cleanups(depth);
+                if self.failed {
                     return;
                 }
                 let last = self.loops.len() - 1;
@@ -1340,10 +1410,19 @@ impl Compiler {
                 }
             }
             Stmt::Return(None) => {
+                self.emit_early_exit_cleanups(0);
+                if self.failed {
+                    return;
+                }
                 self.emit(Insn::ReturnNone);
             }
             Stmt::Return(Some(expr)) => {
                 let r = self.compile_expr(expr);
+                self.emit_early_exit_cleanups(0);
+                if self.failed {
+                    self.free_temp(r);
+                    return;
+                }
                 self.emit(Insn::Return(r));
                 self.free_temp(r);
             }
@@ -1796,6 +1875,7 @@ impl Compiler {
             break_patches: Vec::new(),
             continue_target: Some(loop_start),
             continue_patches: Vec::new(),
+            cleanup_depth: self.except_cleanups.len(),
         });
         let saved = self.def_set;
         self.compile_block(body);
@@ -1892,6 +1972,7 @@ impl Compiler {
             break_patches: Vec::new(),
             continue_target: Some(loop_start),
             continue_patches: Vec::new(),
+            cleanup_depth: self.except_cleanups.len(),
         });
         let saved = self.def_set;
         // Skip the last body statement (VAR += STEP): ForCount already manages
@@ -2033,6 +2114,7 @@ impl Compiler {
             break_patches: Vec::new(),
             continue_target: Some(loop_start),
             continue_patches: Vec::new(),
+            cleanup_depth: self.except_cleanups.len(),
         });
         let saved = self.def_set;
         self.compile_block(body);
@@ -2144,6 +2226,7 @@ impl Compiler {
             break_patches: Vec::new(),
             continue_target: Some(loop_start),
             continue_patches: Vec::new(),
+            cleanup_depth: self.except_cleanups.len(),
         });
         let saved_def_set = self.def_set;
         self.mark_target_def(target);
@@ -2643,8 +2726,32 @@ impl Compiler {
             None
         };
 
+        // Register cleanup entries so that early exits (break/continue/return)
+        // from the try body emit the correct PopExcept + finally sequence.
+        // The outermost handler is pushed first (will be cleaned up last).
+        if outer_finally_patch.is_some() {
+            self.except_cleanups.push(EarlyExitCleanup::TryBody {
+                finally_stmts: Some(finally_branch.unwrap().to_vec()),
+            });
+        }
+        if inner_handler_patch.is_some() {
+            // Inner except handler: no finally at this level (finally belongs to outer).
+            self.except_cleanups.push(EarlyExitCleanup::TryBody {
+                finally_stmts: None,
+            });
+        }
+
         // Compile try body
         self.compile_block(body);
+
+        // Pop the try-body cleanup entries before emitting normal-exit cleanup.
+        if inner_handler_patch.is_some() {
+            self.except_cleanups.pop();
+        }
+        if outer_finally_patch.is_some() {
+            self.except_cleanups.pop();
+        }
+
         if self.failed {
             return;
         }
@@ -2710,7 +2817,18 @@ impl Compiler {
                     self.emit(Insn::PopExcept);
                 }
 
+                // Register an except-body cleanup so that early exits from the
+                // handler body (break/continue/return) emit EndExcept and inline
+                // the finally block before jumping.
+                self.except_cleanups.push(EarlyExitCleanup::ExceptBody {
+                    finally_stmts: finally_branch.map(|s| s.to_vec()),
+                });
+
                 self.compile_block(&handler.body);
+
+                // Remove the except-body cleanup before emitting normal handler exit.
+                self.except_cleanups.pop();
+
                 if self.failed {
                     return;
                 }
