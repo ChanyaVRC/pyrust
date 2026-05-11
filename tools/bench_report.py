@@ -26,7 +26,7 @@ except ModuleNotFoundError:
     tomllib = None  # type: ignore[assignment]
 
 ROOT = Path(__file__).resolve().parent.parent
-CASES_DIR = ROOT / "tests" / "cases"
+CASES_DIR = ROOT / "crates" / "pyrust" / "tests" / "cases"
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "bench.toml"
 
 
