@@ -208,7 +208,7 @@ impl Interpreter {
         }
     }
 
-    fn eval_index(&self, target: Value, index: Value) -> Result<Value> {
+    fn eval_index(&mut self, target: Value, index: Value) -> Result<Value> {
         match target.kind() {
             ValueKind::List(items) => {
                 let idx = normalize_index(&index, items.len(), "list")?;
@@ -228,6 +228,27 @@ impl Interpreter {
                     .to_key()
                     .ok_or_else(|| PyError::Runtime("unhashable key type".to_string()))?;
                 items.get(&key).cloned().ok_or_else(|| PyError::Runtime("key error".to_string()))
+            }
+            ValueKind::PyInstance(inst) => {
+                let inst_rc = Rc::clone(inst);
+                let class = Rc::clone(&inst_rc.borrow().class);
+                if let Some(method_val) = lookup_class_attr(&class, "__getitem__") {
+                    if let ValueKind::UserFunction(f) = method_val.kind() {
+                        let func = Rc::clone(f);
+                        return self.call_user_function_expanded(
+                            func,
+                            &[ExpandedCallArg { name: None, value: index }],
+                            &[Value::py_instance(inst_rc)],
+                        );
+                    }
+                }
+                Err(PyError::Named(
+                    "TypeError".to_string(),
+                    format!(
+                        "'{}' object is not subscriptable",
+                        class.borrow().name
+                    ),
+                ))
             }
             _ => Err(PyError::Runtime("object is not subscriptable".to_string())),
         }

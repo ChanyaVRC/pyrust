@@ -15,6 +15,9 @@ enum IterState {
     Zip { sources: Vec<Vec<Value>>, pos: usize, len: usize },
     /// Lazy reversed: walks a materialized Vec from end to start without mutating it.
     ReversedItems { items: Vec<Value>, pos: usize },
+    /// User-defined iterator: holds the iterator object (result of __iter__).
+    /// Each ForIter call invokes __next__() on it and stops on StopIteration.
+    UserDefined(Value),
 }
 
 fn int_int_fast(a: i64, b: i64, op: BinaryOp) -> Option<Value> {
@@ -253,7 +256,12 @@ impl Interpreter {
                 }
                 Insn::UnaryOp(dst, op, src) => {
                     let val = vm_try!(vm_read(regs, *src, num_locals));
-                    let result = vm_try!(vm_eval_unary(*op, val));
+                    let result = if *op == UnaryOp::Not {
+                        // Dispatch __bool__ for instances before falling back to truthy().
+                        Value::bool_(!vm_try!(self.truthy_value(&val)))
+                    } else {
+                        vm_try!(vm_eval_unary(*op, val))
+                    };
                     regs[*dst as usize] = Some(result);
                 }
 
@@ -392,6 +400,7 @@ impl Interpreter {
                         let target_kind = regs[*obj as usize].as_ref().map(|v| match v.kind() {
                             ValueKind::List(_) => 1u8,
                             ValueKind::Dict(_) => 2u8,
+                            ValueKind::PyInstance(_) => 3u8,
                             _ => 0u8,
                         }).unwrap_or(0);
                         match target_kind {
@@ -406,6 +415,31 @@ impl Interpreter {
                                     PyError::Runtime("unhashable type".to_string())
                                 }));
                                 dict.insert(key, val_val);
+                            }
+                            3 => {
+                                let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
+                                if let ValueKind::PyInstance(inst) = obj_val.kind() {
+                                    let inst_rc = Rc::clone(inst);
+                                    let class = Rc::clone(&inst_rc.borrow().class);
+                                    if let Some(method_val) = lookup_class_attr(&class, "__setitem__") {
+                                        if let ValueKind::UserFunction(f) = method_val.kind() {
+                                            let func = Rc::clone(f);
+                                            vm_try!(self.call_user_function_expanded(
+                                                func,
+                                                &[
+                                                    ExpandedCallArg { name: None, value: idx_val },
+                                                    ExpandedCallArg { name: None, value: val_val },
+                                                ],
+                                                &[Value::py_instance(inst_rc)],
+                                            ));
+                                            continue;
+                                        }
+                                    }
+                                }
+                                vm_try!(Err(PyError::Named(
+                                    "TypeError".to_string(),
+                                    "object does not support item assignment".to_string(),
+                                )));
                             }
                             _ => {
                                 vm_try!(Err(PyError::Runtime(
@@ -453,6 +487,23 @@ impl Interpreter {
                             }
                         }
                         if !handled {
+                            // Try __delitem__ on user-defined instances.
+                            let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
+                            if let ValueKind::PyInstance(inst) = obj_val.kind() {
+                                let inst_rc = Rc::clone(inst);
+                                let class = Rc::clone(&inst_rc.borrow().class);
+                                if let Some(method_val) = lookup_class_attr(&class, "__delitem__") {
+                                    if let ValueKind::UserFunction(f) = method_val.kind() {
+                                        let func = Rc::clone(f);
+                                        vm_try!(self.call_user_function_expanded(
+                                            func,
+                                            &[ExpandedCallArg { name: None, value: idx_val }],
+                                            &[Value::py_instance(inst_rc)],
+                                        ));
+                                        continue;
+                                    }
+                                }
+                            }
                             vm_try!(Err(PyError::Runtime(
                                 "object does not support item deletion".to_string(),
                             )));
@@ -480,7 +531,8 @@ impl Interpreter {
                         }
                     } else { false };
                     if fast { continue; }
-                    if !vm_try!(vm_read(regs, *cond, num_locals)).truthy() {
+                    let cond_val = vm_try!(vm_read(regs, *cond, num_locals));
+                    if !vm_try!(self.truthy_value(&cond_val)) {
                         pc = jump_pc!(*offset);
                     }
                 }
@@ -493,7 +545,8 @@ impl Interpreter {
                         }
                     } else { false };
                     if fast { continue; }
-                    if vm_try!(vm_read(regs, *cond, num_locals)).truthy() {
+                    let cond_val = vm_try!(vm_read(regs, *cond, num_locals));
+                    if vm_try!(self.truthy_value(&cond_val)) {
                         pc = jump_pc!(*offset);
                     }
                 }
@@ -860,6 +913,30 @@ impl Interpreter {
                                 let len = items.len();
                                 IterState::ReversedItems { items, pos: len }
                             }
+                            ValueKind::PyInstance(inst) => {
+                                let inst_rc = Rc::clone(inst);
+                                let class = Rc::clone(&inst_rc.borrow().class);
+                                if let Some(method_val) = lookup_class_attr(&class, "__iter__") {
+                                    if let ValueKind::UserFunction(f) = method_val.kind() {
+                                        let func = Rc::clone(f);
+                                        let iter_obj = vm_try!(self.call_user_function_expanded(
+                                            func,
+                                            &[],
+                                            &[Value::py_instance(inst_rc)],
+                                        ));
+                                        IterState::UserDefined(iter_obj)
+                                    } else {
+                                        vm_try!(Err(PyError::Named(
+                                            "TypeError".to_string(),
+                                            "__iter__ is not callable".to_string(),
+                                        )));
+                                        unreachable!()
+                                    }
+                                } else {
+                                    // No __iter__: try to materialise via iter_values (will fail)
+                                    IterState::Materialized(vm_try!(iter_values(src_val)), 0)
+                                }
+                            }
                             _ => {
                                 IterState::Materialized(vm_try!(iter_values(src_val)), 0)
                             }
@@ -936,6 +1013,54 @@ impl Interpreter {
                                 regs[*dst as usize] = Some(v);
                             } else {
                                 pc = jump_pc!(*offset);
+                            }
+                        }
+                        Some(IterState::UserDefined(iter_obj)) => {
+                            // Call __next__() on the iterator object; stop on StopIteration.
+                            let iter_val = iter_obj.clone();
+                            let next_result = if let ValueKind::PyInstance(inst) = iter_val.kind() {
+                                let inst_rc = Rc::clone(inst);
+                                let class = Rc::clone(&inst_rc.borrow().class);
+                                if let Some(method_val) = lookup_class_attr(&class, "__next__") {
+                                    if let ValueKind::UserFunction(f) = method_val.kind() {
+                                        let func = Rc::clone(f);
+                                        Some(self.call_user_function_expanded(
+                                            func,
+                                            &[],
+                                            &[Value::py_instance(inst_rc)],
+                                        ))
+                                    } else { None }
+                                } else { None }
+                            } else { None };
+                            match next_result {
+                                Some(Ok(val)) => {
+                                    regs[*dst as usize] = Some(val);
+                                }
+                                Some(Err(PyError::Raised(exc))) => {
+                                    // Check for StopIteration: covers both `raise StopIteration()`
+                                    // (PyInstance) and bare `raise StopIteration` (PyClass).
+                                    let is_stop = match exc.kind() {
+                                        ValueKind::PyInstance(inst) => {
+                                            inst.borrow().class.borrow().name == "StopIteration"
+                                        }
+                                        ValueKind::PyClass(cls) => {
+                                            cls.borrow().name == "StopIteration"
+                                        }
+                                        _ => false,
+                                    };
+                                    if is_stop {
+                                        pc = jump_pc!(*offset);
+                                    } else {
+                                        vm_try!(Err(PyError::Raised(exc)));
+                                    }
+                                }
+                                Some(Err(e)) => { vm_try!(Err(e)); }
+                                None => {
+                                    vm_try!(Err(PyError::Named(
+                                        "TypeError".to_string(),
+                                        "iterator has no __next__ method".to_string(),
+                                    )));
+                                }
                             }
                         }
                         None => {
