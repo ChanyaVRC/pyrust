@@ -747,6 +747,12 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
         "getattr" => Some(Value::builtin_function("getattr")),
         "setattr" => Some(Value::builtin_function("setattr")),
         "__vcall__" => Some(Value::builtin_function("__vcall__")),
+        "repr" => Some(Value::builtin_function("repr")),
+        "any" => Some(Value::builtin_function("any")),
+        "all" => Some(Value::builtin_function("all")),
+        "map" => Some(Value::builtin_function("map")),
+        "filter" => Some(Value::builtin_function("filter")),
+        "callable" => Some(Value::builtin_function("callable")),
         _ => None,
     }
 }
