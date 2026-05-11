@@ -641,10 +641,11 @@ fn collect_local_names_from_block(
             }
             Stmt::For {
                 target,
+                iter,
                 body,
                 else_branch,
-                ..
             } => {
+                collect_walrus_targets_in_expr(iter, names, global_names, nonlocal_names);
                 collect_assign_target_names(target, names, global_names, nonlocal_names);
                 collect_local_names_from_block(body, names, global_names, nonlocal_names);
                 if let Some(branch) = else_branch {
