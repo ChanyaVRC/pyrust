@@ -18,8 +18,9 @@ fn subslice_offset(parent: &str, sub: &str) -> usize {
     off
 }
 
-pub fn call(method: &str, src: &Value, args: &[Value]) -> Result<Value> {
+pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
     let s: &str = src.as_str().unwrap();
+    let args = args.as_slice();
     match method {
         // Common Sequence Operations (via char indexing)
         "index" => str_index(s, args),

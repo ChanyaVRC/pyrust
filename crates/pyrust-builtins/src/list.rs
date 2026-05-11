@@ -7,13 +7,13 @@ use crate::sequence;
 pub fn call(
     method: &str,
     items: &mut Vec<Value>,
-    args: &[Value],
+    args: Vec<Value>,
     kwargs: &IndexMap<PyKey, Value>,
 ) -> Result<Value> {
     match method {
         // Common Sequence Operations
-        "index" => sequence::seq_index(items, args, "list"),
-        "count" => sequence::seq_count(items, args, "list"),
+        "index" => sequence::seq_index(items, &args, "list"),
+        "count" => sequence::seq_count(items, &args, "list"),
         // Mutable Sequence Operations
         "append" => ms::append(items, args),
         "clear" => ms::clear(items, args),
@@ -24,7 +24,7 @@ pub fn call(
         "remove" => ms::remove(items, args),
         "reverse" => ms::reverse(items, args),
         // List-specific
-        "sort" => sort(items, args, kwargs),
+        "sort" => sort(items, &args, kwargs),
         _ => Err(PyError::Runtime(format!(
             "'list' object has no attribute '{method}'"
         ))),

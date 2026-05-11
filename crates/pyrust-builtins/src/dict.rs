@@ -1,7 +1,7 @@
 use indexmap::IndexMap;
 use pyrust_core::{PyError, PyKey, Result, Value, ValueKind};
 
-pub fn call(method: &str, dict: &mut IndexMap<PyKey, Value>, args: &[Value]) -> Result<Value> {
+pub fn call(method: &str, dict: &mut IndexMap<PyKey, Value>, args: Vec<Value>) -> Result<Value> {
     match method {
         "get" => get(dict, args),
         "keys" => Ok(Value::list(
@@ -28,19 +28,21 @@ pub fn call(method: &str, dict: &mut IndexMap<PyKey, Value>, args: &[Value]) -> 
     }
 }
 
-fn get(dict: &IndexMap<PyKey, Value>, args: &[Value]) -> Result<Value> {
-    let key = args
-        .first()
+fn get(dict: &IndexMap<PyKey, Value>, args: Vec<Value>) -> Result<Value> {
+    let mut iter = args.into_iter();
+    let key = iter
+        .next()
         .ok_or_else(|| PyError::Runtime("dict.get() requires at least 1 argument".to_string()))?;
-    let default = args.get(1).cloned().unwrap_or_else(Value::none);
+    let default = iter.next().unwrap_or_else(Value::none);
     let pk = key
         .to_key()
         .ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
     Ok(dict.get(&pk).cloned().unwrap_or(default))
 }
 
-fn update(dict: &mut IndexMap<PyKey, Value>, args: &[Value]) -> Result<Value> {
-    let other = match args.first() {
+fn update(dict: &mut IndexMap<PyKey, Value>, args: Vec<Value>) -> Result<Value> {
+    let mut iter = args.into_iter();
+    let other = match iter.next() {
         None => return Ok(Value::none()),
         Some(v) => v,
     };
@@ -76,9 +78,10 @@ fn update(dict: &mut IndexMap<PyKey, Value>, args: &[Value]) -> Result<Value> {
     Ok(Value::none())
 }
 
-fn pop(dict: &mut IndexMap<PyKey, Value>, args: &[Value]) -> Result<Value> {
-    let key = args
-        .first()
+fn pop(dict: &mut IndexMap<PyKey, Value>, args: Vec<Value>) -> Result<Value> {
+    let mut iter = args.into_iter();
+    let key = iter
+        .next()
         .ok_or_else(|| PyError::Runtime("dict.pop() requires at least 1 argument".to_string()))?;
     let pk = key
         .to_key()
@@ -86,8 +89,8 @@ fn pop(dict: &mut IndexMap<PyKey, Value>, args: &[Value]) -> Result<Value> {
     match dict.shift_remove(&pk) {
         Some(v) => Ok(v),
         None => {
-            if let Some(default) = args.get(1) {
-                Ok(default.clone())
+            if let Some(default) = iter.next() {
+                Ok(default)
             } else {
                 Err(PyError::Runtime(format!("KeyError: {}", key.repr())))
             }
@@ -102,11 +105,12 @@ fn popitem(dict: &mut IndexMap<PyKey, Value>) -> Result<Value> {
     }
 }
 
-fn setdefault(dict: &mut IndexMap<PyKey, Value>, args: &[Value]) -> Result<Value> {
-    let key = args.first().ok_or_else(|| {
+fn setdefault(dict: &mut IndexMap<PyKey, Value>, args: Vec<Value>) -> Result<Value> {
+    let mut iter = args.into_iter();
+    let key = iter.next().ok_or_else(|| {
         PyError::Runtime("dict.setdefault() requires at least 1 argument".to_string())
     })?;
-    let default = args.get(1).cloned().unwrap_or_else(Value::none);
+    let default = iter.next().unwrap_or_else(Value::none);
     let pk = key
         .to_key()
         .ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;

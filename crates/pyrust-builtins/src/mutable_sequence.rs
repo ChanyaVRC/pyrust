@@ -62,39 +62,44 @@ fn type_name_of(v: &Value) -> &'static str {
 
 // Mutable Sequence Operations (https://docs.python.org/3/library/stdtypes.html#mutable-sequence-types)
 
-pub fn append(items: &mut Vec<Value>, args: &[Value]) -> Result<Value> {
-    let val = args
-        .first()
+pub fn append(items: &mut Vec<Value>, args: Vec<Value>) -> Result<Value> {
+    let mut iter = args.into_iter();
+    let val = iter
+        .next()
         .ok_or_else(|| PyError::Runtime("list.append() requires 1 argument".to_string()))?;
-    items.push(val.clone());
+    items.push(val);
     Ok(Value::none())
 }
 
-pub fn clear(items: &mut Vec<Value>, _args: &[Value]) -> Result<Value> {
+pub fn clear(items: &mut Vec<Value>, _args: Vec<Value>) -> Result<Value> {
     items.clear();
     Ok(Value::none())
 }
 
-pub fn copy(items: &[Value], _args: &[Value]) -> Result<Value> {
+pub fn copy(items: &[Value], _args: Vec<Value>) -> Result<Value> {
     Ok(Value::list(items.to_vec()))
 }
 
-pub fn extend(items: &mut Vec<Value>, args: &[Value]) -> Result<Value> {
-    let iterable = args
-        .first()
+pub fn extend(items: &mut Vec<Value>, args: Vec<Value>) -> Result<Value> {
+    let mut iter = args.into_iter();
+    let iterable = iter
+        .next()
         .ok_or_else(|| PyError::Runtime("list.extend() requires 1 argument".to_string()))?;
-    let new_items = iter_value(iterable)?;
+    let new_items = iter_value(&iterable)?;
     items.extend(new_items);
     Ok(Value::none())
 }
 
-pub fn insert(items: &mut Vec<Value>, args: &[Value]) -> Result<Value> {
+pub fn insert(items: &mut Vec<Value>, args: Vec<Value>) -> Result<Value> {
     if args.len() < 2 {
         return Err(PyError::Runtime(
             "list.insert() requires 2 arguments".to_string(),
         ));
     }
-    let idx = match args[0].kind() {
+    let mut iter = args.into_iter();
+    let idx_val = iter.next().unwrap();
+    let val = iter.next().unwrap();
+    let idx = match idx_val.kind() {
         ValueKind::Int(i) => i,
         ValueKind::Bool(b) => b as i64,
         _ => {
@@ -104,7 +109,6 @@ pub fn insert(items: &mut Vec<Value>, args: &[Value]) -> Result<Value> {
             ));
         }
     };
-    let val = args[1].clone();
     let len = items.len();
     let pos = if idx < 0 {
         let from_end = (-idx) as usize;
@@ -116,8 +120,9 @@ pub fn insert(items: &mut Vec<Value>, args: &[Value]) -> Result<Value> {
     Ok(Value::none())
 }
 
-pub fn pop(items: &mut Vec<Value>, args: &[Value]) -> Result<Value> {
-    let idx = match args.first().map(|v| v.kind()) {
+pub fn pop(items: &mut Vec<Value>, args: Vec<Value>) -> Result<Value> {
+    let first = args.into_iter().next();
+    let idx = match first.as_ref().map(|v| v.kind()) {
         Some(ValueKind::Int(i)) => i,
         Some(ValueKind::Bool(b)) => b as i64,
         Some(_) => {
@@ -140,19 +145,20 @@ pub fn pop(items: &mut Vec<Value>, args: &[Value]) -> Result<Value> {
     Ok(items.remove(pos))
 }
 
-pub fn remove(items: &mut Vec<Value>, args: &[Value]) -> Result<Value> {
-    let target = args
-        .first()
+pub fn remove(items: &mut Vec<Value>, args: Vec<Value>) -> Result<Value> {
+    let mut iter = args.into_iter();
+    let target = iter
+        .next()
         .ok_or_else(|| PyError::Runtime("list.remove() requires 1 argument".to_string()))?;
     let pos = items
         .iter()
-        .position(|v| v == target)
+        .position(|v| v == &target)
         .ok_or_else(|| PyError::Runtime(format!("{} is not in list", target.repr())))?;
     items.remove(pos);
     Ok(Value::none())
 }
 
-pub fn reverse(items: &mut [Value], _args: &[Value]) -> Result<Value> {
+pub fn reverse(items: &mut [Value], _args: Vec<Value>) -> Result<Value> {
     items.reverse();
     Ok(Value::none())
 }
