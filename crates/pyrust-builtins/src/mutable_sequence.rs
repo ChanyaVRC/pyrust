@@ -53,7 +53,9 @@ fn type_name_of(v: &Value) -> &'static str {
         ValueKind::Enumerate { .. } => "enumerate",
         ValueKind::Zip { .. } => "zip",
         ValueKind::Reversed { .. } => "list_reverseiterator",
-        ValueKind::ClassMethod(_) | ValueKind::StaticMethod(_) | ValueKind::ClassBoundMethod { .. } => "function",
+        ValueKind::ClassMethod(_)
+        | ValueKind::StaticMethod(_)
+        | ValueKind::ClassBoundMethod { .. } => "function",
         ValueKind::SuperProxy { .. } => "super",
     }
 }
