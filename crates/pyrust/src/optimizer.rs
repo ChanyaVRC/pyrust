@@ -701,9 +701,7 @@ fn pass_binopinplace_downgrade(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         .enumerate()
         .map(|(i, insn)| {
             if let Insn::BinOpInPlace(dst, lhs, op, rhs) = insn {
-                if *lhs >= num_locals
-                    && (*dst == *lhs || !reg_is_read_in(&insns[i + 1..], *lhs))
-                {
+                if *lhs >= num_locals && (*dst == *lhs || !reg_is_read_in(&insns[i + 1..], *lhs)) {
                     return Insn::BinOp(*dst, *lhs, *op, *rhs);
                 }
             }
@@ -1849,10 +1847,7 @@ mod tests {
     fn binopinplace_downgrades_dead_temp_lhs() {
         use crate::ast::BinaryOp;
         // BinOpInPlace(dst=2, lhs=5, Add, rhs=1); r5 not read after → BinOp
-        let insns = vec![
-            Insn::BinOpInPlace(2, 5, BinaryOp::Add, 1),
-            Insn::Return(2),
-        ];
+        let insns = vec![Insn::BinOpInPlace(2, 5, BinaryOp::Add, 1), Insn::Return(2)];
         let out = pass_binopinplace_downgrade(insns, 2);
         assert!(
             matches!(out[0], Insn::BinOp(2, 5, BinaryOp::Add, 1)),
@@ -1864,10 +1859,7 @@ mod tests {
     fn binopinplace_skips_local_lhs() {
         use crate::ast::BinaryOp;
         // lhs=1 < num_locals=3 → user object may have __iadd__, must not downgrade
-        let insns = vec![
-            Insn::BinOpInPlace(2, 1, BinaryOp::Add, 0),
-            Insn::Return(2),
-        ];
+        let insns = vec![Insn::BinOpInPlace(2, 1, BinaryOp::Add, 0), Insn::Return(2)];
         let out = pass_binopinplace_downgrade(insns, 3);
         assert!(
             matches!(out[0], Insn::BinOpInPlace(2, 1, BinaryOp::Add, 0)),
@@ -1879,10 +1871,7 @@ mod tests {
     fn binopinplace_skips_live_lhs() {
         use crate::ast::BinaryOp;
         // lhs=5 is read after by Return(5) → live, must not downgrade
-        let insns = vec![
-            Insn::BinOpInPlace(2, 5, BinaryOp::Add, 1),
-            Insn::Return(5),
-        ];
+        let insns = vec![Insn::BinOpInPlace(2, 5, BinaryOp::Add, 1), Insn::Return(5)];
         let out = pass_binopinplace_downgrade(insns, 2);
         assert!(
             matches!(out[0], Insn::BinOpInPlace(2, 5, BinaryOp::Add, 1)),
@@ -1894,10 +1883,7 @@ mod tests {
     fn binopinplace_downgrades_dst_equals_lhs() {
         use crate::ast::BinaryOp;
         // dst == lhs: result lands in same register, always safe to downgrade
-        let insns = vec![
-            Insn::BinOpInPlace(5, 5, BinaryOp::Mul, 1),
-            Insn::Return(5),
-        ];
+        let insns = vec![Insn::BinOpInPlace(5, 5, BinaryOp::Mul, 1), Insn::Return(5)];
         let out = pass_binopinplace_downgrade(insns, 2);
         assert!(
             matches!(out[0], Insn::BinOp(5, 5, BinaryOp::Mul, 1)),
