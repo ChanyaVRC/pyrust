@@ -4196,8 +4196,11 @@ impl Compiler {
             return 0;
         }
         self.next_temp = base + Reg::from(n);
-        if n > 0 && base + Reg::from(n) - 1 > self.max_reg {
-            self.max_reg = base + Reg::from(n) - 1;
+        // Always update max_reg with `base` — BuildList/BuildTuple always writes
+        // to `base` regardless of element count (even empty collections).
+        let max_used = if n > 0 { base + Reg::from(n) - 1 } else { base };
+        if max_used > self.max_reg {
+            self.max_reg = max_used;
         }
         for (i, item) in (0u32..).zip(items.iter()) {
             let slot = base + i;
