@@ -33,6 +33,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_cmpjump_fusion(insns, num_locals);
     let insns = pass_dead_code(insns);
     let insns = pass_trivial_nop(insns);
+    let (insns, consts) = pass_compact_consts(insns, consts);
 
     FnCode {
         insns,
@@ -683,6 +684,95 @@ fn pass_trivial_nop(insns: Vec<Insn>) -> Vec<Insn> {
         })
         .collect();
     compact(insns, &keep)
+}
+
+// ─── Constant pool compaction ──────────────────────────────────────────────────
+
+/// Remove unreferenced entries from `consts` and renumber all constant indices
+/// in `insns`.
+///
+/// After other passes fold or dead-code-eliminate instructions, some constant
+/// pool entries become unreferenced (no instruction uses their index).  Leaving
+/// them in the pool wastes memory and increases the cost of `Rc<FnCode>` clones.
+///
+/// ## Algorithm
+///
+/// 1. **Scan**: walk all instructions collecting every `u16` constant index that
+///    is actually referenced.
+/// 2. **Remap**: build `old_to_new: Vec<Option<u16>>` for the current pool size.
+///    Referenced entries get compact new indices; unreferenced entries get `None`.
+/// 3. **Compact**: rebuild `consts` retaining only referenced values.
+/// 4. **Rewrite**: replace every constant index in `insns` using `old_to_new`.
+///
+/// ## Instruction fields that carry constant indices
+///
+/// `LoadConst`, `BinOpConst`, `CmpJumpIfFalseConst`, `CmpJumpIfTrueConst`,
+/// `ForCountConst` (stop and step), `ForCountReg` (step only).
+///
+/// Reference: CPython `flowgraph.c` `remove_unused_consts()`.
+fn pass_compact_consts(insns: Vec<Insn>, consts: Vec<Value>) -> (Vec<Insn>, Vec<Value>) {
+    let old_len = consts.len();
+    if old_len == 0 {
+        return (insns, consts);
+    }
+
+    // Step 1: collect referenced indices.
+    let mut used = vec![false; old_len];
+    let mark = |used: &mut Vec<bool>, idx: u16| {
+        if (idx as usize) < used.len() {
+            used[idx as usize] = true;
+        }
+    };
+    for insn in &insns {
+        match insn {
+            Insn::LoadConst(_, c) => mark(&mut used, *c),
+            Insn::BinOpConst(_, _, _, c) => mark(&mut used, *c),
+            Insn::CmpJumpIfFalseConst(_, _, c, _) => mark(&mut used, *c),
+            Insn::CmpJumpIfTrueConst(_, _, c, _) => mark(&mut used, *c),
+            Insn::ForCountConst(_, _, stop, step, _) => {
+                mark(&mut used, *stop);
+                mark(&mut used, *step);
+            }
+            Insn::ForCountReg(_, _, _, step, _) => mark(&mut used, *step),
+            _ => {}
+        }
+    }
+
+    // Early exit if every entry is still referenced.
+    if used.iter().all(|&u| u) {
+        return (insns, consts);
+    }
+
+    // Step 2: build remap table.
+    let mut old_to_new: Vec<Option<u16>> = vec![None; old_len];
+    let mut new_consts: Vec<Value> = Vec::with_capacity(used.iter().filter(|&&u| u).count());
+    for (old_idx, val) in consts.into_iter().enumerate() {
+        if used[old_idx] {
+            old_to_new[old_idx] = Some(new_consts.len() as u16);
+            new_consts.push(val);
+        }
+    }
+
+    // Step 3: rewrite constant indices in instructions.
+    let remap = |c: u16| old_to_new[c as usize].expect("referenced const must have new index");
+    let new_insns = insns
+        .into_iter()
+        .map(|insn| match insn {
+            Insn::LoadConst(r, c) => Insn::LoadConst(r, remap(c)),
+            Insn::BinOpConst(d, l, op, c) => Insn::BinOpConst(d, l, op, remap(c)),
+            Insn::CmpJumpIfFalseConst(r, op, c, k) => Insn::CmpJumpIfFalseConst(r, op, remap(c), k),
+            Insn::CmpJumpIfTrueConst(r, op, c, k) => Insn::CmpJumpIfTrueConst(r, op, remap(c), k),
+            Insn::ForCountConst(v, op, stop, step, k) => {
+                Insn::ForCountConst(v, op, remap(stop), remap(step), k)
+            }
+            Insn::ForCountReg(v, op, stop, step, k) => {
+                Insn::ForCountReg(v, op, stop, remap(step), k)
+            }
+            other => other,
+        })
+        .collect();
+
+    (new_insns, new_consts)
 }
 
 // ─── Compaction helper ─────────────────────────────────────────────────────────
@@ -1493,5 +1583,57 @@ mod tests {
             matches!(out[1], Insn::Jump(0)),
             "offset should decrease by 1"
         );
+    }
+
+    // ── pass_compact_consts ───────────────────────────────────────────────────
+
+    #[test]
+    fn compact_consts_removes_unreferenced_entry() {
+        use crate::value::Value;
+        // Pool: [10, 99, 20].  Only consts 0 and 2 are referenced.
+        // Expected pool after compaction: [10, 20]; indices rewritten.
+        let consts = vec![Value::int(10), Value::int(99), Value::int(20)];
+        let insns = vec![
+            Insn::LoadConst(0, 0), // references pool[0] = 10
+            Insn::LoadConst(1, 2), // references pool[2] = 20
+            Insn::Return(0),
+        ];
+        let (out_insns, out_consts) = pass_compact_consts(insns, consts);
+        assert_eq!(out_consts.len(), 2, "unreferenced entry should be removed");
+        assert!(matches!(out_consts[0].kind(), crate::value::ValueKind::Int(10)));
+        assert!(matches!(out_consts[1].kind(), crate::value::ValueKind::Int(20)));
+        // LoadConst(1, 2) should be rewritten to LoadConst(1, 1)
+        assert!(matches!(out_insns[1], Insn::LoadConst(1, 1)));
+    }
+
+    #[test]
+    fn compact_consts_noop_when_all_referenced() {
+        use crate::value::Value;
+        let consts = vec![Value::int(1), Value::int(2)];
+        let insns = vec![
+            Insn::LoadConst(0, 0),
+            Insn::LoadConst(1, 1),
+            Insn::Return(0),
+        ];
+        let (out_insns, out_consts) = pass_compact_consts(insns, consts);
+        assert_eq!(out_consts.len(), 2, "no change when all referenced");
+        assert!(matches!(out_insns[0], Insn::LoadConst(0, 0)));
+        assert!(matches!(out_insns[1], Insn::LoadConst(1, 1)));
+    }
+
+    #[test]
+    fn compact_consts_on_compiled_dead_branch() {
+        // "if True: x=1\nelse: x=2" — the else branch is dead.
+        // pass_const_fold+pass_dead_code should eliminate the else body.
+        // pass_compact_consts should then remove the orphaned constant 2 from the pool.
+        let code = compile_fn("if True:\n    x = 1\nelse:\n    x = 2\n");
+        let optimized = optimize(code);
+        // After optimization, the constant 2 should not appear in the pool
+        // (the dead branch referencing it was removed, then the pool was compacted).
+        let has_2 = optimized
+            .consts
+            .iter()
+            .any(|v| matches!(v.kind(), crate::value::ValueKind::Int(2)));
+        assert!(!has_2, "orphaned constant 2 should be removed by pool compaction");
     }
 }
