@@ -2408,6 +2408,7 @@ impl Compiler {
                 has_default: params.iter().map(|p| p.default.is_some()).collect(),
                 is_args: params.iter().map(|p| p.is_args).collect(),
                 is_kwargs: params.iter().map(|p| p.is_kwargs).collect(),
+                is_keyword_only: params.iter().map(|p| p.is_keyword_only).collect(),
             }),
             code: Rc::new(inner_code),
             local_index: inner_index_rc,
@@ -2535,6 +2536,7 @@ impl Compiler {
                 has_default: vec![],
                 is_args: vec![],
                 is_kwargs: vec![],
+                is_keyword_only: vec![],
             }),
             code: Rc::new(body_code),
             local_index: body_index_rc,
@@ -3237,6 +3239,7 @@ impl Compiler {
                         default: None,
                         is_args: false,
                         is_kwargs: false,
+                        is_keyword_only: false,
                     })
                     .collect();
                 self.compile_lambda(&fp, body)

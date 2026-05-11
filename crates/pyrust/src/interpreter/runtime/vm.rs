@@ -1021,6 +1021,7 @@ impl Interpreter {
                             default,
                             is_args: param_spec.is_args[i],
                             is_kwargs: param_spec.is_kwargs[i],
+                            is_keyword_only: param_spec.is_keyword_only[i],
                         });
                     }
                     // Validate that every nonlocal name resolves to an enclosing local scope.

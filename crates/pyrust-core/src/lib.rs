@@ -106,6 +106,7 @@ pub struct UserFunctionParam {
     pub default: Option<Value>,
     pub is_args: bool,
     pub is_kwargs: bool,
+    pub is_keyword_only: bool,
 }
 
 #[derive(Debug, Clone)]
