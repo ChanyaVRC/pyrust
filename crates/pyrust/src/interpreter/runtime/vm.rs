@@ -1,3 +1,12 @@
+/// Heap-allocated state for a built-in iterable wrapped by `iter()`.
+/// Stored type-erased inside `Value::generator()` via `Box<dyn Any>`,
+/// the same slot used for GeneratorFrame.  resume_generator() checks
+/// which concrete type it has by downcasting.
+pub(crate) struct NativeIterFrame {
+    pub(crate) items: Vec<Value>,
+    pub(crate) pos: usize,
+}
+
 /// Heap-allocated execution state for a suspended generator.
 /// Stored type-erased inside `Value::generator()` via `Box<dyn Any>`.
 pub(crate) struct GeneratorFrame {
@@ -150,8 +159,7 @@ impl Interpreter {
                     frame.exc_handlers = saved_handlers;
                     frame.pc = saved_pc;
                 } else {
-                    // Shouldn't happen but be defensive.
-                    frame.done = true;
+                    unreachable!("GEN_SAVE must be set before every GeneratorYield");
                 }
                 Err(PyError::GeneratorYield(val))
             }
@@ -928,10 +936,14 @@ impl Interpreter {
                 }
 
                 // ── Generator yield ──────────────────────────────────────
-                Insn::Yield { src, dst: _ } => {
+                Insn::Yield { src, dst } => {
                     // Suspend the generator.  pc has already been incremented
                     // past this instruction, so resumption continues at pc.
                     let yielded = vm_try!(vm_read(regs, *src, num_locals));
+                    // Pre-fill dst with None: this is the sent value that the
+                    // yield expression evaluates to on resumption.  Proper
+                    // send() support would overwrite this in resume_generator.
+                    regs[*dst as usize] = Some(Value::none());
                     // Save current iters/exc_handlers/pc to the thread-local
                     // so that resume_generator() can write them back into the
                     // GeneratorFrame after we unwind.
@@ -1132,12 +1144,22 @@ impl Interpreter {
                             let iter_val = iter_obj.clone();
                             let next_result: Option<Result<Value>> =
                                 if let ValueKind::Generator(state_rc) = iter_val.kind() {
-                                    // Resume the generator.
                                     let state_rc = Rc::clone(state_rc);
                                     let mut borrow = state_rc.borrow_mut();
-                                    let frame = borrow
-                                        .downcast_mut::<GeneratorFrame>();
-                                    if let Some(frame) = frame {
+                                    if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
+                                        // Built-in iterator created by iter().
+                                        if native.pos >= native.items.len() {
+                                            Some(Err(PyError::Named(
+                                                "StopIteration".to_string(),
+                                                String::new(),
+                                            )))
+                                        } else {
+                                            let item = native.items[native.pos].clone();
+                                            native.pos += 1;
+                                            Some(Ok(item))
+                                        }
+                                    } else if let Some(frame) = borrow.downcast_mut::<GeneratorFrame>() {
+                                        // Resume the generator.
                                         if frame.done {
                                             Some(Err(PyError::Named(
                                                 "StopIteration".to_string(),
