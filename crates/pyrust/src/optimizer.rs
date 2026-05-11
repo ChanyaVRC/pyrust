@@ -1600,8 +1600,14 @@ mod tests {
         ];
         let (out_insns, out_consts) = pass_compact_consts(insns, consts);
         assert_eq!(out_consts.len(), 2, "unreferenced entry should be removed");
-        assert!(matches!(out_consts[0].kind(), crate::value::ValueKind::Int(10)));
-        assert!(matches!(out_consts[1].kind(), crate::value::ValueKind::Int(20)));
+        assert!(matches!(
+            out_consts[0].kind(),
+            crate::value::ValueKind::Int(10)
+        ));
+        assert!(matches!(
+            out_consts[1].kind(),
+            crate::value::ValueKind::Int(20)
+        ));
         // LoadConst(1, 2) should be rewritten to LoadConst(1, 1)
         assert!(matches!(out_insns[1], Insn::LoadConst(1, 1)));
     }
@@ -1634,6 +1640,9 @@ mod tests {
             .consts
             .iter()
             .any(|v| matches!(v.kind(), crate::value::ValueKind::Int(2)));
-        assert!(!has_2, "orphaned constant 2 should be removed by pool compaction");
+        assert!(
+            !has_2,
+            "orphaned constant 2 should be removed by pool compaction"
+        );
     }
 }
