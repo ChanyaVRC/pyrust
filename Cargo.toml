@@ -1,14 +1,3 @@
 [workspace]
-members = [".", "crates/pyrust-core", "crates/pyrust-builtins"]
+members = ["crates/pyrust", "crates/pyrust-core", "crates/pyrust-builtins"]
 resolver = "2"
-
-[package]
-name = "pyrust"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-indexmap = "2"
-rustyline = "14"
-pyrust-core = { path = "crates/pyrust-core" }
-pyrust-builtins = { path = "crates/pyrust-builtins" }
