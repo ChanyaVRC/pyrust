@@ -12,13 +12,15 @@ PyRust currently supports the following core subset:
 - [x] Numeric, string, tuple, set, list, and dictionary literals
 - [x] Arithmetic, boolean, bitwise, matrix-multiplication, membership, identity, and chained comparison operators
 - [x] `if`, `while`, `for`, `break`, `continue`, `pass`, `assert`, `del`, `with`
-- [x] `def`, `return`, trailing default arguments, keyword arguments, `*args`, `**kwargs`, closures, decorators, `global`, `nonlocal`, `lambda`
+- [x] `def`, `return`, trailing default arguments, keyword arguments, keyword-only parameters, `*args`, `**kwargs`, closures, decorators, `global`, `nonlocal`, `lambda`
 - [x] `class`, instance attributes, bound methods, `__init__`, decorators, and single inheritance
-- [x] `print`, `len`, and `range`
+- [x] `print`, `len`, `range`, and a broad set of built-in functions (see README)
 - [x] REPL mode and script execution
-- [x] Exception handling: `raise`, `raise ... from ...`, `try / except / else / finally`, typed and bare raise, tuple except clauses, built-in exception classes
+- [x] Exception handling: `raise`, `raise ... from ...`, `try / except / else / finally`, typed and bare raise, tuple except clauses, built-in exception classes including `IndexError`, `KeyError`, `StopIteration`, `RecursionError`, `SystemExit`
 - [x] Import system: `import module`, `from module import name`, aliases, user .py files, built-in `math` and `sys` modules
 - [x] List/string slicing, slice assignment, and slice deletion including step slices
+- [x] Built-in type methods for `list`, `dict`, `str`, and `tuple`
+- [x] Peephole optimizer with 15 passes (jump threading, constant folding, dead code/store elimination, copy propagation, and more)
 - [x] A categorized Python parity suite and interpreter unit tests
 
 Everything below is still missing, only partially supported, or not yet validated deeply enough.
@@ -38,6 +40,8 @@ These are statement forms that are not currently represented in the token set, p
 - [x] Alias handling such as `import x as y`
 - [ ] Relative imports
 - [ ] Broader standard library (only `math` and `sys` currently)
+- [ ] `math` module gaps: `tau`, `degrees`, `radians`, `gcd`, `lcm`, `factorial`, `comb`, `perm`, `isqrt`, `trunc`, `fmod`, `modf`, `remainder`, `fsum`, `isclose`, `isfinite`, `copysign`, `hypot`, `dist`, `cbrt`, `exp2`, `expm1`, `log1p`, `acosh`, `asinh`, `atanh`, `cosh`, `sinh`, `tanh`, `erf`, `erfc`, `gamma`, `lgamma`
+- [ ] `sys` module gaps: `sys.version`, `sys.platform`, `sys.stdin`/`stdout`/`stderr`, `sys.modules`
 
 3. Context-management statements
 
@@ -108,9 +112,8 @@ The current function model supports a useful subset, but large parts of Python's
 
 1. Parameter kinds
 
-- [ ] Keyword-only parameters
-- [ ] Positional-only parameters
-- [ ] Bare `*` separator
+- [x] Keyword-only parameters (`def f(*, x)`, `def f(*args, x)`, bare `*` separator)
+- [ ] Positional-only parameters (`/`)
 
 2. Definition-time features
 
@@ -184,23 +187,23 @@ PyRust currently exposes only a very small built-in surface.
 1. Built-in constants and types not surfaced as built-ins
 
 - [ ] `object`
-- [ ] `type`
-- [ ] `int`
-- [ ] `float`
-- [ ] `str`
-- [ ] `bool`
-- [ ] `list`
-- [ ] `dict`
-- [ ] `tuple`
-- [ ] `set`
-- [ ] Exception classes
+- [x] `type` (callable, returns type name)
+- [x] `int`, `float`, `str`, `bool` (conversion functions)
+- [x] `list`, `tuple`, `set`, `dict` (constructor functions)
+- [x] Exception classes (`IndexError`, `KeyError`, `TypeError`, `ValueError`, `RuntimeError`, `AssertionError`, `StopIteration`, `RecursionError`, `SystemExit`)
 
-2. Built-in functions not yet present
+2. Built-in functions
 
-- [ ] Common conversion and inspection functions such as `repr`, `type`, `isinstance`, `issubclass`, `iter`, `next`
-- [ ] Numeric helpers such as `abs`, `min`, `max`, `sum`
-- [ ] Container helpers such as `enumerate`, `zip`, `sorted`, `reversed`, `any`, `all`
-- [ ] I/O helpers such as `open`
+- [x] `type`, `isinstance` (user classes and built-in types)
+- [x] `id`, `hasattr`, `getattr`, `setattr`
+- [x] `abs`, `min`, `max`, `sum`
+- [x] `enumerate`, `zip`, `sorted`, `reversed`
+- [ ] `repr`, `issubclass`, `iter`, `next`, `any`, `all`
+- [ ] Numeric: `round`, `divmod`, `pow`, `hash`, `chr`, `ord`, `bin`, `oct`, `hex`
+- [ ] Introspection: `callable`, `delattr`, `globals`, `locals`, `vars`, `ascii`, `format`
+- [ ] Higher-order: `map`, `filter`
+- [ ] Types: `frozenset`, `complex`, `bytearray`, `bytes`, `memoryview`
+- [ ] I/O: `open`, `input`
 
 3. Runtime value types not yet modeled directly
 
@@ -216,26 +219,34 @@ The current container support is useful but still shallow compared with Python.
 
 1. Lists
 
-- [ ] List methods
-- [ ] In-place update semantics
+- [x] List methods: `append`, `pop`, `insert`, `extend`, `remove`, `clear`, `copy`, `reverse`, `sort(*, reverse=False)`, `index`, `count`
+- [ ] In-place update semantics (`__iadd__` via user-defined `__add__`)
 
 2. Dictionaries
 
-- [ ] Dictionary methods
+- [x] Dictionary methods: `get`, `keys`, `values`, `items`, `update`, `pop`, `popitem`, `setdefault`, `clear`, `copy`
 - [ ] More complete key and hashing behavior
-- [ ] Better `KeyError`-like exception behavior once exceptions exist
+- [x] `KeyError` raised on missing key access
 
 3. Strings
 
-- [ ] Richer string literal syntax
-- [ ] String methods
-- [ ] Escape-sequence coverage review
+- [ ] Richer string literal syntax (bytes, raw strings, triple-quoted, f-strings)
+- [x] String methods: `split`, `rsplit`, `join`, `strip`, `lstrip`, `rstrip`, `upper`, `lower`, `capitalize`, `replace`, `find`, `rfind`, `index`, `rindex`, `count`, `startswith`, `endswith`, `isdigit`, `isalpha`, `isalnum`, `isspace`
+- [ ] String methods not yet implemented: `casefold`, `center`, `ljust`, `rjust`, `zfill`, `expandtabs`, `encode`, `format`, `format_map`, `maketrans`, `translate`, `partition`, `rpartition`, `splitlines`, `removeprefix`, `removesuffix`, `swapcase`, `title`, `islower`, `isupper`, `istitle`, `isascii`, `isdecimal`, `isnumeric`, `isidentifier`, `isprintable`
+- [ ] Richer string literal syntax (bytes, raw strings, triple-quoted, f-strings)
+- [ ] Escape-sequence coverage review (e.g. `\N{name}`, `\uXXXX`)
 
-4. Tuples and sets
+4. Sets
 
-- [ ] Hashability rules involving tuples and sets
+- [ ] Set methods: `add`, `remove`, `discard`, `pop`, `clear`, `copy`, `union`, `intersection`, `difference`, `symmetric_difference`, `issubset`, `issuperset`, `isdisjoint`, `update`, `intersection_update`, `difference_update`, `symmetric_difference_update`
+- [ ] `frozenset` type and its methods (same read-only subset)
+- [ ] Hashability rules involving tuples nested in sets/dicts
 
-5. Iteration model
+5. Tuples
+
+- [x] `index`, `count` implemented
+
+6. Iteration model
 
 - [ ] Iterator protocol support instead of only eagerly materializing iterable values
 - [ ] Custom iterable objects
@@ -331,12 +342,13 @@ If the goal is to keep shipping coherent vertical slices, a practical order is:
 
 1. [ ] Exceptions and traceback-capable error propagation
 2. [x] Import and module support
-3. [ ] Decorator syntax plus richer class behavior (`super`, `staticmethod`, `classmethod`)
-4. [ ] Function signature completeness (keyword-only, positional-only, bare `*`, annotations)
-5. [ ] Richer object and exception protocol support
-6. [ ] Comprehensions and additional expression forms
-7. [ ] REPL and CLI improvements
-8. [ ] Broader built-ins and protocol support
+3. [ ] Richer class behavior (`super`, `staticmethod`, `classmethod`, multiple inheritance)
+4. [x] Function signature completeness (keyword-only parameters, bare `*`)
+5. [ ] Positional-only parameters (`/`) and annotations
+6. [ ] Richer object and exception protocol support
+7. [ ] Comprehensions and generator expressions
+8. [ ] REPL and CLI improvements
+9. [ ] Remaining built-ins (`repr`, `any`, `all`, `round`, `iter`, `next`, etc.)
 
 ## 12. Out of Scope Unless the Project Goal Changes
 

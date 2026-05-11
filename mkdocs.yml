@@ -1,0 +1,50 @@
+site_name: PyRust
+site_description: A tiny Python-like interpreter implemented in Rust.
+site_url: https://chanyavrc.github.io/pyrust/
+repo_url: https://github.com/ChanyaVRC/pyrust
+repo_name: ChanyaVRC/pyrust
+docs_dir: docs
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+
+nav:
+  - Home: index.md
+  - Features: features.md
+  - Limitations: limitations.md
+  - Optimizer: optimizer.md
+  - Benchmarks: benchmark.md
+
+markdown_extensions:
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+
+plugins:
+  - search
