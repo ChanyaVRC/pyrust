@@ -300,7 +300,7 @@ impl Interpreter {
                                     if j >= 0 && (j as usize) < items.len() {
                                         regs[*dst as usize] = Some(items[j as usize].clone());
                                     } else {
-                                        vm_try!(Err(PyError::Runtime("index out of range".into())));
+                                        vm_try!(Err(PyError::Named("IndexError".into(), "list index out of range".into())));
                                     }
                                     handled = true;
                                 }
@@ -310,7 +310,7 @@ impl Interpreter {
                                     if j >= 0 && (j as usize) < items.len() {
                                         regs[*dst as usize] = Some(items[j as usize].clone());
                                     } else {
-                                        vm_try!(Err(PyError::Runtime("index out of range".into())));
+                                        vm_try!(Err(PyError::Named("IndexError".into(), "tuple index out of range".into())));
                                     }
                                     handled = true;
                                 }
@@ -332,11 +332,11 @@ impl Interpreter {
                         let result = if let Some(ov) = &regs[*obj as usize] {
                             match ov.kind() {
                                 ValueKind::List(items) => {
-                                    let i = vm_try!(normalize_index(&idx_val, items.len()));
+                                    let i = vm_try!(normalize_index(&idx_val, items.len(), "list"));
                                     Some(items[i].clone())
                                 }
                                 ValueKind::Tuple(items) => {
-                                    let i = vm_try!(normalize_index(&idx_val, items.len()));
+                                    let i = vm_try!(normalize_index(&idx_val, items.len(), "tuple"));
                                     Some(items[i].clone())
                                 }
                                 ValueKind::Dict(dict) => {
@@ -397,7 +397,7 @@ impl Interpreter {
                         match target_kind {
                             1 => {
                                 let items = vm_try!(expect_list_mut(regs, *obj, "SetItem"));
-                                let i = vm_try!(normalize_index(&idx_val, items.len()));
+                                let i = vm_try!(normalize_index(&idx_val, items.len(), "list"));
                                 items[i] = val_val;
                             }
                             2 => {
@@ -437,7 +437,7 @@ impl Interpreter {
                         let mut handled = false;
                         if let Some(ov) = regs[*obj as usize].as_mut() {
                             if let Some(items) = ov.as_list_mut() {
-                                let i = vm_try!(normalize_index(&idx_val, items.len()));
+                                let i = vm_try!(normalize_index(&idx_val, items.len(), "list"));
                                 if i == items.len() - 1 {
                                     items.pop();
                                 } else {

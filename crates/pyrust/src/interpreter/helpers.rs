@@ -229,7 +229,7 @@ fn py_mod_i64(a: i64, b: i64) -> i64 {
 }
 
 
-fn normalize_index(index: &Value, len: usize) -> Result<usize> {
+fn normalize_index(index: &Value, len: usize, label: &str) -> Result<usize> {
     let mut value = match index.kind() {
         ValueKind::Int(v) => v,
         ValueKind::Bool(b) => b as i64,
@@ -239,7 +239,7 @@ fn normalize_index(index: &Value, len: usize) -> Result<usize> {
         value += len as i64;
     }
     if value < 0 || value >= len as i64 {
-        return Err(PyError::Runtime("index out of range".to_string()));
+        return Err(PyError::Named("IndexError".to_string(), format!("{label} index out of range")));
     }
     Ok(value as usize)
 }

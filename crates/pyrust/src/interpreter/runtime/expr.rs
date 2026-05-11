@@ -107,11 +107,11 @@ impl Interpreter {
                             };
                             col.map(|col| match col.kind() {
                                 ValueKind::List(items) => {
-                                    let idx = normalize_index(&index_value, items.len())?;
+                                    let idx = normalize_index(&index_value, items.len(), "list")?;
                                     Ok(items[idx].clone())
                                 }
                                 ValueKind::Tuple(items) => {
-                                    let idx = normalize_index(&index_value, items.len())?;
+                                    let idx = normalize_index(&index_value, items.len(), "tuple")?;
                                     Ok(items[idx].clone())
                                 }
                                 ValueKind::Dict(items) => {
@@ -206,16 +206,16 @@ impl Interpreter {
     fn eval_index(&self, target: Value, index: Value) -> Result<Value> {
         match target.kind() {
             ValueKind::List(items) => {
-                let idx = normalize_index(&index, items.len())?;
+                let idx = normalize_index(&index, items.len(), "list")?;
                 Ok(items[idx].clone())
             }
             ValueKind::Tuple(items) => {
-                let idx = normalize_index(&index, items.len())?;
+                let idx = normalize_index(&index, items.len(), "tuple")?;
                 Ok(items[idx].clone())
             }
             ValueKind::Str(text) => {
                 let chars: Vec<char> = text.chars().collect();
-                let idx = normalize_index(&index, chars.len())?;
+                let idx = normalize_index(&index, chars.len(), "string")?;
                 Ok(Value::string(chars[idx].to_string()))
             }
             ValueKind::Dict(items) => {
