@@ -33,14 +33,21 @@ fn find_python_executable(root: &Path) -> PathBuf {
         return PathBuf::from(python);
     }
 
-    let venv_python = root.join(".venv").join("bin").join("python");
-    if venv_python.exists() {
-        return venv_python;
-    }
-
-    let venv_python_windows = root.join(".venv").join("Scripts").join("python.exe");
-    if venv_python_windows.exists() {
-        return venv_python_windows;
+    // Search `root` and its ancestors for a .venv directory.
+    let mut dir = root;
+    loop {
+        let venv_unix = dir.join(".venv").join("bin").join("python");
+        if venv_unix.exists() {
+            return venv_unix;
+        }
+        let venv_win = dir.join(".venv").join("Scripts").join("python.exe");
+        if venv_win.exists() {
+            return venv_win;
+        }
+        match dir.parent() {
+            Some(p) => dir = p,
+            None => break,
+        }
     }
 
     // Fallback when .venv is not present.

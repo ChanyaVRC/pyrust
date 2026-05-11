@@ -1,0 +1,14 @@
+[package]
+name = "pyrust"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "pyrust"
+path = "src/main.rs"
+
+[dependencies]
+indexmap = "2"
+rustyline = "14"
+pyrust-core = { path = "../pyrust-core" }
+pyrust-builtins = { path = "../pyrust-builtins" }
