@@ -120,6 +120,25 @@ impl Interpreter {
             vec![None; code.num_iters as usize],
             Vec::new(),
             0,
+            None,
+        )
+    }
+
+    /// Like `run_bytecode` but also passes the current function's id so that
+    /// `TailCall` instructions can perform self-call detection.
+    fn run_bytecode_for_fn(
+        &mut self,
+        code: &crate::bytecode::FnCode,
+        regs: &mut [Option<Value>],
+        fn_id: u64,
+    ) -> Result<Value> {
+        self.run_bytecode_inner(
+            code,
+            regs,
+            vec![None; code.num_iters as usize],
+            Vec::new(),
+            0,
+            Some(fn_id),
         )
     }
 
@@ -145,6 +164,7 @@ impl Interpreter {
             std::mem::take(&mut frame.iters),
             std::mem::take(&mut frame.exc_handlers),
             frame.pc,
+            None,
         );
 
         // Restore env.
@@ -184,6 +204,7 @@ impl Interpreter {
         iters_init: Vec<Option<IterState>>,
         exc_handlers_init: Vec<usize>,
         start_pc: usize,
+        current_fn_id: Option<u64>,
     ) -> Result<Value> {
         use crate::bytecode::Insn;
         use std::collections::HashMap;
@@ -192,6 +213,9 @@ impl Interpreter {
         let mut iters: Vec<Option<IterState>> = iters_init;
         let mut exc_handlers: Vec<usize> = exc_handlers_init;
         let mut pc: usize = start_pc;
+        // Counts self-tail-call iterations so that infinite tail recursion
+        // eventually raises RecursionError instead of looping forever.
+        let mut tco_iters: usize = 0;
 
         'vm: loop {
         // Dispatch errors through the active exception handler stack.
@@ -870,6 +894,79 @@ impl Interpreter {
                 }
                 Insn::ReturnNone => {
                     return Ok(Value::none());
+                }
+
+                // ── Tail-call ────────────────────────────────────────────
+                Insn::TailCall { args_base, nargs } => {
+                    // The function to call lives at func_reg = args_base - 1.
+                    let func_reg = args_base - 1;
+                    let callee_val = vm_try!(vm_read(regs, func_reg, num_locals));
+
+                    // Self-call check: if the callee is the same user function as
+                    // the one currently executing, and we are not inside a try
+                    // block (exc_handlers must be empty for safe frame reuse),
+                    // reset the register file and loop back to pc=0.
+                    let is_self_call = if let Some(fn_id) = current_fn_id {
+                        match callee_val.kind() {
+                            ValueKind::UserFunction(f) => f.id == fn_id,
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    };
+
+                    if is_self_call && exc_handlers.is_empty() {
+                        // Guard against infinite tail recursion: treat each
+                        // TCO iteration as one "call depth" unit.  This allows
+                        // factorial(MAX_CALL_DEPTH * 100) while still raising
+                        // RecursionError for truly infinite self-tail-calls.
+                        tco_iters += 1;
+                        if tco_iters > MAX_CALL_DEPTH * 100 {
+                            let exc = vm_try!(self.instantiate_named_exception(
+                                "RecursionError",
+                                "maximum recursion depth exceeded".to_string(),
+                            ));
+                            return Err(PyError::Raised(exc));
+                        }
+                        // Collect new argument values before we overwrite any registers.
+                        let mut new_args: Vec<Value> =
+                            Vec::with_capacity(*nargs as usize);
+                        for i in 0..*nargs as u32 {
+                            new_args.push(vm_try!(vm_read(regs, args_base + i, num_locals)));
+                        }
+                        // Reset all registers to None.
+                        for slot in regs.iter_mut() {
+                            *slot = None;
+                        }
+                        // Bind new positional args into parameter registers 0..nargs.
+                        for (i, arg) in new_args.into_iter().enumerate() {
+                            regs[i] = Some(arg);
+                        }
+                        // Restore the self-reference in its original register so
+                        // the recursive body can call itself again.
+                        regs[func_reg as usize] = Some(callee_val);
+                        // Reset iterator and exception-handler state.
+                        for slot in iters.iter_mut() {
+                            *slot = None;
+                        }
+                        // exc_handlers is already empty (checked above).
+                        // Jump to the top of the function.
+                        pc = 0;
+                        continue 'vm;
+                    } else {
+                        // Fallback: normal call, then return the result.
+                        let mut buf = std::mem::take(&mut self.call_arg_buf);
+                        buf.clear();
+                        for i in 0..*nargs as u32 {
+                            buf.push(ExpandedCallArg {
+                                name: None,
+                                value: vm_try!(vm_read(regs, args_base + i, num_locals)),
+                            });
+                        }
+                        let call_result = self.call_function_expanded(callee_val, &buf);
+                        self.call_arg_buf = buf;
+                        return Ok(vm_try!(call_result));
+                    }
                 }
 
                 // ── Collection builders ──────────────────────────────────

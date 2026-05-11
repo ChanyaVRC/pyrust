@@ -2107,7 +2107,7 @@ impl Interpreter {
                     return Ok(Value::generator(Box::new(frame)));
                 }
 
-                let vm_result = self.run_bytecode(&code, &mut regs);
+                let vm_result = self.run_bytecode_for_fn(&code, &mut regs, function.id);
 
                 let used_env = std::mem::replace(&mut self.env, previous_env);
                 if needs_local_env {
@@ -2267,7 +2267,7 @@ impl Interpreter {
                 std::mem::replace(&mut self.env, Rc::clone(&function.env))
             };
 
-            let vm_result = self.run_bytecode(&code, &mut regs);
+            let vm_result = self.run_bytecode_for_fn(&code, &mut regs, function.id);
 
             let used_env = std::mem::replace(&mut self.env, previous_env);
             if needs_local_env {
