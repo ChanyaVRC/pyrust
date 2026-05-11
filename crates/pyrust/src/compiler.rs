@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ast::{
-    AssignTarget, BinaryOp, CmpOp, CompClause, Expr, FStringPart, FunctionParam, Stmt, UnaryOp,
+    AssignTarget, BinaryOp, CmpOp, CompClause, Expr, FStringPart, FunctionParam, MatchArm, Pattern,
+    Stmt, UnaryOp,
 };
 use crate::bytecode::{CellVar, FnCode, FnParamSpec, FnProto, Insn, Reg};
 use crate::error::PyError;
@@ -163,6 +164,11 @@ fn collect_cell_vars_in(
             Stmt::With { body, .. } => {
                 collect_cell_vars_in(body, local_index, cells);
             }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    collect_cell_vars_in(&arm.body, local_index, cells);
+                }
+            }
             _ => {}
         }
     }
@@ -298,6 +304,15 @@ fn lambda_captures_in_stmt(
         Stmt::Delete(exprs) => {
             for e in exprs {
                 lambda_captures_in_expr(e, local_index, cells);
+            }
+        }
+        Stmt::Match { subject, arms } => {
+            lambda_captures_in_expr(subject, local_index, cells);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    lambda_captures_in_expr(guard, local_index, cells);
+                }
+                collect_lambda_captures(&arm.body, local_index, cells);
             }
         }
         Stmt::Import { .. }
@@ -616,6 +631,15 @@ fn collect_free_var_reads_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>) {
         Stmt::Delete(exprs) => {
             for e in exprs {
                 collect_free_var_reads_in_expr(e, uses);
+            }
+        }
+        Stmt::Match { subject, arms } => {
+            collect_free_var_reads_in_expr(subject, uses);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_free_var_reads_in_expr(guard, uses);
+                }
+                collect_free_var_reads_in_stmts(&arm.body, uses);
             }
         }
         Stmt::Import { .. }
@@ -1640,6 +1664,9 @@ impl Compiler {
             Stmt::With { items, body } => {
                 self.compile_with(items, body);
             }
+            Stmt::Match { subject, arms } => {
+                self.compile_match(subject, arms);
+            }
         }
     }
 
@@ -1998,6 +2025,322 @@ impl Compiler {
             self.def_set = pre_def_set | all_define;
         } else {
             self.def_set = pre_def_set;
+        }
+    }
+
+    // ── Match/case ────────────────────────────────────────────────────────────
+
+    fn compile_match(&mut self, subject: &Expr, arms: &[MatchArm]) {
+        // Evaluate the subject once into a temp register.
+        let subj = self.compile_expr(subject);
+        let pre_def_set = self.def_set;
+        let mut end_patches: Vec<usize> = Vec::new();
+        let mut all_arm_def_sets: Vec<u64> = Vec::new();
+
+        for arm in arms {
+            self.def_set = pre_def_set;
+            // Emit pattern-matching code; collect jump-to-next-arm patches.
+            let mut next_arm_patches: Vec<usize> = Vec::new();
+            self.compile_pattern_match(subj, &arm.pattern, &mut next_arm_patches);
+            if self.failed {
+                return;
+            }
+            // If there's a guard, test it.
+            if let Some(guard_expr) = &arm.guard {
+                let g = self.compile_expr(guard_expr);
+                let jmp = self.emit(Insn::JumpIfFalse(g, 0));
+                self.free_temp(g);
+                next_arm_patches.push(jmp);
+            }
+            // Arm body
+            self.compile_block(&arm.body);
+            if self.failed {
+                return;
+            }
+            all_arm_def_sets.push(self.def_set);
+            // Jump past remaining arms after successful execution.
+            let jmp_end = self.emit(Insn::Jump(0));
+            end_patches.push(jmp_end);
+            // Patch all "no match" jumps to land here (start of next arm).
+            for idx in next_arm_patches {
+                self.patch_jump(idx);
+            }
+        }
+
+        // Patch all end-of-arm jumps to land after the whole match.
+        for idx in end_patches {
+            self.patch_jump(idx);
+        }
+        self.free_temp(subj);
+        // Variables defined in every arm are definitely bound after the match.
+        let all_define = if all_arm_def_sets.is_empty() {
+            0
+        } else {
+            all_arm_def_sets.iter().fold(!0u64, |acc, &s| acc & s)
+        };
+        self.def_set = pre_def_set | all_define;
+    }
+
+    /// Emit code that tests whether register `subj` matches `pattern`.
+    /// On mismatch, jumps via newly-pushed entries in `fail_patches`
+    /// (caller will patch them all to the next arm).
+    /// On match, binds any capture variables and falls through.
+    fn compile_pattern_match(
+        &mut self,
+        subj: Reg,
+        pattern: &Pattern,
+        fail_patches: &mut Vec<usize>,
+    ) {
+        if self.failed {
+            return;
+        }
+        match pattern {
+            Pattern::Wildcard => {
+                // Always matches, nothing to do.
+            }
+            Pattern::Capture(name) => {
+                // Bind subj to name, always succeeds.
+                self.compile_store_name(name, subj);
+                if let Some(reg) = self.local_reg(name) {
+                    self.mark_def(reg);
+                }
+            }
+            Pattern::Literal(expr) => {
+                // Emit: if subj != literal → fail
+                let lit = self.compile_expr(expr);
+                let jmp = self.emit(Insn::CmpJumpIfFalse(subj, BinaryOp::Eq, lit, 0));
+                self.free_temp(lit);
+                fail_patches.push(jmp);
+            }
+            Pattern::Or(alternatives) => {
+                // Try each alternative; if one matches, jump to success.
+                // If all fail, fall through to after (which will be patched to next arm).
+                let mut success_patches: Vec<usize> = Vec::new();
+                let n = alternatives.len();
+                for (i, alt) in alternatives.iter().enumerate() {
+                    let mut alt_fail: Vec<usize> = Vec::new();
+                    self.compile_pattern_match(subj, alt, &mut alt_fail);
+                    if self.failed {
+                        return;
+                    }
+                    if i < n - 1 {
+                        // This alternative matched — jump to success.
+                        let jmp_ok = self.emit(Insn::Jump(0));
+                        success_patches.push(jmp_ok);
+                        // Patch the fail of this alternative to try the next one.
+                        for idx in alt_fail {
+                            self.patch_jump(idx);
+                        }
+                    } else {
+                        // Last alternative: its failures propagate to caller.
+                        fail_patches.extend(alt_fail);
+                    }
+                }
+                for idx in success_patches {
+                    self.patch_jump(idx);
+                }
+            }
+            Pattern::Sequence(elements) => {
+                // Check that subject has exactly `fixed_count` elements
+                // (unless there's a star element, then >= fixed_count).
+                let has_star = elements.iter().any(|(_, is_star)| *is_star);
+                let fixed_count = elements.iter().filter(|(_, s)| !s).count();
+
+                // R_len = len(subj)
+                let len_name_idx = self.intern_name("len");
+                let len_fn = self.alloc_temp();
+                self.emit(Insn::LoadGlobal(len_fn, len_name_idx));
+                let len_arg = self.alloc_temp();
+                self.emit(Insn::Move(len_arg, subj));
+                self.emit(Insn::Call(len_fn, 1));
+                let r_len = len_fn; // result in len_fn after call
+                self.free_temp(len_arg);
+
+                // Check length
+                let count_val = self.intern_const(Value::int(fixed_count as i64));
+                let len_jmp = if has_star {
+                    self.emit(Insn::CmpJumpIfFalseConst(r_len, BinaryOp::Ge, count_val, 0))
+                } else {
+                    self.emit(Insn::CmpJumpIfFalseConst(r_len, BinaryOp::Eq, count_val, 0))
+                };
+                fail_patches.push(len_jmp);
+                self.free_temp(r_len);
+
+                // Destructure each element.
+                let mut fixed_idx: i64 = 0;
+                let mut star_seen = false;
+                let total = elements.len();
+                for (elem_i, (elem_pat, is_star)) in elements.iter().enumerate() {
+                    if *is_star {
+                        star_seen = true;
+                        // Star element captures subj[fixed_idx:]
+                        // i.e., subj[fixed_idx : len - (total - elem_i - 1)]
+                        let trailing = (total - elem_i - 1) as i64;
+                        if let Pattern::Capture(name) = elem_pat {
+                            // Compute start index
+                            let start_c = self.intern_const(Value::int(fixed_idx));
+                            let start_r = self.alloc_temp();
+                            self.emit(Insn::LoadConst(start_r, start_c));
+                            // Compute stop index: re-compute len
+                            let len2_fn = self.alloc_temp();
+                            self.emit(Insn::LoadGlobal(len2_fn, len_name_idx));
+                            let arg2 = self.alloc_temp();
+                            self.emit(Insn::Move(arg2, subj));
+                            self.emit(Insn::Call(len2_fn, 1));
+                            self.free_temp(arg2);
+                            let r_len2 = len2_fn;
+                            let stop_r = if trailing > 0 {
+                                let trail_c = self.intern_const(Value::int(trailing));
+                                let trail_r = self.alloc_temp();
+                                self.emit(Insn::LoadConst(trail_r, trail_c));
+                                let stop = self.alloc_temp();
+                                self.emit(Insn::BinOp(stop, r_len2, BinaryOp::Sub, trail_r));
+                                self.free_temp(trail_r);
+                                self.free_temp(r_len2);
+                                stop
+                            } else {
+                                r_len2
+                            };
+                            // Build slice subj[start:stop]
+                            let slice_key = self.alloc_temp();
+                            // Build a 3-tuple (start, stop, None) to represent the slice
+                            let none_r = self.alloc_temp();
+                            self.emit(Insn::LoadNone(none_r));
+                            // Use BuildTuple to create the slice key
+                            // Arrange args in consecutive regs: start_r, stop_r, none_r
+                            // They might not be consecutive, so move them.
+                            let base = self.alloc_temp();
+                            self.emit(Insn::Move(base, start_r));
+                            let base1 = self.alloc_temp();
+                            self.emit(Insn::Move(base1, stop_r));
+                            let base2 = self.alloc_temp();
+                            self.emit(Insn::Move(base2, none_r));
+                            self.emit(Insn::BuildTuple(slice_key, base, 3));
+                            self.free_temp(base2);
+                            self.free_temp(base1);
+                            self.free_temp(base);
+                            self.free_temp(none_r);
+                            self.free_temp(stop_r);
+                            self.free_temp(start_r);
+                            // Get the slice: subj[start:stop] via GetItem with a slice tuple
+                            let elem_r = self.alloc_temp();
+                            self.emit(Insn::GetItem(elem_r, subj, slice_key));
+                            self.free_temp(slice_key);
+                            // Store into capture name
+                            self.compile_store_name(name, elem_r);
+                            if let Some(reg) = self.local_reg(name) {
+                                self.mark_def(reg);
+                            }
+                            self.free_temp(elem_r);
+                        }
+                        // Don't increment fixed_idx for the star element itself.
+                        continue;
+                    }
+                    // Compute index: if we haven't seen the star yet, use fixed_idx from left.
+                    // After the star, index from the right.
+                    let idx_val = if !star_seen {
+                        fixed_idx
+                    } else {
+                        // Negative index (from end): -(fixed_count after star) + offset
+                        let after_star =
+                            elements[elem_i..].iter().filter(|(_, s)| !s).count() as i64;
+                        -(after_star)
+                    };
+                    if !star_seen {
+                        fixed_idx += 1;
+                    }
+
+                    let idx_c = self.intern_const(Value::int(idx_val));
+                    let idx_r = self.alloc_temp();
+                    self.emit(Insn::LoadConst(idx_r, idx_c));
+                    let elem_r = self.alloc_temp();
+                    self.emit(Insn::GetItem(elem_r, subj, idx_r));
+                    self.free_temp(idx_r);
+                    self.compile_pattern_match(elem_r, elem_pat, fail_patches);
+                    self.free_temp(elem_r);
+                    if self.failed {
+                        return;
+                    }
+                }
+            }
+            Pattern::Mapping(pairs, rest_name) => {
+                // For each key-pattern pair: check key in subject, then match pattern.
+                let in_name_idx = self.intern_name("__contains__");
+                let _ = in_name_idx; // used indirectly via BinaryOp::In
+
+                for (key_expr, val_pat) in pairs {
+                    let key_r = self.compile_expr(key_expr);
+                    // Check: key in subj
+                    let check_r = self.alloc_temp();
+                    self.emit(Insn::BinOp(check_r, key_r, BinaryOp::In, subj));
+                    let jmp = self.emit(Insn::JumpIfFalse(check_r, 0));
+                    self.free_temp(check_r);
+                    fail_patches.push(jmp);
+                    // Get the value: subj[key]
+                    let val_r = self.alloc_temp();
+                    self.emit(Insn::GetItem(val_r, subj, key_r));
+                    self.free_temp(key_r);
+                    // Match sub-pattern against the value
+                    self.compile_pattern_match(val_r, val_pat, fail_patches);
+                    self.free_temp(val_r);
+                    if self.failed {
+                        return;
+                    }
+                }
+                // If there's a **rest, bind it to subj minus matched keys.
+                if let Some(rest) = rest_name {
+                    // Build a copy of subj and remove matched keys.
+                    // Simplest: call dict(subj) then del keys.
+                    let dict_name_idx = self.intern_name("dict");
+                    let dict_fn = self.alloc_temp();
+                    self.emit(Insn::LoadGlobal(dict_fn, dict_name_idx));
+                    let arg = self.alloc_temp();
+                    self.emit(Insn::Move(arg, subj));
+                    self.emit(Insn::Call(dict_fn, 1));
+                    self.free_temp(arg);
+                    let rest_r = dict_fn; // result in dict_fn
+                    for (key_expr, _) in pairs {
+                        let k = self.compile_expr(key_expr);
+                        self.emit(Insn::DeleteItem(rest_r, k));
+                        self.free_temp(k);
+                    }
+                    self.compile_store_name(rest, rest_r);
+                    if let Some(reg) = self.local_reg(rest) {
+                        self.mark_def(reg);
+                    }
+                    self.free_temp(rest_r);
+                }
+            }
+            Pattern::Class { cls, kwargs } => {
+                // isinstance(subj, cls) check must come FIRST so that attribute
+                // access is never attempted on a subject of the wrong type.
+                let isinstance_name_idx = self.intern_name("isinstance");
+                let isinstance_fn = self.alloc_temp();
+                self.emit(Insn::LoadGlobal(isinstance_fn, isinstance_name_idx));
+                let arg0 = self.alloc_temp();
+                self.emit(Insn::Move(arg0, subj));
+                let cls_r = self.compile_expr(cls);
+                let arg1 = self.alloc_temp();
+                self.emit(Insn::Move(arg1, cls_r));
+                self.free_temp(cls_r);
+                self.emit(Insn::Call(isinstance_fn, 2));
+                self.free_temp(arg1);
+                self.free_temp(arg0);
+                let jmp = self.emit(Insn::JumpIfFalse(isinstance_fn, 0));
+                fail_patches.push(jmp);
+                self.free_temp(isinstance_fn);
+                // Now check each keyword attribute.
+                for (attr_name, attr_pat) in kwargs {
+                    let name_idx = self.intern_name(attr_name);
+                    let attr_r = self.alloc_temp();
+                    self.emit(Insn::GetAttr(attr_r, subj, name_idx));
+                    self.compile_pattern_match(attr_r, attr_pat, fail_patches);
+                    self.free_temp(attr_r);
+                    if self.failed {
+                        return;
+                    }
+                }
+            }
         }
     }
 

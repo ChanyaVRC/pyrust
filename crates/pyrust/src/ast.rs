@@ -119,6 +119,42 @@ pub enum Stmt {
         items: Vec<(Expr, Option<AssignTarget>)>,
         body: Vec<Stmt>,
     },
+    Match {
+        subject: Expr,
+        arms: Vec<MatchArm>,
+    },
+}
+
+/// A single `case <pattern> [if <guard>]: <body>` arm in a `match` statement.
+#[derive(Debug, Clone)]
+pub struct MatchArm {
+    pub pattern: Pattern,
+    pub guard: Option<Expr>,
+    pub body: Vec<Stmt>,
+}
+
+/// Pattern variants for structural pattern matching (PEP 634).
+#[derive(Debug, Clone)]
+pub enum Pattern {
+    /// `_` — always matches, no binding.
+    Wildcard,
+    /// `42`, `"str"`, `True`, `None` — equality test.
+    Literal(Expr),
+    /// `x` — binds the matched value to a name.
+    Capture(String),
+    /// `p1 | p2` — matches if any sub-pattern matches.
+    Or(Vec<Pattern>),
+    /// `[a, b, *rest]` — destructures a sequence.
+    /// Each element is `(pattern, is_star)`.
+    Sequence(Vec<(Pattern, bool)>),
+    /// `{"key": pattern, **rest}` — destructures a mapping.
+    /// `rest` is the optional `**rest` capture name.
+    Mapping(Vec<(Expr, Pattern)>, Option<String>),
+    /// `ClassName(attr=pat, ...)` — class pattern.
+    Class {
+        cls: Box<Expr>,
+        kwargs: Vec<(String, Pattern)>,
+    },
 }
 
 /// One part of a parsed f-string.
