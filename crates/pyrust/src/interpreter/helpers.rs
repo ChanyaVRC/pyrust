@@ -839,6 +839,9 @@ fn collect_assign_target_names(
             }
         }
         AssignTarget::Attr(..) | AssignTarget::Index(..) => {}
+        AssignTarget::Starred(inner) => {
+            collect_assign_target_names(inner, names, global_names, nonlocal_names);
+        }
     }
 }
 

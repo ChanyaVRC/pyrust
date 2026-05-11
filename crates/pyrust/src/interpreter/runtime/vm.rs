@@ -1081,6 +1081,55 @@ impl Interpreter {
                     }
                 }
 
+                Insn::UnpackEx { src, before, after, dst_base } => {
+                    let src_val = vm_try!(vm_read(regs, *src, num_locals));
+                    let items = vm_try!(iter_values(src_val));
+                    let before = *before as usize;
+                    let after = *after as usize;
+                    let min_len = before + after;
+                    if items.len() < min_len {
+                        vm_try!(Err::<(), _>(PyError::Named(
+                            "ValueError".to_string(),
+                            format!(
+                                "not enough values to unpack (expected at least {}, got {})",
+                                min_len,
+                                items.len()
+                            ),
+                        )));
+                    }
+                    let base = *dst_base as usize;
+                    // First `before` elements
+                    for i in 0..before {
+                        let dst = base + i;
+                        if dst >= regs.len() {
+                            vm_try!(Err(PyError::Runtime(format!(
+                                "UnpackEx: register {dst} out of range"
+                            ))));
+                        }
+                        regs[dst] = Some(items[i].clone());
+                    }
+                    // Middle as a list → R[base + before]
+                    let star_end = items.len() - after;
+                    let middle: Vec<Value> = items[before..star_end].to_vec();
+                    let star_dst = base + before;
+                    if star_dst >= regs.len() {
+                        vm_try!(Err(PyError::Runtime(format!(
+                            "UnpackEx: register {star_dst} out of range"
+                        ))));
+                    }
+                    regs[star_dst] = Some(Value::list(middle));
+                    // Last `after` elements
+                    for i in 0..after {
+                        let dst = base + before + 1 + i;
+                        if dst >= regs.len() {
+                            vm_try!(Err(PyError::Runtime(format!(
+                                "UnpackEx: register {dst} out of range"
+                            ))));
+                        }
+                        regs[dst] = Some(items[star_end + i].clone());
+                    }
+                }
+
                 // ── Iterator ─────────────────────────────────────────────
                 Insn::GetIter(slot, src) => {
                     // Range: lazy counter — no Vec needed.
