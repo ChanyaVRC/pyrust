@@ -34,6 +34,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_cmpjump_fusion(insns, num_locals);
     let insns = pass_not_invert(insns, num_locals);
     let insns = pass_binopinplace_downgrade(insns, num_locals);
+    let insns = pass_exit_inline(insns);
     let insns = pass_dead_code(insns);
     let insns = pass_dead_store_elim(insns, num_locals);
     let insns = pass_copy_prop(insns);
@@ -815,6 +816,52 @@ fn pass_binopinplace_downgrade(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 && (*dst == *lhs || !reg_is_read_in(&insns[i + 1..], *lhs))
             {
                 return Insn::BinOp(*dst, *lhs, *op, *rhs);
+            }
+            insn.clone()
+        })
+        .collect()
+}
+
+// ─── Exit-block inlining ───────────────────────────────────────────────────────
+
+/// Replace an unconditional `Jump(k)` with the instruction it targets when that
+/// target is a single-instruction terminal (`Return(r)` or `ReturnNone`).
+///
+/// ## Rationale
+///
+/// Compiled `if/else` branches often look like:
+///
+/// ```text
+/// // true branch
+/// LoadConst(r, 1)
+/// Jump(k)           ← points to epilogue Return
+/// // false branch
+/// LoadConst(r, 0)
+/// Jump(k)           ← same epilogue Return
+/// // epilogue
+/// Return(r)
+/// ```
+///
+/// Replacing both Jumps with `Return(r)` directly — a 1-for-1 substitution that
+/// leaves all other offsets intact — eliminates two taken branches.  The now-dead
+/// epilogue `Return` is removed in the subsequent `pass_dead_code`.
+///
+/// Only single-instruction terminals are inlined to avoid shifting instruction
+/// offsets (which would require a separate offset-fixup pass).
+fn pass_exit_inline(insns: Vec<Insn>) -> Vec<Insn> {
+    let n = insns.len();
+    insns
+        .iter()
+        .enumerate()
+        .map(|(i, insn)| {
+            if let Insn::Jump(k) = insn {
+                let target = (i as i64 + 1 + *k as i64) as usize;
+                if target < n && target != i {
+                    match &insns[target] {
+                        t @ (Insn::Return(_) | Insn::ReturnNone) => return t.clone(),
+                        _ => {}
+                    }
+                }
             }
             insn.clone()
         })
@@ -2439,5 +2486,55 @@ mod tests {
         let out = pass_dead_store_elim(insns, 2);
         assert_eq!(out.len(), 3, "dead Move should be removed");
         assert!(matches!(out[1], Insn::BinOp(3, 2, BinaryOp::Add, 2)));
+    }
+
+    // ── pass_exit_inline ─────────────────────────────────────────────────────
+
+    #[test]
+    fn exit_inline_jump_to_return() {
+        // Jump(0) at index 0 targets index 1 (Return(r)) → replaced with Return(r).
+        let insns = vec![Insn::Jump(0), Insn::Return(5)];
+        let out = pass_exit_inline(insns);
+        assert_eq!(out.len(), 2, "no instructions removed — only inlined");
+        assert!(
+            matches!(out[0], Insn::Return(5)),
+            "Jump targeting Return should be replaced with Return"
+        );
+    }
+
+    #[test]
+    fn exit_inline_jump_to_return_none() {
+        let insns = vec![Insn::Jump(1), Insn::LoadConst(0, 0), Insn::ReturnNone];
+        let out = pass_exit_inline(insns);
+        // Jump(1) at index 0 targets index 2 (ReturnNone)
+        assert!(
+            matches!(out[0], Insn::ReturnNone),
+            "Jump targeting ReturnNone should be replaced with ReturnNone"
+        );
+    }
+
+    #[test]
+    fn exit_inline_skips_non_terminal_target() {
+        use crate::ast::BinaryOp;
+        // Jump(0) targets LoadConst — not a terminal, must not be replaced.
+        let insns = vec![Insn::Jump(0), Insn::LoadConst(3, 0), Insn::Return(3)];
+        let out = pass_exit_inline(insns);
+        assert!(
+            matches!(out[0], Insn::Jump(0)),
+            "Jump to non-terminal should be kept as-is"
+        );
+        // Suppress unused-import lint
+        let _ = BinaryOp::Add;
+    }
+
+    #[test]
+    fn exit_inline_skips_conditional_jumps() {
+        // JumpIfFalse is NOT an unconditional Jump — must not be modified.
+        let insns = vec![Insn::JumpIfFalse(0, 0), Insn::Return(0)];
+        let out = pass_exit_inline(insns);
+        assert!(
+            matches!(out[0], Insn::JumpIfFalse(0, 0)),
+            "conditional jumps must not be inlined"
+        );
     }
 }
