@@ -1440,7 +1440,7 @@ impl Interpreter {
                     .and_then(|v| v.as_list_mut())
                     .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
                 let empty_kw = indexmap::IndexMap::new();
-                pyrust_builtins::list::call(&method, items, &args, &empty_kw)
+                pyrust_builtins::list::call(&method, items, args, &empty_kw)
             }
             2 => {
                 if matches!(method.as_str(), "keys" | "values" | "items") {
@@ -1460,18 +1460,18 @@ impl Interpreter {
                     .as_mut()
                     .and_then(|v| v.as_dict_mut())
                     .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
-                pyrust_builtins::dict::call(&method, dict, &args)
+                pyrust_builtins::dict::call(&method, dict, args)
             }
             3 => {
                 if let Some(ValueKind::Tuple(items)) = regs[obj as usize].as_ref().map(|v| v.kind()) {
-                    pyrust_builtins::tuple::call(&method, items, &args)
+                    pyrust_builtins::tuple::call(&method, items, args)
                 } else {
                     unreachable!()
                 }
             }
             4 => {
                 if let Some(v) = &regs[obj as usize] {
-                    pyrust_builtins::string::call(&method, v, &args)
+                    pyrust_builtins::string::call(&method, v, args)
                 } else { unreachable!() }
             }
             5 => {
@@ -1479,15 +1479,15 @@ impl Interpreter {
                     .as_mut()
                     .and_then(|v| v.as_set_mut())
                     .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
-                pyrust_builtins::set::call(&method, set, &args)
+                pyrust_builtins::set::call(&method, set, args)
             }
             _ => {
                 let obj_val = vm_read(regs, obj, num_locals)?;
                 let method_val = self.get_attr(obj_val, &method)?;
                 let mut buf = std::mem::take(&mut self.call_arg_buf);
                 buf.clear();
-                for arg in &args {
-                    buf.push(ExpandedCallArg { name: None, value: arg.clone() });
+                for arg in args {
+                    buf.push(ExpandedCallArg { name: None, value: arg });
                 }
                 let r = self.call_function_expanded(method_val, &buf);
                 self.call_arg_buf = buf;
@@ -1579,13 +1579,13 @@ impl Interpreter {
                         .as_mut()
                         .and_then(|v| v.as_list_mut())
                         .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
-                    return pyrust_builtins::list::call(&method, items, &pos_items, &kw_map);
+                    return pyrust_builtins::list::call(&method, items, pos_items, &kw_map);
                 }
                 let items = regs[obj as usize]
                     .as_mut()
                     .and_then(|v| v.as_list_mut())
                     .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
-                pyrust_builtins::list::call(&method, items, &pos_items, &kw_map)
+                pyrust_builtins::list::call(&method, items, pos_items, &kw_map)
             }
             2 => {
                 if matches!(method.as_str(), "keys" | "values" | "items") {
@@ -1605,18 +1605,18 @@ impl Interpreter {
                     .as_mut()
                     .and_then(|v| v.as_dict_mut())
                     .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
-                pyrust_builtins::dict::call(&method, dict, &pos_items)
+                pyrust_builtins::dict::call(&method, dict, pos_items)
             }
             3 => {
                 if let Some(ValueKind::Tuple(items)) = regs[obj as usize].as_ref().map(|v| v.kind()) {
-                    pyrust_builtins::tuple::call(&method, items, &pos_items)
+                    pyrust_builtins::tuple::call(&method, items, pos_items)
                 } else {
                     Err(PyError::Runtime("internal: expected tuple".to_string()))
                 }
             }
             4 => {
                 if let Some(v) = &regs[obj as usize] {
-                    pyrust_builtins::string::call(&method, v, &pos_items)
+                    pyrust_builtins::string::call(&method, v, pos_items)
                 } else { unreachable!() }
             }
             5 => {
@@ -1624,14 +1624,14 @@ impl Interpreter {
                     .as_mut()
                     .and_then(|v| v.as_set_mut())
                     .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
-                pyrust_builtins::set::call(&method, set, &pos_items)
+                pyrust_builtins::set::call(&method, set, pos_items)
             }
             _ => {
                 let obj_val = vm_read(regs, obj, num_locals)?;
                 let method_val = self.get_attr(obj_val, &method)?;
                 let mut expanded: Vec<ExpandedCallArg> = pos_items
-                    .iter()
-                    .map(|v| ExpandedCallArg { name: None, value: v.clone() })
+                    .into_iter()
+                    .map(|v| ExpandedCallArg { name: None, value: v })
                     .collect();
                 for (k, v) in &kw_map {
                     if let PyKey::Str(name) = k {

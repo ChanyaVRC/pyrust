@@ -1,7 +1,8 @@
 use indexmap::IndexSet;
 use pyrust_core::{PyError, PyKey, Result, Value, ValueKind};
 
-pub fn call(method: &str, items: &mut IndexSet<PyKey>, args: &[Value]) -> Result<Value> {
+pub fn call(method: &str, items: &mut IndexSet<PyKey>, args: Vec<Value>) -> Result<Value> {
+    let args = args.as_slice();
     match method {
         // Mutating
         "add" => add(items, args),

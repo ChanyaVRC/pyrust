@@ -815,7 +815,7 @@ impl Interpreter {
                         format!("descriptor '{method}' of 'str' object needs an argument"),
                     ))?;
                 let rest: Vec<Value> = args[1..].iter().map(|a| a.value.clone()).collect();
-                pyrust_builtins::string::call(method, self_val, &rest)
+                pyrust_builtins::string::call(method, self_val, rest)
             }
             ValueKind::UserFunction(function) => {
                 let function = Rc::clone(function);
