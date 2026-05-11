@@ -112,15 +112,15 @@ fn pass_thread_jumps(insns: Vec<Insn>) -> Vec<Insn> {
 /// when `r` is a temp register (`r >= num_locals`), and `r` is not read by any
 /// instruction after the BinOp (forward liveness check).
 ///
-/// Also handles the commutative case where the constant is the LHS operand for
-/// commutative operations (`Add`, `Mul`): swaps operands and fuses to `BinOpConst`.
+/// Only handles Case 1 where the constant is the RHS operand. When the constant
+/// is the LHS operand the optimization is skipped because swapping operands would
+/// call `lhs.__add__(const)` instead of `const.__add__(lhs)` / `lhs.__radd__(const)`,
+/// breaking Python's reflected operator protocol.
 ///
 /// The liveness guard is necessary for patterns like chained comparisons where the
 /// same intermediate value is used as both an operand of the first comparison and
 /// the left-hand side of the next comparison.
 fn pass_binop_const_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
-    use crate::ast::BinaryOp;
-
     let n = insns.len();
     let mut transformed = insns;
     let mut keep = vec![true; n];
@@ -141,19 +141,6 @@ fn pass_binop_const_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             {
                 keep[i] = false;
                 transformed[i + 1] = Insn::BinOpConst(dst, lhs, op, c_idx);
-                i += 2;
-                continue;
-            }
-            // Case 2: const is the LHS operand and the op is commutative → swap
-            if lhs == lc_reg
-                && matches!(op, BinaryOp::Add | BinaryOp::Mul)
-                && rhs != lc_reg
-                && lc_reg >= num_locals
-                && !slice_has_back_edge(&transformed[i + 2..])
-                && (dst == lc_reg || !reg_is_read_in(&transformed[i + 2..], lc_reg))
-            {
-                keep[i] = false;
-                transformed[i + 1] = Insn::BinOpConst(dst, rhs, op, c_idx);
                 i += 2;
                 continue;
             }
@@ -1378,18 +1365,18 @@ mod tests {
     fn binop_const_fusion_commutative_lhs_const() {
         use crate::ast::BinaryOp;
         // LoadConst(r=5, c=0)  BinOp(dst=1, lhs=5, Add, rhs=0)  — const on LEFT
-        // r=5 >= num_locals=2, commutative Add, rhs(0) != lc_reg(5), r != dst
-        // → fuse to BinOpConst(1, 0, Add, 0), drop LoadConst
+        // Even though Add is commutative, swapping would break __radd__ dispatch,
+        // so the optimization must be skipped and all 3 instructions kept.
         let insns = vec![
             Insn::LoadConst(5, 0),
             Insn::BinOp(1, 5, BinaryOp::Add, 0),
             Insn::Return(1),
         ];
         let out = pass_binop_const_fusion(insns, 2);
-        assert_eq!(out.len(), 2, "LoadConst should be removed");
-        assert!(
-            matches!(out[0], Insn::BinOpConst(1, 0, BinaryOp::Add, 0)),
-            "BinOp with const-lhs should become BinOpConst with swapped operands"
+        assert_eq!(
+            out.len(),
+            3,
+            "const-lhs Add should NOT be fused (would break __radd__ dispatch)"
         );
     }
 
