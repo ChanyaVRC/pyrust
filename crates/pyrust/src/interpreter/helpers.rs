@@ -652,6 +652,61 @@ fn collect_local_names_from_block(
                     collect_local_names_from_block(branch, names, global_names, nonlocal_names);
                 }
             }
+            Stmt::Match { subject, arms } => {
+                collect_walrus_targets_in_expr(subject, names, global_names, nonlocal_names);
+                for arm in arms {
+                    // Collect capture names introduced by patterns.
+                    collect_pattern_names(&arm.pattern, names, global_names, nonlocal_names);
+                    if let Some(guard) = &arm.guard {
+                        collect_walrus_targets_in_expr(guard, names, global_names, nonlocal_names);
+                    }
+                    collect_local_names_from_block(&arm.body, names, global_names, nonlocal_names);
+                }
+            }
+        }
+    }
+}
+
+/// Collect names that a pattern binds (capture patterns, star captures in sequences,
+/// and `**rest` in mappings).
+fn collect_pattern_names(
+    pattern: &crate::ast::Pattern,
+    names: &mut std::collections::HashSet<String>,
+    global_names: &std::collections::HashSet<String>,
+    nonlocal_names: &std::collections::HashSet<String>,
+) {
+    use crate::ast::Pattern;
+    match pattern {
+        Pattern::Wildcard | Pattern::Literal(_) => {}
+        Pattern::Capture(name) => {
+            if !global_names.contains(name) && !nonlocal_names.contains(name) {
+                names.insert(name.clone());
+            }
+        }
+        Pattern::Or(alts) => {
+            for alt in alts {
+                collect_pattern_names(alt, names, global_names, nonlocal_names);
+            }
+        }
+        Pattern::Sequence(elems) => {
+            for (elem_pat, _) in elems {
+                collect_pattern_names(elem_pat, names, global_names, nonlocal_names);
+            }
+        }
+        Pattern::Mapping(pairs, rest) => {
+            for (_, val_pat) in pairs {
+                collect_pattern_names(val_pat, names, global_names, nonlocal_names);
+            }
+            if let Some(rest_name) = rest {
+                if !global_names.contains(rest_name) && !nonlocal_names.contains(rest_name) {
+                    names.insert(rest_name.clone());
+                }
+            }
+        }
+        Pattern::Class { kwargs, .. } => {
+            for (_, attr_pat) in kwargs {
+                collect_pattern_names(attr_pat, names, global_names, nonlocal_names);
+            }
         }
     }
 }
@@ -719,6 +774,11 @@ fn collect_declared_names_from_block(
             }
             Stmt::With { body, .. } => {
                 collect_declared_names_from_block(body, names, pick);
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    collect_declared_names_from_block(&arm.body, names, pick);
+                }
             }
             _ => {}
         }
@@ -1092,6 +1152,12 @@ fn is_pure_stmt(stmt: &Stmt, pure_fns: &std::collections::HashSet<String>) -> bo
         // Nested definitions don't execute side effects at definition time.
         Stmt::Def { .. } | Stmt::Class { .. } => true,
         Stmt::Pass | Stmt::Break | Stmt::Continue => true,
+        Stmt::Match { subject, arms } => {
+            is_pure_expr(subject, pure_fns)
+                && arms
+                    .iter()
+                    .all(|arm| is_pure_body(&arm.body, pure_fns))
+        }
     }
 }
 
