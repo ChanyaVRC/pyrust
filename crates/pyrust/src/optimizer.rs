@@ -1685,8 +1685,10 @@ fn pass_ivsr(insns: Vec<Insn>, consts: &mut Vec<Value>, num_regs: &mut u32) -> V
             None => continue,
         };
 
-        // Accumulator init = iv_init_val * k_val  (e.g., -1 * K = -K for range(n))
-        let acc_init = iv_init_val * k_val;
+        // ForCountConst increments iv BEFORE the body runs, so the first body
+        // execution sees iv = iv_init_val + 1 (= range start).  The accumulator
+        // must equal that value * K on entry to the body, not iv_init_val * K.
+        let acc_init = (iv_init_val + 1) * k_val;
         let c_acc_init = {
             if let Some(idx) = consts
                 .iter()
@@ -3680,11 +3682,11 @@ mod tests {
             matches!(out[5], Insn::Jump(-4)),
             "back-edge offset adjusted"
         );
-        // Accumulator init value = -3 (= -1 * 3)
+        // Accumulator init value = 0 (= (-1 + 1) * 3 = start * K for range(10))
         let acc_init_in_consts = consts
             .iter()
-            .any(|v| matches!(v.kind(), ValueKind::Int(-3)));
-        assert!(acc_init_in_consts, "const -3 added for accumulator init");
+            .any(|v| matches!(v.kind(), ValueKind::Int(0)));
+        assert!(acc_init_in_consts, "const 0 added for accumulator init ((-1+1)*3=0)");
     }
 
     #[test]
