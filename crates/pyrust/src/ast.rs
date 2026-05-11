@@ -215,7 +215,7 @@ pub enum Expr {
     YieldFrom(Box<Expr>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UnaryOp {
     Neg,
     Not,
@@ -223,7 +223,7 @@ pub enum UnaryOp {
     Pos,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BinaryOp {
     Add,
     Sub,

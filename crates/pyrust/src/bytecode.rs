@@ -52,6 +52,10 @@ pub enum Insn {
     LoadNone(Reg),
     /// R[dst] = R[src]
     Move(Reg, Reg),
+    /// R[dst] = R[src]  — emitted by the CSE pass; semantically identical to Move
+    /// but distinguished so that copy-propagation does not chase through it and
+    /// confuse subsequent passes that expect Move for named-variable copies.
+    CopyReg(Reg, Reg),
     /// R[dst] = R[lhs] op R[rhs]
     BinOp(Reg, Reg, BinaryOp, Reg),
     /// R[dst] = R[lhs] op= R[rhs]  (tries __i<op>__ before __<op>__)
