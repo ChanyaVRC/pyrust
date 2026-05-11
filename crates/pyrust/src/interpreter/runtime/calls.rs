@@ -918,6 +918,35 @@ impl Interpreter {
                 Ok(Value::string(obj.repr()))
             }
 
+            ValueKind::BuiltinFunction("ascii") => {
+                reject_keyword_args_expanded("ascii", args)?;
+                if args.len() != 1 {
+                    return Err(PyError::Runtime(
+                        "ascii() takes exactly one argument".to_string(),
+                    ));
+                }
+                // Get repr first, then escape any non-ASCII characters.
+                let repr_str = args[0].value.repr();
+                let escaped: String = repr_str
+                    .chars()
+                    .flat_map(|c| {
+                        if c.is_ascii() {
+                            vec![c]
+                        } else {
+                            let cp = c as u32;
+                            if cp <= 0xFF {
+                                format!("\\x{cp:02x}").chars().collect()
+                            } else if cp <= 0xFFFF {
+                                format!("\\u{cp:04x}").chars().collect()
+                            } else {
+                                format!("\\U{cp:08x}").chars().collect()
+                            }
+                        }
+                    })
+                    .collect();
+                Ok(Value::string(escaped))
+            }
+
             ValueKind::BuiltinFunction("any") => {
                 reject_keyword_args_expanded("any", args)?;
                 if args.len() != 1 {

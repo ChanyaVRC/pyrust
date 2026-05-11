@@ -972,6 +972,7 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
         "setattr" => Some(Value::builtin_function("setattr")),
         "__vcall__" => Some(Value::builtin_function("__vcall__")),
         "repr" => Some(Value::builtin_function("repr")),
+        "ascii" => Some(Value::builtin_function("ascii")),
         "format" => Some(Value::builtin_function("format")),
         "any" => Some(Value::builtin_function("any")),
         "all" => Some(Value::builtin_function("all")),

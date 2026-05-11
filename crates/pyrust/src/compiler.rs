@@ -3483,14 +3483,14 @@ impl Compiler {
                             frame
                         }
                         Some('a') => {
-                            // ascii() approximated as repr() (not in builtins, use repr)
+                            // ascii(val) — repr with non-ASCII chars escaped
                             let frame = self.next_temp;
                             if frame + 1 > self.max_reg {
                                 self.max_reg = frame + 1;
                             }
                             self.next_temp = frame + 2;
-                            let repr_idx = self.intern_name("repr");
-                            self.emit(Insn::LoadGlobal(frame, repr_idx));
+                            let ascii_idx = self.intern_name("ascii");
+                            self.emit(Insn::LoadGlobal(frame, ascii_idx));
                             if val_r != frame + 1 {
                                 self.emit(Insn::Move(frame + 1, val_r));
                             }
