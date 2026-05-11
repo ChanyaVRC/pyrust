@@ -26,6 +26,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let mut consts = code.consts;
     let insns = pass_thread_jumps(code.insns);
     let insns = pass_binop_const_fusion(insns, num_locals);
+    let insns = pass_fold_const_tuple(insns, num_locals, &mut consts);
     let insns = pass_const_fold(insns, &mut consts);
     let insns = pass_algebraic_simplify(insns, &mut consts);
     let insns = pass_unary_fold(insns, num_locals, &mut consts);
@@ -154,6 +155,91 @@ fn pass_binop_const_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 transformed[i + 1] = Insn::BinOpConst(dst, rhs, op, c_idx);
                 i += 2;
                 continue;
+            }
+        }
+        i += 1;
+    }
+    compact(transformed, &keep)
+}
+
+// ─── Constant tuple folding ────────────────────────────────────────────────────
+
+/// Fold a sequence of `LoadConst` instructions feeding a `BuildTuple` into a
+/// single `LoadConst` pointing to a pre-built tuple constant.
+///
+/// ## Pattern
+///
+/// ```text
+/// LoadConst(base+0, c0)
+/// LoadConst(base+1, c1)
+/// ...
+/// LoadConst(base+n-1, c_{n-1})
+/// BuildTuple(dst, base, n)
+/// ```
+/// → replaced with a single `LoadConst(dst, tuple_pool_idx)` where
+///   `consts[tuple_pool_idx]` is `Value::tuple([consts[c0], ..., consts[c_{n-1}]])`.
+///
+/// ## Guards
+///
+/// - Only `BuildTuple`, not `BuildList` (lists are mutable, tuples are immutable
+///   constants and safe to deduplicate).
+/// - `n >= 1 && n <= 16` — avoids unbounded look-back.
+/// - All `base+j >= num_locals` — the element registers must be temporaries, not
+///   named locals that could have been written by non-`LoadConst` instructions.
+/// - `insns[i-n .. i]` are exactly `LoadConst(base+j, c_j)` for j in 0..n — the
+///   look-back must be a perfect, contiguous, in-order match.
+fn pass_fold_const_tuple(insns: Vec<Insn>, num_locals: u32, consts: &mut Vec<Value>) -> Vec<Insn> {
+    let n = insns.len();
+    let mut transformed = insns;
+    let mut keep = vec![true; n];
+
+    let mut i = 0;
+    while i < n {
+        if let Insn::BuildTuple(dst, base, argc) = transformed[i] {
+            let argc = argc as usize;
+            if argc >= 1 && argc <= 16 && i >= argc {
+                // Check that insns[i-argc .. i] are LoadConst(base+j, c_j) for j in 0..argc
+                // and that all base+j >= num_locals.
+                let mut all_match = true;
+                let mut c_indices: Vec<u16> = Vec::with_capacity(argc);
+                for j in 0..argc {
+                    let slot = i - argc + j;
+                    match transformed[slot] {
+                        Insn::LoadConst(reg, c_idx)
+                            if reg == base + j as u32 && reg >= num_locals =>
+                        {
+                            c_indices.push(c_idx);
+                        }
+                        _ => {
+                            all_match = false;
+                            break;
+                        }
+                    }
+                }
+
+                if all_match {
+                    // Build the tuple value from the pooled constants.
+                    let elems: Vec<Value> = c_indices
+                        .iter()
+                        .map(|&ci| consts[ci as usize].clone())
+                        .collect();
+                    let tuple_val = Value::tuple(elems);
+
+                    // Intern the tuple in the const pool (always append — tuples are
+                    // not deduplicated by intern_const_in_pool which only handles
+                    // scalars, and identity equality on tuples is object-level).
+                    if consts.len() < u16::MAX as usize {
+                        let new_idx = consts.len() as u16;
+                        consts.push(tuple_val);
+
+                        // Mark the n LoadConst predecessors as removed.
+                        for j in 0..argc {
+                            keep[i - argc + j] = false;
+                        }
+                        // Replace BuildTuple with LoadConst(dst, new_idx).
+                        transformed[i] = Insn::LoadConst(dst, new_idx);
+                    }
+                }
             }
         }
         i += 1;
@@ -2174,5 +2260,51 @@ mod tests {
             matches!(out[4], Insn::DictUpdate(5, 4)),
             "DictUpdate: receiver unchanged, src substituted"
         );
+    }
+
+    // ── pass_fold_const_tuple ─────────────────────────────────────────────────
+
+    #[test]
+    fn fold_const_tuple_two_consts() {
+        use crate::value::Value;
+        let mut consts = vec![Value::int(10), Value::int(20)];
+        let insns = vec![
+            Insn::LoadConst(2, 0),
+            Insn::LoadConst(3, 1),
+            Insn::BuildTuple(4, 2, 2),
+            Insn::Return(4),
+        ];
+        let out = pass_fold_const_tuple(insns, 2, &mut consts);
+        assert_eq!(out.len(), 2);
+        assert!(matches!(out[0], Insn::LoadConst(4, _)));
+        let new_idx = match out[0] {
+            Insn::LoadConst(_, i) => i,
+            _ => panic!("expected LoadConst"),
+        };
+        let elems = consts[new_idx as usize]
+            .as_tuple()
+            .expect("new constant should be a tuple");
+        assert_eq!(elems.len(), 2);
+        assert!(matches!(elems[0].kind(), crate::value::ValueKind::Int(10)));
+        assert!(matches!(elems[1].kind(), crate::value::ValueKind::Int(20)));
+    }
+
+    #[test]
+    fn fold_const_tuple_skips_local_regs() {
+        use crate::value::Value;
+        let mut consts = vec![Value::int(1), Value::int(2)];
+        let insns = vec![
+            Insn::LoadConst(1, 0),
+            Insn::LoadConst(2, 1),
+            Insn::BuildTuple(5, 1, 2),
+            Insn::Return(5),
+        ];
+        let out = pass_fold_const_tuple(insns, 3, &mut consts);
+        assert_eq!(
+            out.len(),
+            4,
+            "should not fold when base register is a local"
+        );
+        assert!(matches!(out[2], Insn::BuildTuple(5, 1, 2)));
     }
 }
