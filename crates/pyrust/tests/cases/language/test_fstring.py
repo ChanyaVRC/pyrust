@@ -40,4 +40,19 @@ assert f"{n:5d}" == "   42"
 # format spec: zero-padded
 assert f"{n:05d}" == "00042"
 
+# !s conversion (str())
+assert f"{n!s}" == "42"
+
+# !a conversion (ascii())
+assert f"{'café'!a}" == "'caf\\xe9'"
+
+# Method call inside interpolation
+items = [1, 2, 3]
+assert f"len={len(items)}" == "len=3"
+assert f"{'abc'.upper()}" == "ABC"
+
+# Concatenation of f-string with regular string
+s = f"a={n}" + "!"
+assert s == "a=42!"
+
 print("f-string OK")
