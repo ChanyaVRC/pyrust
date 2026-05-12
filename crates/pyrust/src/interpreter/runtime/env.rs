@@ -201,6 +201,7 @@ impl Interpreter {
                         "count"      => Ok(Value::builtin_function("str.count")),
                         "startswith" => Ok(Value::builtin_function("str.startswith")),
                         "endswith"   => Ok(Value::builtin_function("str.endswith")),
+                        "format"     => Ok(Value::builtin_function("str.format")),
                         "isdigit"    => Ok(Value::builtin_function("str.isdigit")),
                         "isalpha"    => Ok(Value::builtin_function("str.isalpha")),
                         "isalnum"    => Ok(Value::builtin_function("str.isalnum")),

@@ -919,6 +919,31 @@ impl Interpreter {
                     )),
                 }
             }
+            ValueKind::BuiltinFunction("str.format") => {
+                let self_val = args
+                    .first()
+                    .map(|a| &a.value)
+                    .ok_or_else(|| PyError::Named(
+                        "TypeError".to_string(),
+                        "descriptor 'format' of 'str' object needs an argument".to_string(),
+                    ))?;
+                let template = match self_val.kind() {
+                    ValueKind::Str(s) => s.to_string(),
+                    _ => return Err(PyError::Named(
+                        "TypeError".to_string(),
+                        "descriptor 'format' requires a 'str' object".to_string(),
+                    )),
+                };
+                let mut positional: Vec<Value> = Vec::new();
+                let mut keyword: Vec<(String, Value)> = Vec::new();
+                for a in &args[1..] {
+                    match &a.name {
+                        Some(n) => keyword.push((n.clone(), a.value.clone())),
+                        None => positional.push(a.value.clone()),
+                    }
+                }
+                format_str_template(&template, &positional, &keyword)
+            }
             ValueKind::BuiltinFunction(name) if name.starts_with("str.") => {
                 let method = &name[4..];
                 let self_val = args
@@ -3070,4 +3095,303 @@ fn builtin_method_names(type_name: &str) -> Vec<String> {
         _ => &[],
     };
     names.iter().map(|s| s.to_string()).collect()
+}
+
+/// Implements `str.format()`.  Parses `{...}` replacement fields in `template`
+/// and substitutes positional or keyword arguments, optionally formatted by
+/// a `:spec` and/or converted by `!r`/`!s`/`!a`.  Supports `{{` / `}}` for
+/// literal braces and `{0.attr}` / `{0[key]}` field accessors.
+fn format_str_template(
+    template: &str,
+    positional: &[Value],
+    keyword: &[(String, Value)],
+) -> Result<Value> {
+    let bytes = template.as_bytes();
+    let mut out = String::with_capacity(template.len());
+    let mut i = 0;
+    // Tracks auto-numbering of `{}` placeholders.  `Some(n)` = next index;
+    // `None` = mixed manual/auto detected, raise on next auto.
+    let mut auto_idx: Option<usize> = Some(0);
+    let mut saw_manual = false;
+
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'{' {
+            if i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+                out.push('{');
+                i += 2;
+                continue;
+            }
+            // Find matching '}'. Track nested braces inside the format spec
+            // (e.g. "{:{width}}") at depth-1 only.
+            let mut depth = 1;
+            let mut j = i + 1;
+            while j < bytes.len() && depth > 0 {
+                match bytes[j] {
+                    b'{' => depth += 1,
+                    b'}' => depth -= 1,
+                    _ => {}
+                }
+                if depth == 0 {
+                    break;
+                }
+                j += 1;
+            }
+            if depth != 0 {
+                return Err(PyError::Named(
+                    "ValueError".to_string(),
+                    "Single '{' encountered in format string".to_string(),
+                ));
+            }
+            let field = &template[i + 1..j];
+            i = j + 1;
+
+            // Split off the format spec at the first ':' that isn't inside `[]`.
+            let (field_name_full, spec) = split_field_and_spec(field);
+            // Split off the conversion (`!r`, `!s`, `!a`) from the field name.
+            let (field_name, conversion) = match field_name_full.rsplit_once('!') {
+                Some((name, conv)) if conv.len() == 1 => (name, Some(conv.chars().next().unwrap())),
+                _ => (field_name_full, None),
+            };
+
+            // Resolve the base value from the field name's head segment.
+            let (head, rest) = split_head_and_accessors(field_name);
+            let base = if head.is_empty() {
+                // Auto-numbered field
+                if saw_manual {
+                    return Err(PyError::Named(
+                        "ValueError".to_string(),
+                        "cannot switch from manual field specification to automatic field numbering".to_string(),
+                    ));
+                }
+                let Some(idx) = auto_idx else { unreachable!() };
+                auto_idx = Some(idx + 1);
+                positional.get(idx).cloned().ok_or_else(|| PyError::Named(
+                    "IndexError".to_string(),
+                    format!("Replacement index {idx} out of range for positional args tuple"),
+                ))?
+            } else if let Ok(n) = head.parse::<usize>() {
+                if auto_idx.is_some() && auto_idx != Some(0) {
+                    return Err(PyError::Named(
+                        "ValueError".to_string(),
+                        "cannot switch from automatic field numbering to manual field specification".to_string(),
+                    ));
+                }
+                saw_manual = true;
+                auto_idx = None;
+                positional.get(n).cloned().ok_or_else(|| PyError::Named(
+                    "IndexError".to_string(),
+                    format!("Replacement index {n} out of range for positional args tuple"),
+                ))?
+            } else {
+                keyword
+                    .iter()
+                    .find(|(k, _)| k == head)
+                    .map(|(_, v)| v.clone())
+                    .ok_or_else(|| PyError::Named(
+                        "KeyError".to_string(),
+                        format!("'{head}'"),
+                    ))?
+            };
+
+            // Apply field accessors (`.attr` / `[key]`) — limited support.
+            let value = apply_field_accessors(base, rest)?;
+
+            // Apply conversion (`!r`, `!s`, `!a`).
+            let value = match conversion {
+                Some('r') => Value::string(value.repr()),
+                Some('s') => Value::string(value.to_py_str()),
+                Some('a') => Value::string(ascii_repr(&value)),
+                Some(c) => {
+                    return Err(PyError::Named(
+                        "ValueError".to_string(),
+                        format!("Unknown conversion specifier {c}"),
+                    ));
+                }
+                None => value,
+            };
+
+            // Apply the format spec.
+            let formatted = apply_format_spec(&value, spec)?;
+            if let ValueKind::Str(s) = formatted.kind() {
+                out.push_str(s);
+            } else {
+                out.push_str(&formatted.to_py_str());
+            }
+        } else if c == b'}' {
+            if i + 1 < bytes.len() && bytes[i + 1] == b'}' {
+                out.push('}');
+                i += 2;
+            } else {
+                return Err(PyError::Named(
+                    "ValueError".to_string(),
+                    "Single '}' encountered in format string".to_string(),
+                ));
+            }
+        } else {
+            // Walk one UTF-8 char.
+            let ch_start = i;
+            while i < bytes.len() && (bytes[i] & 0xC0) != 0x80 {
+                i += 1;
+                if i >= bytes.len() || bytes[i] == b'{' || bytes[i] == b'}' {
+                    break;
+                }
+                // continue past continuation bytes
+                while i < bytes.len() && (bytes[i] & 0xC0) == 0x80 {
+                    i += 1;
+                }
+                break;
+            }
+            out.push_str(&template[ch_start..i]);
+        }
+    }
+    Ok(Value::string(out))
+}
+
+/// Splits a replacement field on the first `:` that is not inside `[]`,
+/// returning `(field_name_with_conversion, format_spec)`.
+fn split_field_and_spec(field: &str) -> (&str, &str) {
+    let bytes = field.as_bytes();
+    let mut bracket_depth = 0;
+    for (idx, b) in bytes.iter().enumerate() {
+        match b {
+            b'[' => bracket_depth += 1,
+            b']' if bracket_depth > 0 => bracket_depth -= 1,
+            b':' if bracket_depth == 0 => return (&field[..idx], &field[idx + 1..]),
+            _ => {}
+        }
+    }
+    (field, "")
+}
+
+/// Splits a field name like `0.x[1].y` into `("0", ".x[1].y")`.
+fn split_head_and_accessors(name: &str) -> (&str, &str) {
+    let bytes = name.as_bytes();
+    for (i, b) in bytes.iter().enumerate() {
+        if *b == b'.' || *b == b'[' {
+            return (&name[..i], &name[i..]);
+        }
+    }
+    (name, "")
+}
+
+/// Applies a chain of `.attr` / `[key]` accessors to a value.
+fn apply_field_accessors(mut value: Value, mut rest: &str) -> Result<Value> {
+    while !rest.is_empty() {
+        let bytes = rest.as_bytes();
+        if bytes[0] == b'.' {
+            // Find next '.' or '['
+            let end = bytes[1..]
+                .iter()
+                .position(|&b| b == b'.' || b == b'[')
+                .map(|i| i + 1)
+                .unwrap_or(rest.len());
+            let attr = &rest[1..end];
+            rest = &rest[end..];
+            match value.kind() {
+                ValueKind::PyInstance(inst) => {
+                    let v = inst
+                        .borrow()
+                        .attrs
+                        .get(attr)
+                        .cloned()
+                        .ok_or_else(|| PyError::Named(
+                            "AttributeError".to_string(),
+                            format!("attribute '{attr}' not found"),
+                        ))?;
+                    value = v;
+                }
+                _ => {
+                    return Err(PyError::Named(
+                        "AttributeError".to_string(),
+                        format!("attribute access '.{attr}' is only supported on instances"),
+                    ));
+                }
+            }
+        } else if bytes[0] == b'[' {
+            let end = bytes
+                .iter()
+                .position(|&b| b == b']')
+                .ok_or_else(|| PyError::Named(
+                    "ValueError".to_string(),
+                    "Missing ']' in format field accessor".to_string(),
+                ))?;
+            let key_str = &rest[1..end];
+            rest = &rest[end + 1..];
+            // Try integer index first; fall back to string key.
+            let next = if let Ok(idx) = key_str.parse::<i64>() {
+                match value.kind() {
+                    ValueKind::List(items) | ValueKind::Tuple(items) => {
+                        let len = items.len() as i64;
+                        let i = if idx < 0 { idx + len } else { idx };
+                        if i < 0 || i >= len {
+                            return Err(PyError::Named(
+                                "IndexError".to_string(),
+                                "list index out of range".to_string(),
+                            ));
+                        }
+                        items[i as usize].clone()
+                    }
+                    ValueKind::Dict(map) => map
+                        .get(&PyKey::Int(idx))
+                        .cloned()
+                        .ok_or_else(|| PyError::Named(
+                            "KeyError".to_string(),
+                            format!("{idx}"),
+                        ))?,
+                    _ => {
+                        return Err(PyError::Named(
+                            "TypeError".to_string(),
+                            "object is not subscriptable".to_string(),
+                        ));
+                    }
+                }
+            } else {
+                match value.kind() {
+                    ValueKind::Dict(map) => map
+                        .get(&PyKey::Str(key_str.to_string()))
+                        .cloned()
+                        .ok_or_else(|| PyError::Named(
+                            "KeyError".to_string(),
+                            format!("'{key_str}'"),
+                        ))?,
+                    _ => {
+                        return Err(PyError::Named(
+                            "TypeError".to_string(),
+                            "string key only supported on dicts".to_string(),
+                        ));
+                    }
+                }
+            };
+            value = next;
+        } else {
+            return Err(PyError::Named(
+                "ValueError".to_string(),
+                format!("unexpected character in format field: '{}'", &rest[..1]),
+            ));
+        }
+    }
+    Ok(value)
+}
+
+/// Returns the ASCII-escaped repr of a value (like the built-in `ascii()`).
+fn ascii_repr(value: &Value) -> String {
+    value
+        .repr()
+        .chars()
+        .flat_map(|c| {
+            if c.is_ascii() {
+                vec![c]
+            } else {
+                let cp = c as u32;
+                if cp <= 0xFF {
+                    format!("\\x{cp:02x}").chars().collect()
+                } else if cp <= 0xFFFF {
+                    format!("\\u{cp:04x}").chars().collect()
+                } else {
+                    format!("\\U{cp:08x}").chars().collect()
+                }
+            }
+        })
+        .collect()
 }
