@@ -51,102 +51,11 @@ impl Interpreter {
             return dispatch(self, args);
         }
         match function.kind() {
-            ValueKind::BuiltinFunction("print") => {
-                let print_options = self.parse_print_options_expanded(args)?;
-                let mut rendered = Vec::with_capacity(print_options.values.len());
-                for value in print_options.values {
-                    let s = if let ValueKind::PyInstance(inst) = value.kind() {
-                        let inst_rc = Rc::clone(inst);
-                        let class = Rc::clone(&inst_rc.borrow().class);
-                        // Exception instances use the built-in formatting.
-                        if is_exception_class(&class) {
-                            value.to_py_str()
-                        } else {
-                            let mut found = None;
-                            for dunder in &["__str__", "__repr__"] {
-                                if let Some(method_val) = lookup_class_attr(&class, dunder)
-                                    && let ValueKind::UserFunction(f) = method_val.kind()
-                                {
-                                    let func = Rc::clone(f);
-                                    let result = self.call_user_function_expanded(
-                                        func,
-                                        &[],
-                                        &[Value::py_instance(Rc::clone(&inst_rc))],
-                                    )?;
-                                    found = Some(match result.kind() {
-                                        ValueKind::Str(s) => s.to_string(),
-                                        _ => return Err(PyError::named(
-                                            "TypeError",
-                                            format!("{dunder} returned non-string"),
-                                        )),
-                                    });
-                                    break;
-                                }
-                            }
-                            found.unwrap_or_else(|| {
-                                let class_name = class.borrow().name.clone();
-                                format!("<{class_name} object>")
-                            })
-                        }
-                    } else {
-                        value.to_py_str()
-                    };
-                    rendered.push(s);
-                }
-                print!("{}{}", rendered.join(&print_options.sep), print_options.end);
-                Ok(Value::none())
-            }
-            ValueKind::BuiltinFunction("range") => self.call_range_expanded(args),
-
-            ValueKind::BuiltinFunction("open") => {
-                let path = match args.first().map(|a| a.value.kind()) {
-                    Some(ValueKind::Str(s)) => s.to_string(),
-                    _ => {
-                        return Err(PyError::named(
-                            "TypeError",
-                            "open(): path must be a string".to_string(),
-                        ));
-                    }
-                };
-                let mode = {
-                    let kw = args.iter().find(|a| a.name.as_deref() == Some("mode"));
-                    let positional = args.iter().filter(|a| a.name.is_none()).nth(1);
-                    let val = kw.or(positional).map(|a| &a.value);
-                    match val.map(|v| v.kind()) {
-                        None => "r".to_string(),
-                        Some(ValueKind::Str(s)) => s.to_string(),
-                        Some(_) => {
-                            return Err(PyError::named(
-                                "TypeError",
-                                "open(): mode must be a string".to_string(),
-                            ));
-                        }
-                    }
-                };
-                pyrust_builtins::file::open(&path, &mode)
-            }
-            // `sys.exit` migrated to `crate::builtin_modules::sys`.
-            // `math.*` arms migrated to `crate::builtin_modules::math`
-            // and dispatched via the registry probe at the top of this fn.
-            ValueKind::BuiltinFunction("__vcall__") => {
-                if args.len() != 3 {
-                    return Err(PyError::Runtime("__vcall__ requires 3 arguments".to_string()));
-                }
-                let func = args[0].value.clone();
-                let pos_items = iter_values(args[1].value.clone())?;
-                let mut expanded: Vec<ExpandedCallArg> = pos_items
-                    .into_iter()
-                    .map(|v| ExpandedCallArg { name: None, value: v })
-                    .collect();
-                if let ValueKind::Dict(kw_map) = args[2].value.kind() {
-                    for (k, v) in kw_map {
-                        if let PyKey::Str(name) = k {
-                            expanded.push(ExpandedCallArg { name: Some(name.clone()), value: v.clone() });
-                        }
-                    }
-                }
-                self.call_function_expanded(func, &expanded)
-            }
+            // Migrated to `crate::builtin_modules::builtins`:
+            //   print, range, open, __vcall__, plus all the simple top-level
+            //   builtins (abs, len, …) — dispatched via the registry probe
+            //   at the top of this fn.  `math.*` and `sys.exit` similarly
+            //   live in their per-module bodies.
             _ if pyrust_builtins::bound_method::as_bound_method(&function).is_some() => {
                 let (name_rc, receiver_owned) =
                     pyrust_builtins::bound_method::as_bound_method(&function).unwrap();
@@ -259,86 +168,8 @@ impl Interpreter {
                 // First argument is the class itself (not an instance)
                 self.call_user_function_expanded(function, args, &[Value::py_class(class)])
             }
-            ValueKind::BuiltinFunction("format") => {
-                reject_keyword_args_expanded("format", args)?;
-                let (value, spec) = match args.len() {
-                    1 => (args[0].value.clone(), String::new()),
-                    2 => {
-                        let value = args[0].value.clone();
-                        let spec = match args[1].value.kind() {
-                            ValueKind::Str(s) => s.to_string(),
-                            _ => {
-                                return Err(PyError::Runtime(
-                                    "format spec must be a string".to_string(),
-                                ))
-                            }
-                        };
-                        (value, spec)
-                    }
-                    _ => {
-                        return Err(PyError::Runtime(
-                            "format() takes 1 or 2 arguments".to_string(),
-                        ))
-                    }
-                };
-                // Dispatch __format__(spec) for user instances.
-                if let ValueKind::PyInstance(instance) = value.kind() {
-                    let instance_rc = Rc::clone(instance);
-                    let class = Rc::clone(&instance_rc.borrow().class);
-                    if let Some(method_val) = lookup_class_attr(&class, "__format__")
-                        && let ValueKind::UserFunction(f) = method_val.kind()
-                    {
-                        let func = Rc::clone(f);
-                        let spec_val = Value::string(spec.clone());
-                        let result = self.call_user_function_expanded(
-                            func,
-                            &[],
-                            &[Value::py_instance(instance_rc), spec_val],
-                        )?;
-                        return match result.kind() {
-                            ValueKind::Str(_) => Ok(result),
-                            _ => Err(PyError::named(
-                                "TypeError",
-                                format!(
-                                    "__format__ must return a str, not {}",
-                                    value_type_name_str(&result)
-                                ),
-                            )),
-                        };
-                    }
-                }
-                apply_format_spec(&value, &spec)
-            }
-
-            ValueKind::BuiltinFunction("classmethod") => {
-                reject_keyword_args_expanded("classmethod", args)?;
-                if args.len() != 1 {
-                    return Err(PyError::Runtime(
-                        "classmethod() takes exactly one argument".to_string(),
-                    ));
-                }
-                match args[0].value.kind() {
-                    ValueKind::UserFunction(f) => Ok(Value::class_method(Rc::clone(f))),
-                    _ => Err(PyError::Runtime(
-                        "classmethod() argument must be a function".to_string(),
-                    )),
-                }
-            }
-
-            ValueKind::BuiltinFunction("staticmethod") => {
-                reject_keyword_args_expanded("staticmethod", args)?;
-                if args.len() != 1 {
-                    return Err(PyError::Runtime(
-                        "staticmethod() takes exactly one argument".to_string(),
-                    ));
-                }
-                match args[0].value.kind() {
-                    ValueKind::UserFunction(f) => Ok(Value::static_method(Rc::clone(f))),
-                    _ => Err(PyError::Runtime(
-                        "staticmethod() argument must be a function".to_string(),
-                    )),
-                }
-            }
+            // `format`, `classmethod`, `staticmethod` migrated to
+            // `crate::builtin_modules::builtins`.
 
             // Calling prop.setter(fn), prop.deleter(fn), or prop.getter(fn).
             // Returns a new Property with the respective slot replaced.
@@ -373,42 +204,11 @@ impl Interpreter {
                 ))
             }
 
-            // property(fget=None, fset=None, fdel=None, doc=None)
-            ValueKind::BuiltinFunction("property") => {
-                // Accept up to 4 positional args (fget, fset, fdel, doc) or keyword args.
-                if args.len() > 4 {
-                    return Err(PyError::Runtime(
-                        "property() takes at most 4 arguments".to_string(),
-                    ));
-                }
-                let mut fget = Value::none();
-                let mut fset = Value::none();
-                let mut fdel = Value::none();
-                for (i, arg) in args.iter().enumerate() {
-                    let name_ref = arg.name.as_deref();
-                    let idx = match name_ref {
-                        None => i,
-                        Some("fget") => 0,
-                        Some("fset") => 1,
-                        Some("fdel") => 2,
-                        Some("doc") => 3,
-                        Some(k) => return Err(PyError::Runtime(
-                            format!("property() got unexpected keyword argument '{k}'"),
-                        )),
-                    };
-                    match idx {
-                        0 => fget = arg.value.clone(),
-                        1 => fset = arg.value.clone(),
-                        2 => fdel = arg.value.clone(),
-                        _ => {} // doc: ignore
-                    }
-                }
-                Ok(pyrust_builtins::property::property(fget, fset, fdel))
-            }
-
-            // `super(cls, instance)` — two-argument form only.
-            // Zero-argument `super()` (implicit __class__ cell) is not supported;
-            // users must pass both arguments explicitly.
+            // `property` (named-arm form) migrated to
+            // `crate::builtin_modules::builtins`.
+            // `super` stays in this file because `super` is a strict Rust
+            // keyword and not even a raw identifier (`r#super` is rejected),
+            // so it can't be the name of a Rust fn inside `pyrust_module!`.
             ValueKind::BuiltinFunction("super") => {
                 reject_keyword_args_expanded("super", args)?;
                 if args.len() != 2 {
@@ -427,7 +227,6 @@ impl Interpreter {
                 match inst_val.kind() {
                     ValueKind::PyInstance(i) => {
                         let instance = Rc::clone(i);
-                        // Bug #199: validate instance is an instance of class
                         if !class_is_subclass_of(&instance.borrow().class, &class) {
                             return Err(PyError::named(
                                 "TypeError",
@@ -437,9 +236,7 @@ impl Interpreter {
                         Ok(Value::super_proxy(class, instance))
                     }
                     ValueKind::PyClass(obj_class) => {
-                        // Bug #197: classmethod case — second arg is a class
                         let obj_class = Rc::clone(obj_class);
-                        // Validate obj_class is a subclass of class
                         if !class_is_subclass_of(&obj_class, &class) {
                             return Err(PyError::named(
                                 "TypeError",
@@ -714,7 +511,7 @@ impl Interpreter {
         Ok(out)
     }
 
-    fn parse_print_options_expanded(&mut self, args: &[ExpandedCallArg]) -> Result<PrintOptions> {
+    pub(crate) fn parse_print_options_expanded(&mut self, args: &[ExpandedCallArg]) -> Result<PrintOptions> {
         let mut values = Vec::new();
         let mut sep = String::from(" ");
         let mut end = String::from("\n");
@@ -1237,7 +1034,7 @@ impl Interpreter {
         Ok(Value::py_instance(instance))
     }
 
-    fn call_range_expanded(&mut self, args: &[ExpandedCallArg]) -> Result<Value> {
+    pub(crate) fn call_range_expanded(&mut self, args: &[ExpandedCallArg]) -> Result<Value> {
         reject_keyword_args_expanded("range", args)?;
         if args.is_empty() || args.len() > 3 {
             return Err(PyError::Runtime(
@@ -1289,7 +1086,7 @@ impl Interpreter {
 /// Apply a Python format spec string to a `Value` and return the formatted string.
 /// Supports common numeric specs: `d`, `f`, `e`, `g`, `x`, `X`, `o`, `b`, `s`,
 /// with optional width, fill/align, sign, and precision.
-fn apply_format_spec(value: &Value, spec: &str) -> Result<Value> {
+pub(crate) fn apply_format_spec(value: &Value, spec: &str) -> Result<Value> {
     if spec.is_empty() {
         return Ok(Value::string(value.to_py_str()));
     }

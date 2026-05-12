@@ -179,10 +179,10 @@ pub(crate) fn lookup_class_attr(class: &Rc<RefCell<PyClass>>, name: &str) -> Opt
     base.and_then(|base| lookup_class_attr(&base, name))
 }
 
-struct PrintOptions {
-    values: Vec<Value>,
-    sep: String,
-    end: String,
+pub(crate) struct PrintOptions {
+    pub(crate) values: Vec<Value>,
+    pub(crate) sep: String,
+    pub(crate) end: String,
 }
 
 #[derive(Debug, Clone)]
