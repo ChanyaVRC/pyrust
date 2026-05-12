@@ -152,6 +152,10 @@ const INT_SIGN_BIT: u64 = 1 << 47;
 const CANONICAL_NAN: u64 = 0x7FF8_0000_0000_0000;
 
 const TAG_NONE_BITS: u64 = 0xFFF9_0000_0000_0000;
+/// Internal-only sentinel for "uninitialised register slot". Positive NaN
+/// bit pattern outside the negative-NaN range used by the tag system; not
+/// observable from Python code. See `Value::unset()`.
+const UNSET_BITS: u64 = 0x7FF8_0000_0000_BAD0;
 const TAG_BOOL_BITS: u64 = 0xFFFA_0000_0000_0000;
 const TAG_INT_BITS: u64 = 0xFFFB_0000_0000_0000;
 const TAG_STR_BITS: u64 = 0xFFFC_0000_0000_0000;
@@ -528,6 +532,35 @@ impl Value {
 
     pub fn none() -> Self {
         Value(TAG_NONE_BITS)
+    }
+
+    /// A distinct, internal-only sentinel representing "register slot not
+    /// initialised". The bit pattern is a specific positive NaN that the VM
+    /// never produces from real Python values — `0x7FF8_0000_0000_BAD0`.
+    ///
+    /// `is_unset()` returns true only for this exact pattern. All other
+    /// accessors (`kind()`, `truthy()`, `is_none()`, …) classify it as if it
+    /// were the corresponding float NaN, which is fine because correct
+    /// programs never read an unset slot (the compiler emits `CheckLocal`
+    /// before any read that could observe one).
+    pub fn unset() -> Self {
+        Value(UNSET_BITS)
+    }
+
+    pub fn is_unset(&self) -> bool {
+        self.0 == UNSET_BITS
+    }
+
+    /// `Some(self)` if this slot has been written, else `None`.
+    /// Useful for migrating call sites that previously held `Option<Value>`.
+    #[inline]
+    pub fn as_some(&self) -> Option<&Value> {
+        if self.is_unset() { None } else { Some(self) }
+    }
+
+    #[inline]
+    pub fn as_some_mut(&mut self) -> Option<&mut Value> {
+        if self.is_unset() { None } else { Some(self) }
     }
 
     pub fn bool_(b: bool) -> Self {
