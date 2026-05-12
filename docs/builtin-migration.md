@@ -89,18 +89,24 @@ plus each function bound to `Value::builtin_function("math.sqrt")`.
 2. **Create
    `crates/pyrust/src/builtin_registry_modules/<name>.rs`**.  Use
    `math.rs` or `sys.rs` as a template.
-3. **Register the file in
-   [`builtin_registry_modules/mod.rs`](../crates/pyrust/src/builtin_registry_modules/mod.rs)**
-   (`pub mod foo;`).
-4. **Wire the module into the central registry** by appending
-   `all.extend_from_slice(crate::builtin_registry_modules::foo::REGS);`
-   inside the `LazyLock` in
-   [`builtin_registry.rs`](../crates/pyrust/src/builtin_registry.rs).
-5. **Wire `module()` into `load_module`** in
-   [`runtime/env.rs`](../crates/pyrust/src/interpreter/runtime/env.rs):
-   `"foo" => Some(crate::builtin_registry_modules::foo::module())`.
+3. **Add the module to the list in
+   [`builtin_registry_modules/mod.rs`](../crates/pyrust/src/builtin_registry_modules/mod.rs)**:
 
-After these five edits, `import foo; foo.bar()` resolves via the
+   ```rust
+   pyrust_builtin_modules! {
+       math,
+       sys,
+       <new_name>,   // ← add this line
+   }
+   ```
+
+That's it.  The `pyrust_builtin_modules!` macro registers both the
+function-level `REGS` (consumed by `builtin_registry::REGISTRY`) and
+the module-level `module()` constructor (consumed by
+`env.rs::load_module` via `load_builtin_module`), so the central
+registry and the `import` path pick it up automatically.
+
+After this single edit, `import <name>; <name>.foo()` resolves via the
 registry on the call side and via `module()` on the import side, with
 the function-name string appearing exactly once (inside the macro).
 

@@ -362,13 +362,11 @@ impl Interpreter {
         if let Some(cached) = self.module_cache.borrow().get(name).cloned() {
             return Ok(cached);
         }
-        // Built-in modules — generated from the file-scoped
-        // `pyrust_module!` macro in each `builtin_registry_modules/*.rs`.
-        let builtin = match name {
-            "math" => Some(crate::builtin_registry_modules::math::module()),
-            "sys" => Some(crate::builtin_registry_modules::sys::module()),
-            _ => None,
-        };
+        // Built-in modules — declared in
+        // `crates/pyrust/src/builtin_registry_modules/mod.rs::pyrust_builtin_modules!`.
+        // Adding a new module is a single-line edit there; this file
+        // never has to change.
+        let builtin = crate::builtin_registry_modules::load_builtin_module(name);
         if let Some(val) = builtin {
             self.module_cache.borrow_mut().insert(name.to_string(), val.clone());
             return Ok(val);

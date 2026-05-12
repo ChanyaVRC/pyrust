@@ -22,7 +22,7 @@ pyrust_module! {
     /// CPython: sys.exit([arg]) — raises `SystemExit(arg)`.
     /// <https://docs.python.org/3/library/sys.html#sys.exit>
     fn exit(args) -> Result<Value> {
-        reject_keyword_args_expanded("sys.exit", args)?;
+        reject_keyword_args_expanded(FN_NAME, args)?;
         let arg = if args.is_empty() { Value::int(0) } else { args[0].value.clone() };
         let class = match lookup_name_in_module(&_interp.env, "SystemExit") {
             Some(v) => match v.kind() {

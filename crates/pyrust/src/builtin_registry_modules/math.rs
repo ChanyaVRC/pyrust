@@ -5,9 +5,10 @@
 //! with the unified dispatch signature, paired with a sibling
 //! `BuiltinReg` whose Python-level name is `"math.name"`.  The macro
 //! also generates `REGS: &[BuiltinReg]` (consumed by the central
-//! registry) and `module()` (consumed by the interpreter's
-//! `load_module` path), so this file is the single source of truth for
-//! every `math.*` callable.
+//! registry), `module()` (consumed by the interpreter's `load_module`
+//! path), and a `const FN_NAME: &str = "math.name";` inside every
+//! function so error messages and helper calls reference a single
+//! source of truth.
 //!
 //! Reference: <https://docs.python.org/3/library/math.html>
 
@@ -30,7 +31,7 @@ pyrust_module! {
 
     /// CPython: math.floor(x) → int.  <https://docs.python.org/3/library/math.html#math.floor>
     fn floor(args) -> Result<Value> {
-        let x = single_float("math.floor", args)?;
+        let x = single_float(FN_NAME, args)?;
         let f = x.floor();
         if f > i64::MAX as f64 || f < i64::MIN as f64 {
             Ok(float_to_bigint(f))
@@ -41,7 +42,7 @@ pyrust_module! {
 
     /// CPython: math.ceil(x) → int.  <https://docs.python.org/3/library/math.html#math.ceil>
     fn ceil(args) -> Result<Value> {
-        let x = single_float("math.ceil", args)?;
+        let x = single_float(FN_NAME, args)?;
         let f = x.ceil();
         if f > i64::MAX as f64 || f < i64::MIN as f64 {
             Ok(float_to_bigint(f))
@@ -52,100 +53,106 @@ pyrust_module! {
 
     /// CPython: math.sqrt(x) → float.  <https://docs.python.org/3/library/math.html#math.sqrt>
     fn sqrt(args) -> Result<Value> {
-        Ok(Value::float(single_float("math.sqrt", args)?.sqrt()))
+        Ok(Value::float(single_float(FN_NAME, args)?.sqrt()))
     }
 
     /// CPython: math.fabs(x) → float.  <https://docs.python.org/3/library/math.html#math.fabs>
     fn fabs(args) -> Result<Value> {
-        Ok(Value::float(single_float("math.fabs", args)?.abs()))
+        Ok(Value::float(single_float(FN_NAME, args)?.abs()))
     }
 
     /// CPython: math.sin(x) → float.  <https://docs.python.org/3/library/math.html#math.sin>
     fn sin(args) -> Result<Value> {
-        Ok(Value::float(single_float("math.sin", args)?.sin()))
+        Ok(Value::float(single_float(FN_NAME, args)?.sin()))
     }
 
     /// CPython: math.cos(x) → float.  <https://docs.python.org/3/library/math.html#math.cos>
     fn cos(args) -> Result<Value> {
-        Ok(Value::float(single_float("math.cos", args)?.cos()))
+        Ok(Value::float(single_float(FN_NAME, args)?.cos()))
     }
 
     /// CPython: math.tan(x) → float.  <https://docs.python.org/3/library/math.html#math.tan>
     fn tan(args) -> Result<Value> {
-        Ok(Value::float(single_float("math.tan", args)?.tan()))
+        Ok(Value::float(single_float(FN_NAME, args)?.tan()))
     }
 
     /// CPython: math.asin(x) → float.  <https://docs.python.org/3/library/math.html#math.asin>
     fn asin(args) -> Result<Value> {
-        Ok(Value::float(single_float("math.asin", args)?.asin()))
+        Ok(Value::float(single_float(FN_NAME, args)?.asin()))
     }
 
     /// CPython: math.acos(x) → float.  <https://docs.python.org/3/library/math.html#math.acos>
     fn acos(args) -> Result<Value> {
-        Ok(Value::float(single_float("math.acos", args)?.acos()))
+        Ok(Value::float(single_float(FN_NAME, args)?.acos()))
     }
 
     /// CPython: math.atan(x) → float.  <https://docs.python.org/3/library/math.html#math.atan>
     fn atan(args) -> Result<Value> {
-        Ok(Value::float(single_float("math.atan", args)?.atan()))
+        Ok(Value::float(single_float(FN_NAME, args)?.atan()))
     }
 
     /// CPython: math.exp(x) → float.  <https://docs.python.org/3/library/math.html#math.exp>
     fn exp(args) -> Result<Value> {
-        Ok(Value::float(single_float("math.exp", args)?.exp()))
+        Ok(Value::float(single_float(FN_NAME, args)?.exp()))
     }
 
     /// CPython: math.log2(x) → float.  <https://docs.python.org/3/library/math.html#math.log2>
     fn log2(args) -> Result<Value> {
-        Ok(Value::float(single_float("math.log2", args)?.log2()))
+        Ok(Value::float(single_float(FN_NAME, args)?.log2()))
     }
 
     /// CPython: math.log10(x) → float.  <https://docs.python.org/3/library/math.html#math.log10>
     fn log10(args) -> Result<Value> {
-        Ok(Value::float(single_float("math.log10", args)?.log10()))
+        Ok(Value::float(single_float(FN_NAME, args)?.log10()))
     }
 
     /// CPython: math.isnan(x) → bool.  <https://docs.python.org/3/library/math.html#math.isnan>
     fn isnan(args) -> Result<Value> {
-        Ok(Value::bool_(single_float("math.isnan", args)?.is_nan()))
+        Ok(Value::bool_(single_float(FN_NAME, args)?.is_nan()))
     }
 
     /// CPython: math.isinf(x) → bool.  <https://docs.python.org/3/library/math.html#math.isinf>
     fn isinf(args) -> Result<Value> {
-        Ok(Value::bool_(single_float("math.isinf", args)?.is_infinite()))
+        Ok(Value::bool_(single_float(FN_NAME, args)?.is_infinite()))
     }
 
     /// CPython: math.pow(x, y) → float.  <https://docs.python.org/3/library/math.html#math.pow>
     fn pow(args) -> Result<Value> {
-        reject_keyword_args_expanded("math.pow", args)?;
+        reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 2 {
-            return Err(PyError::Runtime("math.pow() takes exactly two arguments".to_string()));
+            return Err(PyError::Runtime(format!(
+                "{FN_NAME}() takes exactly two arguments"
+            )));
         }
-        let x = value_to_float(&args[0].value, "math.pow")?;
-        let y = value_to_float(&args[1].value, "math.pow")?;
+        let x = value_to_float(&args[0].value, FN_NAME)?;
+        let y = value_to_float(&args[1].value, FN_NAME)?;
         Ok(Value::float(x.powf(y)))
     }
 
     /// CPython: math.atan2(y, x) → float.  <https://docs.python.org/3/library/math.html#math.atan2>
     fn atan2(args) -> Result<Value> {
-        reject_keyword_args_expanded("math.atan2", args)?;
+        reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 2 {
-            return Err(PyError::Runtime("math.atan2() takes exactly two arguments".to_string()));
+            return Err(PyError::Runtime(format!(
+                "{FN_NAME}() takes exactly two arguments"
+            )));
         }
-        let y = value_to_float(&args[0].value, "math.atan2")?;
-        let x = value_to_float(&args[1].value, "math.atan2")?;
+        let y = value_to_float(&args[0].value, FN_NAME)?;
+        let x = value_to_float(&args[1].value, FN_NAME)?;
         Ok(Value::float(y.atan2(x)))
     }
 
     /// CPython: math.log(x[, base]) → float.  <https://docs.python.org/3/library/math.html#math.log>
     fn log(args) -> Result<Value> {
-        reject_keyword_args_expanded("math.log", args)?;
+        reject_keyword_args_expanded(FN_NAME, args)?;
         if args.is_empty() || args.len() > 2 {
-            return Err(PyError::Runtime("math.log() takes one or two arguments".to_string()));
+            return Err(PyError::Runtime(format!(
+                "{FN_NAME}() takes one or two arguments"
+            )));
         }
-        let x = value_to_float(&args[0].value, "math.log")?;
+        let x = value_to_float(&args[0].value, FN_NAME)?;
         if args.len() == 2 {
-            let base = value_to_float(&args[1].value, "math.log")?;
+            let base = value_to_float(&args[1].value, FN_NAME)?;
             Ok(Value::float(x.log(base)))
         } else {
             Ok(Value::float(x.ln()))

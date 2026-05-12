@@ -45,14 +45,13 @@ pub fn lookup(name: &str) -> Option<BuiltinDispatchFn> {
         .map(|i| REGISTRY[i].dispatch)
 }
 
-/// The full registry.  Constructed via [`std::sync::LazyLock`] so we can
-/// concatenate per-module slices without const-fn gymnastics, then sort
-/// for the binary-search lookup.
+/// The full registry.  Constructed via [`std::sync::LazyLock`] from
+/// every module's `REGS` slice (collected by
+/// `crate::builtin_registry_modules::all_regs`) so adding a built-in
+/// module touches **only** the `pyrust_builtin_modules!` invocation in
+/// `builtin_registry_modules/mod.rs` — this file needs no edits.
 static REGISTRY: std::sync::LazyLock<Vec<BuiltinReg>> = std::sync::LazyLock::new(|| {
-    let mut all: Vec<BuiltinReg> = Vec::new();
-    all.extend_from_slice(crate::builtin_registry_modules::math::REGS);
-    all.extend_from_slice(crate::builtin_registry_modules::sys::REGS);
-    // future modules append here.
+    let mut all = crate::builtin_registry_modules::all_regs();
     all.sort_by_key(|r| r.name);
     debug_assert!(
         all.windows(2).all(|w| w[0].name < w[1].name),
