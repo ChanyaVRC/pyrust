@@ -1423,6 +1423,30 @@ impl Interpreter {
                         )));
                     }
                 }
+                Insn::ForCountConstInline(var, cmp_op, stop, step, offset) => {
+                    // Same semantics as ForCountConst but with stop/step inlined; no
+                    // per-iteration consts-pool lookup, no .kind() decode for them.
+                    let step = *step as i64;
+                    let stop = *stop as i64;
+                    let fast = if let Some(vv) = &regs[*var as usize] {
+                        if let ValueKind::Int(cur) = vv.kind() {
+                            let next = cur.wrapping_add(step);
+                            let cont = match cmp_op {
+                                BinaryOp::Lt => next < stop,
+                                BinaryOp::Gt => next > stop,
+                                _ => unreachable!("ForCountConstInline uses Lt or Gt only"),
+                            };
+                            if cont { regs[*var as usize] = Some(Value::int(next)); }
+                            else { pc = jump_pc!(*offset); }
+                            true
+                        } else { false }
+                    } else { false };
+                    if !fast {
+                        vm_try!(Err(crate::error::PyError::Runtime(
+                            "for-range: non-integer counter".into(),
+                        )));
+                    }
+                }
                 Insn::CheckLocal(reg, name_idx) => {
                     if regs[*reg as usize].is_none() {
                         let name = pool_get!(code.names, *name_idx, "name");

@@ -1299,7 +1299,8 @@ impl Compiler {
             | Insn::CmpJumpIfFalseConst(_, _, _, off)
             | Insn::CmpJumpIfTrueConst(_, _, _, off)
             | Insn::ForCountReg(_, _, _, _, off)
-            | Insn::ForCountConst(_, _, _, _, off) => *off = offset,
+            | Insn::ForCountConst(_, _, _, _, off)
+            | Insn::ForCountConstInline(_, _, _, _, off) => *off = offset,
             _ => {
                 self.failed = true;
                 if self.error_msg.is_none() {

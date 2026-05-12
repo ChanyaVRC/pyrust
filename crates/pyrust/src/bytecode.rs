@@ -150,6 +150,11 @@ pub enum Insn {
     /// Integer counter for-range (constant bound).
     /// Same semantics as ForCountReg but stop comes from consts[stop_idx].
     ForCountConst(Reg, BinaryOp, u16, u16, i32),
+    /// Integer counter for-range with stop and step inlined as i32.
+    /// Fast path emitted by the compiler when both fit in i32; avoids the
+    /// per-iteration consts-pool lookup that ForCountConst would do.
+    /// Args: (var_reg, cmp_op, stop, step, jump_offset).
+    ForCountConstInline(Reg, BinaryOp, i32, i32, i32),
     /// error if R[reg] is uninitialised: "cannot access local variable '<name>' ..."
     CheckLocal(Reg, u16),
     /// raise AssertionError(R[msg])  (condition already tested by JumpIfTrue)

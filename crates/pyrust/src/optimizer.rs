@@ -44,6 +44,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_copy_prop(insns);
     let insns = pass_trivial_nop(insns);
     let insns = pass_self_tail_call(insns);
+    let insns = pass_forcount_const_inline(insns, &consts);
     let (insns, consts) = pass_compact_consts(insns, consts);
 
     FnCode {
@@ -105,6 +106,7 @@ fn pass_thread_jumps(insns: Vec<Insn>) -> Vec<Insn> {
                 ForIter(dst, slot, k) => ForIter(dst, slot, thread(k)),
                 ForCountReg(v, op, stop, step, k) => ForCountReg(v, op, stop, step, thread(k)),
                 ForCountConst(v, op, stop, step, k) => ForCountConst(v, op, stop, step, thread(k)),
+                ForCountConstInline(v, op, stop, step, k) => ForCountConstInline(v, op, stop, step, thread(k)),
                 SetupExcept(k) => SetupExcept(thread(k)),
                 MatchExcept(r, k) => MatchExcept(r, thread(k)),
                 other => other,
@@ -321,6 +323,7 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn> {
             | Insn::ForIter(_, _, k)
             | Insn::ForCountReg(_, _, _, _, k)
             | Insn::ForCountConst(_, _, _, _, k)
+            | Insn::ForCountConstInline(_, _, _, _, k)
             | Insn::SetupExcept(k) => Some(*k),
             _ => None,
         };
@@ -394,6 +397,7 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn> {
             | Insn::ForIter(..)
             | Insn::ForCountReg(..)
             | Insn::ForCountConst(..)
+            | Insn::ForCountConstInline(..)
             | Insn::SetupExcept(_)
             | Insn::MatchExcept(..)
             | Insn::Return(_)
@@ -450,6 +454,7 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         ForIter(dst, _, _) => Some(*dst),
         ForCountReg(var, _, _, _, _) => Some(*var),
         ForCountConst(var, _, _, _, _) => Some(*var),
+        ForCountConstInline(var, _, _, _, _) => Some(*var),
         // CopyReg is emitted by the CSE pass; it writes to dst just like Move.
         CopyReg(r, _) => Some(*r),
         _ => None,
@@ -520,6 +525,7 @@ fn pass_dead_code(insns: Vec<Insn>) -> Vec<Insn> {
             | Insn::ForIter(_, _, k)
             | Insn::ForCountReg(_, _, _, _, k)
             | Insn::ForCountConst(_, _, _, _, k)
+            | Insn::ForCountConstInline(_, _, _, _, k)
             | Insn::MatchExcept(_, k) => {
                 queue.push(pc + 1);
                 queue.push(jt(*k));
@@ -699,6 +705,7 @@ fn slice_has_back_edge(insns: &[Insn]) -> bool {
             | Insn::ForIter(_, _, k)
             | Insn::ForCountReg(_, _, _, _, k)
             | Insn::ForCountConst(_, _, _, _, k)
+            | Insn::ForCountConstInline(_, _, _, _, k)
             | Insn::CmpJumpIfFalse(_, _, _, k)
             | Insn::CmpJumpIfTrue(_, _, _, k)
             | Insn::CmpJumpIfFalseConst(_, _, _, k)
@@ -720,7 +727,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         // No register sources.
         LoadConst(..) | LoadGlobal(..) | LoadNone(..) | LoadExc(..) | ImportModule(..)
         | DeleteName(..) | DeleteLocal(..) | Jump(..) | SetupExcept(..) | PopExcept | EndExcept
-        | ReturnNone | RaiseReRaise | ForIter(..) | ForCountConst(..) => false,
+        | ReturnNone | RaiseReRaise | ForIter(..) | ForCountConst(..) | ForCountConstInline(..) => false,
 
         // One source register.
         StoreGlobal(_, s)
@@ -1018,6 +1025,7 @@ fn pass_licm(insns: Vec<Insn>) -> Vec<Insn> {
                         | Insn::CmpJumpIfTrueConst(..)
                         | Insn::ForIter(..)
                         | Insn::ForCountReg(..)
+                        | Insn::ForCountConstInline(..)
                         | Insn::ForCountConst(..) => {
                             bound = pc;
                             break;
@@ -1139,7 +1147,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         ForIter(dst, _, _) => {
             written.insert(*dst);
         }
-        ForCountReg(var, _, _, _, _) | ForCountConst(var, _, _, _, _) => {
+        ForCountReg(var, _, _, _, _) | ForCountConst(var, _, _, _, _) | ForCountConstInline(var, _, _, _, _) => {
             written.insert(*var);
         }
         Unpack(base, _, n) => {
@@ -1437,6 +1445,7 @@ fn pass_cse(insns: Vec<Insn>) -> Vec<Insn> {
             | Insn::ForIter(_, _, k)
             | Insn::ForCountReg(_, _, _, _, k)
             | Insn::ForCountConst(_, _, _, _, k)
+            | Insn::ForCountConstInline(_, _, _, _, k)
             | Insn::SetupExcept(k)
             | Insn::MatchExcept(_, k) => Some(*k),
             _ => None,
@@ -1560,6 +1569,7 @@ fn pass_cse(insns: Vec<Insn>) -> Vec<Insn> {
                 | Insn::ForIter(..)
                 | Insn::ForCountReg(..)
                 | Insn::ForCountConst(..)
+                | Insn::ForCountConstInline(..)
                 | Insn::SetupExcept(_)
                 | Insn::MatchExcept(..)
                 | Insn::Return(_)
@@ -1808,6 +1818,7 @@ fn pass_copy_prop(insns: Vec<Insn>) -> Vec<Insn> {
             | Insn::ForIter(_, _, k)
             | Insn::ForCountReg(_, _, _, _, k)
             | Insn::ForCountConst(_, _, _, _, k)
+            | Insn::ForCountConstInline(_, _, _, _, k)
             | Insn::CmpJumpIfFalse(_, _, _, k)
             | Insn::CmpJumpIfTrue(_, _, _, k)
             | Insn::CmpJumpIfFalseConst(_, _, _, k)
@@ -1976,6 +1987,41 @@ fn pass_trivial_nop(insns: Vec<Insn>) -> Vec<Insn> {
 ///    is actually referenced.
 /// 2. **Remap**: build `old_to_new: Vec<Option<u16>>` for the current pool size.
 ///    Referenced entries get compact new indices; unreferenced entries get `None`.
+/// Convert `ForCountConst(var, op, stop_idx, step_idx, off)` to
+/// `ForCountConstInline(var, op, stop, step, off)` when both `consts[stop_idx]`
+/// and `consts[step_idx]` are integers that fit in `i32`.
+///
+/// The inline variant removes the per-iteration `consts` pool lookup, which the
+/// VM otherwise has to perform for both `stop` and `step` on every iteration.
+///
+/// Runs after all other passes (in particular `pass_ivsr`, which pattern-matches
+/// on the un-inlined `ForCountConst`) and before `pass_compact_consts` (which
+/// then drops the now-unused pool entries).
+fn pass_forcount_const_inline(insns: Vec<Insn>, consts: &[Value]) -> Vec<Insn> {
+    insns
+        .into_iter()
+        .map(|insn| match insn {
+            Insn::ForCountConst(var, op, stop_idx, step_idx, off) => {
+                let stop_int = match consts.get(stop_idx as usize).map(Value::kind) {
+                    Some(ValueKind::Int(i)) => i,
+                    _ => return Insn::ForCountConst(var, op, stop_idx, step_idx, off),
+                };
+                let step_int = match consts.get(step_idx as usize).map(Value::kind) {
+                    Some(ValueKind::Int(i)) => i,
+                    _ => return Insn::ForCountConst(var, op, stop_idx, step_idx, off),
+                };
+                match (i32::try_from(stop_int), i32::try_from(step_int)) {
+                    (Ok(stop32), Ok(step32)) => {
+                        Insn::ForCountConstInline(var, op, stop32, step32, off)
+                    }
+                    _ => Insn::ForCountConst(var, op, stop_idx, step_idx, off),
+                }
+            }
+            other => other,
+        })
+        .collect()
+}
+
 /// 3. **Compact**: rebuild `consts` retaining only referenced values.
 /// 4. **Rewrite**: replace every constant index in `insns` using `old_to_new`.
 ///
