@@ -2109,7 +2109,7 @@ impl Interpreter {
             // Tier-0: register-VM path — try compiled bytecode before any env allocation.
             if let Some(code) = self.get_or_compile_bytecode(&function) {
                 let num_regs = code.num_regs as usize;
-                let mut regs: Vec<Option<Value>> = vec![None; num_regs];
+                let mut regs: Vec<Value> = vec![Value::unset(); num_regs];
 
                 let _depth_guard = CallDepthGuard::enter();
                 if call_depth() > MAX_CALL_DEPTH {
@@ -2148,7 +2148,7 @@ impl Interpreter {
                                         ),
                                     ));
                                 }
-                                regs[reg as usize] = Some(val);
+                                regs[reg as usize] = val;
                             }
                         }
                     }
@@ -2166,7 +2166,7 @@ impl Interpreter {
                                     ),
                                 ));
                             }
-                            regs[reg as usize] = Some(val);
+                            regs[reg as usize] = val;
                         }
                     }
                     std::mem::replace(&mut self.env, Rc::clone(&function.env))
@@ -2184,7 +2184,7 @@ impl Interpreter {
                                 ),
                             ));
                         }
-                        regs[slot as usize] = Some(Value::user_function(Rc::clone(&function)));
+                        regs[slot as usize] = Value::user_function(Rc::clone(&function));
                     }
 
                 // Generator function: create a frame rather than executing.
@@ -2301,7 +2301,7 @@ impl Interpreter {
         // Now run via VM (same as non-variadic Tier-0 path)
         if let Some(code) = self.get_or_compile_bytecode(&function) {
             let num_regs = code.num_regs as usize;
-            let mut regs: Vec<Option<Value>> = vec![None; num_regs];
+            let mut regs: Vec<Value> = vec![Value::unset(); num_regs];
 
             // Bind non-cell params into register file using fastlocals slot indices.
             for (param, val) in function.params.iter().zip(param_vals.iter()) {
@@ -2316,7 +2316,7 @@ impl Interpreter {
                                 ),
                             ));
                         }
-                        regs[slot as usize] = Some(val.clone());
+                        regs[slot as usize] = val.clone();
                     }
             }
             // Self-reference for recursive calls (only if not a cell var).
@@ -2331,7 +2331,7 @@ impl Interpreter {
                             ),
                         ));
                     }
-                    regs[slot as usize] = Some(Value::user_function(Rc::clone(&function)));
+                    regs[slot as usize] = Value::user_function(Rc::clone(&function));
                 }
 
             let _depth_guard = CallDepthGuard::enter();

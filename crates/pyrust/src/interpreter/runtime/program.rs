@@ -70,13 +70,14 @@ impl Interpreter {
             Err(e) => return Some(Err(e)),
         };
         let num_regs = code.num_regs as usize;
-        let mut regs: Vec<Option<Value>> = vec![None; num_regs];
+        let mut regs: Vec<Value> = vec![Value::unset(); num_regs];
         let _depth_guard = CallDepthGuard::enter();
         let vm_result = self.run_bytecode(&code, &mut regs);
         // Write fastlocal registers back to the module env so that imported
         // modules and post-run inspection can find all names.
         for (name, &idx) in local_index.iter() {
-            if let Some(val) = regs[idx as usize].take() {
+            if !regs[idx as usize].is_unset() {
+                let val = std::mem::replace(&mut regs[idx as usize], Value::unset());
                 self.assign_name(name.clone(), val);
             }
         }

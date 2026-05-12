@@ -11,7 +11,7 @@ pub(crate) struct NativeIterFrame {
 /// Stored type-erased inside `Value::generator()` via `Box<dyn Any>`.
 pub(crate) struct GeneratorFrame {
     pub(crate) code: Rc<crate::bytecode::FnCode>,
-    pub(crate) regs: Vec<Option<Value>>,
+    pub(crate) regs: Vec<Value>,
     pub(crate) iters: Vec<Option<IterState>>,
     pub(crate) exc_handlers: Vec<usize>,
     /// Program counter for the NEXT instruction to execute on resumption.
@@ -84,24 +84,22 @@ fn int_cmp(a: i64, b: i64, op: BinaryOp) -> Option<bool> {
 }
 
 fn expect_list_mut<'a>(
-    regs: &'a mut [Option<Value>],
+    regs: &'a mut [Value],
     reg: u32,
     op: &str,
 ) -> Result<&'a mut Vec<Value>> {
     regs[reg as usize]
-        .as_mut()
-        .and_then(|v| v.as_list_mut())
+        .as_list_mut()
         .ok_or_else(|| PyError::Runtime(format!("{op} on non-list")))
 }
 
 fn expect_dict_mut<'a>(
-    regs: &'a mut [Option<Value>],
+    regs: &'a mut [Value],
     reg: u32,
     op: &str,
 ) -> Result<&'a mut indexmap::IndexMap<PyKey, Value>> {
     regs[reg as usize]
-        .as_mut()
-        .and_then(|v| v.as_dict_mut())
+        .as_dict_mut()
         .ok_or_else(|| PyError::Runtime(format!("{op} on non-dict")))
 }
 
@@ -112,7 +110,7 @@ impl Interpreter {
     fn run_bytecode(
         &mut self,
         code: &crate::bytecode::FnCode,
-        regs: &mut [Option<Value>],
+        regs: &mut [Value],
     ) -> Result<Value> {
         self.run_bytecode_inner(
             code,
@@ -129,7 +127,7 @@ impl Interpreter {
     fn run_bytecode_for_fn(
         &mut self,
         code: &crate::bytecode::FnCode,
-        regs: &mut [Option<Value>],
+        regs: &mut [Value],
         fn_id: u64,
     ) -> Result<Value> {
         self.run_bytecode_inner(
@@ -200,7 +198,7 @@ impl Interpreter {
     fn run_bytecode_inner(
         &mut self,
         code: &crate::bytecode::FnCode,
-        regs: &mut [Option<Value>],
+        regs: &mut [Value],
         iters_init: Vec<Option<IterState>>,
         exc_handlers_init: Vec<usize>,
         start_pc: usize,
@@ -297,9 +295,9 @@ impl Interpreter {
                 Insn::LoadConst(dst, idx) => {
                     let cv = pool_get!(code.consts, *idx, "const");
                     if let ValueKind::Int(n) = cv.kind() {
-                        regs[*dst as usize] = Some(Value::int(n));
+                        regs[*dst as usize] = Value::int(n);
                     } else {
-                        regs[*dst as usize] = Some(cv.clone());
+                        regs[*dst as usize] = cv.clone();
                     }
                 }
                 Insn::LoadGlobal(dst, name_idx) => {
@@ -311,7 +309,7 @@ impl Interpreter {
                             PyError::Runtime(format!("name '{}' is not defined", name))
                         }))
                     };
-                    regs[*dst as usize] = Some(val);
+                    regs[*dst as usize] = val;
                 }
                 Insn::StoreGlobal(name_idx, src) => {
                     let name = pool_get!(code.names, *name_idx, "name").clone();
@@ -319,37 +317,39 @@ impl Interpreter {
                     self.assign_name(name, val);
                 }
                 Insn::LoadNone(dst) => {
-                    regs[*dst as usize] = Some(Value::none());
+                    regs[*dst as usize] = Value::none();
                 }
                 Insn::Move(dst, src) | Insn::CopyReg(dst, src) => {
-                    if let Some(v) = &regs[*src as usize]
+                    if let Some(v) = regs[*src as usize].as_some()
                         && let ValueKind::Int(n) = v.kind() {
-                            regs[*dst as usize] = Some(Value::int(n));
+                            regs[*dst as usize] = Value::int(n);
                             continue;
                         }
                     let v = vm_try!(vm_read(regs, *src, num_locals));
-                    regs[*dst as usize] = Some(v);
+                    regs[*dst as usize] = v;
                 }
 
                 // ── Arithmetic / Logic ───────────────────────────────────
                 Insn::BinOp(dst, lhs, op, rhs) => {
-                    if let (Some(lv), Some(rv)) = (&regs[*lhs as usize], &regs[*rhs as usize])
-                        && let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), rv.kind())
-                            && let Some(result) = int_int_fast(a, b, *op) {
-                                regs[*dst as usize] = Some(result);
-                                continue;
-                            }
+                    let lv = &regs[*lhs as usize];
+                    let rv = &regs[*rhs as usize];
+                    if let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), rv.kind())
+                        && let Some(result) = int_int_fast(a, b, *op) {
+                            regs[*dst as usize] = result;
+                            continue;
+                        }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = vm_try!(vm_read(regs, *rhs, num_locals));
-                    regs[*dst as usize] = Some(vm_try!(self.eval_binary(l, *op, r)));
+                    regs[*dst as usize] = vm_try!(self.eval_binary(l, *op, r));
                 }
                 Insn::BinOpInPlace(dst, lhs, op, rhs) => {
-                    if let (Some(lv), Some(rv)) = (&regs[*lhs as usize], &regs[*rhs as usize])
-                        && let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), rv.kind())
-                            && let Some(result) = int_int_fast(a, b, *op) {
-                                regs[*dst as usize] = Some(result);
-                                continue;
-                            }
+                    let lv = &regs[*lhs as usize];
+                    let rv = &regs[*rhs as usize];
+                    if let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), rv.kind())
+                        && let Some(result) = int_int_fast(a, b, *op) {
+                            regs[*dst as usize] = result;
+                            continue;
+                        }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = vm_try!(vm_read(regs, *rhs, num_locals));
                     let result = if let Some(v) = vm_try!(self.try_inplace_op(l.clone(), *op, r.clone())) {
@@ -357,14 +357,14 @@ impl Interpreter {
                     } else {
                         vm_try!(self.eval_binary(l, *op, r))
                     };
-                    regs[*dst as usize] = Some(result);
+                    regs[*dst as usize] = result;
                 }
                 Insn::BinOpConst(dst, lhs, op, const_idx) => {
                     let cv = pool_get!(code.consts, *const_idx, "const");
-                    if let Some(lv) = &regs[*lhs as usize]
+                    if let Some(lv) = regs[*lhs as usize].as_some()
                         && let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), cv.kind())
                             && let Some(result) = int_int_fast(a, b, *op) {
-                                regs[*dst as usize] = Some(result);
+                                regs[*dst as usize] = result;
                                 continue;
                             }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
@@ -374,7 +374,7 @@ impl Interpreter {
                     } else {
                         vm_try!(self.eval_binary(l, *op, r))
                     };
-                    regs[*dst as usize] = Some(result);
+                    regs[*dst as usize] = result;
                 }
                 Insn::UnaryOp(dst, op, src) => {
                     let val = vm_try!(vm_read(regs, *src, num_locals));
@@ -399,7 +399,7 @@ impl Interpreter {
                             vm_try!(vm_eval_unary(*op, val))
                         }
                     };
-                    regs[*dst as usize] = Some(result);
+                    regs[*dst as usize] = result;
                 }
 
                 // ── Attribute / Index ────────────────────────────────────
@@ -407,7 +407,7 @@ impl Interpreter {
                     let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
                     let name = pool_get!(code.names, *name_idx, "name");
                     let result = vm_try!(self.get_attr(obj_val, name));
-                    regs[*dst as usize] = Some(result);
+                    regs[*dst as usize] = result;
                 }
                 Insn::SetAttr(obj, name_idx, val) => {
                     let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
@@ -422,19 +422,19 @@ impl Interpreter {
                 }
                 Insn::GetItem(dst, obj, idx) => {
                     // Fast path: List/Tuple indexed by Int — borrow idx, avoid clone.
-                    let fast_int_idx = if let Some(iv) = &regs[*idx as usize] {
+                    let fast_int_idx = if let Some(iv) = regs[*idx as usize].as_some() {
                         if let ValueKind::Int(raw_i) = iv.kind() { Some(raw_i) } else { None }
                     } else { None };
 
                     if let Some(raw_i) = fast_int_idx {
                         let mut handled = false;
-                        if let Some(ov) = &regs[*obj as usize] {
+                        if let Some(ov) = regs[*obj as usize].as_some() {
                             match ov.kind() {
                                 ValueKind::List(items) => {
                                     let len = items.len() as i64;
                                     let j = if raw_i < 0 { raw_i + len } else { raw_i };
                                     if j >= 0 && (j as usize) < items.len() {
-                                        regs[*dst as usize] = Some(items[j as usize].clone());
+                                        regs[*dst as usize] = items[j as usize].clone();
                                     } else {
                                         vm_try!(Err(PyError::Named("IndexError".into(), "list index out of range".into())));
                                     }
@@ -444,7 +444,7 @@ impl Interpreter {
                                     let len = items.len() as i64;
                                     let j = if raw_i < 0 { raw_i + len } else { raw_i };
                                     if j >= 0 && (j as usize) < items.len() {
-                                        regs[*dst as usize] = Some(items[j as usize].clone());
+                                        regs[*dst as usize] = items[j as usize].clone();
                                     } else {
                                         vm_try!(Err(PyError::Named("IndexError".into(), "tuple index out of range".into())));
                                     }
@@ -461,11 +461,11 @@ impl Interpreter {
                     if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
                         let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
                         let result = vm_try!(self.eval_slice(obj_val, lo, hi, st));
-                        regs[*dst as usize] = Some(result);
+                        regs[*dst as usize] = result;
                     } else {
                         // Fast path: read directly from the register without cloning
                         // the entire collection (avoids O(n) clone per GetItem call).
-                        let result = if let Some(ov) = &regs[*obj as usize] {
+                        let result = if let Some(ov) = regs[*obj as usize].as_some() {
                             match ov.kind() {
                                 ValueKind::List(items) => {
                                     let i = vm_try!(normalize_index(&idx_val, items.len(), "list"));
@@ -488,11 +488,11 @@ impl Interpreter {
                             }
                         } else { None };
                         if let Some(r) = result {
-                            regs[*dst as usize] = Some(r);
+                            regs[*dst as usize] = r;
                         } else {
                             let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
                             let r = vm_try!(self.eval_index(obj_val, idx_val));
-                            regs[*dst as usize] = Some(r);
+                            regs[*dst as usize] = r;
                         }
                     }
                 }
@@ -507,7 +507,7 @@ impl Interpreter {
                                 PyError::Runtime("slice assignment requires iterable".to_string())
                             })),
                         };
-                        let list_mut = if let Some(ov) = regs[*obj as usize].as_mut() {
+                        let list_mut = if let Some(ov) = regs[*obj as usize].as_some_mut() {
                             ov.as_list_mut()
                         } else { None };
                         if let Some(items) = list_mut {
@@ -525,7 +525,7 @@ impl Interpreter {
                         }
                     } else {
                         // Non-slice set: determine target type first, then mutate
-                        let target_kind = regs[*obj as usize].as_ref().map(|v| match v.kind() {
+                        let target_kind = regs[*obj as usize].as_some().map(|v| match v.kind() {
                             ValueKind::List(_) => 1u8,
                             ValueKind::Dict(_) => 2u8,
                             ValueKind::PyInstance(_) => 3u8,
@@ -579,7 +579,7 @@ impl Interpreter {
                 Insn::DeleteItem(obj, idx) => {
                     let idx_val = vm_try!(vm_read(regs, *idx, num_locals));
                     if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
-                        let list_mut = if let Some(ov) = regs[*obj as usize].as_mut() {
+                        let list_mut = if let Some(ov) = regs[*obj as usize].as_some_mut() {
                             ov.as_list_mut()
                         } else { None };
                         if let Some(items) = list_mut {
@@ -596,7 +596,7 @@ impl Interpreter {
                         }
                     } else {
                         let mut handled = false;
-                        if let Some(ov) = regs[*obj as usize].as_mut() {
+                        if let Some(ov) = regs[*obj as usize].as_some_mut() {
                             if let Some(items) = ov.as_list_mut() {
                                 let i = vm_try!(normalize_index(&idx_val, items.len(), "list"));
                                 if i == items.len() - 1 {
@@ -647,7 +647,7 @@ impl Interpreter {
                     self.env.borrow_mut().values.remove(&name);
                 }
                 Insn::DeleteLocal(reg) => {
-                    regs[*reg as usize] = None;
+                    regs[*reg as usize] = Value::unset();
                 }
 
                 // ── Control flow ─────────────────────────────────────────
@@ -655,7 +655,7 @@ impl Interpreter {
                     pc = jump_pc!(*offset);
                 }
                 Insn::JumpIfFalse(cond, offset) => {
-                    let fast = if let Some(cv) = &regs[*cond as usize] {
+                    let fast = if let Some(cv) = regs[*cond as usize].as_some() {
                         match cv.kind() {
                             ValueKind::Int(n)  => { if n == 0 { pc = jump_pc!(*offset); } true }
                             ValueKind::Bool(b) => { if !b    { pc = jump_pc!(*offset); } true }
@@ -669,7 +669,7 @@ impl Interpreter {
                     }
                 }
                 Insn::JumpIfTrue(cond, offset) => {
-                    let fast = if let Some(cv) = &regs[*cond as usize] {
+                    let fast = if let Some(cv) = regs[*cond as usize].as_some() {
                         match cv.kind() {
                             ValueKind::Int(n)  => { if n != 0 { pc = jump_pc!(*offset); } true }
                             ValueKind::Bool(b) => { if b      { pc = jump_pc!(*offset); } true }
@@ -683,9 +683,10 @@ impl Interpreter {
                     }
                 }
                 Insn::CmpJumpIfFalse(lhs, op, rhs, offset) => {
-                    if let (Some(lv), Some(rv)) = (&regs[*lhs as usize], &regs[*rhs as usize])
-                        && let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), rv.kind())
-                            && let Some(cond) = int_cmp(a, b, *op) {
+                    let lv = &regs[*lhs as usize];
+                    let rv = &regs[*rhs as usize];
+                    if let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), rv.kind())
+                        && let Some(cond) = int_cmp(a, b, *op) {
                                 if !cond { pc = jump_pc!(*offset); }
                                 continue;
                             }
@@ -694,9 +695,10 @@ impl Interpreter {
                     if !vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = jump_pc!(*offset); }
                 }
                 Insn::CmpJumpIfTrue(lhs, op, rhs, offset) => {
-                    if let (Some(lv), Some(rv)) = (&regs[*lhs as usize], &regs[*rhs as usize])
-                        && let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), rv.kind())
-                            && let Some(cond) = int_cmp(a, b, *op) {
+                    let lv = &regs[*lhs as usize];
+                    let rv = &regs[*rhs as usize];
+                    if let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), rv.kind())
+                        && let Some(cond) = int_cmp(a, b, *op) {
                                 if cond { pc = jump_pc!(*offset); }
                                 continue;
                             }
@@ -706,7 +708,7 @@ impl Interpreter {
                 }
                 Insn::CmpJumpIfFalseConst(lhs, op, const_idx, offset) => {
                     let cv = pool_get!(code.consts, *const_idx, "const");
-                    if let Some(lv) = &regs[*lhs as usize]
+                    if let Some(lv) = regs[*lhs as usize].as_some()
                         && let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), cv.kind())
                             && let Some(cond) = int_cmp(a, b, *op) {
                                 if !cond { pc = jump_pc!(*offset); }
@@ -718,7 +720,7 @@ impl Interpreter {
                 }
                 Insn::CmpJumpIfTrueConst(lhs, op, const_idx, offset) => {
                     let cv = pool_get!(code.consts, *const_idx, "const");
-                    if let Some(lv) = &regs[*lhs as usize]
+                    if let Some(lv) = regs[*lhs as usize].as_some()
                         && let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), cv.kind())
                             && let Some(cond) = int_cmp(a, b, *op) {
                                 if cond { pc = jump_pc!(*offset); }
@@ -740,7 +742,7 @@ impl Interpreter {
                     let exc = vm_try!(self.active_exception.clone().ok_or_else(|| {
                         PyError::Runtime("no active exception".to_string())
                     }));
-                    regs[*dst as usize] = Some(exc);
+                    regs[*dst as usize] = exc;
                 }
                 Insn::MatchExcept(type_reg, offset) => {
                     let type_val = vm_try!(vm_read(regs, *type_reg, num_locals));
@@ -800,10 +802,9 @@ impl Interpreter {
                         && let ValueKind::BuiltinFunction("id") = func_val.kind() {
                             let maybe_id: Option<i64> = regs
                                 .get((*func_reg + 1) as usize)
-                                .and_then(|o| o.as_ref())
                                 .and_then(|v| v.value_id());
                             if let Some(id_val) = maybe_id {
-                                regs[*func_reg as usize] = Some(Value::int(id_val));
+                                regs[*func_reg as usize] = Value::int(id_val);
                                 continue 'vm;
                             }
                         }
@@ -819,19 +820,19 @@ impl Interpreter {
                     }
                     let call_result = self.call_function_expanded(func_val, &buf);
                     self.call_arg_buf = buf;
-                    regs[*func_reg as usize] = Some(vm_try!(call_result));
+                    regs[*func_reg as usize] = vm_try!(call_result);
                 }
 
                 Insn::CallMemo(func_reg, argc) => {
                     // Cache-first path for known-pure callees.
-                    let is_pure_fn = if let Some(fv) = &regs[*func_reg as usize] {
+                    let is_pure_fn = if let Some(fv) = regs[*func_reg as usize].as_some() {
                         if let ValueKind::UserFunction(func) = fv.kind() {
                             func.is_pure
                         } else { false }
                     } else { false };
 
                     if is_pure_fn
-                        && let Some(fv) = &regs[*func_reg as usize]
+                        && let Some(fv) = regs[*func_reg as usize].as_some()
                             && let ValueKind::UserFunction(func) = fv.kind() {
                                 let fn_id = func.id;
                                 let mut key = std::mem::take(&mut self.key_scratch);
@@ -839,8 +840,7 @@ impl Interpreter {
                                 let mut all_hashable = true;
                                 for i in 0..*argc as usize {
                                     match regs[*func_reg as usize + 1 + i]
-                                        .as_ref()
-                                        .and_then(|v| v.to_key())
+                                        .to_key()
                                     {
                                         Some(k) => key.push(k),
                                         None => {
@@ -855,7 +855,7 @@ impl Interpreter {
                                     let (_, key) = lookup;
                                     self.key_scratch = key;
                                     if let Some(cached) = hit {
-                                        regs[*func_reg as usize] = Some(cached);
+                                        regs[*func_reg as usize] = cached;
                                         continue;
                                     }
                                 } else {
@@ -875,17 +875,17 @@ impl Interpreter {
                     }
                     let call_result = self.call_function_expanded(func_val, &buf);
                     self.call_arg_buf = buf;
-                    regs[*func_reg as usize] = Some(vm_try!(call_result));
+                    regs[*func_reg as usize] = vm_try!(call_result);
                 }
 
                 Insn::CallMethod { dst, obj, name_idx, args_base, nargs } => {
                     let r = self.exec_call_method(regs, num_locals, *dst, *obj, *name_idx, *args_base, *nargs, code);
-                    regs[*dst as usize] = Some(vm_try!(r));
+                    regs[*dst as usize] = vm_try!(r);
                 }
 
                 Insn::CallMethodExpanded { dst, obj, name_idx, pos_list, kw_dict } => {
                     let r = self.exec_call_method_expanded(regs, num_locals, *dst, *obj, *name_idx, *pos_list, *kw_dict, code);
-                    regs[*dst as usize] = Some(vm_try!(r));
+                    regs[*dst as usize] = vm_try!(r);
                 }
 
                 // ── Returns ──────────────────────────────────────────────
@@ -934,17 +934,17 @@ impl Interpreter {
                         for i in 0..*nargs as u32 {
                             new_args.push(vm_try!(vm_read(regs, args_base + i, num_locals)));
                         }
-                        // Reset all registers to None.
+                        // Reset all registers to unset.
                         for slot in regs.iter_mut() {
-                            *slot = None;
+                            *slot = Value::unset();
                         }
                         // Bind new positional args into parameter registers 0..nargs.
                         for (i, arg) in new_args.into_iter().enumerate() {
-                            regs[i] = Some(arg);
+                            regs[i] = arg;
                         }
                         // Restore the self-reference in its original register so
                         // the recursive body can call itself again.
-                        regs[func_reg as usize] = Some(callee_val);
+                        regs[func_reg as usize] = callee_val;
                         // Reset iterator and exception-handler state.
                         for slot in iters.iter_mut() {
                             *slot = None;
@@ -975,14 +975,14 @@ impl Interpreter {
                     for i in 0..crate::bytecode::Reg::from(*n) {
                         items.push(vm_try!(vm_read(regs, *base + i, num_locals)));
                     }
-                    regs[*dst as usize] = Some(Value::list(items));
+                    regs[*dst as usize] = Value::list(items);
                 }
                 Insn::BuildTuple(dst, base, n) => {
                     let mut items = Vec::with_capacity(*n as usize);
                     for i in 0..crate::bytecode::Reg::from(*n) {
                         items.push(vm_try!(vm_read(regs, *base + i, num_locals)));
                     }
-                    regs[*dst as usize] = Some(Value::tuple(items));
+                    regs[*dst as usize] = Value::tuple(items);
                 }
                 Insn::BuildDict(dst, base, n) => {
                     let mut dict = indexmap::IndexMap::new();
@@ -994,7 +994,7 @@ impl Interpreter {
                         }));
                         dict.insert(key, v_val);
                     }
-                    regs[*dst as usize] = Some(Value::dict(dict));
+                    regs[*dst as usize] = Value::dict(dict);
                 }
                 Insn::SetAdd(set_reg, val_reg) => {
                     let val = vm_try!(vm_read(regs, *val_reg, num_locals));
@@ -1002,8 +1002,7 @@ impl Interpreter {
                         "unhashable type in set comprehension".to_string()
                     )));
                     let set = vm_try!(regs[*set_reg as usize]
-                        .as_mut()
-                        .and_then(|v| v.as_set_mut())
+                        .as_set_mut()
                         .ok_or_else(|| PyError::Runtime("SetAdd: not a set".to_string())));
                     set.insert(key);
                 }
@@ -1040,7 +1039,7 @@ impl Interpreter {
                     // Pre-fill dst with None: this is the sent value that the
                     // yield expression evaluates to on resumption.  Proper
                     // send() support would overwrite this in resume_generator.
-                    regs[*dst as usize] = Some(Value::none());
+                    regs[*dst as usize] = Value::none();
                     // Save current iters/exc_handlers/pc to the thread-local
                     // so that resume_generator() can write them back into the
                     // GeneratorFrame after we unwind.
@@ -1077,7 +1076,7 @@ impl Interpreter {
                                 "Unpack: register {dst} out of range"
                             ))));
                         }
-                        regs[dst] = Some(v);
+                        regs[dst] = v;
                     }
                 }
 
@@ -1106,7 +1105,7 @@ impl Interpreter {
                                 "UnpackEx: register {dst} out of range"
                             ))));
                         }
-                        regs[dst] = Some(items[i].clone());
+                        regs[dst] = items[i].clone();
                     }
                     // Middle as a list → R[base + before]
                     let star_end = items.len() - after;
@@ -1117,7 +1116,7 @@ impl Interpreter {
                             "UnpackEx: register {star_dst} out of range"
                         ))));
                     }
-                    regs[star_dst] = Some(Value::list(middle));
+                    regs[star_dst] = Value::list(middle);
                     // Last `after` elements
                     for i in 0..after {
                         let dst = base + before + 1 + i;
@@ -1126,7 +1125,7 @@ impl Interpreter {
                                 "UnpackEx: register {dst} out of range"
                             ))));
                         }
-                        regs[dst] = Some(items[star_end + i].clone());
+                        regs[dst] = items[star_end + i].clone();
                     }
                 }
 
@@ -1138,7 +1137,7 @@ impl Interpreter {
                     // Temp register or other type: materialise immediately, because
                     //   a temp reg is freed and may be overwritten by the loop body.
                     let is_list_or_tuple_local = if *src < num_locals {
-                        if let Some(v) = &regs[*src as usize] {
+                        if let Some(v) = regs[*src as usize].as_some() {
                             matches!(v.kind(), ValueKind::List(_) | ValueKind::Tuple(_))
                         } else { false }
                     } else { false };
@@ -1223,16 +1222,17 @@ impl Interpreter {
                         Some(IterState::Indexed { reg, pos }) => {
                             let src = *reg as usize;
                             let cur_pos = *pos;
-                            let items: Option<&Vec<Value>> = match regs[src].as_ref() {
-                                Some(rv) => rv.as_list().or_else(|| rv.as_tuple()),
-                                None => None,
+                            let items: Option<&Vec<Value>> = if regs[src].is_unset() {
+                                None
+                            } else {
+                                regs[src].as_list().or_else(|| regs[src].as_tuple())
                             };
                             match items {
                                 Some(items) if cur_pos < items.len() => {
                                     // SAFETY: cur_pos < items.len() checked just above.
                                     let v = unsafe { items.get_unchecked(cur_pos).clone() };
                                     *pos = cur_pos + 1;
-                                    regs[*dst as usize] = Some(v);
+                                    regs[*dst as usize] = v;
                                 }
                                 _ => pc = jump_pc!(*offset),
                             }
@@ -1243,7 +1243,7 @@ impl Interpreter {
                                 // SAFETY: cur_pos < items.len() checked just above.
                                 let v = unsafe { items.get_unchecked(cur_pos).clone() };
                                 *pos = cur_pos + 1;
-                                regs[*dst as usize] = Some(v);
+                                regs[*dst as usize] = v;
                             } else {
                                 pc = jump_pc!(*offset);
                             }
@@ -1256,7 +1256,7 @@ impl Interpreter {
                             } else {
                                 let v = Value::int(*cur);
                                 *cur += *step;
-                                regs[*dst as usize] = Some(v);
+                                regs[*dst as usize] = v;
                             }
                         }
                         Some(IterState::Enumerate { items, pos, counter }) => {
@@ -1264,7 +1264,7 @@ impl Interpreter {
                                 let v = Value::tuple(vec![Value::int(*counter), items[*pos].clone()]);
                                 *pos += 1;
                                 *counter += 1;
-                                regs[*dst as usize] = Some(v);
+                                regs[*dst as usize] = v;
                             } else {
                                 pc = jump_pc!(*offset);
                             }
@@ -1273,7 +1273,7 @@ impl Interpreter {
                             if *pos < *len {
                                 let row: Vec<Value> = sources.iter().map(|s| s[*pos].clone()).collect();
                                 *pos += 1;
-                                regs[*dst as usize] = Some(Value::tuple(row));
+                                regs[*dst as usize] = Value::tuple(row);
                             } else {
                                 pc = jump_pc!(*offset);
                             }
@@ -1282,7 +1282,7 @@ impl Interpreter {
                             if *pos > 0 {
                                 *pos -= 1;
                                 let v = items[*pos].clone();
-                                regs[*dst as usize] = Some(v);
+                                regs[*dst as usize] = v;
                             } else {
                                 pc = jump_pc!(*offset);
                             }
@@ -1337,10 +1337,10 @@ impl Interpreter {
                                 } else { None };
                             match next_result {
                                 Some(Ok(val)) => {
-                                    regs[*dst as usize] = Some(val);
+                                    regs[*dst as usize] = val;
                                 }
                                 Some(Err(PyError::GeneratorYield(val))) => {
-                                    regs[*dst as usize] = Some(val);
+                                    regs[*dst as usize] = val;
                                 }
                                 Some(Err(PyError::Raised(exc))) => {
                                     // Check for StopIteration: covers both `raise StopIteration()`
@@ -1384,7 +1384,9 @@ impl Interpreter {
                         ValueKind::Int(s) => s,
                         _ => unreachable!("ForCountReg step must be Int"),
                     };
-                    let fast = if let (Some(vv), Some(sv)) = (&regs[*var as usize], &regs[*stop_reg as usize]) {
+                    let fast = {
+                        let vv = &regs[*var as usize];
+                        let sv = &regs[*stop_reg as usize];
                         if let (ValueKind::Int(cur), ValueKind::Int(stop)) = (vv.kind(), sv.kind()) {
                             let next = cur.wrapping_add(step);
                             let cont = match cmp_op {
@@ -1392,11 +1394,11 @@ impl Interpreter {
                                 BinaryOp::Gt => next > stop,
                                 _ => unreachable!("ForCountReg uses Lt or Gt only"),
                             };
-                            if cont { regs[*var as usize] = Some(Value::int(next)); }
+                            if cont { regs[*var as usize] = Value::int(next); }
                             else { pc = jump_pc!(*offset); }
                             true
                         } else { false }
-                    } else { false };
+                    };
                     if !fast {
                         vm_try!(Err(crate::error::PyError::Runtime(
                             "for-range: non-integer counter or stop".into(),
@@ -1412,7 +1414,7 @@ impl Interpreter {
                         ValueKind::Int(s) => s,
                         _ => unreachable!("ForCountConst stop must be Int"),
                     };
-                    let fast = if let Some(vv) = &regs[*var as usize] {
+                    let fast = if let Some(vv) = regs[*var as usize].as_some() {
                         if let ValueKind::Int(cur) = vv.kind() {
                             let next = cur.wrapping_add(step);
                             let cont = match cmp_op {
@@ -1420,7 +1422,7 @@ impl Interpreter {
                                 BinaryOp::Gt => next > stop,
                                 _ => unreachable!("ForCountConst uses Lt or Gt only"),
                             };
-                            if cont { regs[*var as usize] = Some(Value::int(next)); }
+                            if cont { regs[*var as usize] = Value::int(next); }
                             else { pc = jump_pc!(*offset); }
                             true
                         } else { false }
@@ -1456,7 +1458,10 @@ impl Interpreter {
                     }
                 }
                 Insn::CheckLocal(reg, name_idx) => {
-                    if regs[*reg as usize].is_none() {
+                    // is_unset() checks for the slot sentinel (uninitialised
+                    // local), not for Python's None — Value::is_none() would
+                    // mis-fire on legitimate `x = None` followed by a read.
+                    if regs[*reg as usize].is_unset() {
                         let name = pool_get!(code.names, *name_idx, "name");
                         vm_try!(Err::<(), _>(crate::error::PyError::Runtime(format!(
                             "cannot access local variable '{}' where it is not associated with a value",
@@ -1519,7 +1524,7 @@ impl Interpreter {
                         is_pure,
                         precompiled_code: Some(proto_code),
                     });
-                    regs[*dst as usize] = Some(Value::user_function(func));
+                    regs[*dst as usize] = Value::user_function(func);
                 }
                 Insn::MakeClass(dst, proto_idx, bases_base, bases_n, name_idx) => {
                     let class_name = pool_get!(code.names, *name_idx, "name").clone();
@@ -1528,13 +1533,14 @@ impl Interpreter {
                         (Rc::clone(&proto.code), Rc::clone(&proto.local_index))
                     };
                     let num_class_regs = class_code.num_regs as usize;
-                    let mut class_regs: Vec<Option<Value>> = vec![None; num_class_regs];
+                    let mut class_regs: Vec<Value> = vec![Value::unset(); num_class_regs];
                     vm_try!(self.run_bytecode(&class_code, &mut class_regs));
                     let mut attrs = HashMap::new();
                     for (attr_name, &slot) in local_index.iter() {
-                        if let Some(val) = class_regs.get(slot as usize).and_then(|v| v.clone()) {
-                            attrs.insert(attr_name.clone(), val);
-                        }
+                        if let Some(v) = class_regs.get(slot as usize)
+                            && !v.is_unset() {
+                                attrs.insert(attr_name.clone(), v.clone());
+                            }
                     }
                     let base = if *bases_n > 0 {
                         let base_val = vm_try!(vm_read(regs, *bases_base, num_locals));
@@ -1552,14 +1558,14 @@ impl Interpreter {
                     };
                     let class =
                         Rc::new(RefCell::new(PyClass { name: class_name, base, attrs }));
-                    regs[*dst as usize] = Some(Value::py_class(class));
+                    regs[*dst as usize] = Value::py_class(class);
                 }
 
                 // ── Import ───────────────────────────────────────────────
                 Insn::ImportModule(dst, name_idx) => {
                     let name = pool_get!(code.names, *name_idx, "name").clone();
                     let module = vm_try!(self.load_module(&name));
-                    regs[*dst as usize] = Some(module);
+                    regs[*dst as usize] = module;
                 }
 
                 // ── REPL output ──────────────────────────────────────────
@@ -1576,7 +1582,7 @@ impl Interpreter {
     #[allow(clippy::too_many_arguments)]
     fn exec_call_method(
         &mut self,
-        regs: &mut [Option<Value>],
+        regs: &mut [Value],
         num_locals: crate::bytecode::Reg,
         _dst: crate::bytecode::Reg,
         obj: crate::bytecode::Reg,
@@ -1593,7 +1599,7 @@ impl Interpreter {
             args.push(vm_read(regs, args_base + i, num_locals)?);
         }
         // Check if obj is a List, Dict, Tuple, Str, or Set via kind()
-        let obj_kind_tag = regs[obj as usize].as_ref().map(|v| match v.kind() {
+        let obj_kind_tag = regs[obj as usize].as_some().map(|v| match v.kind() {
             ValueKind::List(_) => 1u8,
             ValueKind::Dict(_) => 2u8,
             ValueKind::Tuple(_) => 3u8,
@@ -1608,8 +1614,7 @@ impl Interpreter {
                 // obj_reg and dst_reg may coincide; the mutable borrow of the Vec ends
                 // before exec_call_method returns, so no alias with the later store.
                 let items = regs[obj as usize]
-                    .as_mut()
-                    .and_then(|v| v.as_list_mut())
+                    .as_list_mut()
                     .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
                 let empty_kw = indexmap::IndexMap::new();
                 pyrust_builtins::list::call(&method, items, args, &empty_kw)
@@ -1617,8 +1622,7 @@ impl Interpreter {
             2 => {
                 if matches!(method.as_str(), "keys" | "values" | "items") {
                     let rc = regs[obj as usize]
-                        .as_ref()
-                        .and_then(|v| v.get_dict_rc())
+                        .get_dict_rc()
                         .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?
                         .clone();
                     return match method.as_str() {
@@ -1629,27 +1633,25 @@ impl Interpreter {
                     };
                 }
                 let dict = regs[obj as usize]
-                    .as_mut()
-                    .and_then(|v| v.as_dict_mut())
+                    .as_dict_mut()
                     .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
                 pyrust_builtins::dict::call(&method, dict, args)
             }
             3 => {
-                if let Some(ValueKind::Tuple(items)) = regs[obj as usize].as_ref().map(|v| v.kind()) {
+                if let Some(ValueKind::Tuple(items)) = regs[obj as usize].as_some().map(|v| v.kind()) {
                     pyrust_builtins::tuple::call(&method, items, args)
                 } else {
                     unreachable!()
                 }
             }
             4 => {
-                if let Some(v) = &regs[obj as usize] {
+                if let Some(v) = regs[obj as usize].as_some() {
                     pyrust_builtins::string::call(&method, v, args)
                 } else { unreachable!() }
             }
             5 => {
                 let set = regs[obj as usize]
-                    .as_mut()
-                    .and_then(|v| v.as_set_mut())
+                    .as_set_mut()
                     .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
                 pyrust_builtins::set::call(&method, set, args)
             }
@@ -1671,7 +1673,7 @@ impl Interpreter {
     #[allow(clippy::too_many_arguments)]
     fn exec_call_method_expanded(
         &mut self,
-        regs: &mut [Option<Value>],
+        regs: &mut [Value],
         num_locals: crate::bytecode::Reg,
         _dst: crate::bytecode::Reg,
         obj: crate::bytecode::Reg,
@@ -1694,7 +1696,7 @@ impl Interpreter {
             _ => return Err(PyError::Runtime("CallMethodExpanded: kw_dict must be a dict".to_string())),
         };
 
-        let obj_kind_tag = regs[obj as usize].as_ref().map(|v| match v.kind() {
+        let obj_kind_tag = regs[obj as usize].as_some().map(|v| match v.kind() {
             ValueKind::List(_) => 1u8,
             ValueKind::Dict(_) => 2u8,
             ValueKind::Tuple(_) => 3u8,
@@ -1724,8 +1726,7 @@ impl Interpreter {
                     if let Some(key_fn_val) = key_fn {
                         // Compute keys via the interpreter, then delegate sorting to builtins.
                         let items_snapshot = regs[obj as usize]
-                            .as_ref()
-                            .and_then(|v| v.as_list())
+                            .as_list()
                             .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?
                             .clone();
                         let mut keys: Vec<Value> = Vec::with_capacity(items_snapshot.len());
@@ -1741,29 +1742,25 @@ impl Interpreter {
                             keys.push(key_val);
                         }
                         let items_out = regs[obj as usize]
-                            .as_mut()
-                            .and_then(|v| v.as_list_mut())
+                            .as_list_mut()
                             .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
                         return pyrust_builtins::list::sort_with_precomputed_keys(items_out, keys, reverse);
                     }
                     // No key: delegate to builtins (handles reverse kwarg)
                     let items = regs[obj as usize]
-                        .as_mut()
-                        .and_then(|v| v.as_list_mut())
+                        .as_list_mut()
                         .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
                     return pyrust_builtins::list::call(&method, items, pos_items, &kw_map);
                 }
                 let items = regs[obj as usize]
-                    .as_mut()
-                    .and_then(|v| v.as_list_mut())
+                    .as_list_mut()
                     .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
                 pyrust_builtins::list::call(&method, items, pos_items, &kw_map)
             }
             2 => {
                 if matches!(method.as_str(), "keys" | "values" | "items") {
                     let rc = regs[obj as usize]
-                        .as_ref()
-                        .and_then(|v| v.get_dict_rc())
+                        .get_dict_rc()
                         .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?
                         .clone();
                     return match method.as_str() {
@@ -1774,27 +1771,25 @@ impl Interpreter {
                     };
                 }
                 let dict = regs[obj as usize]
-                    .as_mut()
-                    .and_then(|v| v.as_dict_mut())
+                    .as_dict_mut()
                     .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
                 pyrust_builtins::dict::call(&method, dict, pos_items)
             }
             3 => {
-                if let Some(ValueKind::Tuple(items)) = regs[obj as usize].as_ref().map(|v| v.kind()) {
+                if let Some(ValueKind::Tuple(items)) = regs[obj as usize].as_some().map(|v| v.kind()) {
                     pyrust_builtins::tuple::call(&method, items, pos_items)
                 } else {
                     Err(PyError::Runtime("internal: expected tuple".to_string()))
                 }
             }
             4 => {
-                if let Some(v) = &regs[obj as usize] {
+                if let Some(v) = regs[obj as usize].as_some() {
                     pyrust_builtins::string::call(&method, v, pos_items)
                 } else { unreachable!() }
             }
             5 => {
                 let set = regs[obj as usize]
-                    .as_mut()
-                    .and_then(|v| v.as_set_mut())
+                    .as_set_mut()
                     .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
                 pyrust_builtins::set::call(&method, set, pos_items)
             }
@@ -1821,22 +1816,22 @@ impl Interpreter {
     }
 }
 
-fn vm_read(regs: &[Option<Value>], reg: crate::bytecode::Reg, num_locals: crate::bytecode::Reg) -> crate::interpreter::Result<Value> {
-    match regs[reg as usize].clone() {
-        Some(v) => Ok(v),
-        None => {
-            if reg < num_locals {
-                Err(crate::error::PyError::Named(
-                    "NameError".to_string(),
-                    "local variable referenced before assignment".to_string(),
-                ))
-            } else {
-                Err(crate::error::PyError::Runtime(
-                    "internal: temp register read before write".to_string(),
-                ))
-            }
+#[inline]
+fn vm_read(regs: &[Value], reg: crate::bytecode::Reg, num_locals: crate::bytecode::Reg) -> crate::interpreter::Result<Value> {
+    let v = &regs[reg as usize];
+    if v.is_unset() {
+        if reg < num_locals {
+            return Err(crate::error::PyError::Named(
+                "NameError".to_string(),
+                "local variable referenced before assignment".to_string(),
+            ));
+        } else {
+            return Err(crate::error::PyError::Runtime(
+                "internal: temp register read before write".to_string(),
+            ));
         }
     }
+    Ok(v.clone())
 }
 
 fn vm_eval_unary(op: UnaryOp, val: Value) -> Result<Value> {
@@ -1892,7 +1887,7 @@ mod vm_tests {
         code.insns.push(Insn::MatchExcept(0, 1));     // no active_exception → error
         code.insns.push(Insn::ReturnNone);
         let mut interp = Interpreter::default();
-        let mut regs: Vec<Option<Value>> = vec![None; 1];
+        let mut regs: Vec<Value> = vec![Value::unset(); 1];
         let result = interp.run_bytecode(&code, &mut regs);
         assert!(result.is_err(), "expected Err, got {:?}", result);
         assert!(
@@ -1906,7 +1901,7 @@ mod vm_tests {
         // Jump(100): new_pc = 1 + 100 = 101 > insns.len() (1) → error
         let code = empty_code(vec![Insn::Jump(100)]);
         let mut interp = Interpreter::default();
-        let mut regs: Vec<Option<Value>> = vec![];
+        let mut regs: Vec<Value> = vec![];
         let result = interp.run_bytecode(&code, &mut regs);
         assert!(result.is_err(), "expected Err for OOB jump, got {:?}", result);
         assert!(result.unwrap_err().to_string().contains("internal error"));
@@ -1917,7 +1912,7 @@ mod vm_tests {
         // Jump(-100): new_pc = 1 + (-100) = -99 → underflow error
         let code = empty_code(vec![Insn::Jump(-100)]);
         let mut interp = Interpreter::default();
-        let mut regs: Vec<Option<Value>> = vec![];
+        let mut regs: Vec<Value> = vec![];
         let result = interp.run_bytecode(&code, &mut regs);
         assert!(result.is_err(), "expected Err for negative jump, got {:?}", result);
         assert!(result.unwrap_err().to_string().contains("internal error"));
@@ -1927,7 +1922,7 @@ mod vm_tests {
     fn normal_fallthrough_returns_none() {
         let code = empty_code(vec![Insn::ReturnNone]);
         let mut interp = Interpreter::default();
-        let mut regs: Vec<Option<Value>> = vec![];
+        let mut regs: Vec<Value> = vec![];
         assert_eq!(interp.run_bytecode(&code, &mut regs).unwrap(), Value::none());
     }
 
@@ -1936,7 +1931,7 @@ mod vm_tests {
         // SetupExcept(-100): handler_pc = 1 + (-100) < 0 → error at push time
         let code = empty_code(vec![Insn::SetupExcept(-100), Insn::ReturnNone]);
         let mut interp = Interpreter::default();
-        let mut regs: Vec<Option<Value>> = vec![];
+        let mut regs: Vec<Value> = vec![];
         let result = interp.run_bytecode(&code, &mut regs);
         assert!(result.is_err(), "expected Err for SetupExcept with OOB offset, got {:?}", result);
     }
