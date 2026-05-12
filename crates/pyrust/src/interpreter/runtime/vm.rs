@@ -1609,9 +1609,8 @@ impl Interpreter {
                 if method == "format" {
                     let template = regs[obj as usize]
                         .as_str()
-                        .ok_or_else(|| PyError::Runtime("internal: expected str".to_string()))?
-                        .to_string();
-                    return format_str_template(&template, &args, &[]);
+                        .ok_or_else(|| PyError::Runtime("internal: expected str".to_string()))?;
+                    return format_str_template(template, &args, &[]);
                 }
                 if let Some(v) = regs[obj as usize].as_some() {
                     pyrust_builtins::string::call(&method, v, args)
@@ -1752,17 +1751,16 @@ impl Interpreter {
             }
             4 => {
                 if method == "format" {
-                    let template = regs[obj as usize]
-                        .as_str()
-                        .ok_or_else(|| PyError::Runtime("internal: expected str".to_string()))?
-                        .to_string();
                     let mut keyword: Vec<(String, Value)> = Vec::with_capacity(kw_map.len());
                     for (k, v) in &kw_map {
                         if let PyKey::Str(name) = k {
                             keyword.push((name.clone(), v.clone()));
                         }
                     }
-                    return format_str_template(&template, &pos_items, &keyword);
+                    let template = regs[obj as usize]
+                        .as_str()
+                        .ok_or_else(|| PyError::Runtime("internal: expected str".to_string()))?;
+                    return format_str_template(template, &pos_items, &keyword);
                 }
                 if let Some(v) = regs[obj as usize].as_some() {
                     pyrust_builtins::string::call(&method, v, pos_items)
