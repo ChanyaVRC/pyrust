@@ -68,4 +68,32 @@ try:
 except KeyError:
     pass
 
+# !a conversion: ASCII-escape non-ASCII chars in repr
+assert "{!a}".format("ascii") == "'ascii'"
+assert "{!a}".format("café") == "'caf\\xe9'"
+
+# UTF-8 in the template
+assert "{}".format("あ") == "あ"
+assert "prefixあ{}suffix".format(1) == "prefixあ1suffix"
+
+# Mixed manual/auto numbering raises ValueError
+try:
+    "{0} {}".format("a", "b")
+    print("FAIL: expected ValueError")
+except ValueError:
+    pass
+
+try:
+    "{} {0}".format("a", "b")
+    print("FAIL: expected ValueError")
+except ValueError:
+    pass
+
+# TypeError on list[str-key] inside format field
+try:
+    "{0[abc]}".format([1, 2, 3])
+    print("FAIL: expected TypeError")
+except TypeError:
+    pass
+
 print("str.format OK")

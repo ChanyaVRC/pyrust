@@ -3229,18 +3229,14 @@ fn format_str_template(
                 ));
             }
         } else {
-            // Walk one UTF-8 char.
+            // Walk one UTF-8 char: advance past the start byte, then skip any
+            // continuation bytes (0b10xxxxxx). The outer loop guarantees the
+            // current byte is a start byte (the `{`/`}` branches handle the
+            // ASCII delimiters; other ASCII bytes are 1-byte chars).
             let ch_start = i;
-            while i < bytes.len() && (bytes[i] & 0xC0) != 0x80 {
+            i += 1;
+            while i < bytes.len() && (bytes[i] & 0xC0) == 0x80 {
                 i += 1;
-                if i >= bytes.len() || bytes[i] == b'{' || bytes[i] == b'}' {
-                    break;
-                }
-                // continue past continuation bytes
-                while i < bytes.len() && (bytes[i] & 0xC0) == 0x80 {
-                    i += 1;
-                }
-                break;
             }
             out.push_str(&template[ch_start..i]);
         }
@@ -3355,10 +3351,16 @@ fn apply_field_accessors(mut value: Value, mut rest: &str) -> Result<Value> {
                             "KeyError".to_string(),
                             format!("'{key_str}'"),
                         ))?,
+                    ValueKind::List(_) | ValueKind::Tuple(_) => {
+                        return Err(PyError::Named(
+                            "TypeError".to_string(),
+                            "list indices must be integers or slices, not str".to_string(),
+                        ));
+                    }
                     _ => {
                         return Err(PyError::Named(
                             "TypeError".to_string(),
-                            "string key only supported on dicts".to_string(),
+                            "object is not subscriptable".to_string(),
                         ));
                     }
                 }
