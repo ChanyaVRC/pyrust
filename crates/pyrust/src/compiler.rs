@@ -2422,10 +2422,15 @@ impl Compiler {
             self.patch_jump(jmp);
         }
         let ctx = self.loops.pop().unwrap();
-        if let Some(else_stmts) = else_branch {
-            self.compile_block(else_stmts);
-            if self.failed {
-                return;
+        // For an infinite while (e.g. `while True:`) the else clause is unreachable:
+        // the loop never exits naturally, and `break` deliberately skips the else.
+        // Skip the emit entirely — semantics-preserving, avoids dead bytecode.
+        if !is_infinite {
+            if let Some(else_stmts) = else_branch {
+                self.compile_block(else_stmts);
+                if self.failed {
+                    return;
+                }
             }
         }
         for idx in ctx.break_patches {
