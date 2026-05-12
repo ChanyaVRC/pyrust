@@ -1075,6 +1075,8 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
         "super" => Some(Value::builtin_function("super")),
         "next" => Some(Value::builtin_function("next")),
         "iter" => Some(Value::builtin_function("iter")),
+        "vars" => Some(Value::builtin_function("vars")),
+        "dir" => Some(Value::builtin_function("dir")),
         "NotImplemented" => Some(Value::not_implemented()),
         _ => None,
     }

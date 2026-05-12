@@ -797,6 +797,73 @@ impl Interpreter {
                 self.assign_attr(args[0].value.clone(), &name, args[2].value.clone())?;
                 Ok(Value::none())
             }
+            ValueKind::BuiltinFunction("vars") => {
+                reject_keyword_args_expanded("vars", args)?;
+                if args.len() > 1 {
+                    return Err(PyError::Named(
+                        "TypeError".to_string(),
+                        "vars() takes at most 1 argument".to_string(),
+                    ));
+                }
+                if args.is_empty() {
+                    // No-arg form returns the current environment as a dict.
+                    let mut dict: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
+                    for (k, v) in self.env.borrow().values.iter() {
+                        dict.insert(PyKey::Str(k.clone()), v.clone());
+                    }
+                    return Ok(Value::dict(dict));
+                }
+                match args[0].value.kind() {
+                    ValueKind::PyInstance(instance) => {
+                        let mut dict: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
+                        for (k, v) in instance.borrow().attrs.iter() {
+                            dict.insert(PyKey::Str(k.clone()), v.clone());
+                        }
+                        Ok(Value::dict(dict))
+                    }
+                    ValueKind::PyModule(module) => {
+                        let mut dict: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
+                        for (k, v) in module.borrow().attrs.iter() {
+                            dict.insert(PyKey::Str(k.clone()), v.clone());
+                        }
+                        Ok(Value::dict(dict))
+                    }
+                    ValueKind::PyClass(class) => {
+                        let mut dict: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
+                        for (k, v) in class.borrow().attrs.iter() {
+                            dict.insert(PyKey::Str(k.clone()), v.clone());
+                        }
+                        Ok(Value::dict(dict))
+                    }
+                    _ => Err(PyError::Named(
+                        "TypeError".to_string(),
+                        format!(
+                            "vars() argument must have __dict__ attribute (got '{}')",
+                            value_type_name_str(&args[0].value),
+                        ),
+                    )),
+                }
+            }
+            ValueKind::BuiltinFunction("dir") => {
+                reject_keyword_args_expanded("dir", args)?;
+                if args.len() > 1 {
+                    return Err(PyError::Named(
+                        "TypeError".to_string(),
+                        "dir() takes at most 1 argument".to_string(),
+                    ));
+                }
+                let mut names: Vec<String> = if args.is_empty() {
+                    // No-arg form returns names in the current scope.
+                    self.env.borrow().values.keys().cloned().collect()
+                } else {
+                    dir_names(&args[0].value)
+                };
+                names.sort();
+                names.dedup();
+                Ok(Value::list(
+                    names.into_iter().map(Value::string).collect(),
+                ))
+            }
             ValueKind::BuiltinFunction("dict") => {
                 reject_keyword_args_expanded("dict", args)?;
                 if args.is_empty() {
@@ -2880,4 +2947,83 @@ fn trim_g_trailing_zeros(s: String) -> String {
     } else {
         s
     }
+}
+
+/// Returns the list of attribute/method names that `dir(obj)` should report.
+fn dir_names(value: &Value) -> Vec<String> {
+    match value.kind() {
+        ValueKind::PyInstance(inst) => {
+            let mut names: Vec<String> = inst.borrow().attrs.keys().cloned().collect();
+            let class = Rc::clone(&inst.borrow().class);
+            let mut cls = Some(class);
+            while let Some(c) = cls {
+                let cb = c.borrow();
+                for k in cb.attrs.keys() {
+                    names.push(k.clone());
+                }
+                cls = cb.base.clone();
+            }
+            names
+        }
+        ValueKind::PyClass(class) => {
+            let mut names: Vec<String> = Vec::new();
+            let mut cls = Some(Rc::clone(class));
+            while let Some(c) = cls {
+                let cb = c.borrow();
+                for k in cb.attrs.keys() {
+                    names.push(k.clone());
+                }
+                cls = cb.base.clone();
+            }
+            names
+        }
+        ValueKind::PyModule(module) => module.borrow().attrs.keys().cloned().collect(),
+        ValueKind::Str(_) => builtin_method_names("str"),
+        ValueKind::List(_) => builtin_method_names("list"),
+        ValueKind::Tuple(_) => builtin_method_names("tuple"),
+        ValueKind::Dict(_) => builtin_method_names("dict"),
+        ValueKind::Set(_) => builtin_method_names("set"),
+        _ => Vec::new(),
+    }
+}
+
+/// Hard-coded list of public method names per built-in type for `dir()`.
+///
+/// TODO: also include the dunder methods CPython exposes via `dir([])` /
+/// `dir("")` etc. (`__iter__`, `__len__`, `__getitem__`, `__contains__`,
+/// `__add__`, …). Programs that introspect protocol support via `dir()`
+/// currently get a partial answer. Once `#262` lands, this table should
+/// be derived from `pyrust_builtins::{string,list,…}::METHODS` to remove
+/// the third source of truth — see the PR review thread for the design
+/// discussion.
+fn builtin_method_names(type_name: &str) -> Vec<String> {
+    let names: &[&str] = match type_name {
+        "str" => &[
+            "capitalize", "casefold", "center", "count", "encode", "endswith",
+            "expandtabs", "find", "format", "index", "isalnum", "isalpha",
+            "isascii", "isdecimal", "isdigit", "isidentifier", "islower",
+            "isnumeric", "isprintable", "isspace", "istitle", "isupper", "join",
+            "ljust", "lower", "lstrip", "partition", "removeprefix",
+            "removesuffix", "replace", "rfind", "rindex", "rjust", "rpartition",
+            "rsplit", "rstrip", "split", "splitlines", "startswith", "strip",
+            "swapcase", "title", "upper", "zfill",
+        ],
+        "list" => &[
+            "append", "clear", "copy", "count", "extend", "index", "insert",
+            "pop", "remove", "reverse", "sort",
+        ],
+        "tuple" => &["count", "index"],
+        "dict" => &[
+            "clear", "copy", "get", "items", "keys", "pop", "popitem",
+            "setdefault", "update", "values",
+        ],
+        "set" => &[
+            "add", "clear", "copy", "difference", "difference_update",
+            "discard", "intersection", "intersection_update", "isdisjoint",
+            "issubset", "issuperset", "pop", "remove", "symmetric_difference",
+            "symmetric_difference_update", "union", "update",
+        ],
+        _ => &[],
+    };
+    names.iter().map(|s| s.to_string()).collect()
 }
