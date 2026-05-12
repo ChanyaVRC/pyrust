@@ -1,170 +1,165 @@
-# Migrating built-in callables to `#[pyfunction]`
+# Migrating built-in callables to `pyrust_module!`
 
-This document is for contributors moving built-in Python callables from the
-legacy `match ValueKind::BuiltinFunction("name") => …` cascade in
+This document is for contributors moving built-in Python callables from
+the legacy `match ValueKind::BuiltinFunction("name") => …` cascade in
 [crates/pyrust/src/interpreter/runtime/calls.rs](../crates/pyrust/src/interpreter/runtime/calls.rs)
-into the new `#[pyfunction]` registry.  Phase 1 (the introduction of the
-mechanism) migrated `math.*` and `sys.exit` as proof; the remaining ~60
-arms are scheduled for phase-2 PRs.
+into the file-scoped `pyrust_module!` macro.  Phase 1 (the mechanism)
+migrated `math.*` and `sys.exit`; the remaining ~60 arms are scheduled
+for phase-2 PRs.
 
 ## Why this exists
 
 The legacy dispatch had three growing pains:
 
-1. **One file balloons.**  `calls.rs::call_function_expanded` had grown to
-   3000+ lines because every new built-in added an arm.
-2. **String match cascade.**  73 arms key on `BuiltinFunction("name")` —
-   the compiler optimises this to a jump table, but the source is hard to
-   scan and any new arm requires touching the same hot file.
-3. **Drift between declaration and dispatch.**  Module shells in
-   [helpers.rs](../crates/pyrust/src/interpreter/helpers.rs) list a name
-   (`Value::builtin_function("math.sqrt")`) that must match a string in
-   `calls.rs`.  A typo breaks dispatch silently.
+1. **One file balloons.**  `calls.rs::call_function_expanded` had grown
+   to 3000+ lines because every new built-in added an arm.
+2. **String match cascade.**  73 arms keyed on `BuiltinFunction("name")`
+   — the compiler optimises this to a jump table, but the source is
+   hard to scan and any new arm touches the same hot file.
+3. **Drift between three sources of truth.**  Adding `math.foo`
+   required (a) a `BuiltinFunction("math.foo")` arm in `calls.rs`,
+   (b) a `Value::builtin_function("math.foo")` entry in
+   `helpers.rs::make_math_module`, and (c) the Python name appearing
+   in both as a string literal that had to match exactly.
 
-The new pattern moves each built-in to its own free `fn`, annotated with
-`#[pyfunction(name = "module.fn")]` and collected into a static registry
-that `call_function_expanded` consults via O(log n) binary search.
+The new pattern moves each module's declarations into a single file
+under `crates/pyrust/src/builtin_registry_modules/`, where one
+`pyrust_module! { … }` invocation generates:
 
-## Anatomy of a migration
+- the unified-signature `fn` for each callable,
+- one `BuiltinReg` constant per callable,
+- the `REGS: &[BuiltinReg]` slice consumed by the central registry,
+- a `module()` constructor consumed by `env.rs::load_module`.
 
-Example — `math.sqrt`.
+## Anatomy of a module file
 
-### 1. Find the legacy arm
+Real example — `crates/pyrust/src/builtin_registry_modules/math.rs`:
 
 ```rust
-ValueKind::BuiltinFunction("math.sqrt") => {
-    reject_keyword_args_expanded("math.sqrt", args)?;
-    if args.len() != 1 {
-        return Err(PyError::Runtime("math.sqrt() takes exactly one argument".into()));
+use crate::error::{PyError, Result};
+use crate::interpreter::ExpandedCallArg;
+use crate::interpreter::{float_to_bigint, reject_keyword_args_expanded, value_to_float};
+use crate::value::Value;
+use pyrust_derive::pyrust_module;
+
+pyrust_module! {
+    name = "math",
+
+    constants {
+        "pi"  => Value::float(std::f64::consts::PI),
+        "e"   => Value::float(std::f64::consts::E),
+        // …
     }
-    let x = value_to_float(&args[0].value, "math.sqrt")?;
-    Ok(Value::float(x.sqrt()))
-}
-```
 
-### 2. Choose the target module
-
-[crates/pyrust/src/builtin_registry_modules/](../crates/pyrust/src/builtin_registry_modules/)
-holds one file per logical group:
-
-- `math.rs` — `math.*`
-- `sys.rs` — `sys.*`
-- (add new files for `os.path`, `functools`, `itertools`, `collections`,
-  `pure_builtins` for `abs`/`len`/etc., …)
-
-### 3. Write the annotated function
-
-```rust
-/// CPython: `math.sqrt(x)` → float.
-/// <https://docs.python.org/3/library/math.html#math.sqrt>
-#[pyfunction(name = "math.sqrt")]
-fn math_sqrt(_interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value> {
-    reject_keyword_args_expanded("math.sqrt", args)?;
-    if args.len() != 1 {
-        return Err(PyError::Runtime("math.sqrt() takes exactly one argument".into()));
+    /// CPython: math.sqrt(x) → float.
+    /// <https://docs.python.org/3/library/math.html#math.sqrt>
+    fn sqrt(args) -> Result<Value> {
+        Ok(Value::float(single_float("math.sqrt", args)?.sqrt()))
     }
-    let x = value_to_float(&args[0].value, "math.sqrt")?;
-    Ok(Value::float(x.sqrt()))
+
+    /// CPython: math.pow(x, y) → float.
+    fn pow(args) -> Result<Value> {
+        reject_keyword_args_expanded("math.pow", args)?;
+        if args.len() != 2 {
+            return Err(PyError::Runtime("math.pow() takes exactly two arguments".to_string()));
+        }
+        let x = value_to_float(&args[0].value, "math.pow")?;
+        let y = value_to_float(&args[1].value, "math.pow")?;
+        Ok(Value::float(x.powf(y)))
+    }
+    // … more fns …
 }
+
+// Module-local helpers are plain Rust `fn`s outside the macro.
+fn single_float(fn_name: &str, args: &[ExpandedCallArg]) -> Result<f64> { /* … */ }
 ```
 
-**Signature rules:**
+The macro expands each `fn sqrt(args) -> Result<Value> { … }` to a
+real Rust fn with the canonical signature
+`fn math_sqrt(_interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value>`,
+emits a `MATH_SQRT: BuiltinReg = { name: "math.sqrt", dispatch: math_sqrt }`,
+collects every such constant into `REGS`, and generates a `module()`
+that returns a `PyModule` whose `attrs` are the declared constants
+plus each function bound to `Value::builtin_function("math.sqrt")`.
 
-- The function name (`math_sqrt`) is a snake_case Rust identifier; it
-  doesn't have to mirror the Python name exactly.
-- The Python name in `name = "..."` is what dispatch matches.
-- The signature must be exactly
-  `fn(&mut Interpreter, &[ExpandedCallArg]) -> Result<Value>`.
-  Even pure built-ins that don't read the interpreter take `_interp:
-  &mut Interpreter` and ignore it — uniform signatures let the registry
-  store one `fn` pointer type.
-- **Quote the CPython doc URL** in a `///` comment above the function.
-  Reviewers and future maintainers verify against the same source.
+## Where to put a new module
 
-### 4. Register in the module's `REGS` slice
+1. **Pick a module name** matching the CPython library name
+   (`os`, `os.path`, `functools`, `itertools`, …).
+2. **Create
+   `crates/pyrust/src/builtin_registry_modules/<name>.rs`**.  Use
+   `math.rs` or `sys.rs` as a template.
+3. **Register the file in
+   [`builtin_registry_modules/mod.rs`](../crates/pyrust/src/builtin_registry_modules/mod.rs)**
+   (`pub mod foo;`).
+4. **Wire the module into the central registry** by appending
+   `all.extend_from_slice(crate::builtin_registry_modules::foo::REGS);`
+   inside the `LazyLock` in
+   [`builtin_registry.rs`](../crates/pyrust/src/builtin_registry.rs).
+5. **Wire `module()` into `load_module`** in
+   [`runtime/env.rs`](../crates/pyrust/src/interpreter/runtime/env.rs):
+   `"foo" => Some(crate::builtin_registry_modules::foo::module())`.
 
-```rust
-pub(crate) const REGS: &[BuiltinReg] = &[
-    // … other entries …
-    MATH_SQRT,
-    // …
-];
-```
+After these five edits, `import foo; foo.bar()` resolves via the
+registry on the call side and via `module()` on the import side, with
+the function-name string appearing exactly once (inside the macro).
 
-The `#[pyfunction]` macro emits a `pub const MATH_SQRT: BuiltinReg = …`
-automatically — you just list it.  The constant name is the
-SCREAMING_SNAKE_CASE of the Rust function name.
+## When `pyrust_module!` doesn't fit
 
-### 5. Wire the module into the central registry
+Some legacy arms key on the same function but with very different
+shapes (e.g. `min` and `max` share one arm with an `is_max` boolean).
+For those, either:
 
-Edit [`builtin_registry.rs`](../crates/pyrust/src/builtin_registry.rs):
+1. Split into two functions that delegate to a shared helper inside
+   the macro, or
+2. Keep the legacy arm in `calls.rs` for now; the registry probe at
+   the top of `call_function_expanded` falls through to the cascade
+   when the name isn't registered.
 
-```rust
-static REGISTRY: LazyLock<Vec<BuiltinReg>> = LazyLock::new(|| {
-    let mut all: Vec<BuiltinReg> = Vec::new();
-    all.extend_from_slice(crate::builtin_registry_modules::math::REGS);
-    all.extend_from_slice(crate::builtin_registry_modules::sys::REGS);
-    // add your new module here ↓
-    all.extend_from_slice(crate::builtin_registry_modules::your_module::REGS);
-    all.sort_by_key(|r| r.name);
-    // …
-});
-```
+There is **no flag day** — incremental migration is safe.
 
-### 6. Remove the legacy arm
+## Helpers visibility
 
-Replace the arm in `calls.rs::call_function_expanded` with a one-line
-breadcrumb comment so reviewers can see where it went:
-
-```rust
-// `math.sqrt` migrated to `crate::builtin_registry_modules::math`.
-```
-
-### 7. Verify
-
-```bash
-cargo test --release
-```
-
-The `builtin_registry::tests::lookup_finds_a_known_builtin` smoke test
-confirms the registry is wired; the parity-compare test exercises real
-Python behaviour.
-
-## Helper visibility
-
-Most arm bodies in `calls.rs` use private helpers like
+Most arm bodies in `calls.rs` use helpers like
 `reject_keyword_args_expanded`, `value_to_float`, `float_to_bigint`,
-`instantiate_exception`, `lookup_name_in_module`.  These have been
-exposed as `pub(crate)` so they're callable from
-`builtin_registry_modules`.  If you need a helper that's still private,
-either:
+`instantiate_exception`, `lookup_name_in_module`.  These are exposed
+as `pub(crate)` so they're callable from `builtin_registry_modules`.
+If you need a helper that's still private, promote it to `pub(crate)`
+or inline it into your migrated function.
 
-1. Promote it to `pub(crate)` (preferred when the helper is generic
-   utility code).
-2. Inline it into your migrated function (preferred when the helper is
-   one-off and tightly coupled to a single arm).
+The `_interp` parameter is injected by the macro at the canonical
+position; access the interpreter inside any function as `_interp`.
+Bindings like `_interp.env` work because `Interpreter::env` is
+`pub(crate)`.
 
-## Things to *not* migrate yet
+## One-off: `#[pyfunction]`
 
-The registry probe sits **before** the legacy `match` in
-`call_function_expanded`.  Arms that aren't yet migrated still work via
-the cascade — there is no flag day.  That makes incremental migration
-safe.
+For migrating a single arm that doesn't justify a whole module file
+(e.g. moving `__vcall__` incrementally), you can still use the
+per-function attribute form:
 
-However, **don't migrate arms that match across multiple names with
-shared local state** (e.g. `min` and `max` share one arm with an
-`is_max` boolean).  Either:
+```rust
+#[pyfunction(name = "module.fn")]
+fn module_fn(_interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value> {
+    // …
+}
+```
 
-- Split them into two functions that delegate to a shared helper, or
-- Leave the multi-name arm alone for now and migrate it last.
+The expanded output is one `BuiltinReg` constant — you still need to
+list it in some `REGS` slice (in a sibling module or
+`builtin_registry_modules/mod.rs`).  Prefer `pyrust_module!` when
+moving a whole module group.
 
 ## Reference
 
-- [`pyrust-derive::pyfunction`](../crates/pyrust-derive/src/lib.rs) —
-  the proc-macro that emits `BuiltinReg` constants.
-- [`builtin_registry`](../crates/pyrust/src/builtin_registry.rs) — the
-  `BuiltinReg` type, `BuiltinDispatchFn` signature, and `lookup` entry
-  point.
+- [`pyrust-derive::pyrust_module`](../crates/pyrust-derive/src/lib.rs)
+  — the function-like macro generating the module + REGS + per-fn
+  items.
+- [`pyrust-derive::pyfunction`](../crates/pyrust-derive/src/lib.rs)
+  — the per-function attribute fallback.
+- [`builtin_registry`](../crates/pyrust/src/builtin_registry.rs) —
+  `BuiltinReg`, `BuiltinDispatchFn`, `lookup`.
 - [`builtin_registry_modules/math.rs`](../crates/pyrust/src/builtin_registry_modules/math.rs)
-  and [`sys.rs`](../crates/pyrust/src/builtin_registry_modules/sys.rs)
-  — phase-1 migrated modules; use as templates.
+  and
+  [`sys.rs`](../crates/pyrust/src/builtin_registry_modules/sys.rs) —
+  phase-1 migrated modules; use as templates.
