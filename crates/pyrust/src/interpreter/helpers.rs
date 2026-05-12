@@ -116,7 +116,7 @@ pub(crate) fn value_type_name_str(v: &Value) -> &'static str {
 /// magnitude, strings lexicographically, bools as 0/1, lists and tuples
 /// lexicographically element-by-element.  Incomparable pairs return a
 /// `TypeError`.
-fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
+pub(crate) fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
     use crate::value::{PyBigInt, PyToPrimitive};
     match (a.kind(), b.kind()) {
         (ValueKind::Int(x), ValueKind::Int(y)) => Ok(x.cmp(&y)),
@@ -1144,7 +1144,7 @@ fn is_pure_stmt(stmt: &Stmt, pure_fns: &std::collections::HashSet<String>) -> bo
 
 /// Round a float to the nearest integer using banker's rounding (round half to even),
 /// matching CPython's `round(x)` with no ndigits argument.
-fn py_round_half_even(v: f64) -> i64 {
+pub(crate) fn py_round_half_even(v: f64) -> i64 {
     let floor = v.floor();
     let diff = v - floor;
     if diff < 0.5 {
@@ -1164,7 +1164,7 @@ fn py_round_half_even(v: f64) -> i64 {
 
 /// Round a float to nearest using banker's rounding, returning f64.
 /// Used by round(x, n) for float inputs.
-fn py_round_half_even_f64(v: f64) -> f64 {
+pub(crate) fn py_round_half_even_f64(v: f64) -> f64 {
     let floor = v.floor();
     let diff = v - floor;
     if diff < 0.5 {

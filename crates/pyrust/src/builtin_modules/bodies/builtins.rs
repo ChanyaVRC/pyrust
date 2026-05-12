@@ -19,11 +19,11 @@ use crate::ast::BinaryOp;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::{
-    NativeIterFrame, ascii_repr, class_is_subclass_of, dir_names, iter_values,
-    lookup_class_attr, modpow_i64, py_mod_i64, reject_keyword_args_expanded, value_to_float,
-    value_type_name_str,
+    NativeIterFrame, ascii_repr, class_is_subclass_of, compare_values, dir_names, iter_values,
+    lookup_class_attr, modpow_i64, py_mod_i64, py_round_half_even, py_round_half_even_f64,
+    reject_keyword_args_expanded, value_to_float, value_type_name_str,
 };
-use crate::value::{PyClass, PyKey, Value, ValueKind};
+use crate::value::{PyClass, PyKey, Value, ValueKind, range_len};
 use pyrust_derive::pyrust_module;
 
 pyrust_module! {
@@ -971,6 +971,181 @@ pyrust_module! {
         Ok(Value::list(names.into_iter().map(Value::string).collect()))
     }
 
+    /// CPython: len(s) — number of items in a container.
+    /// <https://docs.python.org/3/library/functions.html#len>
+    fn len(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
+        }
+        let value = args[0].value.clone();
+        let size = match value.kind() {
+            ValueKind::Str(text) => text.chars().count() as i64,
+            ValueKind::List(items) => items.len() as i64,
+            ValueKind::Tuple(items) => items.len() as i64,
+            ValueKind::Set(items) => items.len() as i64,
+            ValueKind::Bytes(rc) => rc.len() as i64,
+            ValueKind::Dict(items) => items.len() as i64,
+            ValueKind::Range { start, stop, step } => range_len(start, stop, step),
+            ValueKind::BuiltinObject { ops, state } => match ops.len(state) {
+                Some(n) => n as i64,
+                None => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("object of type '{}' has no len()", ops.type_name()),
+                    ));
+                }
+            },
+            ValueKind::PyInstance(inst) => {
+                let inst_rc = Rc::clone(inst);
+                let class = Rc::clone(&inst_rc.borrow().class);
+                if let Some(method_val) = lookup_class_attr(&class, "__len__") {
+                    if let ValueKind::UserFunction(f) = method_val.kind() {
+                        let func = Rc::clone(f);
+                        let result = _interp.call_user_function_expanded(
+                            func,
+                            &[],
+                            &[Value::py_instance(inst_rc)],
+                        )?;
+                        match result.kind() {
+                            ValueKind::Int(n) if n >= 0 => n,
+                            ValueKind::Int(_) => return Err(PyError::named(
+                                "ValueError",
+                                "__len__() should return >= 0".to_string(),
+                            )),
+                            ValueKind::Bool(b) => if b { 1 } else { 0 },
+                            _ => return Err(PyError::named(
+                                "TypeError",
+                                "__len__ returned non-int".to_string(),
+                            )),
+                        }
+                    } else {
+                        return Err(PyError::Runtime("object has no len()".to_string()));
+                    }
+                } else {
+                    return Err(PyError::Runtime("object has no len()".to_string()));
+                }
+            }
+            _ => {
+                return Err(PyError::Runtime("object has no len()".to_string()));
+            }
+        };
+        Ok(Value::int(size))
+    }
+
+    /// CPython: sorted(iterable, /, *, key=None, reverse=False) — new sorted list.
+    /// <https://docs.python.org/3/library/functions.html#sorted>
+    fn sorted(args) -> Result<Value> {
+        if args.is_empty() {
+            return Err(PyError::Runtime(format!("{FN_NAME}() requires at least one argument")));
+        }
+        let reverse = args.iter().find(|a| a.name.as_deref() == Some("reverse"))
+            .map(|a| a.value.truthy())
+            .unwrap_or(false);
+        let key_fn = args.iter().find(|a| a.name.as_deref() == Some("key"))
+            .map(|a| a.value.clone());
+        let positional: Vec<&ExpandedCallArg> = args.iter()
+            .filter(|a| a.name.is_none())
+            .collect();
+        if positional.len() != 1 {
+            return Err(PyError::Runtime(format!(
+                "{FN_NAME}() takes exactly one positional argument",
+            )));
+        }
+        let mut items = iter_values(positional[0].value.clone())?;
+        if let Some(kfn) = key_fn {
+            let mut keyed: Vec<(Value, Value)> = items
+                .into_iter()
+                .map(|v| {
+                    let k = _interp.call_function_expanded(
+                        kfn.clone(),
+                        &[ExpandedCallArg { name: None, value: v.clone() }],
+                    )?;
+                    Ok((k, v))
+                })
+                .collect::<Result<_>>()?;
+            let mut sort_err: Option<PyError> = None;
+            keyed.sort_by(|(a, _), (b, _)| {
+                if sort_err.is_some() { return std::cmp::Ordering::Equal; }
+                match compare_values(a, b) {
+                    Ok(ord) => ord,
+                    Err(e) => { sort_err = Some(e); std::cmp::Ordering::Equal }
+                }
+            });
+            if let Some(e) = sort_err { return Err(e); }
+            items = keyed.into_iter().map(|(_, v)| v).collect();
+        } else {
+            let mut sort_err: Option<PyError> = None;
+            items.sort_by(|a, b| {
+                if sort_err.is_some() { return std::cmp::Ordering::Equal; }
+                match compare_values(a, b) {
+                    Ok(ord) => ord,
+                    Err(e) => { sort_err = Some(e); std::cmp::Ordering::Equal }
+                }
+            });
+            if let Some(e) = sort_err { return Err(e); }
+        }
+        if reverse {
+            items.reverse();
+        }
+        Ok(Value::list(items))
+    }
+
+    /// CPython: min(iterable, /, *, key=None) or min(*args, key=None).
+    /// <https://docs.python.org/3/library/functions.html#min>
+    fn min(args) -> Result<Value> {
+        min_max_impl(_interp, args, false, FN_NAME)
+    }
+
+    /// CPython: max(iterable, /, *, key=None) or max(*args, key=None).
+    /// <https://docs.python.org/3/library/functions.html#max>
+    fn max(args) -> Result<Value> {
+        min_max_impl(_interp, args, true, FN_NAME)
+    }
+
+    /// CPython: round(number[, ndigits]) — banker's rounding.
+    /// <https://docs.python.org/3/library/functions.html#round>
+    fn round(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.is_empty() || args.len() > 2 {
+            return Err(PyError::Runtime(format!("{FN_NAME}() takes 1 or 2 arguments")));
+        }
+        let ndigits: Option<i32> = if args.len() == 2 {
+            match args[1].value.kind() {
+                ValueKind::Int(n) => Some(n as i32),
+                ValueKind::None => None,
+                _ => return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() ndigits must be an integer or None"),
+                )),
+            }
+        } else {
+            None
+        };
+        match args[0].value.kind() {
+            ValueKind::Int(v) => Ok(Value::int(v)),
+            ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
+            ValueKind::Float(v) => {
+                match ndigits {
+                    None => Ok(Value::int(py_round_half_even(v))),
+                    Some(n) => {
+                        if n >= 0 {
+                            let factor = 10f64.powi(n);
+                            Ok(Value::float(py_round_half_even_f64(v * factor) / factor))
+                        } else {
+                            let factor = 10f64.powi(-n);
+                            Ok(Value::float(py_round_half_even_f64(v / factor) * factor))
+                        }
+                    }
+                }
+            }
+            _ => Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() argument must be a number"),
+            )),
+        }
+    }
+
     /// CPython: callable(object) — true if the object is callable.
     /// <https://docs.python.org/3/library/functions.html#callable>
     fn callable(args) -> Result<Value> {
@@ -998,5 +1173,79 @@ pyrust_module! {
             _ => false,
         };
         Ok(Value::bool_(is_callable))
+    }
+}
+
+/// Shared implementation for `min` / `max` — both accept the same
+/// argument shapes (single-iterable or 2+ positionals, plus a `key=`
+/// kwarg) and only differ in the ordering direction.
+fn min_max_impl(
+    interp: &mut crate::Interpreter,
+    args: &[ExpandedCallArg],
+    is_max: bool,
+    fn_name: &str,
+) -> Result<Value> {
+    let key_fn = args.iter().find(|a| a.name.as_deref() == Some("key"))
+        .map(|a| a.value.clone());
+    for a in args.iter().filter(|a| a.name.is_some()) {
+        if a.name.as_deref() != Some("key") {
+            return Err(PyError::Runtime(format!(
+                "{fn_name}() got an unexpected keyword argument '{}'",
+                a.name.as_ref().unwrap()
+            )));
+        }
+    }
+    let positional: Vec<&ExpandedCallArg> =
+        args.iter().filter(|a| a.name.is_none()).collect();
+    let items: Vec<Value> = if positional.len() == 1 {
+        iter_values(positional[0].value.clone())?
+    } else if positional.len() >= 2 {
+        positional.iter().map(|a| a.value.clone()).collect()
+    } else {
+        return Err(PyError::Runtime(format!("{fn_name}() expected at least one argument")));
+    };
+    if items.is_empty() {
+        return Err(PyError::Runtime(format!("{fn_name}() arg is an empty sequence")));
+    }
+    if let Some(kfn) = key_fn {
+        let keyed: Vec<(Value, Value)> = items
+            .into_iter()
+            .map(|v| {
+                let k = interp.call_function_expanded(
+                    kfn.clone(),
+                    &[ExpandedCallArg { name: None, value: v.clone() }],
+                )?;
+                Ok((k, v))
+            })
+            .collect::<Result<_>>()?;
+        let mut result_err: Option<PyError> = None;
+        let result = keyed.into_iter().reduce(|acc, item| {
+            if result_err.is_some() { return acc; }
+            match compare_values(&item.0, &acc.0) {
+                Ok(cmp) => {
+                    if (is_max && cmp == std::cmp::Ordering::Greater)
+                        || (!is_max && cmp == std::cmp::Ordering::Less) { item }
+                    else { acc }
+                }
+                Err(e) => { result_err = Some(e); acc }
+            }
+        }).unwrap();
+        if let Some(e) = result_err { return Err(e); }
+        Ok(result.1)
+    } else {
+        let mut result_err: Option<PyError> = None;
+        let result = items.into_iter().reduce(|acc, v| {
+            if result_err.is_some() { return acc; }
+            match compare_values(&v, &acc) {
+                Ok(cmp) => {
+                    if (is_max && cmp == std::cmp::Ordering::Greater)
+                        || (!is_max && cmp == std::cmp::Ordering::Less) { v }
+                    else { acc }
+                }
+                Err(e) => { result_err = Some(e); acc }
+            }
+        }).unwrap();
+        if let Some(e) = result_err { return Err(e); }
+        Ok(result)
     }
 }
