@@ -3,9 +3,24 @@
 This document is for contributors moving built-in Python callables from
 the legacy `match ValueKind::BuiltinFunction("name") => …` cascade in
 [crates/pyrust/src/interpreter/runtime/calls.rs](../crates/pyrust/src/interpreter/runtime/calls.rs)
-into the file-scoped `pyrust_module!` macro.  Phase 1 (the mechanism)
-migrated `math.*` and `sys.exit`; the remaining ~60 arms are scheduled
-for phase-2 PRs.
+into the file-scoped `pyrust_module!` macro.  The infrastructure landed
+with `math.*` and `sys.exit`, and the bulk of the top-level Python
+builtins (`abs`, `len`, `print`, `range`, `int`, `isinstance`,
+`getattr`, …) has since followed in
+[`builtin_modules/bodies/builtins.rs`](../crates/pyrust/src/builtin_modules/bodies/builtins.rs)
+under the `@flat` namespace.  Two small classes of arms remain in
+`calls.rs` and **cannot** move:
+
+1. **Pattern-guarded dispatch** — e.g. the `property` accessor branch
+   matches on the `Value`'s internal partial-slot state, not on a
+   registered name, so registry lookup can't find it.  Same for the
+   bound-method dispatch and the `str.*` method dispatch (which keys on
+   a name *prefix*, not a fixed string).
+2. **Rust-keyword collisions** — `super` is a strict keyword in Rust
+   and is rejected even as a raw identifier (`r#super`), so it cannot
+   be the name of a `fn` inside `pyrust_module!`.  Migration would
+   require adding an explicit Python-name override; the single
+   surviving arm doesn't justify that complexity.
 
 ## Why this exists
 
@@ -179,7 +194,7 @@ moving a whole module group.
   — the per-function attribute fallback.
 - [`builtin_registry`](../crates/pyrust/src/builtin_registry.rs) —
   `BuiltinReg`, `BuiltinDispatchFn`, `lookup`.
-- [`builtin_modules/math.rs`](../crates/pyrust/src/builtin_modules/math.rs)
-  and
-  [`sys.rs`](../crates/pyrust/src/builtin_modules/sys.rs) —
-  phase-1 migrated modules; use as templates.
+- [`builtin_modules/bodies/math.rs`](../crates/pyrust/src/builtin_modules/bodies/math.rs),
+  [`sys.rs`](../crates/pyrust/src/builtin_modules/bodies/sys.rs),
+  [`builtins.rs`](../crates/pyrust/src/builtin_modules/bodies/builtins.rs) —
+  migrated modules; use as templates.
