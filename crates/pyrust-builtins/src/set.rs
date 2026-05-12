@@ -1,28 +1,18 @@
 use indexmap::IndexSet;
 use pyrust_core::{PyError, PyKey, Result, Value, ValueKind};
 
+/// Canonical list of method names dispatched by `call`.
+pub const METHODS: &[&str] = &[
+    "add", "remove", "discard", "pop", "clear",
+    "update", "intersection_update", "difference_update",
+    "symmetric_difference_update", "copy",
+    "union", "intersection", "difference", "symmetric_difference",
+    "issubset", "issuperset", "isdisjoint",
+];
+
 /// Returns `true` if `method` is the name of a built-in `set` method.
 pub fn has_method(method: &str) -> bool {
-    matches!(
-        method,
-        "add"
-            | "remove"
-            | "discard"
-            | "pop"
-            | "clear"
-            | "update"
-            | "intersection_update"
-            | "difference_update"
-            | "symmetric_difference_update"
-            | "copy"
-            | "union"
-            | "intersection"
-            | "difference"
-            | "symmetric_difference"
-            | "issubset"
-            | "issuperset"
-            | "isdisjoint"
-    )
+    METHODS.contains(&method)
 }
 
 pub fn call(method: &str, items: &mut IndexSet<PyKey>, args: Vec<Value>) -> Result<Value> {

@@ -832,8 +832,7 @@ impl Interpreter {
                         pyrust_builtins::list::call(&method, items, pos, &kw)
                     }
                     ValueKind::Tuple(items) => {
-                        let owned: Vec<Value> = items.clone();
-                        pyrust_builtins::tuple::call(&method, &owned, pos)
+                        pyrust_builtins::tuple::call(&method, items, pos)
                     }
                     ValueKind::Dict(_) => {
                         let dict = receiver

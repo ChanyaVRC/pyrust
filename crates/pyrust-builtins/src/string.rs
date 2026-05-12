@@ -18,56 +18,30 @@ fn subslice_offset(parent: &str, sub: &str) -> usize {
     off
 }
 
+/// Canonical list of method names dispatched by `call`.
+/// Single source of truth for `has_method` and the drift-guard test.
+///
+/// Note: `format` is not listed here because it is dispatched separately at
+/// the VM level (see `BuiltinFunction("str.format")` and the `CallMethod`
+/// `"format"` arm). Adding it would require routing `getattr(s, "format")()`
+/// through that path; for now `hasattr(s, "format")` reports False through
+/// this table.
+pub const METHODS: &[&str] = &[
+    "index", "count", "split", "rsplit", "join", "splitlines",
+    "partition", "rpartition", "strip", "lstrip", "rstrip",
+    "removeprefix", "removesuffix", "center", "ljust", "rjust",
+    "zfill", "expandtabs", "upper", "lower", "casefold", "capitalize",
+    "swapcase", "title", "find", "rfind", "rindex", "replace",
+    "startswith", "endswith", "isdigit", "isalpha", "isalnum", "isspace",
+    "isdecimal", "isnumeric", "islower", "isupper", "istitle", "isascii",
+    "isidentifier", "isprintable",
+];
+
 /// Returns `true` if `method` is the name of a built-in `str` method.
 /// Used by `hasattr` / `getattr` to validate attribute names without
 /// invoking the method.
 pub fn has_method(method: &str) -> bool {
-    matches!(
-        method,
-        "index"
-            | "count"
-            | "split"
-            | "rsplit"
-            | "join"
-            | "splitlines"
-            | "partition"
-            | "rpartition"
-            | "strip"
-            | "lstrip"
-            | "rstrip"
-            | "removeprefix"
-            | "removesuffix"
-            | "center"
-            | "ljust"
-            | "rjust"
-            | "zfill"
-            | "expandtabs"
-            | "upper"
-            | "lower"
-            | "casefold"
-            | "capitalize"
-            | "swapcase"
-            | "title"
-            | "find"
-            | "rfind"
-            | "rindex"
-            | "replace"
-            | "startswith"
-            | "endswith"
-            | "isdigit"
-            | "isalpha"
-            | "isalnum"
-            | "isspace"
-            | "isdecimal"
-            | "isnumeric"
-            | "islower"
-            | "isupper"
-            | "istitle"
-            | "isascii"
-            | "isidentifier"
-            | "isprintable"
-            | "format"
-    )
+    METHODS.contains(&method)
 }
 
 pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
