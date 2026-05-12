@@ -41,8 +41,9 @@
 //! Generated, in the surrounding `mod math { … }`:
 //! - `fn math_sqrt(_interp, args) -> Result<Value> { /* FN_NAME = "math.sqrt"; body */ }`
 //! - `pub(crate) fn regs() -> &'static [BuiltinReg]` — every fn's
-//!   `BuiltinReg`, names composed once via leak from `MODULE_NAME +
-//!   ".sqrt"`.
+//!   `BuiltinReg`, names composed once via leak from `FN_PREFIX +
+//!   short_name` (e.g. `"math." + "sqrt"`, or `"" + "abs"` for the
+//!   flat-namespace `builtins` module).
 //! - `pub(crate) fn module() -> Value` — the `PyModule` carrying the
 //!   declared constants plus each fn bound to its
 //!   `Value::builtin_function(...)`.
@@ -275,9 +276,11 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
                 // Compose the Python-level full name once per fn (lazy)
                 // so callers (helpers, error messages) can refer to it as
                 // `FN_NAME` instead of repeating the module prefix.
+                // `FN_PREFIX` is injected by `pyrust_builtin_modules!` and is
+                // either `"<module>."` (prefixed module) or `""` (flat / builtins).
                 static FN_NAME_OWNED: std::sync::LazyLock<String> =
                     std::sync::LazyLock::new(|| {
-                        format!("{}.{}", MODULE_NAME, #short_lit)
+                        format!("{}{}", FN_PREFIX, #short_lit)
                     });
                 #[allow(non_snake_case)]
                 let FN_NAME: &str = FN_NAME_OWNED.as_str();
@@ -286,14 +289,14 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
             }
         });
 
-        // Each registry entry composes its name from MODULE_NAME at
+        // Each registry entry composes its name from FN_PREFIX at
         // first lookup, then leaks the string to satisfy
         // `BuiltinReg.name: &'static str`.  Cost: one allocation per
         // built-in at startup, amortised over every subsequent dispatch.
         reg_entries.push(quote! {
             crate::builtin_registry::BuiltinReg {
                 name: ::std::boxed::Box::leak(
-                    format!("{}.{}", MODULE_NAME, #short_lit).into_boxed_str()
+                    format!("{}{}", FN_PREFIX, #short_lit).into_boxed_str()
                 ),
                 dispatch: #rust_fn_ident,
             }
@@ -304,7 +307,7 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
                 #short_str.to_string(),
                 crate::value::Value::builtin_function(
                     ::std::boxed::Box::leak(
-                        format!("{}.{}", MODULE_NAME, #short_lit).into_boxed_str()
+                        format!("{}{}", FN_PREFIX, #short_lit).into_boxed_str()
                     ),
                 ),
             );
@@ -325,9 +328,8 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
         #(#fn_items)*
 
         /// The per-module registry slice.  Composed at first call by
-        /// leaking `MODULE_NAME + "." + short_name` into a `'static`
-        /// string for each entry.  Consumed by
-        /// `crate::builtin_modules::all_regs`.
+        /// leaking `FN_PREFIX + short_name` into a `'static` string for
+        /// each entry.  Consumed by `crate::builtin_modules::all_regs`.
         pub(crate) fn regs() -> &'static [crate::builtin_registry::BuiltinReg] {
             static REGS_CELL: std::sync::LazyLock<Vec<crate::builtin_registry::BuiltinReg>> =
                 std::sync::LazyLock::new(|| {

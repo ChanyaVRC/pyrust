@@ -21,51 +21,70 @@ use crate::value::Value;
 ///
 /// Syntax:
 /// - `ident` — module whose Python-level name equals the Rust ident
-///   (e.g. `math`, `sys`).  Body file: `bodies/<ident>.rs`.
+///   (e.g. `math`, `sys`).  Body file: `bodies/<ident>.rs`.  Functions
+///   register as `"<ident>.<short>"`.
 /// - `"py.dotted.name" as ident` — module with a dotted Python-level name
 ///   that the Rust ident can't represent (e.g. `"os.path" as os_path`).
-///   Body file: `bodies/<ident>.rs`.
+/// - `@flat ident` — **flat-namespace** module.  Functions register
+///   under their short name only (no `<ident>.` prefix), so this is the
+///   form for Python's built-in `builtins` module whose members
+///   (`abs`, `len`, `print`, …) are accessed without a prefix.  The
+///   module is *also* importable (`import builtins`) with its Python
+///   name set to the Rust ident.
 ///
 /// For each entry the macro emits, in this file's scope:
-/// - `pub mod <ident> { pub(super) const MODULE_NAME: &str = "<name>"; include!("bodies/<ident>.rs"); }`
+/// - `pub mod <ident> { … }` with two injected constants — `MODULE_NAME`
+///   (Python-level name for `PyModule.name` + `import`) and `FN_PREFIX`
+///   (prepended to each function's short name to form its registration
+///   name) — followed by `include!("bodies/<ident>.rs")`.
 /// - one branch of [`load_builtin_module`] keyed on the Python-level name,
 /// - one slice contribution to [`all_regs`].
 ///
 /// Body files therefore never need to know their own module name — the
-/// macro injects `MODULE_NAME` and the body's `pyrust_module!` reads it
-/// via the surrounding scope.
+/// macro injects `MODULE_NAME` / `FN_PREFIX` and the body's
+/// `pyrust_module!` reads them via the surrounding scope.
 macro_rules! pyrust_builtin_modules {
     ($($spec:tt)*) => {
         pyrust_builtin_modules_internal! { @parse [] $($spec)* }
     };
 }
 
-/// Implementation detail of [`pyrust_builtin_modules!`] — accumulates
-/// parsed entries as `(py_name_lit, rust_ident)` pairs and then emits the
-/// full module + registry plumbing.
+/// Implementation detail of [`pyrust_builtin_modules!`].  Accumulates
+/// parsed entries as `(py_name_lit, rust_ident, fn_prefix_lit)` triples,
+/// then emits the full module + registry plumbing once the input is
+/// drained.
 macro_rules! pyrust_builtin_modules_internal {
-    // Entry: `"py.dotted.name" as ident,`
+    // Entry: `@flat ident,` — flat namespace, no fn prefix.
+    (@parse [$($acc:tt)*] @flat $ident:ident $(, $($rest:tt)*)?) => {
+        pyrust_builtin_modules_internal! {
+            @parse [$($acc)* (stringify!($ident), $ident, "")] $($($rest)*)?
+        }
+    };
+    // Entry: `"py.dotted.name" as ident,` — fn prefix = "<py.name>.".
     (@parse [$($acc:tt)*] $py_name:literal as $ident:ident $(, $($rest:tt)*)?) => {
         pyrust_builtin_modules_internal! {
-            @parse [$($acc)* ($py_name, $ident)] $($($rest)*)?
+            @parse [$($acc)* ($py_name, $ident, concat!($py_name, "."))] $($($rest)*)?
         }
     };
-    // Entry: `ident,` — Python name equals stringify!(ident)
+    // Entry: `ident,` — Python name = stringify!(ident), fn prefix = "<ident>.".
     (@parse [$($acc:tt)*] $ident:ident $(, $($rest:tt)*)?) => {
         pyrust_builtin_modules_internal! {
-            @parse [$($acc)* (stringify!($ident), $ident)] $($($rest)*)?
+            @parse [$($acc)* (stringify!($ident), $ident, concat!(stringify!($ident), "."))] $($($rest)*)?
         }
     };
-    // Done.
-    (@parse [$(($py_name:expr, $ident:ident))*]) => {
+    // Done — emit.
+    (@parse [$(($py_name:expr, $ident:ident, $fn_prefix:expr))*]) => {
         $(
             pub mod $ident {
-                /// Python-level name of this built-in module.  Injected
-                /// from `pyrust_builtin_modules!` so the body file never
-                /// has to repeat it; consumed by the body's
-                /// `pyrust_module!` macro to compose each function's
-                /// `FN_NAME` and to populate `PyModule.name`.
+                /// Python-level name of this built-in module.  Used for
+                /// `PyModule.name` and as the key for `import`.
                 pub(crate) const MODULE_NAME: &str = $py_name;
+                /// Prefix prepended to every function's short name to
+                /// form its Python-level registration name (e.g.
+                /// `"math."` so `sqrt` becomes `"math.sqrt"`).  Empty
+                /// for `@flat` modules whose functions live in the
+                /// global namespace (`abs`, `len`, …).
+                pub(crate) const FN_PREFIX: &str = $fn_prefix;
 
                 include!(concat!("bodies/", stringify!($ident), ".rs"));
             }
@@ -104,4 +123,5 @@ macro_rules! pyrust_builtin_modules_internal {
 pyrust_builtin_modules! {
     math,
     sys,
+    @flat builtins,
 }

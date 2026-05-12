@@ -168,7 +168,7 @@ fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
     }
 }
 
-fn lookup_class_attr(class: &Rc<RefCell<PyClass>>, name: &str) -> Option<Value> {
+pub(crate) fn lookup_class_attr(class: &Rc<RefCell<PyClass>>, name: &str) -> Option<Value> {
     let (value, base) = {
         let borrowed = class.borrow();
         (borrowed.attrs.get(name).cloned(), borrowed.base.clone())

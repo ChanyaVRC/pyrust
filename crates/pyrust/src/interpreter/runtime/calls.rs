@@ -838,25 +838,6 @@ impl Interpreter {
                     }
                 }
             }
-            ValueKind::BuiltinFunction("id") => {
-                reject_keyword_args_expanded("id", args)?;
-                if args.len() != 1 {
-                    return Err(PyError::Runtime(
-                        "id() takes exactly 1 argument".to_string(),
-                    ));
-                }
-                let id_val: i64 = match args[0].value.kind() {
-                    ValueKind::PyInstance(rc) => Rc::as_ptr(rc) as i64,
-                    ValueKind::PyClass(rc) => Rc::as_ptr(rc) as i64,
-                    ValueKind::PyModule(rc) => Rc::as_ptr(rc) as i64,
-                    ValueKind::UserFunction(rc) => Rc::as_ptr(rc) as i64,
-                    ValueKind::Int(n) => n,
-                    ValueKind::Bool(b) => b as i64,
-                    ValueKind::None => 0,
-                    _ => args[0].value.value_id().unwrap_or(0),
-                };
-                Ok(Value::int(id_val))
-            }
             ValueKind::BuiltinFunction("hasattr") => {
                 reject_keyword_args_expanded("hasattr", args)?;
                 if args.len() != 2 {
@@ -1190,16 +1171,6 @@ impl Interpreter {
                 Ok(Value::string(obj.repr()))
             }
 
-            ValueKind::BuiltinFunction("ascii") => {
-                reject_keyword_args_expanded("ascii", args)?;
-                if args.len() != 1 {
-                    return Err(PyError::Runtime(
-                        "ascii() takes exactly one argument".to_string(),
-                    ));
-                }
-                Ok(Value::string(ascii_repr(&args[0].value)))
-            }
-
             ValueKind::BuiltinFunction("any") => {
                 reject_keyword_args_expanded("any", args)?;
                 if args.len() != 1 {
@@ -1278,36 +1249,6 @@ impl Interpreter {
                     }
                 }
                 Ok(Value::list(result))
-            }
-
-            ValueKind::BuiltinFunction("callable") => {
-                reject_keyword_args_expanded("callable", args)?;
-                if args.len() != 1 {
-                    return Err(PyError::Runtime(
-                        "callable() takes exactly one argument".to_string(),
-                    ));
-                }
-                let is_callable = match args[0].value.kind() {
-                    ValueKind::UserFunction(_)
-                    | ValueKind::BuiltinFunction(_)
-                    | ValueKind::BoundMethod { .. }
-                    | ValueKind::ClassBoundMethod { .. }
-                    | ValueKind::PyClass(_) => true,
-                    // Only accessor partials (the intermediate results of
-                    // prop.setter / prop.getter / prop.deleter) are callable —
-                    // a plain property descriptor isn't.  Distinguish via the
-                    // `partial_slot` field on PropertyState.
-                    ValueKind::BuiltinObject { .. } => {
-                        pyrust_builtins::property::property_partial_slot(&args[0].value)
-                            .is_some_and(|slot| slot.is_some())
-                    }
-                    ValueKind::PyInstance(inst) => {
-                        let class = Rc::clone(&inst.borrow().class);
-                        lookup_class_attr(&class, "__call__").is_some()
-                    }
-                    _ => false,
-                };
-                Ok(Value::bool_(is_callable))
             }
 
             ValueKind::BuiltinFunction("round") => {
@@ -1565,136 +1506,6 @@ impl Interpreter {
                     )),
                 };
                 Ok(Value::int(hash_val))
-            }
-
-            ValueKind::BuiltinFunction("chr") => {
-                reject_keyword_args_expanded("chr", args)?;
-                if args.len() != 1 {
-                    return Err(PyError::Runtime(
-                        "chr() takes exactly one argument".to_string(),
-                    ));
-                }
-                let code_point = match args[0].value.kind() {
-                    ValueKind::Int(v) => v,
-                    ValueKind::Bool(b) => b as i64,
-                    _ => return Err(PyError::named(
-                        "TypeError",
-                        "an integer is required (got type {})".to_string(),
-                    )),
-                };
-                if !(0..=1114111).contains(&code_point) {
-                    return Err(PyError::named(
-                        "ValueError",
-                        format!("chr() arg not in range(0x110000): {code_point}"),
-                    ));
-                }
-                let ch = char::from_u32(code_point as u32).ok_or_else(|| {
-                    PyError::named(
-                        "ValueError",
-                        format!("chr() arg not in range(0x110000): {code_point}"),
-                    )
-                })?;
-                Ok(Value::string(ch.to_string()))
-            }
-
-            ValueKind::BuiltinFunction("ord") => {
-                reject_keyword_args_expanded("ord", args)?;
-                if args.len() != 1 {
-                    return Err(PyError::Runtime(
-                        "ord() takes exactly one argument".to_string(),
-                    ));
-                }
-                match args[0].value.kind() {
-                    ValueKind::Str(s) => {
-                        let mut chars = s.chars();
-                        let first = chars.next();
-                        let second = chars.next();
-                        match (first, second) {
-                            (Some(c), None) => Ok(Value::int(c as i64)),
-                            (None, _) => Err(PyError::named(
-                                "TypeError",
-                                "ord() expected a character, but string of length 0 found".to_string(),
-                            )),
-                            (Some(_), Some(_)) => Err(PyError::named(
-                                "TypeError",
-                                format!("ord() expected a character, but string of length {} found", s.chars().count()),
-                            )),
-                        }
-                    }
-                    _ => Err(PyError::named(
-                        "TypeError",
-                        "ord() expected string of length 1, but got non-string".to_string(),
-                    )),
-                }
-            }
-
-            ValueKind::BuiltinFunction("bin") => {
-                reject_keyword_args_expanded("bin", args)?;
-                if args.len() != 1 {
-                    return Err(PyError::Runtime(
-                        "bin() takes exactly one argument".to_string(),
-                    ));
-                }
-                match args[0].value.kind() {
-                    ValueKind::Int(v) => {
-                        if v < 0 {
-                            Ok(Value::string(format!("-0b{:b}", -v)))
-                        } else {
-                            Ok(Value::string(format!("0b{:b}", v)))
-                        }
-                    }
-                    ValueKind::Bool(b) => Ok(Value::string(if b { "0b1".to_string() } else { "0b0".to_string() })),
-                    _ => Err(PyError::named(
-                        "TypeError",
-                        "'{}' object cannot be interpreted as an integer".to_string(),
-                    )),
-                }
-            }
-
-            ValueKind::BuiltinFunction("oct") => {
-                reject_keyword_args_expanded("oct", args)?;
-                if args.len() != 1 {
-                    return Err(PyError::Runtime(
-                        "oct() takes exactly one argument".to_string(),
-                    ));
-                }
-                match args[0].value.kind() {
-                    ValueKind::Int(v) => {
-                        if v < 0 {
-                            Ok(Value::string(format!("-0o{:o}", -v)))
-                        } else {
-                            Ok(Value::string(format!("0o{:o}", v)))
-                        }
-                    }
-                    ValueKind::Bool(b) => Ok(Value::string(if b { "0o1".to_string() } else { "0o0".to_string() })),
-                    _ => Err(PyError::named(
-                        "TypeError",
-                        "'{}' object cannot be interpreted as an integer".to_string(),
-                    )),
-                }
-            }
-
-            ValueKind::BuiltinFunction("hex") => {
-                reject_keyword_args_expanded("hex", args)?;
-                if args.len() != 1 {
-                    return Err(PyError::Runtime(
-                        "hex() takes exactly one argument".to_string(),
-                    ));
-                }
-                match args[0].value.kind() {
-                    ValueKind::Int(v) => {
-                        if v < 0 {
-                            Ok(Value::string(format!("-0x{:x}", -v)))
-                        } else {
-                            Ok(Value::string(format!("0x{:x}", v)))
-                        }
-                    }
-                    ValueKind::Bool(b) => Ok(Value::string(if b { "0x1".to_string() } else { "0x0".to_string() })),
-                    _ => Err(PyError::named(
-                        "TypeError",
-                        "'{}' object cannot be interpreted as an integer".to_string(),
-                    )),
-                }
             }
 
             ValueKind::BuiltinFunction("issubclass") => {
@@ -3517,7 +3328,7 @@ fn apply_field_accessors(mut value: Value, mut rest: &str) -> Result<Value> {
 }
 
 /// Returns the ASCII-escaped repr of a value (like the built-in `ascii()`).
-fn ascii_repr(value: &Value) -> String {
+pub(crate) fn ascii_repr(value: &Value) -> String {
     value
         .repr()
         .chars()
