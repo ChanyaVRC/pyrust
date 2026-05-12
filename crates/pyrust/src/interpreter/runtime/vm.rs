@@ -510,7 +510,7 @@ impl Interpreter {
                     // Slice assignment: tuple key on a list.
                     if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
                         let new_items: Vec<Value> = match val_val.kind() {
-                            ValueKind::List(v) => v.clone(),
+                            ValueKind::List(v) => v.to_vec(),
                             _ => vm_try!(iter_values(val_val).map_err(|_| {
                                 PyError::Runtime("slice assignment requires iterable".to_string())
                             })),
@@ -1213,7 +1213,7 @@ impl Interpreter {
                         Some(IterState::Indexed { reg, pos }) => {
                             let src = *reg as usize;
                             let cur_pos = *pos;
-                            let items: Option<&Vec<Value>> = if regs[src].is_unset() {
+                            let items: Option<&[Value]> = if regs[src].is_unset() {
                                 None
                             } else {
                                 regs[src].as_list().or_else(|| regs[src].as_tuple())
@@ -1669,7 +1669,7 @@ impl Interpreter {
             .clone();
         let v = vm_read(regs, pos_list, num_locals)?;
         let pos_items: Vec<Value> = match v.kind() {
-            ValueKind::List(items) => items.clone(),
+            ValueKind::List(items) => items.to_vec(),
             _ => return Err(PyError::Runtime("CallMethodExpanded: pos_list must be a list".to_string())),
         };
         let v = vm_read(regs, kw_dict, num_locals)?;
@@ -1717,7 +1717,7 @@ impl Interpreter {
                         let items_snapshot = regs[obj as usize]
                             .as_list()
                             .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?
-                            .clone();
+                            .to_vec();
                         let mut keys: Vec<Value> = Vec::with_capacity(items_snapshot.len());
                         for item in &items_snapshot {
                             let key_val = {

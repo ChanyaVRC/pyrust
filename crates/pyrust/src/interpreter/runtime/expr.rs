@@ -532,12 +532,12 @@ impl Interpreter {
                 (ValueKind::Float(a), ValueKind::Float(b)) => Ok(Value::float(a + b)),
                 (ValueKind::Str(a), ValueKind::Str(b)) => Ok(Value::string(format!("{a}{b}"))),
                 (ValueKind::List(a), ValueKind::List(b)) => {
-                    let mut out = a.clone();
+                    let mut out = a.to_vec();
                     out.extend_from_slice(b);
                     Ok(Value::list(out))
                 }
                 (ValueKind::Tuple(a), ValueKind::Tuple(b)) => {
-                    let mut out = a.clone();
+                    let mut out = a.to_vec();
                     out.extend_from_slice(b);
                     Ok(Value::tuple(out))
                 }
@@ -979,8 +979,8 @@ fn coerce_numeric(v: Value) -> Value {
 
 fn iter_values(value: Value) -> Result<Vec<Value>> {
     match value.kind() {
-        ValueKind::List(items) => Ok(items.clone()),
-        ValueKind::Tuple(items) => Ok(items.clone()),
+        ValueKind::List(items) => Ok(items.to_vec()),
+        ValueKind::Tuple(items) => Ok(items.to_vec()),
         ValueKind::Set(items) => Ok(items.iter().map(|k| key_to_value(k.clone())).collect()),
         ValueKind::BuiltinObject { .. } => {
             // Frozensets materialise through their inner key set; dict views
