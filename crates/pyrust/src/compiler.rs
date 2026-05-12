@@ -1088,6 +1088,87 @@ fn expr_is_side_effect_free(expr: &Expr) -> bool {
     }
 }
 
+/// Rewrite `while True: if c: break; rest` to `while not c: rest` (issue #282,
+/// sibling of #287 for `continue`).
+///
+/// The literal lowering of `if c: break` at the top of an infinite loop emits a
+/// `JumpIfFalse(c, +1) + Jump(loop_exit)` two-instruction trampoline whose
+/// taken/fallthrough roles are inverted from the common case (the body runs
+/// much more often than the break fires).  Inverting the test into the loop
+/// condition collapses the trampoline to a single `JumpIfTrue(c, loop_exit)`
+/// AND lets `try_compile_while_range` see the canonical `while cond: body; i +=
+/// 1` shape, which promotes to `ForCountConstInline` (issue #256) when the
+/// body is an inductive counter.
+///
+/// Returns `Some((not_c, rest))` when the rewrite fires, otherwise `None`.
+/// The caller is responsible for ensuring the original loop was infinite
+/// (`while True:`) — the `else` branch must already be confirmed absent /
+/// dead, since after the rewrite the `c-becomes-true` exit is "natural" and
+/// would otherwise resurrect the else.
+///
+/// Conservative guards (mirroring `rewrite_continue_top`):
+/// - the if has exactly one branch (no else) and that branch is exactly `[Break]`
+/// - the guard `c` is evaluated once per iteration in both shapes, so its side
+///   effects are preserved — no side-effect-free check is required here
+/// - we only fire when the original body has at least one statement after the
+///   `if c: break` (otherwise the loop is `while True: if c: break` with empty
+///   rest, i.e. a busy spin until c — rewriting still works and is harmless,
+///   so we allow that case too).
+fn rewrite_break_top(body: Vec<Stmt>) -> Option<(Expr, Vec<Stmt>)> {
+    let matches_pattern = matches!(
+        body.first(),
+        Some(Stmt::If { branches, else_branch: None })
+            if branches.len() == 1
+                && matches!(branches[0].1.as_slice(), [Stmt::Break])
+    );
+    if !matches_pattern {
+        return None;
+    }
+    let mut iter = body.into_iter();
+    let first = iter.next().unwrap();
+    let guard = match first {
+        Stmt::If { mut branches, .. } => branches.swap_remove(0).0,
+        _ => unreachable!(),
+    };
+    let rest: Vec<Stmt> = iter.collect();
+    Some((negate_expr(guard), rest))
+}
+
+/// Negate a boolean expression, folding `not (a CMP b)` into the inverted
+/// comparison so `try_compile_while_range` (and other shape detectors that key
+/// off `Expr::Binary { op: Lt|Le|Gt|Ge, ... }`) can match the rewritten loop.
+/// Falls back to `Expr::Unary { Not, expr }` for non-comparison guards.
+fn negate_expr(expr: Expr) -> Expr {
+    match expr {
+        Expr::Binary { left, op, right } => {
+            let inverted = match op {
+                BinaryOp::Lt => Some(BinaryOp::Ge),
+                BinaryOp::Le => Some(BinaryOp::Gt),
+                BinaryOp::Gt => Some(BinaryOp::Le),
+                BinaryOp::Ge => Some(BinaryOp::Lt),
+                BinaryOp::Eq => Some(BinaryOp::Ne),
+                BinaryOp::Ne => Some(BinaryOp::Eq),
+                _ => None,
+            };
+            match inverted {
+                Some(inv) => Expr::Binary {
+                    left,
+                    op: inv,
+                    right,
+                },
+                None => Expr::Unary {
+                    op: UnaryOp::Not,
+                    expr: Box::new(Expr::Binary { left, op, right }),
+                },
+            }
+        }
+        other => Expr::Unary {
+            op: UnaryOp::Not,
+            expr: Box::new(other),
+        },
+    }
+}
+
 fn collect_body_written(body: &[Stmt]) -> HashSet<String> {
     let mut names = HashSet::new();
     collect_written_in(body, &mut names);
@@ -3362,13 +3443,36 @@ impl Compiler {
             return;
         }
 
-        let is_infinite = matches!(cond, Expr::Bool(true) | Expr::Int(1));
+        let is_infinite_initial = matches!(cond, Expr::Bool(true) | Expr::Int(1));
 
         // Collapse `if guard: continue; <rest>` at any top-level position in the
         // loop body (issue #287). The rewrite removes the redundant
         // `JumpIfFalse(g, +1) + Jump(loop_start)` trampoline.
         let rewritten = rewrite_continue_top(body.to_vec());
-        let body: &[Stmt] = &rewritten;
+
+        // For `while True: if c: break; rest`, rewrite the loop to
+        // `while not c: rest` (issue #282).  The else clause is unreachable on
+        // an infinite while (the only natural exit was via break, which skips
+        // else), so it is safe to drop it before rewriting — after the rewrite
+        // the new "c-becomes-true" exit is a natural exit and would otherwise
+        // resurrect the dropped else.  We only fire when there was no else to
+        // begin with, which keeps the transform purely local.
+        let try_break_rewrite = is_infinite_initial
+            && else_branch.is_none()
+            && matches!(
+                rewritten.first(),
+                Some(Stmt::If { branches, else_branch: None })
+                    if branches.len() == 1
+                        && matches!(branches[0].1.as_slice(), [Stmt::Break])
+            );
+        let (cond_owned, body_owned, is_infinite) = if try_break_rewrite {
+            let (new_cond, new_body) = rewrite_break_top(rewritten).expect("guard checked");
+            (Some(new_cond), new_body, false)
+        } else {
+            (None, rewritten, is_infinite_initial)
+        };
+        let cond: &Expr = cond_owned.as_ref().unwrap_or(cond);
+        let body: &[Stmt] = &body_owned;
 
         if !is_infinite
             && !body_has_continue(body)
