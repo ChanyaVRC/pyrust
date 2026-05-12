@@ -1,6 +1,25 @@
 use indexmap::IndexMap;
 use pyrust_core::{PyError, PyKey, Result, Value, ValueKind};
 
+/// Canonical list of method names dispatched by `call`.
+pub const METHODS: &[&str] = &[
+    "get",
+    "keys",
+    "values",
+    "items",
+    "update",
+    "pop",
+    "popitem",
+    "clear",
+    "setdefault",
+    "copy",
+];
+
+/// Returns `true` if `method` is the name of a built-in `dict` method.
+pub fn has_method(method: &str) -> bool {
+    METHODS.contains(&method)
+}
+
 pub fn call(method: &str, dict: &mut IndexMap<PyKey, Value>, args: Vec<Value>) -> Result<Value> {
     match method {
         "get" => get(dict, args),

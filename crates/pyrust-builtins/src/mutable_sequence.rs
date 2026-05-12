@@ -60,6 +60,7 @@ fn type_name_of(v: &Value) -> &'static str {
         ValueKind::Generator(_) => "generator",
         ValueKind::Property { .. } | ValueKind::PropertyAccessorPartial { .. } => "property",
         ValueKind::NotImplemented => "NotImplementedType",
+        ValueKind::BuiltinBoundMethod { .. } => "builtin_function_or_method",
     }
 }
 
