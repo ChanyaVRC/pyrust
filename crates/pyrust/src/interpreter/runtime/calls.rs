@@ -162,48 +162,6 @@ impl Interpreter {
             }
             ValueKind::BuiltinFunction("range") => self.call_range_expanded(args),
 
-            ValueKind::BuiltinFunction("enumerate") => {
-                reject_keyword_args_expanded("enumerate", args)?;
-                if args.is_empty() || args.len() > 2 {
-                    return Err(PyError::Runtime(
-                        "enumerate() takes 1 or 2 arguments".to_string(),
-                    ));
-                }
-                let start = if args.len() == 2 {
-                    match args[1].value.kind() {
-                        ValueKind::Int(n) => n,
-                        _ => return Err(PyError::Runtime(
-                            "enumerate() start argument must be an integer".to_string(),
-                        )),
-                    }
-                } else {
-                    0i64
-                };
-                // Pass the source Value directly — `iter_helpers` materialises
-                // lazily on first iter_next so side effects of e.g. `open()`
-                // happen at iteration start, not at construction.
-                Ok(pyrust_builtins::iter_helpers::enumerate(
-                    args[0].value.clone(),
-                    start,
-                ))
-            }
-
-            ValueKind::BuiltinFunction("zip") => {
-                reject_keyword_args_expanded("zip", args)?;
-                let sources: Vec<Value> = args.iter().map(|a| a.value.clone()).collect();
-                Ok(pyrust_builtins::iter_helpers::zip(sources))
-            }
-
-            ValueKind::BuiltinFunction("reversed") => {
-                reject_keyword_args_expanded("reversed", args)?;
-                if args.len() != 1 {
-                    return Err(PyError::Runtime(
-                        "reversed() takes exactly one argument".to_string(),
-                    ));
-                }
-                Ok(pyrust_builtins::iter_helpers::reversed(args[0].value.clone()))
-            }
-
             ValueKind::BuiltinFunction("sorted") => {
                 if args.is_empty() {
                     return Err(PyError::Runtime(
@@ -1083,54 +1041,6 @@ impl Interpreter {
                 apply_format_spec(&value, &spec)
             }
 
-            ValueKind::BuiltinFunction("map") => {
-                reject_keyword_args_expanded("map", args)?;
-                if args.len() != 2 {
-                    return Err(PyError::Runtime(
-                        "map() takes exactly 2 arguments".to_string(),
-                    ));
-                }
-                let func = args[0].value.clone();
-                let items = iter_values(args[1].value.clone())?;
-                let mut result = Vec::with_capacity(items.len());
-                for item in items {
-                    let mapped = self.call_function_expanded(
-                        func.clone(),
-                        &[ExpandedCallArg { name: None, value: item }],
-                    )?;
-                    result.push(mapped);
-                }
-                Ok(Value::list(result))
-            }
-
-            ValueKind::BuiltinFunction("filter") => {
-                reject_keyword_args_expanded("filter", args)?;
-                if args.len() != 2 {
-                    return Err(PyError::Runtime(
-                        "filter() takes exactly 2 arguments".to_string(),
-                    ));
-                }
-                let func = args[0].value.clone();
-                let items = iter_values(args[1].value.clone())?;
-                let use_identity = func.is_none();
-                let mut result = Vec::new();
-                for item in items {
-                    let keep = if use_identity {
-                        item.truthy()
-                    } else {
-                        let test = self.call_function_expanded(
-                            func.clone(),
-                            &[ExpandedCallArg { name: None, value: item.clone() }],
-                        )?;
-                        test.truthy()
-                    };
-                    if keep {
-                        result.push(item);
-                    }
-                }
-                Ok(Value::list(result))
-            }
-
             ValueKind::BuiltinFunction("round") => {
                 reject_keyword_args_expanded("round", args)?;
                 if args.is_empty() || args.len() > 2 {
@@ -1192,87 +1102,6 @@ impl Interpreter {
                     ValueKind::UserFunction(f) => Ok(Value::class_method(Rc::clone(f))),
                     _ => Err(PyError::Runtime(
                         "classmethod() argument must be a function".to_string(),
-                    )),
-                }
-            }
-
-            ValueKind::BuiltinFunction("issubclass") => {
-                reject_keyword_args_expanded("issubclass", args)?;
-                if args.len() != 2 {
-                    return Err(PyError::Runtime(
-                        "issubclass() takes exactly 2 arguments".to_string(),
-                    ));
-                }
-                let cls = match args[0].value.kind() {
-                    ValueKind::PyClass(c) => Rc::clone(c),
-                    _ => return Err(PyError::named(
-                        "TypeError",
-                        "issubclass() arg 1 must be a class".to_string(),
-                    )),
-                };
-                let result = match args[1].value.kind() {
-                    ValueKind::PyClass(expected) => {
-                        class_is_subclass_of(&cls, expected)
-                    }
-                    ValueKind::Tuple(items) => {
-                        let mut found = false;
-                        for item in items {
-                            if let ValueKind::PyClass(expected) = item.kind()
-                                && class_is_subclass_of(&cls, expected) {
-                                    found = true;
-                                    break;
-                                }
-                        }
-                        found
-                    }
-                    _ => return Err(PyError::named(
-                        "TypeError",
-                        "issubclass() arg 2 must be a class or tuple of classes".to_string(),
-                    )),
-                };
-                Ok(Value::bool_(result))
-            }
-
-            ValueKind::BuiltinFunction("delattr") => {
-                reject_keyword_args_expanded("delattr", args)?;
-                if args.len() != 2 {
-                    return Err(PyError::Runtime(
-                        "delattr() takes exactly 2 arguments".to_string(),
-                    ));
-                }
-                let name = match args[1].value.kind() {
-                    ValueKind::Str(s) => s.to_string(),
-                    _ => return Err(PyError::named(
-                        "TypeError",
-                        "delattr(): attribute name must be a string".to_string(),
-                    )),
-                };
-                match args[0].value.kind() {
-                    ValueKind::PyInstance(instance) => {
-                        let instance = Rc::clone(instance);
-                        if instance.borrow_mut().attrs.remove(&name).is_none() {
-                            let class_name = instance.borrow().class.borrow().name.clone();
-                            return Err(PyError::named(
-                                "AttributeError",
-                                format!("'{}' object has no attribute '{}'", class_name, name),
-                            ));
-                        }
-                        Ok(Value::none())
-                    }
-                    ValueKind::PyClass(class) => {
-                        let class = Rc::clone(class);
-                        if class.borrow_mut().attrs.remove(&name).is_none() {
-                            let class_name = class.borrow().name.clone();
-                            return Err(PyError::named(
-                                "AttributeError",
-                                format!("type object '{}' has no attribute '{}'", class_name, name),
-                            ));
-                        }
-                        Ok(Value::none())
-                    }
-                    _ => Err(PyError::named(
-                        "AttributeError",
-                        "delattr() object has no writable attributes".to_string(),
                     )),
                 }
             }
@@ -1406,70 +1235,6 @@ impl Interpreter {
                 }
             }
 
-            ValueKind::BuiltinFunction("next") => {
-                reject_keyword_args_expanded("next", args)?;
-                if args.is_empty() || args.len() > 2 {
-                    return Err(PyError::Runtime(
-                        "next() takes 1 or 2 arguments".to_string(),
-                    ));
-                }
-                let gen_val = args[0].value.clone();
-                let default_val = if args.len() == 2 {
-                    Some(args[1].value.clone())
-                } else {
-                    None
-                };
-                self.call_next(gen_val, default_val)
-            }
-
-            ValueKind::BuiltinFunction("iter") => {
-                reject_keyword_args_expanded("iter", args)?;
-                if args.len() != 1 {
-                    return Err(PyError::Runtime(
-                        "iter() takes exactly one argument".to_string(),
-                    ));
-                }
-                let val = args[0].value.clone();
-                match val.kind() {
-                    // Generators are their own iterators.
-                    ValueKind::Generator(_) => Ok(val),
-                    // User-defined objects: call __iter__().
-                    ValueKind::PyInstance(inst) => {
-                        let inst_rc = Rc::clone(inst);
-                        let class = Rc::clone(&inst_rc.borrow().class);
-                        if let Some(method_val) = lookup_class_attr(&class, "__iter__")
-                            && let ValueKind::UserFunction(f) = method_val.kind()
-                        {
-                            let func = Rc::clone(f);
-                            self.call_user_function_expanded(
-                                func,
-                                &[],
-                                &[Value::py_instance(inst_rc)],
-                            )
-                        } else if lookup_class_attr(&class, "__next__").is_some() {
-                            // Already an iterator (has __next__ but no separate __iter__).
-                            Ok(val)
-                        } else {
-                            Err(PyError::named(
-                                "TypeError",
-                                format!("'{}' object is not iterable", class.borrow().name),
-                            ))
-                        }
-                    }
-                    // Built-in iterables: materialise into a NativeIterFrame so that
-                    // next() works on the returned value.
-                    _ => {
-                        let items = iter_values(val.clone()).map_err(|_| {
-                            PyError::named(
-                                "TypeError",
-                                format!("'{}' object is not iterable", value_type_name_str(&val)),
-                            )
-                        })?;
-                        Ok(Value::generator(Box::new(NativeIterFrame { items, pos: 0 })))
-                    }
-                }
-            }
-
             ValueKind::PyInstance(inst) => {
                 let inst_rc = Rc::clone(inst);
                 let class = Rc::clone(&inst_rc.borrow().class);
@@ -1577,7 +1342,7 @@ impl Interpreter {
     }
 
     /// Call next() on a generator or any object with __next__.
-    fn call_next(&mut self, val: Value, default: Option<Value>) -> Result<Value> {
+    pub(crate) fn call_next(&mut self, val: Value, default: Option<Value>) -> Result<Value> {
         if let ValueKind::Generator(state_rc) = val.kind() {
             let state_rc = Rc::clone(state_rc);
 

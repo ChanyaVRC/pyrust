@@ -18,8 +18,8 @@ use crate::ast::BinaryOp;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::{
-    ascii_repr, iter_values, lookup_class_attr, modpow_i64, py_mod_i64,
-    reject_keyword_args_expanded, value_to_float,
+    NativeIterFrame, ascii_repr, class_is_subclass_of, iter_values, lookup_class_attr,
+    modpow_i64, py_mod_i64, reject_keyword_args_expanded, value_to_float, value_type_name_str,
 };
 use crate::value::{Value, ValueKind};
 use pyrust_derive::pyrust_module;
@@ -473,6 +473,242 @@ pyrust_module! {
                     Ok(Value::float(a.powf(b)))
                 }
             }
+        }
+    }
+
+    /// CPython: enumerate(iterable, start=0) — enumerate iterator.
+    /// <https://docs.python.org/3/library/functions.html#enumerate>
+    fn enumerate(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.is_empty() || args.len() > 2 {
+            return Err(PyError::Runtime(format!("{FN_NAME}() takes 1 or 2 arguments")));
+        }
+        let start = if args.len() == 2 {
+            match args[1].value.kind() {
+                ValueKind::Int(n) => n,
+                _ => return Err(PyError::Runtime(format!(
+                    "{FN_NAME}() start argument must be an integer",
+                ))),
+            }
+        } else {
+            0i64
+        };
+        // Pass the source Value directly — `iter_helpers` materialises
+        // lazily on first iter_next so side effects of e.g. `open()`
+        // happen at iteration start, not at construction.
+        Ok(pyrust_builtins::iter_helpers::enumerate(
+            args[0].value.clone(),
+            start,
+        ))
+    }
+
+    /// CPython: zip(*iterables) — parallel iterator.
+    /// <https://docs.python.org/3/library/functions.html#zip>
+    fn zip(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        let sources: Vec<Value> = args.iter().map(|a| a.value.clone()).collect();
+        Ok(pyrust_builtins::iter_helpers::zip(sources))
+    }
+
+    /// CPython: reversed(seq) — reverse iterator.
+    /// <https://docs.python.org/3/library/functions.html#reversed>
+    fn reversed(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
+        }
+        Ok(pyrust_builtins::iter_helpers::reversed(args[0].value.clone()))
+    }
+
+    /// CPython: map(func, iterable) — apply func to each element.
+    /// <https://docs.python.org/3/library/functions.html#map>
+    fn map(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 2 {
+            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly 2 arguments")));
+        }
+        let func = args[0].value.clone();
+        let items = iter_values(args[1].value.clone())?;
+        let mut result = Vec::with_capacity(items.len());
+        for item in items {
+            let mapped = _interp.call_function_expanded(
+                func.clone(),
+                &[ExpandedCallArg { name: None, value: item }],
+            )?;
+            result.push(mapped);
+        }
+        Ok(Value::list(result))
+    }
+
+    /// CPython: filter(func, iterable) — keep elements where func is truthy.
+    /// <https://docs.python.org/3/library/functions.html#filter>
+    fn filter(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 2 {
+            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly 2 arguments")));
+        }
+        let func = args[0].value.clone();
+        let items = iter_values(args[1].value.clone())?;
+        let use_identity = func.is_none();
+        let mut result = Vec::new();
+        for item in items {
+            let keep = if use_identity {
+                item.truthy()
+            } else {
+                let test = _interp.call_function_expanded(
+                    func.clone(),
+                    &[ExpandedCallArg { name: None, value: item.clone() }],
+                )?;
+                test.truthy()
+            };
+            if keep {
+                result.push(item);
+            }
+        }
+        Ok(Value::list(result))
+    }
+
+    /// CPython: iter(obj) — return an iterator over obj.
+    /// <https://docs.python.org/3/library/functions.html#iter>
+    fn iter(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
+        }
+        let val = args[0].value.clone();
+        match val.kind() {
+            // Generators are their own iterators.
+            ValueKind::Generator(_) => Ok(val),
+            // User-defined objects: call __iter__().
+            ValueKind::PyInstance(inst) => {
+                let inst_rc = Rc::clone(inst);
+                let class = Rc::clone(&inst_rc.borrow().class);
+                if let Some(method_val) = lookup_class_attr(&class, "__iter__")
+                    && let ValueKind::UserFunction(f) = method_val.kind()
+                {
+                    let func = Rc::clone(f);
+                    _interp.call_user_function_expanded(
+                        func,
+                        &[],
+                        &[Value::py_instance(inst_rc)],
+                    )
+                } else if lookup_class_attr(&class, "__next__").is_some() {
+                    // Already an iterator (has __next__ but no separate __iter__).
+                    Ok(val)
+                } else {
+                    Err(PyError::named(
+                        "TypeError",
+                        format!("'{}' object is not iterable", class.borrow().name),
+                    ))
+                }
+            }
+            // Built-in iterables: materialise into a NativeIterFrame so that
+            // next() works on the returned value.
+            _ => {
+                let items = iter_values(val.clone()).map_err(|_| {
+                    PyError::named(
+                        "TypeError",
+                        format!("'{}' object is not iterable", value_type_name_str(&val)),
+                    )
+                })?;
+                Ok(Value::generator(Box::new(NativeIterFrame { items, pos: 0 })))
+            }
+        }
+    }
+
+    /// CPython: next(iterator[, default]) — fetch the next element.
+    /// <https://docs.python.org/3/library/functions.html#next>
+    fn next(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.is_empty() || args.len() > 2 {
+            return Err(PyError::Runtime(format!("{FN_NAME}() takes 1 or 2 arguments")));
+        }
+        let gen_val = args[0].value.clone();
+        let default_val = if args.len() == 2 {
+            Some(args[1].value.clone())
+        } else {
+            None
+        };
+        _interp.call_next(gen_val, default_val)
+    }
+
+    /// CPython: issubclass(cls, classinfo) — true if `cls` is a subclass.
+    /// <https://docs.python.org/3/library/functions.html#issubclass>
+    fn issubclass(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 2 {
+            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly 2 arguments")));
+        }
+        let cls = match args[0].value.kind() {
+            ValueKind::PyClass(c) => Rc::clone(c),
+            _ => return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() arg 1 must be a class"),
+            )),
+        };
+        let result = match args[1].value.kind() {
+            ValueKind::PyClass(expected) => class_is_subclass_of(&cls, expected),
+            ValueKind::Tuple(items) => {
+                let mut found = false;
+                for item in items {
+                    if let ValueKind::PyClass(expected) = item.kind()
+                        && class_is_subclass_of(&cls, expected)
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                found
+            }
+            _ => return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() arg 2 must be a class or tuple of classes"),
+            )),
+        };
+        Ok(Value::bool_(result))
+    }
+
+    /// CPython: delattr(obj, name) — delete an attribute.
+    /// <https://docs.python.org/3/library/functions.html#delattr>
+    fn delattr(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 2 {
+            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly 2 arguments")));
+        }
+        let name = match args[1].value.kind() {
+            ValueKind::Str(s) => s.to_string(),
+            _ => return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}(): attribute name must be a string"),
+            )),
+        };
+        match args[0].value.kind() {
+            ValueKind::PyInstance(instance) => {
+                let instance = Rc::clone(instance);
+                if instance.borrow_mut().attrs.remove(&name).is_none() {
+                    let class_name = instance.borrow().class.borrow().name.clone();
+                    return Err(PyError::named(
+                        "AttributeError",
+                        format!("'{class_name}' object has no attribute '{name}'"),
+                    ));
+                }
+                Ok(Value::none())
+            }
+            ValueKind::PyClass(class) => {
+                let class = Rc::clone(class);
+                if class.borrow_mut().attrs.remove(&name).is_none() {
+                    let class_name = class.borrow().name.clone();
+                    return Err(PyError::named(
+                        "AttributeError",
+                        format!("type object '{class_name}' has no attribute '{name}'"),
+                    ));
+                }
+                Ok(Value::none())
+            }
+            _ => Err(PyError::named(
+                "AttributeError",
+                format!("{FN_NAME}() object has no writable attributes"),
+            )),
         }
     }
 
