@@ -764,7 +764,9 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
 
         // Range-based: func + args live in consecutive registers.
         Call(base, argc) | CallMemo(base, argc) => r >= *base && r <= *base + *argc as u32,
-        TailCall { args_base, nargs } => r == args_base.wrapping_sub(1) || (r >= *args_base && r < *args_base + *nargs as u32),
+        TailCall { args_base, nargs } => {
+            r == args_base.wrapping_sub(1) || (r >= *args_base && r < *args_base + *nargs as u32)
+        }
         BuildList(_, base, n) | BuildTuple(_, base, n) => r >= *base && r < *base + *n as u32,
         // BuildDict stores n key-value PAIRS — each pair occupies 2 registers,
         // so the live range is base .. base + 2*n (not base + n).
