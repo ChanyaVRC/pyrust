@@ -4,6 +4,7 @@
 # Therefore, mutation via a stored bound method does not propagate back to
 # the original; only read-only methods are tested here for those types.
 # See also CLAUDE.md and pyrust-core/src/lib.rs for value semantics.
+# This divergence from CPython is tracked in issue #305.
 
 # --- list (read-only methods) ---
 x = [1, 2, 3, 4, 5]

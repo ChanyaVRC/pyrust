@@ -5,11 +5,37 @@
 //!
 //! Lives here as a `BuiltinObject` carrying `(name, receiver)`.  Calling the
 //! resulting Value is dispatched **by the interpreter** through
-//! [`as_bound_method`] before the generic trait `call` path is reached, so the
-//! interpreter can take a mutable handle to the receiver register and have
-//! mutations on list/dict/set propagate.  The trait `call` is intentionally
-//! not implemented — bound methods on mutable containers need a mutable
-//! receiver, which only the interpreter can provide.
+//! [`as_bound_method`] before the generic trait `call` path is reached.  The
+//! trait `call` is intentionally not implemented — see the mutation-propagation
+//! caveat below.
+//!
+//! # Mutation propagation (issue #305)
+//!
+//! Bound methods on mutable Tier 1 containers diverge from CPython depending
+//! on the underlying storage of the receiver:
+//!
+//! - `dict`: storage is `Rc<RefCell<IndexMap>>` inside `Opaque::Dict`, so
+//!   `Value::clone` shares it.  Mutations via a captured bound method (e.g.
+//!   `m = d.update; m(...)`) propagate to the original.  **Works as CPython.**
+//! - `list`: storage is a `Vec<Value>` in a NaN-boxed pool header.
+//!   `Value::clone` allocates a fresh header with a deep-copied vector, so the
+//!   captured receiver is a *value copy*.  `m = lst.append; m(4)` silently
+//!   discards the mutation.  **Diverges from CPython.**
+//! - `set`: storage is a plain `IndexSet` inside `Opaque::Set`.  Same value
+//!   semantics as list — captured bound methods do not propagate mutations.
+//!   **Diverges from CPython.**
+//!
+//! This divergence is part of pyrust's broader value-vs-reference semantics
+//! gap for list/set (basic `b = a; b.append(x)` also fails to alias).  The
+//! direct call form `obj.method(args)` works for all three types via the
+//! `CallMethod` bytecode fast path, which hands the VM a mutable register
+//! reference and bypasses bound-method capture entirely.
+//!
+//! Fixing the captured-bound-method case for list/set requires either
+//! Rc-sharing the backing storage (a NaN-box layout change for list, an
+//! `Opaque::Set` rewrap for set) or adding an indirection through the
+//! receiver's register.  Both are larger changes than the documented
+//! limitation warrants for the current iteration.  Tracked in #305.
 
 use std::any::Any;
 use std::rc::Rc;
@@ -66,10 +92,15 @@ pub fn bound_method(name: impl Into<String>, receiver: Value) -> Value {
 }
 
 /// Extract `(name, receiver)` from a bound-method Value, or None if it's
-/// not a bound method.  The returned `receiver` is a clone of the captured
-/// Value — callers that need mutation on mutable Tier 1 containers must
-/// obtain `&mut Vec<Value>` / `&mut IndexMap` / `&mut IndexSet` via the
-/// `Value::as_*_mut` accessors on the returned receiver.
+/// not a bound method.  The returned `receiver` is a `Value::clone` of the
+/// captured Value.
+///
+/// **Caveat (issue #305):** for list and set receivers, `Value::clone`
+/// deep-copies the backing storage, so `as_*_mut` on the returned receiver
+/// mutates a private copy — the mutation will not be visible through the
+/// original Value the caller bound the method on.  For dict receivers,
+/// storage is `Rc<RefCell<_>>`-shared inside `Opaque::Dict`, so mutations
+/// propagate correctly.  See the module-level docs for the full rationale.
 pub fn as_bound_method(value: &Value) -> Option<(Rc<String>, Value)> {
     let ValueKind::BuiltinObject { ops, state } = value.kind() else {
         return None;
