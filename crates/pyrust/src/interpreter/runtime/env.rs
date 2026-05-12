@@ -11,8 +11,10 @@ impl Interpreter {
                 // descriptor takes priority over instance __dict__ — matching CPython.
                 let class = { Rc::clone(&instance.borrow().class) };
                 if let Some(class_val) = lookup_class_attr(&class, name)
-                    && let Some((fget, _, _, partial_slot)) =
-                        pyrust_builtins::property::as_property(&class_val)
+                    && let Some((fget, partial_slot)) =
+                        pyrust_builtins::property::with_property(&class_val, |s| {
+                            (Rc::clone(&s.fget), s.partial_slot)
+                        })
                     && partial_slot.is_none()
                 {
                     return if fget.is_none() {
@@ -163,14 +165,14 @@ impl Interpreter {
             }
             // Access .setter / .deleter / .getter on a property descriptor itself.
             // These return a new property with the respective accessor replaced.
-            _ if pyrust_builtins::property::as_property(&target)
-                .is_some_and(|p| p.3.is_none()) =>
+            _ if pyrust_builtins::property::property_partial_slot(&target)
+                == Some(None) =>
             {
-                let (fget, fset, fdel, _) =
-                    pyrust_builtins::property::as_property(&target).unwrap();
-                let fget_val = (*fget).clone();
-                let fset_val = (*fset).clone();
-                let fdel_val = (*fdel).clone();
+                let (fget_val, fset_val, fdel_val) =
+                    pyrust_builtins::property::with_property(&target, |s| {
+                        ((*s.fget).clone(), (*s.fset).clone(), (*s.fdel).clone())
+                    })
+                    .expect("guard checked above");
                 match name {
                     "setter" => Ok(pyrust_builtins::property::property_setter_partial(
                         fget_val, fdel_val,
@@ -279,8 +281,10 @@ impl Interpreter {
                 // Check for a property descriptor in the class chain.
                 let class = { Rc::clone(&instance.borrow().class) };
                 if let Some(class_val) = lookup_class_attr(&class, name)
-                    && let Some((_, fset, _, partial_slot)) =
-                        pyrust_builtins::property::as_property(&class_val)
+                    && let Some((fset, partial_slot)) =
+                        pyrust_builtins::property::with_property(&class_val, |s| {
+                            (Rc::clone(&s.fset), s.partial_slot)
+                        })
                     && partial_slot.is_none()
                 {
                     return if fset.is_none() {
@@ -322,8 +326,10 @@ impl Interpreter {
             ValueKind::PyInstance(instance) => {
                 let class = { Rc::clone(&instance.borrow().class) };
                 if let Some(class_val) = lookup_class_attr(&class, name)
-                    && let Some((_, _, fdel, partial_slot)) =
-                        pyrust_builtins::property::as_property(&class_val)
+                    && let Some((fdel, partial_slot)) =
+                        pyrust_builtins::property::with_property(&class_val, |s| {
+                            (Rc::clone(&s.fdel), s.partial_slot)
+                        })
                     && partial_slot.is_none()
                 {
                     return if fdel.is_none() {
