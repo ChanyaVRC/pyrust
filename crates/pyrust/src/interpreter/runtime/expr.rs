@@ -599,8 +599,35 @@ impl Interpreter {
         Ok(Some(result))
     }
 
-    fn try_inplace_matmul(&mut self, left: Value, right: Value) -> Result<Option<Value>> {
-        self.try_call_binary_method(&left, "__imatmul__", right)
+    pub(crate) fn try_inplace_op(
+        &mut self,
+        left: Value,
+        op: BinaryOp,
+        right: Value,
+    ) -> Result<Option<Value>> {
+        let dunder = match op {
+            BinaryOp::Add => "__iadd__",
+            BinaryOp::Sub => "__isub__",
+            BinaryOp::Mul => "__imul__",
+            BinaryOp::MatMul => "__imatmul__",
+            BinaryOp::Div => "__itruediv__",
+            BinaryOp::FloorDiv => "__ifloordiv__",
+            BinaryOp::Mod => "__imod__",
+            BinaryOp::Pow => "__ipow__",
+            BinaryOp::BitAnd => "__iand__",
+            BinaryOp::BitOr => "__ior__",
+            BinaryOp::BitXor => "__ixor__",
+            BinaryOp::LShift => "__ilshift__",
+            BinaryOp::RShift => "__irshift__",
+            _ => return Ok(None),
+        };
+        let result = self.try_call_binary_method(&left, dunder, right)?;
+        if let Some(ref v) = result {
+            if is_not_implemented(v) {
+                return Ok(None);
+            }
+        }
+        Ok(result)
     }
 
     fn matmul(&mut self, left: Value, right: Value) -> Result<Value> {

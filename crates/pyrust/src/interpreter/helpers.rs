@@ -345,6 +345,9 @@ fn install_exception_builtins(env: &EnvRef) {
     module
         .values
         .insert("SystemExit".to_string(), Value::py_class(system_exit));
+    module
+        .values
+        .insert("NotImplemented".to_string(), Value::not_implemented());
 }
 
 fn key_to_value(key: PyKey) -> Value {
