@@ -1,5 +1,5 @@
 impl Interpreter {
-    fn get_attr(&mut self, target: Value, name: &str) -> Result<Value> {
+    pub(crate) fn get_attr(&mut self, target: Value, name: &str) -> Result<Value> {
         match target.kind() {
             ValueKind::PyInstance(instance) => {
                 let instance = Rc::clone(instance);
@@ -275,7 +275,7 @@ impl Interpreter {
         }
     }
 
-    fn assign_attr(&mut self, target: Value, name: &str, value: Value) -> Result<()> {
+    pub(crate) fn assign_attr(&mut self, target: Value, name: &str, value: Value) -> Result<()> {
         match target.kind() {
             ValueKind::PyInstance(instance) => {
                 // Check for a property descriptor in the class chain.

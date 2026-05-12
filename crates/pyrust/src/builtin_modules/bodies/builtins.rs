@@ -12,16 +12,18 @@
 //
 // Reference: <https://docs.python.org/3/library/functions.html>
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::ast::BinaryOp;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::{
-    NativeIterFrame, ascii_repr, class_is_subclass_of, iter_values, lookup_class_attr,
-    modpow_i64, py_mod_i64, reject_keyword_args_expanded, value_to_float, value_type_name_str,
+    NativeIterFrame, ascii_repr, class_is_subclass_of, dir_names, iter_values,
+    lookup_class_attr, modpow_i64, py_mod_i64, reject_keyword_args_expanded, value_to_float,
+    value_type_name_str,
 };
-use crate::value::{Value, ValueKind};
+use crate::value::{PyClass, PyKey, Value, ValueKind};
 use pyrust_derive::pyrust_module;
 
 pyrust_module! {
@@ -710,6 +712,263 @@ pyrust_module! {
                 format!("{FN_NAME}() object has no writable attributes"),
             )),
         }
+    }
+
+    /// CPython: isinstance(obj, classinfo) — type check.
+    /// <https://docs.python.org/3/library/functions.html#isinstance>
+    fn isinstance(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 2 {
+            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly 2 arguments")));
+        }
+        let obj = &args[0].value;
+        let cls = &args[1].value;
+        let result = match (obj.kind(), cls.kind()) {
+            (ValueKind::PyInstance(inst), ValueKind::PyClass(expected)) => {
+                class_is_subclass_of(&inst.borrow().class, expected)
+            }
+            (ValueKind::Int(_) | ValueKind::Bool(_), ValueKind::BuiltinFunction("int")) => true,
+            (ValueKind::Float(_), ValueKind::BuiltinFunction("float")) => true,
+            (ValueKind::Str(_), ValueKind::BuiltinFunction("str")) => true,
+            (ValueKind::Bool(_), ValueKind::BuiltinFunction("bool")) => true,
+            (ValueKind::None, ValueKind::BuiltinFunction("NoneType")) => true,
+            (ValueKind::List(_), ValueKind::BuiltinFunction("list")) => true,
+            (ValueKind::Tuple(_), ValueKind::BuiltinFunction("tuple")) => true,
+            (ValueKind::Set(_), ValueKind::BuiltinFunction("set")) => true,
+            (ValueKind::BuiltinObject { ops, .. }, ValueKind::BuiltinFunction(name)) => {
+                ops.type_name() == name
+            }
+            (ValueKind::Bytes(_), ValueKind::BuiltinFunction("bytes")) => true,
+            (ValueKind::Complex(_, _), ValueKind::BuiltinFunction("complex")) => true,
+            (ValueKind::Dict(_), ValueKind::BuiltinFunction("dict")) => true,
+            _ => false,
+        };
+        Ok(Value::bool_(result))
+    }
+
+    /// CPython: type(object) → type / type(name, bases, namespace) → new class.
+    /// <https://docs.python.org/3/library/functions.html#type>
+    fn r#type(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() == 3 {
+            let name = match args[0].value.kind() {
+                ValueKind::Str(s) => s.to_string(),
+                _ => return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() argument 1 must be a str"),
+                )),
+            };
+            let base = match args[1].value.kind() {
+                ValueKind::Tuple(items) | ValueKind::List(items) => {
+                    if items.is_empty() {
+                        None
+                    } else {
+                        // Multiple inheritance: PyRust supports only single base; take the first.
+                        match items[0].kind() {
+                            ValueKind::PyClass(c) => Some(Rc::clone(c)),
+                            _ => return Err(PyError::named(
+                                "TypeError",
+                                format!("{FN_NAME}() argument 2 entries must be classes"),
+                            )),
+                        }
+                    }
+                }
+                _ => return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() argument 2 must be a tuple"),
+                )),
+            };
+            let mut attrs: std::collections::HashMap<String, Value> =
+                std::collections::HashMap::new();
+            match args[2].value.kind() {
+                ValueKind::Dict(map) => {
+                    for (k, v) in map.iter() {
+                        if let PyKey::Str(key) = k {
+                            attrs.insert(key.clone(), v.clone());
+                        }
+                    }
+                }
+                _ => return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() argument 3 must be a dict"),
+                )),
+            }
+            return Ok(Value::py_class(Rc::new(RefCell::new(PyClass {
+                name,
+                base,
+                attrs,
+            }))));
+        }
+        if args.len() != 1 {
+            return Err(PyError::Runtime(format!(
+                "{FN_NAME}() takes exactly 1 argument (or 3 for type creation)",
+            )));
+        }
+        let obj = &args[0].value;
+        // For user-defined class instances return the actual Rc so that
+        // `type(x) is type(x)` works via Rc::ptr_eq.  For builtin types
+        // return a BuiltinFunction value (singleton-like) so
+        // `type(5) is type(5)` works and isinstance(x, type(x)) succeeds.
+        match obj.kind() {
+            ValueKind::PyInstance(inst) => Ok(Value::py_class(Rc::clone(&inst.borrow().class))),
+            ValueKind::PyClass(_) => Ok(Value::builtin_function("type")),
+            ValueKind::Bool(_) => Ok(Value::builtin_function("bool")),
+            ValueKind::Int(_) => Ok(Value::builtin_function("int")),
+            ValueKind::Float(_) => Ok(Value::builtin_function("float")),
+            ValueKind::Str(_) => Ok(Value::builtin_function("str")),
+            ValueKind::None => Ok(Value::builtin_function("NoneType")),
+            ValueKind::List(_) => Ok(Value::builtin_function("list")),
+            ValueKind::Tuple(_) => Ok(Value::builtin_function("tuple")),
+            ValueKind::Dict(_) => Ok(Value::builtin_function("dict")),
+            ValueKind::Set(_) => Ok(Value::builtin_function("set")),
+            ValueKind::Range { .. } => Ok(Value::builtin_function("range")),
+            ValueKind::UserFunction(_)
+            | ValueKind::BoundMethod { .. }
+            | ValueKind::ClassBoundMethod { .. } => Ok(Value::builtin_function("function")),
+            ValueKind::BuiltinFunction(_) => Ok(Value::builtin_function("builtin_function_or_method")),
+            ValueKind::PyModule(_) => Ok(Value::builtin_function("module")),
+            ValueKind::BigInt(_) => Ok(Value::builtin_function("int")),
+            ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => Ok(Value::builtin_function("super")),
+            ValueKind::Generator(_) => Ok(Value::builtin_function("generator")),
+            ValueKind::NotImplemented => Ok(Value::builtin_function("NotImplementedType")),
+            ValueKind::Bytes(_) => Ok(Value::builtin_function("bytes")),
+            ValueKind::Complex(_, _) => Ok(Value::builtin_function("complex")),
+            ValueKind::BuiltinObject { ops, .. } => {
+                Ok(Value::builtin_function(ops.type_name()))
+            }
+        }
+    }
+
+    /// CPython: hasattr(obj, name) — true if `getattr(obj, name)` would succeed.
+    /// <https://docs.python.org/3/library/functions.html#hasattr>
+    fn hasattr(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 2 {
+            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly 2 arguments")));
+        }
+        let name = match args[1].value.kind() {
+            ValueKind::Str(s) => s.to_string(),
+            _ => return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}(): attribute name must be a string"),
+            )),
+        };
+        let result = match _interp.get_attr(args[0].value.clone(), &name) {
+            Ok(_) => true,
+            Err(PyError::Named(ref cls, _)) if cls == "AttributeError" => false,
+            Err(e) => return Err(e),
+        };
+        Ok(Value::bool_(result))
+    }
+
+    /// CPython: getattr(obj, name[, default]) — attribute access by name.
+    /// <https://docs.python.org/3/library/functions.html#getattr>
+    fn getattr(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() < 2 || args.len() > 3 {
+            return Err(PyError::Runtime(format!("{FN_NAME}() takes 2 or 3 arguments")));
+        }
+        let name = match args[1].value.kind() {
+            ValueKind::Str(s) => s.to_string(),
+            _ => return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}(): attribute name must be a string"),
+            )),
+        };
+        match _interp.get_attr(args[0].value.clone(), &name) {
+            Ok(v) => Ok(v),
+            Err(PyError::Named(ref cls, _)) if cls == "AttributeError" && args.len() == 3 => {
+                Ok(args[2].value.clone())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// CPython: setattr(obj, name, value) — attribute assignment by name.
+    /// <https://docs.python.org/3/library/functions.html#setattr>
+    fn setattr(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 3 {
+            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly 3 arguments")));
+        }
+        let name = match args[1].value.kind() {
+            ValueKind::Str(s) => s.to_string(),
+            _ => return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}(): attribute name must be a string"),
+            )),
+        };
+        _interp.assign_attr(args[0].value.clone(), &name, args[2].value.clone())?;
+        Ok(Value::none())
+    }
+
+    /// CPython: vars([object]) — `__dict__` snapshot, or current env if no arg.
+    /// <https://docs.python.org/3/library/functions.html#vars>
+    fn vars(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() > 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes at most 1 argument"),
+            ));
+        }
+        if args.is_empty() {
+            let mut dict: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
+            for (k, v) in _interp.env.borrow().values.iter() {
+                dict.insert(PyKey::Str(k.clone()), v.clone());
+            }
+            return Ok(Value::dict(dict));
+        }
+        match args[0].value.kind() {
+            ValueKind::PyInstance(instance) => {
+                let mut dict: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
+                for (k, v) in instance.borrow().attrs.iter() {
+                    dict.insert(PyKey::Str(k.clone()), v.clone());
+                }
+                Ok(Value::dict(dict))
+            }
+            ValueKind::PyModule(module) => {
+                let mut dict: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
+                for (k, v) in module.borrow().attrs.iter() {
+                    dict.insert(PyKey::Str(k.clone()), v.clone());
+                }
+                Ok(Value::dict(dict))
+            }
+            ValueKind::PyClass(class) => {
+                let mut dict: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
+                for (k, v) in class.borrow().attrs.iter() {
+                    dict.insert(PyKey::Str(k.clone()), v.clone());
+                }
+                Ok(Value::dict(dict))
+            }
+            _ => Err(PyError::named(
+                "TypeError",
+                format!(
+                    "{FN_NAME}() argument must have __dict__ attribute (got '{}')",
+                    value_type_name_str(&args[0].value),
+                ),
+            )),
+        }
+    }
+
+    /// CPython: dir([object]) — list of attribute names.
+    /// <https://docs.python.org/3/library/functions.html#dir>
+    fn dir(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() > 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes at most 1 argument"),
+            ));
+        }
+        let mut names: Vec<String> = if args.is_empty() {
+            _interp.env.borrow().values.keys().cloned().collect()
+        } else {
+            dir_names(&args[0].value)
+        };
+        names.sort();
+        names.dedup();
+        Ok(Value::list(names.into_iter().map(Value::string).collect()))
     }
 
     /// CPython: callable(object) — true if the object is callable.

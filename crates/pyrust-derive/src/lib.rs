@@ -172,9 +172,17 @@ impl Parse for ModuleInput {
             // Function ident must be snake_case so the generated
             // SCREAMING_SNAKE constant name is unique without lossy
             // case-folding (e.g. `fn isDir` and `fn isdir` would both
-            // produce the same const ident).
+            // produce the same const ident).  Accepts raw identifiers
+            // (`r#type`) so callables whose Python name collides with a
+            // Rust keyword can be declared without uglifying the name.
             let short_name: Ident = input.parse()?;
-            let short_str = short_name.to_string();
+            // `Ident::to_string()` keeps the `r#` prefix on raw idents
+            // (e.g. `r#type` round-trips as `"r#type"`).  Strip it so the
+            // Python-level registration name is just `"type"`.
+            let short_str = short_name
+                .to_string()
+                .strip_prefix("r#")
+                .map_or_else(|| short_name.to_string(), str::to_owned);
             if !is_snake_case(&short_str) {
                 return Err(syn::Error::new(
                     short_name.span(),
@@ -253,7 +261,13 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
 
     for f in &funcs {
         let short = &f.short_name;
-        let short_str = short.to_string();
+        // Strip the `r#` prefix from raw idents (e.g. `r#type` → `type`) so
+        // the generated Rust dispatch ident and the Python-level
+        // registration name are both keyword-free.
+        let short_str = short
+            .to_string()
+            .strip_prefix("r#")
+            .map_or_else(|| short.to_string(), str::to_owned);
         // Rust ident for the dispatch fn — prefix with the parent
         // module's basename (taken from the build artifact's symbol
         // mangling).  We can't read `MODULE_NAME` at proc-macro time, but
