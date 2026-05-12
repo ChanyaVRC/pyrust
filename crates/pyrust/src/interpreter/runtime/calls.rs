@@ -2044,6 +2044,21 @@ impl Interpreter {
                             function.name, name
                         )));
                     };
+                    if function.params[param_index].is_positional_only {
+                        // The fast path only runs when the function has neither
+                        // *args nor **kwargs (see the `if !has_args_param &&
+                        // !has_kwargs_param` guard above), so there is no
+                        // **kwargs to absorb this name — TypeError is correct.
+                        // The variadic path (`compute_kw_pos` below) handles
+                        // the "absorb into **kwargs" case separately.
+                        return Err(PyError::Named(
+                            "TypeError".to_string(),
+                            format!(
+                                "{}() got some positional-only arguments passed as keyword arguments: '{}'",
+                                function.name, name
+                            ),
+                        ));
+                    }
                     if bound_args[param_index].is_some() {
                         return Err(PyError::Runtime(format!(
                             "{}() got multiple values for argument '{}'",
@@ -2256,7 +2271,11 @@ impl Interpreter {
                 }
                 Value::dict(dict)
             } else {
-                let kw_pos = keyword_vals.iter().position(|(k, _)| k == &param.name);
+                let kw_pos = if param.is_positional_only {
+                    None
+                } else {
+                    keyword_vals.iter().position(|(k, _)| k == &param.name)
+                };
                 if let Some(ki) = kw_pos {
                     consumed_keywords.insert(keyword_vals[ki].0.clone());
                     keyword_vals[ki].1.clone()
@@ -2290,6 +2309,22 @@ impl Interpreter {
         if !has_kwargs {
             for (name, _) in &keyword_vals {
                 if !consumed_keywords.contains(name) {
+                    // Distinguish "this name matches a positional-only param"
+                    // from "this name is completely unknown" — CPython raises
+                    // a more specific TypeError in the former case.
+                    if function
+                        .params
+                        .iter()
+                        .any(|p| p.is_positional_only && &p.name == name)
+                    {
+                        return Err(PyError::Named(
+                            "TypeError".to_string(),
+                            format!(
+                                "{}() got some positional-only arguments passed as keyword arguments: '{}'",
+                                function.name, name
+                            ),
+                        ));
+                    }
                     return Err(PyError::Runtime(format!(
                         "{}() got unexpected keyword argument '{}'",
                         function.name, name

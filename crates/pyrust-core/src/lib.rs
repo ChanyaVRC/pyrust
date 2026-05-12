@@ -107,6 +107,7 @@ pub struct UserFunctionParam {
     pub is_args: bool,
     pub is_kwargs: bool,
     pub is_keyword_only: bool,
+    pub is_positional_only: bool,
 }
 
 #[derive(Debug, Clone)]
