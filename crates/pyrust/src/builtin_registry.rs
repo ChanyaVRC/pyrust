@@ -1,10 +1,19 @@
 //! Compile-time registry of built-in Python callables.
 //!
-//! Each built-in function is declared as a free Rust `fn` annotated with
-//! `#[pyfunction(name = "module.name")]` (see the `pyrust-derive` crate).
-//! The macro generates a sibling [`BuiltinReg`] constant; this module
-//! collects per-module registration slices into a single static registry
-//! and exposes [`lookup`] for O(log n) name-to-dispatch resolution.
+//! Built-ins are declared in one of two ways (see the `pyrust-derive` crate):
+//!
+//! - **`pyrust_module! { … }`** (function-like, primary) — declares a
+//!   whole built-in module's callables and constants at once.  Each `fn`
+//!   inside the macro expands to a `BuiltinReg` and is collected into the
+//!   per-module `regs()` slice.  Function names that collide with Rust
+//!   keywords use the `#[py_name = "..."]` override.
+//! - **`#[pyfunction(name = "module.fn")]`** (attribute, one-off
+//!   fallback) — for migrating a single arm without spinning up a module
+//!   file.
+//!
+//! Both forms feed [`crate::builtin_modules::all_regs`], which this module
+//! collects into a single sorted static registry exposed via [`lookup`]
+//! for O(log n) name-to-dispatch resolution.
 //!
 //! Compared to the previous `match ValueKind::BuiltinFunction("name") => …`
 //! cascade, this design:
@@ -27,7 +36,8 @@ use crate::value::Value;
 /// `abs` or `math.sqrt` ignore it.
 pub type BuiltinDispatchFn = fn(&mut Interpreter, &[ExpandedCallArg]) -> Result<Value>;
 
-/// One entry in the registry — emitted by `#[pyfunction]`.
+/// One entry in the registry — emitted by `pyrust_module!` (one per fn
+/// inside the macro body) or by `#[pyfunction(name = …)]`.
 #[derive(Copy, Clone)]
 pub struct BuiltinReg {
     pub name: &'static str,
@@ -53,10 +63,15 @@ pub fn lookup(name: &str) -> Option<BuiltinDispatchFn> {
 static REGISTRY: std::sync::LazyLock<Vec<BuiltinReg>> = std::sync::LazyLock::new(|| {
     let mut all = crate::builtin_modules::all_regs();
     all.sort_by_key(|r| r.name);
-    debug_assert!(
-        all.windows(2).all(|w| w[0].name < w[1].name),
-        "duplicate built-in name in registry"
-    );
+    // `assert!` (not `debug_assert!`) — a duplicate registration would
+    // silently make `lookup()` ambiguous in release builds.  This runs
+    // once on first lookup, so the cost is negligible.
+    if let Some(w) = all.windows(2).find(|w| w[0].name >= w[1].name) {
+        panic!(
+            "duplicate built-in name in registry: `{}` (sort produced `{}` followed by `{}`)",
+            w[0].name, w[0].name, w[1].name,
+        );
+    }
     all
 });
 

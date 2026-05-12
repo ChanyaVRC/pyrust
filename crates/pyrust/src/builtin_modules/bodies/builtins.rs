@@ -40,7 +40,10 @@ pyrust_module! {
             ValueKind::Bool(b) => b as i64,
             _ => return Err(PyError::named(
                 "TypeError",
-                "an integer is required (got type {})".to_string(),
+                format!(
+                    "an integer is required (got type {})",
+                    value_type_name_str(&args[0].value),
+                ),
             )),
         };
         if !(0..=1114111).contains(&code_point) {
@@ -101,13 +104,20 @@ pyrust_module! {
         }
         match args[0].value.kind() {
             ValueKind::Int(v) => {
-                if v < 0 { Ok(Value::string(format!("-0b{:b}", -v))) }
-                else { Ok(Value::string(format!("0b{:b}", v))) }
+                if v < 0 {
+                    // Widen to i128 first so `i64::MIN.abs()` doesn't overflow.
+                    Ok(Value::string(format!("-0b{:b}", -(v as i128))))
+                } else {
+                    Ok(Value::string(format!("0b{:b}", v)))
+                }
             }
             ValueKind::Bool(b) => Ok(Value::string(if b { "0b1".to_string() } else { "0b0".to_string() })),
             _ => Err(PyError::named(
                 "TypeError",
-                "'{}' object cannot be interpreted as an integer".to_string(),
+                format!(
+                    "'{}' object cannot be interpreted as an integer",
+                    value_type_name_str(&args[0].value),
+                ),
             )),
         }
     }
@@ -121,13 +131,19 @@ pyrust_module! {
         }
         match args[0].value.kind() {
             ValueKind::Int(v) => {
-                if v < 0 { Ok(Value::string(format!("-0o{:o}", -v))) }
-                else { Ok(Value::string(format!("0o{:o}", v))) }
+                if v < 0 {
+                    Ok(Value::string(format!("-0o{:o}", -(v as i128))))
+                } else {
+                    Ok(Value::string(format!("0o{:o}", v)))
+                }
             }
             ValueKind::Bool(b) => Ok(Value::string(if b { "0o1".to_string() } else { "0o0".to_string() })),
             _ => Err(PyError::named(
                 "TypeError",
-                "'{}' object cannot be interpreted as an integer".to_string(),
+                format!(
+                    "'{}' object cannot be interpreted as an integer",
+                    value_type_name_str(&args[0].value),
+                ),
             )),
         }
     }
@@ -141,13 +157,19 @@ pyrust_module! {
         }
         match args[0].value.kind() {
             ValueKind::Int(v) => {
-                if v < 0 { Ok(Value::string(format!("-0x{:x}", -v))) }
-                else { Ok(Value::string(format!("0x{:x}", v))) }
+                if v < 0 {
+                    Ok(Value::string(format!("-0x{:x}", -(v as i128))))
+                } else {
+                    Ok(Value::string(format!("0x{:x}", v)))
+                }
             }
             ValueKind::Bool(b) => Ok(Value::string(if b { "0x1".to_string() } else { "0x0".to_string() })),
             _ => Err(PyError::named(
                 "TypeError",
-                "'{}' object cannot be interpreted as an integer".to_string(),
+                format!(
+                    "'{}' object cannot be interpreted as an integer",
+                    value_type_name_str(&args[0].value),
+                ),
             )),
         }
     }

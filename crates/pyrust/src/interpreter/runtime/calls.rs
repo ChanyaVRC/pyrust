@@ -41,10 +41,15 @@ impl Interpreter {
         function: Value,
         args: &[ExpandedCallArg],
     ) -> Result<Value> {
-        // New-style dispatch: built-in callables migrated to `#[pyfunction]`
-        // are registered in `crate::builtin_registry`.  We probe it first;
-        // anything not yet migrated falls through to the legacy `match`
-        // cascade below.  See `crates/pyrust/src/builtin_registry.rs`.
+        // Registry-driven dispatch: built-in callables declared via
+        // `pyrust_module! { … fn name(args) … }` (or the per-fn fallback
+        // `#[pyfunction(name = …)]`) are collected into
+        // `crate::builtin_registry`.  We probe it first; the only arms left
+        // in the match cascade below are pattern-guarded (bound-method
+        // dispatch, `str.*` method-name prefix matching, the `property`
+        // accessor partial-slot guard) — these key on `Value` state rather
+        // than on a registered name, so they can't live in the registry.
+        // See `crates/pyrust/src/builtin_modules/` for the per-module bodies.
         if let ValueKind::BuiltinFunction(name) = function.kind()
             && let Some(dispatch) = crate::builtin_registry::lookup(name)
         {

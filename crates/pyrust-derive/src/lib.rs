@@ -94,7 +94,12 @@ pub fn pyfunction(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     let fn_ident = &func.sig.ident;
-    let const_ident = Ident::new(&fn_ident.to_string().to_uppercase(), fn_ident.span());
+    // Strip a leading `r#` from raw idents (`r#type` → `type`) before
+    // upper-casing — otherwise the generated const ident would contain
+    // `#`, which isn't a legal identifier character.
+    let fn_ident_str = fn_ident.to_string();
+    let unraw_str = fn_ident_str.strip_prefix("r#").unwrap_or(&fn_ident_str);
+    let const_ident = Ident::new(&unraw_str.to_uppercase(), fn_ident.span());
 
     let expanded = quote! {
         #func
@@ -318,6 +323,14 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
         // Rust ident for the dispatch fn — `__pyfn_<rust_short>` keeps the
         // generated ident from clashing with user-defined helpers in scope.
         let rust_fn_ident = format_ident!("__pyfn_{}", rust_short, span = short.span());
+        // Per-fn module-scope static holding the leaked Python-level full
+        // name.  One alloc per built-in at first use, shared by all three
+        // consumers (the `FN_NAME` local in the dispatch fn, the
+        // `BuiltinReg.name` field, and the `Value::builtin_function(...)`
+        // bound into `module()`'s attrs).  Previously each consumer leaked
+        // its own copy, producing 3 distinct `&'static str` pointers per
+        // built-in for what is logically one canonical name.
+        let name_static_ident = format_ident!("__pyfn_{}_NAME", rust_short, span = short.span());
         let attrs = &f.attrs;
         let body_stmts = &f.body.stmts;
         let args_ident = &f.args_ident;
@@ -328,37 +341,36 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
         // imports are actually consumed by the expansion (otherwise rustc
         // reports them unused — the macro consumes the surface-level mentions
         // in `fn foo(args) -> Result<Value>` before name resolution sees them).
+        //
+        // `FN_PREFIX` is injected by `pyrust_builtin_modules!` and is
+        // either `"<module>."` (prefixed module) or `""` (flat / builtins).
         fn_items.push(quote! {
+            #[allow(non_upper_case_globals)]
+            static #name_static_ident: std::sync::LazyLock<&'static str> =
+                std::sync::LazyLock::new(|| {
+                    ::std::boxed::Box::leak(
+                        format!("{}{}", FN_PREFIX, #short_lit).into_boxed_str(),
+                    )
+                });
+
             #(#attrs)*
             fn #rust_fn_ident(
                 _interp: &mut crate::Interpreter,
                 #args_ident: &[ExpandedCallArg],
             ) -> Result<Value> {
-                // Compose the Python-level full name once per fn (lazy)
-                // so callers (helpers, error messages) can refer to it as
-                // `FN_NAME` instead of repeating the module prefix.
-                // `FN_PREFIX` is injected by `pyrust_builtin_modules!` and is
-                // either `"<module>."` (prefixed module) or `""` (flat / builtins).
-                static FN_NAME_OWNED: std::sync::LazyLock<String> =
-                    std::sync::LazyLock::new(|| {
-                        format!("{}{}", FN_PREFIX, #short_lit)
-                    });
                 #[allow(non_snake_case)]
-                let FN_NAME: &str = FN_NAME_OWNED.as_str();
+                let FN_NAME: &'static str = *#name_static_ident;
                 let _ = FN_NAME; // suppress unused warning if body ignores it
                 #(#body_stmts)*
             }
         });
 
-        // Each registry entry composes its name from FN_PREFIX at
-        // first lookup, then leaks the string to satisfy
-        // `BuiltinReg.name: &'static str`.  Cost: one allocation per
-        // built-in at startup, amortised over every subsequent dispatch.
+        // Registry entry and module-attr entry both read the shared
+        // `'static` pointer from `#name_static_ident`, so a built-in's
+        // canonical name lives at exactly one address.
         reg_entries.push(quote! {
             crate::builtin_registry::BuiltinReg {
-                name: ::std::boxed::Box::leak(
-                    format!("{}{}", FN_PREFIX, #short_lit).into_boxed_str()
-                ),
+                name: *#name_static_ident,
                 dispatch: #rust_fn_ident,
             }
         });
@@ -366,11 +378,7 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
         attr_entries.push(quote! {
             attrs.insert(
                 #short_lit.to_string(),
-                crate::value::Value::builtin_function(
-                    ::std::boxed::Box::leak(
-                        format!("{}{}", FN_PREFIX, #short_lit).into_boxed_str()
-                    ),
-                ),
+                crate::value::Value::builtin_function(*#name_static_ident),
             );
         });
     }
