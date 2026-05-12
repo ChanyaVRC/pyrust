@@ -1438,7 +1438,7 @@ impl Interpreter {
                     // per-iteration consts-pool lookup, no .kind() decode for them.
                     let step = *step as i64;
                     let stop = *stop as i64;
-                    let fast = if let Some(vv) = &regs[*var as usize] {
+                    let fast = if let Some(vv) = regs[*var as usize].as_some() {
                         if let ValueKind::Int(cur) = vv.kind() {
                             let next = cur.wrapping_add(step);
                             let cont = match cmp_op {
@@ -1446,7 +1446,7 @@ impl Interpreter {
                                 BinaryOp::Gt => next > stop,
                                 _ => unreachable!("ForCountConstInline uses Lt or Gt only"),
                             };
-                            if cont { regs[*var as usize] = Some(Value::int(next)); }
+                            if cont { regs[*var as usize] = Value::int(next); }
                             else { pc = jump_pc!(*offset); }
                             true
                         } else { false }
