@@ -47,6 +47,9 @@ pub enum PyKey {
     Str(String),
     Bool(bool),
     None,
+    /// Hashable frozenset key.  Stores a sorted-canonical Vec of inner keys
+    /// so equality and hashing are content-based (matching CPython).
+    FrozenSet(Vec<PyKey>),
 }
 
 impl Hash for PyKey {
@@ -58,6 +61,11 @@ impl Hash for PyKey {
             PyKey::Float(bits) => bits.hash(state),
             PyKey::Str(s) => s.hash(state),
             PyKey::None => {}
+            PyKey::FrozenSet(items) => {
+                for k in items {
+                    k.hash(state);
+                }
+            }
         }
     }
 }
@@ -290,6 +298,10 @@ pub enum Opaque {
         name: Rc<String>,
         receiver: Value,
     },
+    /// Immutable, hashable counterpart to `Set`.  Constructed via the
+    /// `frozenset(iterable)` builtin.  Stored behind `Rc` so clones are
+    /// cheap and hashability uses `Rc::as_ptr` for identity.
+    FrozenSet(Rc<IndexSet<PyKey>>),
 }
 
 impl Clone for Opaque {
@@ -361,6 +373,7 @@ impl Clone for Opaque {
                 name: Rc::clone(name),
                 receiver: receiver.clone(),
             },
+            Opaque::FrozenSet(rc) => Opaque::FrozenSet(Rc::clone(rc)),
         }
     }
 }
@@ -438,6 +451,7 @@ pub enum ValueKind<'a> {
         name: &'a Rc<String>,
         receiver: &'a Value,
     },
+    FrozenSet(&'a Rc<IndexSet<PyKey>>),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -730,6 +744,14 @@ impl Value {
 
     pub fn set(s: IndexSet<PyKey>) -> Self {
         Value::opaque(Opaque::Set(s))
+    }
+
+    pub fn frozenset(s: IndexSet<PyKey>) -> Self {
+        Value::opaque(Opaque::FrozenSet(Rc::new(s)))
+    }
+
+    pub fn frozenset_rc(rc: Rc<IndexSet<PyKey>>) -> Self {
+        Value::opaque(Opaque::FrozenSet(rc))
     }
 
     pub fn range(start: i64, stop: i64, step: i64) -> Self {
@@ -1126,6 +1148,7 @@ impl Value {
                 Opaque::BuiltinBoundMethod { name, receiver } => {
                     ValueKind::BuiltinBoundMethod { name, receiver }
                 }
+                Opaque::FrozenSet(rc) => ValueKind::FrozenSet(rc),
             },
             _ => unreachable!(),
         }
@@ -1168,6 +1191,7 @@ impl Value {
             ValueKind::PropertyAccessorPartial { .. } => true,
             ValueKind::NotImplemented => true,
             ValueKind::BuiltinBoundMethod { .. } => true,
+            ValueKind::FrozenSet(s) => !s.is_empty(),
         }
     }
 
@@ -1223,6 +1247,13 @@ impl Value {
                 }
                 let inner = items.iter().map(key_repr).collect::<Vec<_>>().join(", ");
                 format!("{{{inner}}}")
+            }
+            ValueKind::FrozenSet(rc) => {
+                if rc.is_empty() {
+                    return "frozenset()".to_string();
+                }
+                let inner = rc.iter().map(key_repr).collect::<Vec<_>>().join(", ");
+                format!("frozenset({{{inner}}})")
             }
             ValueKind::Range { start, stop, step } => {
                 if step == 1 {
@@ -1317,6 +1348,15 @@ impl Value {
             ValueKind::Str(v) => Some(PyKey::Str(v.to_string())),
             ValueKind::Bool(v) => Some(PyKey::Int(v as i64)),
             ValueKind::None => Some(PyKey::None),
+            ValueKind::FrozenSet(rc) => {
+                // Content-based hashable key.  We canonicalise by sorting the
+                // inner keys' Debug form so different insertion orders compare
+                // equal.  (Hash already handles ordering by iterating
+                // canonical Vec; equality of PyKey::FrozenSet matches Vec eq.)
+                let mut items: Vec<PyKey> = rc.iter().cloned().collect();
+                items.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+                Some(PyKey::FrozenSet(items))
+            }
             _ => None,
         }
     }
@@ -1442,6 +1482,9 @@ impl PartialEq for Value {
             (ValueKind::Tuple(a), ValueKind::Tuple(b)) => a == b,
             (ValueKind::Dict(a), ValueKind::Dict(b)) => a == b,
             (ValueKind::Set(a), ValueKind::Set(b)) => a == b,
+            (ValueKind::FrozenSet(a), ValueKind::FrozenSet(b)) => a.as_ref() == b.as_ref(),
+            (ValueKind::Set(a), ValueKind::FrozenSet(b)) => *a == *b.as_ref(),
+            (ValueKind::FrozenSet(a), ValueKind::Set(b)) => *a.as_ref() == *b,
             (
                 ValueKind::Range {
                     start: as_,
@@ -1501,6 +1544,7 @@ pub fn builtin_type_name(value: &Value) -> &'static str {
         ValueKind::Tuple(_) => "tuple",
         ValueKind::Dict(_) => "dict",
         ValueKind::Set(_) => "set",
+        ValueKind::FrozenSet(_) => "frozenset",
         ValueKind::Int(_) | ValueKind::BigInt(_) => "int",
         ValueKind::Float(_) => "float",
         ValueKind::Bool(_) => "bool",
@@ -1522,6 +1566,14 @@ fn key_repr(key: &PyKey) -> String {
             }
         }
         PyKey::None => "None".to_string(),
+        PyKey::FrozenSet(items) => {
+            if items.is_empty() {
+                "frozenset()".to_string()
+            } else {
+                let inner = items.iter().map(key_repr).collect::<Vec<_>>().join(", ");
+                format!("frozenset({{{inner}}})")
+            }
+        }
     }
 }
 

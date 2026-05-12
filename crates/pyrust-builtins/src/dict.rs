@@ -143,5 +143,12 @@ fn key_to_value(k: PyKey) -> Value {
         PyKey::Str(s) => Value::string(s),
         PyKey::Bool(b) => Value::bool_(b),
         PyKey::None => Value::none(),
+        PyKey::FrozenSet(items) => {
+            let mut set = indexmap::IndexSet::new();
+            for k in items {
+                set.insert(k);
+            }
+            Value::frozenset(set)
+        }
     }
 }

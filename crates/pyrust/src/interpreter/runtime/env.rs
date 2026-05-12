@@ -495,6 +495,17 @@ fn builtin_has_method(target: &Value, name: &str) -> bool {
         ValueKind::Tuple(_) => pyrust_builtins::tuple::has_method(name),
         ValueKind::Dict(_) => pyrust_builtins::dict::has_method(name),
         ValueKind::Set(_) => pyrust_builtins::set::has_method(name),
+        ValueKind::FrozenSet(_) => matches!(
+            name,
+            "copy"
+                | "union"
+                | "intersection"
+                | "difference"
+                | "symmetric_difference"
+                | "issubset"
+                | "issuperset"
+                | "isdisjoint"
+        ),
         _ => false,
     }
 }

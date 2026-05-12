@@ -365,6 +365,13 @@ fn key_to_value(key: PyKey) -> Value {
         PyKey::Str(v) => Value::string(v),
         PyKey::Bool(v) => Value::bool_(v),
         PyKey::None => Value::none(),
+        PyKey::FrozenSet(items) => {
+            let mut set = indexmap::IndexSet::new();
+            for k in items {
+                set.insert(k);
+            }
+            Value::frozenset(set)
+        }
     }
 }
 

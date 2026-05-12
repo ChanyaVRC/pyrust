@@ -98,6 +98,7 @@ impl Interpreter {
                     ValueKind::List(items) => items.len() as i64,
                     ValueKind::Tuple(items) => items.len() as i64,
                     ValueKind::Set(items) => items.len() as i64,
+                    ValueKind::FrozenSet(rc) => rc.len() as i64,
                     ValueKind::Dict(items) => items.len() as i64,
                     ValueKind::Range { start, stop, step } => range_len(start, stop, step),
                     ValueKind::PyInstance(inst) => {
@@ -395,6 +396,33 @@ impl Interpreter {
                     _ => Err(PyError::Runtime("set() takes at most one argument".to_string())),
                 }
             }
+            ValueKind::BuiltinFunction("frozenset") => {
+                reject_keyword_args_expanded("frozenset", args)?;
+                match args.len() {
+                    0 => Ok(Value::frozenset(indexmap::IndexSet::new())),
+                    1 => {
+                        // frozenset(frozenset_instance) returns the same object (per CPython).
+                        if let ValueKind::FrozenSet(rc) = args[0].value.kind() {
+                            return Ok(Value::frozenset_rc(Rc::clone(rc)));
+                        }
+                        let items = self.collect_iterable(args[0].value.clone())?;
+                        let mut set = indexmap::IndexSet::new();
+                        for item in items {
+                            let key = item.to_key().ok_or_else(|| {
+                                PyError::Named(
+                                    "TypeError".to_string(),
+                                    "unhashable type in frozenset".to_string(),
+                                )
+                            })?;
+                            set.insert(key);
+                        }
+                        Ok(Value::frozenset(set))
+                    }
+                    _ => Err(PyError::Runtime(
+                        "frozenset() takes at most one argument".to_string(),
+                    )),
+                }
+            }
 
             ValueKind::BuiltinFunction("str") => {
                 reject_keyword_args_expanded("str", args)?;
@@ -668,6 +696,7 @@ impl Interpreter {
                     (ValueKind::List(_), ValueKind::BuiltinFunction("list")) => true,
                     (ValueKind::Tuple(_), ValueKind::BuiltinFunction("tuple")) => true,
                     (ValueKind::Set(_), ValueKind::BuiltinFunction("set")) => true,
+                    (ValueKind::FrozenSet(_), ValueKind::BuiltinFunction("frozenset")) => true,
                     (ValueKind::Dict(_), ValueKind::BuiltinFunction("dict")) => true,
                     _ => false,
                 };
@@ -775,6 +804,7 @@ impl Interpreter {
                     | ValueKind::PropertyAccessorPartial { .. } => Ok(Value::builtin_function("property")),
                     ValueKind::NotImplemented => Ok(Value::builtin_function("NotImplementedType")),
                     ValueKind::BuiltinBoundMethod { .. } => Ok(Value::builtin_function("builtin_function_or_method")),
+                    ValueKind::FrozenSet(_) => Ok(Value::builtin_function("frozenset")),
                 }
             }
             ValueKind::BuiltinFunction("id") => {
@@ -970,6 +1000,23 @@ impl Interpreter {
                             .as_set_mut()
                             .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
                         pyrust_builtins::set::call(&method, set, pos)
+                    }
+                    ValueKind::FrozenSet(rc) => {
+                        // Treat the frozenset as an immutable set for non-mutating methods.
+                        // Clone into a regular IndexSet, call the method, and (for the
+                        // result-returning ones) re-wrap if necessary.
+                        let mut items: indexmap::IndexSet<PyKey> = (**rc).clone();
+                        let result = pyrust_builtins::set::call(&method, &mut items, pos)?;
+                        // For methods that return a new set, re-wrap as frozenset.
+                        if matches!(
+                            method.as_str(),
+                            "copy" | "union" | "intersection" | "difference" | "symmetric_difference"
+                        ) {
+                            if let ValueKind::Set(s) = result.kind() {
+                                return Ok(Value::frozenset(s.clone()));
+                            }
+                        }
+                        Ok(result)
                     }
                     _ => Err(PyError::Named(
                         "TypeError".to_string(),
@@ -3110,6 +3157,7 @@ fn dir_names(value: &Value) -> Vec<String> {
         ValueKind::Tuple(_) => builtin_method_names("tuple"),
         ValueKind::Dict(_) => builtin_method_names("dict"),
         ValueKind::Set(_) => builtin_method_names("set"),
+        ValueKind::FrozenSet(_) => builtin_method_names("frozenset"),
         _ => Vec::new(),
     }
 }
@@ -3149,6 +3197,10 @@ fn builtin_method_names(type_name: &str) -> Vec<String> {
             "discard", "intersection", "intersection_update", "isdisjoint",
             "issubset", "issuperset", "pop", "remove", "symmetric_difference",
             "symmetric_difference_update", "union", "update",
+        ],
+        "frozenset" => &[
+            "copy", "difference", "intersection", "isdisjoint", "issubset",
+            "issuperset", "symmetric_difference", "union",
         ],
         _ => &[],
     };
