@@ -1,4 +1,6 @@
 mod ast;
+mod builtin_registry;
+mod builtin_registry_modules;
 mod bytecode;
 mod compiler;
 mod error;

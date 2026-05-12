@@ -41,6 +41,15 @@ impl Interpreter {
         function: Value,
         args: &[ExpandedCallArg],
     ) -> Result<Value> {
+        // New-style dispatch: built-in callables migrated to `#[pyfunction]`
+        // are registered in `crate::builtin_registry`.  We probe it first;
+        // anything not yet migrated falls through to the legacy `match`
+        // cascade below.  See `crates/pyrust/src/builtin_registry.rs`.
+        if let ValueKind::BuiltinFunction(name) = function.kind()
+            && let Some(dispatch) = crate::builtin_registry::lookup(name)
+        {
+            return dispatch(self, args);
+        }
         match function.kind() {
             ValueKind::BuiltinFunction("print") => {
                 let print_options = self.parse_print_options_expanded(args)?;
@@ -677,112 +686,9 @@ impl Interpreter {
                 }
             }
 
-            ValueKind::BuiltinFunction("sys.exit") => {
-                reject_keyword_args_expanded("sys.exit", args)?;
-                let arg = if args.is_empty() {
-                    Value::int(0)
-                } else {
-                    args[0].value.clone()
-                };
-                // Raise SystemExit like CPython — lets finally/with handlers run.
-                // Look up the SystemExit class and instantiate it with the original arg
-                // so program.rs can extract the integer exit code without reparsing a string.
-                let class = match lookup_name_in_module(&self.env, "SystemExit") {
-                    Some(v) => match v.kind() {
-                        ValueKind::PyClass(c) => Rc::clone(c),
-                        _ => return Err(PyError::Runtime(
-                            "built-in exception 'SystemExit' is not defined".to_string(),
-                        )),
-                    },
-                    None => return Err(PyError::Runtime(
-                        "built-in exception 'SystemExit' is not defined".to_string(),
-                    )),
-                };
-                let exc = instantiate_exception(class, vec![arg]);
-                Err(PyError::Raised(exc))
-            }
-            ValueKind::BuiltinFunction(
-                name @ ("math.floor" | "math.ceil" | "math.sqrt" | "math.fabs" | "math.sin"
-                | "math.cos" | "math.tan" | "math.asin" | "math.acos" | "math.atan"
-                | "math.exp" | "math.log2" | "math.log10" | "math.isnan" | "math.isinf"),
-            ) => {
-                reject_keyword_args_expanded(name, args)?;
-                if args.len() != 1 {
-                    return Err(PyError::Runtime(format!(
-                        "{name}() takes exactly one argument"
-                    )));
-                }
-                let x = value_to_float(&args[0].value, name)?;
-                match name {
-                    "math.floor" => {
-                        let f = x.floor();
-                        if f > i64::MAX as f64 || f < i64::MIN as f64 {
-                            Ok(float_to_bigint(f))
-                        } else {
-                            Ok(Value::int(f as i64))
-                        }
-                    }
-                    "math.ceil" => {
-                        let f = x.ceil();
-                        if f > i64::MAX as f64 || f < i64::MIN as f64 {
-                            Ok(float_to_bigint(f))
-                        } else {
-                            Ok(Value::int(f as i64))
-                        }
-                    }
-                    "math.sqrt" => Ok(Value::float(x.sqrt())),
-                    "math.fabs" => Ok(Value::float(x.abs())),
-                    "math.sin" => Ok(Value::float(x.sin())),
-                    "math.cos" => Ok(Value::float(x.cos())),
-                    "math.tan" => Ok(Value::float(x.tan())),
-                    "math.asin" => Ok(Value::float(x.asin())),
-                    "math.acos" => Ok(Value::float(x.acos())),
-                    "math.atan" => Ok(Value::float(x.atan())),
-                    "math.exp" => Ok(Value::float(x.exp())),
-                    "math.log2" => Ok(Value::float(x.log2())),
-                    "math.log10" => Ok(Value::float(x.log10())),
-                    "math.isnan" => Ok(Value::bool_(x.is_nan())),
-                    "math.isinf" => Ok(Value::bool_(x.is_infinite())),
-                    _ => unreachable!(),
-                }
-            }
-            ValueKind::BuiltinFunction("math.pow") => {
-                reject_keyword_args_expanded("math.pow", args)?;
-                if args.len() != 2 {
-                    return Err(PyError::Runtime(
-                        "math.pow() takes exactly two arguments".to_string(),
-                    ));
-                }
-                let x = value_to_float(&args[0].value, "math.pow")?;
-                let y = value_to_float(&args[1].value, "math.pow")?;
-                Ok(Value::float(x.powf(y)))
-            }
-            ValueKind::BuiltinFunction("math.atan2") => {
-                reject_keyword_args_expanded("math.atan2", args)?;
-                if args.len() != 2 {
-                    return Err(PyError::Runtime(
-                        "math.atan2() takes exactly two arguments".to_string(),
-                    ));
-                }
-                let y = value_to_float(&args[0].value, "math.atan2")?;
-                let x = value_to_float(&args[1].value, "math.atan2")?;
-                Ok(Value::float(y.atan2(x)))
-            }
-            ValueKind::BuiltinFunction("math.log") => {
-                reject_keyword_args_expanded("math.log", args)?;
-                if args.is_empty() || args.len() > 2 {
-                    return Err(PyError::Runtime(
-                        "math.log() takes one or two arguments".to_string(),
-                    ));
-                }
-                let x = value_to_float(&args[0].value, "math.log")?;
-                if args.len() == 2 {
-                    let base = value_to_float(&args[1].value, "math.log")?;
-                    Ok(Value::float(x.log(base)))
-                } else {
-                    Ok(Value::float(x.ln()))
-                }
-            }
+            // `sys.exit` migrated to `crate::builtin_registry_modules::sys`.
+            // `math.*` arms migrated to `crate::builtin_registry_modules::math`
+            // and dispatched via the registry probe at the top of this fn.
             ValueKind::BuiltinFunction("__vcall__") => {
                 if args.len() != 3 {
                     return Err(PyError::Runtime("__vcall__ requires 3 arguments".to_string()));

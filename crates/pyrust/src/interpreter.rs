@@ -23,7 +23,7 @@ const ENV_POOL_MAX: usize = 64;
 const SPEC_THRESHOLD: u8 = 8;
 
 pub struct Interpreter {
-    env: EnvRef,
+    pub(crate) env: EnvRef,
     active_exception: Option<Value>,
     script_dir: Option<PathBuf>,
     module_cache: ModuleCache,

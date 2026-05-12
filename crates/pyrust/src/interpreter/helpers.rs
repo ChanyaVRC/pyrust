@@ -186,9 +186,9 @@ struct PrintOptions {
 }
 
 #[derive(Debug, Clone)]
-struct ExpandedCallArg {
-    name: Option<String>,
-    value: Value,
+pub(crate) struct ExpandedCallArg {
+    pub(crate) name: Option<String>,
+    pub(crate) value: Value,
 }
 
 fn extract_optional_string(value: Value, name: &str) -> Result<Option<String>> {
@@ -202,7 +202,7 @@ fn extract_optional_string(value: Value, name: &str) -> Result<Option<String>> {
     }
 }
 
-fn reject_keyword_args_expanded(function_name: &str, args: &[ExpandedCallArg]) -> Result<()> {
+pub(crate) fn reject_keyword_args_expanded(function_name: &str, args: &[ExpandedCallArg]) -> Result<()> {
     if args.iter().any(|arg| arg.name.is_some()) {
         return Err(PyError::Runtime(format!(
             "{}() does not accept keyword arguments",
@@ -255,7 +255,7 @@ fn is_exception_class(class: &Rc<RefCell<PyClass>>) -> bool {
     base.is_some_and(|base| is_exception_class(&base))
 }
 
-fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value>) -> Value {
+pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value>) -> Value {
     let mut attrs = HashMap::new();
     attrs.insert("args".to_string(), Value::list(args));
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
@@ -388,7 +388,7 @@ fn module_env(env: &EnvRef) -> EnvRef {
     }
 }
 
-fn lookup_name_in_module(env: &EnvRef, name: &str) -> Option<Value> {
+pub(crate) fn lookup_name_in_module(env: &EnvRef, name: &str) -> Option<Value> {
     module_env(env).borrow().values.get(name).cloned()
 }
 
@@ -944,7 +944,7 @@ pub(crate) fn compute_def_bound_mask(
     mask
 }
 
-fn float_to_bigint(f: f64) -> Value {
+pub(crate) fn float_to_bigint(f: f64) -> Value {
     use crate::value::PyBigInt;
     // Convert via the decimal string representation of the f64's integer value.
     let s = format!("{:.0}", f);
@@ -952,7 +952,7 @@ fn float_to_bigint(f: f64) -> Value {
     Value::bigint(n)
 }
 
-fn value_to_float(v: &Value, ctx: &str) -> Result<f64> {
+pub(crate) fn value_to_float(v: &Value, ctx: &str) -> Result<f64> {
     match v.kind() {
         ValueKind::Float(f) => Ok(f),
         ValueKind::Int(i) => Ok(i as f64),
