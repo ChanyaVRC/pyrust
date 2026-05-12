@@ -48,12 +48,14 @@ fn sort(items: &mut Vec<Value>, args: &[Value], kwargs: &IndexMap<PyKey, Value>)
 }
 
 fn extract_reverse(args: &[Value], kwargs: &IndexMap<PyKey, Value>) -> Result<bool> {
+    // Cache the kwarg PyKey once to avoid a `String` allocation on every
+    // list.sort() call. See issue #277.
+    static REVERSE_KW: std::sync::LazyLock<PyKey> =
+        std::sync::LazyLock::new(|| PyKey::Str("reverse".to_string()));
     Ok(
         match (
             args.first().map(|v| v.kind()),
-            kwargs
-                .get(&PyKey::Str("reverse".to_string()))
-                .map(|v| v.kind()),
+            kwargs.get(&*REVERSE_KW).map(|v| v.kind()),
         ) {
             (_, Some(ValueKind::Bool(b))) => b,
             (_, Some(ValueKind::Int(0))) => false,
