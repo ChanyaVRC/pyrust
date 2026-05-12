@@ -40,6 +40,7 @@ impl Default for Interpreter {
     fn default() -> Self {
         let env = Environment::new(None);
         install_exception_builtins(&env);
+        install_singleton_builtins(&env);
         Self {
             env,
             active_exception: None,

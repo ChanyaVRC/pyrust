@@ -345,6 +345,14 @@ fn install_exception_builtins(env: &EnvRef) {
     module
         .values
         .insert("SystemExit".to_string(), Value::py_class(system_exit));
+}
+
+/// Register built-in singleton values (currently just `NotImplemented`).
+/// Kept separate from `install_exception_builtins` because singletons are
+/// neither exceptions nor classes; future additions like `Ellipsis` will
+/// live here too.
+fn install_singleton_builtins(env: &EnvRef) {
+    let mut module = env.borrow_mut();
     module
         .values
         .insert("NotImplemented".to_string(), Value::not_implemented());
