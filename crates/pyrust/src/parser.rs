@@ -412,6 +412,13 @@ impl Parser {
         // Type annotation:  target: Type [= rhs]
         // Only valid when there's a single non-starred target.  The annotation
         // value is parsed and discarded (we don't track types at runtime).
+        //
+        // Divergence from CPython: the annotation expression is parsed but not
+        // evaluated. CPython evaluates annotations at runtime (unless
+        // `from __future__ import annotations` is in effect), so observable
+        // side effects inside an annotation are silently dropped here. In
+        // practice annotations are almost always pure type expressions, so we
+        // accept this trade-off in exchange for a single-line parser hook.
         if self.is(&Token::Colon)
             && targets.len() == 1
             && !starred_flags[0]

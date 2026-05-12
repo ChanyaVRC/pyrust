@@ -39,15 +39,32 @@ result = c.set(5)
 assert c.x == 5
 assert result == 6
 
-# Annotation with simple type names (complex generic syntax with comma needs extended indexing)
+# Annotation with simple type names
+# Note: multi-arg generic syntax like tuple[int, str] / dict[str, int] is
+# blocked by the subscript-with-comma parser limitation tracked in #268
+# — this is independent of variable annotations.
 flag: bool = True
 items: dict = {"a": 1, "b": 2}
 assert flag is True
 assert items["a"] == 1
 
-# Nested generic types (single-arg form; tuple[int, str] needs extended indexing support)
+# Single-arg generic types parse fine
 pair: list[int] = [1, 2]
 assert pair == [1, 2]
+
+# Class body: bare annotation must NOT create a class attribute
+class WithBare:
+    a: int = 1   # creates class attr
+    b: int       # bare — no attr
+
+assert hasattr(WithBare, "a")
+assert not hasattr(WithBare, "b")
+assert WithBare.a == 1
+
+# Subscript annotation (CPython allows it on subscriptable targets)
+items_dict = {}
+items_dict[0]: int = 99
+assert items_dict == {0: 99}
 
 # Walrus and annotation can coexist
 n: int = 0
