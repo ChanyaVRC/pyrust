@@ -244,7 +244,7 @@ pub(crate) fn class_is_subclass_of(class: &Rc<RefCell<PyClass>>, expected: &Rc<R
     base.is_some_and(|base| class_is_subclass_of(&base, expected))
 }
 
-fn is_exception_class(class: &Rc<RefCell<PyClass>>) -> bool {
+pub(crate) fn is_exception_class(class: &Rc<RefCell<PyClass>>) -> bool {
     let (name, base) = {
         let borrowed = class.borrow();
         (borrowed.name.clone(), borrowed.base.clone())

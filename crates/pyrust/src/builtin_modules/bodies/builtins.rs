@@ -19,9 +19,10 @@ use crate::ast::BinaryOp;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::{
-    NativeIterFrame, ascii_repr, class_is_subclass_of, compare_values, dir_names, iter_values,
-    lookup_class_attr, modpow_i64, py_mod_i64, py_round_half_even, py_round_half_even_f64,
-    reject_keyword_args_expanded, value_to_float, value_type_name_str,
+    NativeIterFrame, ascii_repr, class_is_subclass_of, compare_values, dir_names,
+    is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_mod_i64,
+    py_round_half_even, py_round_half_even_f64, reject_keyword_args_expanded, value_to_float,
+    value_type_name_str,
 };
 use crate::value::{PyClass, PyKey, Value, ValueKind, range_len};
 use pyrust_derive::pyrust_module;
@@ -1143,6 +1144,298 @@ pyrust_module! {
                 "TypeError",
                 format!("{FN_NAME}() argument must be a number"),
             )),
+        }
+    }
+
+    /// CPython: list([iterable]) — list constructor.
+    /// <https://docs.python.org/3/library/functions.html#list>
+    fn list(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        match args.len() {
+            0 => Ok(Value::list(vec![])),
+            1 => Ok(Value::list(_interp.collect_iterable(args[0].value.clone())?)),
+            _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most one argument"))),
+        }
+    }
+
+    /// CPython: tuple([iterable]) — tuple constructor.
+    /// <https://docs.python.org/3/library/functions.html#tuple>
+    fn tuple(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        match args.len() {
+            0 => Ok(Value::tuple(vec![])),
+            1 => Ok(Value::tuple(_interp.collect_iterable(args[0].value.clone())?)),
+            _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most one argument"))),
+        }
+    }
+
+    /// CPython: bytes() — bytes constructor.
+    /// <https://docs.python.org/3/library/functions.html#func-bytes>
+    fn bytes(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        match args.len() {
+            0 => Ok(Value::bytes(Vec::new())),
+            1 => match args[0].value.kind() {
+                ValueKind::Int(n) => {
+                    if n < 0 {
+                        return Err(PyError::named("ValueError", "negative count".to_string()));
+                    }
+                    Ok(Value::bytes(vec![0u8; n as usize]))
+                }
+                ValueKind::Bytes(rc) => Ok(Value::bytes((**rc).clone())),
+                ValueKind::Str(_) => Err(PyError::named(
+                    "TypeError",
+                    "string argument without an encoding".to_string(),
+                )),
+                ValueKind::List(items) | ValueKind::Tuple(items) => {
+                    let mut out = Vec::with_capacity(items.len());
+                    for v in items {
+                        match v.kind() {
+                            ValueKind::Int(n) if (0..=255).contains(&n) => out.push(n as u8),
+                            ValueKind::Int(_) => return Err(PyError::named(
+                                "ValueError",
+                                "bytes must be in range(0, 256)".to_string(),
+                            )),
+                            _ => return Err(PyError::named(
+                                "TypeError",
+                                "bytes element must be an integer".to_string(),
+                            )),
+                        }
+                    }
+                    Ok(Value::bytes(out))
+                }
+                _ => Err(PyError::named(
+                    "TypeError",
+                    "cannot convert to bytes".to_string(),
+                )),
+            },
+            _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most 1 positional argument"))),
+        }
+    }
+
+    /// CPython: complex(real=0, imag=0) — complex number.
+    /// <https://docs.python.org/3/library/functions.html#complex>
+    fn complex(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        let to_f64 = |v: &Value, what: &str| -> Result<f64> {
+            match v.kind() {
+                ValueKind::Int(n) => Ok(n as f64),
+                ValueKind::Float(f) => Ok(f),
+                ValueKind::Bool(b) => Ok(if b { 1.0 } else { 0.0 }),
+                _ => Err(PyError::named(
+                    "TypeError",
+                    format!("complex() {what} argument must be a number"),
+                )),
+            }
+        };
+        match args.len() {
+            0 => Ok(Value::complex(0.0, 0.0)),
+            1 => match args[0].value.kind() {
+                ValueKind::Complex(re, im) => Ok(Value::complex(re, im)),
+                _ => Ok(Value::complex(to_f64(&args[0].value, "real")?, 0.0)),
+            },
+            2 => {
+                let re = to_f64(&args[0].value, "real")?;
+                let im = to_f64(&args[1].value, "imag")?;
+                Ok(Value::complex(re, im))
+            }
+            _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most 2 arguments"))),
+        }
+    }
+
+    /// CPython: set([iterable]) — set constructor.
+    /// <https://docs.python.org/3/library/functions.html#func-set>
+    fn set(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        match args.len() {
+            0 => Ok(Value::set(indexmap::IndexSet::new())),
+            1 => {
+                let items = _interp.collect_iterable(args[0].value.clone())?;
+                let mut set = indexmap::IndexSet::new();
+                for item in items {
+                    let key = item.to_key().ok_or_else(|| {
+                        PyError::Runtime("unhashable type in set".to_string())
+                    })?;
+                    set.insert(key);
+                }
+                Ok(Value::set(set))
+            }
+            _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most one argument"))),
+        }
+    }
+
+    /// CPython: frozenset([iterable]) — frozenset constructor.
+    /// <https://docs.python.org/3/library/functions.html#func-frozenset>
+    fn frozenset(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        match args.len() {
+            0 => Ok(pyrust_builtins::frozenset::frozenset(indexmap::IndexSet::new())),
+            1 => {
+                // frozenset(frozenset_instance) returns the same object (per CPython).
+                if let Some(rc) = pyrust_builtins::frozenset::as_items(&args[0].value) {
+                    return Ok(pyrust_builtins::frozenset::frozenset_rc(rc));
+                }
+                let items = _interp.collect_iterable(args[0].value.clone())?;
+                let mut set = indexmap::IndexSet::new();
+                for item in items {
+                    let key = item.to_key().ok_or_else(|| {
+                        PyError::named("TypeError", "unhashable type in frozenset".to_string())
+                    })?;
+                    set.insert(key);
+                }
+                Ok(pyrust_builtins::frozenset::frozenset(set))
+            }
+            _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most one argument"))),
+        }
+    }
+
+    /// CPython: str(object='') — string constructor.
+    /// <https://docs.python.org/3/library/functions.html#func-str>
+    fn str(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        match args.len() {
+            0 => Ok(Value::string(String::new())),
+            1 => {
+                let val = args[0].value.clone();
+                // Try __str__ on PyInstance, fall back to __repr__, then default.
+                // Exception instances use the built-in to_py_str() formatting.
+                if let ValueKind::PyInstance(inst) = val.kind() {
+                    let inst_rc = Rc::clone(inst);
+                    let class = Rc::clone(&inst_rc.borrow().class);
+                    if is_exception_class(&class) {
+                        return Ok(Value::string(val.to_py_str()));
+                    }
+                    for dunder in &["__str__", "__repr__"] {
+                        if let Some(method_val) = lookup_class_attr(&class, dunder)
+                            && let ValueKind::UserFunction(f) = method_val.kind()
+                        {
+                            let func = Rc::clone(f);
+                            let result = _interp.call_user_function_expanded(
+                                func,
+                                &[],
+                                &[Value::py_instance(Rc::clone(&inst_rc))],
+                            )?;
+                            return match result.kind() {
+                                ValueKind::Str(_) => Ok(result),
+                                _ => Err(PyError::named(
+                                    "TypeError",
+                                    format!("{dunder} returned non-string"),
+                                )),
+                            };
+                        }
+                    }
+                    let class_name = class.borrow().name.clone();
+                    return Ok(Value::string(format!("<{class_name} object>")));
+                }
+                Ok(Value::string(val.to_py_str()))
+            }
+            _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most one argument"))),
+        }
+    }
+
+    /// CPython: int(x=0, base=10) — integer constructor.
+    /// <https://docs.python.org/3/library/functions.html#int>
+    fn int(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        match args.len() {
+            0 => Ok(Value::int(0)),
+            1 => match args[0].value.kind() {
+                ValueKind::Int(v) => Ok(Value::int(v)),
+                ValueKind::Float(v) => Ok(Value::int(v as i64)),
+                ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
+                ValueKind::Str(s) => s.trim().parse::<i64>().map(Value::int).map_err(|_| {
+                    PyError::named(
+                        "ValueError",
+                        format!("invalid literal for int() with base 10: '{s}'"),
+                    )
+                }),
+                _ => Err(PyError::Runtime(format!(
+                    "{FN_NAME}() argument must be a number or string",
+                ))),
+            },
+            2 => {
+                let base = match args[1].value.kind() {
+                    ValueKind::Int(b) if (2..=36).contains(&b) => b as u32,
+                    ValueKind::Int(b) => return Err(PyError::named(
+                        "ValueError",
+                        format!("int() base must be >= 2 and <= 36, or 0, not {b}"),
+                    )),
+                    _ => return Err(PyError::Runtime(format!("{FN_NAME}() base must be an integer"))),
+                };
+                match args[0].value.kind() {
+                    ValueKind::Str(s) => {
+                        let stripped = s.trim();
+                        let stripped = if (base == 16 && (stripped.starts_with("0x") || stripped.starts_with("0X")))
+                            || (base == 2 && (stripped.starts_with("0b") || stripped.starts_with("0B")))
+                            || (base == 8 && (stripped.starts_with("0o") || stripped.starts_with("0O")))
+                        {
+                            &stripped[2..]
+                        } else {
+                            stripped
+                        };
+                        i64::from_str_radix(stripped, base).map(Value::int).map_err(|_| {
+                            PyError::named(
+                                "ValueError",
+                                format!("invalid literal for int() with base {base}: '{}'", s.trim()),
+                            )
+                        })
+                    }
+                    _ => Err(PyError::Runtime(format!(
+                        "{FN_NAME}() can't convert non-string with explicit base",
+                    ))),
+                }
+            }
+            _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most two arguments"))),
+        }
+    }
+
+    /// CPython: float(x=0.0) — float constructor.
+    /// <https://docs.python.org/3/library/functions.html#float>
+    fn float(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        match args.len() {
+            0 => Ok(Value::float(0.0)),
+            1 => match args[0].value.kind() {
+                ValueKind::Float(v) => Ok(Value::float(v)),
+                ValueKind::Int(v) => Ok(Value::float(v as f64)),
+                ValueKind::Bool(b) => Ok(Value::float(if b { 1.0 } else { 0.0 })),
+                ValueKind::Str(s) => s.trim().parse::<f64>().map(Value::float).map_err(|_| {
+                    PyError::Runtime(format!("could not convert string to float: '{s}'"))
+                }),
+                _ => Err(PyError::Runtime(format!(
+                    "{FN_NAME}() argument must be a number or string",
+                ))),
+            },
+            _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most one argument"))),
+        }
+    }
+
+    /// CPython: bool(x=False) — bool constructor.
+    /// <https://docs.python.org/3/library/functions.html#bool>
+    fn bool(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        match args.len() {
+            0 => Ok(Value::bool_(false)),
+            1 => {
+                let val = args[0].value.clone();
+                let result = _interp.truthy_value(&val)?;
+                Ok(Value::bool_(result))
+            }
+            _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most one argument"))),
+        }
+    }
+
+    /// CPython: dict() — empty dict (rich constructor forms unsupported).
+    /// <https://docs.python.org/3/library/functions.html#func-dict>
+    fn dict(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.is_empty() {
+            Ok(Value::dict(indexmap::IndexMap::new()))
+        } else {
+            Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() with arguments is not yet supported"),
+            ))
         }
     }
 

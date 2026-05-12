@@ -486,7 +486,7 @@ impl Interpreter {
     }
 
     /// Like `Value::truthy()` but dispatches `__bool__` / `__len__` for instances.
-    fn truthy_value(&mut self, value: &Value) -> Result<bool> {
+    pub(crate) fn truthy_value(&mut self, value: &Value) -> Result<bool> {
         if let ValueKind::PyInstance(inst) = value.kind() {
             let inst_rc = Rc::clone(inst);
             let class = Rc::clone(&inst_rc.borrow().class);
