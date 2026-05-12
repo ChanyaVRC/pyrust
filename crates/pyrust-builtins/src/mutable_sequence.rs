@@ -62,6 +62,7 @@ fn type_name_of(v: &Value) -> &'static str {
         ValueKind::NotImplemented => "NotImplementedType",
         ValueKind::BuiltinBoundMethod { .. } => "builtin_function_or_method",
         ValueKind::FrozenSet(_) => "frozenset",
+        ValueKind::Bytes(_) => "bytes",
     }
 }
 

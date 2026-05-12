@@ -1659,6 +1659,15 @@ impl Parser {
                 }
                 Ok(Expr::Str(s))
             }
+            Some(Token::Bytes(v)) => {
+                self.bump();
+                let mut bs = v;
+                while let Some(Token::Bytes(next)) = self.current().cloned() {
+                    self.bump();
+                    bs.extend_from_slice(&next);
+                }
+                Ok(Expr::Bytes(bs))
+            }
             Some(Token::FString(lex_parts)) => {
                 self.bump();
                 let parts = self.parse_fstring_parts(lex_parts)?;

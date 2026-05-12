@@ -99,6 +99,7 @@ impl Interpreter {
                     ValueKind::Tuple(items) => items.len() as i64,
                     ValueKind::Set(items) => items.len() as i64,
                     ValueKind::FrozenSet(rc) => rc.len() as i64,
+                    ValueKind::Bytes(rc) => rc.len() as i64,
                     ValueKind::Dict(items) => items.len() as i64,
                     ValueKind::Range { start, stop, step } => range_len(start, stop, step),
                     ValueKind::PyInstance(inst) => {
@@ -378,6 +379,54 @@ impl Interpreter {
                 }
             }
 
+            ValueKind::BuiltinFunction("bytes") => {
+                reject_keyword_args_expanded("bytes", args)?;
+                match args.len() {
+                    0 => Ok(Value::bytes(Vec::new())),
+                    1 => match args[0].value.kind() {
+                        ValueKind::Int(n) => {
+                            if n < 0 {
+                                return Err(PyError::Named(
+                                    "ValueError".to_string(),
+                                    "negative count".to_string(),
+                                ));
+                            }
+                            Ok(Value::bytes(vec![0u8; n as usize]))
+                        }
+                        ValueKind::Bytes(rc) => Ok(Value::bytes((**rc).clone())),
+                        ValueKind::Str(_) => Err(PyError::Named(
+                            "TypeError".to_string(),
+                            "string argument without an encoding".to_string(),
+                        )),
+                        ValueKind::List(items) | ValueKind::Tuple(items) => {
+                            let mut out = Vec::with_capacity(items.len());
+                            for v in items {
+                                match v.kind() {
+                                    ValueKind::Int(n) if (0..=255).contains(&n) => {
+                                        out.push(n as u8);
+                                    }
+                                    ValueKind::Int(_) => return Err(PyError::Named(
+                                        "ValueError".to_string(),
+                                        "bytes must be in range(0, 256)".to_string(),
+                                    )),
+                                    _ => return Err(PyError::Named(
+                                        "TypeError".to_string(),
+                                        "bytes element must be an integer".to_string(),
+                                    )),
+                                }
+                            }
+                            Ok(Value::bytes(out))
+                        }
+                        _ => Err(PyError::Named(
+                            "TypeError".to_string(),
+                            "cannot convert to bytes".to_string(),
+                        )),
+                    },
+                    _ => Err(PyError::Runtime(
+                        "bytes() takes at most 1 positional argument".to_string(),
+                    )),
+                }
+            }
             ValueKind::BuiltinFunction("set") => {
                 reject_keyword_args_expanded("set", args)?;
                 match args.len() {
@@ -697,6 +746,7 @@ impl Interpreter {
                     (ValueKind::Tuple(_), ValueKind::BuiltinFunction("tuple")) => true,
                     (ValueKind::Set(_), ValueKind::BuiltinFunction("set")) => true,
                     (ValueKind::FrozenSet(_), ValueKind::BuiltinFunction("frozenset")) => true,
+                    (ValueKind::Bytes(_), ValueKind::BuiltinFunction("bytes")) => true,
                     (ValueKind::Dict(_), ValueKind::BuiltinFunction("dict")) => true,
                     _ => false,
                 };
@@ -805,6 +855,7 @@ impl Interpreter {
                     ValueKind::NotImplemented => Ok(Value::builtin_function("NotImplementedType")),
                     ValueKind::BuiltinBoundMethod { .. } => Ok(Value::builtin_function("builtin_function_or_method")),
                     ValueKind::FrozenSet(_) => Ok(Value::builtin_function("frozenset")),
+                    ValueKind::Bytes(_) => Ok(Value::builtin_function("bytes")),
                 }
             }
             ValueKind::BuiltinFunction("id") => {

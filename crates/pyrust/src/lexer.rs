@@ -105,6 +105,13 @@ impl Lexer {
                         let (tok, next) = lex_fstring(&chars, pos + 2, quote)?;
                         self.tokens.push(tok);
                         pos = next;
+                    } else if (c == 'b' || c == 'B')
+                        && matches!(chars.get(pos + 1), Some('"') | Some('\''))
+                    {
+                        // Bytes literal: b"..." or b'...' (no rb/br combos yet)
+                        let (tok, next) = lex_bytes(&chars, pos + 1)?;
+                        self.tokens.push(tok);
+                        pos = next;
                     } else {
                         let (tok, next) = lex_ident_or_keyword(&chars, pos);
                         self.tokens.push(tok);
@@ -487,6 +494,65 @@ fn lex_ident_or_keyword(chars: &[char], start: usize) -> (Token, usize) {
     };
 
     (tok, pos)
+}
+
+fn lex_bytes(chars: &[char], start: usize) -> Result<(Token, usize)> {
+    let quote = chars[start];
+    let mut pos = start + 1;
+    let mut out: Vec<u8> = Vec::new();
+    while let Some(c) = chars.get(pos).copied() {
+        if c == quote {
+            return Ok((Token::Bytes(out), pos + 1));
+        }
+        if c == '\\' {
+            pos += 1;
+            let esc = chars
+                .get(pos)
+                .copied()
+                .ok_or_else(|| PyError::Lex("unterminated bytes escape".to_string()))?;
+            let mapped = match esc {
+                'n' => 0x0a,
+                't' => 0x09,
+                'r' => 0x0d,
+                '0' => 0x00,
+                '\\' => 0x5c,
+                '\'' => 0x27,
+                '"' => 0x22,
+                'x' => {
+                    // \xNN — two hex digits
+                    let hi = chars
+                        .get(pos + 1)
+                        .copied()
+                        .ok_or_else(|| PyError::Lex("incomplete \\x escape".to_string()))?;
+                    let lo = chars
+                        .get(pos + 2)
+                        .copied()
+                        .ok_or_else(|| PyError::Lex("incomplete \\x escape".to_string()))?;
+                    let v = u8::from_str_radix(&format!("{hi}{lo}"), 16)
+                        .map_err(|_| PyError::Lex("invalid \\x escape".to_string()))?;
+                    pos += 2;
+                    v
+                }
+                other => {
+                    return Err(PyError::Lex(format!(
+                        "unsupported escape in bytes literal: \\{other}"
+                    )));
+                }
+            };
+            out.push(mapped);
+            pos += 1;
+            continue;
+        }
+        // Non-ASCII characters not allowed in bytes literals
+        if (c as u32) > 0x7f {
+            return Err(PyError::Lex(format!(
+                "bytes can only contain ASCII literal characters (got {c:?})"
+            )));
+        }
+        out.push(c as u8);
+        pos += 1;
+    }
+    Err(PyError::Lex("unterminated bytes literal".to_string()))
 }
 
 fn lex_string(chars: &[char], start: usize) -> Result<(Token, usize)> {
