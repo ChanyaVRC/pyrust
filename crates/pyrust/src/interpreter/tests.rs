@@ -1066,4 +1066,52 @@ result = fact(10)
         // Issue #64: Value must be a NaN-boxed u64 (8 bytes), not a tagged enum.
         assert_eq!(std::mem::size_of::<Value>(), 8);
     }
+
+    /// Issue #272: `dir()` on a built-in type instance must surface every
+    /// name in the corresponding `pyrust_builtins::*::METHODS` slice, since
+    /// that slice is the single source of truth.  This locks in that the
+    /// `builtin_method_names` table is derived from `METHODS` rather than
+    /// duplicated.
+    #[test]
+    fn dir_covers_every_pyrust_builtins_methods_entry() {
+        fn dir_names(interp: &Interpreter, name: &str) -> Vec<String> {
+            let v = interp.lookup_name(name).unwrap().unwrap();
+            match v.kind() {
+                ValueKind::List(items) => items
+                    .iter()
+                    .map(|s| match s.kind() {
+                        ValueKind::Str(rc) => rc.to_string(),
+                        _ => panic!("dir() must return list of str"),
+                    })
+                    .collect(),
+                _ => panic!("dir() must return a list"),
+            }
+        }
+
+        let interp = run_program(
+            "ds = dir(\"\")\n\
+             dl = dir([])\n\
+             dt = dir(())\n\
+             dd = dir({})\n\
+             dset = dir(set())\n",
+        );
+
+        let cases: &[(&str, &[&str])] = &[
+            ("ds", pyrust_builtins::string::METHODS),
+            ("dl", pyrust_builtins::list::METHODS),
+            ("dt", pyrust_builtins::tuple::METHODS),
+            ("dd", pyrust_builtins::dict::METHODS),
+            ("dset", pyrust_builtins::set::METHODS),
+        ];
+
+        for (var, expected) in cases {
+            let got = dir_names(&interp, var);
+            for name in *expected {
+                assert!(
+                    got.iter().any(|g| g == name),
+                    "dir({var}) missing {name:?}; got {got:?}"
+                );
+            }
+        }
+    }
 }

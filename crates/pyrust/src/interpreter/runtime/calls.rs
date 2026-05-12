@@ -3291,49 +3291,36 @@ fn dir_names(value: &Value) -> Vec<String> {
     }
 }
 
-/// Hard-coded list of public method names per built-in type for `dir()`.
+/// Public method names per built-in type for `dir()`.
+///
+/// Derives the list from each type's canonical `METHODS` slice in
+/// `pyrust_builtins`, so adding a new method there automatically surfaces
+/// it via `dir()` without a parallel table to maintain.
+///
+/// `str.format` is appended explicitly because it is dispatched at the VM
+/// level rather than through `string::call` (see the comment on
+/// `pyrust_builtins::string::METHODS`).  This is the one method-name source
+/// of truth that lives outside `METHODS`.
 ///
 /// TODO: also include the dunder methods CPython exposes via `dir([])` /
 /// `dir("")` etc. (`__iter__`, `__len__`, `__getitem__`, `__contains__`,
 /// `__add__`, …). Programs that introspect protocol support via `dir()`
-/// currently get a partial answer. Once `#262` lands, this table should
-/// be derived from `pyrust_builtins::{string,list,…}::METHODS` to remove
-/// the third source of truth — see the PR review thread for the design
-/// discussion.
+/// currently get a partial answer.  Tracked separately.
 fn builtin_method_names(type_name: &str) -> Vec<String> {
     let names: &[&str] = match type_name {
-        "str" => &[
-            "capitalize", "casefold", "center", "count", "encode", "endswith",
-            "expandtabs", "find", "format", "index", "isalnum", "isalpha",
-            "isascii", "isdecimal", "isdigit", "isidentifier", "islower",
-            "isnumeric", "isprintable", "isspace", "istitle", "isupper", "join",
-            "ljust", "lower", "lstrip", "partition", "removeprefix",
-            "removesuffix", "replace", "rfind", "rindex", "rjust", "rpartition",
-            "rsplit", "rstrip", "split", "splitlines", "startswith", "strip",
-            "swapcase", "title", "upper", "zfill",
-        ],
-        "list" => &[
-            "append", "clear", "copy", "count", "extend", "index", "insert",
-            "pop", "remove", "reverse", "sort",
-        ],
-        "tuple" => &["count", "index"],
-        "dict" => &[
-            "clear", "copy", "get", "items", "keys", "pop", "popitem",
-            "setdefault", "update", "values",
-        ],
-        "set" => &[
-            "add", "clear", "copy", "difference", "difference_update",
-            "discard", "intersection", "intersection_update", "isdisjoint",
-            "issubset", "issuperset", "pop", "remove", "symmetric_difference",
-            "symmetric_difference_update", "union", "update",
-        ],
-        "frozenset" => &[
-            "copy", "difference", "intersection", "isdisjoint", "issubset",
-            "issuperset", "symmetric_difference", "union",
-        ],
+        "str" => pyrust_builtins::string::METHODS,
+        "list" => pyrust_builtins::list::METHODS,
+        "tuple" => pyrust_builtins::tuple::METHODS,
+        "dict" => pyrust_builtins::dict::METHODS,
+        "set" => pyrust_builtins::set::METHODS,
+        "frozenset" => pyrust_builtins::frozenset::METHODS,
         _ => &[],
     };
-    names.iter().map(|s| s.to_string()).collect()
+    let mut out: Vec<String> = names.iter().map(|s| (*s).to_string()).collect();
+    if type_name == "str" {
+        out.push("format".to_string());
+    }
+    out
 }
 
 /// Implements `str.format()`.  Parses `{...}` replacement fields in `template`
