@@ -40,6 +40,12 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_const_branch_elim(insns, &consts);
     let insns = pass_cmpjump_fusion(insns, num_locals);
     let insns = pass_not_invert(insns, num_locals);
+    // Run cmpjump fusion again: `pass_not_invert` can expose new
+    // `BinOp + Cond-Jump` pairs (e.g. when an outer `not` was stripped from
+    // `not (a == b)`, leaving `BinOp(Eq) + JumpIfTrue` ready to fuse into
+    // `CmpJumpIfTrue`).  This matters for `if not (...): ...` patterns,
+    // including the inversion emitted by the issue #287 trampoline rewrite.
+    let insns = pass_cmpjump_fusion(insns, num_locals);
     let insns = pass_binopinplace_downgrade(insns, num_locals);
     let insns = pass_exit_inline(insns);
     let insns = pass_licm(insns);
