@@ -1861,6 +1861,7 @@ fn vm_eval_unary(op: UnaryOp, val: Value) -> Result<Value> {
         UnaryOp::Neg => match val.kind() {
             ValueKind::Int(v) => Ok(Value::int(-v)),
             ValueKind::Float(v) => Ok(Value::float(-v)),
+            ValueKind::Complex(re, im) => Ok(Value::complex(-re, -im)),
             _ => Err(PyError::Named("TypeError".to_string(), "bad operand type for unary -".to_string())),
         },
         UnaryOp::Not => Ok(Value::bool_(!val.truthy())),

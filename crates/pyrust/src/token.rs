@@ -15,6 +15,8 @@ pub enum FStringPart {
 pub enum Token {
     Int(i64),
     Float(f64),
+    /// Imaginary literal, e.g. `3j` or `2.5j` (the f64 is the imaginary part)
+    Imag(f64),
     Str(String),
     Bytes(Vec<u8>),
     FString(Vec<FStringPart>),

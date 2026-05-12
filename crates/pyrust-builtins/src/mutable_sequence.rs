@@ -63,6 +63,7 @@ fn type_name_of(v: &Value) -> &'static str {
         ValueKind::BuiltinBoundMethod { .. } => "builtin_function_or_method",
         ValueKind::FrozenSet(_) => "frozenset",
         ValueKind::Bytes(_) => "bytes",
+        ValueKind::Complex(_, _) => "complex",
     }
 }
 

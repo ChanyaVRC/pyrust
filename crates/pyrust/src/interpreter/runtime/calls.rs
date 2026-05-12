@@ -267,6 +267,7 @@ impl Interpreter {
                     ValueKind::Int(v) => Ok(Value::int(v.abs())),
                     ValueKind::Float(v) => Ok(Value::float(v.abs())),
                     ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
+                    ValueKind::Complex(re, im) => Ok(Value::float((re * re + im * im).sqrt())),
                     _ => Err(PyError::Runtime(
                         "abs() argument must be a number".to_string(),
                     )),
@@ -424,6 +425,35 @@ impl Interpreter {
                     },
                     _ => Err(PyError::Runtime(
                         "bytes() takes at most 1 positional argument".to_string(),
+                    )),
+                }
+            }
+            ValueKind::BuiltinFunction("complex") => {
+                reject_keyword_args_expanded("complex", args)?;
+                let to_f64 = |v: &Value, what: &str| -> Result<f64> {
+                    match v.kind() {
+                        ValueKind::Int(n) => Ok(n as f64),
+                        ValueKind::Float(f) => Ok(f),
+                        ValueKind::Bool(b) => Ok(if b { 1.0 } else { 0.0 }),
+                        _ => Err(PyError::Named(
+                            "TypeError".to_string(),
+                            format!("complex() {what} argument must be a number"),
+                        )),
+                    }
+                };
+                match args.len() {
+                    0 => Ok(Value::complex(0.0, 0.0)),
+                    1 => match args[0].value.kind() {
+                        ValueKind::Complex(re, im) => Ok(Value::complex(re, im)),
+                        _ => Ok(Value::complex(to_f64(&args[0].value, "real")?, 0.0)),
+                    },
+                    2 => {
+                        let re = to_f64(&args[0].value, "real")?;
+                        let im = to_f64(&args[1].value, "imag")?;
+                        Ok(Value::complex(re, im))
+                    }
+                    _ => Err(PyError::Runtime(
+                        "complex() takes at most 2 arguments".to_string(),
                     )),
                 }
             }
@@ -747,6 +777,7 @@ impl Interpreter {
                     (ValueKind::Set(_), ValueKind::BuiltinFunction("set")) => true,
                     (ValueKind::FrozenSet(_), ValueKind::BuiltinFunction("frozenset")) => true,
                     (ValueKind::Bytes(_), ValueKind::BuiltinFunction("bytes")) => true,
+                    (ValueKind::Complex(_, _), ValueKind::BuiltinFunction("complex")) => true,
                     (ValueKind::Dict(_), ValueKind::BuiltinFunction("dict")) => true,
                     _ => false,
                 };
@@ -856,6 +887,7 @@ impl Interpreter {
                     ValueKind::BuiltinBoundMethod { .. } => Ok(Value::builtin_function("builtin_function_or_method")),
                     ValueKind::FrozenSet(_) => Ok(Value::builtin_function("frozenset")),
                     ValueKind::Bytes(_) => Ok(Value::builtin_function("bytes")),
+                    ValueKind::Complex(_, _) => Ok(Value::builtin_function("complex")),
                 }
             }
             ValueKind::BuiltinFunction("id") => {
@@ -1068,6 +1100,9 @@ impl Interpreter {
                             }
                         }
                         Ok(result)
+                    }
+                    ValueKind::Complex(re, im) if method == "conjugate" => {
+                        Ok(Value::complex(re, -im))
                     }
                     _ => Err(PyError::Named(
                         "TypeError".to_string(),

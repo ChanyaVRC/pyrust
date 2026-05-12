@@ -9,6 +9,7 @@ impl Interpreter {
             Expr::Float(v) => Ok(Value::float(*v)),
             Expr::Str(v) => Ok(Value::string(v.clone())),
             Expr::Bytes(v) => Ok(Value::bytes(v.clone())),
+            Expr::Complex(re, im) => Ok(Value::complex(*re, *im)),
             Expr::Bool(v) => Ok(Value::bool_(*v)),
             Expr::None => Ok(Value::none()),
             Expr::Var(name) => {
@@ -48,6 +49,7 @@ impl Interpreter {
                         match value.kind() {
                             ValueKind::Int(v) => Ok(Value::int(-v)),
                             ValueKind::Float(v) => Ok(Value::float(-v)),
+                            ValueKind::Complex(re, im) => Ok(Value::complex(-re, -im)),
                             _ => Err(PyError::Named("TypeError".to_string(), "bad operand type for unary -".to_string())),
                         }
                     }
@@ -515,6 +517,9 @@ impl Interpreter {
     }
 
     fn add(&self, left: Value, right: Value) -> Result<Value> {
+        if let Some((a, b)) = both_as_complex(&left, &right) {
+            return Ok(Value::complex(a.0 + b.0, a.1 + b.1));
+        }
         let (l, r) = (coerce_numeric(left), coerce_numeric(right));
         match (l.kind(), r.kind()) {
                 (ValueKind::Int(a), ValueKind::Int(b)) => Ok(match a.checked_add(b) {
@@ -540,6 +545,9 @@ impl Interpreter {
     }
 
     fn sub(&self, left: Value, right: Value) -> Result<Value> {
+        if let Some((a, b)) = both_as_complex(&left, &right) {
+            return Ok(Value::complex(a.0 - b.0, a.1 - b.1));
+        }
         let (l, r) = (coerce_numeric(left), coerce_numeric(right));
         match (l.kind(), r.kind()) {
             (ValueKind::Int(a), ValueKind::Int(b)) => Ok(match a.checked_sub(b) {
@@ -554,6 +562,10 @@ impl Interpreter {
     }
 
     fn mul(&self, left: Value, right: Value) -> Result<Value> {
+        if let Some((a, b)) = both_as_complex(&left, &right) {
+            // (ar+ai*j) * (br+bi*j) = (ar*br - ai*bi) + (ar*bi + ai*br)j
+            return Ok(Value::complex(a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0));
+        }
         let (l, r) = (coerce_numeric(left), coerce_numeric(right));
         match (l.kind(), r.kind()) {
             (ValueKind::Int(a), ValueKind::Int(b)) => Ok(match a.checked_mul(b) {
@@ -659,6 +671,20 @@ impl Interpreter {
 
 
     fn div(&self, left: Value, right: Value) -> Result<Value> {
+        if let Some((a, b)) = both_as_complex(&left, &right) {
+            // (ar+ai*j) / (br+bi*j) = ((ar*br + ai*bi) + (ai*br - ar*bi)j) / (br^2 + bi^2)
+            let denom = b.0 * b.0 + b.1 * b.1;
+            if denom == 0.0 {
+                return Err(PyError::Named(
+                    "ZeroDivisionError".to_string(),
+                    "complex division by zero".to_string(),
+                ));
+            }
+            return Ok(Value::complex(
+                (a.0 * b.0 + a.1 * b.1) / denom,
+                (a.1 * b.0 - a.0 * b.1) / denom,
+            ));
+        }
         let (a, b) = self.to_pair_number(left, right)?;
         if b == 0.0 {
             return Err(PyError::Runtime("division by zero".to_string()));
@@ -1114,6 +1140,7 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
         "vars" => Some(Value::builtin_function("vars")),
         "dir" => Some(Value::builtin_function("dir")),
         "NotImplemented" => Some(Value::not_implemented()),
+        "complex" => Some(Value::builtin_function("complex")),
         _ => None,
     }
 }
@@ -1182,4 +1209,29 @@ fn set_binary_op(left: &Value, right: &Value, op: SetOp) -> Option<Result<Value>
     } else {
         Value::set(out)
     }))
+}
+
+/// Coerce a numeric value to a `(real, imag)` pair if possible.
+fn as_complex_pair(v: &Value) -> Option<(f64, f64)> {
+    match v.kind() {
+        ValueKind::Complex(re, im) => Some((re, im)),
+        ValueKind::Int(n) => Some((n as f64, 0.0)),
+        ValueKind::Float(f) => Some((f, 0.0)),
+        ValueKind::Bool(b) => Some((if b { 1.0 } else { 0.0 }, 0.0)),
+        _ => None,
+    }
+}
+
+/// Returns the two operands as complex `(re, im)` pairs only when AT LEAST
+/// one of them is already a complex number — that way pure int/float
+/// arithmetic continues to use the dedicated fast paths.
+fn both_as_complex(left: &Value, right: &Value) -> Option<((f64, f64), (f64, f64))> {
+    let l_is_c = matches!(left.kind(), ValueKind::Complex(_, _));
+    let r_is_c = matches!(right.kind(), ValueKind::Complex(_, _));
+    if !l_is_c && !r_is_c {
+        return None;
+    }
+    let a = as_complex_pair(left)?;
+    let b = as_complex_pair(right)?;
+    Some((a, b))
 }
