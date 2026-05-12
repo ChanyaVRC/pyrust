@@ -4543,13 +4543,15 @@ impl Compiler {
                 }
             }
 
-            self.emit(Insn::CallMethodExpanded(Box::new(crate::bytecode::CallMethodExpandedArgs {
-                dst: dst_reg,
-                obj: obj_reg,
-                name_idx,
-                pos_list: pos_list_reg,
-                kw_dict: kw_dict_reg,
-            })));
+            self.emit(Insn::CallMethodExpanded(Box::new(
+                crate::bytecode::CallMethodExpandedArgs {
+                    dst: dst_reg,
+                    obj: obj_reg,
+                    name_idx,
+                    pos_list: pos_list_reg,
+                    kw_dict: kw_dict_reg,
+                },
+            )));
             self.free_temp(kw_dict_reg);
             self.free_temp(pos_list_reg);
             self.next_temp = dst_reg + 1;
