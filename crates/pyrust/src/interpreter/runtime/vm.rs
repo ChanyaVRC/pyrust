@@ -1434,7 +1434,10 @@ impl Interpreter {
                     }
                 }
                 Insn::CheckLocal(reg, name_idx) => {
-                    if regs[*reg as usize].is_none() {
+                    // is_unset() checks for the slot sentinel (uninitialised
+                    // local), not for Python's None — Value::is_none() would
+                    // mis-fire on legitimate `x = None` followed by a read.
+                    if regs[*reg as usize].is_unset() {
                         let name = pool_get!(code.names, *name_idx, "name");
                         vm_try!(Err::<(), _>(crate::error::PyError::Runtime(format!(
                             "cannot access local variable '{}' where it is not associated with a value",
