@@ -1,16 +1,11 @@
-//! `math` module built-ins — declared via the file-scoped
-//! `pyrust_module!` macro.
-//!
-//! Each `fn name(args)` here is expanded to `fn math_name(_interp, args)`
-//! with the unified dispatch signature, paired with a sibling
-//! `BuiltinReg` whose Python-level name is `"math.name"`.  The macro
-//! also generates `REGS: &[BuiltinReg]` (consumed by the central
-//! registry), `module()` (consumed by the interpreter's `load_module`
-//! path), and a `const FN_NAME: &str = "math.name";` inside every
-//! function so error messages and helper calls reference a single
-//! source of truth.
-//!
-//! Reference: <https://docs.python.org/3/library/math.html>
+// `math` module — included into `pub mod math { … }` declared by the
+// `pyrust_builtin_modules!` invocation in
+// `builtin_registry_modules/mod.rs`.  The macro injects a sibling
+// `MODULE_NAME: &str = "math"` constant; the `pyrust_module!` body
+// below reads it to compose every function's `FN_NAME` and the
+// `PyModule.name`.  No name literal appears in this file.
+//
+// Reference: <https://docs.python.org/3/library/math.html>
 
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
@@ -19,8 +14,6 @@ use crate::value::Value;
 use pyrust_derive::pyrust_module;
 
 pyrust_module! {
-    name = "math",
-
     constants {
         "pi"  => Value::float(std::f64::consts::PI),
         "e"   => Value::float(std::f64::consts::E),

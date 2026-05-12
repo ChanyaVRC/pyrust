@@ -1,5 +1,9 @@
-//! `sys` module built-ins — declared via the file-scoped `pyrust_module!`
-//! macro.  Reference: <https://docs.python.org/3/library/sys.html>
+// `sys` module — included into `pub mod sys { … }` declared by the
+// `pyrust_builtin_modules!` invocation in
+// `builtin_registry_modules/mod.rs`.  `MODULE_NAME` is injected from
+// the outer scope; no name literal appears in this file.
+//
+// Reference: <https://docs.python.org/3/library/sys.html>
 
 use std::rc::Rc;
 
@@ -12,8 +16,6 @@ use crate::value::{Value, ValueKind};
 use pyrust_derive::pyrust_module;
 
 pyrust_module! {
-    name = "sys",
-
     constants {
         "version" => Value::string("PyRust 0.2"),
         "argv"    => Value::list(Vec::new()),

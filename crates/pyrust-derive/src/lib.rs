@@ -1,57 +1,51 @@
 //! `pyrust-derive` — proc-macros for declaring built-in Python modules in Rust.
 //!
-//! Two complementary entry points:
+//! Two entry points:
 //!
-//! - **`pyrust_module! { … }`** (function-like) — declares a whole built-in
-//!   module in one place: name, optional constants, and a sequence of
-//!   functions whose Python names are derived from the Rust ident with the
-//!   module prefix applied automatically.  Emits:
-//!     - each `fn` with the unified
-//!       `fn(&mut Interpreter, &[ExpandedCallArg]) -> Result<Value>`
-//!       signature,
-//!     - one `BuiltinReg` constant per function,
-//!     - a `pub(crate) const REGS: &[BuiltinReg]` slice for the central
-//!       registry,
-//!     - a `pub fn module() -> Value` PyModule constructor consumed by the
-//!       interpreter's `load_module`.
+//! - **`pyrust_module! { … }`** (function-like, primary) — declares a
+//!   whole built-in module's content (optional constants and a sequence
+//!   of functions).  The **module's Python-level name is *not* given here**;
+//!   the macro reads it from a sibling `MODULE_NAME: &str` constant that
+//!   the surrounding `pyrust_builtin_modules!` invocation in
+//!   `builtin_registry_modules/mod.rs` injects.  This makes that `mod.rs`
+//!   the single source of truth for the set of built-in modules and
+//!   their Python-level names.
 //!
-//! - **`#[pyfunction(name = "module.fn")]`** (attribute) — drop-in for
-//!   one-off built-ins that don't fit a whole module file (e.g. moving a
-//!   single arm of the legacy cascade incrementally).  Same output as a
-//!   single `fn` inside `pyrust_module!` minus the `REGS`/`module()`
-//!   plumbing.
+//!   Each `fn name(args)` is expanded to a full Rust fn with the
+//!   canonical dispatch signature; a `FN_NAME: &str` local at the top of
+//!   the body lets call sites (helpers, error messages) reference the
+//!   Python-level full name without re-spelling it.
 //!
-//! Either form pairs cleanly with the central `crate::builtin_registry`.
+//! - **`#[pyfunction(name = "module.fn")]`** (attribute, one-off fallback)
+//!   — drop-in for moving a single arm of the legacy cascade
+//!   incrementally.  Same output as a single `fn` inside
+//!   `pyrust_module!` minus the `regs`/`module()` plumbing.
 //!
 //! ## `pyrust_module!` syntax
 //!
 //! ```ignore
+//! // bodies/math.rs (included from `pub mod math { … }` declared by
+//! // `pyrust_builtin_modules!` in mod.rs):
 //! pyrust_module! {
-//!     name = "math",
-//!
 //!     constants {
 //!         "pi" => Value::float(std::f64::consts::PI),
-//!         "e"  => Value::float(std::f64::consts::E),
 //!     }
 //!
 //!     /// CPython: math.sqrt(x) → float.
 //!     fn sqrt(args) -> Result<Value> {
-//!         Ok(Value::float(single_float("math.sqrt", args)?.sqrt()))
-//!     }
-//!
-//!     /// CPython: math.pow(x, y) → float.
-//!     fn pow(args) -> Result<Value> {
-//!         reject_keyword_args_expanded("math.pow", args)?;
-//!         /* … */
+//!         Ok(Value::float(single_float(FN_NAME, args)?.sqrt()))
 //!     }
 //! }
 //! ```
 //!
-//! Each `fn foo(args)` is expanded to
-//! `fn math_foo(_interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value>`,
-//! registered as `"math.foo"`, and listed in `REGS`.  The `module()` fn
-//! returns a `PyModule` whose `attrs` contain the declared constants plus
-//! every function as `Value::builtin_function("math.foo")`.
+//! Generated, in the surrounding `mod math { … }`:
+//! - `fn math_sqrt(_interp, args) -> Result<Value> { /* FN_NAME = "math.sqrt"; body */ }`
+//! - `pub(crate) fn regs() -> &'static [BuiltinReg]` — every fn's
+//!   `BuiltinReg`, names composed once via leak from `MODULE_NAME +
+//!   ".sqrt"`.
+//! - `pub(crate) fn module() -> Value` — the `PyModule` carrying the
+//!   declared constants plus each fn bound to its
+//!   `Value::builtin_function(...)`.
 
 use proc_macro::TokenStream;
 use proc_macro2::Span;
@@ -62,8 +56,12 @@ use syn::{
     Block, Expr, Ident, ItemFn, LitStr, Meta, Token, parse_macro_input, punctuated::Punctuated,
 };
 
-/// `#[pyfunction(name = "module.fn")]` — generates a sibling registration
-/// constant so the function is picked up by the built-in dispatch registry.
+// ─── `#[pyfunction]` (one-off attribute form) ────────────────────────────────
+
+/// `#[pyfunction(name = "module.fn")]` — emits a sibling registration
+/// constant so the function is picked up by the built-in dispatch
+/// registry.  Use this for migrating individual arms; for a whole
+/// module, prefer [`pyrust_module`].
 #[proc_macro_attribute]
 pub fn pyfunction(attr: TokenStream, item: TokenStream) -> TokenStream {
     let func = parse_macro_input!(item as ItemFn);
@@ -111,17 +109,19 @@ pub fn pyfunction(attr: TokenStream, item: TokenStream) -> TokenStream {
     expanded.into()
 }
 
-// ─── `pyrust_module!` ───────────────────────────────────────────────────────
+// ─── `pyrust_module!` (function-like, file-scoped) ────────────────────────────
 
 /// Parsed `pyrust_module! { … }` input.
+///
+/// The Python-level module name is *not* part of the input — it's read
+/// from a sibling `MODULE_NAME: &str` constant injected by
+/// `pyrust_builtin_modules!`.
 struct ModuleInput {
-    module_name: LitStr,
     constants: Vec<(LitStr, Expr)>,
     funcs: Vec<ModuleFn>,
 }
 
-/// A single `fn` declaration inside `pyrust_module!`.  Looks like:
-/// `[doc-attrs] fn name(args) -> Result<Value> { body }`.
+/// A single `fn` declaration inside `pyrust_module!`.
 struct ModuleFn {
     attrs: Vec<syn::Attribute>,
     short_name: Ident,
@@ -131,29 +131,9 @@ struct ModuleFn {
 
 impl Parse for ModuleInput {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        // `name = "module"` — the module's Python-level name.
-        let name_ident: Ident = input.parse()?;
-        if name_ident != "name" {
-            return Err(syn::Error::new(
-                name_ident.span(),
-                "expected `name = \"...\"` as the first item of `pyrust_module!`",
-            ));
-        }
-        let _eq: Token![=] = input.parse()?;
-        let module_name: LitStr = input.parse()?;
-        // A trailing comma after `name = "..."` is required so subsequent
-        // items (`constants { ... }` or `fn ...`) are unambiguous to parse.
-        if !input.peek(Token![,]) {
-            return Err(input.error(
-                "expected `,` after the module name; \
-                 `pyrust_module! { name = \"foo\", … }` requires a comma here",
-            ));
-        }
-        let _comma: Token![,] = input.parse()?;
-
-        // Optional `constants { ... }` block.  Function declarations begin
-        // with the `fn` keyword (not an `Ident`), so peeking for an Ident
-        // here cleanly distinguishes the two cases.
+        // Optional `constants { ... }` block — function declarations begin
+        // with the `fn` keyword, so peeking for an Ident here cleanly
+        // distinguishes the two cases.
         let mut constants: Vec<(LitStr, Expr)> = Vec::new();
         if input.peek(Ident) {
             let lookahead: Ident = input.fork().parse()?;
@@ -188,10 +168,10 @@ impl Parse for ModuleInput {
         while !input.is_empty() {
             let attrs = input.call(syn::Attribute::parse_outer)?;
             let _fn_kw: Token![fn] = input.parse()?;
-            // Function ident is required to be snake_case so the generated
+            // Function ident must be snake_case so the generated
             // SCREAMING_SNAKE constant name is unique without lossy
-            // case-folding.  (e.g. `fn isDir` and `fn isdir` would both
-            // produce `MATH_ISDIR`.)
+            // case-folding (e.g. `fn isDir` and `fn isdir` would both
+            // produce the same const ident).
             let short_name: Ident = input.parse()?;
             let short_str = short_name.to_string();
             if !is_snake_case(&short_str) {
@@ -206,11 +186,7 @@ impl Parse for ModuleInput {
             let arg_content;
             syn::parenthesized!(arg_content in input);
             let args_ident: Ident = arg_content.parse()?;
-            // If the user wrote a type annotation, validate that it matches
-            // the canonical `&[ExpandedCallArg]` shape so a mismatch
-            // surfaces here rather than later as a cryptic macro-expansion
-            // error.  Anything more elaborate than `: &[ExpandedCallArg]`
-            // (e.g. ownership tweaks) is rejected.
+            // If the user wrote a type annotation, validate it.
             if arg_content.peek(Token![:]) {
                 let _: Token![:] = arg_content.parse()?;
                 let ty: syn::Type = arg_content.parse()?;
@@ -219,7 +195,6 @@ impl Parse for ModuleInput {
                     .to_string()
                     .split_whitespace()
                     .collect::<String>();
-                // Accept the canonical form and a few obvious variants.
                 let accepted = matches!(
                     ty_str.as_str(),
                     "&[ExpandedCallArg]" | "&[crate::interpreter::ExpandedCallArg]"
@@ -253,94 +228,89 @@ impl Parse for ModuleInput {
             });
         }
 
-        Ok(ModuleInput {
-            module_name,
-            constants,
-            funcs,
-        })
+        Ok(ModuleInput { constants, funcs })
     }
 }
 
-/// Returns true if `s` is a Rust snake_case identifier — lowercase letters,
-/// digits, and underscores only.  Used as a guard so the generated
-/// SCREAMING_SNAKE_CASE const name uniquely identifies the function.
+/// Returns true if `s` is a Rust snake_case identifier — lowercase
+/// letters, digits, and underscores only.
 fn is_snake_case(s: &str) -> bool {
     !s.is_empty()
         && s.chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
-/// Function-like proc-macro: see crate-level docs for syntax.
+/// File-scoped module declaration: see crate-level docs for the full
+/// syntax and the contract with `pyrust_builtin_modules!`.
 #[proc_macro]
 pub fn pyrust_module(input: TokenStream) -> TokenStream {
-    let ModuleInput {
-        module_name,
-        constants,
-        funcs,
-    } = parse_macro_input!(input as ModuleInput);
+    let ModuleInput { constants, funcs } = parse_macro_input!(input as ModuleInput);
 
-    let module_name_str = module_name.value();
-
-    // For each fn: build the full fn definition, its BuiltinReg const, and
-    // collect the const ident for the REGS slice + the (short-name, Python
-    // name) pair for the module() attrs.
     let mut fn_items = Vec::new();
-    let mut reg_consts = Vec::new();
-    let mut reg_idents: Vec<Ident> = Vec::new();
+    let mut reg_entries: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut attr_entries: Vec<proc_macro2::TokenStream> = Vec::new();
 
     for f in &funcs {
         let short = &f.short_name;
         let short_str = short.to_string();
-        let py_name = format!("{}.{}", module_name_str, short_str);
-        let py_name_lit = LitStr::new(&py_name, short.span());
-        let rust_fn_ident = format_ident!(
-            "{}_{}",
-            module_name_str.replace('.', "_"),
-            short_str,
-            span = short.span()
-        );
-        let const_ident = Ident::new(&rust_fn_ident.to_string().to_uppercase(), short.span());
+        // Rust ident for the dispatch fn — prefix with the parent
+        // module's basename (taken from the build artifact's symbol
+        // mangling).  We can't read `MODULE_NAME` at proc-macro time, but
+        // since each module's contents land in a distinct Rust `mod`, the
+        // short name alone is sufficient for uniqueness *within* a
+        // module.  Still prefix with `__pyfn_` to keep the generated
+        // idents from clashing with user-defined helper functions.
+        let rust_fn_ident = format_ident!("__pyfn_{}", short_str, span = short.span());
         let attrs = &f.attrs;
-        let body = &f.body;
+        let body_stmts = &f.body.stmts;
         let args_ident = &f.args_ident;
+        let short_lit = LitStr::new(&short_str, short.span());
 
-        // Inject `const FN_NAME: &str = "<module>.<short>"` at the top of
-        // the body so error messages and helper calls inside the fn can use
-        // `FN_NAME` instead of re-spelling the full name.  Single source
-        // of truth for the Python-level name.
-        let body_stmts = &body.stmts;
         fn_items.push(quote! {
             #(#attrs)*
             fn #rust_fn_ident(
                 _interp: &mut crate::Interpreter,
                 #args_ident: &[crate::interpreter::ExpandedCallArg],
             ) -> crate::error::Result<crate::value::Value> {
-                #[allow(dead_code)]
-                const FN_NAME: &str = #py_name_lit;
+                // Compose the Python-level full name once per fn (lazy)
+                // so callers (helpers, error messages) can refer to it as
+                // `FN_NAME` instead of repeating the module prefix.
+                static FN_NAME_OWNED: std::sync::LazyLock<String> =
+                    std::sync::LazyLock::new(|| {
+                        format!("{}.{}", MODULE_NAME, #short_lit)
+                    });
+                #[allow(non_snake_case)]
+                let FN_NAME: &str = FN_NAME_OWNED.as_str();
+                let _ = FN_NAME; // suppress unused warning if body ignores it
                 #(#body_stmts)*
             }
         });
 
-        reg_consts.push(quote! {
-            #[allow(non_upper_case_globals)]
-            pub const #const_ident: crate::builtin_registry::BuiltinReg =
-                crate::builtin_registry::BuiltinReg {
-                    name: #py_name_lit,
-                    dispatch: #rust_fn_ident,
-                };
+        // Each registry entry composes its name from MODULE_NAME at
+        // first lookup, then leaks the string to satisfy
+        // `BuiltinReg.name: &'static str`.  Cost: one allocation per
+        // built-in at startup, amortised over every subsequent dispatch.
+        reg_entries.push(quote! {
+            crate::builtin_registry::BuiltinReg {
+                name: ::std::boxed::Box::leak(
+                    format!("{}.{}", MODULE_NAME, #short_lit).into_boxed_str()
+                ),
+                dispatch: #rust_fn_ident,
+            }
         });
 
-        reg_idents.push(const_ident);
         attr_entries.push(quote! {
             attrs.insert(
                 #short_str.to_string(),
-                crate::value::Value::builtin_function(#py_name_lit),
+                crate::value::Value::builtin_function(
+                    ::std::boxed::Box::leak(
+                        format!("{}.{}", MODULE_NAME, #short_lit).into_boxed_str()
+                    ),
+                ),
             );
         });
     }
 
-    // Constants → module() attrs.
     let const_entries: Vec<proc_macro2::TokenStream> = constants
         .iter()
         .map(|(k, v)| {
@@ -350,22 +320,35 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
         })
         .collect();
 
-    let module_name_lit = module_name;
-
     let expanded = quote! {
-        // Per-function bodies and BuiltinReg constants.
+        // Per-function bodies.
         #(#fn_items)*
-        #(#reg_consts)*
 
-        /// Slice of every `#py_name`-prefixed registration in this file —
-        /// consumed by `crate::builtin_registry::REGISTRY`.
-        pub(crate) const REGS: &[crate::builtin_registry::BuiltinReg] = &[
-            #(#reg_idents),*
-        ];
+        /// The per-module registry slice.  Composed at first call by
+        /// leaking `MODULE_NAME + "." + short_name` into a `'static`
+        /// string for each entry.  Consumed by
+        /// `crate::builtin_registry_modules::all_regs`.
+        pub(crate) fn regs() -> &'static [crate::builtin_registry::BuiltinReg] {
+            static REGS_CELL: std::sync::LazyLock<Vec<crate::builtin_registry::BuiltinReg>> =
+                std::sync::LazyLock::new(|| {
+                    vec![
+                        #(#reg_entries),*
+                    ]
+                });
+            REGS_CELL.as_slice()
+        }
+
+        // Back-compat: the previous design exposed `pub(crate) const
+        // REGS: &[BuiltinReg]`.  Some callers may still reference that;
+        // expose a fn of the same name as a thin shim.  (Hidden — the
+        // canonical entry point is `regs()`.)
+        #[doc(hidden)]
+        pub(crate) fn REGS() -> &'static [crate::builtin_registry::BuiltinReg] {
+            regs()
+        }
 
         /// Build the PyModule for this built-in module.  Called from the
-        /// interpreter's `load_module` path on first `import`.  Crate-local —
-        /// no external consumer.
+        /// interpreter's `load_module` path on first `import`.
         pub(crate) fn module() -> crate::value::Value {
             use std::cell::RefCell;
             use std::collections::HashMap;
@@ -374,7 +357,7 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
             #(#const_entries)*
             #(#attr_entries)*
             crate::value::Value::py_module(Rc::new(RefCell::new(crate::value::PyModule {
-                name: #module_name_lit.to_string(),
+                name: MODULE_NAME.to_string(),
                 attrs,
             })))
         }

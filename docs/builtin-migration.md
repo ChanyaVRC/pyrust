@@ -31,9 +31,9 @@ under `crates/pyrust/src/builtin_registry_modules/`, where one
 - the `REGS: &[BuiltinReg]` slice consumed by the central registry,
 - a `module()` constructor consumed by `env.rs::load_module`.
 
-## Anatomy of a module file
+## Anatomy of a module body
 
-Real example — `crates/pyrust/src/builtin_registry_modules/math.rs`:
+Real example — `crates/pyrust/src/builtin_registry_modules/bodies/math.rs`:
 
 ```rust
 use crate::error::{PyError, Result};
@@ -43,8 +43,6 @@ use crate::value::Value;
 use pyrust_derive::pyrust_module;
 
 pyrust_module! {
-    name = "math",
-
     constants {
         "pi"  => Value::float(std::f64::consts::PI),
         "e"   => Value::float(std::f64::consts::E),
@@ -54,17 +52,17 @@ pyrust_module! {
     /// CPython: math.sqrt(x) → float.
     /// <https://docs.python.org/3/library/math.html#math.sqrt>
     fn sqrt(args) -> Result<Value> {
-        Ok(Value::float(single_float("math.sqrt", args)?.sqrt()))
+        Ok(Value::float(single_float(FN_NAME, args)?.sqrt()))
     }
 
     /// CPython: math.pow(x, y) → float.
     fn pow(args) -> Result<Value> {
-        reject_keyword_args_expanded("math.pow", args)?;
+        reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 2 {
-            return Err(PyError::Runtime("math.pow() takes exactly two arguments".to_string()));
+            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly two arguments")));
         }
-        let x = value_to_float(&args[0].value, "math.pow")?;
-        let y = value_to_float(&args[1].value, "math.pow")?;
+        let x = value_to_float(&args[0].value, FN_NAME)?;
+        let y = value_to_float(&args[1].value, FN_NAME)?;
         Ok(Value::float(x.powf(y)))
     }
     // … more fns …
@@ -74,21 +72,30 @@ pyrust_module! {
 fn single_float(fn_name: &str, args: &[ExpandedCallArg]) -> Result<f64> { /* … */ }
 ```
 
+**Note:** `pyrust_module!` does *not* take a `name` field.  The module's
+Python-level name is injected from `mod.rs::pyrust_builtin_modules!`
+as a sibling `MODULE_NAME: &str` constant.  Inside the macro body,
+`FN_NAME` is also auto-injected per fn as `&str` equal to
+`"<MODULE_NAME>.<short>"`, so error messages and helper calls
+reference a single source of truth.
+
 The macro expands each `fn sqrt(args) -> Result<Value> { … }` to a
 real Rust fn with the canonical signature
-`fn math_sqrt(_interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value>`,
-emits a `MATH_SQRT: BuiltinReg = { name: "math.sqrt", dispatch: math_sqrt }`,
-collects every such constant into `REGS`, and generates a `module()`
-that returns a `PyModule` whose `attrs` are the declared constants
-plus each function bound to `Value::builtin_function("math.sqrt")`.
+`fn __pyfn_sqrt(_interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value>`,
+adds it to a per-module `regs() -> &'static [BuiltinReg]` (whose
+names are leaked at first use from `MODULE_NAME + ".sqrt"`), and
+generates a `module() -> Value` returning a `PyModule` whose `attrs`
+are the declared constants plus each function bound to
+`Value::builtin_function("math.sqrt")`.
 
 ## Where to put a new module
 
 1. **Pick a module name** matching the CPython library name
    (`os`, `os.path`, `functools`, `itertools`, …).
 2. **Create
-   `crates/pyrust/src/builtin_registry_modules/<name>.rs`**.  Use
-   `math.rs` or `sys.rs` as a template.
+   `crates/pyrust/src/builtin_registry_modules/bodies/<ident>.rs`**.
+   Use `bodies/math.rs` or `bodies/sys.rs` as a template — note the
+   file has no `mod` declaration and no `name = "..."` literal.
 3. **Add the module to the list in
    [`builtin_registry_modules/mod.rs`](../crates/pyrust/src/builtin_registry_modules/mod.rs)**:
 
@@ -96,19 +103,26 @@ plus each function bound to `Value::builtin_function("math.sqrt")`.
    pyrust_builtin_modules! {
        math,
        sys,
-       <new_name>,   // ← add this line
+       <ident>,                          // simple name, file: bodies/<ident>.rs
+       "py.dotted.name" as <ident>,      // dotted Python name (e.g. "os.path")
    }
    ```
 
-That's it.  The `pyrust_builtin_modules!` macro registers both the
-function-level `REGS` (consumed by `builtin_registry::REGISTRY`) and
-the module-level `module()` constructor (consumed by
-`env.rs::load_module` via `load_builtin_module`), so the central
-registry and the `import` path pick it up automatically.
+That's it.  **The module name appears only on this one line.**  The
+`pyrust_builtin_modules!` macro:
 
-After this single edit, `import <name>; <name>.foo()` resolves via the
-registry on the call side and via `module()` on the import side, with
-the function-name string appearing exactly once (inside the macro).
+- creates `pub mod <ident> { … }` with an injected
+  `MODULE_NAME: &str = "<py.name>"` constant,
+- `include!`s `bodies/<ident>.rs` into that module,
+- contributes the module's `regs()` to `all_regs()` (consumed by
+  `builtin_registry::REGISTRY`),
+- adds a branch to `load_builtin_module` keyed on the Python-level
+  name (consumed by `env.rs::load_module`).
+
+After this single edit, `import <name>; <name>.foo()` resolves on
+both the import path and the call dispatch.  The body file never
+mentions its own module name — `FN_NAME` (per fn) and `MODULE_NAME`
+(once per module, in `mod.rs`) are the only source-of-truth.
 
 ## When `pyrust_module!` doesn't fit
 
