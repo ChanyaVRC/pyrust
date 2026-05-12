@@ -409,6 +409,41 @@ impl Parser {
             (vec![first_expr], vec![first_starred])
         };
 
+        // Type annotation:  target: Type [= rhs]
+        // Only valid when there's a single non-starred target.  The annotation
+        // value is parsed and discarded (we don't track types at runtime).
+        if self.is(&Token::Colon)
+            && targets.len() == 1
+            && !starred_flags[0]
+            && matches!(
+                &targets[0],
+                Expr::Var(_) | Expr::Attr { .. } | Expr::Index { .. }
+            )
+        {
+            self.bump(); // consume :
+            self.parse_expr()?; // discard the annotation expression
+            if self.is(&Token::Assign) {
+                self.bump(); // consume =
+                let rhs = self.parse_expr()?;
+                return match &targets[0] {
+                    Expr::Var(name) => Ok(Stmt::Assign(AssignTarget::Name(name.clone()), rhs)),
+                    Expr::Attr { target, name } => Ok(Stmt::AttrAssign {
+                        target: *target.clone(),
+                        name: name.clone(),
+                        expr: rhs,
+                    }),
+                    Expr::Index { target, index } => Ok(Stmt::IndexAssign {
+                        target: target.clone(),
+                        index: index.clone(),
+                        expr: rhs,
+                    }),
+                    _ => unreachable!(),
+                };
+            }
+            // Bare annotation declaration without value: no-op at runtime.
+            return Ok(Stmt::Pass);
+        }
+
         // Assignment: = rhs
         if self.is(&Token::Assign) {
             // Validate starred flags: at most one starred item
