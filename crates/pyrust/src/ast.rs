@@ -2,9 +2,10 @@
 pub struct FunctionParam {
     pub name: String,
     pub default: Option<Expr>,
-    pub is_args: bool,         // *args
-    pub is_kwargs: bool,       // **kwargs
-    pub is_keyword_only: bool, // declared after * or *args
+    pub is_args: bool,            // *args
+    pub is_kwargs: bool,          // **kwargs
+    pub is_keyword_only: bool,    // declared after * or *args
+    pub is_positional_only: bool, // declared before / separator
 }
 
 #[derive(Debug, Clone)]

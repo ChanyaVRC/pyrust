@@ -561,6 +561,7 @@ impl Parser {
         let mut seen_args = false;
         let mut seen_kwargs = false;
         let mut seen_star = false; // bare * or *args seen — params after are keyword-only
+        let mut seen_slash = false;
 
         if self.is(&Token::RParen) {
             return Ok(params);
@@ -571,7 +572,29 @@ impl Parser {
                 return Err(PyError::Parse("parameter after **kwargs".to_string()));
             }
 
-            if self.is(&Token::StarStar) {
+            if self.is(&Token::Slash) {
+                if seen_slash {
+                    return Err(PyError::Parse(
+                        "duplicate '/' in function parameter list".to_string(),
+                    ));
+                }
+                if seen_star {
+                    return Err(PyError::Parse(
+                        "'/' must appear before '*' in parameter list".to_string(),
+                    ));
+                }
+                if params.is_empty() {
+                    return Err(PyError::Parse(
+                        "at least one parameter must precede '/'".to_string(),
+                    ));
+                }
+                // Mark all prior params as positional-only.
+                for p in &mut params {
+                    p.is_positional_only = true;
+                }
+                seen_slash = true;
+                self.bump();
+            } else if self.is(&Token::StarStar) {
                 self.bump();
                 let name = self.expect_ident("kwargs parameter name")?;
                 let default = if self.is(&Token::Assign) {
@@ -587,6 +610,7 @@ impl Parser {
                     is_args: false,
                     is_kwargs: true,
                     is_keyword_only: false,
+                    is_positional_only: false,
                 });
                 seen_kwargs = true;
             } else if self.is(&Token::Star) {
@@ -602,6 +626,7 @@ impl Parser {
                         is_args: true,
                         is_kwargs: false,
                         is_keyword_only: false,
+                        is_positional_only: false,
                     });
                     seen_args = true;
                 }
@@ -632,6 +657,7 @@ impl Parser {
                             is_args: false,
                             is_kwargs: false,
                             is_keyword_only: seen_star,
+                            is_positional_only: false,
                         });
                     }
                     other => {
