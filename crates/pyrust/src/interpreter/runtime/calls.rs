@@ -1401,14 +1401,14 @@ impl Interpreter {
                     | ValueKind::BoundMethod { .. }
                     | ValueKind::ClassBoundMethod { .. }
                     | ValueKind::PyClass(_) => true,
-                    // PropertyAccessorPartial counts as callable (it builds a
-                    // new property when called).
-                    ValueKind::BuiltinObject { ops, state }
-                        if ops.type_name() == pyrust_builtins::property::TYPE_NAME =>
-                    {
-                        let _ = state;
-                        true
-                    }
+                    // Only accessor partials (the intermediate results of
+                    // prop.setter / prop.getter / prop.deleter) are callable —
+                    // a plain property descriptor isn't.  Distinguish via the
+                    // `partial_slot` field on PropertyState.
+                    ValueKind::BuiltinObject { .. } => pyrust_builtins::property::as_property(
+                        &args[0].value,
+                    )
+                    .is_some_and(|(_, _, _, partial_slot)| partial_slot.is_some()),
                     ValueKind::PyInstance(inst) => {
                         let class = Rc::clone(&inst.borrow().class);
                         lookup_class_attr(&class, "__call__").is_some()
@@ -2261,6 +2261,19 @@ impl Interpreter {
                         class.borrow().name
                     ),
                 ))
+            }
+        } else if let ValueKind::BuiltinObject { ops, state } = val.kind()
+            && ops.is_iterable()
+        {
+            match ops.iter_next(state)? {
+                Some(v) => Ok(v),
+                None => {
+                    if let Some(d) = default {
+                        Ok(d)
+                    } else {
+                        Err(PyError::Named("StopIteration".to_string(), String::new()))
+                    }
+                }
             }
         } else {
             Err(PyError::Named(

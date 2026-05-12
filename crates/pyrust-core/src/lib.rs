@@ -351,16 +351,20 @@ pub trait BuiltinTypeOps: 'static {
     }
 
     /// Returns true if `name` is a method this type exposes.  Used by
-    /// `hasattr(x, name)`.  Default checks via `call_method` — impls with
-    /// fixed method tables should override for efficiency.
+    /// `hasattr(x, name)`.  Default returns `false`; impls with a method
+    /// table should override.  (We don't probe `call_method` here because
+    /// that would require running it with placeholder args, which has
+    /// observable side effects.)
     fn has_method(&self, name: &str) -> bool {
         let _ = name;
         false
     }
 
-    /// Returns true if this type is iterable.  Default: tries `iter_next`
-    /// and observes whether the default "not iterable" error came back.
-    /// Impls that override `iter_next` should override this too.
+    /// Returns true if this type is iterable.  Default returns `false`;
+    /// impls that override `iter_next` must also override this — the VM
+    /// uses `is_iterable()` to choose the dispatch path before ever
+    /// calling `iter_next`, so an iterable type that forgets to override
+    /// `is_iterable` will be treated as non-iterable.
     fn is_iterable(&self) -> bool {
         false
     }

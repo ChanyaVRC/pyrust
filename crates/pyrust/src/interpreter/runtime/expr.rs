@@ -990,7 +990,19 @@ fn iter_values(value: Value) -> Result<Vec<Value>> {
                 return Ok(rc.iter().map(|k| key_to_value(k.clone())).collect());
             }
             if let Some(kind) = pyrust_builtins::dict_views::view_kind(&value) {
-                let rc = pyrust_builtins::dict_views::as_dict_rc(&value).unwrap();
+                // `view_kind` and `as_dict_rc` both check the same ops, so
+                // they should agree — but use a structured error rather than
+                // unwrap to avoid panicking if a future BuiltinObject impl
+                // shares the dict-view type name without the matching state.
+                // Surface as TypeError so Python-level `except` blocks can
+                // catch it (the only way to reach this is a misregistered
+                // ops table, which is a type-mismatch error).
+                let rc = pyrust_builtins::dict_views::as_dict_rc(&value).ok_or_else(|| {
+                    PyError::Named(
+                        "TypeError".to_string(),
+                        "dict-view state type mismatch".to_string(),
+                    )
+                })?;
                 let map = rc.borrow();
                 return Ok(match kind {
                     0 => map.keys().map(|k| key_to_value(k.clone())).collect(),
