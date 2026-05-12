@@ -1174,6 +1174,836 @@ fn expr_is_invariant(expr: &Expr, written: &HashSet<String>) -> bool {
     }
 }
 
+/// Try to rewrite `while i < len(c): ...; c[i]; ...; i += 1` into `for i in c: ...`
+/// for the matched-pattern `while` at `stmts[idx]`.  Returns `Some(rewritten_for)`
+/// when the rewrite is safe; `None` otherwise.
+///
+/// This promotes the manual-indexed iteration pattern to a `ForIter` loop
+/// (issue #289), avoiding the per-iteration `len(c)` bound check and the
+/// subscript-by-register-index that the `ForCountReg` lowering still needs.
+///
+/// We reuse the existing index variable `i` as the loop variable in the
+/// rewritten `for` — Python's `for i in c:` already binds the same name, so no
+/// fresh fastlocal is required.  This is safe ONLY when `i` is never read
+/// after the loop in the same block (and never read in the body in any form
+/// other than `c[i]`), since the for-loop leaves `i` equal to the last element
+/// value rather than `len(c)`.
+///
+/// Bail-out conditions (return `None`):
+/// - `cond` is not `Var(i) < len(Var(c))` with a single positional arg.
+/// - The trailing increment is missing, has step != 1, or assigns to a
+///   different variable.
+/// - `i` is assigned anywhere else in the body (other than the trailing
+///   increment).
+/// - `c` is assigned anywhere in the body (would change iteration).
+/// - `c[i] = ...` (index-assign) or `del c[i]` appears in the body.
+/// - `i` is read in the body in any form other than `Subscript(Var(c), Var(i))`.
+/// - `i` is read in any of the statements after the loop in the same block.
+/// - The body contains `break` or `continue` (the original program with a
+///   `continue` is buggy — infinite loop — and a `break` in the rewritten
+///   for-loop has slightly different `i` semantics; conservatively bail).
+/// - `len` or `c` is shadowed as a local (we approximate by requiring `c` to
+///   be a `Var(name)`; `len` shadowing inside the loop body would be caught
+///   by the "i only appears as c[i]" check since shadowing requires assigning
+///   to `len`, which the c-mutation check covers).
+fn try_rewrite_while_index_to_for(stmts: &[Stmt], idx: usize) -> Option<Stmt> {
+    let stmt = stmts.get(idx)?;
+    let (cond, body, else_branch) = match stmt {
+        Stmt::While {
+            cond,
+            body,
+            else_branch,
+        } => (cond, body, else_branch),
+        _ => return None,
+    };
+    // Don't rewrite when there's an `else:` clause — Python's `for-else` runs
+    // when the loop exits naturally (same semantics as `while-else`), but
+    // we'd need to preserve it through the rewrite and it adds complexity
+    // for a rare pattern.  Conservatively bail.
+    if else_branch.is_some() {
+        return None;
+    }
+
+    // Match `Var(i) < len(Var(c))` (single positional arg).
+    let (i_name, c_name) = match cond {
+        Expr::Binary {
+            op: BinaryOp::Lt,
+            left,
+            right,
+        } => {
+            let i = match left.as_ref() {
+                Expr::Var(n) => n.clone(),
+                _ => return None,
+            };
+            let c = match right.as_ref() {
+                Expr::Call { func, args } => {
+                    if !matches!(func.as_ref(), Expr::Var(f) if f == "len") {
+                        return None;
+                    }
+                    if args.len() != 1 {
+                        return None;
+                    }
+                    let a = &args[0];
+                    if a.splat || a.double_splat || a.name.is_some() {
+                        return None;
+                    }
+                    match &a.value {
+                        Expr::Var(n) => n.clone(),
+                        _ => return None,
+                    }
+                }
+                _ => return None,
+            };
+            (i, c)
+        }
+        _ => return None,
+    };
+    // Cannot rewrite when the index and collection share the same name.
+    if i_name == c_name {
+        return None;
+    }
+
+    // Body must end with `i += 1` (or `i = i + 1`).
+    let inc_idx = body.len().checked_sub(1)?;
+    let inc_ok = match &body[inc_idx] {
+        Stmt::AugAssign {
+            target: AssignTarget::Name(t),
+            op: BinaryOp::Add,
+            expr: Expr::Int(1),
+        } => t == &i_name,
+        Stmt::Assign(
+            AssignTarget::Name(t),
+            Expr::Binary {
+                op: BinaryOp::Add,
+                left,
+                right,
+            },
+        ) => {
+            t == &i_name
+                && matches!(left.as_ref(), Expr::Var(n) if n == &i_name)
+                && matches!(right.as_ref(), Expr::Int(1))
+        }
+        _ => false,
+    };
+    if !inc_ok {
+        return None;
+    }
+    let body_without_inc = &body[..inc_idx];
+
+    // Safety analysis on the body (excluding the trailing increment):
+    // - `i` is read ONLY as Subscript(Var(c), Var(i))
+    // - `i` is NOT assigned anywhere
+    // - `c` is NOT assigned anywhere
+    // - No `c[i] = ...` index-assign, no `del c[i]`
+    // - No `break` or `continue`
+    if !body_index_pattern_is_safe(body_without_inc, &i_name, &c_name) {
+        return None;
+    }
+
+    // Post-loop usage: `i` must not be read in any statement after the while.
+    for s in &stmts[idx + 1..] {
+        if stmt_reads_var(s, &i_name) {
+            return None;
+        }
+    }
+
+    // Build the rewritten body: replace each `Subscript(Var(c), Var(i))` with
+    // `Var(i)`.  The new for-loop binds `i` to the element value.
+    let mut new_body: Vec<Stmt> = Vec::with_capacity(body_without_inc.len());
+    for s in body_without_inc {
+        let mut s2 = s.clone();
+        rewrite_c_at_i_in_stmt(&mut s2, &c_name, &i_name);
+        new_body.push(s2);
+    }
+
+    Some(Stmt::For {
+        target: AssignTarget::Name(i_name),
+        iter: Expr::Var(c_name),
+        body: new_body,
+        else_branch: None,
+    })
+}
+
+/// Check the body of a candidate `while i < len(c)` loop for the conservative
+/// rewrite to `for i in c`.  Returns `true` only if every read of `i` is
+/// `Subscript(Var(c), Var(i))`, `i` and `c` are never assigned/deleted, and
+/// the body contains no `break`/`continue` or `c[i] = ...` / `del c[i]`.
+fn body_index_pattern_is_safe(body: &[Stmt], i_name: &str, c_name: &str) -> bool {
+    for s in body {
+        if !stmt_safe_for_index_rewrite(s, i_name, c_name) {
+            return false;
+        }
+    }
+    true
+}
+
+fn stmt_safe_for_index_rewrite(stmt: &Stmt, i_name: &str, c_name: &str) -> bool {
+    match stmt {
+        Stmt::Break | Stmt::Continue => false,
+        // Assigning to `i` or `c` would break the rewrite invariant.
+        Stmt::Assign(target, value) => {
+            if target_assigns(target, i_name) || target_assigns(target, c_name) {
+                return false;
+            }
+            target_safe_for_rewrite(target, i_name, c_name) && expr_safe(value, i_name, c_name)
+        }
+        Stmt::AugAssign { target, expr, .. } => {
+            if target_assigns(target, i_name) || target_assigns(target, c_name) {
+                return false;
+            }
+            target_safe_for_rewrite(target, i_name, c_name) && expr_safe(expr, i_name, c_name)
+        }
+        Stmt::IndexAssign {
+            target,
+            index,
+            expr,
+        } => {
+            // Disallow `c[i] = ...`: the rewritten for-loop sees the snapshot
+            // value, not the live `c[i]` slot, so the mutation would not be
+            // observable to subsequent reads inside the iteration.
+            if is_c_at_i_expr(target, index, c_name, i_name) {
+                return false;
+            }
+            expr_safe(target, i_name, c_name)
+                && expr_safe(index, i_name, c_name)
+                && expr_safe(expr, i_name, c_name)
+        }
+        Stmt::SliceAssign {
+            target,
+            lower,
+            upper,
+            step,
+            expr,
+        } => {
+            // Slice-assigning into `c` could change its length, breaking iter.
+            if matches!(target.as_ref(), Expr::Var(n) if n == c_name) {
+                return false;
+            }
+            expr_safe(target, i_name, c_name)
+                && lower
+                    .as_deref()
+                    .is_none_or(|e| expr_safe(e, i_name, c_name))
+                && upper
+                    .as_deref()
+                    .is_none_or(|e| expr_safe(e, i_name, c_name))
+                && step.as_deref().is_none_or(|e| expr_safe(e, i_name, c_name))
+                && expr_safe(expr, i_name, c_name)
+        }
+        Stmt::AttrAssign {
+            target,
+            name: _,
+            expr,
+        } => expr_safe(target, i_name, c_name) && expr_safe(expr, i_name, c_name),
+        Stmt::Expr(e) => expr_safe(e, i_name, c_name),
+        Stmt::Return(e) => e.as_ref().is_none_or(|x| expr_safe(x, i_name, c_name)),
+        Stmt::If {
+            branches,
+            else_branch,
+        } => {
+            for (cond, b) in branches {
+                if !expr_safe(cond, i_name, c_name)
+                    || !body_index_pattern_is_safe(b, i_name, c_name)
+                {
+                    return false;
+                }
+            }
+            else_branch
+                .as_deref()
+                .is_none_or(|b| body_index_pattern_is_safe(b, i_name, c_name))
+        }
+        Stmt::While {
+            cond,
+            body,
+            else_branch,
+        } => {
+            // Nested loop has its own `break`/`continue`, which don't target
+            // the outer loop, so we don't need to bail on them here.
+            expr_safe(cond, i_name, c_name)
+                && nested_loop_body_safe(body, i_name, c_name)
+                && else_branch
+                    .as_deref()
+                    .is_none_or(|b| body_index_pattern_is_safe(b, i_name, c_name))
+        }
+        Stmt::For {
+            target,
+            iter,
+            body,
+            else_branch,
+        } => {
+            // Iterating with target `i` or `c` would rebind them.
+            if target_assigns(target, i_name) || target_assigns(target, c_name) {
+                return false;
+            }
+            target_safe_for_rewrite(target, i_name, c_name)
+                && expr_safe(iter, i_name, c_name)
+                && nested_loop_body_safe(body, i_name, c_name)
+                && else_branch
+                    .as_deref()
+                    .is_none_or(|b| body_index_pattern_is_safe(b, i_name, c_name))
+        }
+        Stmt::Pass | Stmt::Global(_) | Stmt::Nonlocal(_) => true,
+        Stmt::Delete(exprs) => {
+            // `del c[i]` is unsafe; any other delete is OK as long as it
+            // doesn't reference i in a bare way.
+            for e in exprs {
+                if let Expr::Index { target, index } = e
+                    && is_c_at_i_expr(target, index, c_name, i_name)
+                {
+                    return false;
+                }
+                // `del i` and `del c` would change semantics.
+                if let Expr::Var(n) = e
+                    && (n == i_name || n == c_name)
+                {
+                    return false;
+                }
+                if !expr_safe(e, i_name, c_name) {
+                    return false;
+                }
+            }
+            true
+        }
+        Stmt::Assert { test, msg } => {
+            expr_safe(test, i_name, c_name)
+                && msg.as_ref().is_none_or(|m| expr_safe(m, i_name, c_name))
+        }
+        Stmt::Raise { expr, cause } => {
+            expr.as_ref().is_none_or(|e| expr_safe(e, i_name, c_name))
+                && cause.as_ref().is_none_or(|e| expr_safe(e, i_name, c_name))
+        }
+        // Conservatively bail on anything that might re-bind or capture `i`/`c`:
+        // try/with/match/import/def/class.  These are uncommon inside the hot
+        // sentinel-break pattern; leaving them out keeps the analysis tractable.
+        _ => false,
+    }
+}
+
+/// Like `body_index_pattern_is_safe` but for nested loop bodies, where
+/// `break`/`continue` are bound to the nested loop and therefore fine.
+fn nested_loop_body_safe(body: &[Stmt], i_name: &str, c_name: &str) -> bool {
+    for s in body {
+        match s {
+            Stmt::Break | Stmt::Continue => continue,
+            other => {
+                if !stmt_safe_for_index_rewrite(other, i_name, c_name) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// `true` if `expr_safe`: every read of `i_name` is `Subscript(Var(c), Var(i))`
+/// (replaced wholesale by the rewrite), and `c_name` only appears as the
+/// container in such subscripts or in other reads that don't escape the loop.
+///
+/// We allow `c` to be read as a bare name elsewhere only if it's clearly a
+/// read (no assignment to it).  The mutation check is in
+/// `stmt_safe_for_index_rewrite`.
+fn expr_safe(expr: &Expr, i_name: &str, c_name: &str) -> bool {
+    match expr {
+        Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Complex(_, _)
+        | Expr::Str(_)
+        | Expr::Bytes(_)
+        | Expr::Bool(_)
+        | Expr::None => true,
+        Expr::Var(n) => {
+            // A bare reference to `i` outside of `c[i]` would still need to
+            // see the index, not the value — bail.  Bare `c` reads are fine.
+            n != i_name
+        }
+        Expr::Index { target, index } => {
+            // `c[i]` is the canonical safe shape: rewritten to a bare `i`.
+            if is_c_at_i_expr(target, index, c_name, i_name) {
+                return true;
+            }
+            expr_safe(target, i_name, c_name) && expr_safe(index, i_name, c_name)
+        }
+        Expr::Attr { target, .. } => expr_safe(target, i_name, c_name),
+        Expr::Slice {
+            target,
+            lower,
+            upper,
+            step,
+        } => {
+            expr_safe(target, i_name, c_name)
+                && lower
+                    .as_deref()
+                    .is_none_or(|e| expr_safe(e, i_name, c_name))
+                && upper
+                    .as_deref()
+                    .is_none_or(|e| expr_safe(e, i_name, c_name))
+                && step.as_deref().is_none_or(|e| expr_safe(e, i_name, c_name))
+        }
+        Expr::Unary { expr, .. } => expr_safe(expr, i_name, c_name),
+        Expr::Binary { left, right, .. } => {
+            expr_safe(left, i_name, c_name) && expr_safe(right, i_name, c_name)
+        }
+        Expr::Compare { left, ops } => {
+            expr_safe(left, i_name, c_name) && ops.iter().all(|(_, e)| expr_safe(e, i_name, c_name))
+        }
+        Expr::Ternary { cond, then, else_ } => {
+            expr_safe(cond, i_name, c_name)
+                && expr_safe(then, i_name, c_name)
+                && expr_safe(else_, i_name, c_name)
+        }
+        Expr::Call { func, args } => {
+            expr_safe(func, i_name, c_name)
+                && args.iter().all(|a| expr_safe(&a.value, i_name, c_name))
+        }
+        Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
+            items.iter().all(|e| expr_safe(e, i_name, c_name))
+        }
+        Expr::Dict(pairs) => pairs
+            .iter()
+            .all(|(k, v)| expr_safe(k, i_name, c_name) && expr_safe(v, i_name, c_name)),
+        Expr::FString(parts) => parts.iter().all(|p| match p {
+            FStringPart::Literal(_) => true,
+            FStringPart::Expr { expr, .. } => expr_safe(expr, i_name, c_name),
+        }),
+        // Conservatively bail on anything that captures or re-evaluates
+        // expressions in a non-trivial way: comprehensions (they have their
+        // own scope and could shadow), lambdas, walrus, yield.
+        Expr::ListComp { .. }
+        | Expr::DictComp { .. }
+        | Expr::SetComp { .. }
+        | Expr::Lambda { .. }
+        | Expr::Named { .. }
+        | Expr::Yield(_)
+        | Expr::YieldFrom(_) => false,
+    }
+}
+
+fn is_c_at_i_expr(target: &Expr, index: &Expr, c_name: &str, i_name: &str) -> bool {
+    matches!(target, Expr::Var(n) if n == c_name) && matches!(index, Expr::Var(n) if n == i_name)
+}
+
+fn target_assigns(target: &AssignTarget, name: &str) -> bool {
+    match target {
+        AssignTarget::Name(n) => n == name,
+        AssignTarget::Tuple(ts) => ts.iter().any(|t| target_assigns(t, name)),
+        AssignTarget::Starred(t) => target_assigns(t, name),
+        _ => false,
+    }
+}
+
+/// Verify a non-Name assignment target doesn't read `i`/`c` in unsafe ways.
+fn target_safe_for_rewrite(target: &AssignTarget, i_name: &str, c_name: &str) -> bool {
+    match target {
+        AssignTarget::Name(_) => true,
+        AssignTarget::Attr(t, _) => expr_safe(t, i_name, c_name),
+        AssignTarget::Index(t, idx) => {
+            // `c[i] = ...` is handled at the Stmt::IndexAssign site; here we
+            // only see this via `IndexAssign`/`SliceAssign` containers — never
+            // reached in practice, but keep it sound.
+            expr_safe(t, i_name, c_name) && expr_safe(idx, i_name, c_name)
+        }
+        AssignTarget::Tuple(ts) => ts
+            .iter()
+            .all(|t| target_safe_for_rewrite(t, i_name, c_name)),
+        AssignTarget::Starred(t) => target_safe_for_rewrite(t, i_name, c_name),
+    }
+}
+
+/// `true` if `stmt` (recursively, but not crossing function/class scopes)
+/// contains a read of `name`.  Used to verify post-loop non-use of `i`.
+fn stmt_reads_var(stmt: &Stmt, name: &str) -> bool {
+    match stmt {
+        Stmt::Assign(_, e) => expr_reads_var(e, name),
+        Stmt::AttrAssign { target, expr, .. } => {
+            expr_reads_var(target, name) || expr_reads_var(expr, name)
+        }
+        Stmt::IndexAssign {
+            target,
+            index,
+            expr,
+        } => {
+            expr_reads_var(target, name)
+                || expr_reads_var(index, name)
+                || expr_reads_var(expr, name)
+        }
+        Stmt::SliceAssign {
+            target,
+            lower,
+            upper,
+            step,
+            expr,
+        } => {
+            expr_reads_var(target, name)
+                || lower.as_deref().is_some_and(|e| expr_reads_var(e, name))
+                || upper.as_deref().is_some_and(|e| expr_reads_var(e, name))
+                || step.as_deref().is_some_and(|e| expr_reads_var(e, name))
+                || expr_reads_var(expr, name)
+        }
+        Stmt::AugAssign { expr, .. } => expr_reads_var(expr, name),
+        Stmt::Expr(e) => expr_reads_var(e, name),
+        Stmt::Return(Some(e)) => expr_reads_var(e, name),
+        Stmt::Return(None) => false,
+        Stmt::If {
+            branches,
+            else_branch,
+        } => {
+            branches
+                .iter()
+                .any(|(c, b)| expr_reads_var(c, name) || b.iter().any(|s| stmt_reads_var(s, name)))
+                || else_branch
+                    .as_deref()
+                    .is_some_and(|b| b.iter().any(|s| stmt_reads_var(s, name)))
+        }
+        Stmt::While {
+            cond,
+            body,
+            else_branch,
+        } => {
+            expr_reads_var(cond, name)
+                || body.iter().any(|s| stmt_reads_var(s, name))
+                || else_branch
+                    .as_deref()
+                    .is_some_and(|b| b.iter().any(|s| stmt_reads_var(s, name)))
+        }
+        Stmt::For {
+            iter,
+            body,
+            else_branch,
+            ..
+        } => {
+            expr_reads_var(iter, name)
+                || body.iter().any(|s| stmt_reads_var(s, name))
+                || else_branch
+                    .as_deref()
+                    .is_some_and(|b| b.iter().any(|s| stmt_reads_var(s, name)))
+        }
+        Stmt::Try {
+            body,
+            handlers,
+            else_branch,
+            finally_branch,
+        } => {
+            body.iter().any(|s| stmt_reads_var(s, name))
+                || handlers.iter().any(|h| {
+                    h.kind.as_ref().is_some_and(|e| expr_reads_var(e, name))
+                        || h.body.iter().any(|s| stmt_reads_var(s, name))
+                })
+                || else_branch
+                    .as_deref()
+                    .is_some_and(|b| b.iter().any(|s| stmt_reads_var(s, name)))
+                || finally_branch
+                    .as_deref()
+                    .is_some_and(|b| b.iter().any(|s| stmt_reads_var(s, name)))
+        }
+        Stmt::With { items, body } => {
+            items.iter().any(|(e, _)| expr_reads_var(e, name))
+                || body.iter().any(|s| stmt_reads_var(s, name))
+        }
+        Stmt::Match { subject, arms } => {
+            expr_reads_var(subject, name)
+                || arms.iter().any(|a| {
+                    a.guard.as_ref().is_some_and(|e| expr_reads_var(e, name))
+                        || a.body.iter().any(|s| stmt_reads_var(s, name))
+                })
+        }
+        Stmt::Delete(exprs) => exprs.iter().any(|e| expr_reads_var(e, name)),
+        Stmt::Assert { test, msg } => {
+            expr_reads_var(test, name) || msg.as_ref().is_some_and(|e| expr_reads_var(e, name))
+        }
+        Stmt::Raise { expr, cause } => {
+            expr.as_ref().is_some_and(|e| expr_reads_var(e, name))
+                || cause.as_ref().is_some_and(|e| expr_reads_var(e, name))
+        }
+        // A nested `def` or `class` may close over `i`.  Conservatively
+        // consider that a read of `i` — bail on the rewrite.
+        Stmt::Def { body, .. } | Stmt::Class { body, .. } => {
+            body.iter().any(|s| stmt_reads_var(s, name))
+        }
+        Stmt::Global(_)
+        | Stmt::Nonlocal(_)
+        | Stmt::Break
+        | Stmt::Continue
+        | Stmt::Pass
+        | Stmt::Import { .. }
+        | Stmt::ImportFrom { .. } => false,
+    }
+}
+
+fn expr_reads_var(expr: &Expr, name: &str) -> bool {
+    match expr {
+        Expr::Var(n) => n == name,
+        Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Complex(_, _)
+        | Expr::Str(_)
+        | Expr::Bytes(_)
+        | Expr::Bool(_)
+        | Expr::None => false,
+        Expr::FString(parts) => parts.iter().any(|p| match p {
+            FStringPart::Literal(_) => false,
+            FStringPart::Expr { expr, .. } => expr_reads_var(expr, name),
+        }),
+        Expr::Unary { expr, .. } => expr_reads_var(expr, name),
+        Expr::Binary { left, right, .. } => {
+            expr_reads_var(left, name) || expr_reads_var(right, name)
+        }
+        Expr::Compare { left, ops } => {
+            expr_reads_var(left, name) || ops.iter().any(|(_, e)| expr_reads_var(e, name))
+        }
+        Expr::Ternary { cond, then, else_ } => {
+            expr_reads_var(cond, name) || expr_reads_var(then, name) || expr_reads_var(else_, name)
+        }
+        Expr::Call { func, args } => {
+            expr_reads_var(func, name) || args.iter().any(|a| expr_reads_var(&a.value, name))
+        }
+        Expr::Attr { target, .. } => expr_reads_var(target, name),
+        Expr::Index { target, index } => {
+            expr_reads_var(target, name) || expr_reads_var(index, name)
+        }
+        Expr::Slice {
+            target,
+            lower,
+            upper,
+            step,
+        } => {
+            expr_reads_var(target, name)
+                || lower.as_deref().is_some_and(|e| expr_reads_var(e, name))
+                || upper.as_deref().is_some_and(|e| expr_reads_var(e, name))
+                || step.as_deref().is_some_and(|e| expr_reads_var(e, name))
+        }
+        Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
+            items.iter().any(|e| expr_reads_var(e, name))
+        }
+        Expr::Dict(pairs) => pairs
+            .iter()
+            .any(|(k, v)| expr_reads_var(k, name) || expr_reads_var(v, name)),
+        Expr::ListComp { elt, clauses } | Expr::SetComp { elt, clauses } => {
+            expr_reads_var(elt, name)
+                || clauses.iter().any(|c| {
+                    expr_reads_var(&c.iter, name)
+                        || c.cond.as_ref().is_some_and(|x| expr_reads_var(x, name))
+                })
+        }
+        Expr::DictComp { key, val, clauses } => {
+            expr_reads_var(key, name)
+                || expr_reads_var(val, name)
+                || clauses.iter().any(|c| {
+                    expr_reads_var(&c.iter, name)
+                        || c.cond.as_ref().is_some_and(|x| expr_reads_var(x, name))
+                })
+        }
+        Expr::Lambda { body, .. } => expr_reads_var(body, name),
+        Expr::Named { value, .. } => expr_reads_var(value, name),
+        Expr::Yield(Some(e)) => expr_reads_var(e, name),
+        Expr::Yield(None) => false,
+        Expr::YieldFrom(e) => expr_reads_var(e, name),
+    }
+}
+
+/// Replace `Subscript(Var(c), Var(i))` with `Var(i)` everywhere in `stmt`.
+/// Called after `body_index_pattern_is_safe` has verified that every
+/// occurrence of `i` in the body is of this exact shape.
+fn rewrite_c_at_i_in_stmt(stmt: &mut Stmt, c_name: &str, i_name: &str) {
+    match stmt {
+        Stmt::Assign(_, e) | Stmt::AugAssign { expr: e, .. } | Stmt::Expr(e) => {
+            rewrite_c_at_i_in_expr(e, c_name, i_name);
+        }
+        Stmt::Return(Some(e)) => rewrite_c_at_i_in_expr(e, c_name, i_name),
+        Stmt::AttrAssign { target, expr, .. } => {
+            rewrite_c_at_i_in_expr(target, c_name, i_name);
+            rewrite_c_at_i_in_expr(expr, c_name, i_name);
+        }
+        Stmt::IndexAssign {
+            target,
+            index,
+            expr,
+        } => {
+            rewrite_c_at_i_in_expr(target, c_name, i_name);
+            rewrite_c_at_i_in_expr(index, c_name, i_name);
+            rewrite_c_at_i_in_expr(expr, c_name, i_name);
+        }
+        Stmt::SliceAssign {
+            target,
+            lower,
+            upper,
+            step,
+            expr,
+        } => {
+            rewrite_c_at_i_in_expr(target, c_name, i_name);
+            if let Some(e) = lower.as_mut() {
+                rewrite_c_at_i_in_expr(e, c_name, i_name);
+            }
+            if let Some(e) = upper.as_mut() {
+                rewrite_c_at_i_in_expr(e, c_name, i_name);
+            }
+            if let Some(e) = step.as_mut() {
+                rewrite_c_at_i_in_expr(e, c_name, i_name);
+            }
+            rewrite_c_at_i_in_expr(expr, c_name, i_name);
+        }
+        Stmt::If {
+            branches,
+            else_branch,
+        } => {
+            for (cond, b) in branches.iter_mut() {
+                rewrite_c_at_i_in_expr(cond, c_name, i_name);
+                for s in b.iter_mut() {
+                    rewrite_c_at_i_in_stmt(s, c_name, i_name);
+                }
+            }
+            if let Some(b) = else_branch.as_mut() {
+                for s in b.iter_mut() {
+                    rewrite_c_at_i_in_stmt(s, c_name, i_name);
+                }
+            }
+        }
+        Stmt::While {
+            cond,
+            body,
+            else_branch,
+        } => {
+            rewrite_c_at_i_in_expr(cond, c_name, i_name);
+            for s in body.iter_mut() {
+                rewrite_c_at_i_in_stmt(s, c_name, i_name);
+            }
+            if let Some(b) = else_branch.as_mut() {
+                for s in b.iter_mut() {
+                    rewrite_c_at_i_in_stmt(s, c_name, i_name);
+                }
+            }
+        }
+        Stmt::For {
+            iter,
+            body,
+            else_branch,
+            ..
+        } => {
+            rewrite_c_at_i_in_expr(iter, c_name, i_name);
+            for s in body.iter_mut() {
+                rewrite_c_at_i_in_stmt(s, c_name, i_name);
+            }
+            if let Some(b) = else_branch.as_mut() {
+                for s in b.iter_mut() {
+                    rewrite_c_at_i_in_stmt(s, c_name, i_name);
+                }
+            }
+        }
+        Stmt::Delete(exprs) => {
+            for e in exprs.iter_mut() {
+                rewrite_c_at_i_in_expr(e, c_name, i_name);
+            }
+        }
+        Stmt::Assert { test, msg } => {
+            rewrite_c_at_i_in_expr(test, c_name, i_name);
+            if let Some(m) = msg.as_mut() {
+                rewrite_c_at_i_in_expr(m, c_name, i_name);
+            }
+        }
+        Stmt::Raise { expr, cause } => {
+            if let Some(e) = expr.as_mut() {
+                rewrite_c_at_i_in_expr(e, c_name, i_name);
+            }
+            if let Some(e) = cause.as_mut() {
+                rewrite_c_at_i_in_expr(e, c_name, i_name);
+            }
+        }
+        // Other variants are excluded by stmt_safe_for_index_rewrite or have
+        // no inner expressions to walk (Pass, Break, Continue, Global,
+        // Nonlocal, Return(None)).
+        _ => {}
+    }
+}
+
+fn rewrite_c_at_i_in_expr(expr: &mut Expr, c_name: &str, i_name: &str) {
+    // `c[i]` → `i` (the rewritten loop variable now holds the element value).
+    if let Expr::Index { target, index } = expr
+        && is_c_at_i_expr(target, index, c_name, i_name)
+    {
+        *expr = Expr::Var(i_name.to_string());
+        return;
+    }
+    match expr {
+        Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Complex(_, _)
+        | Expr::Str(_)
+        | Expr::Bytes(_)
+        | Expr::Bool(_)
+        | Expr::None
+        | Expr::Var(_) => {}
+        Expr::FString(parts) => {
+            for p in parts.iter_mut() {
+                if let FStringPart::Expr { expr, .. } = p {
+                    rewrite_c_at_i_in_expr(expr, c_name, i_name);
+                }
+            }
+        }
+        Expr::Unary { expr, .. } => rewrite_c_at_i_in_expr(expr, c_name, i_name),
+        Expr::Binary { left, right, .. } => {
+            rewrite_c_at_i_in_expr(left, c_name, i_name);
+            rewrite_c_at_i_in_expr(right, c_name, i_name);
+        }
+        Expr::Compare { left, ops } => {
+            rewrite_c_at_i_in_expr(left, c_name, i_name);
+            for (_, e) in ops.iter_mut() {
+                rewrite_c_at_i_in_expr(e, c_name, i_name);
+            }
+        }
+        Expr::Ternary { cond, then, else_ } => {
+            rewrite_c_at_i_in_expr(cond, c_name, i_name);
+            rewrite_c_at_i_in_expr(then, c_name, i_name);
+            rewrite_c_at_i_in_expr(else_, c_name, i_name);
+        }
+        Expr::Call { func, args } => {
+            rewrite_c_at_i_in_expr(func, c_name, i_name);
+            for a in args.iter_mut() {
+                rewrite_c_at_i_in_expr(&mut a.value, c_name, i_name);
+            }
+        }
+        Expr::Attr { target, .. } => rewrite_c_at_i_in_expr(target, c_name, i_name),
+        Expr::Index { target, index } => {
+            rewrite_c_at_i_in_expr(target, c_name, i_name);
+            rewrite_c_at_i_in_expr(index, c_name, i_name);
+        }
+        Expr::Slice {
+            target,
+            lower,
+            upper,
+            step,
+        } => {
+            rewrite_c_at_i_in_expr(target, c_name, i_name);
+            if let Some(e) = lower.as_mut() {
+                rewrite_c_at_i_in_expr(e, c_name, i_name);
+            }
+            if let Some(e) = upper.as_mut() {
+                rewrite_c_at_i_in_expr(e, c_name, i_name);
+            }
+            if let Some(e) = step.as_mut() {
+                rewrite_c_at_i_in_expr(e, c_name, i_name);
+            }
+        }
+        Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
+            for e in items.iter_mut() {
+                rewrite_c_at_i_in_expr(e, c_name, i_name);
+            }
+        }
+        Expr::Dict(pairs) => {
+            for (k, v) in pairs.iter_mut() {
+                rewrite_c_at_i_in_expr(k, c_name, i_name);
+                rewrite_c_at_i_in_expr(v, c_name, i_name);
+            }
+        }
+        // Comprehensions/lambdas/walrus/yield are bailed on in expr_safe so
+        // we should never see them here, but be defensive.
+        Expr::ListComp { .. }
+        | Expr::DictComp { .. }
+        | Expr::SetComp { .. }
+        | Expr::Lambda { .. }
+        | Expr::Named { .. }
+        | Expr::Yield(_)
+        | Expr::YieldFrom(_) => {}
+    }
+}
+
 /// Detect `while VAR cmp STOP: ...; VAR += STEP` (or -= for decreasing).
 fn detect_while_range<'a>(
     cond: &'a Expr,
@@ -1507,9 +2337,19 @@ impl Compiler {
     }
 
     fn compile_block(&mut self, stmts: &[Stmt]) {
-        for stmt in stmts {
+        for (idx, stmt) in stmts.iter().enumerate() {
             if self.failed {
                 return;
+            }
+            // #289: rewrite `while i < len(c): ...; i += 1` → `for i in c: ...`
+            // when `i` is unused after the loop.  Needs the post-loop suffix
+            // for the unused-after-loop check, so it lives in compile_block
+            // (not compile_while which only sees its own body/else).
+            if matches!(stmt, Stmt::While { .. })
+                && let Some(rewritten) = try_rewrite_while_index_to_for(stmts, idx)
+            {
+                self.compile_stmt(&rewritten);
+                continue;
             }
             self.compile_stmt(stmt);
         }
