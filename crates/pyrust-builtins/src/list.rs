@@ -6,8 +6,8 @@ use crate::sequence;
 
 /// Canonical list of method names dispatched by `call`.
 pub const METHODS: &[&str] = &[
-    "index", "count", "append", "clear", "copy", "extend",
-    "insert", "pop", "remove", "reverse", "sort",
+    "index", "count", "append", "clear", "copy", "extend", "insert", "pop", "remove", "reverse",
+    "sort",
 ];
 
 /// Returns `true` if `method` is the name of a built-in `list` method.

@@ -3,8 +3,16 @@ use pyrust_core::{PyError, PyKey, Result, Value, ValueKind};
 
 /// Canonical list of method names dispatched by `call`.
 pub const METHODS: &[&str] = &[
-    "get", "keys", "values", "items", "update",
-    "pop", "popitem", "clear", "setdefault", "copy",
+    "get",
+    "keys",
+    "values",
+    "items",
+    "update",
+    "pop",
+    "popitem",
+    "clear",
+    "setdefault",
+    "copy",
 ];
 
 /// Returns `true` if `method` is the name of a built-in `dict` method.

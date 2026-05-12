@@ -3,11 +3,23 @@ use pyrust_core::{PyError, PyKey, Result, Value, ValueKind};
 
 /// Canonical list of method names dispatched by `call`.
 pub const METHODS: &[&str] = &[
-    "add", "remove", "discard", "pop", "clear",
-    "update", "intersection_update", "difference_update",
-    "symmetric_difference_update", "copy",
-    "union", "intersection", "difference", "symmetric_difference",
-    "issubset", "issuperset", "isdisjoint",
+    "add",
+    "remove",
+    "discard",
+    "pop",
+    "clear",
+    "update",
+    "intersection_update",
+    "difference_update",
+    "symmetric_difference_update",
+    "copy",
+    "union",
+    "intersection",
+    "difference",
+    "symmetric_difference",
+    "issubset",
+    "issuperset",
+    "isdisjoint",
 ];
 
 /// Returns `true` if `method` is the name of a built-in `set` method.
