@@ -1139,6 +1139,7 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
         "iter" => Some(Value::builtin_function("iter")),
         "vars" => Some(Value::builtin_function("vars")),
         "dir" => Some(Value::builtin_function("dir")),
+        "open" => Some(Value::builtin_function("open")),
         "NotImplemented" => Some(Value::not_implemented()),
         "complex" => Some(Value::builtin_function("complex")),
         _ => None,
