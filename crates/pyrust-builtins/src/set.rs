@@ -74,7 +74,8 @@ fn collect_iterable(v: &Value) -> Result<IndexSet<PyKey>> {
                 out.insert(k.clone());
             }
         }
-        ValueKind::FrozenSet(rc) => {
+        _ if crate::frozenset::as_items(v).is_some() => {
+            let rc = crate::frozenset::as_items(v).unwrap();
             for k in rc.iter() {
                 out.insert(k.clone());
             }
@@ -129,9 +130,9 @@ fn type_name(v: &Value) -> &'static str {
         ValueKind::List(_) => "list",
         ValueKind::Tuple(_) => "tuple",
         ValueKind::Set(_) => "set",
-        ValueKind::FrozenSet(_) => "frozenset",
         ValueKind::Dict(_) => "dict",
         ValueKind::Range { .. } => "range",
+        ValueKind::BuiltinObject { ops, .. } => ops.type_name(),
         _ => "object",
     }
 }
@@ -319,7 +320,7 @@ fn key_to_value(k: PyKey) -> Value {
             for k in items {
                 set.insert(k);
             }
-            Value::frozenset(set)
+            crate::frozenset::frozenset(set)
         }
     }
 }

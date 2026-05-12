@@ -148,7 +148,7 @@ fn key_to_value(k: PyKey) -> Value {
             for k in items {
                 set.insert(k);
             }
-            Value::frozenset(set)
+            crate::frozenset::frozenset(set)
         }
     }
 }

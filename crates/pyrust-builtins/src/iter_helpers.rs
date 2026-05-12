@@ -1,0 +1,226 @@
+//! `enumerate`, `zip`, `reversed` — iterator helper builtins.
+//!
+//! Eliminated from `pyrust-core`'s Tier 1 (#295) because each one wraps an
+//! arbitrary source iterator: the payload isn't small enough to justify a
+//! dedicated `Opaque` variant.  The values live here as `BuiltinObject`s.
+//!
+//! Materialisation of the source happens **lazily on first `iter_next`**, not
+//! at construction time, so side effects of the source (e.g. `open()` opening
+//! a file) are deferred to iteration start — matching the previous behavior.
+
+use std::cell::RefCell;
+
+use pyrust_core::{BuiltinState, BuiltinTypeOps, PyError, Result, Value, iter_values_via_registry};
+
+// ── enumerate ────────────────────────────────────────────────────────────────
+
+pub struct EnumerateState {
+    source: Value,
+    start: i64,
+    /// Materialised lazily on first `iter_next` call.
+    items: RefCell<Option<Vec<Value>>>,
+    pos: RefCell<usize>,
+}
+
+pub struct EnumerateOps;
+pub const ENUMERATE_OPS: &EnumerateOps = &EnumerateOps;
+pub const ENUMERATE_TYPE_NAME: &str = "enumerate";
+
+impl BuiltinTypeOps for EnumerateOps {
+    fn type_name(&self) -> &'static str {
+        ENUMERATE_TYPE_NAME
+    }
+
+    fn repr(&self, _state: &BuiltinState) -> String {
+        "<enumerate object>".to_string()
+    }
+
+    fn truthy(&self, _state: &BuiltinState) -> bool {
+        true
+    }
+
+    fn is_iterable(&self) -> bool {
+        true
+    }
+
+    fn iter_next(&self, state: &BuiltinState) -> Result<Option<Value>> {
+        let borrow = state.borrow();
+        let s = borrow
+            .downcast_ref::<EnumerateState>()
+            .ok_or_else(|| PyError::Runtime("internal: bad enumerate state".to_string()))?;
+        ensure_materialized(&s.items, || iter_values_via_registry(&s.source))?;
+        let items_ref = s.items.borrow();
+        let items = items_ref.as_ref().unwrap();
+        let mut pos = s.pos.borrow_mut();
+        if *pos < items.len() {
+            let tuple = Value::tuple(vec![Value::int(*pos as i64 + s.start), items[*pos].clone()]);
+            *pos += 1;
+            Ok(Some(tuple))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+/// `enumerate(source, start=0)` — yields `(start + i, x)` for each `x` in
+/// `source`.  Source is *not* drained yet — the first `iter_next` call
+/// triggers materialisation.
+pub fn enumerate(source: Value, start: i64) -> Value {
+    let state = EnumerateState {
+        source,
+        start,
+        items: RefCell::new(None),
+        pos: RefCell::new(0),
+    };
+    Value::builtin_object(ENUMERATE_OPS, Box::new(state))
+}
+
+// ── zip ──────────────────────────────────────────────────────────────────────
+
+pub struct ZipState {
+    sources: Vec<Value>,
+    /// Per-source materialised vecs; lazy.
+    columns: RefCell<Option<Vec<Vec<Value>>>>,
+    /// Min length across columns.
+    len: RefCell<usize>,
+    pos: RefCell<usize>,
+}
+
+pub struct ZipOps;
+pub const ZIP_OPS: &ZipOps = &ZipOps;
+pub const ZIP_TYPE_NAME: &str = "zip";
+
+impl BuiltinTypeOps for ZipOps {
+    fn type_name(&self) -> &'static str {
+        ZIP_TYPE_NAME
+    }
+
+    fn repr(&self, _state: &BuiltinState) -> String {
+        "<zip object>".to_string()
+    }
+
+    fn truthy(&self, _state: &BuiltinState) -> bool {
+        true
+    }
+
+    fn is_iterable(&self) -> bool {
+        true
+    }
+
+    fn iter_next(&self, state: &BuiltinState) -> Result<Option<Value>> {
+        let borrow = state.borrow();
+        let s = borrow
+            .downcast_ref::<ZipState>()
+            .ok_or_else(|| PyError::Runtime("internal: bad zip state".to_string()))?;
+        if s.columns.borrow().is_none() {
+            let mut cols: Vec<Vec<Value>> = Vec::with_capacity(s.sources.len());
+            for src in &s.sources {
+                cols.push(iter_values_via_registry(src)?);
+            }
+            let len = cols.iter().map(|v| v.len()).min().unwrap_or(0);
+            *s.columns.borrow_mut() = Some(cols);
+            *s.len.borrow_mut() = len;
+        }
+        let cols_ref = s.columns.borrow();
+        let cols = cols_ref.as_ref().unwrap();
+        let len = *s.len.borrow();
+        let mut pos = s.pos.borrow_mut();
+        if *pos < len {
+            let row: Vec<Value> = cols.iter().map(|c| c[*pos].clone()).collect();
+            *pos += 1;
+            Ok(Some(Value::tuple(row)))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+/// `zip(it1, it2, ...)` — yields tuples drawn pointwise from each source.
+/// Sources are drained on first `iter_next`.
+pub fn zip(sources: Vec<Value>) -> Value {
+    let state = ZipState {
+        sources,
+        columns: RefCell::new(None),
+        len: RefCell::new(0),
+        pos: RefCell::new(0),
+    };
+    Value::builtin_object(ZIP_OPS, Box::new(state))
+}
+
+// ── reversed ─────────────────────────────────────────────────────────────────
+
+pub struct ReversedState {
+    source: Value,
+    items: RefCell<Option<Vec<Value>>>,
+    /// Cursor walks from the end of `items` down to 0.  `usize::MAX` means
+    /// "not yet initialised"; set to `items.len()` once materialised.
+    pos: RefCell<usize>,
+}
+
+pub struct ReversedOps;
+pub const REVERSED_OPS: &ReversedOps = &ReversedOps;
+pub const REVERSED_TYPE_NAME: &str = "list_reverseiterator";
+
+impl BuiltinTypeOps for ReversedOps {
+    fn type_name(&self) -> &'static str {
+        REVERSED_TYPE_NAME
+    }
+
+    fn repr(&self, _state: &BuiltinState) -> String {
+        "<list_reverseiterator object>".to_string()
+    }
+
+    fn truthy(&self, _state: &BuiltinState) -> bool {
+        true
+    }
+
+    fn is_iterable(&self) -> bool {
+        true
+    }
+
+    fn iter_next(&self, state: &BuiltinState) -> Result<Option<Value>> {
+        let borrow = state.borrow();
+        let s = borrow
+            .downcast_ref::<ReversedState>()
+            .ok_or_else(|| PyError::Runtime("internal: bad reversed state".to_string()))?;
+        if s.items.borrow().is_none() {
+            let items = iter_values_via_registry(&s.source)?;
+            let len = items.len();
+            *s.items.borrow_mut() = Some(items);
+            *s.pos.borrow_mut() = len;
+        }
+        let items_ref = s.items.borrow();
+        let items = items_ref.as_ref().unwrap();
+        let mut pos = s.pos.borrow_mut();
+        if *pos > 0 {
+            *pos -= 1;
+            Ok(Some(items[*pos].clone()))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+/// `reversed(source)` — yields `source` items in reverse order.  Source is
+/// drained on first `iter_next`.
+pub fn reversed(source: Value) -> Value {
+    let state = ReversedState {
+        source,
+        items: RefCell::new(None),
+        pos: RefCell::new(0),
+    };
+    Value::builtin_object(REVERSED_OPS, Box::new(state))
+}
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+fn ensure_materialized<F>(slot: &RefCell<Option<Vec<Value>>>, fill: F) -> Result<()>
+where
+    F: FnOnce() -> Result<Vec<Value>>,
+{
+    if slot.borrow().is_none() {
+        let items = fill()?;
+        *slot.borrow_mut() = Some(items);
+    }
+    Ok(())
+}

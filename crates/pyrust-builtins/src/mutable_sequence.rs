@@ -47,24 +47,13 @@ fn type_name_of(v: &Value) -> &'static str {
         ValueKind::PyClass(_) => "type",
         ValueKind::PyInstance(_) => "object",
         ValueKind::PyModule(_) => "module",
-        ValueKind::DictKeysView(_) => "dict_keys",
-        ValueKind::DictValuesView(_) => "dict_values",
-        ValueKind::DictItemsView(_) => "dict_items",
-        ValueKind::Enumerate { .. } => "enumerate",
-        ValueKind::Zip { .. } => "zip",
-        ValueKind::Reversed { .. } => "list_reverseiterator",
-        ValueKind::ClassMethod(_)
-        | ValueKind::StaticMethod(_)
-        | ValueKind::ClassBoundMethod { .. } => "function",
+        ValueKind::ClassBoundMethod { .. } => "function",
         ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => "super",
         ValueKind::Generator(_) => "generator",
-        ValueKind::Property { .. } | ValueKind::PropertyAccessorPartial { .. } => "property",
         ValueKind::NotImplemented => "NotImplementedType",
-        ValueKind::BuiltinBoundMethod { .. } => "builtin_function_or_method",
-        ValueKind::FrozenSet(_) => "frozenset",
         ValueKind::Bytes(_) => "bytes",
         ValueKind::Complex(_, _) => "complex",
-        ValueKind::File(_) => "_io.TextIOWrapper",
+        ValueKind::BuiltinObject { ops, .. } => ops.type_name(),
     }
 }
 

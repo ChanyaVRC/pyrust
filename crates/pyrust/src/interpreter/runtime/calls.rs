@@ -98,10 +98,21 @@ impl Interpreter {
                     ValueKind::List(items) => items.len() as i64,
                     ValueKind::Tuple(items) => items.len() as i64,
                     ValueKind::Set(items) => items.len() as i64,
-                    ValueKind::FrozenSet(rc) => rc.len() as i64,
                     ValueKind::Bytes(rc) => rc.len() as i64,
                     ValueKind::Dict(items) => items.len() as i64,
                     ValueKind::Range { start, stop, step } => range_len(start, stop, step),
+                    ValueKind::BuiltinObject { ops, state } => match ops.len(state) {
+                        Some(n) => n as i64,
+                        None => {
+                            return Err(PyError::Named(
+                                "TypeError".to_string(),
+                                format!(
+                                    "object of type '{}' has no len()",
+                                    ops.type_name()
+                                ),
+                            ));
+                        }
+                    },
                     ValueKind::PyInstance(inst) => {
                         let inst_rc = Rc::clone(inst);
                         let class = Rc::clone(&inst_rc.borrow().class);
@@ -157,13 +168,19 @@ impl Interpreter {
                 } else {
                     0i64
                 };
-                Ok(Value::lazy_enumerate(args[0].value.clone(), start))
+                // Pass the source Value directly — `iter_helpers` materialises
+                // lazily on first iter_next so side effects of e.g. `open()`
+                // happen at iteration start, not at construction.
+                Ok(pyrust_builtins::iter_helpers::enumerate(
+                    args[0].value.clone(),
+                    start,
+                ))
             }
 
             ValueKind::BuiltinFunction("zip") => {
                 reject_keyword_args_expanded("zip", args)?;
-                let sources = args.iter().map(|a| a.value.clone()).collect();
-                Ok(Value::lazy_zip(sources))
+                let sources: Vec<Value> = args.iter().map(|a| a.value.clone()).collect();
+                Ok(pyrust_builtins::iter_helpers::zip(sources))
             }
 
             ValueKind::BuiltinFunction("reversed") => {
@@ -173,7 +190,7 @@ impl Interpreter {
                         "reversed() takes exactly one argument".to_string(),
                     ));
                 }
-                Ok(Value::lazy_reversed(args[0].value.clone()))
+                Ok(pyrust_builtins::iter_helpers::reversed(args[0].value.clone()))
             }
 
             ValueKind::BuiltinFunction("sorted") => {
@@ -457,7 +474,33 @@ impl Interpreter {
                     )),
                 }
             }
-            ValueKind::BuiltinFunction("open") => builtin_open(args),
+            ValueKind::BuiltinFunction("open") => {
+                let path = match args.first().map(|a| a.value.kind()) {
+                    Some(ValueKind::Str(s)) => s.to_string(),
+                    _ => {
+                        return Err(PyError::Named(
+                            "TypeError".to_string(),
+                            "open(): path must be a string".to_string(),
+                        ));
+                    }
+                };
+                let mode = {
+                    let kw = args.iter().find(|a| a.name.as_deref() == Some("mode"));
+                    let positional = args.iter().filter(|a| a.name.is_none()).nth(1);
+                    let val = kw.or(positional).map(|a| &a.value);
+                    match val.map(|v| v.kind()) {
+                        None => "r".to_string(),
+                        Some(ValueKind::Str(s)) => s.to_string(),
+                        Some(_) => {
+                            return Err(PyError::Named(
+                                "TypeError".to_string(),
+                                "open(): mode must be a string".to_string(),
+                            ));
+                        }
+                    }
+                };
+                pyrust_builtins::file::open(&path, &mode)
+            }
             ValueKind::BuiltinFunction("set") => {
                 reject_keyword_args_expanded("set", args)?;
                 match args.len() {
@@ -479,11 +522,13 @@ impl Interpreter {
             ValueKind::BuiltinFunction("frozenset") => {
                 reject_keyword_args_expanded("frozenset", args)?;
                 match args.len() {
-                    0 => Ok(Value::frozenset(indexmap::IndexSet::new())),
+                    0 => Ok(pyrust_builtins::frozenset::frozenset(
+                        indexmap::IndexSet::new(),
+                    )),
                     1 => {
                         // frozenset(frozenset_instance) returns the same object (per CPython).
-                        if let ValueKind::FrozenSet(rc) = args[0].value.kind() {
-                            return Ok(Value::frozenset_rc(Rc::clone(rc)));
+                        if let Some(rc) = pyrust_builtins::frozenset::as_items(&args[0].value) {
+                            return Ok(pyrust_builtins::frozenset::frozenset_rc(rc));
                         }
                         let items = self.collect_iterable(args[0].value.clone())?;
                         let mut set = indexmap::IndexSet::new();
@@ -496,7 +541,7 @@ impl Interpreter {
                             })?;
                             set.insert(key);
                         }
-                        Ok(Value::frozenset(set))
+                        Ok(pyrust_builtins::frozenset::frozenset(set))
                     }
                     _ => Err(PyError::Runtime(
                         "frozenset() takes at most one argument".to_string(),
@@ -776,7 +821,9 @@ impl Interpreter {
                     (ValueKind::List(_), ValueKind::BuiltinFunction("list")) => true,
                     (ValueKind::Tuple(_), ValueKind::BuiltinFunction("tuple")) => true,
                     (ValueKind::Set(_), ValueKind::BuiltinFunction("set")) => true,
-                    (ValueKind::FrozenSet(_), ValueKind::BuiltinFunction("frozenset")) => true,
+                    (ValueKind::BuiltinObject { ops, .. }, ValueKind::BuiltinFunction(name)) => {
+                        ops.type_name() == name
+                    }
                     (ValueKind::Bytes(_), ValueKind::BuiltinFunction("bytes")) => true,
                     (ValueKind::Complex(_, _), ValueKind::BuiltinFunction("complex")) => true,
                     (ValueKind::Dict(_), ValueKind::BuiltinFunction("dict")) => true,
@@ -865,9 +912,6 @@ impl Interpreter {
                     ValueKind::List(_) => Ok(Value::builtin_function("list")),
                     ValueKind::Tuple(_) => Ok(Value::builtin_function("tuple")),
                     ValueKind::Dict(_) => Ok(Value::builtin_function("dict")),
-                    ValueKind::DictKeysView(_) => Ok(Value::builtin_function("dict_keys")),
-                    ValueKind::DictValuesView(_) => Ok(Value::builtin_function("dict_values")),
-                    ValueKind::DictItemsView(_) => Ok(Value::builtin_function("dict_items")),
                     ValueKind::Set(_) => Ok(Value::builtin_function("set")),
                     ValueKind::Range { .. } => Ok(Value::builtin_function("range")),
                     ValueKind::UserFunction(_)
@@ -876,20 +920,14 @@ impl Interpreter {
                     ValueKind::BuiltinFunction(_) => Ok(Value::builtin_function("builtin_function_or_method")),
                     ValueKind::PyModule(_) => Ok(Value::builtin_function("module")),
                     ValueKind::BigInt(_) => Ok(Value::builtin_function("int")),
-                    ValueKind::Enumerate { .. } => Ok(Value::builtin_function("enumerate")),
-                    ValueKind::Zip { .. } => Ok(Value::builtin_function("zip")),
-                    ValueKind::Reversed { .. } => Ok(Value::builtin_function("reversed")),
-                    ValueKind::ClassMethod(_) | ValueKind::StaticMethod(_) => Ok(Value::builtin_function("function")),
                     ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => Ok(Value::builtin_function("super")),
                     ValueKind::Generator(_) => Ok(Value::builtin_function("generator")),
-                    ValueKind::Property { .. }
-                    | ValueKind::PropertyAccessorPartial { .. } => Ok(Value::builtin_function("property")),
                     ValueKind::NotImplemented => Ok(Value::builtin_function("NotImplementedType")),
-                    ValueKind::BuiltinBoundMethod { .. } => Ok(Value::builtin_function("builtin_function_or_method")),
-                    ValueKind::FrozenSet(_) => Ok(Value::builtin_function("frozenset")),
                     ValueKind::Bytes(_) => Ok(Value::builtin_function("bytes")),
                     ValueKind::Complex(_, _) => Ok(Value::builtin_function("complex")),
-                    ValueKind::File(_) => Ok(Value::builtin_function("_io.TextIOWrapper")),
+                    ValueKind::BuiltinObject { ops, .. } => {
+                        Ok(Value::builtin_function(ops.type_name()))
+                    }
                 }
             }
             ValueKind::BuiltinFunction("id") => {
@@ -1049,9 +1087,11 @@ impl Interpreter {
                     ))
                 }
             }
-            ValueKind::BuiltinBoundMethod { name, receiver } => {
-                let method = name.to_string();
-                let mut receiver = receiver.clone();
+            _ if pyrust_builtins::bound_method::as_bound_method(&function).is_some() => {
+                let (name_rc, receiver_owned) =
+                    pyrust_builtins::bound_method::as_bound_method(&function).unwrap();
+                let method = name_rc.to_string();
+                let mut receiver = receiver_owned;
                 // Separate positional and keyword args.
                 let mut pos: Vec<Value> = Vec::with_capacity(args.len());
                 let mut kw: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
@@ -1086,27 +1126,14 @@ impl Interpreter {
                             .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
                         pyrust_builtins::set::call(&method, set, pos)
                     }
-                    ValueKind::FrozenSet(rc) => {
-                        // Treat the frozenset as an immutable set for non-mutating methods.
-                        // Clone into a regular IndexSet, call the method, and (for the
-                        // result-returning ones) re-wrap if necessary.
-                        let mut items: indexmap::IndexSet<PyKey> = (**rc).clone();
-                        let result = pyrust_builtins::set::call(&method, &mut items, pos)?;
-                        // For methods that return a new set, re-wrap as frozenset.
-                        if matches!(
-                            method.as_str(),
-                            "copy" | "union" | "intersection" | "difference" | "symmetric_difference"
-                        ) {
-                            if let ValueKind::Set(s) = result.kind() {
-                                return Ok(Value::frozenset(s.clone()));
-                            }
-                        }
-                        Ok(result)
-                    }
                     ValueKind::Complex(re, im) if method == "conjugate" => {
                         Ok(Value::complex(re, -im))
                     }
-                    ValueKind::File(_) => call_file_method(&receiver, &method, &pos),
+                    ValueKind::BuiltinObject { ops, state } => {
+                        let empty_kw: indexmap::IndexMap<String, Value> =
+                            indexmap::IndexMap::new();
+                        ops.call_method(state, &method, pos, &empty_kw)
+                    }
                     _ => Err(PyError::Named(
                         "TypeError".to_string(),
                         format!("'{}' object has no method '{method}'", pyrust_core::builtin_type_name(&receiver)),
@@ -1373,10 +1400,15 @@ impl Interpreter {
                     | ValueKind::BuiltinFunction(_)
                     | ValueKind::BoundMethod { .. }
                     | ValueKind::ClassBoundMethod { .. }
-                    | ValueKind::PyClass(_)
-                    | ValueKind::ClassMethod(_)
-                    | ValueKind::StaticMethod(_)
-                    | ValueKind::PropertyAccessorPartial { .. } => true,
+                    | ValueKind::PyClass(_) => true,
+                    // Only accessor partials (the intermediate results of
+                    // prop.setter / prop.getter / prop.deleter) are callable —
+                    // a plain property descriptor isn't.  Distinguish via the
+                    // `partial_slot` field on PropertyState.
+                    ValueKind::BuiltinObject { .. } => pyrust_builtins::property::as_property(
+                        &args[0].value,
+                    )
+                    .is_some_and(|(_, _, _, partial_slot)| partial_slot.is_some()),
                     ValueKind::PyInstance(inst) => {
                         let class = Rc::clone(&inst.borrow().class);
                         lookup_class_attr(&class, "__call__").is_some()
@@ -1871,7 +1903,11 @@ impl Interpreter {
 
             // Calling prop.setter(fn), prop.deleter(fn), or prop.getter(fn).
             // Returns a new Property with the respective slot replaced.
-            ValueKind::PropertyAccessorPartial { slot, fget, fset, fdel } => {
+            _ if pyrust_builtins::property::as_property(&function).is_some_and(|p| p.3.is_some()) =>
+            {
+                let (fget, fset, fdel, partial_slot) =
+                    pyrust_builtins::property::as_property(&function).unwrap();
+                let slot = partial_slot.unwrap();
                 reject_keyword_args_expanded("property accessor", args)?;
                 if args.len() != 1 {
                     return Err(PyError::Runtime(
@@ -1880,12 +1916,14 @@ impl Interpreter {
                 }
                 let new_fn = args[0].value.clone();
                 let (fget_val, fset_val, fdel_val) = match slot {
-                    0 => (new_fn,           (**fset).clone(), (**fdel).clone()),
-                    1 => ((**fget).clone(), new_fn,           (**fdel).clone()),
-                    2 => ((**fget).clone(), (**fset).clone(), new_fn          ),
+                    0 => (new_fn, (*fset).clone(), (*fdel).clone()),
+                    1 => ((*fget).clone(), new_fn, (*fdel).clone()),
+                    2 => ((*fget).clone(), (*fset).clone(), new_fn),
                     _ => unreachable!(),
                 };
-                Ok(Value::property(fget_val, fset_val, fdel_val))
+                Ok(pyrust_builtins::property::property(
+                    fget_val, fset_val, fdel_val,
+                ))
             }
 
             // property(fget=None, fset=None, fdel=None, doc=None)
@@ -1918,7 +1956,7 @@ impl Interpreter {
                         _ => {} // doc: ignore
                     }
                 }
-                Ok(Value::property(fget, fset, fdel))
+                Ok(pyrust_builtins::property::property(fget, fset, fdel))
             }
 
             // `super(cls, instance)` — two-argument form only.
@@ -2223,6 +2261,19 @@ impl Interpreter {
                         class.borrow().name
                     ),
                 ))
+            }
+        } else if let ValueKind::BuiltinObject { ops, state } = val.kind()
+            && ops.is_iterable()
+        {
+            match ops.iter_next(state)? {
+                Some(v) => Ok(v),
+                None => {
+                    if let Some(d) = default {
+                        Ok(d)
+                    } else {
+                        Err(PyError::Named("StopIteration".to_string(), String::new()))
+                    }
+                }
             }
         } else {
             Err(PyError::Named(
@@ -3246,7 +3297,7 @@ fn dir_names(value: &Value) -> Vec<String> {
         ValueKind::Tuple(_) => builtin_method_names("tuple"),
         ValueKind::Dict(_) => builtin_method_names("dict"),
         ValueKind::Set(_) => builtin_method_names("set"),
-        ValueKind::FrozenSet(_) => builtin_method_names("frozenset"),
+        ValueKind::BuiltinObject { ops, .. } => builtin_method_names(ops.type_name()),
         _ => Vec::new(),
     }
 }
@@ -3573,323 +3624,6 @@ fn apply_field_accessors(mut value: Value, mut rest: &str) -> Result<Value> {
         }
     }
     Ok(value)
-}
-
-// ─── File I/O ────────────────────────────────────────────────────────────────
-
-/// Backing state for a Python file object produced by `open()`.
-/// Stored in `Opaque::File` via a `Box<dyn Any>` so `pyrust-core` doesn't
-/// need to depend on `std::fs`.
-#[allow(dead_code)] // `mode` is kept for diagnostics / future repr() support
-pub(crate) struct FileState {
-    pub(crate) path: String,
-    pub(crate) mode: String,
-    pub(crate) closed: bool,
-    /// For read modes: the full file contents; we read eagerly at open time.
-    pub(crate) content: String,
-    /// Read cursor into `content` (in bytes).
-    pub(crate) pos: usize,
-    /// For write modes: buffered bytes to flush on `close()`.
-    pub(crate) write_buf: String,
-    pub(crate) is_write: bool,
-    pub(crate) is_append: bool,
-}
-
-impl FileState {
-    fn is_readable(&self) -> bool {
-        !self.is_write && !self.is_append
-    }
-}
-
-/// Implements `open(path, mode='r')`.
-fn builtin_open(args: &[ExpandedCallArg]) -> Result<Value> {
-    let path = match args.first().map(|a| a.value.kind()) {
-        Some(ValueKind::Str(s)) => s.to_string(),
-        _ => {
-            return Err(PyError::Named(
-                "TypeError".to_string(),
-                "open(): path must be a string".to_string(),
-            ));
-        }
-    };
-    // mode argument may be positional or kwarg; default "r"
-    let mode = {
-        let kw = args.iter().find(|a| a.name.as_deref() == Some("mode"));
-        let positional = args.iter().filter(|a| a.name.is_none()).nth(1);
-        let val = kw.or(positional).map(|a| &a.value);
-        match val.map(|v| v.kind()) {
-            None => "r".to_string(),
-            Some(ValueKind::Str(s)) => s.to_string(),
-            Some(_) => {
-                return Err(PyError::Named(
-                    "TypeError".to_string(),
-                    "open(): mode must be a string".to_string(),
-                ));
-            }
-        }
-    };
-    // Reject unknown chars to avoid silent surprises.
-    for c in mode.chars() {
-        if !matches!(c, 'r' | 'w' | 'a' | 'b' | 't' | '+') {
-            return Err(PyError::Named(
-                "ValueError".to_string(),
-                format!("invalid mode: '{mode}'"),
-            ));
-        }
-    }
-    let is_write = mode.contains('w');
-    let is_append = mode.contains('a');
-    let is_read = mode.contains('r') || (!is_write && !is_append);
-
-    let mut content = String::new();
-    if is_read || is_append {
-        // For 'r' we need the content; for 'a' Python keeps the existing
-        // bytes on disk but the buffer collects only the new appends.
-        if is_read {
-            content = std::fs::read_to_string(&path).map_err(|e| {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    PyError::Named(
-                        "FileNotFoundError".to_string(),
-                        format!("[Errno 2] No such file or directory: '{path}'"),
-                    )
-                } else {
-                    PyError::Named("OSError".to_string(), e.to_string())
-                }
-            })?;
-        }
-    }
-    // For 'w' we truncate at close-time; for 'a' we append at close-time.
-    let state = FileState {
-        path,
-        mode,
-        closed: false,
-        content,
-        pos: 0,
-        write_buf: String::new(),
-        is_write,
-        is_append,
-    };
-    Ok(Value::file(Box::new(state)))
-}
-
-/// Dispatch `method` on a file value.  Always checks `closed` for the
-/// methods that operate on the underlying state.
-fn call_file_method(value: &Value, method: &str, args: &[Value]) -> Result<Value> {
-    let rc = match value.kind() {
-        ValueKind::File(rc) => Rc::clone(rc),
-        _ => unreachable!(),
-    };
-    match method {
-        "__enter__" => Ok(value.clone()),
-        "__exit__" => {
-            // ignore exc info — just close
-            close_file(&rc)?;
-            Ok(Value::none())
-        }
-        "__iter__" => Ok(value.clone()),
-        "__next__" => {
-            let line = read_line_or_none(&rc)?;
-            match line {
-                Some(s) => Ok(Value::string(s)),
-                None => Err(PyError::Named("StopIteration".to_string(), String::new())),
-            }
-        }
-        "close" => {
-            close_file(&rc)?;
-            Ok(Value::none())
-        }
-        "read" => {
-            let n = args.first().and_then(|v| match v.kind() {
-                ValueKind::Int(n) => Some(n),
-                _ => None,
-            });
-            let mut borrow = rc.borrow_mut();
-            let s = borrow
-                .downcast_mut::<FileState>()
-                .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
-            if s.closed {
-                return Err(PyError::Named(
-                    "ValueError".to_string(),
-                    "I/O operation on closed file".to_string(),
-                ));
-            }
-            if !s.is_readable() {
-                return Err(PyError::Named(
-                    "io.UnsupportedOperation".to_string(),
-                    "not readable".to_string(),
-                ));
-            }
-            let bytes = s.content.as_bytes();
-            let remaining = &bytes[s.pos..];
-            let to_take = match n {
-                Some(n) if n >= 0 => remaining.len().min(n as usize),
-                _ => remaining.len(),
-            };
-            // Walk by char boundaries so we don't split UTF-8 chars; for our use
-            // cases this is rare, but matters for correctness.
-            let mut take = 0usize;
-            let mut chars = 0usize;
-            let want_chars = match n {
-                Some(n) if n >= 0 => n as usize,
-                _ => usize::MAX,
-            };
-            for (i, _) in s.content[s.pos..].char_indices() {
-                if chars >= want_chars {
-                    take = i;
-                    break;
-                }
-                chars += 1;
-                take = i + s.content[s.pos + i..].chars().next().unwrap().len_utf8();
-                if chars >= want_chars {
-                    break;
-                }
-            }
-            let take = if n.is_some_and(|n| n >= 0) {
-                take
-            } else {
-                to_take
-            };
-            let out = s.content[s.pos..s.pos + take].to_string();
-            s.pos += take;
-            Ok(Value::string(out))
-        }
-        "readline" => {
-            let line = read_line_or_none(&rc)?;
-            Ok(Value::string(line.unwrap_or_default()))
-        }
-        "readlines" => {
-            let mut out = Vec::new();
-            while let Some(line) = read_line_or_none(&rc)? {
-                out.push(Value::string(line));
-            }
-            Ok(Value::list(out))
-        }
-        "write" => {
-            let s = args.first().and_then(|v| v.as_str().map(|s| s.to_string())).ok_or_else(|| {
-                PyError::Named(
-                    "TypeError".to_string(),
-                    "write() argument must be str".to_string(),
-                )
-            })?;
-            let len = s.len();
-            let mut borrow = rc.borrow_mut();
-            let st = borrow
-                .downcast_mut::<FileState>()
-                .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
-            if st.closed {
-                return Err(PyError::Named(
-                    "ValueError".to_string(),
-                    "I/O operation on closed file".to_string(),
-                ));
-            }
-            if !st.is_write && !st.is_append {
-                return Err(PyError::Named(
-                    "io.UnsupportedOperation".to_string(),
-                    "not writable".to_string(),
-                ));
-            }
-            st.write_buf.push_str(&s);
-            Ok(Value::int(len as i64))
-        }
-        "writelines" => {
-            // Accept an iterable of strings.
-            let lines = match args.first().map(|v| v.kind()) {
-                Some(ValueKind::List(items)) | Some(ValueKind::Tuple(items)) => items.clone(),
-                _ => {
-                    return Err(PyError::Named(
-                        "TypeError".to_string(),
-                        "writelines() argument must be a list or tuple of str".to_string(),
-                    ));
-                }
-            };
-            let mut borrow = rc.borrow_mut();
-            let st = borrow
-                .downcast_mut::<FileState>()
-                .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
-            if st.closed {
-                return Err(PyError::Named(
-                    "ValueError".to_string(),
-                    "I/O operation on closed file".to_string(),
-                ));
-            }
-            for v in lines {
-                match v.kind() {
-                    ValueKind::Str(s) => st.write_buf.push_str(s),
-                    _ => {
-                        return Err(PyError::Named(
-                            "TypeError".to_string(),
-                            "writelines() requires str items".to_string(),
-                        ));
-                    }
-                }
-            }
-            Ok(Value::none())
-        }
-        _ => Err(PyError::Named(
-            "AttributeError".to_string(),
-            format!("'_io.TextIOWrapper' object has no attribute '{method}'"),
-        )),
-    }
-}
-
-fn read_line_or_none(rc: &Rc<RefCell<Box<dyn std::any::Any>>>) -> Result<Option<String>> {
-    let mut borrow = rc.borrow_mut();
-    let s = borrow
-        .downcast_mut::<FileState>()
-        .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
-    if s.closed {
-        return Err(PyError::Named(
-            "ValueError".to_string(),
-            "I/O operation on closed file".to_string(),
-        ));
-    }
-    if !s.is_readable() {
-        return Err(PyError::Named(
-            "io.UnsupportedOperation".to_string(),
-            "not readable".to_string(),
-        ));
-    }
-    let bytes = s.content.as_bytes();
-    if s.pos >= bytes.len() {
-        return Ok(None);
-    }
-    // Find next '\n'
-    let mut end = s.pos;
-    while end < bytes.len() && bytes[end] != b'\n' {
-        end += 1;
-    }
-    if end < bytes.len() {
-        end += 1; // include '\n'
-    }
-    let line = s.content[s.pos..end].to_string();
-    s.pos = end;
-    Ok(Some(line))
-}
-
-fn close_file(rc: &Rc<RefCell<Box<dyn std::any::Any>>>) -> Result<()> {
-    let mut borrow = rc.borrow_mut();
-    let s = borrow
-        .downcast_mut::<FileState>()
-        .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
-    if s.closed {
-        return Ok(());
-    }
-    if s.is_write {
-        std::fs::write(&s.path, &s.write_buf)
-            .map_err(|e| PyError::Named("OSError".to_string(), e.to_string()))?;
-    } else if s.is_append {
-        use std::io::Write;
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&s.path)
-            .map_err(|e| PyError::Named("OSError".to_string(), e.to_string()))?;
-        f.write_all(s.write_buf.as_bytes())
-            .map_err(|e| PyError::Named("OSError".to_string(), e.to_string()))?;
-    }
-    s.closed = true;
-    s.write_buf.clear();
-    Ok(())
 }
 
 /// Returns the ASCII-escaped repr of a value (like the built-in `ascii()`).

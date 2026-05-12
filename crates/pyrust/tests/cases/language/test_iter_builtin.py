@@ -58,4 +58,32 @@ try:
 except TypeError:
     pass
 
+# next() on iterator-helper BuiltinObjects (regression: enumerate/zip/reversed
+# went through dispatch but the next() builtin previously only handled
+# Generator / PyInstance, so next(enumerate(...)) raised TypeError).
+e = enumerate(["a", "b"])
+assert next(e) == (0, "a")
+assert next(e) == (1, "b")
+try:
+    next(e)
+    assert False, "enumerate exhaustion should raise StopIteration"
+except StopIteration:
+    pass
+assert next(e, "fallback") == "fallback"
+
+z = zip([1, 2], ["x", "y"])
+assert next(z) == (1, "x")
+assert next(z) == (2, "y")
+assert next(z, None) is None
+
+r = reversed([10, 20, 30])
+assert next(r) == 30
+assert next(r) == 20
+assert next(r) == 10
+try:
+    next(r)
+    assert False, "reversed exhaustion should raise StopIteration"
+except StopIteration:
+    pass
+
 print("iter builtin OK")

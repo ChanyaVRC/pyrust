@@ -112,9 +112,13 @@ fn value_type_name_str(v: &Value) -> &'static str {
         ValueKind::None => "NoneType",
         ValueKind::List(_) => "list",
         ValueKind::Tuple(_) => "tuple",
-        ValueKind::Dict(_) | ValueKind::DictKeysView(_) | ValueKind::DictValuesView(_) | ValueKind::DictItemsView(_) => "dict",
+        ValueKind::Dict(_) => "dict",
         ValueKind::Set(_) => "set",
         ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_) | ValueKind::BoundMethod { .. } => "function",
+        ValueKind::BuiltinObject { ops, .. } => match ops.type_name() {
+            "dict_keys" | "dict_values" | "dict_items" => "dict",
+            other => other,
+        },
         _ => "object",
     }
 }
@@ -380,7 +384,7 @@ fn key_to_value(key: PyKey) -> Value {
             for k in items {
                 set.insert(k);
             }
-            Value::frozenset(set)
+            pyrust_builtins::frozenset::frozenset(set)
         }
     }
 }

@@ -11,24 +11,26 @@ impl Interpreter {
                 // descriptor takes priority over instance __dict__ — matching CPython.
                 let class = { Rc::clone(&instance.borrow().class) };
                 if let Some(class_val) = lookup_class_attr(&class, name)
-                    && let ValueKind::Property { fget, .. } = class_val.kind() {
-                        let fget = Rc::clone(fget);
-                        return if fget.is_none() {
-                            Err(PyError::Named(
-                                "AttributeError".to_string(),
-                                format!("property '{}' has no getter", name),
-                            ))
-                        } else {
-                            let getter = (*fget).clone();
-                            self.call_function_expanded(
-                                getter,
-                                &[ExpandedCallArg {
-                                    name: None,
-                                    value: Value::py_instance(Rc::clone(&instance)),
-                                }],
-                            )
-                        };
-                    }
+                    && let Some((fget, _, _, partial_slot)) =
+                        pyrust_builtins::property::as_property(&class_val)
+                    && partial_slot.is_none()
+                {
+                    return if fget.is_none() {
+                        Err(PyError::Named(
+                            "AttributeError".to_string(),
+                            format!("property '{}' has no getter", name),
+                        ))
+                    } else {
+                        let getter = (*fget).clone();
+                        self.call_function_expanded(
+                            getter,
+                            &[ExpandedCallArg {
+                                name: None,
+                                value: Value::py_instance(Rc::clone(&instance)),
+                            }],
+                        )
+                    };
+                }
 
                 if let Some(value) = instance.borrow().attrs.get(name).cloned() {
                     return Ok(value);
@@ -36,17 +38,22 @@ impl Interpreter {
 
                 if let Some(value) = lookup_class_attr(&class, name) {
                     return Ok(match value.kind() {
-                        ValueKind::UserFunction(f) => {
-                            Value::bound_method(Rc::clone(f), instance)
-                        }
-                        ValueKind::ClassMethod(f) => {
-                            // classmethod: bind the class (not the instance) as first argument
-                            Value::class_bound_method(Rc::clone(f), Rc::clone(&class))
-                        }
-                        ValueKind::StaticMethod(f) => {
-                            // staticmethod: return the raw function, no binding
-                            Value::user_function(Rc::clone(f))
-                        }
+                        ValueKind::UserFunction(f) => match f.kind {
+                            UserFunctionKind::Regular => {
+                                Value::bound_method(Rc::clone(f), instance)
+                            }
+                            UserFunctionKind::ClassMethod => {
+                                // bind the class (not the instance) as first argument
+                                Value::class_bound_method(Rc::clone(f), Rc::clone(&class))
+                            }
+                            UserFunctionKind::StaticMethod => {
+                                // staticmethod: return the raw function, no binding
+                                Value::user_function(Rc::clone(f))
+                            }
+                            // kind() synthesizes BuiltinFunction for kind=Builtin
+                            // so this arm is unreachable; satisfy exhaustiveness.
+                            UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(f)),
+                        },
                         _ => value,
                     });
                 }
@@ -64,11 +71,15 @@ impl Interpreter {
                 }
                 if let Some(value) = lookup_class_attr(&class, name) {
                     return Ok(match value.kind() {
-                        ValueKind::ClassMethod(f) => {
-                            // classmethod accessed on a class: bind the class as first argument
-                            Value::class_bound_method(Rc::clone(f), Rc::clone(&class))
-                        }
-                        ValueKind::StaticMethod(f) => Value::user_function(Rc::clone(f)),
+                        ValueKind::UserFunction(f) => match f.kind {
+                            UserFunctionKind::ClassMethod => {
+                                // bind the class as first argument
+                                Value::class_bound_method(Rc::clone(f), Rc::clone(&class))
+                            }
+                            UserFunctionKind::StaticMethod => Value::user_function(Rc::clone(f)),
+                            UserFunctionKind::Regular => value,
+                            UserFunctionKind::Builtin(_) => value,
+                        },
                         _ => value,
                     });
                 }
@@ -92,13 +103,19 @@ impl Interpreter {
                 };
                 if let Some(value) = lookup_class_attr(&parent_class, name) {
                     return Ok(match value.kind() {
-                        ValueKind::UserFunction(f) => {
-                            Value::bound_method(Rc::clone(f), instance)
-                        }
-                        ValueKind::ClassMethod(f) => {
-                            Value::class_bound_method(Rc::clone(f), parent_class)
-                        }
-                        ValueKind::StaticMethod(f) => Value::user_function(Rc::clone(f)),
+                        ValueKind::UserFunction(f) => match f.kind {
+                            UserFunctionKind::Regular => {
+                                Value::bound_method(Rc::clone(f), instance)
+                            }
+                            UserFunctionKind::ClassMethod => {
+                                Value::class_bound_method(Rc::clone(f), parent_class)
+                            }
+                            UserFunctionKind::StaticMethod => Value::user_function(Rc::clone(f)),
+                            // `kind()` synthesizes `ValueKind::BuiltinFunction`
+                            // for kind=Builtin, so this arm is unreachable in
+                            // practice — but rustc requires exhaustiveness.
+                            UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(f)),
+                        },
                         _ => value,
                     });
                 }
@@ -120,16 +137,22 @@ impl Interpreter {
                 };
                 if let Some(value) = lookup_class_attr(&parent_class, name) {
                     return Ok(match value.kind() {
-                        ValueKind::UserFunction(f) => {
-                            // Regular method accessed via super in classmethod context —
-                            // return the raw function (rare, but valid).
-                            Value::user_function(Rc::clone(f))
-                        }
-                        ValueKind::ClassMethod(f) => {
-                            // classmethod: bind to the concrete subclass
-                            Value::class_bound_method(Rc::clone(f), obj_class)
-                        }
-                        ValueKind::StaticMethod(f) => Value::user_function(Rc::clone(f)),
+                        ValueKind::UserFunction(f) => match f.kind {
+                            UserFunctionKind::Regular => {
+                                // Regular method accessed via super in classmethod context —
+                                // return the raw function (rare, but valid).
+                                Value::user_function(Rc::clone(f))
+                            }
+                            UserFunctionKind::ClassMethod => {
+                                // bind to the concrete subclass
+                                Value::class_bound_method(Rc::clone(f), obj_class)
+                            }
+                            UserFunctionKind::StaticMethod => Value::user_function(Rc::clone(f)),
+                            // `kind()` synthesizes `ValueKind::BuiltinFunction`
+                            // for kind=Builtin, so this arm is unreachable in
+                            // practice — but rustc requires exhaustiveness.
+                            UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(f)),
+                        },
                         _ => value,
                     });
                 }
@@ -140,22 +163,24 @@ impl Interpreter {
             }
             // Access .setter / .deleter / .getter on a property descriptor itself.
             // These return a new property with the respective accessor replaced.
-            ValueKind::Property { fget, fset, fdel } => {
-                let fget_val = (**fget).clone();
-                let fset_val = (**fset).clone();
-                let fdel_val = (**fdel).clone();
+            _ if pyrust_builtins::property::as_property(&target)
+                .is_some_and(|p| p.3.is_none()) =>
+            {
+                let (fget, fset, fdel, _) =
+                    pyrust_builtins::property::as_property(&target).unwrap();
+                let fget_val = (*fget).clone();
+                let fset_val = (*fset).clone();
+                let fdel_val = (*fdel).clone();
                 match name {
-                    "setter" => {
-                        // Return a builtin-callable that takes (new_fset) and returns
-                        // a new Property with fget preserved.
-                        Ok(Value::property_setter_partial(fget_val, fdel_val))
-                    }
-                    "deleter" => {
-                        Ok(Value::property_deleter_partial(fget_val, fset_val))
-                    }
-                    "getter" => {
-                        Ok(Value::property_getter_partial(fset_val, fdel_val))
-                    }
+                    "setter" => Ok(pyrust_builtins::property::property_setter_partial(
+                        fget_val, fdel_val,
+                    )),
+                    "deleter" => Ok(pyrust_builtins::property::property_deleter_partial(
+                        fget_val, fset_val,
+                    )),
+                    "getter" => Ok(pyrust_builtins::property::property_getter_partial(
+                        fset_val, fdel_val,
+                    )),
                     "fget" => Ok(fget_val),
                     "fset" => Ok(fset_val),
                     "fdel" => Ok(fdel_val),
@@ -223,13 +248,21 @@ impl Interpreter {
                     match name {
                         "real" => return Ok(Value::float(re)),
                         "imag" => return Ok(Value::float(im)),
-                        "conjugate" => return Ok(Value::builtin_bound_method(name, target.clone())),
+                        "conjugate" => {
+                            return Ok(pyrust_builtins::bound_method::bound_method(
+                                name,
+                                target.clone(),
+                            ));
+                        }
                         _ => {}
                     }
                 }
                 // Built-in type instance method lookup: list.append, str.upper, etc.
                 if builtin_has_method(&target, name) {
-                    return Ok(Value::builtin_bound_method(name, target.clone()));
+                    return Ok(pyrust_builtins::bound_method::bound_method(
+                        name,
+                        target.clone(),
+                    ));
                 }
                 let type_name = pyrust_core::builtin_type_name(&target);
                 Err(PyError::Named(
@@ -246,28 +279,30 @@ impl Interpreter {
                 // Check for a property descriptor in the class chain.
                 let class = { Rc::clone(&instance.borrow().class) };
                 if let Some(class_val) = lookup_class_attr(&class, name)
-                    && let ValueKind::Property { fset, .. } = class_val.kind() {
-                        let fset = Rc::clone(fset);
-                        return if fset.is_none() {
-                            Err(PyError::Named(
-                                "AttributeError".to_string(),
-                                format!("property '{}' has no setter", name),
-                            ))
-                        } else {
-                            let setter = (*fset).clone();
-                            self.call_function_expanded(
-                                setter,
-                                &[
-                                    ExpandedCallArg {
-                                        name: None,
-                                        value: Value::py_instance(Rc::clone(instance)),
-                                    },
-                                    ExpandedCallArg { name: None, value },
-                                ],
-                            )?;
-                            Ok(())
-                        };
-                    }
+                    && let Some((_, fset, _, partial_slot)) =
+                        pyrust_builtins::property::as_property(&class_val)
+                    && partial_slot.is_none()
+                {
+                    return if fset.is_none() {
+                        Err(PyError::Named(
+                            "AttributeError".to_string(),
+                            format!("property '{}' has no setter", name),
+                        ))
+                    } else {
+                        let setter = (*fset).clone();
+                        self.call_function_expanded(
+                            setter,
+                            &[
+                                ExpandedCallArg {
+                                    name: None,
+                                    value: Value::py_instance(Rc::clone(instance)),
+                                },
+                                ExpandedCallArg { name: None, value },
+                            ],
+                        )?;
+                        Ok(())
+                    };
+                }
                 instance.borrow_mut().attrs.insert(name.to_string(), value);
                 Ok(())
             }
@@ -287,25 +322,27 @@ impl Interpreter {
             ValueKind::PyInstance(instance) => {
                 let class = { Rc::clone(&instance.borrow().class) };
                 if let Some(class_val) = lookup_class_attr(&class, name)
-                    && let ValueKind::Property { fdel, .. } = class_val.kind() {
-                        let fdel = Rc::clone(fdel);
-                        return if fdel.is_none() {
-                            Err(PyError::Named(
-                                "AttributeError".to_string(),
-                                format!("property '{}' has no deleter", name),
-                            ))
-                        } else {
-                            let deleter = (*fdel).clone();
-                            self.call_function_expanded(
-                                deleter,
-                                &[ExpandedCallArg {
-                                    name: None,
-                                    value: Value::py_instance(Rc::clone(instance)),
-                                }],
-                            )?;
-                            Ok(())
-                        };
-                    }
+                    && let Some((_, _, fdel, partial_slot)) =
+                        pyrust_builtins::property::as_property(&class_val)
+                    && partial_slot.is_none()
+                {
+                    return if fdel.is_none() {
+                        Err(PyError::Named(
+                            "AttributeError".to_string(),
+                            format!("property '{}' has no deleter", name),
+                        ))
+                    } else {
+                        let deleter = (*fdel).clone();
+                        self.call_function_expanded(
+                            deleter,
+                            &[ExpandedCallArg {
+                                name: None,
+                                value: Value::py_instance(Rc::clone(instance)),
+                            }],
+                        )?;
+                        Ok(())
+                    };
+                }
                 instance.borrow_mut().attrs.remove(name);
                 Ok(())
             }
@@ -504,30 +541,7 @@ fn builtin_has_method(target: &Value, name: &str) -> bool {
         ValueKind::Tuple(_) => pyrust_builtins::tuple::has_method(name),
         ValueKind::Dict(_) => pyrust_builtins::dict::has_method(name),
         ValueKind::Set(_) => pyrust_builtins::set::has_method(name),
-        ValueKind::FrozenSet(_) => matches!(
-            name,
-            "copy"
-                | "union"
-                | "intersection"
-                | "difference"
-                | "symmetric_difference"
-                | "issubset"
-                | "issuperset"
-                | "isdisjoint"
-        ),
-        ValueKind::File(_) => matches!(
-            name,
-            "read"
-                | "readline"
-                | "readlines"
-                | "write"
-                | "writelines"
-                | "close"
-                | "__enter__"
-                | "__exit__"
-                | "__iter__"
-                | "__next__"
-        ),
+        ValueKind::BuiltinObject { ops, .. } => ops.has_method(name),
         _ => false,
     }
 }

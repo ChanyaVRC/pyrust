@@ -10,6 +10,43 @@ assert list(d.keys()) == ["a", "b", "c"]
 assert list(d.values()) == [1, 2, 3]
 assert list(d.items()) == [("a", 1), ("b", 2), ("c", 3)]
 
+# Iterating dict views (regression: the iter_values BuiltinObject arm
+# in expr.rs replaced an unwrap with a structured TypeError fallback;
+# verify the happy path through that branch still works).
+collected_keys = []
+for k in d.keys():
+    collected_keys.append(k)
+assert collected_keys == ["a", "b", "c"]
+
+collected_vals = []
+for v in d.values():
+    collected_vals.append(v)
+assert collected_vals == [1, 2, 3]
+
+collected_items = []
+for kv in d.items():
+    collected_items.append(kv)
+assert collected_items == [("a", 1), ("b", 2), ("c", 3)]
+
+# Splat-unpack a dict view through call args (also routes through iter_values).
+def _three(a, b, c):
+    return (a, b, c)
+assert _three(*d.keys()) == ("a", "b", "c")
+assert _three(*d.values()) == (1, 2, 3)
+
+# len() on dict views — dispatches through BuiltinTypeOps::len.
+assert len(d.keys()) == 3
+assert len(d.values()) == 3
+assert len(d.items()) == 3
+
+# `in` on dict views — dispatches through BuiltinTypeOps::contains.
+assert "a" in d.keys()
+assert "z" not in d.keys()
+assert 1 in d.values()
+assert 99 not in d.values()
+assert ("a", 1) in d.items()
+assert ("a", 2) not in d.items()
+
 # update
 d.update({"d": 4})
 assert d["d"] == 4

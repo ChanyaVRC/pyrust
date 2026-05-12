@@ -1,10 +1,41 @@
+pub mod bound_method;
 pub mod dict;
+pub mod dict_views;
+pub mod file;
+pub mod frozenset;
+pub mod iter_helpers;
 pub mod list;
 pub mod mutable_sequence;
+pub mod property;
 pub mod sequence;
 pub mod set;
 pub mod string;
 pub mod tuple;
+
+/// Look up `BuiltinTypeOps` by stable type-name.  Installed in pyrust-core's
+/// registry at interpreter startup so the VM can dispatch operations on
+/// built-in objects whose Tier 1 variant has been eliminated.
+pub fn lookup_ops(type_name: &str) -> Option<&'static dyn pyrust_core::BuiltinTypeOps> {
+    match type_name {
+        file::TYPE_NAME => Some(file::FILE_OPS),
+        frozenset::TYPE_NAME => Some(frozenset::FROZENSET_OPS),
+        iter_helpers::ENUMERATE_TYPE_NAME => Some(iter_helpers::ENUMERATE_OPS),
+        iter_helpers::ZIP_TYPE_NAME => Some(iter_helpers::ZIP_OPS),
+        iter_helpers::REVERSED_TYPE_NAME => Some(iter_helpers::REVERSED_OPS),
+        dict_views::DICT_KEYS_TYPE_NAME => Some(dict_views::DICT_KEYS_OPS),
+        dict_views::DICT_VALUES_TYPE_NAME => Some(dict_views::DICT_VALUES_OPS),
+        dict_views::DICT_ITEMS_TYPE_NAME => Some(dict_views::DICT_ITEMS_OPS),
+        property::TYPE_NAME => Some(property::PROPERTY_OPS),
+        bound_method::TYPE_NAME => Some(bound_method::BOUND_METHOD_OPS),
+        _ => None,
+    }
+}
+
+/// Install [`lookup_ops`] in pyrust-core's registry.  Idempotent — safe to
+/// call from `Interpreter::default()`.
+pub fn install() {
+    pyrust_core::install_builtin_registry(lookup_ops);
+}
 
 #[cfg(test)]
 mod method_table_drift_guard {
@@ -78,5 +109,46 @@ mod method_table_drift_guard {
                 assert!(!is_fallback(e), "set::call({name}) hit fallback: {e:?}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cross_dispatch_tests {
+    //! Regression tests for the BuiltinTypeOps dispatch paths added in #291.
+
+    use indexmap::IndexSet;
+    use pyrust_core::{PyKey, Value};
+
+    #[test]
+    fn set_eq_frozenset_dispatches_through_ops() {
+        // `set == frozenset` must route through `BuiltinTypeOps::eq` on the
+        // frozenset side so pyrust-core never needs to name the frozenset type.
+        let mut s: IndexSet<PyKey> = IndexSet::new();
+        s.insert(PyKey::Int(1));
+        s.insert(PyKey::Int(2));
+
+        let mut fs_items: IndexSet<PyKey> = IndexSet::new();
+        fs_items.insert(PyKey::Int(2));
+        fs_items.insert(PyKey::Int(1));
+
+        let set_val = Value::set(s.clone());
+        let frozen_val = super::frozenset::frozenset(fs_items);
+
+        assert_eq!(set_val, frozen_val);
+        assert_eq!(frozen_val, set_val);
+    }
+
+    #[test]
+    fn frozenset_eq_frozenset_uses_rc_fastpath() {
+        // Two frozensets sharing the same backing Rc should compare equal
+        // via the Rc::ptr_eq fast path inside FrozenSetOps::eq.
+        let mut items: IndexSet<PyKey> = IndexSet::new();
+        items.insert(PyKey::Int(42));
+        let rc = std::rc::Rc::new(items);
+
+        let a = super::frozenset::frozenset_rc(rc.clone());
+        let b = super::frozenset::frozenset_rc(rc);
+
+        assert_eq!(a, b);
     }
 }

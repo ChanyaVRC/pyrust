@@ -203,6 +203,7 @@ impl Interpreter {
                 let lambda_body = vec![crate::ast::Stmt::Return(Some(*body.clone()))];
                 let func = Rc::new(crate::value::UserFunction {
                     id: crate::value::next_fn_id(),
+                    kind: crate::value::UserFunctionKind::Regular,
                     name: "<lambda>".to_string(),
                     params: params.iter().map(|n| crate::value::UserFunctionParam {
                         name: n.clone(), default: None, is_args: false, is_kwargs: false, is_keyword_only: false, is_positional_only: false,
@@ -879,9 +880,8 @@ impl Interpreter {
                 let key = item.to_key().ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
                 Ok(Value::bool_(items.contains(&key)))
             }
-            ValueKind::FrozenSet(rc) => {
-                let key = item.to_key().ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
-                Ok(Value::bool_(rc.contains(&key)))
+            ValueKind::BuiltinObject { ops, state } => {
+                ops.contains(state, &item).map(Value::bool_)
             }
             ValueKind::Bytes(rc) => {
                 match item.kind() {
@@ -904,23 +904,6 @@ impl Interpreter {
             ValueKind::Dict(items) => {
                 let key = item.to_key().ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
                 Ok(Value::bool_(items.contains_key(&key)))
-            }
-            ValueKind::DictKeysView(rc) => {
-                let key = item.to_key().ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
-                Ok(Value::bool_(rc.borrow().contains_key(&key)))
-            }
-            ValueKind::DictValuesView(rc) => {
-                Ok(Value::bool_(rc.borrow().values().any(|v| v == &item)))
-            }
-            ValueKind::DictItemsView(rc) => {
-                match item.kind() {
-                    ValueKind::Tuple(kv) if kv.len() == 2 => {
-                        let key = kv[0].to_key().ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
-                        let map = rc.borrow();
-                        Ok(Value::bool_(map.get(&key).is_some_and(|v| v == &kv[1])))
-                    }
-                    _ => Ok(Value::bool_(false)),
-                }
             }
             ValueKind::Range { start, stop, step } => {
                 match item.kind() {
@@ -999,22 +982,55 @@ fn iter_values(value: Value) -> Result<Vec<Value>> {
         ValueKind::List(items) => Ok(items.clone()),
         ValueKind::Tuple(items) => Ok(items.clone()),
         ValueKind::Set(items) => Ok(items.iter().map(|k| key_to_value(k.clone())).collect()),
-        ValueKind::FrozenSet(rc) => Ok(rc.iter().map(|k| key_to_value(k.clone())).collect()),
+        ValueKind::BuiltinObject { .. } => {
+            // Frozensets materialise through their inner key set; dict views
+            // materialise through their backing IndexMap; everything else
+            // iterates via `iter_next`.
+            if let Some(rc) = pyrust_builtins::frozenset::as_items(&value) {
+                return Ok(rc.iter().map(|k| key_to_value(k.clone())).collect());
+            }
+            if let Some(kind) = pyrust_builtins::dict_views::view_kind(&value) {
+                // `view_kind` and `as_dict_rc` both check the same ops, so
+                // they should agree — but use a structured error rather than
+                // unwrap to avoid panicking if a future BuiltinObject impl
+                // shares the dict-view type name without the matching state.
+                // Surface as TypeError so Python-level `except` blocks can
+                // catch it (the only way to reach this is a misregistered
+                // ops table, which is a type-mismatch error).
+                let rc = pyrust_builtins::dict_views::as_dict_rc(&value).ok_or_else(|| {
+                    PyError::Named(
+                        "TypeError".to_string(),
+                        "dict-view state type mismatch".to_string(),
+                    )
+                })?;
+                let map = rc.borrow();
+                return Ok(match kind {
+                    0 => map.keys().map(|k| key_to_value(k.clone())).collect(),
+                    1 => map.values().cloned().collect(),
+                    _ => map
+                        .iter()
+                        .map(|(k, v)| Value::tuple(vec![key_to_value(k.clone()), v.clone()]))
+                        .collect(),
+                });
+            }
+            let mut out = Vec::new();
+            let ValueKind::BuiltinObject { ops, state } = value.kind() else {
+                unreachable!();
+            };
+            if !ops.is_iterable() {
+                return Err(PyError::Named(
+                    "TypeError".to_string(),
+                    format!("'{}' object is not iterable", ops.type_name()),
+                ));
+            }
+            while let Some(v) = ops.iter_next(state)? {
+                out.push(v);
+            }
+            Ok(out)
+        }
         ValueKind::Bytes(rc) => Ok(rc.iter().map(|b| Value::int(*b as i64)).collect()),
         ValueKind::Str(text) => Ok(text.chars().map(|c| Value::string(c.to_string())).collect()),
         ValueKind::Dict(items) => Ok(items.keys().map(|k| key_to_value(k.clone())).collect()),
-        ValueKind::DictKeysView(rc) => {
-            let map = rc.borrow();
-            Ok(map.keys().map(|k| key_to_value(k.clone())).collect())
-        }
-        ValueKind::DictValuesView(rc) => {
-            let map = rc.borrow();
-            Ok(map.values().cloned().collect())
-        }
-        ValueKind::DictItemsView(rc) => {
-            let map = rc.borrow();
-            Ok(map.iter().map(|(k, v)| Value::tuple(vec![key_to_value(k.clone()), v.clone()])).collect())
-        }
         ValueKind::Range { start, stop, step } => {
             let mut out = Vec::new();
             if step > 0 {
@@ -1031,32 +1047,6 @@ fn iter_values(value: Value) -> Result<Vec<Value>> {
                 }
             }
             Ok(out)
-        }
-        ValueKind::Enumerate { source, start } => {
-            let items = iter_values(source.clone())?;
-            Ok(items
-                .into_iter()
-                .enumerate()
-                .map(|(i, v)| Value::tuple(vec![Value::int(i as i64 + start), v]))
-                .collect())
-        }
-        ValueKind::Zip { sources } => {
-            if sources.is_empty() {
-                return Ok(vec![]);
-            }
-            let mut vecs: Vec<Vec<Value>> = Vec::with_capacity(sources.len());
-            for s in sources {
-                vecs.push(iter_values(s.clone())?);
-            }
-            let len = vecs.iter().map(|v| v.len()).min().unwrap_or(0);
-            Ok((0..len)
-                .map(|i| Value::tuple(vecs.iter().map(|v| v[i].clone()).collect()))
-                .collect())
-        }
-        ValueKind::Reversed { source } => {
-            let mut items = iter_values(source.clone())?;
-            items.reverse();
-            Ok(items)
         }
         ValueKind::Generator(state_rc) => {
             // Drain a NativeIterFrame (created by iter() on builtins) into a Vec.
@@ -1161,13 +1151,11 @@ enum SetOp {
 fn set_binary_op(left: &Value, right: &Value, op: SetOp) -> Option<Result<Value>> {
     let lhs_items = match left.kind() {
         ValueKind::Set(s) => Some((s.clone(), false)),
-        ValueKind::FrozenSet(rc) => Some(((**rc).clone(), true)),
-        _ => None,
+        _ => pyrust_builtins::frozenset::as_items(left).map(|rc| ((*rc).clone(), true)),
     }?;
     let rhs_items = match right.kind() {
         ValueKind::Set(s) => Some((s.clone(), false)),
-        ValueKind::FrozenSet(rc) => Some(((**rc).clone(), true)),
-        _ => None,
+        _ => pyrust_builtins::frozenset::as_items(right).map(|rc| ((*rc).clone(), true)),
     }?;
     let (a, l_frozen) = lhs_items;
     let (b, r_frozen) = rhs_items;
@@ -1206,7 +1194,7 @@ fn set_binary_op(left: &Value, right: &Value, op: SetOp) -> Option<Result<Value>
         }
     }
     Some(Ok(if l_frozen || r_frozen {
-        Value::frozenset(out)
+        pyrust_builtins::frozenset::frozenset(out)
     } else {
         Value::set(out)
     }))
