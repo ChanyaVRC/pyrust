@@ -726,12 +726,32 @@ impl Parser {
         self.expect(&Token::Class)?;
         let name = self.expect_ident("class name")?;
 
-        let bases = if self.is(&Token::LParen) {
+        let mut bases = Vec::new();
+        let mut metaclass: Option<Expr> = None;
+        if self.is(&Token::LParen) {
             self.bump();
-            let mut bases = Vec::new();
             if !self.is(&Token::RParen) {
                 loop {
-                    bases.push(self.parse_expr()?);
+                    // Detect keyword argument: `ident = expr`
+                    let is_kwarg = matches!(self.current(), Some(Token::Ident(_)))
+                        && self.peek() == Some(&Token::Assign);
+                    if is_kwarg {
+                        let key = self.expect_ident("class keyword")?;
+                        self.expect(&Token::Assign)?;
+                        let value = self.parse_expr()?;
+                        if key == "metaclass" {
+                            if metaclass.is_some() {
+                                return Err(PyError::Parse(
+                                    "duplicate 'metaclass' keyword in class header".to_string(),
+                                ));
+                            }
+                            metaclass = Some(value);
+                        }
+                        // Other keyword args (e.g. PEP 487 __init_subclass__ kwargs)
+                        // are accepted by the parser but discarded for now.
+                    } else {
+                        bases.push(self.parse_expr()?);
+                    }
                     if self.is(&Token::RParen) {
                         break;
                     }
@@ -742,16 +762,14 @@ impl Parser {
                 }
             }
             self.expect(&Token::RParen)?;
-            bases
-        } else {
-            Vec::new()
-        };
+        }
 
         self.expect(&Token::Colon)?;
         let body = self.parse_suite()?;
         Ok(Stmt::Class {
             name,
             bases,
+            metaclass,
             body,
             decorators,
         })

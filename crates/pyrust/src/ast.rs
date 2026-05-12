@@ -70,6 +70,11 @@ pub enum Stmt {
     Class {
         name: String,
         bases: Vec<Expr>,
+        /// Optional metaclass specified as `metaclass=<expr>` keyword in the
+        /// class header.  If present, the class object is produced by calling
+        /// `metaclass(name, bases_tuple, namespace_dict)` instead of the
+        /// default `type(...)` constructor.
+        metaclass: Option<Expr>,
         body: Vec<Stmt>,
         decorators: Vec<Expr>,
     },
