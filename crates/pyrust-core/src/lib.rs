@@ -957,11 +957,20 @@ impl Value {
 
     /// Wrap a function with a different `UserFunctionKind` tag.  Used by
     /// `@classmethod` / `@staticmethod`: produces a new UserFunction that
-    /// shares everything but the kind tag.  The wrapped function gets a
-    /// fresh `id` so it has its own identity for fn_cache keying.
+    /// shares everything but the kind tag.
+    ///
+    /// The wrapped function reuses the **original** `id` so the fn_cache and
+    /// any other id-keyed caches share a single entry between the decorated
+    /// and undecorated forms.  The function body and `is_pure` flag are
+    /// identical (the kind tag only affects attribute-lookup-time binding,
+    /// not execution), so cache hits across forms are correct.  See #303.
     pub fn with_function_kind(f: Rc<UserFunction>, kind: UserFunctionKind) -> Self {
+        // Fast path: kind already matches — reuse the Rc directly.
+        if f.kind == kind {
+            return Value::opaque(Opaque::UserFunction(f));
+        }
         let new_fn = UserFunction {
-            id: next_fn_id(),
+            id: f.id,
             kind,
             name: f.name.clone(),
             params: f.params.clone(),
@@ -1896,5 +1905,63 @@ mod tests {
         assert!(!unset.is_not_implemented());
         assert!(nimpl.is_not_implemented());
         assert!(!nimpl.is_unset());
+    }
+
+    /// Helper: build a minimal `UserFunction` for kind-wrapping tests.
+    fn make_user_function() -> Rc<UserFunction> {
+        Rc::new(UserFunction {
+            id: next_fn_id(),
+            kind: UserFunctionKind::Regular,
+            name: "f".to_string(),
+            params: Vec::new(),
+            local_names: Rc::new(HashSet::new()),
+            local_index: Rc::new(HashMap::new()),
+            global_names: Rc::new(HashSet::new()),
+            nonlocal_names: Rc::new(HashSet::new()),
+            env: Environment::new(None),
+            is_pure: false,
+            precompiled_code: None,
+        })
+    }
+
+    fn extract_user_function(v: &Value) -> Rc<UserFunction> {
+        match v.kind() {
+            ValueKind::UserFunction(f) => Rc::clone(f),
+            _ => panic!("expected UserFunction value"),
+        }
+    }
+
+    #[test]
+    fn with_function_kind_reuses_original_id() {
+        // Regression: #303 — `@classmethod` / `@staticmethod` must reuse the
+        // original `id` so they share `fn_cache` entries with the undecorated
+        // form (and with each other), instead of allocating a fresh `id`
+        // every time and doubling cache footprint.
+        let original = make_user_function();
+        let original_id = original.id;
+
+        let cm = Value::class_method(Rc::clone(&original));
+        let sm = Value::static_method(Rc::clone(&original));
+
+        let cm_fn = extract_user_function(&cm);
+        let sm_fn = extract_user_function(&sm);
+
+        assert_eq!(cm_fn.id, original_id, "classmethod must reuse id");
+        assert_eq!(sm_fn.id, original_id, "staticmethod must reuse id");
+        assert_eq!(cm_fn.kind, UserFunctionKind::ClassMethod);
+        assert_eq!(sm_fn.kind, UserFunctionKind::StaticMethod);
+    }
+
+    #[test]
+    fn with_function_kind_idempotent_reuses_rc() {
+        // When the requested kind already matches, return the same Rc — no
+        // reallocation at all.
+        let original = make_user_function();
+        let wrapped = Value::with_function_kind(Rc::clone(&original), UserFunctionKind::Regular);
+        let wrapped_fn = extract_user_function(&wrapped);
+        assert!(
+            Rc::ptr_eq(&original, &wrapped_fn),
+            "kind-preserving wrap must reuse the original Rc"
+        );
     }
 }
