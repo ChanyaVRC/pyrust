@@ -70,7 +70,7 @@ impl Interpreter {
             Err(e) => return Some(Err(e)),
         };
         let num_regs = code.num_regs as usize;
-        let mut regs: Vec<Value> = vec![Value::unset(); num_regs];
+        let mut regs: RegsBuf = smallvec![Value::unset(); num_regs];
         let _depth_guard = CallDepthGuard::enter();
         let vm_result = self.run_bytecode(&code, &mut regs);
         // Write fastlocal registers back to the module env so that imported

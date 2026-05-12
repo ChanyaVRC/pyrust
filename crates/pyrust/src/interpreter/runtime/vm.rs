@@ -1,3 +1,18 @@
+/// Inline capacity for the VM's per-frame register file.
+///
+/// `Value` is a NaN-boxed `u64` (8 bytes), so 16 inline slots = 128 bytes of
+/// register storage embedded directly in the stack frame.  Most user functions
+/// have fewer than 16 locals + temporaries, so this avoids the per-call heap
+/// allocation that a fresh `Vec<Value>` would require.  Functions with more
+/// than 16 registers transparently spill onto the heap (same big-O as before).
+pub(crate) const VM_REGS_INLINE: usize = 16;
+
+/// Per-frame register file backing for the VM.
+///
+/// All VM internals operate on `&mut [Value]` (via `SmallVec`'s `DerefMut`
+/// blanket), so call sites that need a mutable slice work unchanged.
+pub(crate) type RegsBuf = smallvec::SmallVec<[Value; VM_REGS_INLINE]>;
+
 /// Heap-allocated state for a built-in iterable wrapped by `iter()`.
 /// Stored type-erased inside `Value::generator()` via `Box<dyn Any>`,
 /// the same slot used for GeneratorFrame.  resume_generator() checks
@@ -11,7 +26,7 @@ pub(crate) struct NativeIterFrame {
 /// Stored type-erased inside `Value::generator()` via `Box<dyn Any>`.
 pub(crate) struct GeneratorFrame {
     pub(crate) code: Rc<crate::bytecode::FnCode>,
-    pub(crate) regs: Vec<Value>,
+    pub(crate) regs: RegsBuf,
     pub(crate) iters: Vec<Option<IterState>>,
     pub(crate) exc_handlers: Vec<usize>,
     /// Program counter for the NEXT instruction to execute on resumption.
@@ -1494,7 +1509,7 @@ impl Interpreter {
                         (Rc::clone(&proto.code), Rc::clone(&proto.local_index))
                     };
                     let num_class_regs = class_code.num_regs as usize;
-                    let mut class_regs: Vec<Value> = vec![Value::unset(); num_class_regs];
+                    let mut class_regs: RegsBuf = smallvec![Value::unset(); num_class_regs];
                     vm_try!(self.run_bytecode(&class_code, &mut class_regs));
                     let mut attrs = HashMap::new();
                     for (attr_name, &slot) in local_index.iter() {

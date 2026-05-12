@@ -3,6 +3,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 
+use smallvec::smallvec;
+
 use crate::ast::{AssignTarget, BinaryOp, CallArg, CmpOp, Expr, Stmt, UnaryOp};
 use crate::bytecode::FnCode;
 use crate::error::{PyError, Result};
