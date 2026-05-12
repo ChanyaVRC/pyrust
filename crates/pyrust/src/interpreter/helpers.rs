@@ -104,23 +104,11 @@ fn eval_binary_float(op: BinaryOp, a: f64, b: f64) -> Option<Result<Value>> {
 }
 
 /// Returns the Python type name string for a `Value`, used in error messages.
+///
+/// Thin alias for [`pyrust_core::builtin_type_name`] — kept locally so the
+/// many interpreter call sites stay short.
 fn value_type_name_str(v: &Value) -> &'static str {
-    match v.kind() {
-        ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => "int",
-        ValueKind::Float(_) => "float",
-        ValueKind::Str(_) => "str",
-        ValueKind::None => "NoneType",
-        ValueKind::List(_) => "list",
-        ValueKind::Tuple(_) => "tuple",
-        ValueKind::Dict(_) => "dict",
-        ValueKind::Set(_) => "set",
-        ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_) | ValueKind::BoundMethod { .. } => "function",
-        ValueKind::BuiltinObject { ops, .. } => match ops.type_name() {
-            "dict_keys" | "dict_values" | "dict_items" => "dict",
-            other => other,
-        },
-        _ => "object",
-    }
+    pyrust_core::builtin_type_name(v)
 }
 
 /// Total order for Python values used by `sorted()` / `min()` / `max()` and

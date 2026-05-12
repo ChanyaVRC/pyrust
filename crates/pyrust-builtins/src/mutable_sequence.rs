@@ -24,36 +24,8 @@ fn iter_value(v: &Value) -> Result<Vec<Value>> {
         }
         _ => Err(PyError::Runtime(format!(
             "'{}' object is not iterable",
-            type_name_of(v)
+            pyrust_core::builtin_type_name(v)
         ))),
-    }
-}
-
-fn type_name_of(v: &Value) -> &'static str {
-    match v.kind() {
-        ValueKind::Int(_) | ValueKind::BigInt(_) => "int",
-        ValueKind::Float(_) => "float",
-        ValueKind::Str(_) => "str",
-        ValueKind::Bool(_) => "bool",
-        ValueKind::None => "NoneType",
-        ValueKind::List(_) => "list",
-        ValueKind::Dict(_) => "dict",
-        ValueKind::Tuple(_) => "tuple",
-        ValueKind::Set(_) => "set",
-        ValueKind::Range { .. } => "range",
-        ValueKind::BuiltinFunction(_)
-        | ValueKind::UserFunction(_)
-        | ValueKind::BoundMethod { .. } => "function",
-        ValueKind::PyClass(_) => "type",
-        ValueKind::PyInstance(_) => "object",
-        ValueKind::PyModule(_) => "module",
-        ValueKind::ClassBoundMethod { .. } => "function",
-        ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => "super",
-        ValueKind::Generator(_) => "generator",
-        ValueKind::NotImplemented => "NotImplementedType",
-        ValueKind::Bytes(_) => "bytes",
-        ValueKind::Complex(_, _) => "complex",
-        ValueKind::BuiltinObject { ops, .. } => ops.type_name(),
     }
 }
 

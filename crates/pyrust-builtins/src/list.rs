@@ -152,21 +152,8 @@ pub fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
         }
         _ => Err(PyError::Runtime(format!(
             "'<' not supported between instances of '{}' and '{}'",
-            type_name(a),
-            type_name(b)
+            pyrust_core::builtin_type_name(a),
+            pyrust_core::builtin_type_name(b)
         ))),
-    }
-}
-
-fn type_name(v: &Value) -> &'static str {
-    match v.kind() {
-        ValueKind::Int(_) => "int",
-        ValueKind::Float(_) => "float",
-        ValueKind::Str(_) => "str",
-        ValueKind::Bool(_) => "bool",
-        ValueKind::None => "NoneType",
-        ValueKind::List(_) => "list",
-        ValueKind::Tuple(_) => "tuple",
-        _ => "object",
     }
 }

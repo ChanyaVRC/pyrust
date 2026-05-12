@@ -113,28 +113,14 @@ fn collect_iterable(v: &Value) -> Result<IndexSet<PyKey>> {
         _ => {
             return Err(PyError::named(
                 "TypeError",
-                format!("'{}' object is not iterable", type_name(v)),
+                format!(
+                    "'{}' object is not iterable",
+                    pyrust_core::builtin_type_name(v)
+                ),
             ));
         }
     }
     Ok(out)
-}
-
-fn type_name(v: &Value) -> &'static str {
-    match v.kind() {
-        ValueKind::Int(_) | ValueKind::BigInt(_) => "int",
-        ValueKind::Float(_) => "float",
-        ValueKind::Bool(_) => "bool",
-        ValueKind::None => "NoneType",
-        ValueKind::Str(_) => "str",
-        ValueKind::List(_) => "list",
-        ValueKind::Tuple(_) => "tuple",
-        ValueKind::Set(_) => "set",
-        ValueKind::Dict(_) => "dict",
-        ValueKind::Range { .. } => "range",
-        ValueKind::BuiltinObject { ops, .. } => ops.type_name(),
-        _ => "object",
-    }
 }
 
 // ── mutating methods ──────────────────────────────────────────────────────────
