@@ -1090,7 +1090,10 @@ impl Interpreter {
             _ if pyrust_builtins::bound_method::as_bound_method(&function).is_some() => {
                 let (name_rc, receiver_owned) =
                     pyrust_builtins::bound_method::as_bound_method(&function).unwrap();
-                let method = name_rc.to_string();
+                // Borrow the method name as `&str` from the `Rc<String>` rather
+                // than cloning into a fresh `String` — the dispatch helpers
+                // below all accept `&str`. See issue #276 item #1.
+                let method: &str = name_rc.as_str();
                 let mut receiver = receiver_owned;
                 // Separate positional and keyword args.
                 let mut pos: Vec<Value> = Vec::with_capacity(args.len());
@@ -1103,28 +1106,28 @@ impl Interpreter {
                 }
                 match receiver.kind() {
                     ValueKind::Str(_) => {
-                        pyrust_builtins::string::call(&method, &receiver, pos)
+                        pyrust_builtins::string::call(method, &receiver, pos)
                     }
                     ValueKind::List(_) => {
                         let items = receiver
                             .as_list_mut()
                             .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
-                        pyrust_builtins::list::call(&method, items, pos, &kw)
+                        pyrust_builtins::list::call(method, items, pos, &kw)
                     }
                     ValueKind::Tuple(items) => {
-                        pyrust_builtins::tuple::call(&method, items, pos)
+                        pyrust_builtins::tuple::call(method, items, pos)
                     }
                     ValueKind::Dict(_) => {
                         let dict = receiver
                             .as_dict_mut()
                             .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
-                        pyrust_builtins::dict::call(&method, dict, pos)
+                        pyrust_builtins::dict::call(method, dict, pos)
                     }
                     ValueKind::Set(_) => {
                         let set = receiver
                             .as_set_mut()
                             .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
-                        pyrust_builtins::set::call(&method, set, pos)
+                        pyrust_builtins::set::call(method, set, pos)
                     }
                     ValueKind::Complex(re, im) if method == "conjugate" => {
                         Ok(Value::complex(re, -im))
@@ -1132,7 +1135,7 @@ impl Interpreter {
                     ValueKind::BuiltinObject { ops, state } => {
                         let empty_kw: indexmap::IndexMap<String, Value> =
                             indexmap::IndexMap::new();
-                        ops.call_method(state, &method, pos, &empty_kw)
+                        ops.call_method(state, method, pos, &empty_kw)
                     }
                     _ => Err(PyError::Named(
                         "TypeError".to_string(),
