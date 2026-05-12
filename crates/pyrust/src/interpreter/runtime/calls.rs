@@ -168,13 +168,17 @@ impl Interpreter {
                 } else {
                     0i64
                 };
-                Ok(Value::lazy_enumerate(args[0].value.clone(), start))
+                let items = self.collect_iterable(args[0].value.clone())?;
+                Ok(pyrust_builtins::iter_helpers::enumerate(items, start))
             }
 
             ValueKind::BuiltinFunction("zip") => {
                 reject_keyword_args_expanded("zip", args)?;
-                let sources = args.iter().map(|a| a.value.clone()).collect();
-                Ok(Value::lazy_zip(sources))
+                let mut sources: Vec<Vec<Value>> = Vec::with_capacity(args.len());
+                for a in args.iter() {
+                    sources.push(self.collect_iterable(a.value.clone())?);
+                }
+                Ok(pyrust_builtins::iter_helpers::zip(sources))
             }
 
             ValueKind::BuiltinFunction("reversed") => {
@@ -184,7 +188,8 @@ impl Interpreter {
                         "reversed() takes exactly one argument".to_string(),
                     ));
                 }
-                Ok(Value::lazy_reversed(args[0].value.clone()))
+                let items = self.collect_iterable(args[0].value.clone())?;
+                Ok(pyrust_builtins::iter_helpers::reversed(items))
             }
 
             ValueKind::BuiltinFunction("sorted") => {
@@ -906,9 +911,6 @@ impl Interpreter {
                     ValueKind::List(_) => Ok(Value::builtin_function("list")),
                     ValueKind::Tuple(_) => Ok(Value::builtin_function("tuple")),
                     ValueKind::Dict(_) => Ok(Value::builtin_function("dict")),
-                    ValueKind::DictKeysView(_) => Ok(Value::builtin_function("dict_keys")),
-                    ValueKind::DictValuesView(_) => Ok(Value::builtin_function("dict_values")),
-                    ValueKind::DictItemsView(_) => Ok(Value::builtin_function("dict_items")),
                     ValueKind::Set(_) => Ok(Value::builtin_function("set")),
                     ValueKind::Range { .. } => Ok(Value::builtin_function("range")),
                     ValueKind::UserFunction(_)
@@ -917,9 +919,6 @@ impl Interpreter {
                     ValueKind::BuiltinFunction(_) => Ok(Value::builtin_function("builtin_function_or_method")),
                     ValueKind::PyModule(_) => Ok(Value::builtin_function("module")),
                     ValueKind::BigInt(_) => Ok(Value::builtin_function("int")),
-                    ValueKind::Enumerate { .. } => Ok(Value::builtin_function("enumerate")),
-                    ValueKind::Zip { .. } => Ok(Value::builtin_function("zip")),
-                    ValueKind::Reversed { .. } => Ok(Value::builtin_function("reversed")),
                     ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => Ok(Value::builtin_function("super")),
                     ValueKind::Generator(_) => Ok(Value::builtin_function("generator")),
                     ValueKind::Property { .. }

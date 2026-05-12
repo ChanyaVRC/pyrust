@@ -380,9 +380,6 @@ pub fn lookup_builtin_ops(type_name: &str) -> Option<&'static dyn BuiltinTypeOps
 pub enum Opaque {
     PyBigInt(Rc<BigInt>),
     Dict(Rc<RefCell<IndexMap<PyKey, Value>>>),
-    DictKeysView(Rc<RefCell<IndexMap<PyKey, Value>>>),
-    DictValuesView(Rc<RefCell<IndexMap<PyKey, Value>>>),
-    DictItemsView(Rc<RefCell<IndexMap<PyKey, Value>>>),
     Set(IndexSet<PyKey>),
     Range {
         start: i64,
@@ -397,16 +394,6 @@ pub enum Opaque {
     BoundMethod {
         function: Rc<UserFunction>,
         receiver: Rc<RefCell<PyInstance>>,
-    },
-    Enumerate {
-        source: Value,
-        start: i64,
-    },
-    Zip {
-        sources: Vec<Value>,
-    },
-    Reversed {
-        source: Value,
     },
     /// A classmethod bound to a specific class (the first argument will be `cls`).
     ClassBoundMethod {
@@ -482,9 +469,6 @@ impl Clone for Opaque {
         match self {
             Opaque::PyBigInt(rc) => Opaque::PyBigInt(Rc::clone(rc)),
             Opaque::Dict(rc) => Opaque::Dict(Rc::clone(rc)),
-            Opaque::DictKeysView(rc) => Opaque::DictKeysView(Rc::clone(rc)),
-            Opaque::DictValuesView(rc) => Opaque::DictValuesView(Rc::clone(rc)),
-            Opaque::DictItemsView(rc) => Opaque::DictItemsView(Rc::clone(rc)),
             Opaque::Set(s) => Opaque::Set(s.clone()),
             Opaque::Range { start, stop, step } => Opaque::Range {
                 start: *start,
@@ -499,16 +483,6 @@ impl Clone for Opaque {
             Opaque::BoundMethod { function, receiver } => Opaque::BoundMethod {
                 function: Rc::clone(function),
                 receiver: Rc::clone(receiver),
-            },
-            Opaque::Enumerate { source, start } => Opaque::Enumerate {
-                source: source.clone(),
-                start: *start,
-            },
-            Opaque::Zip { sources } => Opaque::Zip {
-                sources: sources.clone(),
-            },
-            Opaque::Reversed { source } => Opaque::Reversed {
-                source: source.clone(),
             },
             Opaque::ClassBoundMethod { function, class } => Opaque::ClassBoundMethod {
                 function: Rc::clone(function),
@@ -568,9 +542,6 @@ pub enum ValueKind<'a> {
     List(&'a Vec<Value>),
     Tuple(&'a Vec<Value>),
     Dict(&'a IndexMap<PyKey, Value>),
-    DictKeysView(&'a Rc<RefCell<IndexMap<PyKey, Value>>>),
-    DictValuesView(&'a Rc<RefCell<IndexMap<PyKey, Value>>>),
-    DictItemsView(&'a Rc<RefCell<IndexMap<PyKey, Value>>>),
     Set(&'a IndexSet<PyKey>),
     Range {
         start: i64,
@@ -585,16 +556,6 @@ pub enum ValueKind<'a> {
     BoundMethod {
         function: &'a Rc<UserFunction>,
         receiver: &'a Rc<RefCell<PyInstance>>,
-    },
-    Enumerate {
-        source: &'a Value,
-        start: i64,
-    },
-    Zip {
-        sources: &'a Vec<Value>,
-    },
-    Reversed {
-        source: &'a Value,
     },
     ClassBoundMethod {
         function: &'a Rc<UserFunction>,
@@ -909,18 +870,6 @@ impl Value {
         Value::opaque(Opaque::Dict(Rc::new(RefCell::new(d))))
     }
 
-    pub fn dict_keys_view(rc: Rc<RefCell<IndexMap<PyKey, Value>>>) -> Self {
-        Value::opaque(Opaque::DictKeysView(rc))
-    }
-
-    pub fn dict_values_view(rc: Rc<RefCell<IndexMap<PyKey, Value>>>) -> Self {
-        Value::opaque(Opaque::DictValuesView(rc))
-    }
-
-    pub fn dict_items_view(rc: Rc<RefCell<IndexMap<PyKey, Value>>>) -> Self {
-        Value::opaque(Opaque::DictItemsView(rc))
-    }
-
     pub fn set(s: IndexSet<PyKey>) -> Self {
         Value::opaque(Opaque::Set(s))
     }
@@ -987,18 +936,6 @@ impl Value {
             name: Rc::new(name.into()),
             receiver,
         })
-    }
-
-    pub fn lazy_enumerate(source: Value, start: i64) -> Self {
-        Value::opaque(Opaque::Enumerate { source, start })
-    }
-
-    pub fn lazy_zip(sources: Vec<Value>) -> Self {
-        Value::opaque(Opaque::Zip { sources })
-    }
-
-    pub fn lazy_reversed(source: Value) -> Self {
-        Value::opaque(Opaque::Reversed { source })
     }
 
     /// Wrap a function with a different `UserFunctionKind` tag.  Used by
@@ -1316,9 +1253,6 @@ impl Value {
                 // No mutable borrow (borrow_mut) is held concurrently in our single-
                 // threaded interpreter, so the raw-pointer alias is sound.
                 Opaque::Dict(rc) => ValueKind::Dict(unsafe { &*rc.as_ref().as_ptr() }),
-                Opaque::DictKeysView(rc) => ValueKind::DictKeysView(rc),
-                Opaque::DictValuesView(rc) => ValueKind::DictValuesView(rc),
-                Opaque::DictItemsView(rc) => ValueKind::DictItemsView(rc),
                 Opaque::Set(s) => ValueKind::Set(s),
                 Opaque::Range { start, stop, step } => ValueKind::Range {
                     start: *start,
@@ -1333,12 +1267,6 @@ impl Value {
                 Opaque::BoundMethod { function, receiver } => {
                     ValueKind::BoundMethod { function, receiver }
                 }
-                Opaque::Enumerate { source, start } => ValueKind::Enumerate {
-                    source,
-                    start: *start,
-                },
-                Opaque::Zip { sources } => ValueKind::Zip { sources },
-                Opaque::Reversed { source } => ValueKind::Reversed { source },
                 Opaque::ClassBoundMethod { function, class } => {
                     ValueKind::ClassBoundMethod { function, class }
                 }
@@ -1385,9 +1313,6 @@ impl Value {
             ValueKind::None => false,
             ValueKind::List(v) => !v.is_empty(),
             ValueKind::Dict(v) => !v.is_empty(),
-            ValueKind::DictKeysView(rc) => !rc.borrow().is_empty(),
-            ValueKind::DictValuesView(rc) => !rc.borrow().is_empty(),
-            ValueKind::DictItemsView(rc) => !rc.borrow().is_empty(),
             ValueKind::Set(v) => !v.is_empty(),
             ValueKind::Range { start, stop, step } => range_len(start, stop, step) > 0,
             ValueKind::UserFunction(_) => true,
@@ -1397,9 +1322,6 @@ impl Value {
             ValueKind::BoundMethod { .. } => true,
             ValueKind::PyModule(_) => true,
             ValueKind::Tuple(v) => !v.is_empty(),
-            ValueKind::Enumerate { .. } => true,
-            ValueKind::Zip { .. } => true,
-            ValueKind::Reversed { .. } => true,
             ValueKind::ClassBoundMethod { .. } => true,
             ValueKind::SuperProxy { .. } => true,
             ValueKind::SuperProxyClass { .. } => true,
@@ -1496,24 +1418,6 @@ impl Value {
                 format!("<bound method {class_name}.{}>", function.name)
             }
             ValueKind::PyModule(m) => format!("<module '{}'>", m.borrow().name),
-            ValueKind::DictKeysView(rc) => {
-                let map = rc.borrow();
-                let keys: Vec<String> = map.keys().map(key_repr).collect();
-                format!("dict_keys([{}])", keys.join(", "))
-            }
-            ValueKind::DictValuesView(rc) => {
-                let map = rc.borrow();
-                let vals: Vec<String> = map.values().map(|v| v.repr()).collect();
-                format!("dict_values([{}])", vals.join(", "))
-            }
-            ValueKind::DictItemsView(rc) => {
-                let map = rc.borrow();
-                let items: Vec<String> = map
-                    .iter()
-                    .map(|(k, v)| format!("({}, {})", key_repr(k), v.repr()))
-                    .collect();
-                format!("dict_items([{}])", items.join(", "))
-            }
             ValueKind::Tuple(items) => {
                 let inner = items
                     .iter()
@@ -1526,9 +1430,6 @@ impl Value {
                     format!("({inner})")
                 }
             }
-            ValueKind::Enumerate { .. } => "<enumerate object>".to_string(),
-            ValueKind::Zip { .. } => "<zip object>".to_string(),
-            ValueKind::Reversed { .. } => "<list_reverseiterator object>".to_string(),
             ValueKind::ClassBoundMethod { function, class } => {
                 format!("<bound method {}.{}>", class.borrow().name, function.name)
             }

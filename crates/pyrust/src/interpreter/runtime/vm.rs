@@ -39,14 +39,6 @@ pub(crate) enum IterState {
     /// Behaves like CPython's list_iterator: checks pos < len each tick; no
     /// mutation detection (appending extends iteration, removing shortens it).
     Indexed { reg: crate::bytecode::Reg, pos: usize },
-    /// Lazy enumerate: yields (counter, item) pairs from pre-materialized items.
-    /// The source is materialised once at GetIter time, but individual tuples are
-    /// built on demand instead of all at once.
-    Enumerate { items: Vec<Value>, pos: usize, counter: i64 },
-    /// Lazy zip: yields row-tuples from pre-materialized parallel sources.
-    Zip { sources: Vec<Vec<Value>>, pos: usize, len: usize },
-    /// Lazy reversed: walks a materialized Vec from end to start without mutating it.
-    ReversedItems { items: Vec<Value>, pos: usize },
     /// User-defined iterator: holds the iterator object (result of __iter__).
     /// Each ForIter call invokes __next__() on it and stops on StopIteration.
     UserDefined(Value),
@@ -1157,27 +1149,6 @@ impl Interpreter {
                                 }
                                 IterState::Range { cur: start, stop, step }
                             }
-                            ValueKind::Enumerate { source, start } => {
-                                let items = vm_try!(iter_values(source.clone()));
-                                IterState::Enumerate { items, pos: 0, counter: start }
-                            }
-                            ValueKind::Zip { sources } => {
-                                if sources.is_empty() {
-                                    IterState::Materialized(vec![], 0)
-                                } else {
-                                    let mut vecs: Vec<Vec<Value>> = Vec::with_capacity(sources.len());
-                                    for s in sources {
-                                        vecs.push(vm_try!(iter_values(s.clone())));
-                                    }
-                                    let len = vecs.iter().map(|v| v.len()).min().unwrap_or(0);
-                                    IterState::Zip { sources: vecs, pos: 0, len }
-                                }
-                            }
-                            ValueKind::Reversed { source } => {
-                                let items = vm_try!(iter_values(source.clone()));
-                                let len = items.len();
-                                IterState::ReversedItems { items, pos: len }
-                            }
                             ValueKind::Generator(_) => {
                                 // A generator is its own iterator.
                                 IterState::UserDefined(src_val)
@@ -1262,34 +1233,6 @@ impl Interpreter {
                                 let v = Value::int(*cur);
                                 *cur += *step;
                                 regs[*dst as usize] = v;
-                            }
-                        }
-                        Some(IterState::Enumerate { items, pos, counter }) => {
-                            if *pos < items.len() {
-                                let v = Value::tuple(vec![Value::int(*counter), items[*pos].clone()]);
-                                *pos += 1;
-                                *counter += 1;
-                                regs[*dst as usize] = v;
-                            } else {
-                                pc = jump_pc!(*offset);
-                            }
-                        }
-                        Some(IterState::Zip { sources, pos, len }) => {
-                            if *pos < *len {
-                                let row: Vec<Value> = sources.iter().map(|s| s[*pos].clone()).collect();
-                                *pos += 1;
-                                regs[*dst as usize] = Value::tuple(row);
-                            } else {
-                                pc = jump_pc!(*offset);
-                            }
-                        }
-                        Some(IterState::ReversedItems { items, pos }) => {
-                            if *pos > 0 {
-                                *pos -= 1;
-                                let v = items[*pos].clone();
-                                regs[*dst as usize] = v;
-                            } else {
-                                pc = jump_pc!(*offset);
                             }
                         }
                         Some(IterState::UserDefined(iter_obj)) => {
@@ -1644,9 +1587,9 @@ impl Interpreter {
                         .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?
                         .clone();
                     return match method.as_str() {
-                        "keys"   => Ok(Value::dict_keys_view(rc)),
-                        "values" => Ok(Value::dict_values_view(rc)),
-                        "items"  => Ok(Value::dict_items_view(rc)),
+                        "keys"   => Ok(pyrust_builtins::dict_views::dict_keys(rc)),
+                        "values" => Ok(pyrust_builtins::dict_views::dict_values(rc)),
+                        "items"  => Ok(pyrust_builtins::dict_views::dict_items(rc)),
                         _ => unreachable!(),
                     };
                 }
@@ -1789,9 +1732,9 @@ impl Interpreter {
                         .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?
                         .clone();
                     return match method.as_str() {
-                        "keys"   => Ok(Value::dict_keys_view(rc)),
-                        "values" => Ok(Value::dict_values_view(rc)),
-                        "items"  => Ok(Value::dict_items_view(rc)),
+                        "keys"   => Ok(pyrust_builtins::dict_views::dict_keys(rc)),
+                        "values" => Ok(pyrust_builtins::dict_views::dict_values(rc)),
+                        "items"  => Ok(pyrust_builtins::dict_views::dict_items(rc)),
                         _ => unreachable!(),
                     };
                 }

@@ -905,23 +905,6 @@ impl Interpreter {
                 let key = item.to_key().ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
                 Ok(Value::bool_(items.contains_key(&key)))
             }
-            ValueKind::DictKeysView(rc) => {
-                let key = item.to_key().ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
-                Ok(Value::bool_(rc.borrow().contains_key(&key)))
-            }
-            ValueKind::DictValuesView(rc) => {
-                Ok(Value::bool_(rc.borrow().values().any(|v| v == &item)))
-            }
-            ValueKind::DictItemsView(rc) => {
-                match item.kind() {
-                    ValueKind::Tuple(kv) if kv.len() == 2 => {
-                        let key = kv[0].to_key().ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
-                        let map = rc.borrow();
-                        Ok(Value::bool_(map.get(&key).is_some_and(|v| v == &kv[1])))
-                    }
-                    _ => Ok(Value::bool_(false)),
-                }
-            }
             ValueKind::Range { start, stop, step } => {
                 match item.kind() {
                     ValueKind::Int(v) => {
@@ -1000,42 +983,42 @@ fn iter_values(value: Value) -> Result<Vec<Value>> {
         ValueKind::Tuple(items) => Ok(items.clone()),
         ValueKind::Set(items) => Ok(items.iter().map(|k| key_to_value(k.clone())).collect()),
         ValueKind::BuiltinObject { .. } => {
-            // Frozenset materialises through its inner key set; other builtin
-            // objects iterate via `iter_next` and are collected lazily.
+            // Frozensets materialise through their inner key set; dict views
+            // materialise through their backing IndexMap; everything else
+            // iterates via `iter_next`.
             if let Some(rc) = pyrust_builtins::frozenset::as_items(&value) {
-                Ok(rc.iter().map(|k| key_to_value(k.clone())).collect())
-            } else {
-                let mut out = Vec::new();
-                let ValueKind::BuiltinObject { ops, state } = value.kind() else {
-                    unreachable!();
-                };
-                if !ops.is_iterable() {
-                    return Err(PyError::Named(
-                        "TypeError".to_string(),
-                        format!("'{}' object is not iterable", ops.type_name()),
-                    ));
-                }
-                while let Some(v) = ops.iter_next(state)? {
-                    out.push(v);
-                }
-                Ok(out)
+                return Ok(rc.iter().map(|k| key_to_value(k.clone())).collect());
             }
+            if let Some(kind) = pyrust_builtins::dict_views::view_kind(&value) {
+                let rc = pyrust_builtins::dict_views::as_dict_rc(&value).unwrap();
+                let map = rc.borrow();
+                return Ok(match kind {
+                    0 => map.keys().map(|k| key_to_value(k.clone())).collect(),
+                    1 => map.values().cloned().collect(),
+                    _ => map
+                        .iter()
+                        .map(|(k, v)| Value::tuple(vec![key_to_value(k.clone()), v.clone()]))
+                        .collect(),
+                });
+            }
+            let mut out = Vec::new();
+            let ValueKind::BuiltinObject { ops, state } = value.kind() else {
+                unreachable!();
+            };
+            if !ops.is_iterable() {
+                return Err(PyError::Named(
+                    "TypeError".to_string(),
+                    format!("'{}' object is not iterable", ops.type_name()),
+                ));
+            }
+            while let Some(v) = ops.iter_next(state)? {
+                out.push(v);
+            }
+            Ok(out)
         }
         ValueKind::Bytes(rc) => Ok(rc.iter().map(|b| Value::int(*b as i64)).collect()),
         ValueKind::Str(text) => Ok(text.chars().map(|c| Value::string(c.to_string())).collect()),
         ValueKind::Dict(items) => Ok(items.keys().map(|k| key_to_value(k.clone())).collect()),
-        ValueKind::DictKeysView(rc) => {
-            let map = rc.borrow();
-            Ok(map.keys().map(|k| key_to_value(k.clone())).collect())
-        }
-        ValueKind::DictValuesView(rc) => {
-            let map = rc.borrow();
-            Ok(map.values().cloned().collect())
-        }
-        ValueKind::DictItemsView(rc) => {
-            let map = rc.borrow();
-            Ok(map.iter().map(|(k, v)| Value::tuple(vec![key_to_value(k.clone()), v.clone()])).collect())
-        }
         ValueKind::Range { start, stop, step } => {
             let mut out = Vec::new();
             if step > 0 {
@@ -1052,32 +1035,6 @@ fn iter_values(value: Value) -> Result<Vec<Value>> {
                 }
             }
             Ok(out)
-        }
-        ValueKind::Enumerate { source, start } => {
-            let items = iter_values(source.clone())?;
-            Ok(items
-                .into_iter()
-                .enumerate()
-                .map(|(i, v)| Value::tuple(vec![Value::int(i as i64 + start), v]))
-                .collect())
-        }
-        ValueKind::Zip { sources } => {
-            if sources.is_empty() {
-                return Ok(vec![]);
-            }
-            let mut vecs: Vec<Vec<Value>> = Vec::with_capacity(sources.len());
-            for s in sources {
-                vecs.push(iter_values(s.clone())?);
-            }
-            let len = vecs.iter().map(|v| v.len()).min().unwrap_or(0);
-            Ok((0..len)
-                .map(|i| Value::tuple(vecs.iter().map(|v| v[i].clone()).collect()))
-                .collect())
-        }
-        ValueKind::Reversed { source } => {
-            let mut items = iter_values(source.clone())?;
-            items.reverse();
-            Ok(items)
         }
         ValueKind::Generator(state_rc) => {
             // Drain a NativeIterFrame (created by iter() on builtins) into a Vec.

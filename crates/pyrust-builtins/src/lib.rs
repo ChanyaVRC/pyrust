@@ -1,6 +1,8 @@
 pub mod dict;
+pub mod dict_views;
 pub mod file;
 pub mod frozenset;
+pub mod iter_helpers;
 pub mod list;
 pub mod mutable_sequence;
 pub mod sequence;
@@ -15,6 +17,12 @@ pub fn lookup_ops(type_name: &str) -> Option<&'static dyn pyrust_core::BuiltinTy
     match type_name {
         file::TYPE_NAME => Some(file::FILE_OPS),
         frozenset::TYPE_NAME => Some(frozenset::FROZENSET_OPS),
+        iter_helpers::ENUMERATE_TYPE_NAME => Some(iter_helpers::ENUMERATE_OPS),
+        iter_helpers::ZIP_TYPE_NAME => Some(iter_helpers::ZIP_OPS),
+        iter_helpers::REVERSED_TYPE_NAME => Some(iter_helpers::REVERSED_OPS),
+        dict_views::DICT_KEYS_TYPE_NAME => Some(dict_views::DICT_KEYS_OPS),
+        dict_views::DICT_VALUES_TYPE_NAME => Some(dict_views::DICT_VALUES_OPS),
+        dict_views::DICT_ITEMS_TYPE_NAME => Some(dict_views::DICT_ITEMS_OPS),
         _ => None,
     }
 }
