@@ -78,6 +78,7 @@ static REGISTRY: std::sync::LazyLock<Vec<BuiltinReg>> = std::sync::LazyLock::new
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::value::ValueKind;
 
     #[test]
     fn lookup_finds_a_known_builtin() {
@@ -104,5 +105,72 @@ mod tests {
                 w[1]
             );
         }
+    }
+
+    #[test]
+    fn flat_namespace_builtins_register_without_prefix() {
+        // `@flat builtins` mode means top-level Python builtins
+        // (`abs`, `len`, `print`, …) register under their short name,
+        // not `builtins.abs`.  Picking a handful at random pins the contract.
+        for name in ["abs", "len", "print", "type", "super"] {
+            assert!(
+                lookup(name).is_some(),
+                "expected flat builtin {name:?} in registry"
+            );
+            assert!(
+                lookup(&format!("builtins.{name}")).is_none(),
+                "flat builtin {name:?} must NOT be registered with `builtins.` prefix"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_name_and_module_attr_share_one_pointer() {
+        // The Copilot review flagged that `pyrust_module!` used to emit
+        // three independent `Box::leak` sites per built-in (one for
+        // `FN_NAME`, one for `BuiltinReg.name`, one for the
+        // `Value::builtin_function(...)` in the module attrs).  After the
+        // fix, all three consumers read from a single per-fn
+        // `LazyLock<&'static str>`, so the `&'static str` stored in the
+        // registry must be **the exact same pointer** as the one bound
+        // into the imported `PyModule`.  Compare with `std::ptr::eq` —
+        // string equality alone wouldn't catch a regression to multiple
+        // leaks.
+        let registered = lookup("math.sqrt").map(|_| {
+            REGISTRY
+                .iter()
+                .find(|r| r.name == "math.sqrt")
+                .expect("just looked up")
+                .name
+        });
+        let registered = registered.expect("math.sqrt must be registered");
+
+        let module =
+            crate::builtin_modules::load_builtin_module("math").expect("import math must resolve");
+        let module_attr_name: &'static str = match module.kind() {
+            ValueKind::PyModule(m) => match m.borrow().attrs.get("sqrt").map(|v| v.kind()) {
+                Some(ValueKind::BuiltinFunction(s)) => s,
+                _ => panic!("math.sqrt attr is not a BuiltinFunction"),
+            },
+            _ => panic!("import math did not return a PyModule"),
+        };
+
+        assert!(
+            std::ptr::eq(registered, module_attr_name),
+            "BuiltinReg.name and PyModule attr name must point to the same \
+             leaked str (got {registered:p} vs {module_attr_name:p})",
+        );
+    }
+
+    #[test]
+    fn duplicate_registration_panics_at_init() {
+        // The uniqueness check fires when REGISTRY is built (first lookup).
+        // We can't *cause* a duplicate from the outside — the registry is
+        // populated from compile-time-fixed `regs()` slices — so this test
+        // is necessarily a smoke check that registry init has run cleanly.
+        // The behavioural assertion (`assert!`, not `debug_assert!`) lives
+        // in the static initialiser; a duplicate would have panicked
+        // before any other test could reach `lookup()`.
+        assert!(lookup("abs").is_some());
     }
 }

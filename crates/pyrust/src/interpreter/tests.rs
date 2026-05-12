@@ -1076,6 +1076,146 @@ result = fact(10)
     /// that slice is the single source of truth.  This locks in that the
     /// `builtin_method_names` table is derived from `METHODS` rather than
     /// duplicated.
+    // ── Copilot-review regression tests (PR #326) ────────────────────────────
+    //
+    // The migrated `bodies/builtins.rs` originally carried two latent bugs
+    // forward from the legacy match arms in `calls.rs`:
+    //
+    //   - The TypeError message for `chr`/`bin`/`oct`/`hex` was built with
+    //     `"…'{}' object…".to_string()` instead of `format!()`, so users saw
+    //     the literal `{}` instead of the offending type name.
+    //   - `bin(i64::MIN)` (and oct/hex) computed `-v` directly, which panics
+    //     in debug and wraps in release for the boundary case.
+    //
+    // Both are now fixed; these tests pin the corrected behaviour so a
+    // future refactor can't silently regress them.
+
+    fn run_program_expect_error(src: &str) -> crate::error::PyError {
+        let tokens = Lexer::new(src).unwrap().into_tokens();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut interpreter = Interpreter::default();
+        interpreter.exec_program(&program, false).unwrap_err()
+    }
+
+    #[test]
+    fn chr_type_error_message_substitutes_type_name() {
+        let err = run_program_expect_error("chr('not an int')\n");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("got type str"),
+            "expected substituted type name, got: {msg}"
+        );
+        assert!(
+            !msg.contains("got type {}"),
+            "literal `{{}}` placeholder still present in: {msg}"
+        );
+    }
+
+    #[test]
+    fn bin_oct_hex_type_error_messages_substitute_type_name() {
+        for src in [
+            "bin('s')\n",
+            "oct(3.14)\n",
+            "hex([])\n",
+        ] {
+            let err = run_program_expect_error(src);
+            let msg = err.to_string();
+            assert!(
+                !msg.contains("'{}' object"),
+                "literal `{{}}` placeholder still present in: {msg} (src: {src:?})"
+            );
+            assert!(
+                msg.contains("object cannot be interpreted"),
+                "expected canonical TypeError shape, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn bin_oct_hex_at_i64_min_do_not_overflow() {
+        // `-9223372036854775807 - 1` is the only way to *write* i64::MIN
+        // since the lexer parses leading-minus literals by negating an
+        // unsigned magnitude — and 9223372036854775808 doesn't fit in i64.
+        //
+        // Before the fix, the `-v` inside the bin/oct/hex bodies would
+        // panic in debug (`attempt to negate with overflow`) and wrap to
+        // 0 in release (producing the wrong string).
+        let interp = run_program(
+            "n = -9223372036854775807 - 1\n\
+             b = bin(n)\n\
+             o = oct(n)\n\
+             h = hex(n)\n",
+        );
+        // 0x8000_0000_0000_0000 as the unsigned magnitude:
+        //   binary  = 1 followed by 63 zeros
+        //   octal   = 1 followed by 21 zeros
+        //   hex     = 8000000000000000
+        assert_eq!(
+            interp.lookup_name("b").unwrap(),
+            Some(Value::string(format!("-0b1{}", "0".repeat(63))))
+        );
+        assert_eq!(
+            interp.lookup_name("o").unwrap(),
+            Some(Value::string(format!("-0o1{}", "0".repeat(21))))
+        );
+        assert_eq!(
+            interp.lookup_name("h").unwrap(),
+            Some(Value::string("-0x8000000000000000"))
+        );
+    }
+
+    #[test]
+    fn super_two_arg_form_works_after_py_name_migration() {
+        // `super` migrated from `calls.rs` into `bodies/builtins.rs` via
+        // `#[py_name = "super"]` because `super` is a strict Rust keyword
+        // that can't be a raw ident.  This pins both classic two-arg uses.
+        let interp = run_program(
+            "class A:\n    def f(self): return 'A'\n\
+             class B(A):\n    def f(self): return 'B+' + super(B, self).f()\n\
+             instance_chain = B().f()\n\
+             class C:\n    @classmethod\n    def cm(cls): return 'C'\n\
+             class D(C):\n    @classmethod\n    def cm(cls): return 'D+' + super(D, cls).cm()\n\
+             class_chain = D.cm()\n",
+        );
+        assert_eq!(
+            interp.lookup_name("instance_chain").unwrap(),
+            Some(Value::string("B+A"))
+        );
+        assert_eq!(
+            interp.lookup_name("class_chain").unwrap(),
+            Some(Value::string("D+C"))
+        );
+    }
+
+    #[test]
+    fn print_and_str_use_shared_dunder_render() {
+        // `print(x)` and `str(x)` route through the same `render_instance_str`
+        // helper, so they must produce identical text for instances that
+        // define `__str__`, `__repr__`, both, or neither.  Capturing print's
+        // output is awkward here, so we verify the `str()` path with each
+        // priority tier and trust the shared call site.
+        let interp = run_program(
+            "class Neither: pass\n\
+             class StrOnly:\n    def __str__(self): return 'S'\n\
+             class ReprOnly:\n    def __repr__(self): return 'R'\n\
+             class Both:\n    def __str__(self): return 'BS'\n    def __repr__(self): return 'BR'\n\
+             a = str(Neither())\nb = str(StrOnly())\nc = str(ReprOnly())\nd = str(Both())\n",
+        );
+        // __str__ wins over __repr__; falls through to __repr__ when only it
+        // exists; falls all the way to `<ClassName object>` when neither does.
+        assert!(
+            matches!(
+                interp.lookup_name("a").unwrap(),
+                Some(v) if matches!(v.kind(), ValueKind::Str(s) if s.contains("Neither object"))
+            ),
+            "Neither instance should render as `<Neither object>`"
+        );
+        assert_eq!(interp.lookup_name("b").unwrap(), Some(Value::string("S")));
+        assert_eq!(interp.lookup_name("c").unwrap(), Some(Value::string("R")));
+        assert_eq!(interp.lookup_name("d").unwrap(), Some(Value::string("BS")));
+    }
+
     #[test]
     fn dir_covers_every_pyrust_builtins_methods_entry() {
         fn dir_names(interp: &Interpreter, name: &str) -> Vec<String> {
