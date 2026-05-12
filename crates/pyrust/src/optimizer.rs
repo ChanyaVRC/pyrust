@@ -1088,38 +1088,75 @@ fn pass_licm(insns: Vec<Insn>) -> Vec<Insn> {
             let hoist_set: HashSet<usize> = to_hoist.iter().copied().collect();
 
             // Build old→new index map (size n+1 for the past-the-end sentinel).
-            let mut old_to_new = vec![0usize; n + 1];
+            //
+            // `placement_map` says where each old instruction physically lands —
+            // hoisted ones move to the pre-header region, non-hoisted body
+            // instructions slide down by `num_hoisted`.
+            //
+            // `jump_target_map` is what `rewrite_offsets` consults when fixing
+            // jump targets.  It differs from `placement_map` only for hoisted
+            // positions: a jump that originally pointed *at* a hoisted
+            // instruction (because that instruction was the first body
+            // statement, and the compiler emitted the body-entry jump to its
+            // address) must be redirected to the new body entry — i.e. the
+            // first non-hoisted instruction at-or-after the old target — not
+            // to the hoisted instruction's pre-header slot.  Without this
+            // distinction a `CmpJumpIfFalse(_, _, _, k)` whose body started
+            // with a hoistable LoadConst would, after LICM, loop back forever
+            // into the pre-header.  See issue #323.
+            let mut placement_map = vec![0usize; n + 1];
+            let mut jump_target_map = vec![0usize; n + 1];
 
             // Before-body region: indices unchanged.
             for i in 0..body_start {
-                old_to_new[i] = i;
+                placement_map[i] = i;
+                jump_target_map[i] = i;
             }
-            // Hoisted instructions land at [body_start .. body_start+num_hoisted).
-            for (i, &pc) in to_hoist.iter().enumerate() {
-                old_to_new[pc] = body_start + i;
-            }
-            // Non-hoisted loop body: [body_start+num_hoisted .. latch+1).
+            // Non-hoisted body slots first, so we know where the body now
+            // starts and where jumps targeting hoisted instructions should
+            // redirect.
             {
                 let mut slot = body_start + num_hoisted;
                 for pc in body_start..=latch {
                     if !hoist_set.contains(&pc) {
-                        old_to_new[pc] = slot;
+                        placement_map[pc] = slot;
+                        jump_target_map[pc] = slot;
                         slot += 1;
                     }
                 }
             }
+            // Hoisted instructions land at [body_start .. body_start+num_hoisted).
+            // Their jump-target redirection is to the first non-hoisted body
+            // instruction at-or-after the old position.
+            //
+            // Compute the redirection for each hoisted pc by scanning forward
+            // from pc to the first non-hoisted instruction in the body.  If
+            // none exists (everything from pc to latch was hoisted, which is
+            // unreachable since the back-edge Jump at latch isn't hoistable),
+            // fall back to the slot just past the loop.
+            for (i, &pc) in to_hoist.iter().enumerate() {
+                placement_map[pc] = body_start + i;
+                let redirect = ((pc + 1)..=latch)
+                    .find(|p| !hoist_set.contains(p))
+                    .map(|p| jump_target_map[p])
+                    .unwrap_or(latch + 1);
+                jump_target_map[pc] = redirect;
+            }
             // After-latch region: indices unchanged.
             for i in (latch + 1)..n {
-                old_to_new[i] = i;
+                placement_map[i] = i;
+                jump_target_map[i] = i;
             }
             // Past-the-end sentinel.
-            old_to_new[n] = n;
+            placement_map[n] = n;
+            jump_target_map[n] = n;
 
             // Scatter instructions into their new positions and fix jump offsets.
             let mut new_insns: Vec<Insn> = vec![Insn::ReturnNone; n];
             for (old_i, insn) in insns.iter().enumerate() {
-                let new_i = old_to_new[old_i];
-                new_insns[new_i] = rewrite_offsets(insn.clone(), old_i, &old_to_new);
+                let new_i = placement_map[old_i];
+                new_insns[new_i] =
+                    rewrite_offsets_with(insn.clone(), old_i, &placement_map, &jump_target_map);
             }
             insns = new_insns;
 
@@ -2142,10 +2179,23 @@ pub(crate) fn compact(insns: Vec<Insn>, keep: &[bool]) -> Vec<Insn> {
 /// Rewrite all jump offsets in `insn` using the old→new index table.
 /// `old_i` is the pre-compaction index of `insn` (which is guaranteed to be kept).
 pub(crate) fn rewrite_offsets(insn: Insn, old_i: usize, to_new: &[usize]) -> Insn {
+    rewrite_offsets_with(insn, old_i, to_new, to_new)
+}
+
+/// Like [`rewrite_offsets`] but with a separate map for jump targets.  LICM
+/// uses this to redirect jumps that targeted a hoisted instruction so they
+/// land at the new body start rather than at the hoisted instruction's
+/// pre-header position.  See issue #323.
+pub(crate) fn rewrite_offsets_with(
+    insn: Insn,
+    old_i: usize,
+    placement_map: &[usize],
+    jump_target_map: &[usize],
+) -> Insn {
     let fix = |k: i32| -> i32 {
         let old_target = (old_i as i64 + 1 + k as i64) as usize;
-        let new_src = to_new[old_i];
-        let new_target = to_new[old_target];
+        let new_src = placement_map[old_i];
+        let new_target = jump_target_map[old_target];
         (new_target as i64 - new_src as i64 - 1) as i32
     };
     use Insn::*;
