@@ -475,6 +475,22 @@ pub enum Opaque {
     Bytes(Rc<Vec<u8>>),
     /// A Python `complex` number stored as (real, imag).
     Complex(f64, f64),
+    /// Inline storage for a 2-element tuple.  Eliminates the secondary
+    /// `Vec<Value>` heap allocation for the most common Python tuple shape
+    /// (e.g. `dict.items()` entries, `enumerate()` yields, `divmod()`).
+    /// `obj_id` preserves stable `id()` identity across clones, matching the
+    /// behaviour of the pool-based tuple path.
+    SmallTuple2 {
+        items: [Value; 2],
+        obj_id: u64,
+    },
+    /// Inline storage for a 3-element tuple.  Same rationale as
+    /// `SmallTuple2`; covers `str.partition()`/`rpartition()` and similar
+    /// fixed-arity returns.
+    SmallTuple3 {
+        items: [Value; 3],
+        obj_id: u64,
+    },
     /// A type-erased built-in object whose operations are dispatched through
     /// the installed [`BuiltinTypeOps`] table.  Used for built-in types whose
     /// payload doesn't justify a dedicated Tier 1 variant (file, property,
@@ -520,6 +536,14 @@ impl Clone for Opaque {
             Opaque::Generator(state) => Opaque::Generator(Rc::clone(state)),
             Opaque::Bytes(rc) => Opaque::Bytes(Rc::clone(rc)),
             Opaque::Complex(re, im) => Opaque::Complex(*re, *im),
+            Opaque::SmallTuple2 { items, obj_id } => Opaque::SmallTuple2 {
+                items: [items[0].clone(), items[1].clone()],
+                obj_id: *obj_id,
+            },
+            Opaque::SmallTuple3 { items, obj_id } => Opaque::SmallTuple3 {
+                items: [items[0].clone(), items[1].clone(), items[2].clone()],
+                obj_id: *obj_id,
+            },
             Opaque::BuiltinObject { ops, state } => Opaque::BuiltinObject {
                 ops: *ops,
                 state: Rc::clone(state),
@@ -539,8 +563,12 @@ pub enum ValueKind<'a> {
     BigInt(&'a BigInt),
     Float(f64),
     Str(&'a str),
-    List(&'a Vec<Value>),
-    Tuple(&'a Vec<Value>),
+    List(&'a [Value]),
+    /// Borrowed view of a tuple's elements.  Backed either by the pool path
+    /// (`TAG_TUPLE`) which stores `Vec<Value>`, or by the inline
+    /// `Opaque::SmallTuple2/3` path which stores a fixed-size array.  Using
+    /// a slice unifies both backing representations behind one variant.
+    Tuple(&'a [Value]),
     Dict(&'a IndexMap<PyKey, Value>),
     Set(&'a IndexSet<PyKey>),
     Range {
@@ -626,6 +654,51 @@ unsafe fn pool_b_dealloc(ptr: *mut u8) {
             c.set((ptr, len + 1));
         } else {
             unsafe { dealloc(ptr, Layout::from_size_align(20, 8).unwrap()) };
+        }
+    })
+}
+
+// Pool for `Box<Opaque>` allocations (#281).  Every `Value::opaque(...)` boxes
+// an `Opaque` enum; for hot patterns like `Opaque::SmallTuple2` per-iteration
+// these allocations dominate.  Recycling the fixed-size slabs (the enum
+// reserves max-variant bytes regardless of which arm is alive) eliminates the
+// general allocator round-trip.  Allocator round-trips for non-hot variants
+// also benefit; the pool is per-thread and has bounded capacity so it can
+// never leak memory unboundedly.
+const POOL_OPAQUE_CAP: usize = 128;
+
+thread_local! {
+    static POOL_OPAQUE: Cell<(*mut u8, usize)> = const { Cell::new((std::ptr::null_mut(), 0)) };
+}
+
+#[inline(always)]
+fn opaque_layout() -> Layout {
+    Layout::new::<Opaque>()
+}
+
+#[inline(always)]
+unsafe fn pool_opaque_alloc() -> *mut u8 {
+    POOL_OPAQUE.with(|c| {
+        let (head, len) = c.get();
+        if len > 0 {
+            let next = unsafe { *(head as *const *mut u8) };
+            c.set((next, len - 1));
+            head
+        } else {
+            unsafe { alloc(opaque_layout()) }
+        }
+    })
+}
+
+#[inline(always)]
+unsafe fn pool_opaque_dealloc(ptr: *mut u8) {
+    POOL_OPAQUE.with(|c| {
+        let (head, len) = c.get();
+        if len < POOL_OPAQUE_CAP {
+            unsafe { *(ptr as *mut *mut u8) = head };
+            c.set((ptr, len + 1));
+        } else {
+            unsafe { dealloc(ptr, opaque_layout()) };
         }
     })
 }
@@ -847,8 +920,31 @@ impl Value {
         unsafe { Self::alloc_seq_hdr(TAG_LIST_BITS, v, obj_id) }
     }
 
-    pub fn tuple(v: Vec<Value>) -> Self {
-        unsafe { Self::alloc_seq_hdr(TAG_TUPLE_BITS, v, next_obj_id()) }
+    pub fn tuple(mut v: Vec<Value>) -> Self {
+        // Small-tuple fast path (#281): route 2- and 3-element tuples through
+        // `Opaque::SmallTuple2/3` so the backing `Vec<Value>` heap allocation
+        // is avoided.  These shapes dominate hot sites (`dict.items()`,
+        // `enumerate()`, `divmod()`, `str.partition()`, …).
+        match v.len() {
+            2 => {
+                let b = v.pop().unwrap();
+                let a = v.pop().unwrap();
+                Value::opaque(Opaque::SmallTuple2 {
+                    items: [a, b],
+                    obj_id: next_obj_id(),
+                })
+            }
+            3 => {
+                let c = v.pop().unwrap();
+                let b = v.pop().unwrap();
+                let a = v.pop().unwrap();
+                Value::opaque(Opaque::SmallTuple3 {
+                    items: [a, b, c],
+                    obj_id: next_obj_id(),
+                })
+            }
+            _ => unsafe { Self::alloc_seq_hdr(TAG_TUPLE_BITS, v, next_obj_id()) },
+        }
     }
 
     fn tuple_with_id(v: Vec<Value>, obj_id: u64) -> Self {
@@ -1013,8 +1109,14 @@ impl Value {
     }
 
     fn opaque(o: Opaque) -> Self {
-        let ptr = Box::into_raw(Box::new(o)) as u64;
-        Value(TAG_OPAQUE_BITS | (ptr & PAYLOAD_MASK))
+        // SAFETY: `pool_opaque_alloc` returns a block sized/aligned for `Opaque`
+        // (either a recycled one from this thread's free list or a fresh
+        // `alloc(Layout::new::<Opaque>())`).  Writing through the cast pointer
+        // initialises the slot; the matching `pool_opaque_dealloc` in `Drop` is
+        // only invoked after `drop_in_place`, so no double-drop.  See #281.
+        let ptr = unsafe { pool_opaque_alloc() as *mut Opaque };
+        unsafe { std::ptr::write(ptr, o) };
+        Value(TAG_OPAQUE_BITS | (ptr as u64 & PAYLOAD_MASK))
     }
 
     // ── Type checks ──────────────────────────────────────────────────────────
@@ -1047,7 +1149,18 @@ impl Value {
     }
 
     pub fn is_tuple(&self) -> bool {
-        top16(self.0) == TAG_TUPLE
+        if top16(self.0) == TAG_TUPLE {
+            return true;
+        }
+        // Small tuples (2/3 elements) live in `Opaque::SmallTuple2/3` to
+        // avoid the backing `Vec<Value>` heap allocation.  See #281.
+        if top16(self.0) == TAG_OPAQUE {
+            return matches!(
+                unsafe { &*self.opaque_ptr() },
+                Opaque::SmallTuple2 { .. } | Opaque::SmallTuple3 { .. }
+            );
+        }
+        false
     }
 
     pub fn is_list(&self) -> bool {
@@ -1065,6 +1178,13 @@ impl Value {
                 Some(unsafe { *(hdr.add(24) as *const u64) } as i64)
             }
             TAG_STR => Some((self.0 & PAYLOAD_MASK) as i64),
+            // Small-tuple variants stash a monotonic obj_id alongside their
+            // inline payload so `id()` stays stable across clones; see #281.
+            TAG_OPAQUE => match unsafe { &*self.opaque_ptr() } {
+                Opaque::SmallTuple2 { obj_id, .. } => Some(*obj_id as i64),
+                Opaque::SmallTuple3 { obj_id, .. } => Some(*obj_id as i64),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -1123,7 +1243,7 @@ impl Value {
         }
     }
 
-    pub fn as_list(&self) -> Option<&Vec<Value>> {
+    pub fn as_list(&self) -> Option<&[Value]> {
         if self.is_list() {
             Some(unsafe { &*self.list_ptr() })
         } else {
@@ -1139,12 +1259,21 @@ impl Value {
         }
     }
 
-    pub fn as_tuple(&self) -> Option<&Vec<Value>> {
-        if self.is_tuple() {
-            Some(unsafe { &*self.tuple_ptr() })
-        } else {
-            None
+    /// Borrow the tuple's elements as a slice.  Backs both the pool-allocated
+    /// path (`TAG_TUPLE`) and the inline small-tuple path
+    /// (`Opaque::SmallTuple2/3`); see #281.
+    pub fn as_tuple(&self) -> Option<&[Value]> {
+        if top16(self.0) == TAG_TUPLE {
+            return Some(unsafe { &*self.tuple_ptr() });
         }
+        if top16(self.0) == TAG_OPAQUE {
+            match unsafe { &*self.opaque_ptr() } {
+                Opaque::SmallTuple2 { items, .. } => return Some(&items[..]),
+                Opaque::SmallTuple3 { items, .. } => return Some(&items[..]),
+                _ => {}
+            }
+        }
+        None
     }
 
     pub fn as_opaque(&self) -> Option<&Opaque> {
@@ -1276,6 +1405,11 @@ impl Value {
                 Opaque::Generator(state) => ValueKind::Generator(state),
                 Opaque::Bytes(rc) => ValueKind::Bytes(rc),
                 Opaque::Complex(re, im) => ValueKind::Complex(*re, *im),
+                // Inline small tuples surface as `ValueKind::Tuple(&[Value])`
+                // so all existing match arms keep working without learning
+                // about the new variant.  See #281.
+                Opaque::SmallTuple2 { items, .. } => ValueKind::Tuple(&items[..]),
+                Opaque::SmallTuple3 { items, .. } => ValueKind::Tuple(&items[..]),
                 Opaque::BuiltinObject { ops, state } => {
                     ValueKind::BuiltinObject { ops: *ops, state }
                 }
@@ -1535,7 +1669,12 @@ impl Drop for Value {
                 pool_vec_hdr_dealloc(hdr);
             },
             TAG_OPAQUE => unsafe {
-                drop(Box::from_raw(self.opaque_ptr()));
+                // Matched allocator: `Value::opaque` allocates through
+                // `pool_opaque_alloc`; drop the contained value in place and
+                // hand the slab back to the same pool.  See #281.
+                let ptr = self.opaque_ptr();
+                std::ptr::drop_in_place(ptr);
+                pool_opaque_dealloc(ptr as *mut u8);
             },
             _ => unreachable!(),
         }

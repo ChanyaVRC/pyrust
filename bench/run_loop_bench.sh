@@ -27,6 +27,7 @@ CASES=(
     while
     nested
     enumerate
+    dict_items
 )
 
 ARGS=()

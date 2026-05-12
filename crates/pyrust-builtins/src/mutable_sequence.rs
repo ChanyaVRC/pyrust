@@ -4,8 +4,8 @@ use crate::sequence::normalise_index;
 
 fn iter_value(v: &Value) -> Result<Vec<Value>> {
     match v.kind() {
-        ValueKind::List(items) => Ok(items.clone()),
-        ValueKind::Tuple(items) => Ok(items.clone()),
+        ValueKind::List(items) => Ok(items.to_vec()),
+        ValueKind::Tuple(items) => Ok(items.to_vec()),
         ValueKind::Str(s) => Ok(s.chars().map(|c| Value::string(c.to_string())).collect()),
         ValueKind::Range { start, stop, step } => {
             let mut out = Vec::new();
