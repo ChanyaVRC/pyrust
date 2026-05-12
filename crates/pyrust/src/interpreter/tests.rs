@@ -3,6 +3,10 @@ mod tests {
     use super::*;
     use crate::lexer::Lexer;
     use crate::parser::Parser;
+    // `range_len` is no longer used in this module's non-test code (it
+    // moved to `builtin_modules::builtins::len`); pull it in for the
+    // legacy unit test below.
+    use crate::value::range_len;
 
     fn run_program(src: &str) -> Interpreter {
         let tokens = Lexer::new(src).unwrap().into_tokens();

@@ -1295,40 +1295,7 @@ pyrust_module! {
         reject_keyword_args_expanded(FN_NAME, args)?;
         match args.len() {
             0 => Ok(Value::string(String::new())),
-            1 => {
-                let val = args[0].value.clone();
-                // Try __str__ on PyInstance, fall back to __repr__, then default.
-                // Exception instances use the built-in to_py_str() formatting.
-                if let ValueKind::PyInstance(inst) = val.kind() {
-                    let inst_rc = Rc::clone(inst);
-                    let class = Rc::clone(&inst_rc.borrow().class);
-                    if is_exception_class(&class) {
-                        return Ok(Value::string(val.to_py_str()));
-                    }
-                    for dunder in &["__str__", "__repr__"] {
-                        if let Some(method_val) = lookup_class_attr(&class, dunder)
-                            && let ValueKind::UserFunction(f) = method_val.kind()
-                        {
-                            let func = Rc::clone(f);
-                            let result = _interp.call_user_function_expanded(
-                                func,
-                                &[],
-                                &[Value::py_instance(Rc::clone(&inst_rc))],
-                            )?;
-                            return match result.kind() {
-                                ValueKind::Str(_) => Ok(result),
-                                _ => Err(PyError::named(
-                                    "TypeError",
-                                    format!("{dunder} returned non-string"),
-                                )),
-                            };
-                        }
-                    }
-                    let class_name = class.borrow().name.clone();
-                    return Ok(Value::string(format!("<{class_name} object>")));
-                }
-                Ok(Value::string(val.to_py_str()))
-            }
+            1 => Ok(Value::string(render_instance_str(_interp, &args[0].value)?)),
             _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most one argument"))),
         }
     }
@@ -1444,43 +1411,8 @@ pyrust_module! {
     fn print(args) -> Result<Value> {
         let print_options = _interp.parse_print_options_expanded(args)?;
         let mut rendered = Vec::with_capacity(print_options.values.len());
-        for value in print_options.values {
-            let s = if let ValueKind::PyInstance(inst) = value.kind() {
-                let inst_rc = Rc::clone(inst);
-                let class = Rc::clone(&inst_rc.borrow().class);
-                if is_exception_class(&class) {
-                    value.to_py_str()
-                } else {
-                    let mut found = None;
-                    for dunder in &["__str__", "__repr__"] {
-                        if let Some(method_val) = lookup_class_attr(&class, dunder)
-                            && let ValueKind::UserFunction(f) = method_val.kind()
-                        {
-                            let func = Rc::clone(f);
-                            let result = _interp.call_user_function_expanded(
-                                func,
-                                &[],
-                                &[Value::py_instance(Rc::clone(&inst_rc))],
-                            )?;
-                            found = Some(match result.kind() {
-                                ValueKind::Str(s) => s.to_string(),
-                                _ => return Err(PyError::named(
-                                    "TypeError",
-                                    format!("{dunder} returned non-string"),
-                                )),
-                            });
-                            break;
-                        }
-                    }
-                    found.unwrap_or_else(|| {
-                        let class_name = class.borrow().name.clone();
-                        format!("<{class_name} object>")
-                    })
-                }
-            } else {
-                value.to_py_str()
-            };
-            rendered.push(s);
+        for value in &print_options.values {
+            rendered.push(render_instance_str(_interp, value)?);
         }
         print!("{}{}", rendered.join(&print_options.sep), print_options.end);
         Ok(Value::none())
@@ -1644,6 +1576,60 @@ pyrust_module! {
         Ok(pyrust_builtins::property::property(fget, fset, fdel))
     }
 
+    /// CPython: super(class, instance) — two-argument form only.
+    /// Zero-argument `super()` (implicit `__class__` cell) is not supported;
+    /// users must pass both arguments explicitly.
+    /// <https://docs.python.org/3/library/functions.html#super>
+    ///
+    /// The Rust fn is named `super_fn` because `super` is a strict Rust
+    /// keyword that is *also* rejected as a raw identifier — `r#super`
+    /// won't parse — so the `#[py_name = "super"]` override is the only
+    /// way to give this callable its Python-level name.
+    #[py_name = "super"]
+    fn super_fn(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 2 {
+            return Err(PyError::Runtime(format!(
+                "{FN_NAME}() requires exactly 2 arguments: super(CurrentClass, self)",
+            )));
+        }
+        let cls_val = args[0].value.clone();
+        let inst_val = args[1].value.clone();
+        let class = match cls_val.kind() {
+            ValueKind::PyClass(c) => Rc::clone(c),
+            _ => return Err(PyError::Runtime(format!(
+                "{FN_NAME}() first argument must be a class",
+            ))),
+        };
+        match inst_val.kind() {
+            ValueKind::PyInstance(i) => {
+                let instance = Rc::clone(i);
+                // Bug #199: validate instance is an instance of class.
+                if !class_is_subclass_of(&instance.borrow().class, &class) {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "super(type, obj): obj must be an instance or subtype of type".to_string(),
+                    ));
+                }
+                Ok(Value::super_proxy(class, instance))
+            }
+            ValueKind::PyClass(obj_class) => {
+                // Bug #197: classmethod case — second arg is a class.
+                let obj_class = Rc::clone(obj_class);
+                if !class_is_subclass_of(&obj_class, &class) {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "super(type, obj): obj must be an instance or subtype of type".to_string(),
+                    ));
+                }
+                Ok(Value::super_proxy_class(class, obj_class))
+            }
+            _ => Err(PyError::Runtime(format!(
+                "{FN_NAME}() second argument must be a class instance",
+            ))),
+        }
+    }
+
     /// CPython: callable(object) — true if the object is callable.
     /// <https://docs.python.org/3/library/functions.html#callable>
     fn callable(args) -> Result<Value> {
@@ -1746,4 +1732,44 @@ fn min_max_impl(
         if let Some(e) = result_err { return Err(e); }
         Ok(result)
     }
+}
+
+/// Render `value` to its Python-string form, honouring `__str__` / `__repr__`
+/// on user instances (in that priority order) and falling back to
+/// `<ClassName object>` for instances of classes that define neither.
+///
+/// Shared by `print` and `str(x)` — both want the same dunder-aware
+/// rendering, just wrapped differently (`print` collects into a `Vec<String>`,
+/// `str(x)` returns a `Value::string(...)`).  Exception instances bypass
+/// the dunder lookup and use the built-in `Value::to_py_str()` formatting,
+/// matching CPython's special-cased `BaseException.__str__`.
+fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result<String> {
+    let ValueKind::PyInstance(inst) = value.kind() else {
+        return Ok(value.to_py_str());
+    };
+    let inst_rc = Rc::clone(&inst);
+    let class = Rc::clone(&inst_rc.borrow().class);
+    if is_exception_class(&class) {
+        return Ok(value.to_py_str());
+    }
+    for dunder in &["__str__", "__repr__"] {
+        if let Some(method_val) = lookup_class_attr(&class, dunder)
+            && let ValueKind::UserFunction(f) = method_val.kind()
+        {
+            let func = Rc::clone(&f);
+            let result = interp.call_user_function_expanded(
+                func,
+                &[],
+                &[Value::py_instance(Rc::clone(&inst_rc))],
+            )?;
+            return match result.kind() {
+                ValueKind::Str(s) => Ok(s.to_string()),
+                _ => Err(PyError::named(
+                    "TypeError",
+                    format!("{dunder} returned non-string"),
+                )),
+            };
+        }
+    }
+    Ok(format!("<{} object>", class.borrow().name))
 }

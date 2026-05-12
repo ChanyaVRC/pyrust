@@ -124,8 +124,15 @@ struct ModuleInput {
 
 /// A single `fn` declaration inside `pyrust_module!`.
 struct ModuleFn {
+    /// Outer attributes that should remain on the generated fn (`#[doc = …]`
+    /// and friends).  `#[py_name = "..."]` is extracted out and stored in
+    /// `py_name_override` so it doesn't leak through to the emitted code.
     attrs: Vec<syn::Attribute>,
     short_name: Ident,
+    /// Optional override for the Python-level name, set via
+    /// `#[py_name = "..."]`.  Used when the desired Python name is a Rust
+    /// strict keyword that can't be a raw identifier (`super`, etc.).
+    py_name_override: Option<LitStr>,
     args_ident: Ident,
     body: Block,
 }
@@ -167,7 +174,41 @@ impl Parse for ModuleInput {
         // One or more `fn` declarations.
         let mut funcs: Vec<ModuleFn> = Vec::new();
         while !input.is_empty() {
-            let attrs = input.call(syn::Attribute::parse_outer)?;
+            let raw_attrs = input.call(syn::Attribute::parse_outer)?;
+            // Pull `#[py_name = "..."]` out of the attr list so it's not
+            // emitted on the generated Rust fn (which wouldn't recognise it).
+            let mut py_name_override: Option<LitStr> = None;
+            let mut attrs: Vec<syn::Attribute> = Vec::with_capacity(raw_attrs.len());
+            for attr in raw_attrs {
+                if attr.path().is_ident("py_name") {
+                    let nv = attr.meta.require_name_value().map_err(|_| {
+                        syn::Error::new_spanned(
+                            &attr,
+                            "`#[py_name = \"...\"]` must use the name-value form",
+                        )
+                    })?;
+                    if let Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(s),
+                        ..
+                    }) = &nv.value
+                    {
+                        if py_name_override.is_some() {
+                            return Err(syn::Error::new_spanned(
+                                &attr,
+                                "`#[py_name]` may appear at most once per fn",
+                            ));
+                        }
+                        py_name_override = Some(s.clone());
+                    } else {
+                        return Err(syn::Error::new_spanned(
+                            &nv.value,
+                            "`#[py_name = \"...\"]` value must be a string literal",
+                        ));
+                    }
+                } else {
+                    attrs.push(attr);
+                }
+            }
             let _fn_kw: Token![fn] = input.parse()?;
             // Function ident must be snake_case so the generated
             // SCREAMING_SNAKE constant name is unique without lossy
@@ -232,6 +273,7 @@ impl Parse for ModuleInput {
             funcs.push(ModuleFn {
                 attrs,
                 short_name,
+                py_name_override,
                 args_ident,
                 body,
             });
@@ -261,32 +303,37 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
 
     for f in &funcs {
         let short = &f.short_name;
-        // Strip the `r#` prefix from raw idents (e.g. `r#type` → `type`) so
-        // the generated Rust dispatch ident and the Python-level
-        // registration name are both keyword-free.
-        let short_str = short
+        // The Rust ident is always derived from the fn name (with `r#` stripped
+        // off raw idents).  The Python-level name is the same *unless* the
+        // user supplied `#[py_name = "..."]` — used for Python names that are
+        // strict Rust keywords with no raw form (`super`).
+        let rust_short = short
             .to_string()
             .strip_prefix("r#")
             .map_or_else(|| short.to_string(), str::to_owned);
-        // Rust ident for the dispatch fn — prefix with the parent
-        // module's basename (taken from the build artifact's symbol
-        // mangling).  We can't read `MODULE_NAME` at proc-macro time, but
-        // since each module's contents land in a distinct Rust `mod`, the
-        // short name alone is sufficient for uniqueness *within* a
-        // module.  Still prefix with `__pyfn_` to keep the generated
-        // idents from clashing with user-defined helper functions.
-        let rust_fn_ident = format_ident!("__pyfn_{}", short_str, span = short.span());
+        let py_short = match &f.py_name_override {
+            Some(lit) => lit.value(),
+            None => rust_short.clone(),
+        };
+        // Rust ident for the dispatch fn — `__pyfn_<rust_short>` keeps the
+        // generated ident from clashing with user-defined helpers in scope.
+        let rust_fn_ident = format_ident!("__pyfn_{}", rust_short, span = short.span());
         let attrs = &f.attrs;
         let body_stmts = &f.body.stmts;
         let args_ident = &f.args_ident;
-        let short_lit = LitStr::new(&short_str, short.span());
+        let short_lit = LitStr::new(&py_short, short.span());
 
+        // Emit unqualified `Result<Value>` and `ExpandedCallArg` so the
+        // body's `use crate::{error::Result, value::Value, interpreter::ExpandedCallArg};`
+        // imports are actually consumed by the expansion (otherwise rustc
+        // reports them unused — the macro consumes the surface-level mentions
+        // in `fn foo(args) -> Result<Value>` before name resolution sees them).
         fn_items.push(quote! {
             #(#attrs)*
             fn #rust_fn_ident(
                 _interp: &mut crate::Interpreter,
-                #args_ident: &[crate::interpreter::ExpandedCallArg],
-            ) -> crate::error::Result<crate::value::Value> {
+                #args_ident: &[ExpandedCallArg],
+            ) -> Result<Value> {
                 // Compose the Python-level full name once per fn (lazy)
                 // so callers (helpers, error messages) can refer to it as
                 // `FN_NAME` instead of repeating the module prefix.
@@ -318,7 +365,7 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
 
         attr_entries.push(quote! {
             attrs.insert(
-                #short_str.to_string(),
+                #short_lit.to_string(),
                 crate::value::Value::builtin_function(
                     ::std::boxed::Box::leak(
                         format!("{}{}", FN_PREFIX, #short_lit).into_boxed_str()

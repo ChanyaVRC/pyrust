@@ -12,7 +12,7 @@ use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::value::{
     EnvRef, Environment, PyBigInt, PyClass, PyInstance, PyKey, PyModule, UserFunction,
-    UserFunctionKind, UserFunctionParam, Value, ValueKind, range_len,
+    UserFunctionKind, UserFunctionParam, Value, ValueKind,
 };
 
 type ModuleCache = Rc<RefCell<HashMap<String, Value>>>;

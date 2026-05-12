@@ -204,52 +204,12 @@ impl Interpreter {
                 ))
             }
 
-            // `property` (named-arm form) migrated to
-            // `crate::builtin_modules::builtins`.
-            // `super` stays in this file because `super` is a strict Rust
-            // keyword and not even a raw identifier (`r#super` is rejected),
-            // so it can't be the name of a Rust fn inside `pyrust_module!`.
-            ValueKind::BuiltinFunction("super") => {
-                reject_keyword_args_expanded("super", args)?;
-                if args.len() != 2 {
-                    return Err(PyError::Runtime(
-                        "super() requires exactly 2 arguments: super(CurrentClass, self)".to_string(),
-                    ));
-                }
-                let cls_val = args[0].value.clone();
-                let inst_val = args[1].value.clone();
-                let class = match cls_val.kind() {
-                    ValueKind::PyClass(c) => Rc::clone(c),
-                    _ => return Err(PyError::Runtime(
-                        "super() first argument must be a class".to_string(),
-                    )),
-                };
-                match inst_val.kind() {
-                    ValueKind::PyInstance(i) => {
-                        let instance = Rc::clone(i);
-                        if !class_is_subclass_of(&instance.borrow().class, &class) {
-                            return Err(PyError::named(
-                                "TypeError",
-                                "super(type, obj): obj must be an instance or subtype of type".to_string(),
-                            ));
-                        }
-                        Ok(Value::super_proxy(class, instance))
-                    }
-                    ValueKind::PyClass(obj_class) => {
-                        let obj_class = Rc::clone(obj_class);
-                        if !class_is_subclass_of(&obj_class, &class) {
-                            return Err(PyError::named(
-                                "TypeError",
-                                "super(type, obj): obj must be an instance or subtype of type".to_string(),
-                            ));
-                        }
-                        Ok(Value::super_proxy_class(class, obj_class))
-                    }
-                    _ => Err(PyError::Runtime(
-                        "super() second argument must be a class instance".to_string(),
-                    )),
-                }
-            }
+            // `property` (named-arm form) and `super` migrated to
+            // `crate::builtin_modules::builtins`.  `super` reaches the
+            // registry through `#[py_name = "super"]` on its Rust fn
+            // (named `super_fn`) — `super` is a strict Rust keyword that
+            // rejects even the raw-ident form, so the explicit override is
+            // the only way to give it its Python-level name.
 
             ValueKind::PyInstance(inst) => {
                 let inst_rc = Rc::clone(inst);
