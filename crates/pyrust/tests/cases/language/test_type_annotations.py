@@ -40,9 +40,6 @@ assert c.x == 5
 assert result == 6
 
 # Annotation with simple type names
-# Note: multi-arg generic syntax like tuple[int, str] / dict[str, int] is
-# blocked by the subscript-with-comma parser limitation tracked in #268
-# — this is independent of variable annotations.
 flag: bool = True
 items: dict = {"a": 1, "b": 2}
 assert flag is True
@@ -51,6 +48,12 @@ assert items["a"] == 1
 # Single-arg generic types parse fine
 pair: list[int] = [1, 2]
 assert pair == [1, 2]
+
+# Multi-arg generic syntax (fixed by #268).
+pair2: tuple[int, str] = (1, "a")
+assert pair2 == (1, "a")
+mapping: dict[str, int] = {"a": 1}
+assert mapping["a"] == 1
 
 # Class body: bare annotation must NOT create a class attribute
 class WithBare:
