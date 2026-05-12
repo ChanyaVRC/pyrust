@@ -110,13 +110,10 @@ pub enum Insn {
     },
     /// Like CallMethod but args are pre-built as a positional list and a kwargs dict.
     /// R[dst] = R[obj].names[name_idx](*R[pos_list], **R[kw_dict])
-    CallMethodExpanded {
-        dst: Reg,
-        obj: Reg,
-        name_idx: u16,
-        pos_list: Reg,
-        kw_dict: Reg,
-    },
+    ///
+    /// Boxed so that this rare variant doesn't bloat the Insn enum size; the
+    /// common in-loop instructions then fit in 4 fewer bytes per slot.
+    CallMethodExpanded(Box<CallMethodExpandedArgs>),
     /// return R[src]
     Return(Reg),
     /// return None
@@ -195,6 +192,17 @@ pub enum Insn {
     /// and the callee is the same function as the one being executed.  Falls back to a normal
     /// call+return if the callee turns out to be a different function at runtime.
     TailCall { args_base: Reg, nargs: u8 },
+}
+
+/// Payload for `Insn::CallMethodExpanded`. Held behind a `Box` so the rare
+/// variant doesn't widen every other `Insn` slot by 4 bytes.
+#[derive(Debug, Clone)]
+pub struct CallMethodExpandedArgs {
+    pub dst: Reg,
+    pub obj: Reg,
+    pub name_idx: u16,
+    pub pos_list: Reg,
+    pub kw_dict: Reg,
 }
 
 #[derive(Debug, Clone)]

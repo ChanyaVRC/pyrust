@@ -877,9 +877,9 @@ impl Interpreter {
                     regs[*dst as usize] = Some(vm_try!(r));
                 }
 
-                Insn::CallMethodExpanded { dst, obj, name_idx, pos_list, kw_dict } => {
-                    let r = self.exec_call_method_expanded(regs, num_locals, *dst, *obj, *name_idx, *pos_list, *kw_dict, code);
-                    regs[*dst as usize] = Some(vm_try!(r));
+                Insn::CallMethodExpanded(args) => {
+                    let r = self.exec_call_method_expanded(regs, num_locals, args.dst, args.obj, args.name_idx, args.pos_list, args.kw_dict, code);
+                    regs[args.dst as usize] = Some(vm_try!(r));
                 }
 
                 // ── Returns ──────────────────────────────────────────────

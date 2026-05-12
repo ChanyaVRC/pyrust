@@ -442,7 +442,8 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | ImportModule(r, _)
         | LoadExc(r)
         | MakeClass(r, _, _, _, _) => Some(*r),
-        CallMethod { dst, .. } | CallMethodExpanded { dst, .. } => Some(*dst),
+        CallMethod { dst, .. } => Some(*dst),
+        CallMethodExpanded(args) => Some(args.dst),
         // Loop instructions write to their first register on each iteration.
         // Without these arms, pass_const_fold would fail to invalidate the
         // known-constant map entry for the destination, producing stale folds
@@ -780,12 +781,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
             nargs,
             ..
         } => *obj == r || (r >= *args_base && r < *args_base + *nargs as u32),
-        CallMethodExpanded {
-            obj,
-            pos_list,
-            kw_dict,
-            ..
-        } => *obj == r || *pos_list == r || *kw_dict == r,
+        CallMethodExpanded(args) => args.obj == r || args.pos_list == r || args.kw_dict == r,
 
         MakeFunction(_, _, defs_base, defs_n) => r >= *defs_base && r < *defs_base + *defs_n as u32,
         MakeClass(_, _, bases_base, bases_n, _) => {
@@ -1133,8 +1129,11 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | DeleteLocal(r) => {
             written.insert(*r);
         }
-        CallMethod { dst, .. } | CallMethodExpanded { dst, .. } | Yield { dst, .. } => {
+        CallMethod { dst, .. } | Yield { dst, .. } => {
             written.insert(*dst);
+        }
+        CallMethodExpanded(args) => {
+            written.insert(args.dst);
         }
         ForIter(dst, _, _) => {
             written.insert(*dst);

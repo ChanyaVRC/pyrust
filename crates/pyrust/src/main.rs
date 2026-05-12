@@ -161,6 +161,14 @@ fn run_repl() -> Result<()> {
 mod tests {
     use super::*;
 
+    /// Locks the `Insn` enum size at 16 bytes. The boxing of
+    /// `CallMethodExpanded` is what brought it down from 20 — this test
+    /// guards against accidentally adding a new wider variant.
+    #[test]
+    fn insn_size_is_16() {
+        assert_eq!(std::mem::size_of::<crate::bytecode::Insn>(), 16);
+    }
+
     // ── last_line_is_indented ────────────────────────────────────────────────
 
     #[test]
