@@ -1206,6 +1206,10 @@ impl Interpreter {
                                     IterState::Materialized(vm_try!(iter_values(src_val)), 0)
                                 }
                             }
+                            ValueKind::File(_) => {
+                                // File objects are iterators — yields each line.
+                                IterState::UserDefined(src_val)
+                            }
                             _ => {
                                 IterState::Materialized(vm_try!(iter_values(src_val)), 0)
                             }
@@ -1335,6 +1339,8 @@ impl Interpreter {
                                             ))
                                         } else { None }
                                     } else { None }
+                                } else if matches!(iter_val.kind(), ValueKind::File(_)) {
+                                    Some(call_file_method(&iter_val, "__next__", &[]))
                                 } else { None };
                             match next_result {
                                 Some(Ok(val)) => {

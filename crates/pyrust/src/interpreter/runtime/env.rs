@@ -515,6 +515,19 @@ fn builtin_has_method(target: &Value, name: &str) -> bool {
                 | "issuperset"
                 | "isdisjoint"
         ),
+        ValueKind::File(_) => matches!(
+            name,
+            "read"
+                | "readline"
+                | "readlines"
+                | "write"
+                | "writelines"
+                | "close"
+                | "__enter__"
+                | "__exit__"
+                | "__iter__"
+                | "__next__"
+        ),
         _ => false,
     }
 }

@@ -457,6 +457,7 @@ impl Interpreter {
                     )),
                 }
             }
+            ValueKind::BuiltinFunction("open") => builtin_open(args),
             ValueKind::BuiltinFunction("set") => {
                 reject_keyword_args_expanded("set", args)?;
                 match args.len() {
@@ -888,6 +889,7 @@ impl Interpreter {
                     ValueKind::FrozenSet(_) => Ok(Value::builtin_function("frozenset")),
                     ValueKind::Bytes(_) => Ok(Value::builtin_function("bytes")),
                     ValueKind::Complex(_, _) => Ok(Value::builtin_function("complex")),
+                    ValueKind::File(_) => Ok(Value::builtin_function("_io.TextIOWrapper")),
                 }
             }
             ValueKind::BuiltinFunction("id") => {
@@ -1104,6 +1106,7 @@ impl Interpreter {
                     ValueKind::Complex(re, im) if method == "conjugate" => {
                         Ok(Value::complex(re, -im))
                     }
+                    ValueKind::File(_) => call_file_method(&receiver, &method, &pos),
                     _ => Err(PyError::Named(
                         "TypeError".to_string(),
                         format!("'{}' object has no method '{method}'", pyrust_core::builtin_type_name(&receiver)),
@@ -3570,6 +3573,323 @@ fn apply_field_accessors(mut value: Value, mut rest: &str) -> Result<Value> {
         }
     }
     Ok(value)
+}
+
+// ─── File I/O ────────────────────────────────────────────────────────────────
+
+/// Backing state for a Python file object produced by `open()`.
+/// Stored in `Opaque::File` via a `Box<dyn Any>` so `pyrust-core` doesn't
+/// need to depend on `std::fs`.
+#[allow(dead_code)] // `mode` is kept for diagnostics / future repr() support
+pub(crate) struct FileState {
+    pub(crate) path: String,
+    pub(crate) mode: String,
+    pub(crate) closed: bool,
+    /// For read modes: the full file contents; we read eagerly at open time.
+    pub(crate) content: String,
+    /// Read cursor into `content` (in bytes).
+    pub(crate) pos: usize,
+    /// For write modes: buffered bytes to flush on `close()`.
+    pub(crate) write_buf: String,
+    pub(crate) is_write: bool,
+    pub(crate) is_append: bool,
+}
+
+impl FileState {
+    fn is_readable(&self) -> bool {
+        !self.is_write && !self.is_append
+    }
+}
+
+/// Implements `open(path, mode='r')`.
+fn builtin_open(args: &[ExpandedCallArg]) -> Result<Value> {
+    let path = match args.first().map(|a| a.value.kind()) {
+        Some(ValueKind::Str(s)) => s.to_string(),
+        _ => {
+            return Err(PyError::Named(
+                "TypeError".to_string(),
+                "open(): path must be a string".to_string(),
+            ));
+        }
+    };
+    // mode argument may be positional or kwarg; default "r"
+    let mode = {
+        let kw = args.iter().find(|a| a.name.as_deref() == Some("mode"));
+        let positional = args.iter().filter(|a| a.name.is_none()).nth(1);
+        let val = kw.or(positional).map(|a| &a.value);
+        match val.map(|v| v.kind()) {
+            None => "r".to_string(),
+            Some(ValueKind::Str(s)) => s.to_string(),
+            Some(_) => {
+                return Err(PyError::Named(
+                    "TypeError".to_string(),
+                    "open(): mode must be a string".to_string(),
+                ));
+            }
+        }
+    };
+    // Reject unknown chars to avoid silent surprises.
+    for c in mode.chars() {
+        if !matches!(c, 'r' | 'w' | 'a' | 'b' | 't' | '+') {
+            return Err(PyError::Named(
+                "ValueError".to_string(),
+                format!("invalid mode: '{mode}'"),
+            ));
+        }
+    }
+    let is_write = mode.contains('w');
+    let is_append = mode.contains('a');
+    let is_read = mode.contains('r') || (!is_write && !is_append);
+
+    let mut content = String::new();
+    if is_read || is_append {
+        // For 'r' we need the content; for 'a' Python keeps the existing
+        // bytes on disk but the buffer collects only the new appends.
+        if is_read {
+            content = std::fs::read_to_string(&path).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    PyError::Named(
+                        "FileNotFoundError".to_string(),
+                        format!("[Errno 2] No such file or directory: '{path}'"),
+                    )
+                } else {
+                    PyError::Named("OSError".to_string(), e.to_string())
+                }
+            })?;
+        }
+    }
+    // For 'w' we truncate at close-time; for 'a' we append at close-time.
+    let state = FileState {
+        path,
+        mode,
+        closed: false,
+        content,
+        pos: 0,
+        write_buf: String::new(),
+        is_write,
+        is_append,
+    };
+    Ok(Value::file(Box::new(state)))
+}
+
+/// Dispatch `method` on a file value.  Always checks `closed` for the
+/// methods that operate on the underlying state.
+fn call_file_method(value: &Value, method: &str, args: &[Value]) -> Result<Value> {
+    let rc = match value.kind() {
+        ValueKind::File(rc) => Rc::clone(rc),
+        _ => unreachable!(),
+    };
+    match method {
+        "__enter__" => Ok(value.clone()),
+        "__exit__" => {
+            // ignore exc info — just close
+            close_file(&rc)?;
+            Ok(Value::none())
+        }
+        "__iter__" => Ok(value.clone()),
+        "__next__" => {
+            let line = read_line_or_none(&rc)?;
+            match line {
+                Some(s) => Ok(Value::string(s)),
+                None => Err(PyError::Named("StopIteration".to_string(), String::new())),
+            }
+        }
+        "close" => {
+            close_file(&rc)?;
+            Ok(Value::none())
+        }
+        "read" => {
+            let n = args.first().and_then(|v| match v.kind() {
+                ValueKind::Int(n) => Some(n),
+                _ => None,
+            });
+            let mut borrow = rc.borrow_mut();
+            let s = borrow
+                .downcast_mut::<FileState>()
+                .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
+            if s.closed {
+                return Err(PyError::Named(
+                    "ValueError".to_string(),
+                    "I/O operation on closed file".to_string(),
+                ));
+            }
+            if !s.is_readable() {
+                return Err(PyError::Named(
+                    "io.UnsupportedOperation".to_string(),
+                    "not readable".to_string(),
+                ));
+            }
+            let bytes = s.content.as_bytes();
+            let remaining = &bytes[s.pos..];
+            let to_take = match n {
+                Some(n) if n >= 0 => remaining.len().min(n as usize),
+                _ => remaining.len(),
+            };
+            // Walk by char boundaries so we don't split UTF-8 chars; for our use
+            // cases this is rare, but matters for correctness.
+            let mut take = 0usize;
+            let mut chars = 0usize;
+            let want_chars = match n {
+                Some(n) if n >= 0 => n as usize,
+                _ => usize::MAX,
+            };
+            for (i, _) in s.content[s.pos..].char_indices() {
+                if chars >= want_chars {
+                    take = i;
+                    break;
+                }
+                chars += 1;
+                take = i + s.content[s.pos + i..].chars().next().unwrap().len_utf8();
+                if chars >= want_chars {
+                    break;
+                }
+            }
+            let take = if n.is_some_and(|n| n >= 0) {
+                take
+            } else {
+                to_take
+            };
+            let out = s.content[s.pos..s.pos + take].to_string();
+            s.pos += take;
+            Ok(Value::string(out))
+        }
+        "readline" => {
+            let line = read_line_or_none(&rc)?;
+            Ok(Value::string(line.unwrap_or_default()))
+        }
+        "readlines" => {
+            let mut out = Vec::new();
+            while let Some(line) = read_line_or_none(&rc)? {
+                out.push(Value::string(line));
+            }
+            Ok(Value::list(out))
+        }
+        "write" => {
+            let s = args.first().and_then(|v| v.as_str().map(|s| s.to_string())).ok_or_else(|| {
+                PyError::Named(
+                    "TypeError".to_string(),
+                    "write() argument must be str".to_string(),
+                )
+            })?;
+            let len = s.len();
+            let mut borrow = rc.borrow_mut();
+            let st = borrow
+                .downcast_mut::<FileState>()
+                .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
+            if st.closed {
+                return Err(PyError::Named(
+                    "ValueError".to_string(),
+                    "I/O operation on closed file".to_string(),
+                ));
+            }
+            if !st.is_write && !st.is_append {
+                return Err(PyError::Named(
+                    "io.UnsupportedOperation".to_string(),
+                    "not writable".to_string(),
+                ));
+            }
+            st.write_buf.push_str(&s);
+            Ok(Value::int(len as i64))
+        }
+        "writelines" => {
+            // Accept an iterable of strings.
+            let lines = match args.first().map(|v| v.kind()) {
+                Some(ValueKind::List(items)) | Some(ValueKind::Tuple(items)) => items.clone(),
+                _ => {
+                    return Err(PyError::Named(
+                        "TypeError".to_string(),
+                        "writelines() argument must be a list or tuple of str".to_string(),
+                    ));
+                }
+            };
+            let mut borrow = rc.borrow_mut();
+            let st = borrow
+                .downcast_mut::<FileState>()
+                .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
+            if st.closed {
+                return Err(PyError::Named(
+                    "ValueError".to_string(),
+                    "I/O operation on closed file".to_string(),
+                ));
+            }
+            for v in lines {
+                match v.kind() {
+                    ValueKind::Str(s) => st.write_buf.push_str(s),
+                    _ => {
+                        return Err(PyError::Named(
+                            "TypeError".to_string(),
+                            "writelines() requires str items".to_string(),
+                        ));
+                    }
+                }
+            }
+            Ok(Value::none())
+        }
+        _ => Err(PyError::Named(
+            "AttributeError".to_string(),
+            format!("'_io.TextIOWrapper' object has no attribute '{method}'"),
+        )),
+    }
+}
+
+fn read_line_or_none(rc: &Rc<RefCell<Box<dyn std::any::Any>>>) -> Result<Option<String>> {
+    let mut borrow = rc.borrow_mut();
+    let s = borrow
+        .downcast_mut::<FileState>()
+        .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
+    if s.closed {
+        return Err(PyError::Named(
+            "ValueError".to_string(),
+            "I/O operation on closed file".to_string(),
+        ));
+    }
+    if !s.is_readable() {
+        return Err(PyError::Named(
+            "io.UnsupportedOperation".to_string(),
+            "not readable".to_string(),
+        ));
+    }
+    let bytes = s.content.as_bytes();
+    if s.pos >= bytes.len() {
+        return Ok(None);
+    }
+    // Find next '\n'
+    let mut end = s.pos;
+    while end < bytes.len() && bytes[end] != b'\n' {
+        end += 1;
+    }
+    if end < bytes.len() {
+        end += 1; // include '\n'
+    }
+    let line = s.content[s.pos..end].to_string();
+    s.pos = end;
+    Ok(Some(line))
+}
+
+fn close_file(rc: &Rc<RefCell<Box<dyn std::any::Any>>>) -> Result<()> {
+    let mut borrow = rc.borrow_mut();
+    let s = borrow
+        .downcast_mut::<FileState>()
+        .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
+    if s.closed {
+        return Ok(());
+    }
+    if s.is_write {
+        std::fs::write(&s.path, &s.write_buf)
+            .map_err(|e| PyError::Named("OSError".to_string(), e.to_string()))?;
+    } else if s.is_append {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&s.path)
+            .map_err(|e| PyError::Named("OSError".to_string(), e.to_string()))?;
+        f.write_all(s.write_buf.as_bytes())
+            .map_err(|e| PyError::Named("OSError".to_string(), e.to_string()))?;
+    }
+    s.closed = true;
+    s.write_buf.clear();
+    Ok(())
 }
 
 /// Returns the ASCII-escaped repr of a value (like the built-in `ascii()`).

@@ -298,6 +298,10 @@ fn install_exception_builtins(env: &EnvRef) {
     let overflow_error = make_child("OverflowError");
     let zero_division_error = make_child("ZeroDivisionError");
     let system_exit = make_child("SystemExit");
+    let os_error = make_child("OSError");
+    // FileNotFoundError inherits from OSError in CPython; we just register it
+    // as a sibling for now.
+    let file_not_found_error = make_child("FileNotFoundError");
 
     let mut module = env.borrow_mut();
     module
@@ -345,6 +349,12 @@ fn install_exception_builtins(env: &EnvRef) {
     module
         .values
         .insert("SystemExit".to_string(), Value::py_class(system_exit));
+    module
+        .values
+        .insert("OSError".to_string(), Value::py_class(os_error));
+    module
+        .values
+        .insert("FileNotFoundError".to_string(), Value::py_class(file_not_found_error));
 }
 
 /// Register built-in singleton values (currently just `NotImplemented`).

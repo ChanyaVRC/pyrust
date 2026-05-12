@@ -64,6 +64,7 @@ fn type_name_of(v: &Value) -> &'static str {
         ValueKind::FrozenSet(_) => "frozenset",
         ValueKind::Bytes(_) => "bytes",
         ValueKind::Complex(_, _) => "complex",
+        ValueKind::File(_) => "_io.TextIOWrapper",
     }
 }
 

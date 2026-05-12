@@ -307,6 +307,10 @@ pub enum Opaque {
     Bytes(Rc<Vec<u8>>),
     /// A Python `complex` number stored as (real, imag).
     Complex(f64, f64),
+    /// A file object produced by `open()`. The concrete state is held by
+    /// `pyrust` (the interpreter crate) as a type-erased `Box<dyn Any>` so
+    /// `pyrust-core` doesn't need to depend on `std::fs`.
+    File(Rc<RefCell<Box<dyn std::any::Any>>>),
 }
 
 impl Clone for Opaque {
@@ -381,6 +385,7 @@ impl Clone for Opaque {
             Opaque::FrozenSet(rc) => Opaque::FrozenSet(Rc::clone(rc)),
             Opaque::Bytes(rc) => Opaque::Bytes(Rc::clone(rc)),
             Opaque::Complex(re, im) => Opaque::Complex(*re, *im),
+            Opaque::File(rc) => Opaque::File(Rc::clone(rc)),
         }
     }
 }
@@ -461,6 +466,7 @@ pub enum ValueKind<'a> {
     FrozenSet(&'a Rc<IndexSet<PyKey>>),
     Bytes(&'a Rc<Vec<u8>>),
     Complex(f64, f64),
+    File(&'a Rc<RefCell<Box<dyn std::any::Any>>>),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -769,6 +775,10 @@ impl Value {
 
     pub fn complex(re: f64, im: f64) -> Self {
         Value::opaque(Opaque::Complex(re, im))
+    }
+
+    pub fn file(state: Box<dyn std::any::Any>) -> Self {
+        Value::opaque(Opaque::File(Rc::new(RefCell::new(state))))
     }
 
     pub fn range(start: i64, stop: i64, step: i64) -> Self {
@@ -1168,6 +1178,7 @@ impl Value {
                 Opaque::FrozenSet(rc) => ValueKind::FrozenSet(rc),
                 Opaque::Bytes(rc) => ValueKind::Bytes(rc),
                 Opaque::Complex(re, im) => ValueKind::Complex(*re, *im),
+                Opaque::File(rc) => ValueKind::File(rc),
             },
             _ => unreachable!(),
         }
@@ -1213,6 +1224,7 @@ impl Value {
             ValueKind::FrozenSet(s) => !s.is_empty(),
             ValueKind::Bytes(b) => !b.is_empty(),
             ValueKind::Complex(re, im) => re != 0.0 || im != 0.0,
+            ValueKind::File(_) => true,
         }
     }
 
@@ -1357,6 +1369,7 @@ impl Value {
             }
             ValueKind::Bytes(rc) => bytes_repr(rc),
             ValueKind::Complex(re, im) => complex_repr(re, im),
+            ValueKind::File(_) => "<file object>".to_string(),
         }
     }
 
@@ -1576,6 +1589,7 @@ pub fn builtin_type_name(value: &Value) -> &'static str {
         ValueKind::FrozenSet(_) => "frozenset",
         ValueKind::Bytes(_) => "bytes",
         ValueKind::Complex(_, _) => "complex",
+        ValueKind::File(_) => "_io.TextIOWrapper",
         ValueKind::Int(_) | ValueKind::BigInt(_) => "int",
         ValueKind::Float(_) => "float",
         ValueKind::Bool(_) => "bool",
