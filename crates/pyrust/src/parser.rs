@@ -1551,13 +1551,26 @@ impl Parser {
                 step,
             })
         } else {
-            // Plain index
+            // Plain index. If a comma follows, collect into a tuple key
+            // (e.g. `a[b, c]` parses the same as `a[(b, c)]`).
+            let first = first.ok_or_else(|| PyError::Parse("empty subscript".to_string()))?;
+            let index = if self.is(&Token::Comma) {
+                let mut items = vec![first];
+                while self.is(&Token::Comma) {
+                    self.bump();
+                    if self.is(&Token::RBracket) {
+                        break;
+                    }
+                    items.push(self.parse_expr()?);
+                }
+                Expr::Tuple(items)
+            } else {
+                first
+            };
             self.expect(&Token::RBracket)?;
             Ok(Expr::Index {
                 target: Box::new(target),
-                index: Box::new(
-                    first.ok_or_else(|| PyError::Parse("empty subscript".to_string()))?,
-                ),
+                index: Box::new(index),
             })
         }
     }
