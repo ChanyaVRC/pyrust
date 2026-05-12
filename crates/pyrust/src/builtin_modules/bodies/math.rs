@@ -1,6 +1,6 @@
 // `math` module — included into `pub mod math { … }` declared by the
 // `pyrust_builtin_modules!` invocation in
-// `builtin_registry_modules/mod.rs`.  The macro injects a sibling
+// `builtin_modules/mod.rs`.  The macro injects a sibling
 // `MODULE_NAME: &str = "math"` constant; the `pyrust_module!` body
 // below reads it to compose every function's `FN_NAME` and the
 // `PyModule.name`.  No name literal appears in this file.

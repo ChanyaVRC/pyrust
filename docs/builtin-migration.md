@@ -23,7 +23,7 @@ The legacy dispatch had three growing pains:
    in both as a string literal that had to match exactly.
 
 The new pattern moves each module's declarations into a single file
-under `crates/pyrust/src/builtin_registry_modules/`, where one
+under `crates/pyrust/src/builtin_modules/`, where one
 `pyrust_module! { … }` invocation generates:
 
 - the unified-signature `fn` for each callable,
@@ -33,7 +33,7 @@ under `crates/pyrust/src/builtin_registry_modules/`, where one
 
 ## Anatomy of a module body
 
-Real example — `crates/pyrust/src/builtin_registry_modules/bodies/math.rs`:
+Real example — `crates/pyrust/src/builtin_modules/bodies/math.rs`:
 
 ```rust
 use crate::error::{PyError, Result};
@@ -93,11 +93,11 @@ are the declared constants plus each function bound to
 1. **Pick a module name** matching the CPython library name
    (`os`, `os.path`, `functools`, `itertools`, …).
 2. **Create
-   `crates/pyrust/src/builtin_registry_modules/bodies/<ident>.rs`**.
+   `crates/pyrust/src/builtin_modules/bodies/<ident>.rs`**.
    Use `bodies/math.rs` or `bodies/sys.rs` as a template — note the
    file has no `mod` declaration and no `name = "..."` literal.
 3. **Add the module to the list in
-   [`builtin_registry_modules/mod.rs`](../crates/pyrust/src/builtin_registry_modules/mod.rs)**:
+   [`builtin_modules/mod.rs`](../crates/pyrust/src/builtin_modules/mod.rs)**:
 
    ```rust
    pyrust_builtin_modules! {
@@ -143,7 +143,7 @@ There is **no flag day** — incremental migration is safe.
 Most arm bodies in `calls.rs` use helpers like
 `reject_keyword_args_expanded`, `value_to_float`, `float_to_bigint`,
 `instantiate_exception`, `lookup_name_in_module`.  These are exposed
-as `pub(crate)` so they're callable from `builtin_registry_modules`.
+as `pub(crate)` so they're callable from `builtin_modules`.
 If you need a helper that's still private, promote it to `pub(crate)`
 or inline it into your migrated function.
 
@@ -167,7 +167,7 @@ fn module_fn(_interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Valu
 
 The expanded output is one `BuiltinReg` constant — you still need to
 list it in some `REGS` slice (in a sibling module or
-`builtin_registry_modules/mod.rs`).  Prefer `pyrust_module!` when
+`builtin_modules/mod.rs`).  Prefer `pyrust_module!` when
 moving a whole module group.
 
 ## Reference
@@ -179,7 +179,7 @@ moving a whole module group.
   — the per-function attribute fallback.
 - [`builtin_registry`](../crates/pyrust/src/builtin_registry.rs) —
   `BuiltinReg`, `BuiltinDispatchFn`, `lookup`.
-- [`builtin_registry_modules/math.rs`](../crates/pyrust/src/builtin_registry_modules/math.rs)
+- [`builtin_modules/math.rs`](../crates/pyrust/src/builtin_modules/math.rs)
   and
-  [`sys.rs`](../crates/pyrust/src/builtin_registry_modules/sys.rs) —
+  [`sys.rs`](../crates/pyrust/src/builtin_modules/sys.rs) —
   phase-1 migrated modules; use as templates.

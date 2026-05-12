@@ -1,6 +1,6 @@
 // `sys` module — included into `pub mod sys { … }` declared by the
 // `pyrust_builtin_modules!` invocation in
-// `builtin_registry_modules/mod.rs`.  `MODULE_NAME` is injected from
+// `builtin_modules/mod.rs`.  `MODULE_NAME` is injected from
 // the outer scope; no name literal appears in this file.
 //
 // Reference: <https://docs.python.org/3/library/sys.html>

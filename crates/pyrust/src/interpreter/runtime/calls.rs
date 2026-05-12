@@ -686,8 +686,8 @@ impl Interpreter {
                 }
             }
 
-            // `sys.exit` migrated to `crate::builtin_registry_modules::sys`.
-            // `math.*` arms migrated to `crate::builtin_registry_modules::math`
+            // `sys.exit` migrated to `crate::builtin_modules::sys`.
+            // `math.*` arms migrated to `crate::builtin_modules::math`
             // and dispatched via the registry probe at the top of this fn.
             ValueKind::BuiltinFunction("__vcall__") => {
                 if args.len() != 3 {

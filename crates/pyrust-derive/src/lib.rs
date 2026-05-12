@@ -7,7 +7,7 @@
 //!   of functions).  The **module's Python-level name is *not* given here**;
 //!   the macro reads it from a sibling `MODULE_NAME: &str` constant that
 //!   the surrounding `pyrust_builtin_modules!` invocation in
-//!   `builtin_registry_modules/mod.rs` injects.  This makes that `mod.rs`
+//!   `builtin_modules/mod.rs` injects.  This makes that `mod.rs`
 //!   the single source of truth for the set of built-in modules and
 //!   their Python-level names.
 //!
@@ -327,7 +327,7 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
         /// The per-module registry slice.  Composed at first call by
         /// leaking `MODULE_NAME + "." + short_name` into a `'static`
         /// string for each entry.  Consumed by
-        /// `crate::builtin_registry_modules::all_regs`.
+        /// `crate::builtin_modules::all_regs`.
         pub(crate) fn regs() -> &'static [crate::builtin_registry::BuiltinReg] {
             static REGS_CELL: std::sync::LazyLock<Vec<crate::builtin_registry::BuiltinReg>> =
                 std::sync::LazyLock::new(|| {
