@@ -10,8 +10,8 @@ impl Interpreter {
                 // Check the class first for data descriptors (Property).  A data
                 // descriptor takes priority over instance __dict__ — matching CPython.
                 let class = { Rc::clone(&instance.borrow().class) };
-                if let Some(class_val) = lookup_class_attr(&class, name) {
-                    if let ValueKind::Property { fget, .. } = class_val.kind() {
+                if let Some(class_val) = lookup_class_attr(&class, name)
+                    && let ValueKind::Property { fget, .. } = class_val.kind() {
                         let fget = Rc::clone(fget);
                         return if fget.is_none() {
                             Err(PyError::Named(
@@ -29,7 +29,6 @@ impl Interpreter {
                             )
                         };
                     }
-                }
 
                 if let Some(value) = instance.borrow().attrs.get(name).cloned() {
                     return Ok(value);
@@ -237,8 +236,8 @@ impl Interpreter {
             ValueKind::PyInstance(instance) => {
                 // Check for a property descriptor in the class chain.
                 let class = { Rc::clone(&instance.borrow().class) };
-                if let Some(class_val) = lookup_class_attr(&class, name) {
-                    if let ValueKind::Property { fset, .. } = class_val.kind() {
+                if let Some(class_val) = lookup_class_attr(&class, name)
+                    && let ValueKind::Property { fset, .. } = class_val.kind() {
                         let fset = Rc::clone(fset);
                         return if fset.is_none() {
                             Err(PyError::Named(
@@ -252,7 +251,7 @@ impl Interpreter {
                                 &[
                                     ExpandedCallArg {
                                         name: None,
-                                        value: Value::py_instance(Rc::clone(&instance)),
+                                        value: Value::py_instance(Rc::clone(instance)),
                                     },
                                     ExpandedCallArg { name: None, value },
                                 ],
@@ -260,7 +259,6 @@ impl Interpreter {
                             Ok(())
                         };
                     }
-                }
                 instance.borrow_mut().attrs.insert(name.to_string(), value);
                 Ok(())
             }
@@ -279,8 +277,8 @@ impl Interpreter {
         match target.kind() {
             ValueKind::PyInstance(instance) => {
                 let class = { Rc::clone(&instance.borrow().class) };
-                if let Some(class_val) = lookup_class_attr(&class, name) {
-                    if let ValueKind::Property { fdel, .. } = class_val.kind() {
+                if let Some(class_val) = lookup_class_attr(&class, name)
+                    && let ValueKind::Property { fdel, .. } = class_val.kind() {
                         let fdel = Rc::clone(fdel);
                         return if fdel.is_none() {
                             Err(PyError::Named(
@@ -293,13 +291,12 @@ impl Interpreter {
                                 deleter,
                                 &[ExpandedCallArg {
                                     name: None,
-                                    value: Value::py_instance(Rc::clone(&instance)),
+                                    value: Value::py_instance(Rc::clone(instance)),
                                 }],
                             )?;
                             Ok(())
                         };
                     }
-                }
                 instance.borrow_mut().attrs.remove(name);
                 Ok(())
             }

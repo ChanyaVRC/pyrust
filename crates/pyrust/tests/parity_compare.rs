@@ -83,10 +83,11 @@ fn collect_test_scripts(dir: &Path, out: &mut Vec<PathBuf>) {
             continue;
         }
 
-        if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-            if name.starts_with("test_") && name.ends_with(".py") {
-                out.push(path);
-            }
+        if let Some(name) = path.file_name().and_then(|s| s.to_str())
+            && name.starts_with("test_")
+            && name.ends_with(".py")
+        {
+            out.push(path);
         }
     }
 }

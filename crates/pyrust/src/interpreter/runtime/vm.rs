@@ -24,13 +24,14 @@ pub(crate) struct GeneratorFrame {
 // Thread-local used to pass generator suspension state back from the VM loop
 // to the resume_generator() caller without an extra return value or RefCell on
 // the hot path.  Set immediately before `return Err(GeneratorYield(...))`.
+type GenSaveState = (Vec<Option<IterState>>, Vec<usize>, usize);
 thread_local! {
-    static GEN_SAVE: std::cell::RefCell<Option<(Vec<Option<IterState>>, Vec<usize>, usize)>>
+    static GEN_SAVE: std::cell::RefCell<Option<GenSaveState>>
         = const { std::cell::RefCell::new(None) };
 }
 
 #[derive(Clone)]
-enum IterState {
+pub(crate) enum IterState {
     Materialized(Vec<Value>, usize),
     Range { cur: i64, stop: i64, step: i64 },
     /// Lazy: reads directly from the source register on each ForIter call.
@@ -1098,14 +1099,14 @@ impl Interpreter {
                     }
                     let base = *dst_base as usize;
                     // First `before` elements
-                    for i in 0..before {
+                    for (i, item) in items.iter().take(before).enumerate() {
                         let dst = base + i;
                         if dst >= regs.len() {
                             vm_try!(Err(PyError::Runtime(format!(
                                 "UnpackEx: register {dst} out of range"
                             ))));
                         }
-                        regs[dst] = items[i].clone();
+                        regs[dst] = item.clone();
                     }
                     // Middle as a list → R[base + before]
                     let star_end = items.len() - after;

@@ -708,11 +708,10 @@ fn collect_pattern_names(
             for (_, val_pat) in pairs {
                 collect_pattern_names(val_pat, names, global_names, nonlocal_names);
             }
-            if let Some(rest_name) = rest {
-                if !global_names.contains(rest_name) && !nonlocal_names.contains(rest_name) {
+            if let Some(rest_name) = rest
+                && !global_names.contains(rest_name) && !nonlocal_names.contains(rest_name) {
                     names.insert(rest_name.clone());
                 }
-            }
         }
         Pattern::Class { kwargs, .. } => {
             for (_, attr_pat) in kwargs {
