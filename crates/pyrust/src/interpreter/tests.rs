@@ -133,10 +133,10 @@ mod tests {
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
             Some(Value::list(vec![
-                Value::string("base".to_string()),
+                Value::string("base"),
                 Value::int(10),
                 Value::int(11),
-                Value::string("base".to_string()),
+                Value::string("base"),
             ]))
         );
     }
@@ -150,8 +150,8 @@ mod tests {
         assert_eq!(
             interpreter.lookup_name("events").unwrap(),
             Some(Value::list(vec![
-                Value::string("bad".to_string()),
-                Value::string("finally".to_string()),
+                Value::string("bad"),
+                Value::string("finally"),
             ]))
         );
     }
@@ -164,7 +164,7 @@ mod tests {
 
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
-            Some(Value::string("inner".to_string()))
+            Some(Value::string("inner"))
         );
     }
 
@@ -176,7 +176,7 @@ mod tests {
 
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
-            Some(Value::string("division by zero".to_string()))
+            Some(Value::string("division by zero"))
         );
     }
 
@@ -467,7 +467,7 @@ result = fib(35)
         assert_eq!(interpreter.lookup_name("x").unwrap(), Some(Value::int(3)));
         assert_eq!(
             interpreter.lookup_name("y").unwrap(),
-            Some(Value::string("hello world".to_string()))
+            Some(Value::string("hello world"))
         );
     }
 
@@ -642,7 +642,7 @@ result = fact(10)
         // Just verify it runs without panic and assigned the last key
         assert_eq!(
             interpreter.lookup_name("last_k").unwrap(),
-            Some(Value::string("world".to_string()))
+            Some(Value::string("world"))
         );
     }
     #[test]

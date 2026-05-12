@@ -157,6 +157,20 @@ fn run_repl() -> Result<()> {
     Ok(())
 }
 
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let result = if args.len() > 1 {
+        run_file(&args[1])
+    } else {
+        run_repl()
+    };
+
+    if let Err(e) = result {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,19 +285,5 @@ mod tests {
         let src = "def f():\n    return 42\n";
         assert!(parse_source(src).is_ok());
         assert!(last_line_is_indented(src));
-    }
-}
-
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let result = if args.len() > 1 {
-        run_file(&args[1])
-    } else {
-        run_repl()
-    };
-
-    if let Err(e) = result {
-        eprintln!("{e}");
-        std::process::exit(1);
     }
 }

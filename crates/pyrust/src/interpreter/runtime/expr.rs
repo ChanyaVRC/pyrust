@@ -622,11 +622,10 @@ impl Interpreter {
             _ => return Ok(None),
         };
         let result = self.try_call_binary_method(&left, dunder, right)?;
-        if let Some(ref v) = result {
-            if is_not_implemented(v) {
+        if let Some(ref v) = result
+            && is_not_implemented(v) {
                 return Ok(None);
             }
-        }
         Ok(result)
     }
 

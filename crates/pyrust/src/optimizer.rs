@@ -1,3 +1,8 @@
+#![allow(clippy::needless_range_loop)]
+// ↑ The optimizer walks bytecode by `pc` index and remaps positions via
+// `old_to_new`, which is fundamentally an index-based algorithm. Iterator
+// rewrites would obscure the dataflow without speeding anything up.
+
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -896,11 +901,11 @@ fn pass_exit_inline(insns: Vec<Insn>) -> Vec<Insn> {
         .map(|(i, insn)| {
             if let Insn::Jump(k) = insn {
                 let target = (i as i64 + 1 + *k as i64) as usize;
-                if target < n && target != i {
-                    match &insns[target] {
-                        t @ (Insn::Return(_) | Insn::ReturnNone) => return t.clone(),
-                        _ => {}
-                    }
+                if target < n
+                    && target != i
+                    && let t @ (Insn::Return(_) | Insn::ReturnNone) = &insns[target]
+                {
+                    return t.clone();
                 }
             }
             insn.clone()
@@ -1084,12 +1089,8 @@ fn pass_licm(insns: Vec<Insn>) -> Vec<Insn> {
                 old_to_new[i] = i;
             }
             // Hoisted instructions land at [body_start .. body_start+num_hoisted).
-            {
-                let mut slot = body_start;
-                for &pc in &to_hoist {
-                    old_to_new[pc] = slot;
-                    slot += 1;
-                }
+            for (i, &pc) in to_hoist.iter().enumerate() {
+                old_to_new[pc] = body_start + i;
             }
             // Non-hoisted loop body: [body_start+num_hoisted .. latch+1).
             {
@@ -1989,21 +1990,8 @@ fn pass_trivial_nop(insns: Vec<Insn>) -> Vec<Insn> {
     compact(insns, &keep)
 }
 
-// ─── Constant pool compaction ──────────────────────────────────────────────────
+// ─── ForCountConst → ForCountConstInline ──────────────────────────────────────
 
-/// Remove unreferenced entries from `consts` and renumber all constant indices
-/// in `insns`.
-///
-/// After other passes fold or dead-code-eliminate instructions, some constant
-/// pool entries become unreferenced (no instruction uses their index).  Leaving
-/// them in the pool wastes memory and increases the cost of `Rc<FnCode>` clones.
-///
-/// ## Algorithm
-///
-/// 1. **Scan**: walk all instructions collecting every `u16` constant index that
-///    is actually referenced.
-/// 2. **Remap**: build `old_to_new: Vec<Option<u16>>` for the current pool size.
-///    Referenced entries get compact new indices; unreferenced entries get `None`.
 /// Convert `ForCountConst(var, op, stop_idx, step_idx, off)` to
 /// `ForCountConstInline(var, op, stop, step, off)` when both `consts[stop_idx]`
 /// and `consts[step_idx]` are integers that fit in `i32`.
@@ -3745,7 +3733,6 @@ mod tests {
 
     #[test]
     fn cse_does_not_cross_basic_block_boundary() {
-        use crate::ast::BinaryOp;
         // LoadConst(r2, 0)
         // JumpIfFalse(r1, 0)   ← ends basic block; target is next instruction
         // LoadConst(r3, 0)     ← same const, but different basic block → NOT replaced
