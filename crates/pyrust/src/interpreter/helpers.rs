@@ -169,8 +169,8 @@ fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
             }
             Ok(x.len().cmp(&y.len()))
         }
-        _ => Err(PyError::Named(
-            "TypeError".to_string(),
+        _ => Err(PyError::named(
+            "TypeError",
             format!(
                 "'<' not supported between instances of '{}' and '{}'",
                 value_type_name_str(a),
@@ -243,7 +243,7 @@ fn normalize_index(index: &Value, len: usize, label: &str) -> Result<usize> {
         value += len as i64;
     }
     if value < 0 || value >= len as i64 {
-        return Err(PyError::Named("IndexError".to_string(), format!("{label} index out of range")));
+        return Err(PyError::named("IndexError", format!("{label} index out of range")));
     }
     Ok(value as usize)
 }
@@ -969,7 +969,7 @@ fn value_to_float(v: &Value, ctx: &str) -> Result<f64> {
         ValueKind::Float(f) => Ok(f),
         ValueKind::Int(i) => Ok(i as f64),
         ValueKind::Bool(b) => Ok(if b { 1.0 } else { 0.0 }),
-        _ => Err(PyError::Named("TypeError".to_string(), format!(
+        _ => Err(PyError::named("TypeError", format!(
             "{ctx}: a float is required, not {}",
             v.repr()
         ))),

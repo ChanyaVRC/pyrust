@@ -181,14 +181,14 @@ fn fill_char_arg(args: &[Value]) -> Result<char> {
             let mut chars = s.chars();
             match (chars.next(), chars.next()) {
                 (Some(c), None) => Ok(c),
-                _ => Err(PyError::Named(
-                    "TypeError".to_string(),
+                _ => Err(PyError::named(
+                    "TypeError",
                     "The fill character must be exactly one character long".to_string(),
                 )),
             }
         }
-        _ => Err(PyError::Named(
-            "TypeError".to_string(),
+        _ => Err(PyError::named(
+            "TypeError",
             "The fill character must be a str".to_string(),
         )),
     }
@@ -325,10 +325,7 @@ fn str_expandtabs(s: &str, args: &[Value]) -> Result<Value> {
 fn str_partition(s: &str, args: &[Value]) -> Result<Value> {
     let sep = str_require_str_arg(args, "partition")?;
     if sep.is_empty() {
-        return Err(PyError::Named(
-            "ValueError".to_string(),
-            "empty separator".to_string(),
-        ));
+        return Err(PyError::named("ValueError", "empty separator".to_string()));
     }
     let (before, found_sep, after) = match s.find(sep) {
         Some(pos) => (&s[..pos], sep, &s[pos + sep.len()..]),
@@ -344,10 +341,7 @@ fn str_partition(s: &str, args: &[Value]) -> Result<Value> {
 fn str_rpartition(s: &str, args: &[Value]) -> Result<Value> {
     let sep = str_require_str_arg(args, "rpartition")?;
     if sep.is_empty() {
-        return Err(PyError::Named(
-            "ValueError".to_string(),
-            "empty separator".to_string(),
-        ));
+        return Err(PyError::named("ValueError", "empty separator".to_string()));
     }
     let (before, found_sep, after) = match s.rfind(sep) {
         Some(pos) => (&s[..pos], sep, &s[pos + sep.len()..]),
@@ -762,10 +756,7 @@ fn split(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
         }
         Some(sep_str) => {
             if sep_str.is_empty() {
-                return Err(PyError::Named(
-                    "ValueError".to_string(),
-                    "empty separator".to_string(),
-                ));
+                return Err(PyError::named("ValueError", "empty separator".to_string()));
             }
             if maxsplit < 0 {
                 let cap = s.len() / sep_str.len() + 1;
@@ -835,10 +826,7 @@ fn rsplit(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
         }
         Some(sep_str) => {
             if sep_str.is_empty() {
-                return Err(PyError::Named(
-                    "ValueError".to_string(),
-                    "empty separator".to_string(),
-                ));
+                return Err(PyError::named("ValueError", "empty separator".to_string()));
             }
             if maxsplit < 0 {
                 let cap = s.len() / sep_str.len() + 1;

@@ -1,5 +1,6 @@
 use std::alloc::{Layout, alloc, dealloc};
 use std::any::Any;
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -277,8 +278,8 @@ pub trait BuiltinTypeOps: 'static {
 
     fn setattr(&self, state: &BuiltinState, name: &str, value: Value) -> Result<()> {
         let _ = (state, value);
-        Err(PyError::Named(
-            "AttributeError".to_string(),
+        Err(PyError::named(
+            "AttributeError",
             format!("'{}' object has no attribute '{}'", self.type_name(), name),
         ))
     }
@@ -290,8 +291,8 @@ pub trait BuiltinTypeOps: 'static {
         kwargs: &IndexMap<String, Value>,
     ) -> Result<Value> {
         let _ = (state, args, kwargs);
-        Err(PyError::Named(
-            "TypeError".to_string(),
+        Err(PyError::named(
+            "TypeError",
             format!("'{}' object is not callable", self.type_name()),
         ))
     }
@@ -304,16 +305,16 @@ pub trait BuiltinTypeOps: 'static {
         kwargs: &IndexMap<String, Value>,
     ) -> Result<Value> {
         let _ = (state, args, kwargs);
-        Err(PyError::Named(
-            "AttributeError".to_string(),
+        Err(PyError::named(
+            "AttributeError",
             format!("'{}' object has no attribute '{}'", self.type_name(), name),
         ))
     }
 
     fn iter_next(&self, state: &BuiltinState) -> Result<Option<Value>> {
         let _ = state;
-        Err(PyError::Named(
-            "TypeError".to_string(),
+        Err(PyError::named(
+            "TypeError",
             format!("'{}' object is not iterable", self.type_name()),
         ))
     }
@@ -325,16 +326,16 @@ pub trait BuiltinTypeOps: 'static {
 
     fn get_item(&self, state: &BuiltinState, key: &Value) -> Result<Value> {
         let _ = (state, key);
-        Err(PyError::Named(
-            "TypeError".to_string(),
+        Err(PyError::named(
+            "TypeError",
             format!("'{}' object is not subscriptable", self.type_name()),
         ))
     }
 
     fn set_item(&self, state: &BuiltinState, key: &Value, value: Value) -> Result<()> {
         let _ = (state, key, value);
-        Err(PyError::Named(
-            "TypeError".to_string(),
+        Err(PyError::named(
+            "TypeError",
             format!(
                 "'{}' object does not support item assignment",
                 self.type_name()
@@ -344,8 +345,8 @@ pub trait BuiltinTypeOps: 'static {
 
     fn contains(&self, state: &BuiltinState, item: &Value) -> Result<bool> {
         let _ = (state, item);
-        Err(PyError::Named(
-            "TypeError".to_string(),
+        Err(PyError::named(
+            "TypeError",
             format!("argument of type '{}' is not iterable", self.type_name()),
         ))
     }
@@ -1845,11 +1846,26 @@ pub enum PyError {
     /// A named Python exception (e.g. "ValueError", "TypeError") raised from
     /// builtin code that cannot instantiate exception objects directly.
     /// The VM converts this to a proper PyInstance before propagating.
-    Named(String, String), // (class_name, message)
+    ///
+    /// `class_name` is a `Cow<'static, str>` so the overwhelmingly common
+    /// case (a string literal like `"TypeError"`) is zero-allocation; rare
+    /// dynamic class names (e.g. from user-defined exception types) can
+    /// still be carried via `Cow::Owned`.
+    Named(Cow<'static, str>, String), // (class_name, message)
     Raised(Value),
     /// Internal: used to unwind the VM call stack when a generator yields.
     /// Never observed outside the generator machinery.
     GeneratorYield(Value),
+}
+
+impl PyError {
+    /// Convenience constructor for a named Python exception with a static
+    /// class-name literal.  Avoids the per-call `"TypeError".to_string()`
+    /// allocation that every error site would otherwise perform.
+    #[inline]
+    pub fn named(cls: &'static str, msg: impl Into<String>) -> Self {
+        PyError::Named(Cow::Borrowed(cls), msg.into())
+    }
 }
 
 impl fmt::Display for PyError {

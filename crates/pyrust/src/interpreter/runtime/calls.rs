@@ -64,8 +64,8 @@ impl Interpreter {
                                     )?;
                                     found = Some(match result.kind() {
                                         ValueKind::Str(s) => s.to_string(),
-                                        _ => return Err(PyError::Named(
-                                            "TypeError".to_string(),
+                                        _ => return Err(PyError::named(
+                                            "TypeError",
                                             format!("{dunder} returned non-string"),
                                         )),
                                     });
@@ -104,8 +104,8 @@ impl Interpreter {
                     ValueKind::BuiltinObject { ops, state } => match ops.len(state) {
                         Some(n) => n as i64,
                         None => {
-                            return Err(PyError::Named(
-                                "TypeError".to_string(),
+                            return Err(PyError::named(
+                                "TypeError",
                                 format!(
                                     "object of type '{}' has no len()",
                                     ops.type_name()
@@ -126,13 +126,13 @@ impl Interpreter {
                                 )?;
                                 match result.kind() {
                                     ValueKind::Int(n) if n >= 0 => n,
-                                    ValueKind::Int(_) => return Err(PyError::Named(
-                                        "ValueError".to_string(),
+                                    ValueKind::Int(_) => return Err(PyError::named(
+                                        "ValueError",
                                         "__len__() should return >= 0".to_string(),
                                     )),
                                     ValueKind::Bool(b) => if b { 1 } else { 0 },
-                                    _ => return Err(PyError::Named(
-                                        "TypeError".to_string(),
+                                    _ => return Err(PyError::named(
+                                        "TypeError",
                                         "__len__ returned non-int".to_string(),
                                     )),
                                 }
@@ -272,8 +272,8 @@ impl Interpreter {
                             &[Value::py_instance(inst_rc)],
                         );
                     }
-                    return Err(PyError::Named(
-                        "TypeError".to_string(),
+                    return Err(PyError::named(
+                        "TypeError",
                         format!(
                             "bad operand type for abs(): '{}'",
                             class.borrow().name
@@ -404,16 +404,16 @@ impl Interpreter {
                     1 => match args[0].value.kind() {
                         ValueKind::Int(n) => {
                             if n < 0 {
-                                return Err(PyError::Named(
-                                    "ValueError".to_string(),
+                                return Err(PyError::named(
+                                    "ValueError",
                                     "negative count".to_string(),
                                 ));
                             }
                             Ok(Value::bytes(vec![0u8; n as usize]))
                         }
                         ValueKind::Bytes(rc) => Ok(Value::bytes((**rc).clone())),
-                        ValueKind::Str(_) => Err(PyError::Named(
-                            "TypeError".to_string(),
+                        ValueKind::Str(_) => Err(PyError::named(
+                            "TypeError",
                             "string argument without an encoding".to_string(),
                         )),
                         ValueKind::List(items) | ValueKind::Tuple(items) => {
@@ -423,20 +423,20 @@ impl Interpreter {
                                     ValueKind::Int(n) if (0..=255).contains(&n) => {
                                         out.push(n as u8);
                                     }
-                                    ValueKind::Int(_) => return Err(PyError::Named(
-                                        "ValueError".to_string(),
+                                    ValueKind::Int(_) => return Err(PyError::named(
+                                        "ValueError",
                                         "bytes must be in range(0, 256)".to_string(),
                                     )),
-                                    _ => return Err(PyError::Named(
-                                        "TypeError".to_string(),
+                                    _ => return Err(PyError::named(
+                                        "TypeError",
                                         "bytes element must be an integer".to_string(),
                                     )),
                                 }
                             }
                             Ok(Value::bytes(out))
                         }
-                        _ => Err(PyError::Named(
-                            "TypeError".to_string(),
+                        _ => Err(PyError::named(
+                            "TypeError",
                             "cannot convert to bytes".to_string(),
                         )),
                     },
@@ -452,8 +452,8 @@ impl Interpreter {
                         ValueKind::Int(n) => Ok(n as f64),
                         ValueKind::Float(f) => Ok(f),
                         ValueKind::Bool(b) => Ok(if b { 1.0 } else { 0.0 }),
-                        _ => Err(PyError::Named(
-                            "TypeError".to_string(),
+                        _ => Err(PyError::named(
+                            "TypeError",
                             format!("complex() {what} argument must be a number"),
                         )),
                     }
@@ -478,8 +478,8 @@ impl Interpreter {
                 let path = match args.first().map(|a| a.value.kind()) {
                     Some(ValueKind::Str(s)) => s.to_string(),
                     _ => {
-                        return Err(PyError::Named(
-                            "TypeError".to_string(),
+                        return Err(PyError::named(
+                            "TypeError",
                             "open(): path must be a string".to_string(),
                         ));
                     }
@@ -492,8 +492,8 @@ impl Interpreter {
                         None => "r".to_string(),
                         Some(ValueKind::Str(s)) => s.to_string(),
                         Some(_) => {
-                            return Err(PyError::Named(
-                                "TypeError".to_string(),
+                            return Err(PyError::named(
+                                "TypeError",
                                 "open(): mode must be a string".to_string(),
                             ));
                         }
@@ -534,8 +534,8 @@ impl Interpreter {
                         let mut set = indexmap::IndexSet::new();
                         for item in items {
                             let key = item.to_key().ok_or_else(|| {
-                                PyError::Named(
-                                    "TypeError".to_string(),
+                                PyError::named(
+                                    "TypeError",
                                     "unhashable type in frozenset".to_string(),
                                 )
                             })?;
@@ -575,8 +575,8 @@ impl Interpreter {
                                     )?;
                                     return match result.kind() {
                                         ValueKind::Str(_) => Ok(result),
-                                        _ => Err(PyError::Named(
-                                            "TypeError".to_string(),
+                                        _ => Err(PyError::named(
+                                            "TypeError",
                                             format!("{dunder} returned non-string"),
                                         )),
                                     };
@@ -600,8 +600,8 @@ impl Interpreter {
                         ValueKind::Float(v) => Ok(Value::int(v as i64)),
                         ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
                         ValueKind::Str(s) => s.trim().parse::<i64>().map(Value::int).map_err(|_| {
-                            PyError::Named(
-                                "ValueError".to_string(),
+                            PyError::named(
+                                "ValueError",
                                 format!("invalid literal for int() with base 10: '{s}'"),
                             )
                         }),
@@ -612,8 +612,8 @@ impl Interpreter {
                     2 => {
                         let base = match args[1].value.kind() {
                             ValueKind::Int(b) if (2..=36).contains(&b) => b as u32,
-                            ValueKind::Int(b) => return Err(PyError::Named(
-                                "ValueError".to_string(),
+                            ValueKind::Int(b) => return Err(PyError::named(
+                                "ValueError",
                                 format!("int() base must be >= 2 and <= 36, or 0, not {b}"))),
                             _ => return Err(PyError::Runtime("int() base must be an integer".to_string())),
                         };
@@ -629,8 +629,8 @@ impl Interpreter {
                                 };
                                 i64::from_str_radix(stripped, base)
                                     .map(Value::int)
-                                    .map_err(|_| PyError::Named(
-                                        "ValueError".to_string(),
+                                    .map_err(|_| PyError::named(
+                                        "ValueError",
                                         format!("invalid literal for int() with base {base}: '{}'", s.trim()),
                                     ))
                             }
@@ -837,8 +837,8 @@ impl Interpreter {
                     // 3-arg form: type(name, bases, namespace) constructs a new class.
                     let name = match args[0].value.kind() {
                         ValueKind::Str(s) => s.to_string(),
-                        _ => return Err(PyError::Named(
-                            "TypeError".to_string(),
+                        _ => return Err(PyError::named(
+                            "TypeError",
                             "type() argument 1 must be a str".to_string(),
                         )),
                     };
@@ -849,8 +849,8 @@ impl Interpreter {
                             } else if items.len() == 1 {
                                 match items[0].kind() {
                                     ValueKind::PyClass(c) => Some(Rc::clone(c)),
-                                    _ => return Err(PyError::Named(
-                                        "TypeError".to_string(),
+                                    _ => return Err(PyError::named(
+                                        "TypeError",
                                         "type() argument 2 entries must be classes".to_string(),
                                     )),
                                 }
@@ -858,15 +858,15 @@ impl Interpreter {
                                 // Multiple inheritance: PyRust supports only single base; take the first.
                                 match items[0].kind() {
                                     ValueKind::PyClass(c) => Some(Rc::clone(c)),
-                                    _ => return Err(PyError::Named(
-                                        "TypeError".to_string(),
+                                    _ => return Err(PyError::named(
+                                        "TypeError",
                                         "type() argument 2 entries must be classes".to_string(),
                                     )),
                                 }
                             }
                         }
-                        _ => return Err(PyError::Named(
-                            "TypeError".to_string(),
+                        _ => return Err(PyError::named(
+                            "TypeError",
                             "type() argument 2 must be a tuple".to_string(),
                         )),
                     };
@@ -880,8 +880,8 @@ impl Interpreter {
                                 }
                             }
                         }
-                        _ => return Err(PyError::Named(
-                            "TypeError".to_string(),
+                        _ => return Err(PyError::named(
+                            "TypeError",
                             "type() argument 3 must be a dict".to_string(),
                         )),
                     }
@@ -958,8 +958,8 @@ impl Interpreter {
                 }
                 let name = match args[1].value.kind() {
                     ValueKind::Str(s) => s.to_string(),
-                    _ => return Err(PyError::Named(
-                        "TypeError".to_string(),
+                    _ => return Err(PyError::named(
+                        "TypeError",
                         "hasattr(): attribute name must be a string".to_string(),
                     )),
                 };
@@ -979,8 +979,8 @@ impl Interpreter {
                 }
                 let name = match args[1].value.kind() {
                     ValueKind::Str(s) => s.to_string(),
-                    _ => return Err(PyError::Named(
-                        "TypeError".to_string(),
+                    _ => return Err(PyError::named(
+                        "TypeError",
                         "getattr(): attribute name must be a string".to_string(),
                     )),
                 };
@@ -1001,8 +1001,8 @@ impl Interpreter {
                 }
                 let name = match args[1].value.kind() {
                     ValueKind::Str(s) => s.to_string(),
-                    _ => return Err(PyError::Named(
-                        "TypeError".to_string(),
+                    _ => return Err(PyError::named(
+                        "TypeError",
                         "setattr(): attribute name must be a string".to_string(),
                     )),
                 };
@@ -1012,8 +1012,8 @@ impl Interpreter {
             ValueKind::BuiltinFunction("vars") => {
                 reject_keyword_args_expanded("vars", args)?;
                 if args.len() > 1 {
-                    return Err(PyError::Named(
-                        "TypeError".to_string(),
+                    return Err(PyError::named(
+                        "TypeError",
                         "vars() takes at most 1 argument".to_string(),
                     ));
                 }
@@ -1047,8 +1047,8 @@ impl Interpreter {
                         }
                         Ok(Value::dict(dict))
                     }
-                    _ => Err(PyError::Named(
-                        "TypeError".to_string(),
+                    _ => Err(PyError::named(
+                        "TypeError",
                         format!(
                             "vars() argument must have __dict__ attribute (got '{}')",
                             value_type_name_str(&args[0].value),
@@ -1059,8 +1059,8 @@ impl Interpreter {
             ValueKind::BuiltinFunction("dir") => {
                 reject_keyword_args_expanded("dir", args)?;
                 if args.len() > 1 {
-                    return Err(PyError::Named(
-                        "TypeError".to_string(),
+                    return Err(PyError::named(
+                        "TypeError",
                         "dir() takes at most 1 argument".to_string(),
                     ));
                 }
@@ -1081,8 +1081,8 @@ impl Interpreter {
                 if args.is_empty() {
                     Ok(Value::dict(indexmap::IndexMap::new()))
                 } else {
-                    Err(PyError::Named(
-                        "TypeError".to_string(),
+                    Err(PyError::named(
+                        "TypeError",
                         "dict() with arguments is not yet supported".to_string(),
                     ))
                 }
@@ -1134,8 +1134,8 @@ impl Interpreter {
                             indexmap::IndexMap::new();
                         ops.call_method(state, &method, pos, &empty_kw)
                     }
-                    _ => Err(PyError::Named(
-                        "TypeError".to_string(),
+                    _ => Err(PyError::named(
+                        "TypeError",
                         format!("'{}' object has no method '{method}'", pyrust_core::builtin_type_name(&receiver)),
                     )),
                 }
@@ -1144,14 +1144,14 @@ impl Interpreter {
                 let self_val = args
                     .first()
                     .map(|a| &a.value)
-                    .ok_or_else(|| PyError::Named(
-                        "TypeError".to_string(),
+                    .ok_or_else(|| PyError::named(
+                        "TypeError",
                         "descriptor 'format' of 'str' object needs an argument".to_string(),
                     ))?;
                 let template = match self_val.kind() {
                     ValueKind::Str(s) => s.to_string(),
-                    _ => return Err(PyError::Named(
-                        "TypeError".to_string(),
+                    _ => return Err(PyError::named(
+                        "TypeError",
                         "descriptor 'format' requires a 'str' object".to_string(),
                     )),
                 };
@@ -1170,8 +1170,8 @@ impl Interpreter {
                 let self_val = args
                     .first()
                     .map(|a| &a.value)
-                    .ok_or_else(|| PyError::Named(
-                        "TypeError".to_string(),
+                    .ok_or_else(|| PyError::named(
+                        "TypeError",
                         format!("descriptor '{method}' of 'str' object needs an argument"),
                     ))?;
                 let rest: Vec<Value> = args[1..].iter().map(|a| a.value.clone()).collect();
@@ -1234,8 +1234,8 @@ impl Interpreter {
                         )?;
                         return match result.kind() {
                             ValueKind::Str(_) => Ok(result),
-                            _ => Err(PyError::Named(
-                                "TypeError".to_string(),
+                            _ => Err(PyError::named(
+                                "TypeError",
                                 format!(
                                     "__format__ must return a str, not {}",
                                     value_type_name_str(&result)
@@ -1269,8 +1269,8 @@ impl Interpreter {
                             )?;
                             return match result.kind() {
                                 ValueKind::Str(_) => Ok(result),
-                                _ => Err(PyError::Named(
-                                    "TypeError".to_string(),
+                                _ => Err(PyError::named(
+                                    "TypeError",
                                     "__repr__ returned non-string".to_string(),
                                 )),
                             };
@@ -1410,8 +1410,8 @@ impl Interpreter {
                     match args[1].value.kind() {
                         ValueKind::Int(n) => Some(n as i32),
                         ValueKind::None => None,
-                        _ => return Err(PyError::Named(
-                            "TypeError".to_string(),
+                        _ => return Err(PyError::named(
+                            "TypeError",
                             "round() ndigits must be an integer or None".to_string(),
                         )),
                     }
@@ -1442,8 +1442,8 @@ impl Interpreter {
                             }
                         }
                     }
-                    _ => Err(PyError::Named(
-                        "TypeError".to_string(),
+                    _ => Err(PyError::named(
+                        "TypeError",
                         "round() argument must be a number".to_string(),
                     )),
                 }
@@ -1474,8 +1474,8 @@ impl Interpreter {
                 match (args[0].value.kind(), args[1].value.kind()) {
                     (ValueKind::Int(a), ValueKind::Int(b)) => {
                         if b == 0 {
-                            return Err(PyError::Named(
-                                "ZeroDivisionError".to_string(),
+                            return Err(PyError::named(
+                                "ZeroDivisionError",
                                 "integer division or modulo by zero".to_string(),
                             ));
                         }
@@ -1487,8 +1487,8 @@ impl Interpreter {
                         let a = a as i64;
                         let b = b as i64;
                         if b == 0 {
-                            return Err(PyError::Named(
-                                "ZeroDivisionError".to_string(),
+                            return Err(PyError::named(
+                                "ZeroDivisionError",
                                 "integer division or modulo by zero".to_string(),
                             ));
                         }
@@ -1500,8 +1500,8 @@ impl Interpreter {
                         let a = value_to_float(&args[0].value, "divmod")?;
                         let b = value_to_float(&args[1].value, "divmod")?;
                         if b == 0.0 {
-                            return Err(PyError::Named(
-                                "ZeroDivisionError".to_string(),
+                            return Err(PyError::named(
+                                "ZeroDivisionError",
                                 "float divmod()".to_string(),
                             ));
                         }
@@ -1524,36 +1524,36 @@ impl Interpreter {
                     let base = match args[0].value.kind() {
                         ValueKind::Int(v) => v,
                         ValueKind::Bool(b) => b as i64,
-                        _ => return Err(PyError::Named(
-                            "TypeError".to_string(),
+                        _ => return Err(PyError::named(
+                            "TypeError",
                             "pow() 3-argument form requires integers".to_string(),
                         )),
                     };
                     let exp = match args[1].value.kind() {
                         ValueKind::Int(v) => v,
                         ValueKind::Bool(b) => b as i64,
-                        _ => return Err(PyError::Named(
-                            "TypeError".to_string(),
+                        _ => return Err(PyError::named(
+                            "TypeError",
                             "pow() 3-argument form requires integers".to_string(),
                         )),
                     };
                     let modulus = match args[2].value.kind() {
                         ValueKind::Int(v) => v,
                         ValueKind::Bool(b) => b as i64,
-                        _ => return Err(PyError::Named(
-                            "TypeError".to_string(),
+                        _ => return Err(PyError::named(
+                            "TypeError",
                             "pow() 3-argument form requires integers".to_string(),
                         )),
                     };
                     if modulus == 0 {
-                        return Err(PyError::Named(
-                            "ValueError".to_string(),
+                        return Err(PyError::named(
+                            "ValueError",
                             "pow() 3rd argument cannot be 0".to_string(),
                         ));
                     }
                     if exp < 0 {
-                        return Err(PyError::Named(
-                            "ValueError".to_string(),
+                        return Err(PyError::named(
+                            "ValueError",
                             "pow() 2nd argument cannot be negative when 3rd argument specified".to_string(),
                         ));
                     }
@@ -1627,8 +1627,8 @@ impl Interpreter {
                                     sh as i64
                                 }
                                 ValueKind::None => 0,
-                                _ => return Err(PyError::Named(
-                                    "TypeError".to_string(),
+                                _ => return Err(PyError::named(
+                                    "TypeError",
                                     "unhashable type in tuple".to_string(),
                                 )),
                             };
@@ -1636,20 +1636,20 @@ impl Interpreter {
                         }
                         h
                     }
-                    ValueKind::List(_) => return Err(PyError::Named(
-                        "TypeError".to_string(),
+                    ValueKind::List(_) => return Err(PyError::named(
+                        "TypeError",
                         "unhashable type: 'list'".to_string(),
                     )),
-                    ValueKind::Dict(_) => return Err(PyError::Named(
-                        "TypeError".to_string(),
+                    ValueKind::Dict(_) => return Err(PyError::named(
+                        "TypeError",
                         "unhashable type: 'dict'".to_string(),
                     )),
-                    ValueKind::Set(_) => return Err(PyError::Named(
-                        "TypeError".to_string(),
+                    ValueKind::Set(_) => return Err(PyError::named(
+                        "TypeError",
                         "unhashable type: 'set'".to_string(),
                     )),
-                    _ => return Err(PyError::Named(
-                        "TypeError".to_string(),
+                    _ => return Err(PyError::named(
+                        "TypeError",
                         "unhashable type".to_string(),
                     )),
                 };
@@ -1666,20 +1666,20 @@ impl Interpreter {
                 let code_point = match args[0].value.kind() {
                     ValueKind::Int(v) => v,
                     ValueKind::Bool(b) => b as i64,
-                    _ => return Err(PyError::Named(
-                        "TypeError".to_string(),
+                    _ => return Err(PyError::named(
+                        "TypeError",
                         "an integer is required (got type {})".to_string(),
                     )),
                 };
                 if !(0..=1114111).contains(&code_point) {
-                    return Err(PyError::Named(
-                        "ValueError".to_string(),
+                    return Err(PyError::named(
+                        "ValueError",
                         format!("chr() arg not in range(0x110000): {code_point}"),
                     ));
                 }
                 let ch = char::from_u32(code_point as u32).ok_or_else(|| {
-                    PyError::Named(
-                        "ValueError".to_string(),
+                    PyError::named(
+                        "ValueError",
                         format!("chr() arg not in range(0x110000): {code_point}"),
                     )
                 })?;
@@ -1700,18 +1700,18 @@ impl Interpreter {
                         let second = chars.next();
                         match (first, second) {
                             (Some(c), None) => Ok(Value::int(c as i64)),
-                            (None, _) => Err(PyError::Named(
-                                "TypeError".to_string(),
+                            (None, _) => Err(PyError::named(
+                                "TypeError",
                                 "ord() expected a character, but string of length 0 found".to_string(),
                             )),
-                            (Some(_), Some(_)) => Err(PyError::Named(
-                                "TypeError".to_string(),
+                            (Some(_), Some(_)) => Err(PyError::named(
+                                "TypeError",
                                 format!("ord() expected a character, but string of length {} found", s.chars().count()),
                             )),
                         }
                     }
-                    _ => Err(PyError::Named(
-                        "TypeError".to_string(),
+                    _ => Err(PyError::named(
+                        "TypeError",
                         "ord() expected string of length 1, but got non-string".to_string(),
                     )),
                 }
@@ -1733,8 +1733,8 @@ impl Interpreter {
                         }
                     }
                     ValueKind::Bool(b) => Ok(Value::string(if b { "0b1".to_string() } else { "0b0".to_string() })),
-                    _ => Err(PyError::Named(
-                        "TypeError".to_string(),
+                    _ => Err(PyError::named(
+                        "TypeError",
                         "'{}' object cannot be interpreted as an integer".to_string(),
                     )),
                 }
@@ -1756,8 +1756,8 @@ impl Interpreter {
                         }
                     }
                     ValueKind::Bool(b) => Ok(Value::string(if b { "0o1".to_string() } else { "0o0".to_string() })),
-                    _ => Err(PyError::Named(
-                        "TypeError".to_string(),
+                    _ => Err(PyError::named(
+                        "TypeError",
                         "'{}' object cannot be interpreted as an integer".to_string(),
                     )),
                 }
@@ -1779,8 +1779,8 @@ impl Interpreter {
                         }
                     }
                     ValueKind::Bool(b) => Ok(Value::string(if b { "0x1".to_string() } else { "0x0".to_string() })),
-                    _ => Err(PyError::Named(
-                        "TypeError".to_string(),
+                    _ => Err(PyError::named(
+                        "TypeError",
                         "'{}' object cannot be interpreted as an integer".to_string(),
                     )),
                 }
@@ -1795,8 +1795,8 @@ impl Interpreter {
                 }
                 let cls = match args[0].value.kind() {
                     ValueKind::PyClass(c) => Rc::clone(c),
-                    _ => return Err(PyError::Named(
-                        "TypeError".to_string(),
+                    _ => return Err(PyError::named(
+                        "TypeError",
                         "issubclass() arg 1 must be a class".to_string(),
                     )),
                 };
@@ -1815,8 +1815,8 @@ impl Interpreter {
                         }
                         found
                     }
-                    _ => return Err(PyError::Named(
-                        "TypeError".to_string(),
+                    _ => return Err(PyError::named(
+                        "TypeError",
                         "issubclass() arg 2 must be a class or tuple of classes".to_string(),
                     )),
                 };
@@ -1832,8 +1832,8 @@ impl Interpreter {
                 }
                 let name = match args[1].value.kind() {
                     ValueKind::Str(s) => s.to_string(),
-                    _ => return Err(PyError::Named(
-                        "TypeError".to_string(),
+                    _ => return Err(PyError::named(
+                        "TypeError",
                         "delattr(): attribute name must be a string".to_string(),
                     )),
                 };
@@ -1842,8 +1842,8 @@ impl Interpreter {
                         let instance = Rc::clone(instance);
                         if instance.borrow_mut().attrs.remove(&name).is_none() {
                             let class_name = instance.borrow().class.borrow().name.clone();
-                            return Err(PyError::Named(
-                                "AttributeError".to_string(),
+                            return Err(PyError::named(
+                                "AttributeError",
                                 format!("'{}' object has no attribute '{}'", class_name, name),
                             ));
                         }
@@ -1853,15 +1853,15 @@ impl Interpreter {
                         let class = Rc::clone(class);
                         if class.borrow_mut().attrs.remove(&name).is_none() {
                             let class_name = class.borrow().name.clone();
-                            return Err(PyError::Named(
-                                "AttributeError".to_string(),
+                            return Err(PyError::named(
+                                "AttributeError",
                                 format!("type object '{}' has no attribute '{}'", class_name, name),
                             ));
                         }
                         Ok(Value::none())
                     }
-                    _ => Err(PyError::Named(
-                        "AttributeError".to_string(),
+                    _ => Err(PyError::named(
+                        "AttributeError",
                         "delattr() object has no writable attributes".to_string(),
                     )),
                 }
@@ -1971,8 +1971,8 @@ impl Interpreter {
                         let instance = Rc::clone(i);
                         // Bug #199: validate instance is an instance of class
                         if !class_is_subclass_of(&instance.borrow().class, &class) {
-                            return Err(PyError::Named(
-                                "TypeError".to_string(),
+                            return Err(PyError::named(
+                                "TypeError",
                                 "super(type, obj): obj must be an instance or subtype of type".to_string(),
                             ));
                         }
@@ -1983,8 +1983,8 @@ impl Interpreter {
                         let obj_class = Rc::clone(obj_class);
                         // Validate obj_class is a subclass of class
                         if !class_is_subclass_of(&obj_class, &class) {
-                            return Err(PyError::Named(
-                                "TypeError".to_string(),
+                            return Err(PyError::named(
+                                "TypeError",
                                 "super(type, obj): obj must be an instance or subtype of type".to_string(),
                             ));
                         }
@@ -2040,8 +2040,8 @@ impl Interpreter {
                             // Already an iterator (has __next__ but no separate __iter__).
                             Ok(val)
                         } else {
-                            Err(PyError::Named(
-                                "TypeError".to_string(),
+                            Err(PyError::named(
+                                "TypeError",
                                 format!("'{}' object is not iterable", class.borrow().name),
                             ))
                         }
@@ -2050,8 +2050,8 @@ impl Interpreter {
                     // next() works on the returned value.
                     _ => {
                         let items = iter_values(val.clone()).map_err(|_| {
-                            PyError::Named(
-                                "TypeError".to_string(),
+                            PyError::named(
+                                "TypeError",
                                 format!("'{}' object is not iterable", value_type_name_str(&val)),
                             )
                         })?;
@@ -2072,8 +2072,8 @@ impl Interpreter {
                             &[Value::py_instance(inst_rc)],
                         );
                     }
-                Err(PyError::Named(
-                    "TypeError".to_string(),
+                Err(PyError::named(
+                    "TypeError",
                     format!(
                         "'{}' object is not callable",
                         class.borrow().name
@@ -2139,8 +2139,8 @@ impl Interpreter {
                 } else if lookup_class_attr(&class, "__next__").is_some() {
                     val.clone()
                 } else {
-                    return Err(PyError::Named(
-                        "TypeError".to_string(),
+                    return Err(PyError::named(
+                        "TypeError",
                         format!("'{}' object is not iterable", class.borrow().name),
                     ));
                 }
@@ -2179,7 +2179,7 @@ impl Interpreter {
                         return if let Some(d) = default {
                             Ok(d)
                         } else {
-                            Err(PyError::Named("StopIteration".to_string(), String::new()))
+                            Err(PyError::named("StopIteration", String::new()))
                         };
                     }
                     let item = native.items[native.pos].clone();
@@ -2198,7 +2198,7 @@ impl Interpreter {
                 return if let Some(d) = default {
                     Ok(d)
                 } else {
-                    Err(PyError::Named("StopIteration".to_string(), String::new()))
+                    Err(PyError::named("StopIteration", String::new()))
                 };
             }
             match self.resume_generator(frame) {
@@ -2208,7 +2208,7 @@ impl Interpreter {
                     if let Some(d) = default {
                         Ok(d)
                     } else {
-                        Err(PyError::Named("StopIteration".to_string(), String::new()))
+                        Err(PyError::named("StopIteration", String::new()))
                     }
                 }
                 Err(e) => Err(e),
@@ -2243,8 +2243,8 @@ impl Interpreter {
                     Err(e) => Err(e),
                 }
             } else {
-                Err(PyError::Named(
-                    "TypeError".to_string(),
+                Err(PyError::named(
+                    "TypeError",
                     format!(
                         "'{}' object is not an iterator",
                         class.borrow().name
@@ -2260,13 +2260,13 @@ impl Interpreter {
                     if let Some(d) = default {
                         Ok(d)
                     } else {
-                        Err(PyError::Named("StopIteration".to_string(), String::new()))
+                        Err(PyError::named("StopIteration", String::new()))
                     }
                 }
             }
         } else {
-            Err(PyError::Named(
-                "TypeError".to_string(),
+            Err(PyError::named(
+                "TypeError",
                 format!("'{}' object is not an iterator", value_type_name_str(&val)),
             ))
         }
@@ -2421,8 +2421,8 @@ impl Interpreter {
                         // **kwargs to absorb this name — TypeError is correct.
                         // The variadic path (`compute_kw_pos` below) handles
                         // the "absorb into **kwargs" case separately.
-                        return Err(PyError::Named(
-                            "TypeError".to_string(),
+                        return Err(PyError::named(
+                            "TypeError",
                             format!(
                                 "{}() got some positional-only arguments passed as keyword arguments: '{}'",
                                 function.name, name
@@ -2456,16 +2456,16 @@ impl Interpreter {
                 if bound_args[index].is_none() {
                     bound_args[index] = Some(param.default.clone().ok_or_else(|| {
                         if param.is_keyword_only {
-                            PyError::Named(
-                                "TypeError".to_string(),
+                            PyError::named(
+                                "TypeError",
                                 format!(
                                     "{}() missing 1 required keyword-only argument: '{}'",
                                     function.name, param.name
                                 ),
                             )
                         } else {
-                            PyError::Named(
-                                "TypeError".to_string(),
+                            PyError::named(
+                                "TypeError",
                                 format!(
                                     "{}() missing required positional argument: '{}'",
                                     function.name, param.name
@@ -2525,8 +2525,8 @@ impl Interpreter {
                                 e.values.insert(param.name.clone(), val);
                             } else if let Some(&reg) = function.local_index.get(&param.name) {
                                 if reg as usize >= num_regs {
-                                    return Err(PyError::Named(
-                                        "SystemError".to_string(),
+                                    return Err(PyError::named(
+                                        "SystemError",
                                         format!(
                                             "parameter '{}' register index {} out of range (num_regs={})",
                                             param.name, reg, num_regs
@@ -2543,8 +2543,8 @@ impl Interpreter {
                         let val = slot.take().unwrap();
                         if let Some(&reg) = function.local_index.get(&param.name) {
                             if reg as usize >= num_regs {
-                                return Err(PyError::Named(
-                                    "SystemError".to_string(),
+                                return Err(PyError::named(
+                                    "SystemError",
                                     format!(
                                         "parameter '{}' register index {} out of range (num_regs={})",
                                         param.name, reg, num_regs
@@ -2561,8 +2561,8 @@ impl Interpreter {
                 if !code.cell_vars.contains(&function.name)
                     && let Some(&slot) = function.local_index.get(&function.name) {
                         if slot as usize >= num_regs {
-                            return Err(PyError::Named(
-                                "SystemError".to_string(),
+                            return Err(PyError::named(
+                                "SystemError",
                                 format!(
                                     "self-reference register index {} out of range (num_regs={})",
                                     slot, num_regs
@@ -2656,16 +2656,16 @@ impl Interpreter {
                 } else if let Some(d) = &param.default {
                     d.clone()
                 } else if param.is_keyword_only {
-                    return Err(PyError::Named(
-                        "TypeError".to_string(),
+                    return Err(PyError::named(
+                        "TypeError",
                         format!(
                             "{}() missing 1 required keyword-only argument: '{}'",
                             function.name, param.name
                         ),
                     ));
                 } else {
-                    return Err(PyError::Named(
-                        "TypeError".to_string(),
+                    return Err(PyError::named(
+                        "TypeError",
                         format!(
                             "{}() missing required argument: '{}'",
                             function.name, param.name
@@ -2687,8 +2687,8 @@ impl Interpreter {
                         .iter()
                         .any(|p| p.is_positional_only && &p.name == name)
                     {
-                        return Err(PyError::Named(
-                            "TypeError".to_string(),
+                        return Err(PyError::named(
+                            "TypeError",
                             format!(
                                 "{}() got some positional-only arguments passed as keyword arguments: '{}'",
                                 function.name, name
@@ -2713,8 +2713,8 @@ impl Interpreter {
                 if !code.cell_vars.contains(&param.name)
                     && let Some(&slot) = function.local_index.get(&param.name) {
                         if (slot as usize) >= num_regs {
-                            return Err(PyError::Named(
-                                "SystemError".to_string(),
+                            return Err(PyError::named(
+                                "SystemError",
                                 format!(
                                     "parameter '{}' register index {} out of range (num_regs={})",
                                     param.name, slot, num_regs
@@ -2728,8 +2728,8 @@ impl Interpreter {
             if !code.cell_vars.contains(&function.name)
                 && let Some(&slot) = function.local_index.get(&function.name) {
                     if (slot as usize) >= num_regs {
-                        return Err(PyError::Named(
-                            "SystemError".to_string(),
+                        return Err(PyError::named(
+                            "SystemError",
                             format!(
                                 "self-reference register index {} out of range (num_regs={})",
                                 slot, num_regs
@@ -2869,8 +2869,8 @@ impl Interpreter {
         };
 
         if step == 0 {
-            return Err(PyError::Named(
-                "ValueError".to_string(),
+            return Err(PyError::named(
+                "ValueError",
                 "range() arg 3 must not be zero".to_string(),
             ));
         }
@@ -2999,8 +2999,8 @@ fn apply_format_spec(value: &Value, spec: &str) -> Result<Value> {
         Some('d') => match value.kind() {
             ValueKind::Int(n) => format_int_with_sign(n, sign),
             ValueKind::Bool(b) => format_int_with_sign(if b { 1 } else { 0 }, sign),
-            _ => return Err(PyError::Named(
-                "ValueError".to_string(),
+            _ => return Err(PyError::named(
+                "ValueError",
                 format!("unknown format code 'd' for object of type '{}'", value_type_name_str(value)),
             )),
         },
@@ -3051,8 +3051,8 @@ fn apply_format_spec(value: &Value, spec: &str) -> Result<Value> {
                 let n: i64 = if b { 1 } else { 0 };
                 if alt { format!("0x{n:x}") } else { format!("{n:x}") }
             }
-            _ => return Err(PyError::Named(
-                "ValueError".to_string(),
+            _ => return Err(PyError::named(
+                "ValueError",
                 format!("unknown format code 'x' for object of type '{}'", value_type_name_str(value)),
             )),
         },
@@ -3069,8 +3069,8 @@ fn apply_format_spec(value: &Value, spec: &str) -> Result<Value> {
                 let n: i64 = if b { 1 } else { 0 };
                 if alt { format!("0X{n:X}") } else { format!("{n:X}") }
             }
-            _ => return Err(PyError::Named(
-                "ValueError".to_string(),
+            _ => return Err(PyError::named(
+                "ValueError",
                 format!("unknown format code 'X' for object of type '{}'", value_type_name_str(value)),
             )),
         },
@@ -3087,8 +3087,8 @@ fn apply_format_spec(value: &Value, spec: &str) -> Result<Value> {
                 let n: i64 = if b { 1 } else { 0 };
                 if alt { format!("0o{n:o}") } else { format!("{n:o}") }
             }
-            _ => return Err(PyError::Named(
-                "ValueError".to_string(),
+            _ => return Err(PyError::named(
+                "ValueError",
                 format!("unknown format code 'o' for object of type '{}'", value_type_name_str(value)),
             )),
         },
@@ -3105,14 +3105,14 @@ fn apply_format_spec(value: &Value, spec: &str) -> Result<Value> {
                 let n: i64 = if b { 1 } else { 0 };
                 if alt { format!("0b{n:b}") } else { format!("{n:b}") }
             }
-            _ => return Err(PyError::Named(
-                "ValueError".to_string(),
+            _ => return Err(PyError::named(
+                "ValueError",
                 format!("unknown format code 'b' for object of type '{}'", value_type_name_str(value)),
             )),
         },
         Some(other) => {
-            return Err(PyError::Named(
-                "ValueError".to_string(),
+            return Err(PyError::named(
+                "ValueError",
                 format!("unknown format code '{other}' for object of type '{}'", value_type_name_str(value)),
             ))
         }
@@ -3157,8 +3157,8 @@ fn fmt_value_to_float(value: &Value) -> Result<f64> {
         ValueKind::Float(f) => Ok(f),
         ValueKind::Int(n) => Ok(n as f64),
         ValueKind::Bool(b) => Ok(if b { 1.0 } else { 0.0 }),
-        _ => Err(PyError::Named(
-            "TypeError".to_string(),
+        _ => Err(PyError::named(
+            "TypeError",
             format!("must be real number, not {}", value_type_name_str(value)),
         )),
     }
@@ -3377,8 +3377,8 @@ fn format_str_template(
                 j += 1;
             }
             if depth != 0 {
-                return Err(PyError::Named(
-                    "ValueError".to_string(),
+                return Err(PyError::named(
+                    "ValueError",
                     "Single '{' encountered in format string".to_string(),
                 ));
             }
@@ -3398,28 +3398,28 @@ fn format_str_template(
             let base = if head.is_empty() {
                 // Auto-numbered field
                 if saw_manual {
-                    return Err(PyError::Named(
-                        "ValueError".to_string(),
+                    return Err(PyError::named(
+                        "ValueError",
                         "cannot switch from manual field specification to automatic field numbering".to_string(),
                     ));
                 }
                 let Some(idx) = auto_idx else { unreachable!() };
                 auto_idx = Some(idx + 1);
-                positional.get(idx).cloned().ok_or_else(|| PyError::Named(
-                    "IndexError".to_string(),
+                positional.get(idx).cloned().ok_or_else(|| PyError::named(
+                    "IndexError",
                     format!("Replacement index {idx} out of range for positional args tuple"),
                 ))?
             } else if let Ok(n) = head.parse::<usize>() {
                 if auto_idx.is_some() && auto_idx != Some(0) {
-                    return Err(PyError::Named(
-                        "ValueError".to_string(),
+                    return Err(PyError::named(
+                        "ValueError",
                         "cannot switch from automatic field numbering to manual field specification".to_string(),
                     ));
                 }
                 saw_manual = true;
                 auto_idx = None;
-                positional.get(n).cloned().ok_or_else(|| PyError::Named(
-                    "IndexError".to_string(),
+                positional.get(n).cloned().ok_or_else(|| PyError::named(
+                    "IndexError",
                     format!("Replacement index {n} out of range for positional args tuple"),
                 ))?
             } else {
@@ -3427,8 +3427,8 @@ fn format_str_template(
                     .iter()
                     .find(|(k, _)| k == head)
                     .map(|(_, v)| v.clone())
-                    .ok_or_else(|| PyError::Named(
-                        "KeyError".to_string(),
+                    .ok_or_else(|| PyError::named(
+                        "KeyError",
                         format!("'{head}'"),
                     ))?
             };
@@ -3442,8 +3442,8 @@ fn format_str_template(
                 Some('s') => Value::string(value.to_py_str()),
                 Some('a') => Value::string(ascii_repr(&value)),
                 Some(c) => {
-                    return Err(PyError::Named(
-                        "ValueError".to_string(),
+                    return Err(PyError::named(
+                        "ValueError",
                         format!("Unknown conversion specifier {c}"),
                     ));
                 }
@@ -3462,8 +3462,8 @@ fn format_str_template(
                 out.push('}');
                 i += 2;
             } else {
-                return Err(PyError::Named(
-                    "ValueError".to_string(),
+                return Err(PyError::named(
+                    "ValueError",
                     "Single '}' encountered in format string".to_string(),
                 ));
             }
@@ -3530,15 +3530,15 @@ fn apply_field_accessors(mut value: Value, mut rest: &str) -> Result<Value> {
                         .attrs
                         .get(attr)
                         .cloned()
-                        .ok_or_else(|| PyError::Named(
-                            "AttributeError".to_string(),
+                        .ok_or_else(|| PyError::named(
+                            "AttributeError",
                             format!("attribute '{attr}' not found"),
                         ))?;
                     value = v;
                 }
                 _ => {
-                    return Err(PyError::Named(
-                        "AttributeError".to_string(),
+                    return Err(PyError::named(
+                        "AttributeError",
                         format!("attribute access '.{attr}' is only supported on instances"),
                     ));
                 }
@@ -3547,8 +3547,8 @@ fn apply_field_accessors(mut value: Value, mut rest: &str) -> Result<Value> {
             let end = bytes
                 .iter()
                 .position(|&b| b == b']')
-                .ok_or_else(|| PyError::Named(
-                    "ValueError".to_string(),
+                .ok_or_else(|| PyError::named(
+                    "ValueError",
                     "Missing ']' in format field accessor".to_string(),
                 ))?;
             let key_str = &rest[1..end];
@@ -3560,8 +3560,8 @@ fn apply_field_accessors(mut value: Value, mut rest: &str) -> Result<Value> {
                         let len = items.len() as i64;
                         let i = if idx < 0 { idx + len } else { idx };
                         if i < 0 || i >= len {
-                            return Err(PyError::Named(
-                                "IndexError".to_string(),
+                            return Err(PyError::named(
+                                "IndexError",
                                 "list index out of range".to_string(),
                             ));
                         }
@@ -3570,13 +3570,13 @@ fn apply_field_accessors(mut value: Value, mut rest: &str) -> Result<Value> {
                     ValueKind::Dict(map) => map
                         .get(&PyKey::Int(idx))
                         .cloned()
-                        .ok_or_else(|| PyError::Named(
-                            "KeyError".to_string(),
+                        .ok_or_else(|| PyError::named(
+                            "KeyError",
                             format!("{idx}"),
                         ))?,
                     _ => {
-                        return Err(PyError::Named(
-                            "TypeError".to_string(),
+                        return Err(PyError::named(
+                            "TypeError",
                             "object is not subscriptable".to_string(),
                         ));
                     }
@@ -3586,19 +3586,19 @@ fn apply_field_accessors(mut value: Value, mut rest: &str) -> Result<Value> {
                     ValueKind::Dict(map) => map
                         .get(&PyKey::Str(key_str.to_string()))
                         .cloned()
-                        .ok_or_else(|| PyError::Named(
-                            "KeyError".to_string(),
+                        .ok_or_else(|| PyError::named(
+                            "KeyError",
                             format!("'{key_str}'"),
                         ))?,
                     ValueKind::List(_) | ValueKind::Tuple(_) => {
-                        return Err(PyError::Named(
-                            "TypeError".to_string(),
+                        return Err(PyError::named(
+                            "TypeError",
                             "list indices must be integers or slices, not str".to_string(),
                         ));
                     }
                     _ => {
-                        return Err(PyError::Named(
-                            "TypeError".to_string(),
+                        return Err(PyError::named(
+                            "TypeError",
                             "object is not subscriptable".to_string(),
                         ));
                     }
@@ -3606,8 +3606,8 @@ fn apply_field_accessors(mut value: Value, mut rest: &str) -> Result<Value> {
             };
             value = next;
         } else {
-            return Err(PyError::Named(
-                "ValueError".to_string(),
+            return Err(PyError::named(
+                "ValueError",
                 format!("unexpected character in format field: '{}'", &rest[..1]),
             ));
         }

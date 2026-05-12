@@ -140,8 +140,8 @@ impl Interpreter {
     /// - `Err(other)` — propagating exception
     pub(crate) fn resume_generator(&mut self, frame: &mut GeneratorFrame) -> Result<Value> {
         if frame.done {
-            return Err(PyError::Named(
-                "StopIteration".to_string(),
+            return Err(PyError::named(
+                "StopIteration",
                 String::new(),
             ));
         }
@@ -178,7 +178,7 @@ impl Interpreter {
                 // Generator returned normally (fell off end or hit explicit `return`).
                 // Signal exhaustion as StopIteration so ForIter and call_next handle it uniformly.
                 frame.done = true;
-                Err(PyError::Named("StopIteration".to_string(), String::new()))
+                Err(PyError::named("StopIteration", String::new()))
             }
             Err(e) => {
                 // Propagating exception or other error.
@@ -429,7 +429,7 @@ impl Interpreter {
                                     if j >= 0 && (j as usize) < items.len() {
                                         regs[*dst as usize] = items[j as usize].clone();
                                     } else {
-                                        vm_try!(Err(PyError::Named("IndexError".into(), "list index out of range".into())));
+                                        vm_try!(Err(PyError::named("IndexError", "list index out of range")));
                                     }
                                     handled = true;
                                 }
@@ -439,7 +439,7 @@ impl Interpreter {
                                     if j >= 0 && (j as usize) < items.len() {
                                         regs[*dst as usize] = items[j as usize].clone();
                                     } else {
-                                        vm_try!(Err(PyError::Named("IndexError".into(), "tuple index out of range".into())));
+                                        vm_try!(Err(PyError::named("IndexError", "tuple index out of range")));
                                     }
                                     handled = true;
                                 }
@@ -556,8 +556,8 @@ impl Interpreter {
                                             continue;
                                         }
                                 }
-                                vm_try!(Err(PyError::Named(
-                                    "TypeError".to_string(),
+                                vm_try!(Err(PyError::named(
+                                    "TypeError",
                                     "object does not support item assignment".to_string(),
                                 )));
                             }
@@ -623,13 +623,13 @@ impl Interpreter {
                                         continue;
                                     }
                                 let class_name = class.borrow().name.clone();
-                                vm_try!(Err(PyError::Named(
-                                    "TypeError".to_string(),
+                                vm_try!(Err(PyError::named(
+                                    "TypeError",
                                     format!("'{class_name}' object doesn't support item deletion"),
                                 )));
                             }
-                            vm_try!(Err(PyError::Named(
-                                "TypeError".to_string(),
+                            vm_try!(Err(PyError::named(
+                                "TypeError",
                                 "object does not support item deletion".to_string(),
                             )));
                         }
@@ -1080,8 +1080,8 @@ impl Interpreter {
                     let after = *after as usize;
                     let min_len = before + after;
                     if items.len() < min_len {
-                        vm_try!(Err::<(), _>(PyError::Named(
-                            "ValueError".to_string(),
+                        vm_try!(Err::<(), _>(PyError::named(
+                            "ValueError",
                             format!(
                                 "not enough values to unpack (expected at least {}, got {})",
                                 min_len,
@@ -1142,8 +1142,8 @@ impl Interpreter {
                         match src_val.kind() {
                             ValueKind::Range { start, stop, step } => {
                                 if step == 0 {
-                                    vm_try!(Err(PyError::Named(
-                                        "ValueError".to_string(),
+                                    vm_try!(Err(PyError::named(
+                                        "ValueError",
                                         "range() arg 3 must not be zero".to_string(),
                                     )));
                                 }
@@ -1166,8 +1166,8 @@ impl Interpreter {
                                         ));
                                         IterState::UserDefined(iter_obj)
                                     } else {
-                                        vm_try!(Err(PyError::Named(
-                                            "TypeError".to_string(),
+                                        vm_try!(Err(PyError::named(
+                                            "TypeError",
                                             "__iter__ is not callable".to_string(),
                                         )));
                                         unreachable!()
@@ -1245,8 +1245,8 @@ impl Interpreter {
                                     if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
                                         // Built-in iterator created by iter().
                                         if native.pos >= native.items.len() {
-                                            Some(Err(PyError::Named(
-                                                "StopIteration".to_string(),
+                                            Some(Err(PyError::named(
+                                                "StopIteration",
                                                 String::new(),
                                             )))
                                         } else {
@@ -1257,8 +1257,8 @@ impl Interpreter {
                                     } else if let Some(frame) = borrow.downcast_mut::<GeneratorFrame>() {
                                         // Resume the generator.
                                         if frame.done {
-                                            Some(Err(PyError::Named(
-                                                "StopIteration".to_string(),
+                                            Some(Err(PyError::named(
+                                                "StopIteration",
                                                 String::new(),
                                             )))
                                         } else {
@@ -1287,8 +1287,8 @@ impl Interpreter {
                                 {
                                     Some(ops.iter_next(state).and_then(|opt| {
                                         opt.ok_or_else(|| {
-                                            PyError::Named(
-                                                "StopIteration".to_string(),
+                                            PyError::named(
+                                                "StopIteration",
                                                 String::new(),
                                             )
                                         })
@@ -1326,8 +1326,8 @@ impl Interpreter {
                                 }
                                 Some(Err(e)) => { vm_try!(Err(e)); }
                                 None => {
-                                    vm_try!(Err(PyError::Named(
-                                        "TypeError".to_string(),
+                                    vm_try!(Err(PyError::named(
+                                        "TypeError",
                                         "iterator has no __next__ method".to_string(),
                                     )));
                                 }
@@ -1686,8 +1686,8 @@ impl Interpreter {
                     for k in kw_map.keys() {
                         if let PyKey::Str(s) = k
                             && s != "key" && s != "reverse" {
-                                return Err(PyError::Named(
-                                    "TypeError".to_string(),
+                                return Err(PyError::named(
+                                    "TypeError",
                                     format!("sort() got an unexpected keyword argument '{s}'"),
                                 ));
                             }
@@ -1807,8 +1807,8 @@ fn vm_read(regs: &[Value], reg: crate::bytecode::Reg, num_locals: crate::bytecod
     let v = &regs[reg as usize];
     if v.is_unset() {
         if reg < num_locals {
-            return Err(crate::error::PyError::Named(
-                "NameError".to_string(),
+            return Err(crate::error::PyError::named(
+                "NameError",
                 "local variable referenced before assignment".to_string(),
             ));
         } else {
@@ -1826,13 +1826,13 @@ fn vm_eval_unary(op: UnaryOp, val: Value) -> Result<Value> {
             ValueKind::Int(v) => Ok(Value::int(-v)),
             ValueKind::Float(v) => Ok(Value::float(-v)),
             ValueKind::Complex(re, im) => Ok(Value::complex(-re, -im)),
-            _ => Err(PyError::Named("TypeError".to_string(), "bad operand type for unary -".to_string())),
+            _ => Err(PyError::named("TypeError", "bad operand type for unary -".to_string())),
         },
         UnaryOp::Not => Ok(Value::bool_(!val.truthy())),
         UnaryOp::BitNot => match val.kind() {
             ValueKind::Int(v) => Ok(Value::int(!v)),
             ValueKind::Bool(b) => Ok(Value::int(if b { -2 } else { -1 })),
-            _ => Err(PyError::Named("TypeError".to_string(),
+            _ => Err(PyError::named("TypeError",
                 "bad operand type for unary ~: use integer".to_string(),
             )),
         },
@@ -1840,7 +1840,7 @@ fn vm_eval_unary(op: UnaryOp, val: Value) -> Result<Value> {
             ValueKind::Int(v) => Ok(Value::int(v)),
             ValueKind::Float(v) => Ok(Value::float(v)),
             ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
-            _ => Err(PyError::Named("TypeError".to_string(), "bad operand type for unary +".to_string())),
+            _ => Err(PyError::named("TypeError", "bad operand type for unary +".to_string())),
         },
     }
 }

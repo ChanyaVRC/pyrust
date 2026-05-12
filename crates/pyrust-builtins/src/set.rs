@@ -62,7 +62,7 @@ pub fn call(method: &str, items: &mut IndexSet<PyKey>, args: Vec<Value>) -> Resu
 
 fn to_key(v: &Value) -> Result<PyKey> {
     v.to_key()
-        .ok_or_else(|| PyError::Named("TypeError".to_string(), "unhashable type".to_string()))
+        .ok_or_else(|| PyError::named("TypeError", "unhashable type".to_string()))
 }
 
 /// Collect an iterable `Value` into a set of `PyKey`s.
@@ -111,8 +111,8 @@ fn collect_iterable(v: &Value) -> Result<IndexSet<PyKey>> {
             }
         }
         _ => {
-            return Err(PyError::Named(
-                "TypeError".to_string(),
+            return Err(PyError::named(
+                "TypeError",
                 format!("'{}' object is not iterable", type_name(v)),
             ));
         }
@@ -155,7 +155,7 @@ fn remove(items: &mut IndexSet<PyKey>, args: &[Value]) -> Result<Value> {
     if items.shift_remove(&key) {
         Ok(Value::none())
     } else {
-        Err(PyError::Named("KeyError".to_string(), elem.repr()))
+        Err(PyError::named("KeyError", elem.repr()))
     }
 }
 
@@ -171,8 +171,8 @@ fn discard(items: &mut IndexSet<PyKey>, args: &[Value]) -> Result<Value> {
 fn pop(items: &mut IndexSet<PyKey>) -> Result<Value> {
     match items.pop() {
         Some(k) => Ok(key_to_value(k)),
-        None => Err(PyError::Named(
-            "KeyError".to_string(),
+        None => Err(PyError::named(
+            "KeyError",
             "pop from an empty set".to_string(),
         )),
     }

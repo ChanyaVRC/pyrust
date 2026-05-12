@@ -18,8 +18,8 @@ impl Interpreter {
                     && partial_slot.is_none()
                 {
                     return if fget.is_none() {
-                        Err(PyError::Named(
-                            "AttributeError".to_string(),
+                        Err(PyError::named(
+                            "AttributeError",
                             format!("property '{}' has no getter", name),
                         ))
                     } else {
@@ -61,8 +61,8 @@ impl Interpreter {
                 }
 
                 let class_name = class.borrow().name.clone();
-                Err(PyError::Named(
-                    "AttributeError".to_string(),
+                Err(PyError::named(
+                    "AttributeError",
                     format!("'{}' object has no attribute '{}'", class_name, name),
                 ))
             }
@@ -87,8 +87,8 @@ impl Interpreter {
                 }
 
                 let class_name = class.borrow().name.clone();
-                Err(PyError::Named(
-                    "AttributeError".to_string(),
+                Err(PyError::named(
+                    "AttributeError",
                     format!("type object '{}' has no attribute '{}'", class_name, name),
                 ))
             }
@@ -98,8 +98,8 @@ impl Interpreter {
                 // Look up the method starting from class's parent (skip class itself)
                 let parent = class.borrow().base.clone();
                 let Some(parent_class) = parent else {
-                    return Err(PyError::Named(
-                        "AttributeError".to_string(),
+                    return Err(PyError::named(
+                        "AttributeError",
                         format!("super(): '{}' has no base class", class.borrow().name),
                     ));
                 };
@@ -121,8 +121,8 @@ impl Interpreter {
                         _ => value,
                     });
                 }
-                Err(PyError::Named(
-                    "AttributeError".to_string(),
+                Err(PyError::named(
+                    "AttributeError",
                     format!("super(): parent class has no attribute '{name}'"),
                 ))
             }
@@ -132,8 +132,8 @@ impl Interpreter {
                 // classmethod super(): look up from class's parent and bind to obj_class
                 let parent = class.borrow().base.clone();
                 let Some(parent_class) = parent else {
-                    return Err(PyError::Named(
-                        "AttributeError".to_string(),
+                    return Err(PyError::named(
+                        "AttributeError",
                         format!("super(): '{}' has no base class", class.borrow().name),
                     ));
                 };
@@ -158,8 +158,8 @@ impl Interpreter {
                         _ => value,
                     });
                 }
-                Err(PyError::Named(
-                    "AttributeError".to_string(),
+                Err(PyError::named(
+                    "AttributeError",
                     format!("super(): parent class has no attribute '{name}'"),
                 ))
             }
@@ -186,8 +186,8 @@ impl Interpreter {
                     "fget" => Ok(fget_val),
                     "fset" => Ok(fset_val),
                     "fdel" => Ok(fdel_val),
-                    _ => Err(PyError::Named(
-                        "AttributeError".to_string(),
+                    _ => Err(PyError::named(
+                        "AttributeError",
                         format!("property object has no attribute '{name}'"),
                     )),
                 }
@@ -198,8 +198,8 @@ impl Interpreter {
                     return Ok(value);
                 }
                 let mod_name = module.borrow().name.clone();
-                Err(PyError::Named(
-                    "AttributeError".to_string(),
+                Err(PyError::named(
+                    "AttributeError",
                     format!("module '{mod_name}' has no attribute '{name}'"),
                 ))
             }
@@ -232,14 +232,14 @@ impl Interpreter {
                         "isalpha"    => Ok(Value::builtin_function("str.isalpha")),
                         "isalnum"    => Ok(Value::builtin_function("str.isalnum")),
                         "isspace"    => Ok(Value::builtin_function("str.isspace")),
-                        _ => Err(PyError::Named(
-                            "AttributeError".to_string(),
+                        _ => Err(PyError::named(
+                            "AttributeError",
                             format!("type object 'str' has no attribute '{name}'"),
                         )),
                     }
                 } else {
-                    Err(PyError::Named(
-                        "AttributeError".to_string(),
+                    Err(PyError::named(
+                        "AttributeError",
                         format!("type object '{}' has no attribute '{name}'", func_name),
                     ))
                 }
@@ -267,8 +267,8 @@ impl Interpreter {
                     ));
                 }
                 let type_name = pyrust_core::builtin_type_name(&target);
-                Err(PyError::Named(
-                    "AttributeError".to_string(),
+                Err(PyError::named(
+                    "AttributeError",
                     format!("'{type_name}' object has no attribute '{name}'"),
                 ))
             }
@@ -288,8 +288,8 @@ impl Interpreter {
                     && partial_slot.is_none()
                 {
                     return if fset.is_none() {
-                        Err(PyError::Named(
-                            "AttributeError".to_string(),
+                        Err(PyError::named(
+                            "AttributeError",
                             format!("property '{}' has no setter", name),
                         ))
                     } else {
@@ -333,8 +333,8 @@ impl Interpreter {
                     && partial_slot.is_none()
                 {
                     return if fdel.is_none() {
-                        Err(PyError::Named(
-                            "AttributeError".to_string(),
+                        Err(PyError::named(
+                            "AttributeError",
                             format!("property '{}' has no deleter", name),
                         ))
                     } else {
@@ -502,12 +502,12 @@ impl Interpreter {
                     )?;
                     return match result.kind() {
                         ValueKind::Bool(b) => Ok(b),
-                        ValueKind::Int(_) => Err(PyError::Named(
-                            "TypeError".to_string(),
+                        ValueKind::Int(_) => Err(PyError::named(
+                            "TypeError",
                             "__bool__ should return bool, not int".to_string(),
                         )),
-                        _ => Err(PyError::Named(
-                            "TypeError".to_string(),
+                        _ => Err(PyError::named(
+                            "TypeError",
                             "__bool__ should return bool".to_string(),
                         )),
                     };
@@ -524,8 +524,8 @@ impl Interpreter {
                     return match result.kind() {
                         ValueKind::Int(n) => Ok(n != 0),
                         ValueKind::Bool(b) => Ok(b),
-                        _ => Err(PyError::Named(
-                            "TypeError".to_string(),
+                        _ => Err(PyError::named(
+                            "TypeError",
                             "__len__ returned non-int".to_string(),
                         )),
                     };
