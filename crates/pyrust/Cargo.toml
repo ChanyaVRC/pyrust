@@ -13,3 +13,4 @@ rustyline = "14"
 smallvec = "1"
 pyrust-core = { path = "../pyrust-core" }
 pyrust-builtins = { path = "../pyrust-builtins" }
+pyrust-derive = { path = "../pyrust-derive" }

@@ -12,7 +12,7 @@ use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::value::{
     EnvRef, Environment, PyBigInt, PyClass, PyInstance, PyKey, PyModule, UserFunction,
-    UserFunctionKind, UserFunctionParam, Value, ValueKind, range_len,
+    UserFunctionKind, UserFunctionParam, Value, ValueKind,
 };
 
 type ModuleCache = Rc<RefCell<HashMap<String, Value>>>;
@@ -23,7 +23,7 @@ const ENV_POOL_MAX: usize = 64;
 const SPEC_THRESHOLD: u8 = 8;
 
 pub struct Interpreter {
-    env: EnvRef,
+    pub(crate) env: EnvRef,
     active_exception: Option<Value>,
     script_dir: Option<PathBuf>,
     module_cache: ModuleCache,

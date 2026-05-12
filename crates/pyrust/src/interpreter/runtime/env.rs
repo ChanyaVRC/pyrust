@@ -1,5 +1,5 @@
 impl Interpreter {
-    fn get_attr(&mut self, target: Value, name: &str) -> Result<Value> {
+    pub(crate) fn get_attr(&mut self, target: Value, name: &str) -> Result<Value> {
         match target.kind() {
             ValueKind::PyInstance(instance) => {
                 let instance = Rc::clone(instance);
@@ -275,7 +275,7 @@ impl Interpreter {
         }
     }
 
-    fn assign_attr(&mut self, target: Value, name: &str, value: Value) -> Result<()> {
+    pub(crate) fn assign_attr(&mut self, target: Value, name: &str, value: Value) -> Result<()> {
         match target.kind() {
             ValueKind::PyInstance(instance) => {
                 // Check for a property descriptor in the class chain.
@@ -362,12 +362,11 @@ impl Interpreter {
         if let Some(cached) = self.module_cache.borrow().get(name).cloned() {
             return Ok(cached);
         }
-        // Built-in modules
-        let builtin = match name {
-            "math" => Some(make_math_module()),
-            "sys" => Some(make_sys_module()),
-            _ => None,
-        };
+        // Built-in modules — declared in
+        // `crates/pyrust/src/builtin_modules/mod.rs::pyrust_builtin_modules!`.
+        // Adding a new module is a single-line edit there; this file
+        // never has to change.
+        let builtin = crate::builtin_modules::load_builtin_module(name);
         if let Some(val) = builtin {
             self.module_cache.borrow_mut().insert(name.to_string(), val.clone());
             return Ok(val);
@@ -487,7 +486,7 @@ impl Interpreter {
     }
 
     /// Like `Value::truthy()` but dispatches `__bool__` / `__len__` for instances.
-    fn truthy_value(&mut self, value: &Value) -> Result<bool> {
+    pub(crate) fn truthy_value(&mut self, value: &Value) -> Result<bool> {
         if let ValueKind::PyInstance(inst) = value.kind() {
             let inst_rc = Rc::clone(inst);
             let class = Rc::clone(&inst_rc.borrow().class);

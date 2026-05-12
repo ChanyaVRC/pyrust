@@ -107,7 +107,7 @@ fn eval_binary_float(op: BinaryOp, a: f64, b: f64) -> Option<Result<Value>> {
 ///
 /// Thin alias for [`pyrust_core::builtin_type_name`] — kept locally so the
 /// many interpreter call sites stay short.
-fn value_type_name_str(v: &Value) -> &'static str {
+pub(crate) fn value_type_name_str(v: &Value) -> &'static str {
     pyrust_core::builtin_type_name(v)
 }
 
@@ -116,7 +116,7 @@ fn value_type_name_str(v: &Value) -> &'static str {
 /// magnitude, strings lexicographically, bools as 0/1, lists and tuples
 /// lexicographically element-by-element.  Incomparable pairs return a
 /// `TypeError`.
-fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
+pub(crate) fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
     use crate::value::{PyBigInt, PyToPrimitive};
     match (a.kind(), b.kind()) {
         (ValueKind::Int(x), ValueKind::Int(y)) => Ok(x.cmp(&y)),
@@ -168,7 +168,7 @@ fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
     }
 }
 
-fn lookup_class_attr(class: &Rc<RefCell<PyClass>>, name: &str) -> Option<Value> {
+pub(crate) fn lookup_class_attr(class: &Rc<RefCell<PyClass>>, name: &str) -> Option<Value> {
     let (value, base) = {
         let borrowed = class.borrow();
         (borrowed.attrs.get(name).cloned(), borrowed.base.clone())
@@ -179,16 +179,16 @@ fn lookup_class_attr(class: &Rc<RefCell<PyClass>>, name: &str) -> Option<Value> 
     base.and_then(|base| lookup_class_attr(&base, name))
 }
 
-struct PrintOptions {
-    values: Vec<Value>,
-    sep: String,
-    end: String,
+pub(crate) struct PrintOptions {
+    pub(crate) values: Vec<Value>,
+    pub(crate) sep: String,
+    pub(crate) end: String,
 }
 
 #[derive(Debug, Clone)]
-struct ExpandedCallArg {
-    name: Option<String>,
-    value: Value,
+pub(crate) struct ExpandedCallArg {
+    pub(crate) name: Option<String>,
+    pub(crate) value: Value,
 }
 
 fn extract_optional_string(value: Value, name: &str) -> Result<Option<String>> {
@@ -202,7 +202,7 @@ fn extract_optional_string(value: Value, name: &str) -> Result<Option<String>> {
     }
 }
 
-fn reject_keyword_args_expanded(function_name: &str, args: &[ExpandedCallArg]) -> Result<()> {
+pub(crate) fn reject_keyword_args_expanded(function_name: &str, args: &[ExpandedCallArg]) -> Result<()> {
     if args.iter().any(|arg| arg.name.is_some()) {
         return Err(PyError::Runtime(format!(
             "{}() does not accept keyword arguments",
@@ -212,7 +212,7 @@ fn reject_keyword_args_expanded(function_name: &str, args: &[ExpandedCallArg]) -
     Ok(())
 }
 
-fn py_mod_i64(a: i64, b: i64) -> i64 {
+pub(crate) fn py_mod_i64(a: i64, b: i64) -> i64 {
     let mut remainder = a % b;
     if (remainder > 0 && b < 0) || (remainder < 0 && b > 0) {
         remainder += b;
@@ -236,7 +236,7 @@ fn normalize_index(index: &Value, len: usize, label: &str) -> Result<usize> {
     Ok(value as usize)
 }
 
-fn class_is_subclass_of(class: &Rc<RefCell<PyClass>>, expected: &Rc<RefCell<PyClass>>) -> bool {
+pub(crate) fn class_is_subclass_of(class: &Rc<RefCell<PyClass>>, expected: &Rc<RefCell<PyClass>>) -> bool {
     if Rc::ptr_eq(class, expected) {
         return true;
     }
@@ -244,7 +244,7 @@ fn class_is_subclass_of(class: &Rc<RefCell<PyClass>>, expected: &Rc<RefCell<PyCl
     base.is_some_and(|base| class_is_subclass_of(&base, expected))
 }
 
-fn is_exception_class(class: &Rc<RefCell<PyClass>>) -> bool {
+pub(crate) fn is_exception_class(class: &Rc<RefCell<PyClass>>) -> bool {
     let (name, base) = {
         let borrowed = class.borrow();
         (borrowed.name.clone(), borrowed.base.clone())
@@ -255,7 +255,7 @@ fn is_exception_class(class: &Rc<RefCell<PyClass>>) -> bool {
     base.is_some_and(|base| is_exception_class(&base))
 }
 
-fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value>) -> Value {
+pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value>) -> Value {
     let mut attrs = HashMap::new();
     attrs.insert("args".to_string(), Value::list(args));
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
@@ -388,7 +388,7 @@ fn module_env(env: &EnvRef) -> EnvRef {
     }
 }
 
-fn lookup_name_in_module(env: &EnvRef, name: &str) -> Option<Value> {
+pub(crate) fn lookup_name_in_module(env: &EnvRef, name: &str) -> Option<Value> {
     module_env(env).borrow().values.get(name).cloned()
 }
 
@@ -944,7 +944,7 @@ pub(crate) fn compute_def_bound_mask(
     mask
 }
 
-fn float_to_bigint(f: f64) -> Value {
+pub(crate) fn float_to_bigint(f: f64) -> Value {
     use crate::value::PyBigInt;
     // Convert via the decimal string representation of the f64's integer value.
     let s = format!("{:.0}", f);
@@ -952,7 +952,7 @@ fn float_to_bigint(f: f64) -> Value {
     Value::bigint(n)
 }
 
-fn value_to_float(v: &Value, ctx: &str) -> Result<f64> {
+pub(crate) fn value_to_float(v: &Value, ctx: &str) -> Result<f64> {
     match v.kind() {
         ValueKind::Float(f) => Ok(f),
         ValueKind::Int(i) => Ok(i as f64),
@@ -964,52 +964,10 @@ fn value_to_float(v: &Value, ctx: &str) -> Result<f64> {
     }
 }
 
-fn make_math_module() -> Value {
-    let mut attrs: HashMap<String, Value> = HashMap::new();
-    attrs.insert("pi".to_string(), Value::float(std::f64::consts::PI));
-    attrs.insert("e".to_string(), Value::float(std::f64::consts::E));
-    attrs.insert("tau".to_string(), Value::float(std::f64::consts::TAU));
-    attrs.insert("inf".to_string(), Value::float(f64::INFINITY));
-    attrs.insert("nan".to_string(), Value::float(f64::NAN));
-    const MATH_FUNS: &[(&str, &str)] = &[
-        ("floor", "math.floor"),
-        ("ceil", "math.ceil"),
-        ("sqrt", "math.sqrt"),
-        ("fabs", "math.fabs"),
-        ("sin", "math.sin"),
-        ("cos", "math.cos"),
-        ("tan", "math.tan"),
-        ("asin", "math.asin"),
-        ("acos", "math.acos"),
-        ("atan", "math.atan"),
-        ("exp", "math.exp"),
-        ("log2", "math.log2"),
-        ("log10", "math.log10"),
-        ("isnan", "math.isnan"),
-        ("isinf", "math.isinf"),
-        ("pow", "math.pow"),
-        ("atan2", "math.atan2"),
-        ("log", "math.log"),
-    ];
-    for (name, builtin) in MATH_FUNS {
-        attrs.insert(name.to_string(), Value::builtin_function(builtin));
-    }
-    Value::py_module(Rc::new(RefCell::new(PyModule {
-        name: "math".to_string(),
-        attrs,
-    })))
-}
-
-fn make_sys_module() -> Value {
-    let mut attrs: HashMap<String, Value> = HashMap::new();
-    attrs.insert("version".to_string(), Value::string("PyRust 0.2"));
-    attrs.insert("argv".to_string(), Value::list(Vec::new()));
-    attrs.insert("exit".to_string(), Value::builtin_function("sys.exit"));
-    Value::py_module(Rc::new(RefCell::new(PyModule {
-        name: "sys".to_string(),
-        attrs,
-    })))
-}
+// `make_math_module()` / `make_sys_module()` removed — both are now
+// generated by the `pyrust_module!` macro inside
+// `crates/pyrust/src/builtin_modules/{math,sys}.rs`.  See
+// `docs/builtin-migration.md` for the recipe.
 
 // Names of built-in callables with observable side effects.
 const IMPURE_BUILTINS: &[&str] = &["print", "input", "open", "exit", "quit", "exec", "eval"];
@@ -1186,7 +1144,7 @@ fn is_pure_stmt(stmt: &Stmt, pure_fns: &std::collections::HashSet<String>) -> bo
 
 /// Round a float to the nearest integer using banker's rounding (round half to even),
 /// matching CPython's `round(x)` with no ndigits argument.
-fn py_round_half_even(v: f64) -> i64 {
+pub(crate) fn py_round_half_even(v: f64) -> i64 {
     let floor = v.floor();
     let diff = v - floor;
     if diff < 0.5 {
@@ -1206,7 +1164,7 @@ fn py_round_half_even(v: f64) -> i64 {
 
 /// Round a float to nearest using banker's rounding, returning f64.
 /// Used by round(x, n) for float inputs.
-fn py_round_half_even_f64(v: f64) -> f64 {
+pub(crate) fn py_round_half_even_f64(v: f64) -> f64 {
     let floor = v.floor();
     let diff = v - floor;
     if diff < 0.5 {
@@ -1225,7 +1183,7 @@ fn py_round_half_even_f64(v: f64) -> f64 {
 }
 
 /// Modular exponentiation: (base^exp) % modulus for i64.
-fn modpow_i64(base: i64, exp: u64, modulus: i64) -> i64 {
+pub(crate) fn modpow_i64(base: i64, exp: u64, modulus: i64) -> i64 {
     if modulus == 1 {
         return 0;
     }
