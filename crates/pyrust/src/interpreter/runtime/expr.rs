@@ -623,7 +623,7 @@ impl Interpreter {
         };
         let result = self.try_call_binary_method(&left, dunder, right)?;
         if let Some(ref v) = result {
-            if matches!(v.kind(), ValueKind::BuiltinFunction("NotImplemented")) {
+            if is_not_implemented(v) {
                 return Ok(None);
             }
         }
