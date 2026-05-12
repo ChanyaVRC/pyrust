@@ -51,7 +51,6 @@ fn type_name_of(v: &Value) -> &'static str {
         ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => "super",
         ValueKind::Generator(_) => "generator",
         ValueKind::NotImplemented => "NotImplementedType",
-        ValueKind::BuiltinBoundMethod { .. } => "builtin_function_or_method",
         ValueKind::Bytes(_) => "bytes",
         ValueKind::Complex(_, _) => "complex",
         ValueKind::BuiltinObject { ops, .. } => ops.type_name(),

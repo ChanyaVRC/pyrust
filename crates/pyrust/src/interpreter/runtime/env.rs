@@ -50,6 +50,9 @@ impl Interpreter {
                                 // staticmethod: return the raw function, no binding
                                 Value::user_function(Rc::clone(f))
                             }
+                            // kind() synthesizes BuiltinFunction for kind=Builtin
+                            // so this arm is unreachable; satisfy exhaustiveness.
+                            UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(f)),
                         },
                         _ => value,
                     });
@@ -75,6 +78,7 @@ impl Interpreter {
                             }
                             UserFunctionKind::StaticMethod => Value::user_function(Rc::clone(f)),
                             UserFunctionKind::Regular => value,
+                            UserFunctionKind::Builtin(_) => value,
                         },
                         _ => value,
                     });
@@ -107,6 +111,10 @@ impl Interpreter {
                                 Value::class_bound_method(Rc::clone(f), parent_class)
                             }
                             UserFunctionKind::StaticMethod => Value::user_function(Rc::clone(f)),
+                            // `kind()` synthesizes `ValueKind::BuiltinFunction`
+                            // for kind=Builtin, so this arm is unreachable in
+                            // practice — but rustc requires exhaustiveness.
+                            UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(f)),
                         },
                         _ => value,
                     });
@@ -140,6 +148,10 @@ impl Interpreter {
                                 Value::class_bound_method(Rc::clone(f), obj_class)
                             }
                             UserFunctionKind::StaticMethod => Value::user_function(Rc::clone(f)),
+                            // `kind()` synthesizes `ValueKind::BuiltinFunction`
+                            // for kind=Builtin, so this arm is unreachable in
+                            // practice — but rustc requires exhaustiveness.
+                            UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(f)),
                         },
                         _ => value,
                     });
@@ -236,13 +248,21 @@ impl Interpreter {
                     match name {
                         "real" => return Ok(Value::float(re)),
                         "imag" => return Ok(Value::float(im)),
-                        "conjugate" => return Ok(Value::builtin_bound_method(name, target.clone())),
+                        "conjugate" => {
+                            return Ok(pyrust_builtins::bound_method::bound_method(
+                                name,
+                                target.clone(),
+                            ));
+                        }
                         _ => {}
                     }
                 }
                 // Built-in type instance method lookup: list.append, str.upper, etc.
                 if builtin_has_method(&target, name) {
-                    return Ok(Value::builtin_bound_method(name, target.clone()));
+                    return Ok(pyrust_builtins::bound_method::bound_method(
+                        name,
+                        target.clone(),
+                    ));
                 }
                 let type_name = pyrust_core::builtin_type_name(&target);
                 Err(PyError::Named(

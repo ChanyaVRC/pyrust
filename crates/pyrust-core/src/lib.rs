@@ -121,12 +121,17 @@ pub struct UserFunctionParam {
 /// Discriminator for `UserFunction` semantics.  `@classmethod` and
 /// `@staticmethod` decorators produce a UserFunction whose body Rc-shares
 /// with the original, distinguished only by this tag — no wrapper variant.
+/// `Builtin` is the relocated form of the former `Opaque::BuiltinFunction`
+/// variant: a Rust built-in dispatched by name (`len`, `print`, …).  Same
+/// representable state as the old variant, but unified into the function
+/// value's kind tag so `Opaque` shrinks by one variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UserFunctionKind {
     #[default]
     Regular,
     ClassMethod,
     StaticMethod,
+    Builtin(&'static str),
 }
 
 #[derive(Debug, Clone)]
@@ -177,6 +182,12 @@ const TAG_NONE_BITS: u64 = 0xFFF9_0000_0000_0000;
 /// bit pattern outside the negative-NaN range used by the tag system; not
 /// observable from Python code. See `Value::unset()`.
 const UNSET_BITS: u64 = 0x7FF8_0000_0000_BAD0;
+/// The `NotImplemented` singleton.  Stored as a reserved NaN-box pattern
+/// so identity comparison is a cheap u64-eq, and the value doesn't take an
+/// `Opaque` variant.  Pattern is a positive NaN in the same family as
+/// `UNSET_BITS` — not classified as a float by `top16()`-based checks
+/// because we test the exact bit pattern explicitly. See [`Value::not_implemented`].
+const NOT_IMPLEMENTED_BITS: u64 = 0x7FF8_0000_0000_BAD2;
 const TAG_BOOL_BITS: u64 = 0xFFFA_0000_0000_0000;
 const TAG_INT_BITS: u64 = 0xFFFB_0000_0000_0000;
 const TAG_STR_BITS: u64 = 0xFFFC_0000_0000_0000;
@@ -387,7 +398,6 @@ pub enum Opaque {
         step: i64,
     },
     UserFunction(Rc<UserFunction>),
-    BuiltinFunction(&'static str),
     PyClass(Rc<RefCell<PyClass>>),
     PyInstance(Rc<RefCell<PyInstance>>),
     PyModule(Rc<RefCell<PyModule>>),
@@ -420,17 +430,6 @@ pub enum Opaque {
     /// iterator slots, etc.) is stored as a type-erased `Box<dyn Any>` so that
     /// `pyrust-core` does not need to depend on `pyrust`'s bytecode types.
     Generator(Rc<RefCell<Box<dyn std::any::Any>>>),
-    /// The `NotImplemented` singleton.  Returned by binary dunder methods to
-    /// signal that the operation is not supported for the given operand types.
-    NotImplemented,
-    /// A method on a built-in type instance with the receiver bound.  Produced
-    /// by `getattr(x, "method")` where `x` is a list/str/dict/tuple/set and
-    /// `"method"` is one of its methods.  When called, dispatches through
-    /// `pyrust-builtins` with `receiver` as `self`.
-    BuiltinBoundMethod {
-        name: Rc<String>,
-        receiver: Value,
-    },
     /// An immutable byte string.  Constructed via the `b"..."` literal or
     /// the `bytes(...)` builtin.  Stored behind `Rc` for cheap clones.
     Bytes(Rc<Vec<u8>>),
@@ -459,7 +458,6 @@ impl Clone for Opaque {
                 step: *step,
             },
             Opaque::UserFunction(f) => Opaque::UserFunction(Rc::clone(f)),
-            Opaque::BuiltinFunction(s) => Opaque::BuiltinFunction(s),
             Opaque::PyClass(c) => Opaque::PyClass(Rc::clone(c)),
             Opaque::PyInstance(i) => Opaque::PyInstance(Rc::clone(i)),
             Opaque::PyModule(m) => Opaque::PyModule(Rc::clone(m)),
@@ -480,11 +478,6 @@ impl Clone for Opaque {
                 obj_class: Rc::clone(obj_class),
             },
             Opaque::Generator(state) => Opaque::Generator(Rc::clone(state)),
-            Opaque::NotImplemented => Opaque::NotImplemented,
-            Opaque::BuiltinBoundMethod { name, receiver } => Opaque::BuiltinBoundMethod {
-                name: Rc::clone(name),
-                receiver: receiver.clone(),
-            },
             Opaque::Bytes(rc) => Opaque::Bytes(Rc::clone(rc)),
             Opaque::Complex(re, im) => Opaque::Complex(*re, *im),
             Opaque::BuiltinObject { ops, state } => Opaque::BuiltinObject {
@@ -537,11 +530,11 @@ pub enum ValueKind<'a> {
         obj_class: &'a Rc<RefCell<PyClass>>,
     },
     Generator(&'a Rc<RefCell<Box<dyn std::any::Any>>>),
+    /// Synthesized view of the [`NotImplemented`] sentinel.  No backing
+    /// `Opaque` variant — the value is encoded as a reserved NaN-box bit
+    /// pattern, and `kind()` decodes it here so existing matchers keep
+    /// working.  Identity-test via `Value::is_not_implemented()` is cheaper.
     NotImplemented,
-    BuiltinBoundMethod {
-        name: &'a Rc<String>,
-        receiver: &'a Value,
-    },
     Bytes(&'a Rc<Vec<u8>>),
     Complex(f64, f64),
     BuiltinObject {
@@ -863,12 +856,48 @@ impl Value {
         Value::opaque(Opaque::UserFunction(f))
     }
 
+    /// Construct a built-in function value.  Stored as a `UserFunction` with
+    /// `kind = Builtin(name)` so the function machinery is unified (one Opaque
+    /// variant for both user and built-in functions).  The per-name
+    /// `UserFunction` stub is interned in a thread-local cache so repeated
+    /// calls don't reallocate it — equivalent in cost to the previous
+    /// single-pointer payload.
     pub fn builtin_function(name: &'static str) -> Self {
-        Value::opaque(Opaque::BuiltinFunction(name))
+        thread_local! {
+            static CACHE: RefCell<HashMap<&'static str, Rc<UserFunction>>>
+                = RefCell::new(HashMap::new());
+        }
+        let func = CACHE.with(|c| {
+            if let Some(f) = c.borrow().get(name) {
+                return Rc::clone(f);
+            }
+            let f = Rc::new(UserFunction {
+                id: next_fn_id(),
+                kind: UserFunctionKind::Builtin(name),
+                name: name.to_string(),
+                params: Vec::new(),
+                local_names: Rc::new(HashSet::new()),
+                local_index: Rc::new(HashMap::new()),
+                global_names: Rc::new(HashSet::new()),
+                nonlocal_names: Rc::new(HashSet::new()),
+                env: Environment::new(None),
+                is_pure: false,
+                precompiled_code: None,
+            });
+            c.borrow_mut().insert(name, Rc::clone(&f));
+            f
+        });
+        Value::opaque(Opaque::UserFunction(func))
     }
 
+    /// The `NotImplemented` singleton.  Stored as a reserved NaN-box bit
+    /// pattern so identity comparison is a single u64 equality check.
     pub fn not_implemented() -> Self {
-        Value::opaque(Opaque::NotImplemented)
+        Value(NOT_IMPLEMENTED_BITS)
+    }
+
+    pub fn is_not_implemented(&self) -> bool {
+        self.0 == NOT_IMPLEMENTED_BITS
     }
 
     pub fn py_class(c: Rc<RefCell<PyClass>>) -> Self {
@@ -885,13 +914,6 @@ impl Value {
 
     pub fn bound_method(function: Rc<UserFunction>, receiver: Rc<RefCell<PyInstance>>) -> Self {
         Value::opaque(Opaque::BoundMethod { function, receiver })
-    }
-
-    pub fn builtin_bound_method(name: impl Into<String>, receiver: Value) -> Self {
-        Value::opaque(Opaque::BuiltinBoundMethod {
-            name: Rc::new(name.into()),
-            receiver,
-        })
     }
 
     /// Wrap a function with a different `UserFunctionKind` tag.  Used by
@@ -1148,6 +1170,11 @@ impl Value {
     // ── kind() — borrow-based view for pattern matching ──────────────────────
 
     pub fn kind(&self) -> ValueKind<'_> {
+        // NotImplemented is encoded as a reserved NaN-box bit pattern; check
+        // before the float arm so it doesn't get classified as a float NaN.
+        if self.0 == NOT_IMPLEMENTED_BITS {
+            return ValueKind::NotImplemented;
+        }
         match top16(self.0) {
             t if t <= TAG_FLOAT_MAX => ValueKind::Float(self.as_float_raw()),
             TAG_NONE => ValueKind::None,
@@ -1175,8 +1202,10 @@ impl Value {
                     stop: *stop,
                     step: *step,
                 },
-                Opaque::UserFunction(f) => ValueKind::UserFunction(f),
-                Opaque::BuiltinFunction(s) => ValueKind::BuiltinFunction(s),
+                Opaque::UserFunction(f) => match f.kind {
+                    UserFunctionKind::Builtin(name) => ValueKind::BuiltinFunction(name),
+                    _ => ValueKind::UserFunction(f),
+                },
                 Opaque::PyClass(c) => ValueKind::PyClass(c),
                 Opaque::PyInstance(i) => ValueKind::PyInstance(i),
                 Opaque::PyModule(m) => ValueKind::PyModule(m),
@@ -1191,10 +1220,6 @@ impl Value {
                     ValueKind::SuperProxyClass { class, obj_class }
                 }
                 Opaque::Generator(state) => ValueKind::Generator(state),
-                Opaque::NotImplemented => ValueKind::NotImplemented,
-                Opaque::BuiltinBoundMethod { name, receiver } => {
-                    ValueKind::BuiltinBoundMethod { name, receiver }
-                }
                 Opaque::Bytes(rc) => ValueKind::Bytes(rc),
                 Opaque::Complex(re, im) => ValueKind::Complex(*re, *im),
                 Opaque::BuiltinObject { ops, state } => {
@@ -1231,7 +1256,8 @@ impl Value {
             ValueKind::SuperProxyClass { .. } => true,
             ValueKind::Generator(_) => true,
             ValueKind::NotImplemented => true,
-            ValueKind::BuiltinBoundMethod { .. } => true,
+            // (NaN-box pattern handled by kind() dispatch above; included
+            // in this match for completeness.)
             ValueKind::Bytes(b) => !b.is_empty(),
             ValueKind::Complex(re, im) => re != 0.0 || im != 0.0,
             ValueKind::BuiltinObject { ops, state } => ops.truthy(state),
@@ -1303,6 +1329,10 @@ impl Value {
                 UserFunctionKind::ClassMethod => format!("<classmethod '{}'>", func.name),
                 UserFunctionKind::StaticMethod => format!("<staticmethod '{}'>", func.name),
                 UserFunctionKind::Regular => format!("<function {}>", func.name),
+                // Builtins are surfaced via `ValueKind::BuiltinFunction` by
+                // `kind()`, so we never reach this arm — but the match is
+                // total either way.
+                UserFunctionKind::Builtin(name) => format!("<built-in function {name}>"),
             },
             ValueKind::PyClass(class) => {
                 let name = class.borrow().name.clone();
@@ -1343,12 +1373,6 @@ impl Value {
             }
             ValueKind::Generator(_) => "<generator object>".to_string(),
             ValueKind::NotImplemented => "NotImplemented".to_string(),
-            ValueKind::BuiltinBoundMethod { name, receiver } => {
-                format!(
-                    "<built-in method {name} of {} object>",
-                    builtin_type_name(receiver)
-                )
-            }
             ValueKind::Bytes(rc) => bytes_repr(rc),
             ValueKind::Complex(re, im) => complex_repr(re, im),
             ValueKind::BuiltinObject { ops, state } => ops.repr(state),

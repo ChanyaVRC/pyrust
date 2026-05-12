@@ -922,7 +922,6 @@ impl Interpreter {
                     ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => Ok(Value::builtin_function("super")),
                     ValueKind::Generator(_) => Ok(Value::builtin_function("generator")),
                     ValueKind::NotImplemented => Ok(Value::builtin_function("NotImplementedType")),
-                    ValueKind::BuiltinBoundMethod { .. } => Ok(Value::builtin_function("builtin_function_or_method")),
                     ValueKind::Bytes(_) => Ok(Value::builtin_function("bytes")),
                     ValueKind::Complex(_, _) => Ok(Value::builtin_function("complex")),
                     ValueKind::BuiltinObject { ops, .. } => {
@@ -1087,9 +1086,11 @@ impl Interpreter {
                     ))
                 }
             }
-            ValueKind::BuiltinBoundMethod { name, receiver } => {
-                let method = name.to_string();
-                let mut receiver = receiver.clone();
+            _ if pyrust_builtins::bound_method::as_bound_method(&function).is_some() => {
+                let (name_rc, receiver_owned) =
+                    pyrust_builtins::bound_method::as_bound_method(&function).unwrap();
+                let method = name_rc.to_string();
+                let mut receiver = receiver_owned;
                 // Separate positional and keyword args.
                 let mut pos: Vec<Value> = Vec::with_capacity(args.len());
                 let mut kw: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
