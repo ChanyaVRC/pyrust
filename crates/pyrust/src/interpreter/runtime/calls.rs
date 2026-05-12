@@ -1405,10 +1405,10 @@ impl Interpreter {
                     // prop.setter / prop.getter / prop.deleter) are callable —
                     // a plain property descriptor isn't.  Distinguish via the
                     // `partial_slot` field on PropertyState.
-                    ValueKind::BuiltinObject { .. } => pyrust_builtins::property::as_property(
-                        &args[0].value,
-                    )
-                    .is_some_and(|(_, _, _, partial_slot)| partial_slot.is_some()),
+                    ValueKind::BuiltinObject { .. } => {
+                        pyrust_builtins::property::property_partial_slot(&args[0].value)
+                            .is_some_and(|slot| slot.is_some())
+                    }
                     ValueKind::PyInstance(inst) => {
                         let class = Rc::clone(&inst.borrow().class);
                         lookup_class_attr(&class, "__call__").is_some()
@@ -1903,11 +1903,19 @@ impl Interpreter {
 
             // Calling prop.setter(fn), prop.deleter(fn), or prop.getter(fn).
             // Returns a new Property with the respective slot replaced.
-            _ if pyrust_builtins::property::as_property(&function).is_some_and(|p| p.3.is_some()) =>
+            _ if pyrust_builtins::property::property_partial_slot(&function)
+                .is_some_and(|s| s.is_some()) =>
             {
-                let (fget, fset, fdel, partial_slot) =
-                    pyrust_builtins::property::as_property(&function).unwrap();
-                let slot = partial_slot.unwrap();
+                let (fget, fset, fdel, slot) =
+                    pyrust_builtins::property::with_property(&function, |s| {
+                        (
+                            Rc::clone(&s.fget),
+                            Rc::clone(&s.fset),
+                            Rc::clone(&s.fdel),
+                            s.partial_slot.expect("guard ensured Some"),
+                        )
+                    })
+                    .expect("guard ensured property");
                 reject_keyword_args_expanded("property accessor", args)?;
                 if args.len() != 1 {
                     return Err(PyError::Runtime(
