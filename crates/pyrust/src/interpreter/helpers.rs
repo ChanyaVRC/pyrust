@@ -212,7 +212,7 @@ pub(crate) fn reject_keyword_args_expanded(function_name: &str, args: &[Expanded
     Ok(())
 }
 
-fn py_mod_i64(a: i64, b: i64) -> i64 {
+pub(crate) fn py_mod_i64(a: i64, b: i64) -> i64 {
     let mut remainder = a % b;
     if (remainder > 0 && b < 0) || (remainder < 0 && b > 0) {
         remainder += b;
@@ -1183,7 +1183,7 @@ fn py_round_half_even_f64(v: f64) -> f64 {
 }
 
 /// Modular exponentiation: (base^exp) % modulus for i64.
-fn modpow_i64(base: i64, exp: u64, modulus: i64) -> i64 {
+pub(crate) fn modpow_i64(base: i64, exp: u64, modulus: i64) -> i64 {
     if modulus == 1 {
         return 0;
     }

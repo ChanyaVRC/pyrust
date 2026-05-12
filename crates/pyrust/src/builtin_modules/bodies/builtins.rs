@@ -14,9 +14,13 @@
 
 use std::rc::Rc;
 
+use crate::ast::BinaryOp;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
-use crate::interpreter::{ascii_repr, lookup_class_attr, reject_keyword_args_expanded};
+use crate::interpreter::{
+    ascii_repr, iter_values, lookup_class_attr, modpow_i64, py_mod_i64,
+    reject_keyword_args_expanded, value_to_float,
+};
 use crate::value::{Value, ValueKind};
 use pyrust_derive::pyrust_module;
 
@@ -173,6 +177,303 @@ pyrust_module! {
             _ => args[0].value.value_id().unwrap_or(0),
         };
         Ok(Value::int(id_val))
+    }
+
+    /// CPython: abs(x) — absolute value.
+    /// <https://docs.python.org/3/library/functions.html#abs>
+    fn abs(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
+        }
+        let val = args[0].value.clone();
+        if let ValueKind::PyInstance(inst) = val.kind() {
+            let inst_rc = Rc::clone(inst);
+            let class = Rc::clone(&inst_rc.borrow().class);
+            if let Some(method_val) = lookup_class_attr(&class, "__abs__")
+                && let ValueKind::UserFunction(f) = method_val.kind()
+            {
+                let func = Rc::clone(f);
+                return _interp.call_user_function_expanded(
+                    func,
+                    &[],
+                    &[Value::py_instance(inst_rc)],
+                );
+            }
+            return Err(PyError::named(
+                "TypeError",
+                format!("bad operand type for abs(): '{}'", class.borrow().name),
+            ));
+        }
+        match val.kind() {
+            ValueKind::Int(v) => Ok(Value::int(v.abs())),
+            ValueKind::Float(v) => Ok(Value::float(v.abs())),
+            ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
+            ValueKind::Complex(re, im) => Ok(Value::float((re * re + im * im).sqrt())),
+            _ => Err(PyError::Runtime(format!("{FN_NAME}() argument must be a number"))),
+        }
+    }
+
+    /// CPython: sum(iterable, /, start=0) — sum elements of an iterable.
+    /// <https://docs.python.org/3/library/functions.html#sum>
+    fn sum(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.is_empty() || args.len() > 2 {
+            return Err(PyError::Runtime(format!("{FN_NAME}() takes 1 or 2 arguments")));
+        }
+        let items = iter_values(args[0].value.clone())?;
+        let start = if args.len() == 2 { args[1].value.clone() } else { Value::int(0) };
+        let mut acc = start;
+        for item in items {
+            acc = _interp.eval_binary(acc, BinaryOp::Add, item)?;
+        }
+        Ok(acc)
+    }
+
+    /// CPython: any(iterable) — true if any element is truthy.
+    /// <https://docs.python.org/3/library/functions.html#any>
+    fn any(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
+        }
+        let items = iter_values(args[0].value.clone())?;
+        for item in items {
+            if item.truthy() {
+                return Ok(Value::bool_(true));
+            }
+        }
+        Ok(Value::bool_(false))
+    }
+
+    /// CPython: all(iterable) — true if every element is truthy (or empty).
+    /// <https://docs.python.org/3/library/functions.html#all>
+    fn all(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
+        }
+        let items = iter_values(args[0].value.clone())?;
+        for item in items {
+            if !item.truthy() {
+                return Ok(Value::bool_(false));
+            }
+        }
+        Ok(Value::bool_(true))
+    }
+
+    /// CPython: repr(object) — printable representation string.
+    /// <https://docs.python.org/3/library/functions.html#repr>
+    fn repr(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
+        }
+        let obj = args[0].value.clone();
+        if let ValueKind::PyInstance(instance) = obj.kind() {
+            let instance_rc = Rc::clone(instance);
+            let class = Rc::clone(&instance_rc.borrow().class);
+            if let Some(method_val) = lookup_class_attr(&class, "__repr__")
+                && let ValueKind::UserFunction(f) = method_val.kind()
+            {
+                let func = Rc::clone(f);
+                let result = _interp.call_user_function_expanded(
+                    func,
+                    &[],
+                    &[Value::py_instance(instance_rc)],
+                )?;
+                return match result.kind() {
+                    ValueKind::Str(_) => Ok(result),
+                    _ => Err(PyError::named(
+                        "TypeError",
+                        "__repr__ returned non-string".to_string(),
+                    )),
+                };
+            }
+        }
+        Ok(Value::string(obj.repr()))
+    }
+
+    /// CPython: hash(object) — hash value if hashable.
+    /// <https://docs.python.org/3/library/functions.html#hash>
+    fn hash(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
+        }
+        let hash_val = match args[0].value.kind() {
+            ValueKind::Int(v) => v,
+            ValueKind::Bool(b) => b as i64,
+            ValueKind::Float(v) => {
+                if v.fract() == 0.0 && v.is_finite() { v as i64 }
+                else { v.to_bits() as i64 }
+            }
+            ValueKind::Str(s) => {
+                let mut h: u64 = 14695981039346656037u64;
+                for b in s.bytes() {
+                    h ^= b as u64;
+                    h = h.wrapping_mul(1099511628211u64);
+                }
+                h as i64
+            }
+            ValueKind::None => 0,
+            ValueKind::Tuple(items) => {
+                let mut h: i64 = 3527539;
+                for item in items {
+                    let item_hash = match item.kind() {
+                        ValueKind::Int(v) => v,
+                        ValueKind::Bool(b) => b as i64,
+                        ValueKind::Float(fv) => {
+                            if fv.fract() == 0.0 && fv.is_finite() { fv as i64 }
+                            else { fv.to_bits() as i64 }
+                        }
+                        ValueKind::Str(s) => {
+                            let mut sh: u64 = 14695981039346656037u64;
+                            for byte in s.bytes() {
+                                sh ^= byte as u64;
+                                sh = sh.wrapping_mul(1099511628211u64);
+                            }
+                            sh as i64
+                        }
+                        ValueKind::None => 0,
+                        _ => return Err(PyError::named(
+                            "TypeError",
+                            "unhashable type in tuple".to_string(),
+                        )),
+                    };
+                    h = h.wrapping_mul(1000003).wrapping_add(item_hash);
+                }
+                h
+            }
+            ValueKind::List(_) => return Err(PyError::named(
+                "TypeError",
+                "unhashable type: 'list'".to_string(),
+            )),
+            ValueKind::Dict(_) => return Err(PyError::named(
+                "TypeError",
+                "unhashable type: 'dict'".to_string(),
+            )),
+            ValueKind::Set(_) => return Err(PyError::named(
+                "TypeError",
+                "unhashable type: 'set'".to_string(),
+            )),
+            _ => return Err(PyError::named(
+                "TypeError",
+                "unhashable type".to_string(),
+            )),
+        };
+        Ok(Value::int(hash_val))
+    }
+
+    /// CPython: divmod(a, b) — `(a // b, a % b)`.
+    /// <https://docs.python.org/3/library/functions.html#divmod>
+    fn divmod(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 2 {
+            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly 2 arguments")));
+        }
+        match (args[0].value.kind(), args[1].value.kind()) {
+            (ValueKind::Int(a), ValueKind::Int(b)) => {
+                if b == 0 {
+                    return Err(PyError::named(
+                        "ZeroDivisionError",
+                        "integer division or modulo by zero".to_string(),
+                    ));
+                }
+                let modulo = py_mod_i64(a, b);
+                let quotient = (a - modulo) / b;
+                Ok(Value::tuple(vec![Value::int(quotient), Value::int(modulo)]))
+            }
+            (ValueKind::Bool(a), ValueKind::Bool(b)) => {
+                let a = a as i64;
+                let b = b as i64;
+                if b == 0 {
+                    return Err(PyError::named(
+                        "ZeroDivisionError",
+                        "integer division or modulo by zero".to_string(),
+                    ));
+                }
+                let modulo = py_mod_i64(a, b);
+                let quotient = (a - modulo) / b;
+                Ok(Value::tuple(vec![Value::int(quotient), Value::int(modulo)]))
+            }
+            _ => {
+                let a = value_to_float(&args[0].value, FN_NAME)?;
+                let b = value_to_float(&args[1].value, FN_NAME)?;
+                if b == 0.0 {
+                    return Err(PyError::named(
+                        "ZeroDivisionError",
+                        "float divmod()".to_string(),
+                    ));
+                }
+                let quotient = (a / b).floor();
+                let modulo = a - b * quotient;
+                Ok(Value::tuple(vec![Value::float(quotient), Value::float(modulo)]))
+            }
+        }
+    }
+
+    /// CPython: pow(base, exp[, mod]) — exponentiation, optionally modular.
+    /// <https://docs.python.org/3/library/functions.html#pow>
+    fn pow(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() < 2 || args.len() > 3 {
+            return Err(PyError::Runtime(format!("{FN_NAME}() takes 2 or 3 arguments")));
+        }
+        if args.len() == 3 {
+            let base = match args[0].value.kind() {
+                ValueKind::Int(v) => v,
+                ValueKind::Bool(b) => b as i64,
+                _ => return Err(PyError::named(
+                    "TypeError",
+                    "pow() 3-argument form requires integers".to_string(),
+                )),
+            };
+            let exp = match args[1].value.kind() {
+                ValueKind::Int(v) => v,
+                ValueKind::Bool(b) => b as i64,
+                _ => return Err(PyError::named(
+                    "TypeError",
+                    "pow() 3-argument form requires integers".to_string(),
+                )),
+            };
+            let modulus = match args[2].value.kind() {
+                ValueKind::Int(v) => v,
+                ValueKind::Bool(b) => b as i64,
+                _ => return Err(PyError::named(
+                    "TypeError",
+                    "pow() 3-argument form requires integers".to_string(),
+                )),
+            };
+            if modulus == 0 {
+                return Err(PyError::named(
+                    "ValueError",
+                    "pow() 3rd argument cannot be 0".to_string(),
+                ));
+            }
+            if exp < 0 {
+                return Err(PyError::named(
+                    "ValueError",
+                    "pow() 2nd argument cannot be negative when 3rd argument specified".to_string(),
+                ));
+            }
+            let result = modpow_i64(base, exp as u64, modulus);
+            Ok(Value::int(result))
+        } else {
+            match (args[0].value.kind(), args[1].value.kind()) {
+                (ValueKind::Int(a), ValueKind::Int(b)) if b >= 0 => {
+                    Ok(Value::int(a.wrapping_pow(b as u32)))
+                }
+                (ValueKind::Bool(a), ValueKind::Int(b)) if b >= 0 => {
+                    Ok(Value::int((a as i64).wrapping_pow(b as u32)))
+                }
+                _ => {
+                    let a = value_to_float(&args[0].value, FN_NAME)?;
+                    let b = value_to_float(&args[1].value, FN_NAME)?;
+                    Ok(Value::float(a.powf(b)))
+                }
+            }
+        }
     }
 
     /// CPython: callable(object) — true if the object is callable.

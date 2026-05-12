@@ -366,7 +366,7 @@ impl Interpreter {
         None
     }
 
-    fn eval_binary(&mut self, left: Value, op: BinaryOp, right: Value) -> Result<Value> {
+    pub(crate) fn eval_binary(&mut self, left: Value, op: BinaryOp, right: Value) -> Result<Value> {
         match op {
             BinaryOp::Add => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__add__", "__radd__") {
@@ -977,7 +977,7 @@ fn coerce_numeric(v: Value) -> Value {
     }
 }
 
-fn iter_values(value: Value) -> Result<Vec<Value>> {
+pub(crate) fn iter_values(value: Value) -> Result<Vec<Value>> {
     match value.kind() {
         ValueKind::List(items) => Ok(items.to_vec()),
         ValueKind::Tuple(items) => Ok(items.to_vec()),

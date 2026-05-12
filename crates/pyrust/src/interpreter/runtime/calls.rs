@@ -36,7 +36,7 @@ impl Interpreter {
         self.call_function_expanded(function, &expanded)
     }
 
-    fn call_function_expanded(
+    pub(crate) fn call_function_expanded(
         &mut self,
         function: Value,
         args: &[ExpandedCallArg],
@@ -262,46 +262,6 @@ impl Interpreter {
                 Ok(Value::list(items))
             }
 
-            ValueKind::BuiltinFunction("abs") => {
-                reject_keyword_args_expanded("abs", args)?;
-                if args.len() != 1 {
-                    return Err(PyError::Runtime(
-                        "abs() takes exactly one argument".to_string(),
-                    ));
-                }
-                let val = args[0].value.clone();
-                if let ValueKind::PyInstance(inst) = val.kind() {
-                    let inst_rc = Rc::clone(inst);
-                    let class = Rc::clone(&inst_rc.borrow().class);
-                    if let Some(method_val) = lookup_class_attr(&class, "__abs__")
-                        && let ValueKind::UserFunction(f) = method_val.kind()
-                    {
-                        let func = Rc::clone(f);
-                        return self.call_user_function_expanded(
-                            func,
-                            &[],
-                            &[Value::py_instance(inst_rc)],
-                        );
-                    }
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "bad operand type for abs(): '{}'",
-                            class.borrow().name
-                        ),
-                    ));
-                }
-                match val.kind() {
-                    ValueKind::Int(v) => Ok(Value::int(v.abs())),
-                    ValueKind::Float(v) => Ok(Value::float(v.abs())),
-                    ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
-                    ValueKind::Complex(re, im) => Ok(Value::float((re * re + im * im).sqrt())),
-                    _ => Err(PyError::Runtime(
-                        "abs() argument must be a number".to_string(),
-                    )),
-                }
-            }
-
             ValueKind::BuiltinFunction("min") | ValueKind::BuiltinFunction("max") => {
                 let is_max = matches!(function.kind(), ValueKind::BuiltinFunction("max"));
                 let fname = if is_max { "max" } else { "min" };
@@ -372,22 +332,6 @@ impl Interpreter {
                     if let Some(e) = result_err { return Err(e); }
                     Ok(result)
                 }
-            }
-
-            ValueKind::BuiltinFunction("sum") => {
-                reject_keyword_args_expanded("sum", args)?;
-                if args.is_empty() || args.len() > 2 {
-                    return Err(PyError::Runtime(
-                        "sum() takes 1 or 2 arguments".to_string(),
-                    ));
-                }
-                let items = iter_values(args[0].value.clone())?;
-                let start = if args.len() == 2 { args[1].value.clone() } else { Value::int(0) };
-                let mut acc = start;
-                for item in items {
-                    acc = self.eval_binary(acc, BinaryOp::Add, item)?;
-                }
-                Ok(acc)
             }
 
             ValueKind::BuiltinFunction("list") => {
@@ -1139,70 +1083,6 @@ impl Interpreter {
                 apply_format_spec(&value, &spec)
             }
 
-            ValueKind::BuiltinFunction("repr") => {
-                reject_keyword_args_expanded("repr", args)?;
-                if args.len() != 1 {
-                    return Err(PyError::Runtime(
-                        "repr() takes exactly one argument".to_string(),
-                    ));
-                }
-                let obj = args[0].value.clone();
-                // Check for user-defined __repr__ method on instances.
-                if let ValueKind::PyInstance(instance) = obj.kind() {
-                    let instance_rc = Rc::clone(instance);
-                    let class = Rc::clone(&instance_rc.borrow().class);
-                    if let Some(method_val) = lookup_class_attr(&class, "__repr__")
-                        && let ValueKind::UserFunction(f) = method_val.kind() {
-                            let func = Rc::clone(f);
-                            let result = self.call_user_function_expanded(
-                                func,
-                                &[],
-                                &[Value::py_instance(instance_rc)],
-                            )?;
-                            return match result.kind() {
-                                ValueKind::Str(_) => Ok(result),
-                                _ => Err(PyError::named(
-                                    "TypeError",
-                                    "__repr__ returned non-string".to_string(),
-                                )),
-                            };
-                        }
-                }
-                Ok(Value::string(obj.repr()))
-            }
-
-            ValueKind::BuiltinFunction("any") => {
-                reject_keyword_args_expanded("any", args)?;
-                if args.len() != 1 {
-                    return Err(PyError::Runtime(
-                        "any() takes exactly one argument".to_string(),
-                    ));
-                }
-                let items = iter_values(args[0].value.clone())?;
-                for item in items {
-                    if item.truthy() {
-                        return Ok(Value::bool_(true));
-                    }
-                }
-                Ok(Value::bool_(false))
-            }
-
-            ValueKind::BuiltinFunction("all") => {
-                reject_keyword_args_expanded("all", args)?;
-                if args.len() != 1 {
-                    return Err(PyError::Runtime(
-                        "all() takes exactly one argument".to_string(),
-                    ));
-                }
-                let items = iter_values(args[0].value.clone())?;
-                for item in items {
-                    if !item.truthy() {
-                        return Ok(Value::bool_(false));
-                    }
-                }
-                Ok(Value::bool_(true))
-            }
-
             ValueKind::BuiltinFunction("map") => {
                 reject_keyword_args_expanded("map", args)?;
                 if args.len() != 2 {
@@ -1314,198 +1194,6 @@ impl Interpreter {
                         "classmethod() argument must be a function".to_string(),
                     )),
                 }
-            }
-
-            ValueKind::BuiltinFunction("divmod") => {
-                reject_keyword_args_expanded("divmod", args)?;
-                if args.len() != 2 {
-                    return Err(PyError::Runtime(
-                        "divmod() takes exactly 2 arguments".to_string(),
-                    ));
-                }
-                match (args[0].value.kind(), args[1].value.kind()) {
-                    (ValueKind::Int(a), ValueKind::Int(b)) => {
-                        if b == 0 {
-                            return Err(PyError::named(
-                                "ZeroDivisionError",
-                                "integer division or modulo by zero".to_string(),
-                            ));
-                        }
-                        let modulo = py_mod_i64(a, b);
-                        let quotient = (a - modulo) / b;
-                        Ok(Value::tuple(vec![Value::int(quotient), Value::int(modulo)]))
-                    }
-                    (ValueKind::Bool(a), ValueKind::Bool(b)) => {
-                        let a = a as i64;
-                        let b = b as i64;
-                        if b == 0 {
-                            return Err(PyError::named(
-                                "ZeroDivisionError",
-                                "integer division or modulo by zero".to_string(),
-                            ));
-                        }
-                        let modulo = py_mod_i64(a, b);
-                        let quotient = (a - modulo) / b;
-                        Ok(Value::tuple(vec![Value::int(quotient), Value::int(modulo)]))
-                    }
-                    _ => {
-                        let a = value_to_float(&args[0].value, "divmod")?;
-                        let b = value_to_float(&args[1].value, "divmod")?;
-                        if b == 0.0 {
-                            return Err(PyError::named(
-                                "ZeroDivisionError",
-                                "float divmod()".to_string(),
-                            ));
-                        }
-                        let quotient = (a / b).floor();
-                        let modulo = a - b * quotient;
-                        Ok(Value::tuple(vec![Value::float(quotient), Value::float(modulo)]))
-                    }
-                }
-            }
-
-            ValueKind::BuiltinFunction("pow") => {
-                reject_keyword_args_expanded("pow", args)?;
-                if args.len() < 2 || args.len() > 3 {
-                    return Err(PyError::Runtime(
-                        "pow() takes 2 or 3 arguments".to_string(),
-                    ));
-                }
-                if args.len() == 3 {
-                    // 3-argument pow: integer only
-                    let base = match args[0].value.kind() {
-                        ValueKind::Int(v) => v,
-                        ValueKind::Bool(b) => b as i64,
-                        _ => return Err(PyError::named(
-                            "TypeError",
-                            "pow() 3-argument form requires integers".to_string(),
-                        )),
-                    };
-                    let exp = match args[1].value.kind() {
-                        ValueKind::Int(v) => v,
-                        ValueKind::Bool(b) => b as i64,
-                        _ => return Err(PyError::named(
-                            "TypeError",
-                            "pow() 3-argument form requires integers".to_string(),
-                        )),
-                    };
-                    let modulus = match args[2].value.kind() {
-                        ValueKind::Int(v) => v,
-                        ValueKind::Bool(b) => b as i64,
-                        _ => return Err(PyError::named(
-                            "TypeError",
-                            "pow() 3-argument form requires integers".to_string(),
-                        )),
-                    };
-                    if modulus == 0 {
-                        return Err(PyError::named(
-                            "ValueError",
-                            "pow() 3rd argument cannot be 0".to_string(),
-                        ));
-                    }
-                    if exp < 0 {
-                        return Err(PyError::named(
-                            "ValueError",
-                            "pow() 2nd argument cannot be negative when 3rd argument specified".to_string(),
-                        ));
-                    }
-                    // Use modular exponentiation
-                    let result = modpow_i64(base, exp as u64, modulus);
-                    Ok(Value::int(result))
-                } else {
-                    // 2-argument pow
-                    match (args[0].value.kind(), args[1].value.kind()) {
-                        (ValueKind::Int(a), ValueKind::Int(b)) if b >= 0 => {
-                            Ok(Value::int(a.wrapping_pow(b as u32)))
-                        }
-                        (ValueKind::Bool(a), ValueKind::Int(b)) if b >= 0 => {
-                            Ok(Value::int((a as i64).wrapping_pow(b as u32)))
-                        }
-                        _ => {
-                            let a = value_to_float(&args[0].value, "pow")?;
-                            let b = value_to_float(&args[1].value, "pow")?;
-                            Ok(Value::float(a.powf(b)))
-                        }
-                    }
-                }
-            }
-
-            ValueKind::BuiltinFunction("hash") => {
-                reject_keyword_args_expanded("hash", args)?;
-                if args.len() != 1 {
-                    return Err(PyError::Runtime(
-                        "hash() takes exactly one argument".to_string(),
-                    ));
-                }
-                let hash_val = match args[0].value.kind() {
-                    ValueKind::Int(v) => v,
-                    ValueKind::Bool(b) => b as i64,
-                    ValueKind::Float(v) => {
-                        // CPython: if float == int, hash equals int hash
-                        if v.fract() == 0.0 && v.is_finite() {
-                            v as i64
-                        } else {
-                            // Simple bit-cast hash for non-integer floats
-                            v.to_bits() as i64
-                        }
-                    }
-                    ValueKind::Str(s) => {
-                        // FNV-1a hash
-                        let mut h: u64 = 14695981039346656037u64;
-                        for b in s.bytes() {
-                            h ^= b as u64;
-                            h = h.wrapping_mul(1099511628211u64);
-                        }
-                        h as i64
-                    }
-                    ValueKind::None => 0,
-                    ValueKind::Tuple(items) => {
-                        // Simple tuple hash: combine element hashes
-                        let mut h: i64 = 3527539;
-                        for item in items {
-                            let item_hash = match item.kind() {
-                                ValueKind::Int(v) => v,
-                                ValueKind::Bool(b) => b as i64,
-                                ValueKind::Float(fv) => {
-                                    if fv.fract() == 0.0 && fv.is_finite() { fv as i64 }
-                                    else { fv.to_bits() as i64 }
-                                }
-                                ValueKind::Str(s) => {
-                                    let mut sh: u64 = 14695981039346656037u64;
-                                    for byte in s.bytes() {
-                                        sh ^= byte as u64;
-                                        sh = sh.wrapping_mul(1099511628211u64);
-                                    }
-                                    sh as i64
-                                }
-                                ValueKind::None => 0,
-                                _ => return Err(PyError::named(
-                                    "TypeError",
-                                    "unhashable type in tuple".to_string(),
-                                )),
-                            };
-                            h = h.wrapping_mul(1000003).wrapping_add(item_hash);
-                        }
-                        h
-                    }
-                    ValueKind::List(_) => return Err(PyError::named(
-                        "TypeError",
-                        "unhashable type: 'list'".to_string(),
-                    )),
-                    ValueKind::Dict(_) => return Err(PyError::named(
-                        "TypeError",
-                        "unhashable type: 'dict'".to_string(),
-                    )),
-                    ValueKind::Set(_) => return Err(PyError::named(
-                        "TypeError",
-                        "unhashable type: 'set'".to_string(),
-                    )),
-                    _ => return Err(PyError::named(
-                        "TypeError",
-                        "unhashable type".to_string(),
-                    )),
-                };
-                Ok(Value::int(hash_val))
             }
 
             ValueKind::BuiltinFunction("issubclass") => {
@@ -2095,7 +1783,7 @@ impl Interpreter {
         self.call_user_function_expanded(function, &expanded, bound_prefix)
     }
 
-    fn call_user_function_expanded(
+    pub(crate) fn call_user_function_expanded(
         &mut self,
         function: Rc<UserFunction>,
         args: &[ExpandedCallArg],
