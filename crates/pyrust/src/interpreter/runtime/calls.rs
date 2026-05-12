@@ -2045,6 +2045,12 @@ impl Interpreter {
                         )));
                     };
                     if function.params[param_index].is_positional_only {
+                        // The fast path only runs when the function has neither
+                        // *args nor **kwargs (see the `if !has_args_param &&
+                        // !has_kwargs_param` guard above), so there is no
+                        // **kwargs to absorb this name — TypeError is correct.
+                        // The variadic path (`compute_kw_pos` below) handles
+                        // the "absorb into **kwargs" case separately.
                         return Err(PyError::Named(
                             "TypeError".to_string(),
                             format!(
@@ -2303,6 +2309,22 @@ impl Interpreter {
         if !has_kwargs {
             for (name, _) in &keyword_vals {
                 if !consumed_keywords.contains(name) {
+                    // Distinguish "this name matches a positional-only param"
+                    // from "this name is completely unknown" — CPython raises
+                    // a more specific TypeError in the former case.
+                    if function
+                        .params
+                        .iter()
+                        .any(|p| p.is_positional_only && &p.name == name)
+                    {
+                        return Err(PyError::Named(
+                            "TypeError".to_string(),
+                            format!(
+                                "{}() got some positional-only arguments passed as keyword arguments: '{}'",
+                                function.name, name
+                            ),
+                        ));
+                    }
                     return Err(PyError::Runtime(format!(
                         "{}() got unexpected keyword argument '{}'",
                         function.name, name
