@@ -180,6 +180,7 @@ dependencies = [
  "pyrust-builtins",
  "pyrust-core",
  "rustyline",
+ "smallvec",
 ]
 
 [[package]]
