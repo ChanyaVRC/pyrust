@@ -764,8 +764,10 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
 
         // Range-based: func + args live in consecutive registers.
         Call(base, argc) | CallMemo(base, argc) => r >= *base && r <= *base + *argc as u32,
+        // args_base is always >= 1 (compiler sets it to func_reg + 1, func_reg >= 0),
+        // so args_base - 1 is the callee register and the subtraction never underflows.
         TailCall { args_base, nargs } => {
-            r == args_base.wrapping_sub(1) || (r >= *args_base && r < *args_base + *nargs as u32)
+            r == *args_base - 1 || (r >= *args_base && r < *args_base + *nargs as u32)
         }
         BuildList(_, base, n) | BuildTuple(_, base, n) => r >= *base && r < *base + *n as u32,
         // BuildDict stores n key-value PAIRS — each pair occupies 2 registers,
@@ -2134,8 +2136,8 @@ pub(crate) fn rewrite_offsets(insn: Insn, old_i: usize, to_new: &[usize]) -> Ins
 /// ```
 ///
 /// The args to the call are in `R[r+1 .. r+1+n]` (per the `Call` convention);
-/// `TailCall` stores only `args_base` and `nargs` — the function register `r`
-/// itself is not needed because the VM already knows the current function.
+/// `TailCall` stores only `args_base` and `nargs`. The VM recovers the callee
+/// register as `args_base - 1` at runtime and reads it from the register file.
 ///
 /// ## Guards
 ///

@@ -25,4 +25,13 @@ assert is_even(50) == True
 assert is_odd(51) == True
 
 
+# Deeper recursion — verifies DSE stays correct at larger call depths.
+def count_down_deep(n):
+    if n <= 0:
+        return 0
+    return count_down_deep(n - 1)
+
+assert count_down_deep(500) == 0
+
+
 print("tailcall dse OK")
