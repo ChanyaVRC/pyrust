@@ -418,6 +418,10 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
         let val = text
             .parse::<f64>()
             .map_err(|_| PyError::Lex(format!("invalid float '{text}'")))?;
+        // Imaginary suffix: 3.14j
+        if matches!(chars.get(pos), Some(&'j') | Some(&'J')) {
+            return Ok((Token::Imag(val), pos + 1));
+        }
         Ok((Token::Float(val), pos))
     } else {
         // Optional exponent on integer-looking floats like 1e5
@@ -435,8 +439,19 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
                 let val = text
                     .parse::<f64>()
                     .map_err(|_| PyError::Lex(format!("invalid float '{text}'")))?;
+                if matches!(chars.get(pos), Some(&'j') | Some(&'J')) {
+                    return Ok((Token::Imag(val), pos + 1));
+                }
                 return Ok((Token::Float(val), pos));
             }
+        }
+        // Imaginary suffix on bare int: 5j
+        if matches!(chars.get(pos), Some(&'j') | Some(&'J')) {
+            let text: String = chars[start..pos].iter().filter(|&&c| c != '_').collect();
+            let val = text
+                .parse::<f64>()
+                .map_err(|_| PyError::Lex(format!("invalid imaginary literal '{text}j'")))?;
+            return Ok((Token::Imag(val), pos + 1));
         }
         let text: String = chars[start..pos].iter().filter(|&&c| c != '_').collect();
         let val = text

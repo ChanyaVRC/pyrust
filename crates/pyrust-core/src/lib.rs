@@ -305,6 +305,8 @@ pub enum Opaque {
     /// An immutable byte string.  Constructed via the `b"..."` literal or
     /// the `bytes(...)` builtin.  Stored behind `Rc` for cheap clones.
     Bytes(Rc<Vec<u8>>),
+    /// A Python `complex` number stored as (real, imag).
+    Complex(f64, f64),
 }
 
 impl Clone for Opaque {
@@ -378,6 +380,7 @@ impl Clone for Opaque {
             },
             Opaque::FrozenSet(rc) => Opaque::FrozenSet(Rc::clone(rc)),
             Opaque::Bytes(rc) => Opaque::Bytes(Rc::clone(rc)),
+            Opaque::Complex(re, im) => Opaque::Complex(*re, *im),
         }
     }
 }
@@ -457,6 +460,7 @@ pub enum ValueKind<'a> {
     },
     FrozenSet(&'a Rc<IndexSet<PyKey>>),
     Bytes(&'a Rc<Vec<u8>>),
+    Complex(f64, f64),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -761,6 +765,10 @@ impl Value {
 
     pub fn bytes(b: Vec<u8>) -> Self {
         Value::opaque(Opaque::Bytes(Rc::new(b)))
+    }
+
+    pub fn complex(re: f64, im: f64) -> Self {
+        Value::opaque(Opaque::Complex(re, im))
     }
 
     pub fn range(start: i64, stop: i64, step: i64) -> Self {
@@ -1159,6 +1167,7 @@ impl Value {
                 }
                 Opaque::FrozenSet(rc) => ValueKind::FrozenSet(rc),
                 Opaque::Bytes(rc) => ValueKind::Bytes(rc),
+                Opaque::Complex(re, im) => ValueKind::Complex(*re, *im),
             },
             _ => unreachable!(),
         }
@@ -1203,6 +1212,7 @@ impl Value {
             ValueKind::BuiltinBoundMethod { .. } => true,
             ValueKind::FrozenSet(s) => !s.is_empty(),
             ValueKind::Bytes(b) => !b.is_empty(),
+            ValueKind::Complex(re, im) => re != 0.0 || im != 0.0,
         }
     }
 
@@ -1346,6 +1356,7 @@ impl Value {
                 )
             }
             ValueKind::Bytes(rc) => bytes_repr(rc),
+            ValueKind::Complex(re, im) => complex_repr(re, im),
         }
     }
 
@@ -1498,6 +1509,11 @@ impl PartialEq for Value {
             (ValueKind::Set(a), ValueKind::FrozenSet(b)) => *a == *b.as_ref(),
             (ValueKind::FrozenSet(a), ValueKind::Set(b)) => *a.as_ref() == *b,
             (ValueKind::Bytes(a), ValueKind::Bytes(b)) => a.as_ref() == b.as_ref(),
+            (ValueKind::Complex(ar, ai), ValueKind::Complex(br, bi)) => ar == br && ai == bi,
+            (ValueKind::Int(n), ValueKind::Complex(br, bi)) => (n as f64) == br && bi == 0.0,
+            (ValueKind::Complex(ar, ai), ValueKind::Int(n)) => ar == (n as f64) && ai == 0.0,
+            (ValueKind::Float(f), ValueKind::Complex(br, bi)) => f == br && bi == 0.0,
+            (ValueKind::Complex(ar, ai), ValueKind::Float(f)) => ar == f && ai == 0.0,
             (
                 ValueKind::Range {
                     start: as_,
@@ -1559,6 +1575,7 @@ pub fn builtin_type_name(value: &Value) -> &'static str {
         ValueKind::Set(_) => "set",
         ValueKind::FrozenSet(_) => "frozenset",
         ValueKind::Bytes(_) => "bytes",
+        ValueKind::Complex(_, _) => "complex",
         ValueKind::Int(_) | ValueKind::BigInt(_) => "int",
         ValueKind::Float(_) => "float",
         ValueKind::Bool(_) => "bool",
@@ -1590,6 +1607,55 @@ fn bytes_repr(bytes: &[u8]) -> String {
     }
     out.push(q);
     out
+}
+
+/// Format a single complex component the way CPython's repr does:
+///   - integer-valued floats with |v| < 1e16 → `"3"` (no `.0`)
+///   - |v| >= 1e16 → scientific notation `"1e+20"` (Python style)
+///   - NaN / inf via `format_float`
+///   - everything else → standard float repr
+///
+/// Python uses scientific notation for absolute values >= 1e16 (where i64
+/// rounding would lose precision) and for very small non-zero values; we
+/// mirror that boundary.
+fn complex_component(v: f64) -> String {
+    if !v.is_finite() {
+        return format_float(v);
+    }
+    let abs = v.abs();
+    if v == v.trunc() && abs < 1e16 {
+        return format!("{}", v as i64);
+    }
+    if abs >= 1e16 || (abs != 0.0 && abs < 1e-4) {
+        // Rust's `{:e}` produces "1e20"; CPython prints "1e+20". Patch the sign.
+        let raw = format!("{v:e}");
+        if let Some(idx) = raw.find('e') {
+            let (mantissa, exp) = raw.split_at(idx);
+            let exp = &exp[1..]; // skip 'e'
+            if let Some(stripped) = exp.strip_prefix('-') {
+                return format!("{mantissa}e-{stripped:0>2}");
+            }
+            return format!("{mantissa}e+{exp:0>2}");
+        }
+        return raw;
+    }
+    format_float(v)
+}
+
+/// Format a complex number the way Python does:
+///   `1j`, `(2+3j)`, `(2-3j)`, `(-1+0j)`, etc.
+fn complex_repr(re: f64, im: f64) -> String {
+    let im_str = complex_component(im);
+    if re == 0.0 && (1.0_f64).copysign(re) > 0.0 {
+        return format!("{im_str}j");
+    }
+    let re_str = complex_component(re);
+    let sep = if im < 0.0 || (im == 0.0 && im.is_sign_negative()) {
+        ""
+    } else {
+        "+"
+    };
+    format!("({re_str}{sep}{im_str}j)")
 }
 
 fn key_repr(key: &PyKey) -> String {

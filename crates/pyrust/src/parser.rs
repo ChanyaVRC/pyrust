@@ -1649,6 +1649,10 @@ impl Parser {
                 self.bump();
                 Ok(Expr::Float(v))
             }
+            Some(Token::Imag(v)) => {
+                self.bump();
+                Ok(Expr::Complex(0.0, v))
+            }
             Some(Token::Str(v)) => {
                 self.bump();
                 // Adjacent string literal concatenation

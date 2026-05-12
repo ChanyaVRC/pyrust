@@ -181,6 +181,8 @@ pub enum FStringPart {
 pub enum Expr {
     Int(i64),
     Float(f64),
+    /// Complex literal: (real, imag) — produced from imaginary `Nj` tokens.
+    Complex(f64, f64),
     Str(String),
     Bytes(Vec<u8>),
     Bool(bool),

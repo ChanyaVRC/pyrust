@@ -218,6 +218,15 @@ impl Interpreter {
                 }
             }
             _ => {
+                // Complex .real / .imag attribute access.
+                if let ValueKind::Complex(re, im) = target.kind() {
+                    match name {
+                        "real" => return Ok(Value::float(re)),
+                        "imag" => return Ok(Value::float(im)),
+                        "conjugate" => return Ok(Value::builtin_bound_method(name, target.clone())),
+                        _ => {}
+                    }
+                }
                 // Built-in type instance method lookup: list.append, str.upper, etc.
                 if builtin_has_method(&target, name) {
                     return Ok(Value::builtin_bound_method(name, target.clone()));

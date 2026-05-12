@@ -1030,6 +1030,7 @@ const PURE_BUILTINS: &[&str] = &[
 fn is_pure_expr(expr: &Expr, pure_fns: &std::collections::HashSet<String>) -> bool {
     match expr {
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bytes(_) | Expr::Bool(_) | Expr::None => true,
+        Expr::Int(_) | Expr::Float(_) | Expr::Complex(_, _) | Expr::Str(_) | Expr::Bool(_) | Expr::None => true,
         Expr::Var(_) => true,
         Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
             items.iter().all(|e| is_pure_expr(e, pure_fns))
