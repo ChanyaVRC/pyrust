@@ -61,3 +61,39 @@ while True:
         break
     i += 1
 print("while-true-search", found)
+
+# while True with else — else is unreachable (break skips it, condition never goes false)
+trace = []
+n = 0
+while True:
+    trace.append(n)
+    n += 1
+    if n == 3:
+        break
+else:
+    trace.append("dead-else")
+print("while-true-else-skip", trace)
+
+# while 1 with else — same: else dead even though break is taken
+seen = []
+k = 0
+while 1:
+    seen.append(k)
+    k += 1
+    if k == 2:
+        break
+else:
+    seen.append("never")
+print("while-one-else-skip", seen)
+
+# while True else with no break in sight: else still must never run (sanity guard)
+# Using a function so the infinite loop is contained by an explicit early-return break.
+def _inf_with_else():
+    out = []
+    while True:
+        out.append("body")
+        break
+    else:
+        out.append("else-bad")
+    return out
+print("while-true-fn-else", _inf_with_else())
