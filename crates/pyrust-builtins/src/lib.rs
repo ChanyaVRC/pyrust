@@ -5,6 +5,7 @@ pub mod frozenset;
 pub mod iter_helpers;
 pub mod list;
 pub mod mutable_sequence;
+pub mod property;
 pub mod sequence;
 pub mod set;
 pub mod string;
@@ -23,6 +24,7 @@ pub fn lookup_ops(type_name: &str) -> Option<&'static dyn pyrust_core::BuiltinTy
         dict_views::DICT_KEYS_TYPE_NAME => Some(dict_views::DICT_KEYS_OPS),
         dict_views::DICT_VALUES_TYPE_NAME => Some(dict_views::DICT_VALUES_OPS),
         dict_views::DICT_ITEMS_TYPE_NAME => Some(dict_views::DICT_ITEMS_OPS),
+        property::TYPE_NAME => Some(property::PROPERTY_OPS),
         _ => None,
     }
 }

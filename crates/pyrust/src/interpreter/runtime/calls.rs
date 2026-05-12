@@ -921,8 +921,6 @@ impl Interpreter {
                     ValueKind::BigInt(_) => Ok(Value::builtin_function("int")),
                     ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => Ok(Value::builtin_function("super")),
                     ValueKind::Generator(_) => Ok(Value::builtin_function("generator")),
-                    ValueKind::Property { .. }
-                    | ValueKind::PropertyAccessorPartial { .. } => Ok(Value::builtin_function("property")),
                     ValueKind::NotImplemented => Ok(Value::builtin_function("NotImplementedType")),
                     ValueKind::BuiltinBoundMethod { .. } => Ok(Value::builtin_function("builtin_function_or_method")),
                     ValueKind::Bytes(_) => Ok(Value::builtin_function("bytes")),
@@ -1400,8 +1398,15 @@ impl Interpreter {
                     | ValueKind::BuiltinFunction(_)
                     | ValueKind::BoundMethod { .. }
                     | ValueKind::ClassBoundMethod { .. }
-                    | ValueKind::PyClass(_)
-                    | ValueKind::PropertyAccessorPartial { .. } => true,
+                    | ValueKind::PyClass(_) => true,
+                    // PropertyAccessorPartial counts as callable (it builds a
+                    // new property when called).
+                    ValueKind::BuiltinObject { ops, state }
+                        if ops.type_name() == pyrust_builtins::property::TYPE_NAME =>
+                    {
+                        let _ = state;
+                        true
+                    }
                     ValueKind::PyInstance(inst) => {
                         let class = Rc::clone(&inst.borrow().class);
                         lookup_class_attr(&class, "__call__").is_some()
@@ -1896,7 +1901,11 @@ impl Interpreter {
 
             // Calling prop.setter(fn), prop.deleter(fn), or prop.getter(fn).
             // Returns a new Property with the respective slot replaced.
-            ValueKind::PropertyAccessorPartial { slot, fget, fset, fdel } => {
+            _ if pyrust_builtins::property::as_property(&function).is_some_and(|p| p.3.is_some()) =>
+            {
+                let (fget, fset, fdel, partial_slot) =
+                    pyrust_builtins::property::as_property(&function).unwrap();
+                let slot = partial_slot.unwrap();
                 reject_keyword_args_expanded("property accessor", args)?;
                 if args.len() != 1 {
                     return Err(PyError::Runtime(
@@ -1905,12 +1914,14 @@ impl Interpreter {
                 }
                 let new_fn = args[0].value.clone();
                 let (fget_val, fset_val, fdel_val) = match slot {
-                    0 => (new_fn,           (**fset).clone(), (**fdel).clone()),
-                    1 => ((**fget).clone(), new_fn,           (**fdel).clone()),
-                    2 => ((**fget).clone(), (**fset).clone(), new_fn          ),
+                    0 => (new_fn, (*fset).clone(), (*fdel).clone()),
+                    1 => ((*fget).clone(), new_fn, (*fdel).clone()),
+                    2 => ((*fget).clone(), (*fset).clone(), new_fn),
                     _ => unreachable!(),
                 };
-                Ok(Value::property(fget_val, fset_val, fdel_val))
+                Ok(pyrust_builtins::property::property(
+                    fget_val, fset_val, fdel_val,
+                ))
             }
 
             // property(fget=None, fset=None, fdel=None, doc=None)
@@ -1943,7 +1954,7 @@ impl Interpreter {
                         _ => {} // doc: ignore
                     }
                 }
-                Ok(Value::property(fget, fset, fdel))
+                Ok(pyrust_builtins::property::property(fget, fset, fdel))
             }
 
             // `super(cls, instance)` — two-argument form only.
