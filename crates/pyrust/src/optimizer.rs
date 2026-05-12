@@ -106,7 +106,9 @@ fn pass_thread_jumps(insns: Vec<Insn>) -> Vec<Insn> {
                 ForIter(dst, slot, k) => ForIter(dst, slot, thread(k)),
                 ForCountReg(v, op, stop, step, k) => ForCountReg(v, op, stop, step, thread(k)),
                 ForCountConst(v, op, stop, step, k) => ForCountConst(v, op, stop, step, thread(k)),
-                ForCountConstInline(v, op, stop, step, k) => ForCountConstInline(v, op, stop, step, thread(k)),
+                ForCountConstInline(v, op, stop, step, k) => {
+                    ForCountConstInline(v, op, stop, step, thread(k))
+                }
                 SetupExcept(k) => SetupExcept(thread(k)),
                 MatchExcept(r, k) => MatchExcept(r, thread(k)),
                 other => other,
@@ -725,9 +727,22 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
     use Insn::*;
     match insn {
         // No register sources.
-        LoadConst(..) | LoadGlobal(..) | LoadNone(..) | LoadExc(..) | ImportModule(..)
-        | DeleteName(..) | DeleteLocal(..) | Jump(..) | SetupExcept(..) | PopExcept | EndExcept
-        | ReturnNone | RaiseReRaise | ForIter(..) | ForCountConst(..) | ForCountConstInline(..) => false,
+        LoadConst(..)
+        | LoadGlobal(..)
+        | LoadNone(..)
+        | LoadExc(..)
+        | ImportModule(..)
+        | DeleteName(..)
+        | DeleteLocal(..)
+        | Jump(..)
+        | SetupExcept(..)
+        | PopExcept
+        | EndExcept
+        | ReturnNone
+        | RaiseReRaise
+        | ForIter(..)
+        | ForCountConst(..)
+        | ForCountConstInline(..) => false,
 
         // One source register.
         StoreGlobal(_, s)
@@ -1147,7 +1162,9 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         ForIter(dst, _, _) => {
             written.insert(*dst);
         }
-        ForCountReg(var, _, _, _, _) | ForCountConst(var, _, _, _, _) | ForCountConstInline(var, _, _, _, _) => {
+        ForCountReg(var, _, _, _, _)
+        | ForCountConst(var, _, _, _, _)
+        | ForCountConstInline(var, _, _, _, _) => {
             written.insert(*var);
         }
         Unpack(base, _, n) => {
