@@ -442,10 +442,10 @@ result = fib(35)
     #[test]
     fn int_float_str_bool_conversions() {
         let interpreter = run_program(
-            "a = int('42')\nb = float('3.14')\nc = str(100)\nd = bool(0)\ne = bool(1)\n",
+            "a = int('42')\nb = float('2.5')\nc = str(100)\nd = bool(0)\ne = bool(1)\n",
         );
         assert_eq!(interpreter.lookup_name("a").unwrap(), Some(Value::int(42)));
-        assert_eq!(interpreter.lookup_name("b").unwrap(), Some(Value::float(3.14)));
+        assert_eq!(interpreter.lookup_name("b").unwrap(), Some(Value::float(2.5)));
         assert_eq!(interpreter.lookup_name("c").unwrap(), Some(Value::string("100")));
         assert_eq!(interpreter.lookup_name("d").unwrap(), Some(Value::bool_(false)));
         assert_eq!(interpreter.lookup_name("e").unwrap(), Some(Value::bool_(true)));
