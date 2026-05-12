@@ -1,4 +1,16 @@
-# Parity tests for repr, any, all, map, filter, callable
+# Parity tests for repr, ascii, any, all, map, filter, callable
+
+# ── ascii ────────────────────────────────────────────────────────────────────
+# ascii() should match str.format("{!a}") / f"{x!a}" — see issue #270.
+print("ascii-ascii-str", ascii("hello"))
+print("ascii-latin1", ascii("café"))
+print("ascii-bmp", ascii("héllo→"))
+print("ascii-astral", ascii(chr(0x1F600)))
+print("ascii-int", ascii(42))
+print("ascii-list-mixed", ascii(["a", "é"]))
+# ascii() and f"{x!a}" should produce identical output by construction.
+s = "café→" + chr(0x1F600)
+print("ascii-parity-fstring", ascii(s) == f"{s!a}")
 
 # ── repr ─────────────────────────────────────────────────────────────────────
 print("repr-int", repr(42))
