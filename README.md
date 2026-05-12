@@ -25,6 +25,25 @@ cargo run
 cargo run -- examples/demo.py
 ```
 
+## Using with uv
+
+PyRust is also packaged as a Python distribution via [maturin](https://www.maturin.rs/), so it can be installed and run through [uv](https://docs.astral.sh/uv/).
+
+```bash
+# Inside the repo: build and run from the project venv
+uv sync
+uv run pyrust examples/demo.py
+
+# Or one-shot via uvx (no persistent install)
+uvx --from . pyrust examples/demo.py
+
+# Once published to PyPI
+uvx pyrust examples/demo.py
+uv tool install pyrust
+```
+
+Note: `uv run pyrust file.py` invokes the PyRust binary. There is no way to make `uv run file.py` use PyRust instead of CPython — uv always dispatches `.py` scripts to the resolved Python interpreter.
+
 ## Example
 
 ```python
