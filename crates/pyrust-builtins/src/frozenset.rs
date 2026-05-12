@@ -70,8 +70,8 @@ impl BuiltinTypeOps for FrozenSetOps {
             .ok_or_else(|| PyError::Runtime("internal: bad frozenset state".to_string()))?;
         match item.to_key() {
             Some(k) => Ok(items.contains(&k)),
-            None => Err(PyError::Named(
-                "TypeError".to_string(),
+            None => Err(PyError::named(
+                "TypeError",
                 format!("unhashable type: '{}'", builtin_type_name(item)),
             )),
         }

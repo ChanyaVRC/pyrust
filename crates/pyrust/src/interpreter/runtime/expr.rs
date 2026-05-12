@@ -1,6 +1,6 @@
 impl Interpreter {
     fn unsupported_binary_operand(op: &str) -> PyError {
-        PyError::Named("TypeError".to_string(), format!("unsupported operand type(s) for {op}"))
+        PyError::named("TypeError", format!("unsupported operand type(s) for {op}"))
     }
 
     fn eval_expr(&mut self, expr: &Expr) -> Result<Value> {
@@ -50,7 +50,7 @@ impl Interpreter {
                             ValueKind::Int(v) => Ok(Value::int(-v)),
                             ValueKind::Float(v) => Ok(Value::float(-v)),
                             ValueKind::Complex(re, im) => Ok(Value::complex(-re, -im)),
-                            _ => Err(PyError::Named("TypeError".to_string(), "bad operand type for unary -".to_string())),
+                            _ => Err(PyError::named("TypeError", "bad operand type for unary -".to_string())),
                         }
                     }
                     UnaryOp::Not => Ok(Value::bool_(!self.truthy_value(&value)?)),
@@ -61,7 +61,7 @@ impl Interpreter {
                         match value.kind() {
                             ValueKind::Int(v) => Ok(Value::int(!v)),
                             ValueKind::Bool(b) => Ok(Value::int(if b { -2 } else { -1 })),
-                            _ => Err(PyError::Named("TypeError".to_string(), "bad operand type for unary ~: use integer".to_string())),
+                            _ => Err(PyError::named("TypeError", "bad operand type for unary ~: use integer".to_string())),
                         }
                     }
                     UnaryOp::Pos => {
@@ -72,7 +72,7 @@ impl Interpreter {
                             ValueKind::Int(v) => Ok(Value::int(v)),
                             ValueKind::Float(v) => Ok(Value::float(v)),
                             ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
-                            _ => Err(PyError::Named("TypeError".to_string(), "bad operand type for unary +".to_string())),
+                            _ => Err(PyError::named("TypeError", "bad operand type for unary +".to_string())),
                         }
                     }
                 }
@@ -300,8 +300,8 @@ impl Interpreter {
                             &[Value::py_instance(inst_rc)],
                         );
                     }
-                Err(PyError::Named(
-                    "TypeError".to_string(),
+                Err(PyError::named(
+                    "TypeError",
                     format!(
                         "'{}' object is not subscriptable",
                         class.borrow().name
@@ -496,7 +496,7 @@ impl Interpreter {
                     return r;
                 }
                 self.bitwise_op(&left, &right, |a, b| {
-                    if b < 0 { return Err(PyError::Named("ValueError".to_string(), "negative shift count".to_string())); }
+                    if b < 0 { return Err(PyError::named("ValueError", "negative shift count".to_string())); }
                     Ok(a << (b & 63))
                 })
             }
@@ -505,7 +505,7 @@ impl Interpreter {
                     return r;
                 }
                 self.bitwise_op(&left, &right, |a, b| {
-                    if b < 0 { return Err(PyError::Named("ValueError".to_string(), "negative shift count".to_string())); }
+                    if b < 0 { return Err(PyError::named("ValueError", "negative shift count".to_string())); }
                     Ok(a >> (b & 63))
                 })
             }
@@ -676,8 +676,8 @@ impl Interpreter {
             // (ar+ai*j) / (br+bi*j) = ((ar*br + ai*bi) + (ai*br - ar*bi)j) / (br^2 + bi^2)
             let denom = b.0 * b.0 + b.1 * b.1;
             if denom == 0.0 {
-                return Err(PyError::Named(
-                    "ZeroDivisionError".to_string(),
+                return Err(PyError::named(
+                    "ZeroDivisionError",
                     "complex division by zero".to_string(),
                 ));
             }
@@ -752,7 +752,7 @@ impl Interpreter {
             ValueKind::Int(v) => Ok(v as f64),
             ValueKind::Float(v) => Ok(v),
             ValueKind::Bool(b) => Ok(if b { 1.0 } else { 0.0 }),
-            _ => Err(PyError::Named("TypeError".to_string(), "expected number".to_string())),
+            _ => Err(PyError::named("TypeError", "expected number".to_string())),
         }
     }
 
@@ -783,12 +783,12 @@ impl Interpreter {
         let a = match left.kind() {
             ValueKind::Int(v) => v,
             ValueKind::Bool(b) => if b { 1 } else { 0 },
-            _ => return Err(PyError::Named("TypeError".to_string(), "bitwise op requires integer".to_string())),
+            _ => return Err(PyError::named("TypeError", "bitwise op requires integer".to_string())),
         };
         let b = match right.kind() {
             ValueKind::Int(v) => v,
             ValueKind::Bool(b) => if b { 1 } else { 0 },
-            _ => return Err(PyError::Named("TypeError".to_string(), "bitwise op requires integer".to_string())),
+            _ => return Err(PyError::named("TypeError", "bitwise op requires integer".to_string())),
         };
         Ok(Value::int(op(a, b)?))
     }
@@ -889,8 +889,8 @@ impl Interpreter {
                     ValueKind::Bytes(sub) => Ok(Value::bool_(
                         sub.is_empty() || rc.windows(sub.len()).any(|w| w == sub.as_ref().as_slice())
                     )),
-                    _ => Err(PyError::Named(
-                        "TypeError".to_string(),
+                    _ => Err(PyError::named(
+                        "TypeError",
                         "a bytes-like object is required as left operand of 'in <bytes>'".to_string(),
                     )),
                 }
@@ -928,8 +928,8 @@ impl Interpreter {
                         let result = self.call_user_function_expanded(func, &[], &[self_val, item])?;
                         return Ok(Value::bool_(result.truthy()));
                     } else {
-                        return Err(PyError::Named(
-                            "TypeError".to_string(),
+                        return Err(PyError::named(
+                            "TypeError",
                             format!("argument of type '{}' is not iterable", class.borrow().name),
                         ));
                     }
@@ -955,8 +955,8 @@ impl Interpreter {
                         }
                     }
                 }
-                Err(PyError::Named(
-                    "TypeError".to_string(),
+                Err(PyError::named(
+                    "TypeError",
                     format!("argument of type '{}' is not iterable", class.borrow().name),
                 ))
             }
@@ -998,8 +998,8 @@ fn iter_values(value: Value) -> Result<Vec<Value>> {
                 // catch it (the only way to reach this is a misregistered
                 // ops table, which is a type-mismatch error).
                 let rc = pyrust_builtins::dict_views::as_dict_rc(&value).ok_or_else(|| {
-                    PyError::Named(
-                        "TypeError".to_string(),
+                    PyError::named(
+                        "TypeError",
                         "dict-view state type mismatch".to_string(),
                     )
                 })?;
@@ -1018,8 +1018,8 @@ fn iter_values(value: Value) -> Result<Vec<Value>> {
                 unreachable!();
             };
             if !ops.is_iterable() {
-                return Err(PyError::Named(
-                    "TypeError".to_string(),
+                return Err(PyError::named(
+                    "TypeError",
                     format!("'{}' object is not iterable", ops.type_name()),
                 ));
             }
@@ -1056,14 +1056,14 @@ fn iter_values(value: Value) -> Result<Vec<Value>> {
                 native.pos = native.items.len();
                 Ok(remaining)
             } else {
-                Err(PyError::Named(
-                    "TypeError".to_string(),
+                Err(PyError::named(
+                    "TypeError",
                     "object is not iterable".to_string(),
                 ))
             }
         }
-        _ => Err(PyError::Named(
-            "TypeError".to_string(),
+        _ => Err(PyError::named(
+            "TypeError",
             format!("'{}' object is not iterable", value_type_name_str(&value)),
         )),
     }

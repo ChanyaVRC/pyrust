@@ -78,8 +78,8 @@ impl BuiltinTypeOps for FileOps {
 pub fn open(path: &str, mode: &str) -> Result<Value> {
     for c in mode.chars() {
         if !matches!(c, 'r' | 'w' | 'a' | 'b' | 't' | '+') {
-            return Err(PyError::Named(
-                "ValueError".to_string(),
+            return Err(PyError::named(
+                "ValueError",
                 format!("invalid mode: '{mode}'"),
             ));
         }
@@ -92,12 +92,12 @@ pub fn open(path: &str, mode: &str) -> Result<Value> {
     if is_read {
         content = std::fs::read_to_string(path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                PyError::Named(
-                    "FileNotFoundError".to_string(),
+                PyError::named(
+                    "FileNotFoundError",
                     format!("[Errno 2] No such file or directory: '{path}'"),
                 )
             } else {
-                PyError::Named("OSError".to_string(), e.to_string())
+                PyError::named("OSError", e.to_string())
             }
         })?;
     }
@@ -127,7 +127,7 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
             let line = read_line_or_none(state)?;
             match line {
                 Some(s) => Ok(Value::string(s)),
-                None => Err(PyError::Named("StopIteration".to_string(), String::new())),
+                None => Err(PyError::named("StopIteration", String::new())),
             }
         }
         "close" => {
@@ -144,14 +144,14 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
                 .downcast_mut::<FileState>()
                 .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
             if s.closed {
-                return Err(PyError::Named(
-                    "ValueError".to_string(),
+                return Err(PyError::named(
+                    "ValueError",
                     "I/O operation on closed file".to_string(),
                 ));
             }
             if !s.is_readable() {
-                return Err(PyError::Named(
-                    "io.UnsupportedOperation".to_string(),
+                return Err(PyError::named(
+                    "io.UnsupportedOperation",
                     "not readable".to_string(),
                 ));
             }
@@ -203,10 +203,7 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
                 .first()
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .ok_or_else(|| {
-                    PyError::Named(
-                        "TypeError".to_string(),
-                        "write() argument must be str".to_string(),
-                    )
+                    PyError::named("TypeError", "write() argument must be str".to_string())
                 })?;
             let len = s.len();
             let mut borrow = state.borrow_mut();
@@ -214,14 +211,14 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
                 .downcast_mut::<FileState>()
                 .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
             if st.closed {
-                return Err(PyError::Named(
-                    "ValueError".to_string(),
+                return Err(PyError::named(
+                    "ValueError",
                     "I/O operation on closed file".to_string(),
                 ));
             }
             if !st.is_write && !st.is_append {
-                return Err(PyError::Named(
-                    "io.UnsupportedOperation".to_string(),
+                return Err(PyError::named(
+                    "io.UnsupportedOperation",
                     "not writable".to_string(),
                 ));
             }
@@ -232,8 +229,8 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
             let lines = match args.first().map(|v| v.kind()) {
                 Some(ValueKind::List(items)) | Some(ValueKind::Tuple(items)) => items.clone(),
                 _ => {
-                    return Err(PyError::Named(
-                        "TypeError".to_string(),
+                    return Err(PyError::named(
+                        "TypeError",
                         "writelines() argument must be a list or tuple of str".to_string(),
                     ));
                 }
@@ -243,8 +240,8 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
                 .downcast_mut::<FileState>()
                 .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
             if st.closed {
-                return Err(PyError::Named(
-                    "ValueError".to_string(),
+                return Err(PyError::named(
+                    "ValueError",
                     "I/O operation on closed file".to_string(),
                 ));
             }
@@ -252,8 +249,8 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
                 match v.kind() {
                     ValueKind::Str(s) => st.write_buf.push_str(s),
                     _ => {
-                        return Err(PyError::Named(
-                            "TypeError".to_string(),
+                        return Err(PyError::named(
+                            "TypeError",
                             "writelines() requires str items".to_string(),
                         ));
                     }
@@ -261,8 +258,8 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
             }
             Ok(Value::none())
         }
-        _ => Err(PyError::Named(
-            "AttributeError".to_string(),
+        _ => Err(PyError::named(
+            "AttributeError",
             format!("'{TYPE_NAME}' object has no attribute '{method}'"),
         )),
     }
@@ -274,14 +271,14 @@ fn read_line_or_none(state: &BuiltinState) -> Result<Option<String>> {
         .downcast_mut::<FileState>()
         .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
     if s.closed {
-        return Err(PyError::Named(
-            "ValueError".to_string(),
+        return Err(PyError::named(
+            "ValueError",
             "I/O operation on closed file".to_string(),
         ));
     }
     if !s.is_readable() {
-        return Err(PyError::Named(
-            "io.UnsupportedOperation".to_string(),
+        return Err(PyError::named(
+            "io.UnsupportedOperation",
             "not readable".to_string(),
         ));
     }
@@ -311,16 +308,16 @@ fn close_file(state: &BuiltinState) -> Result<()> {
     }
     if s.is_write {
         std::fs::write(&s.path, &s.write_buf)
-            .map_err(|e| PyError::Named("OSError".to_string(), e.to_string()))?;
+            .map_err(|e| PyError::named("OSError", e.to_string()))?;
     } else if s.is_append {
         use std::io::Write;
         let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&s.path)
-            .map_err(|e| PyError::Named("OSError".to_string(), e.to_string()))?;
+            .map_err(|e| PyError::named("OSError", e.to_string()))?;
         f.write_all(s.write_buf.as_bytes())
-            .map_err(|e| PyError::Named("OSError".to_string(), e.to_string()))?;
+            .map_err(|e| PyError::named("OSError", e.to_string()))?;
     }
     s.closed = true;
     s.write_buf.clear();

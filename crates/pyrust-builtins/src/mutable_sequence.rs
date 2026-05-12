@@ -100,8 +100,8 @@ pub fn insert(items: &mut Vec<Value>, args: Vec<Value>) -> Result<Value> {
         ValueKind::Int(i) => i,
         ValueKind::Bool(b) => b as i64,
         _ => {
-            return Err(PyError::Named(
-                "TypeError".to_string(),
+            return Err(PyError::named(
+                "TypeError",
                 "list.insert() index must be an integer".to_string(),
             ));
         }
@@ -134,8 +134,8 @@ pub fn pop(items: &mut Vec<Value>, args: Vec<Value>) -> Result<Value> {
     }
     let pos = normalise_index(idx, items.len());
     if pos >= items.len() {
-        return Err(PyError::Named(
-            "IndexError".to_string(),
+        return Err(PyError::named(
+            "IndexError",
             "pop index out of range".to_string(),
         ));
     }
