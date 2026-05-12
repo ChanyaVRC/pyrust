@@ -629,8 +629,14 @@ impl Interpreter {
                                         ));
                                         continue;
                                     }
+                                let class_name = class.borrow().name.clone();
+                                vm_try!(Err(PyError::Named(
+                                    "TypeError".to_string(),
+                                    format!("'{class_name}' object doesn't support item deletion"),
+                                )));
                             }
-                            vm_try!(Err(PyError::Runtime(
+                            vm_try!(Err(PyError::Named(
+                                "TypeError".to_string(),
                                 "object does not support item deletion".to_string(),
                             )));
                         }

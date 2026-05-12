@@ -117,17 +117,15 @@ try:
 except TypeError as e:
     print("no-setitem TypeError OK")
 
-# Error for missing __delitem__
+# TypeError for missing __delitem__
 class NoDel:
     pass
 
 try:
     del NoDel()[0]
-    print("FAIL: expected error")
+    print("FAIL: expected TypeError")
 except TypeError:
-    print("no-delitem error OK")
-except RuntimeError:
-    print("no-delitem error OK")
+    print("no-delitem TypeError OK")
 
 # Empty collection literals in methods (compiler fix: empty [] / () must not panic)
 class WithEmptyLiterals:
