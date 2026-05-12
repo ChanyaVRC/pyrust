@@ -21,6 +21,20 @@ pub struct FrozenSetOps;
 pub const FROZENSET_OPS: &FrozenSetOps = &FrozenSetOps;
 pub const TYPE_NAME: &str = "frozenset";
 
+/// Canonical list of method names exposed by frozenset.  Frozenset reuses
+/// the non-mutating subset of `set`'s methods via `call_method` (see below);
+/// this list mirrors the names recognised there and is consumed by `dir()`.
+pub const METHODS: &[&str] = &[
+    "copy",
+    "difference",
+    "intersection",
+    "isdisjoint",
+    "issubset",
+    "issuperset",
+    "symmetric_difference",
+    "union",
+];
+
 impl BuiltinTypeOps for FrozenSetOps {
     fn type_name(&self) -> &'static str {
         TYPE_NAME
