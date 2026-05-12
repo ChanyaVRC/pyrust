@@ -1210,10 +1210,33 @@ impl Interpreter {
                 Insn::ForIter(dst, slot, offset) => {
                     #[allow(clippy::collapsible_match)]
                     match iters[*slot as usize].as_mut() {
+                        // Hot path: indexed iteration over a list/tuple held in a register.
+                        // Direct as_list()/as_tuple() accessors skip the kind() decode and
+                        // the big ValueKind match that the old implementation went through
+                        // on every iteration.
+                        Some(IterState::Indexed { reg, pos }) => {
+                            let src = *reg as usize;
+                            let cur_pos = *pos;
+                            let items: Option<&Vec<Value>> = match regs[src].as_ref() {
+                                Some(rv) => rv.as_list().or_else(|| rv.as_tuple()),
+                                None => None,
+                            };
+                            match items {
+                                Some(items) if cur_pos < items.len() => {
+                                    // SAFETY: cur_pos < items.len() checked just above.
+                                    let v = unsafe { items.get_unchecked(cur_pos).clone() };
+                                    *pos = cur_pos + 1;
+                                    regs[*dst as usize] = Some(v);
+                                }
+                                _ => pc = jump_pc!(*offset),
+                            }
+                        }
                         Some(IterState::Materialized(items, pos)) => {
-                            if *pos < items.len() {
-                                let v = items[*pos].clone();
-                                *pos += 1;
+                            let cur_pos = *pos;
+                            if cur_pos < items.len() {
+                                // SAFETY: cur_pos < items.len() checked just above.
+                                let v = unsafe { items.get_unchecked(cur_pos).clone() };
+                                *pos = cur_pos + 1;
                                 regs[*dst as usize] = Some(v);
                             } else {
                                 pc = jump_pc!(*offset);
@@ -1228,27 +1251,6 @@ impl Interpreter {
                                 let v = Value::int(*cur);
                                 *cur += *step;
                                 regs[*dst as usize] = Some(v);
-                            }
-                        }
-                        Some(IterState::Indexed { reg, pos }) => {
-                            let src = *reg as usize;
-                            let cur_pos = *pos;
-                            let v_opt: Option<Value> = if let Some(rv) = &regs[src] {
-                                match rv.kind() {
-                                    ValueKind::List(items) if cur_pos < items.len() => {
-                                        Some(items[cur_pos].clone())
-                                    }
-                                    ValueKind::Tuple(items) if cur_pos < items.len() => {
-                                        Some(items[cur_pos].clone())
-                                    }
-                                    _ => None,
-                                }
-                            } else { None };
-                            if let Some(v) = v_opt {
-                                *pos += 1;
-                                regs[*dst as usize] = Some(v);
-                            } else {
-                                pc = jump_pc!(*offset);
                             }
                         }
                         Some(IterState::Enumerate { items, pos, counter }) => {
