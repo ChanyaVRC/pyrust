@@ -86,7 +86,10 @@ impl BuiltinTypeOps for FrozenSetOps {
             Some(k) => Ok(items.contains(&k)),
             None => Err(PyError::named(
                 "TypeError",
-                format!("unhashable type: '{}'", builtin_type_name(item)),
+                format!(
+                    "unhashable type: '{}'",
+                    pyrust_core::builtin_type_name(item)
+                ),
             )),
         }
     }
@@ -175,22 +178,6 @@ fn borrow_items(state: &BuiltinState) -> Option<Rc<IndexSet<PyKey>>> {
     borrow
         .downcast_ref::<FrozenSetState>()
         .map(|s| Rc::clone(&s.items))
-}
-
-fn builtin_type_name(value: &Value) -> &'static str {
-    match value.kind() {
-        ValueKind::Int(_) | ValueKind::BigInt(_) => "int",
-        ValueKind::Float(_) => "float",
-        ValueKind::Bool(_) => "bool",
-        ValueKind::None => "NoneType",
-        ValueKind::Str(_) => "str",
-        ValueKind::List(_) => "list",
-        ValueKind::Tuple(_) => "tuple",
-        ValueKind::Dict(_) => "dict",
-        ValueKind::Set(_) => "set",
-        ValueKind::BuiltinObject { ops, .. } => ops.type_name(),
-        _ => "object",
-    }
 }
 
 fn key_repr(key: &PyKey) -> String {

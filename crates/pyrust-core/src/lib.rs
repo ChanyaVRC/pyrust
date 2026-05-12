@@ -1632,23 +1632,40 @@ impl fmt::Debug for Value {
 // Helper free functions
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Returns the built-in type name (e.g. "list", "str") for use in
-/// repr strings like "<built-in method append of list object>".
+/// Returns the Python built-in type name (e.g. `"list"`, `"str"`) for a
+/// `Value`.  Used by error messages (`'X' object is not iterable`, attribute
+/// errors), built-in method repr strings (`<built-in method append of list
+/// object>`), and similar diagnostics.
+///
+/// This is the canonical implementation — every crate in the workspace
+/// routes type-name lookup through this function so naming stays consistent.
+/// The match is exhaustive over [`ValueKind`]; new variants must be added
+/// here, not in per-crate copies.
 pub fn builtin_type_name(value: &Value) -> &'static str {
     match value.kind() {
+        ValueKind::None => "NoneType",
+        ValueKind::Bool(_) => "bool",
+        ValueKind::Int(_) | ValueKind::BigInt(_) => "int",
+        ValueKind::Float(_) => "float",
         ValueKind::Str(_) => "str",
         ValueKind::List(_) => "list",
         ValueKind::Tuple(_) => "tuple",
         ValueKind::Dict(_) => "dict",
         ValueKind::Set(_) => "set",
+        ValueKind::Range { .. } => "range",
         ValueKind::Bytes(_) => "bytes",
         ValueKind::Complex(_, _) => "complex",
-        ValueKind::Int(_) | ValueKind::BigInt(_) => "int",
-        ValueKind::Float(_) => "float",
-        ValueKind::Bool(_) => "bool",
-        ValueKind::None => "NoneType",
+        ValueKind::BuiltinFunction(_)
+        | ValueKind::UserFunction(_)
+        | ValueKind::BoundMethod { .. }
+        | ValueKind::ClassBoundMethod { .. } => "function",
+        ValueKind::PyClass(_) => "type",
+        ValueKind::PyInstance(_) => "object",
+        ValueKind::PyModule(_) => "module",
+        ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => "super",
+        ValueKind::Generator(_) => "generator",
+        ValueKind::NotImplemented => "NotImplementedType",
         ValueKind::BuiltinObject { ops, .. } => ops.type_name(),
-        _ => "object",
     }
 }
 
