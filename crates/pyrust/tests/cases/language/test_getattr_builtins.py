@@ -75,4 +75,23 @@ except AttributeError:
 assert getattr([], "foobar", "default") == "default"
 assert getattr("hi", "missing", None) is None
 
+# --- bound-method dispatch hot path (issue #276) ---
+# Stored bound method invoked many times in a loop. Exercises the
+# `pyrust_builtins::bound_method::as_bound_method` arm of
+# `call_function_expanded` repeatedly so any regression in the recent
+# refactor (drop of `name.to_string()`) would surface here.
+total = 0
+counter = getattr("ababab", "count")
+for _ in range(50):
+    total += counter("a")
+assert total == 150
+
+# Same shape for dict.get, exercising the dict arm.
+d = {"k": 7}
+getter = getattr(d, "get")
+acc = 0
+for _ in range(50):
+    acc += getter("k")
+assert acc == 350
+
 print("getattr/hasattr builtins OK")
