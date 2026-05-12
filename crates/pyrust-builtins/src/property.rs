@@ -135,8 +135,16 @@ mod tests {
         let getter = Value::builtin_function("len");
         let prop = property(getter.clone(), Value::none(), Value::none());
         let fget = with_property(&prop, |s| Rc::clone(&s.fget)).expect("is property");
-        // fget should be the getter, others untouched.
-        assert!(!fget.is_none());
+        // fget should be exactly the getter we put in.  Both refer to the
+        // same interned built-in function via `Value::builtin_function`'s
+        // thread-local cache, so a content-eq is sufficient (and would also
+        // catch a slot mix-up where fget came back as Value::none()).
+        assert_eq!(*fget, getter);
+        // The slots we didn't touch should still be `none`.
+        let (fset_is_none, fdel_is_none) =
+            with_property(&prop, |s| (s.fset.is_none(), s.fdel.is_none())).expect("is property");
+        assert!(fset_is_none, "fset should remain none for getter-only");
+        assert!(fdel_is_none, "fdel should remain none for getter-only");
         assert_eq!(
             with_property(&prop, |s| s.partial_slot),
             Some(None),
