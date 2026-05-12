@@ -1206,8 +1206,8 @@ impl Interpreter {
                                     IterState::Materialized(vm_try!(iter_values(src_val)), 0)
                                 }
                             }
-                            ValueKind::File(_) => {
-                                // File objects are iterators — yields each line.
+                            ValueKind::BuiltinObject { ops, .. } if ops.is_iterable() => {
+                                // Iterable built-in objects dispatch through ops.iter_next.
                                 IterState::UserDefined(src_val)
                             }
                             _ => {
@@ -1339,8 +1339,17 @@ impl Interpreter {
                                             ))
                                         } else { None }
                                     } else { None }
-                                } else if matches!(iter_val.kind(), ValueKind::File(_)) {
-                                    Some(call_file_method(&iter_val, "__next__", &[]))
+                                } else if let ValueKind::BuiltinObject { ops, state } =
+                                    iter_val.kind()
+                                {
+                                    Some(ops.iter_next(state).and_then(|opt| {
+                                        opt.ok_or_else(|| {
+                                            PyError::Named(
+                                                "StopIteration".to_string(),
+                                                String::new(),
+                                            )
+                                        })
+                                    }))
                                 } else { None };
                             match next_result {
                                 Some(Ok(val)) => {
@@ -1522,6 +1531,7 @@ impl Interpreter {
                     }
                     let func = Rc::new(UserFunction {
                         id: crate::value::next_fn_id(),
+                        kind: crate::value::UserFunctionKind::Regular,
                         name: proto_name,
                         params,
                         local_names: proto_local_names,

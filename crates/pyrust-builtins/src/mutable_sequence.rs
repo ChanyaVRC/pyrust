@@ -53,18 +53,15 @@ fn type_name_of(v: &Value) -> &'static str {
         ValueKind::Enumerate { .. } => "enumerate",
         ValueKind::Zip { .. } => "zip",
         ValueKind::Reversed { .. } => "list_reverseiterator",
-        ValueKind::ClassMethod(_)
-        | ValueKind::StaticMethod(_)
-        | ValueKind::ClassBoundMethod { .. } => "function",
+        ValueKind::ClassBoundMethod { .. } => "function",
         ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => "super",
         ValueKind::Generator(_) => "generator",
         ValueKind::Property { .. } | ValueKind::PropertyAccessorPartial { .. } => "property",
         ValueKind::NotImplemented => "NotImplementedType",
         ValueKind::BuiltinBoundMethod { .. } => "builtin_function_or_method",
-        ValueKind::FrozenSet(_) => "frozenset",
         ValueKind::Bytes(_) => "bytes",
         ValueKind::Complex(_, _) => "complex",
-        ValueKind::File(_) => "_io.TextIOWrapper",
+        ValueKind::BuiltinObject { ops, .. } => ops.type_name(),
     }
 }
 

@@ -36,17 +36,19 @@ impl Interpreter {
 
                 if let Some(value) = lookup_class_attr(&class, name) {
                     return Ok(match value.kind() {
-                        ValueKind::UserFunction(f) => {
-                            Value::bound_method(Rc::clone(f), instance)
-                        }
-                        ValueKind::ClassMethod(f) => {
-                            // classmethod: bind the class (not the instance) as first argument
-                            Value::class_bound_method(Rc::clone(f), Rc::clone(&class))
-                        }
-                        ValueKind::StaticMethod(f) => {
-                            // staticmethod: return the raw function, no binding
-                            Value::user_function(Rc::clone(f))
-                        }
+                        ValueKind::UserFunction(f) => match f.kind {
+                            UserFunctionKind::Regular => {
+                                Value::bound_method(Rc::clone(f), instance)
+                            }
+                            UserFunctionKind::ClassMethod => {
+                                // bind the class (not the instance) as first argument
+                                Value::class_bound_method(Rc::clone(f), Rc::clone(&class))
+                            }
+                            UserFunctionKind::StaticMethod => {
+                                // staticmethod: return the raw function, no binding
+                                Value::user_function(Rc::clone(f))
+                            }
+                        },
                         _ => value,
                     });
                 }
@@ -64,11 +66,14 @@ impl Interpreter {
                 }
                 if let Some(value) = lookup_class_attr(&class, name) {
                     return Ok(match value.kind() {
-                        ValueKind::ClassMethod(f) => {
-                            // classmethod accessed on a class: bind the class as first argument
-                            Value::class_bound_method(Rc::clone(f), Rc::clone(&class))
-                        }
-                        ValueKind::StaticMethod(f) => Value::user_function(Rc::clone(f)),
+                        ValueKind::UserFunction(f) => match f.kind {
+                            UserFunctionKind::ClassMethod => {
+                                // bind the class as first argument
+                                Value::class_bound_method(Rc::clone(f), Rc::clone(&class))
+                            }
+                            UserFunctionKind::StaticMethod => Value::user_function(Rc::clone(f)),
+                            UserFunctionKind::Regular => value,
+                        },
                         _ => value,
                     });
                 }
@@ -92,13 +97,15 @@ impl Interpreter {
                 };
                 if let Some(value) = lookup_class_attr(&parent_class, name) {
                     return Ok(match value.kind() {
-                        ValueKind::UserFunction(f) => {
-                            Value::bound_method(Rc::clone(f), instance)
-                        }
-                        ValueKind::ClassMethod(f) => {
-                            Value::class_bound_method(Rc::clone(f), parent_class)
-                        }
-                        ValueKind::StaticMethod(f) => Value::user_function(Rc::clone(f)),
+                        ValueKind::UserFunction(f) => match f.kind {
+                            UserFunctionKind::Regular => {
+                                Value::bound_method(Rc::clone(f), instance)
+                            }
+                            UserFunctionKind::ClassMethod => {
+                                Value::class_bound_method(Rc::clone(f), parent_class)
+                            }
+                            UserFunctionKind::StaticMethod => Value::user_function(Rc::clone(f)),
+                        },
                         _ => value,
                     });
                 }
@@ -120,16 +127,18 @@ impl Interpreter {
                 };
                 if let Some(value) = lookup_class_attr(&parent_class, name) {
                     return Ok(match value.kind() {
-                        ValueKind::UserFunction(f) => {
-                            // Regular method accessed via super in classmethod context —
-                            // return the raw function (rare, but valid).
-                            Value::user_function(Rc::clone(f))
-                        }
-                        ValueKind::ClassMethod(f) => {
-                            // classmethod: bind to the concrete subclass
-                            Value::class_bound_method(Rc::clone(f), obj_class)
-                        }
-                        ValueKind::StaticMethod(f) => Value::user_function(Rc::clone(f)),
+                        ValueKind::UserFunction(f) => match f.kind {
+                            UserFunctionKind::Regular => {
+                                // Regular method accessed via super in classmethod context —
+                                // return the raw function (rare, but valid).
+                                Value::user_function(Rc::clone(f))
+                            }
+                            UserFunctionKind::ClassMethod => {
+                                // bind to the concrete subclass
+                                Value::class_bound_method(Rc::clone(f), obj_class)
+                            }
+                            UserFunctionKind::StaticMethod => Value::user_function(Rc::clone(f)),
+                        },
                         _ => value,
                     });
                 }
@@ -504,30 +513,7 @@ fn builtin_has_method(target: &Value, name: &str) -> bool {
         ValueKind::Tuple(_) => pyrust_builtins::tuple::has_method(name),
         ValueKind::Dict(_) => pyrust_builtins::dict::has_method(name),
         ValueKind::Set(_) => pyrust_builtins::set::has_method(name),
-        ValueKind::FrozenSet(_) => matches!(
-            name,
-            "copy"
-                | "union"
-                | "intersection"
-                | "difference"
-                | "symmetric_difference"
-                | "issubset"
-                | "issuperset"
-                | "isdisjoint"
-        ),
-        ValueKind::File(_) => matches!(
-            name,
-            "read"
-                | "readline"
-                | "readlines"
-                | "write"
-                | "writelines"
-                | "close"
-                | "__enter__"
-                | "__exit__"
-                | "__iter__"
-                | "__next__"
-        ),
+        ValueKind::BuiltinObject { ops, .. } => ops.has_method(name),
         _ => false,
     }
 }

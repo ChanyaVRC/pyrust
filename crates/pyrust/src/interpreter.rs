@@ -9,8 +9,8 @@ use crate::error::{PyError, Result};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::value::{
-    EnvRef, Environment, PyBigInt, PyClass, PyInstance, PyKey, PyModule, UserFunction,
-    UserFunctionParam, Value, ValueKind, range_len,
+    BuiltinState, BuiltinTypeOps, EnvRef, Environment, PyBigInt, PyClass, PyInstance, PyKey,
+    PyModule, UserFunction, UserFunctionKind, UserFunctionParam, Value, ValueKind, range_len,
 };
 
 type ModuleCache = Rc<RefCell<HashMap<String, Value>>>;
@@ -38,6 +38,7 @@ pub struct Interpreter {
 
 impl Default for Interpreter {
     fn default() -> Self {
+        pyrust_builtins::install();
         let env = Environment::new(None);
         install_exception_builtins(&env);
         install_singleton_builtins(&env);

@@ -203,6 +203,7 @@ impl Interpreter {
                 let lambda_body = vec![crate::ast::Stmt::Return(Some(*body.clone()))];
                 let func = Rc::new(crate::value::UserFunction {
                     id: crate::value::next_fn_id(),
+                    kind: crate::value::UserFunctionKind::Regular,
                     name: "<lambda>".to_string(),
                     params: params.iter().map(|n| crate::value::UserFunctionParam {
                         name: n.clone(), default: None, is_args: false, is_kwargs: false, is_keyword_only: false, is_positional_only: false,
@@ -879,9 +880,8 @@ impl Interpreter {
                 let key = item.to_key().ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
                 Ok(Value::bool_(items.contains(&key)))
             }
-            ValueKind::FrozenSet(rc) => {
-                let key = item.to_key().ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
-                Ok(Value::bool_(rc.contains(&key)))
+            ValueKind::BuiltinObject { ops, state } => {
+                ops.contains(state, &item).map(Value::bool_)
             }
             ValueKind::Bytes(rc) => {
                 match item.kind() {
@@ -999,7 +999,28 @@ fn iter_values(value: Value) -> Result<Vec<Value>> {
         ValueKind::List(items) => Ok(items.clone()),
         ValueKind::Tuple(items) => Ok(items.clone()),
         ValueKind::Set(items) => Ok(items.iter().map(|k| key_to_value(k.clone())).collect()),
-        ValueKind::FrozenSet(rc) => Ok(rc.iter().map(|k| key_to_value(k.clone())).collect()),
+        ValueKind::BuiltinObject { .. } => {
+            // Frozenset materialises through its inner key set; other builtin
+            // objects iterate via `iter_next` and are collected lazily.
+            if let Some(rc) = pyrust_builtins::frozenset::as_items(&value) {
+                Ok(rc.iter().map(|k| key_to_value(k.clone())).collect())
+            } else {
+                let mut out = Vec::new();
+                let ValueKind::BuiltinObject { ops, state } = value.kind() else {
+                    unreachable!();
+                };
+                if !ops.is_iterable() {
+                    return Err(PyError::Named(
+                        "TypeError".to_string(),
+                        format!("'{}' object is not iterable", ops.type_name()),
+                    ));
+                }
+                while let Some(v) = ops.iter_next(state)? {
+                    out.push(v);
+                }
+                Ok(out)
+            }
+        }
         ValueKind::Bytes(rc) => Ok(rc.iter().map(|b| Value::int(*b as i64)).collect()),
         ValueKind::Str(text) => Ok(text.chars().map(|c| Value::string(c.to_string())).collect()),
         ValueKind::Dict(items) => Ok(items.keys().map(|k| key_to_value(k.clone())).collect()),
@@ -1161,13 +1182,11 @@ enum SetOp {
 fn set_binary_op(left: &Value, right: &Value, op: SetOp) -> Option<Result<Value>> {
     let lhs_items = match left.kind() {
         ValueKind::Set(s) => Some((s.clone(), false)),
-        ValueKind::FrozenSet(rc) => Some(((**rc).clone(), true)),
-        _ => None,
+        _ => pyrust_builtins::frozenset::as_items(left).map(|rc| ((*rc).clone(), true)),
     }?;
     let rhs_items = match right.kind() {
         ValueKind::Set(s) => Some((s.clone(), false)),
-        ValueKind::FrozenSet(rc) => Some(((**rc).clone(), true)),
-        _ => None,
+        _ => pyrust_builtins::frozenset::as_items(right).map(|rc| ((*rc).clone(), true)),
     }?;
     let (a, l_frozen) = lhs_items;
     let (b, r_frozen) = rhs_items;
@@ -1206,7 +1225,7 @@ fn set_binary_op(left: &Value, right: &Value, op: SetOp) -> Option<Result<Value>
         }
     }
     Some(Ok(if l_frozen || r_frozen {
-        Value::frozenset(out)
+        pyrust_builtins::frozenset::frozenset(out)
     } else {
         Value::set(out)
     }))

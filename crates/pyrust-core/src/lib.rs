@@ -118,10 +118,22 @@ pub struct UserFunctionParam {
     pub is_positional_only: bool,
 }
 
+/// Discriminator for `UserFunction` semantics.  `@classmethod` and
+/// `@staticmethod` decorators produce a UserFunction whose body Rc-shares
+/// with the original, distinguished only by this tag — no wrapper variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UserFunctionKind {
+    #[default]
+    Regular,
+    ClassMethod,
+    StaticMethod,
+}
+
 #[derive(Debug, Clone)]
 pub struct UserFunction {
     /// Globally unique identity for fn_cache keying — stable across Rc drops/reallocations.
     pub id: u64,
+    pub kind: UserFunctionKind,
     pub name: String,
     pub params: Vec<UserFunctionParam>,
     pub local_names: NameSet,
@@ -204,6 +216,164 @@ fn top16(bits: u64) -> u16 {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// BuiltinTypeOps — operations the VM performs on built-in objects whose
+// concrete implementation lives in `pyrust-builtins`.  `pyrust-core` never
+// names a concrete built-in type; the VM dispatches through this trait.
+//
+// `state` is `Rc<RefCell<Box<dyn Any>>>` so impls can downcast to their
+// concrete state and `RefCell::borrow_mut` when they need to mutate.  Default
+// methods return CPython-style "object is not X" errors; impls override only
+// the operations their type actually supports.
+// ─────────────────────────────────────────────────────────────────────────────
+
+pub type BuiltinState = Rc<RefCell<Box<dyn Any>>>;
+
+pub trait BuiltinTypeOps: 'static {
+    fn type_name(&self) -> &'static str;
+
+    fn repr(&self, state: &BuiltinState) -> String {
+        let _ = state;
+        format!("<{} object>", self.type_name())
+    }
+
+    fn truthy(&self, state: &BuiltinState) -> bool {
+        let _ = state;
+        true
+    }
+
+    fn eq(&self, state: &BuiltinState, other: &Value) -> bool {
+        let _ = (state, other);
+        false
+    }
+
+    fn hash(&self, state: &BuiltinState) -> Option<u64> {
+        let _ = state;
+        None
+    }
+
+    fn getattr(&self, state: &BuiltinState, name: &str) -> Option<Value> {
+        let _ = (state, name);
+        None
+    }
+
+    fn setattr(&self, state: &BuiltinState, name: &str, value: Value) -> Result<()> {
+        let _ = (state, value);
+        Err(PyError::Runtime(format!(
+            "'{}' object has no attribute '{}'",
+            self.type_name(),
+            name
+        )))
+    }
+
+    fn call(
+        &self,
+        state: &BuiltinState,
+        args: Vec<Value>,
+        kwargs: &IndexMap<String, Value>,
+    ) -> Result<Value> {
+        let _ = (state, args, kwargs);
+        Err(PyError::Runtime(format!(
+            "'{}' object is not callable",
+            self.type_name()
+        )))
+    }
+
+    fn call_method(
+        &self,
+        state: &BuiltinState,
+        name: &str,
+        args: Vec<Value>,
+        kwargs: &IndexMap<String, Value>,
+    ) -> Result<Value> {
+        let _ = (state, args, kwargs);
+        Err(PyError::Runtime(format!(
+            "'{}' object has no method '{}'",
+            self.type_name(),
+            name
+        )))
+    }
+
+    fn iter_next(&self, state: &BuiltinState) -> Result<Option<Value>> {
+        let _ = state;
+        Err(PyError::Runtime(format!(
+            "'{}' object is not iterable",
+            self.type_name()
+        )))
+    }
+
+    fn len(&self, state: &BuiltinState) -> Option<usize> {
+        let _ = state;
+        None
+    }
+
+    fn get_item(&self, state: &BuiltinState, key: &Value) -> Result<Value> {
+        let _ = (state, key);
+        Err(PyError::Runtime(format!(
+            "'{}' object is not subscriptable",
+            self.type_name()
+        )))
+    }
+
+    fn set_item(&self, state: &BuiltinState, key: &Value, value: Value) -> Result<()> {
+        let _ = (state, key, value);
+        Err(PyError::Runtime(format!(
+            "'{}' object does not support item assignment",
+            self.type_name()
+        )))
+    }
+
+    fn contains(&self, state: &BuiltinState, item: &Value) -> Result<bool> {
+        let _ = (state, item);
+        Err(PyError::Runtime(format!(
+            "argument of type '{}' is not iterable",
+            self.type_name()
+        )))
+    }
+
+    /// Returns true if `name` is a method this type exposes.  Used by
+    /// `hasattr(x, name)`.  Default checks via `call_method` — impls with
+    /// fixed method tables should override for efficiency.
+    fn has_method(&self, name: &str) -> bool {
+        let _ = name;
+        false
+    }
+
+    /// Returns true if this type is iterable.  Default: tries `iter_next`
+    /// and observes whether the default "not iterable" error came back.
+    /// Impls that override `iter_next` should override this too.
+    fn is_iterable(&self) -> bool {
+        false
+    }
+
+    /// Convert this object to a `PyKey` for use as a dict/set key.  Returns
+    /// `None` if this type is not hashable.  Frozensets etc. override this.
+    fn to_key(&self, state: &BuiltinState) -> Option<PyKey> {
+        let _ = state;
+        None
+    }
+}
+
+/// Registry function: maps a stable type-name string to its `BuiltinTypeOps`.
+/// Installed once at interpreter startup by the consumer of pyrust-core
+/// (typically `pyrust-builtins`).  `pyrust-core` never names a concrete
+/// built-in type — it only looks up by string and calls through the trait.
+pub type BuiltinRegistry = fn(&str) -> Option<&'static dyn BuiltinTypeOps>;
+
+static BUILTIN_REGISTRY: std::sync::OnceLock<BuiltinRegistry> = std::sync::OnceLock::new();
+
+/// Install the registry that maps built-in type names to their dispatch ops.
+/// Safe to call multiple times — only the first call wins.
+pub fn install_builtin_registry(registry: BuiltinRegistry) {
+    let _ = BUILTIN_REGISTRY.set(registry);
+}
+
+/// Look up dispatch ops for a built-in type name.  Returns `None` if no
+/// registry has been installed or the type is unknown.
+pub fn lookup_builtin_ops(type_name: &str) -> Option<&'static dyn BuiltinTypeOps> {
+    BUILTIN_REGISTRY.get().and_then(|reg| reg(type_name))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Opaque — heap-allocated types that don't fit in 48 bits
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -238,13 +408,6 @@ pub enum Opaque {
     Reversed {
         source: Value,
     },
-    /// A @classmethod-decorated function stored in a class's attribute dict.
-    /// When accessed through an instance or class, binding produces a
-    /// `ClassBoundMethod` with the class as the receiver.
-    ClassMethod(Rc<UserFunction>),
-    /// A @staticmethod-decorated function stored in a class's attribute dict.
-    /// When accessed, the raw `UserFunction` is returned with no binding.
-    StaticMethod(Rc<UserFunction>),
     /// A classmethod bound to a specific class (the first argument will be `cls`).
     ClassBoundMethod {
         function: Rc<UserFunction>,
@@ -298,19 +461,20 @@ pub enum Opaque {
         name: Rc<String>,
         receiver: Value,
     },
-    /// Immutable, hashable counterpart to `Set`.  Constructed via the
-    /// `frozenset(iterable)` builtin.  Stored behind `Rc` so clones are
-    /// cheap and hashability uses `Rc::as_ptr` for identity.
-    FrozenSet(Rc<IndexSet<PyKey>>),
     /// An immutable byte string.  Constructed via the `b"..."` literal or
     /// the `bytes(...)` builtin.  Stored behind `Rc` for cheap clones.
     Bytes(Rc<Vec<u8>>),
     /// A Python `complex` number stored as (real, imag).
     Complex(f64, f64),
-    /// A file object produced by `open()`. The concrete state is held by
-    /// `pyrust` (the interpreter crate) as a type-erased `Box<dyn Any>` so
-    /// `pyrust-core` doesn't need to depend on `std::fs`.
-    File(Rc<RefCell<Box<dyn std::any::Any>>>),
+    /// A type-erased built-in object whose operations are dispatched through
+    /// the installed [`BuiltinTypeOps`] table.  Used for built-in types whose
+    /// payload doesn't justify a dedicated Tier 1 variant (file, property,
+    /// frozenset value, dict views, iterator helpers, …).  `pyrust-core`
+    /// never names the concrete type — it only calls through `ops`.
+    BuiltinObject {
+        ops: &'static dyn BuiltinTypeOps,
+        state: BuiltinState,
+    },
 }
 
 impl Clone for Opaque {
@@ -346,8 +510,6 @@ impl Clone for Opaque {
             Opaque::Reversed { source } => Opaque::Reversed {
                 source: source.clone(),
             },
-            Opaque::ClassMethod(f) => Opaque::ClassMethod(Rc::clone(f)),
-            Opaque::StaticMethod(f) => Opaque::StaticMethod(Rc::clone(f)),
             Opaque::ClassBoundMethod { function, class } => Opaque::ClassBoundMethod {
                 function: Rc::clone(function),
                 class: Rc::clone(class),
@@ -382,10 +544,12 @@ impl Clone for Opaque {
                 name: Rc::clone(name),
                 receiver: receiver.clone(),
             },
-            Opaque::FrozenSet(rc) => Opaque::FrozenSet(Rc::clone(rc)),
             Opaque::Bytes(rc) => Opaque::Bytes(Rc::clone(rc)),
             Opaque::Complex(re, im) => Opaque::Complex(*re, *im),
-            Opaque::File(rc) => Opaque::File(Rc::clone(rc)),
+            Opaque::BuiltinObject { ops, state } => Opaque::BuiltinObject {
+                ops: *ops,
+                state: Rc::clone(state),
+            },
         }
     }
 }
@@ -432,8 +596,6 @@ pub enum ValueKind<'a> {
     Reversed {
         source: &'a Value,
     },
-    ClassMethod(&'a Rc<UserFunction>),
-    StaticMethod(&'a Rc<UserFunction>),
     ClassBoundMethod {
         function: &'a Rc<UserFunction>,
         class: &'a Rc<RefCell<PyClass>>,
@@ -463,10 +625,12 @@ pub enum ValueKind<'a> {
         name: &'a Rc<String>,
         receiver: &'a Value,
     },
-    FrozenSet(&'a Rc<IndexSet<PyKey>>),
     Bytes(&'a Rc<Vec<u8>>),
     Complex(f64, f64),
-    File(&'a Rc<RefCell<Box<dyn std::any::Any>>>),
+    BuiltinObject {
+        ops: &'static dyn BuiltinTypeOps,
+        state: &'a BuiltinState,
+    },
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -761,14 +925,6 @@ impl Value {
         Value::opaque(Opaque::Set(s))
     }
 
-    pub fn frozenset(s: IndexSet<PyKey>) -> Self {
-        Value::opaque(Opaque::FrozenSet(Rc::new(s)))
-    }
-
-    pub fn frozenset_rc(rc: Rc<IndexSet<PyKey>>) -> Self {
-        Value::opaque(Opaque::FrozenSet(rc))
-    }
-
     pub fn bytes(b: Vec<u8>) -> Self {
         Value::opaque(Opaque::Bytes(Rc::new(b)))
     }
@@ -777,8 +933,21 @@ impl Value {
         Value::opaque(Opaque::Complex(re, im))
     }
 
-    pub fn file(state: Box<dyn std::any::Any>) -> Self {
-        Value::opaque(Opaque::File(Rc::new(RefCell::new(state))))
+    /// Construct a generic built-in object dispatched through the installed
+    /// [`BuiltinTypeOps`] table.  `ops` must outlive the program (typically
+    /// `&'static`); `state` is owned heap state of any concrete type.
+    pub fn builtin_object(ops: &'static dyn BuiltinTypeOps, state: Box<dyn Any>) -> Self {
+        Value::opaque(Opaque::BuiltinObject {
+            ops,
+            state: Rc::new(RefCell::new(state)),
+        })
+    }
+
+    /// Construct a generic built-in object that shares state with an existing
+    /// `BuiltinState` cell.  Used when multiple Values must reference the
+    /// same underlying mutable state.
+    pub fn builtin_object_shared(ops: &'static dyn BuiltinTypeOps, state: BuiltinState) -> Self {
+        Value::opaque(Opaque::BuiltinObject { ops, state })
     }
 
     pub fn range(start: i64, stop: i64, step: i64) -> Self {
@@ -832,12 +1001,33 @@ impl Value {
         Value::opaque(Opaque::Reversed { source })
     }
 
+    /// Wrap a function with a different `UserFunctionKind` tag.  Used by
+    /// `@classmethod` / `@staticmethod`: produces a new UserFunction that
+    /// shares everything but the kind tag.  The wrapped function gets a
+    /// fresh `id` so it has its own identity for fn_cache keying.
+    pub fn with_function_kind(f: Rc<UserFunction>, kind: UserFunctionKind) -> Self {
+        let new_fn = UserFunction {
+            id: next_fn_id(),
+            kind,
+            name: f.name.clone(),
+            params: f.params.clone(),
+            local_names: Rc::clone(&f.local_names),
+            local_index: Rc::clone(&f.local_index),
+            global_names: Rc::clone(&f.global_names),
+            nonlocal_names: Rc::clone(&f.nonlocal_names),
+            env: Rc::clone(&f.env),
+            is_pure: f.is_pure,
+            precompiled_code: f.precompiled_code.clone(),
+        };
+        Value::opaque(Opaque::UserFunction(Rc::new(new_fn)))
+    }
+
     pub fn class_method(f: Rc<UserFunction>) -> Self {
-        Value::opaque(Opaque::ClassMethod(f))
+        Value::with_function_kind(f, UserFunctionKind::ClassMethod)
     }
 
     pub fn static_method(f: Rc<UserFunction>) -> Self {
-        Value::opaque(Opaque::StaticMethod(f))
+        Value::with_function_kind(f, UserFunctionKind::StaticMethod)
     }
 
     pub fn class_bound_method(function: Rc<UserFunction>, class: Rc<RefCell<PyClass>>) -> Self {
@@ -1149,8 +1339,6 @@ impl Value {
                 },
                 Opaque::Zip { sources } => ValueKind::Zip { sources },
                 Opaque::Reversed { source } => ValueKind::Reversed { source },
-                Opaque::ClassMethod(f) => ValueKind::ClassMethod(f),
-                Opaque::StaticMethod(f) => ValueKind::StaticMethod(f),
                 Opaque::ClassBoundMethod { function, class } => {
                     ValueKind::ClassBoundMethod { function, class }
                 }
@@ -1175,10 +1363,11 @@ impl Value {
                 Opaque::BuiltinBoundMethod { name, receiver } => {
                     ValueKind::BuiltinBoundMethod { name, receiver }
                 }
-                Opaque::FrozenSet(rc) => ValueKind::FrozenSet(rc),
                 Opaque::Bytes(rc) => ValueKind::Bytes(rc),
                 Opaque::Complex(re, im) => ValueKind::Complex(*re, *im),
-                Opaque::File(rc) => ValueKind::File(rc),
+                Opaque::BuiltinObject { ops, state } => {
+                    ValueKind::BuiltinObject { ops: *ops, state }
+                }
             },
             _ => unreachable!(),
         }
@@ -1211,8 +1400,6 @@ impl Value {
             ValueKind::Enumerate { .. } => true,
             ValueKind::Zip { .. } => true,
             ValueKind::Reversed { .. } => true,
-            ValueKind::ClassMethod(_) => true,
-            ValueKind::StaticMethod(_) => true,
             ValueKind::ClassBoundMethod { .. } => true,
             ValueKind::SuperProxy { .. } => true,
             ValueKind::SuperProxyClass { .. } => true,
@@ -1221,10 +1408,9 @@ impl Value {
             ValueKind::PropertyAccessorPartial { .. } => true,
             ValueKind::NotImplemented => true,
             ValueKind::BuiltinBoundMethod { .. } => true,
-            ValueKind::FrozenSet(s) => !s.is_empty(),
             ValueKind::Bytes(b) => !b.is_empty(),
             ValueKind::Complex(re, im) => re != 0.0 || im != 0.0,
-            ValueKind::File(_) => true,
+            ValueKind::BuiltinObject { ops, state } => ops.truthy(state),
         }
     }
 
@@ -1281,13 +1467,6 @@ impl Value {
                 let inner = items.iter().map(key_repr).collect::<Vec<_>>().join(", ");
                 format!("{{{inner}}}")
             }
-            ValueKind::FrozenSet(rc) => {
-                if rc.is_empty() {
-                    return "frozenset()".to_string();
-                }
-                let inner = rc.iter().map(key_repr).collect::<Vec<_>>().join(", ");
-                format!("frozenset({{{inner}}})")
-            }
             ValueKind::Range { start, stop, step } => {
                 if step == 1 {
                     format!("range({start}, {stop})")
@@ -1296,7 +1475,11 @@ impl Value {
                 }
             }
             ValueKind::BuiltinFunction(name) => format!("<built-in function {name}>"),
-            ValueKind::UserFunction(func) => format!("<function {}>", func.name),
+            ValueKind::UserFunction(func) => match func.kind {
+                UserFunctionKind::ClassMethod => format!("<classmethod '{}'>", func.name),
+                UserFunctionKind::StaticMethod => format!("<staticmethod '{}'>", func.name),
+                UserFunctionKind::Regular => format!("<function {}>", func.name),
+            },
             ValueKind::PyClass(class) => {
                 let name = class.borrow().name.clone();
                 format!("<class '{name}'>")
@@ -1346,8 +1529,6 @@ impl Value {
             ValueKind::Enumerate { .. } => "<enumerate object>".to_string(),
             ValueKind::Zip { .. } => "<zip object>".to_string(),
             ValueKind::Reversed { .. } => "<list_reverseiterator object>".to_string(),
-            ValueKind::ClassMethod(f) => format!("<classmethod '{}'>", f.name),
-            ValueKind::StaticMethod(f) => format!("<staticmethod '{}'>", f.name),
             ValueKind::ClassBoundMethod { function, class } => {
                 format!("<bound method {}.{}>", class.borrow().name, function.name)
             }
@@ -1369,7 +1550,7 @@ impl Value {
             }
             ValueKind::Bytes(rc) => bytes_repr(rc),
             ValueKind::Complex(re, im) => complex_repr(re, im),
-            ValueKind::File(_) => "<file object>".to_string(),
+            ValueKind::BuiltinObject { ops, state } => ops.repr(state),
         }
     }
 
@@ -1384,15 +1565,7 @@ impl Value {
             ValueKind::Str(v) => Some(PyKey::Str(v.to_string())),
             ValueKind::Bool(v) => Some(PyKey::Int(v as i64)),
             ValueKind::None => Some(PyKey::None),
-            ValueKind::FrozenSet(rc) => {
-                // Content-based hashable key.  We canonicalise by sorting the
-                // inner keys' Debug form so different insertion orders compare
-                // equal.  (Hash already handles ordering by iterating
-                // canonical Vec; equality of PyKey::FrozenSet matches Vec eq.)
-                let mut items: Vec<PyKey> = rc.iter().cloned().collect();
-                items.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
-                Some(PyKey::FrozenSet(items))
-            }
+            ValueKind::BuiltinObject { ops, state } => ops.to_key(state),
             _ => None,
         }
     }
@@ -1518,9 +1691,6 @@ impl PartialEq for Value {
             (ValueKind::Tuple(a), ValueKind::Tuple(b)) => a == b,
             (ValueKind::Dict(a), ValueKind::Dict(b)) => a == b,
             (ValueKind::Set(a), ValueKind::Set(b)) => a == b,
-            (ValueKind::FrozenSet(a), ValueKind::FrozenSet(b)) => a.as_ref() == b.as_ref(),
-            (ValueKind::Set(a), ValueKind::FrozenSet(b)) => *a == *b.as_ref(),
-            (ValueKind::FrozenSet(a), ValueKind::Set(b)) => *a.as_ref() == *b,
             (ValueKind::Bytes(a), ValueKind::Bytes(b)) => a.as_ref() == b.as_ref(),
             (ValueKind::Complex(ar, ai), ValueKind::Complex(br, bi)) => ar == br && ai == bi,
             (ValueKind::Int(n), ValueKind::Complex(br, bi)) => (n as f64) == br && bi == 0.0,
@@ -1554,6 +1724,12 @@ impl PartialEq for Value {
                     receiver: br,
                 },
             ) => Rc::ptr_eq(af, bf) && Rc::ptr_eq(ar, br),
+            // Built-in objects dispatch equality through their ops trait so
+            // pyrust-core never names a concrete built-in type.  Try both
+            // directions so e.g. `frozenset == set` and `set == frozenset`
+            // both reach the frozenset impl.
+            (ValueKind::BuiltinObject { ops, state }, _) => ops.eq(state, other),
+            (_, ValueKind::BuiltinObject { ops, state }) => ops.eq(state, self),
             _ => false,
         }
     }
@@ -1586,14 +1762,13 @@ pub fn builtin_type_name(value: &Value) -> &'static str {
         ValueKind::Tuple(_) => "tuple",
         ValueKind::Dict(_) => "dict",
         ValueKind::Set(_) => "set",
-        ValueKind::FrozenSet(_) => "frozenset",
         ValueKind::Bytes(_) => "bytes",
         ValueKind::Complex(_, _) => "complex",
-        ValueKind::File(_) => "_io.TextIOWrapper",
         ValueKind::Int(_) | ValueKind::BigInt(_) => "int",
         ValueKind::Float(_) => "float",
         ValueKind::Bool(_) => "bool",
         ValueKind::None => "NoneType",
+        ValueKind::BuiltinObject { ops, .. } => ops.type_name(),
         _ => "object",
     }
 }

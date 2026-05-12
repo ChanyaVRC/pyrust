@@ -380,7 +380,7 @@ fn key_to_value(key: PyKey) -> Value {
             for k in items {
                 set.insert(k);
             }
-            Value::frozenset(set)
+            pyrust_builtins::frozenset::frozenset(set)
         }
     }
 }

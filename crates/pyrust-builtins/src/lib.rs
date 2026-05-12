@@ -1,10 +1,29 @@
 pub mod dict;
+pub mod file;
+pub mod frozenset;
 pub mod list;
 pub mod mutable_sequence;
 pub mod sequence;
 pub mod set;
 pub mod string;
 pub mod tuple;
+
+/// Look up `BuiltinTypeOps` by stable type-name.  Installed in pyrust-core's
+/// registry at interpreter startup so the VM can dispatch operations on
+/// built-in objects whose Tier 1 variant has been eliminated.
+pub fn lookup_ops(type_name: &str) -> Option<&'static dyn pyrust_core::BuiltinTypeOps> {
+    match type_name {
+        file::TYPE_NAME => Some(file::FILE_OPS),
+        frozenset::TYPE_NAME => Some(frozenset::FROZENSET_OPS),
+        _ => None,
+    }
+}
+
+/// Install [`lookup_ops`] in pyrust-core's registry.  Idempotent — safe to
+/// call from `Interpreter::default()`.
+pub fn install() {
+    pyrust_core::install_builtin_registry(lookup_ops);
+}
 
 #[cfg(test)]
 mod method_table_drift_guard {
