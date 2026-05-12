@@ -675,6 +675,64 @@ impl Interpreter {
             }
             ValueKind::BuiltinFunction("type") => {
                 reject_keyword_args_expanded("type", args)?;
+                if args.len() == 3 {
+                    // 3-arg form: type(name, bases, namespace) constructs a new class.
+                    let name = match args[0].value.kind() {
+                        ValueKind::Str(s) => s.to_string(),
+                        _ => return Err(PyError::Named(
+                            "TypeError".to_string(),
+                            "type() argument 1 must be a str".to_string(),
+                        )),
+                    };
+                    let base = match args[1].value.kind() {
+                        ValueKind::Tuple(items) | ValueKind::List(items) => {
+                            if items.is_empty() {
+                                None
+                            } else if items.len() == 1 {
+                                match items[0].kind() {
+                                    ValueKind::PyClass(c) => Some(Rc::clone(c)),
+                                    _ => return Err(PyError::Named(
+                                        "TypeError".to_string(),
+                                        "type() argument 2 entries must be classes".to_string(),
+                                    )),
+                                }
+                            } else {
+                                // Multiple inheritance: PyRust supports only single base; take the first.
+                                match items[0].kind() {
+                                    ValueKind::PyClass(c) => Some(Rc::clone(c)),
+                                    _ => return Err(PyError::Named(
+                                        "TypeError".to_string(),
+                                        "type() argument 2 entries must be classes".to_string(),
+                                    )),
+                                }
+                            }
+                        }
+                        _ => return Err(PyError::Named(
+                            "TypeError".to_string(),
+                            "type() argument 2 must be a tuple".to_string(),
+                        )),
+                    };
+                    let mut attrs: std::collections::HashMap<String, Value> =
+                        std::collections::HashMap::new();
+                    match args[2].value.kind() {
+                        ValueKind::Dict(map) => {
+                            for (k, v) in map.iter() {
+                                if let crate::value::PyKey::Str(key) = k {
+                                    attrs.insert(key.clone(), v.clone());
+                                }
+                            }
+                        }
+                        _ => return Err(PyError::Named(
+                            "TypeError".to_string(),
+                            "type() argument 3 must be a dict".to_string(),
+                        )),
+                    }
+                    return Ok(Value::py_class(Rc::new(RefCell::new(crate::value::PyClass {
+                        name,
+                        base,
+                        attrs,
+                    }))));
+                }
                 if args.len() != 1 {
                     return Err(PyError::Runtime(
                         "type() takes exactly 1 argument (or 3 for type creation)".to_string(),
