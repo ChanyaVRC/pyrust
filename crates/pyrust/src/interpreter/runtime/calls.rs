@@ -3,6 +3,8 @@
 // method call. The thread_local is safe because the interpreter is single-threaded.
 use std::cell::Cell;
 
+use smallvec::SmallVec;
+
 thread_local! {
     static CALL_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
@@ -2275,8 +2277,11 @@ impl Interpreter {
         }
     }
 
-    fn expand_call_args(&mut self, args: &[CallArg]) -> Result<Vec<ExpandedCallArg>> {
-        let mut out = Vec::new();
+    fn expand_call_args(
+        &mut self,
+        args: &[CallArg],
+    ) -> Result<SmallVec<[ExpandedCallArg; 4]>> {
+        let mut out: SmallVec<[ExpandedCallArg; 4]> = SmallVec::new();
         for arg in args {
             if arg.splat {
                 let value = self.eval_expr(&arg.value)?;
