@@ -10,5 +10,6 @@ path = "src/main.rs"
 [dependencies]
 indexmap = "2"
 rustyline = "14"
+smallvec = "1"
 pyrust-core = { path = "../pyrust-core" }
 pyrust-builtins = { path = "../pyrust-builtins" }
