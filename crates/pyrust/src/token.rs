@@ -16,6 +16,7 @@ pub enum Token {
     Int(i64),
     Float(f64),
     Str(String),
+    Bytes(Vec<u8>),
     FString(Vec<FStringPart>),
     Ident(String),
     // Arithmetic

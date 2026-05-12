@@ -424,6 +424,7 @@ fn lambda_captures_in_expr(
         | Expr::Int(_)
         | Expr::Float(_)
         | Expr::Str(_)
+        | Expr::Bytes(_)
         | Expr::Bool(_)
         | Expr::None => {}
         Expr::Yield(Some(e)) => lambda_captures_in_expr(e, local_index, cells),
@@ -735,7 +736,12 @@ fn collect_free_var_reads_in_expr(expr: &Expr, uses: &mut HashSet<String>) {
                 }
             }
         }
-        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::None => {}
+        Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Str(_)
+        | Expr::Bytes(_)
+        | Expr::Bool(_)
+        | Expr::None => {}
         Expr::Yield(Some(e)) => collect_free_var_reads_in_expr(e, uses),
         Expr::Yield(None) => {}
         Expr::YieldFrom(e) => collect_free_var_reads_in_expr(e, uses),
@@ -779,6 +785,7 @@ fn fold_constant(expr: &Expr) -> Option<Value> {
         Expr::Int(v) => Some(Value::int(*v)),
         Expr::Float(v) => Some(Value::float(*v)),
         Expr::Str(s) => Some(Value::string(s.clone())),
+        Expr::Bytes(b) => Some(Value::bytes(b.clone())),
         Expr::Bool(b) => Some(Value::bool_(*b)),
         Expr::None => Some(Value::none()),
         Expr::Unary { op, expr } => {
@@ -996,7 +1003,12 @@ fn collect_written_target(target: &AssignTarget, names: &mut HashSet<String>) {
 
 fn expr_is_invariant(expr: &Expr, written: &HashSet<String>) -> bool {
     match expr {
-        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::None => true,
+        Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Str(_)
+        | Expr::Bytes(_)
+        | Expr::Bool(_)
+        | Expr::None => true,
         Expr::Var(name) => !written.contains(name.as_str()),
         Expr::Binary { left, right, .. } => {
             expr_is_invariant(left, written) && expr_is_invariant(right, written)
@@ -1191,6 +1203,7 @@ impl Compiler {
             Expr::Int(v) => Some(self.intern_const(Value::int(*v))),
             Expr::Float(v) => Some(self.intern_const(Value::float(*v))),
             Expr::Str(s) => Some(self.intern_const(Value::string(s.clone()))),
+            Expr::Bytes(b) => Some(self.intern_const(Value::bytes(b.clone()))),
             Expr::Bool(b) => Some(self.intern_const(Value::bool_(*b))),
             Expr::None => Some(self.intern_const(Value::none())),
             _ => fold_constant(expr).map(|v| self.intern_const(v)),
@@ -3760,6 +3773,7 @@ impl Compiler {
             Expr::Int(v) => self.compile_literal(Value::int(*v)),
             Expr::Float(v) => self.compile_literal(Value::float(*v)),
             Expr::Str(s) => self.compile_literal(Value::string(s.clone())),
+            Expr::Bytes(b) => self.compile_literal(Value::bytes(b.clone())),
             Expr::Bool(b) => self.compile_literal(Value::bool_(*b)),
             Expr::Var(name) => {
                 if let Some(reg) = self.local_reg(name) {

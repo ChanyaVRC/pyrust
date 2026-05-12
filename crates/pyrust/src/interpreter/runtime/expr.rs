@@ -8,6 +8,7 @@ impl Interpreter {
             Expr::Int(v) => Ok(Value::int(*v)),
             Expr::Float(v) => Ok(Value::float(*v)),
             Expr::Str(v) => Ok(Value::string(v.clone())),
+            Expr::Bytes(v) => Ok(Value::bytes(v.clone())),
             Expr::Bool(v) => Ok(Value::bool_(*v)),
             Expr::None => Ok(Value::none()),
             Expr::Var(name) => {
@@ -273,6 +274,10 @@ impl Interpreter {
                 let chars: Vec<char> = text.chars().collect();
                 let idx = normalize_index(&index, chars.len(), "string")?;
                 Ok(Value::string(chars[idx].to_string()))
+            }
+            ValueKind::Bytes(rc) => {
+                let idx = normalize_index(&index, rc.len(), "bytes")?;
+                Ok(Value::int(rc[idx] as i64))
             }
             ValueKind::Dict(items) => {
                 let key = index
@@ -852,6 +857,18 @@ impl Interpreter {
                 let key = item.to_key().ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
                 Ok(Value::bool_(rc.contains(&key)))
             }
+            ValueKind::Bytes(rc) => {
+                match item.kind() {
+                    ValueKind::Int(n) if (0..=255).contains(&n) => Ok(Value::bool_(rc.contains(&(n as u8)))),
+                    ValueKind::Bytes(sub) => Ok(Value::bool_(
+                        sub.is_empty() || rc.windows(sub.len()).any(|w| w == sub.as_ref().as_slice())
+                    )),
+                    _ => Err(PyError::Named(
+                        "TypeError".to_string(),
+                        "a bytes-like object is required as left operand of 'in <bytes>'".to_string(),
+                    )),
+                }
+            }
             ValueKind::Str(s) => {
                 match item.kind() {
                     ValueKind::Str(sub) => Ok(Value::bool_(s.contains(sub))),
@@ -957,6 +974,7 @@ fn iter_values(value: Value) -> Result<Vec<Value>> {
         ValueKind::Tuple(items) => Ok(items.clone()),
         ValueKind::Set(items) => Ok(items.iter().map(|k| key_to_value(k.clone())).collect()),
         ValueKind::FrozenSet(rc) => Ok(rc.iter().map(|k| key_to_value(k.clone())).collect()),
+        ValueKind::Bytes(rc) => Ok(rc.iter().map(|b| Value::int(*b as i64)).collect()),
         ValueKind::Str(text) => Ok(text.chars().map(|c| Value::string(c.to_string())).collect()),
         ValueKind::Dict(items) => Ok(items.keys().map(|k| key_to_value(k.clone())).collect()),
         ValueKind::DictKeysView(rc) => {
@@ -1055,6 +1073,7 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
         "tuple" => Some(Value::builtin_function("tuple")),
         "set" => Some(Value::builtin_function("set")),
         "frozenset" => Some(Value::builtin_function("frozenset")),
+        "bytes" => Some(Value::builtin_function("bytes")),
         "dict" => Some(Value::builtin_function("dict")),
         "str" => Some(Value::builtin_function("str")),
         "int" => Some(Value::builtin_function("int")),

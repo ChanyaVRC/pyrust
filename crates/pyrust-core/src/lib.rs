@@ -302,6 +302,9 @@ pub enum Opaque {
     /// `frozenset(iterable)` builtin.  Stored behind `Rc` so clones are
     /// cheap and hashability uses `Rc::as_ptr` for identity.
     FrozenSet(Rc<IndexSet<PyKey>>),
+    /// An immutable byte string.  Constructed via the `b"..."` literal or
+    /// the `bytes(...)` builtin.  Stored behind `Rc` for cheap clones.
+    Bytes(Rc<Vec<u8>>),
 }
 
 impl Clone for Opaque {
@@ -374,6 +377,7 @@ impl Clone for Opaque {
                 receiver: receiver.clone(),
             },
             Opaque::FrozenSet(rc) => Opaque::FrozenSet(Rc::clone(rc)),
+            Opaque::Bytes(rc) => Opaque::Bytes(Rc::clone(rc)),
         }
     }
 }
@@ -452,6 +456,7 @@ pub enum ValueKind<'a> {
         receiver: &'a Value,
     },
     FrozenSet(&'a Rc<IndexSet<PyKey>>),
+    Bytes(&'a Rc<Vec<u8>>),
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -752,6 +757,10 @@ impl Value {
 
     pub fn frozenset_rc(rc: Rc<IndexSet<PyKey>>) -> Self {
         Value::opaque(Opaque::FrozenSet(rc))
+    }
+
+    pub fn bytes(b: Vec<u8>) -> Self {
+        Value::opaque(Opaque::Bytes(Rc::new(b)))
     }
 
     pub fn range(start: i64, stop: i64, step: i64) -> Self {
@@ -1149,6 +1158,7 @@ impl Value {
                     ValueKind::BuiltinBoundMethod { name, receiver }
                 }
                 Opaque::FrozenSet(rc) => ValueKind::FrozenSet(rc),
+                Opaque::Bytes(rc) => ValueKind::Bytes(rc),
             },
             _ => unreachable!(),
         }
@@ -1192,6 +1202,7 @@ impl Value {
             ValueKind::NotImplemented => true,
             ValueKind::BuiltinBoundMethod { .. } => true,
             ValueKind::FrozenSet(s) => !s.is_empty(),
+            ValueKind::Bytes(b) => !b.is_empty(),
         }
     }
 
@@ -1334,6 +1345,7 @@ impl Value {
                     builtin_type_name(receiver)
                 )
             }
+            ValueKind::Bytes(rc) => bytes_repr(rc),
         }
     }
 
@@ -1485,6 +1497,7 @@ impl PartialEq for Value {
             (ValueKind::FrozenSet(a), ValueKind::FrozenSet(b)) => a.as_ref() == b.as_ref(),
             (ValueKind::Set(a), ValueKind::FrozenSet(b)) => *a == *b.as_ref(),
             (ValueKind::FrozenSet(a), ValueKind::Set(b)) => *a.as_ref() == *b,
+            (ValueKind::Bytes(a), ValueKind::Bytes(b)) => a.as_ref() == b.as_ref(),
             (
                 ValueKind::Range {
                     start: as_,
@@ -1545,12 +1558,38 @@ pub fn builtin_type_name(value: &Value) -> &'static str {
         ValueKind::Dict(_) => "dict",
         ValueKind::Set(_) => "set",
         ValueKind::FrozenSet(_) => "frozenset",
+        ValueKind::Bytes(_) => "bytes",
         ValueKind::Int(_) | ValueKind::BigInt(_) => "int",
         ValueKind::Float(_) => "float",
         ValueKind::Bool(_) => "bool",
         ValueKind::None => "NoneType",
         _ => "object",
     }
+}
+
+/// Render a `bytes` value the way Python does (b'...' with escapes).
+fn bytes_repr(bytes: &[u8]) -> String {
+    // Choose a quote: if any single quote and no double quote, use double; else single.
+    let has_single = bytes.contains(&b'\'');
+    let has_double = bytes.contains(&b'"');
+    let q = if has_single && !has_double { '"' } else { '\'' };
+    let mut out = String::with_capacity(bytes.len() + 3);
+    out.push('b');
+    out.push(q);
+    for &b in bytes {
+        match b {
+            0x09 => out.push_str("\\t"),
+            0x0a => out.push_str("\\n"),
+            0x0d => out.push_str("\\r"),
+            0x5c => out.push_str("\\\\"),
+            b'\'' if q == '\'' => out.push_str("\\'"),
+            b'"' if q == '"' => out.push_str("\\\""),
+            0x20..=0x7e => out.push(b as char),
+            _ => out.push_str(&format!("\\x{b:02x}")),
+        }
+    }
+    out.push(q);
+    out
 }
 
 fn key_repr(key: &PyKey) -> String {
