@@ -52,6 +52,11 @@ assert d == [1, 1, 3, 4, 5, 9]
 d.sort(reverse=True)
 assert d == [9, 5, 4, 3, 1, 1]
 
+# sort with key= and reverse= together (regression: issue #277)
+words = ['banana', 'apple', 'cherry', 'date']
+words.sort(key=len, reverse=True)
+assert words == ['banana', 'cherry', 'apple', 'date']
+
 # clear
 e = [1, 2, 3]
 e.clear()

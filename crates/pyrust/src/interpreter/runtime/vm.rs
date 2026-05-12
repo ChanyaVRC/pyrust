@@ -1676,6 +1676,13 @@ impl Interpreter {
             1 => {
                 // Intercept list.sort here to support key= (needs interpreter access).
                 if method == "sort" {
+                    // Cache the kwarg PyKeys once so each list.sort() call avoids
+                    // the two `String` allocations the literal lookups would
+                    // otherwise incur. See issue #277.
+                    static KEY_KW: std::sync::LazyLock<PyKey> =
+                        std::sync::LazyLock::new(|| PyKey::Str("key".to_string()));
+                    static REVERSE_KW: std::sync::LazyLock<PyKey> =
+                        std::sync::LazyLock::new(|| PyKey::Str("reverse".to_string()));
                     for k in kw_map.keys() {
                         if let PyKey::Str(s) = k
                             && s != "key" && s != "reverse" {
@@ -1685,9 +1692,9 @@ impl Interpreter {
                                 ));
                             }
                     }
-                    let key_fn = kw_map.get(&PyKey::Str("key".to_string())).cloned();
+                    let key_fn = kw_map.get(&*KEY_KW).cloned();
                     let reverse = kw_map
-                        .get(&PyKey::Str("reverse".to_string()))
+                        .get(&*REVERSE_KW)
                         .map(|v| v.truthy())
                         .unwrap_or(false);
                     if let Some(key_fn_val) = key_fn {
