@@ -64,4 +64,31 @@ try:
 except TypeError:
     pass
 
+# --- no-arg vars()/dir() return the accessible env ---
+# Note: CPython's no-arg vars()/dir() return the *local* scope inside a
+# function. PyRust currently returns the enclosing env (the module / built-in
+# scope) because fastlocals live in registers, not the env. Tracked as a
+# follow-up — for now we just verify the call shape doesn't error.
+v = vars()
+d = dir()
+assert isinstance(v, dict)
+assert isinstance(d, list)
+assert d == sorted(d)
+
+# --- dir(instance) walks the class hierarchy ---
+class Base:
+    def base_method(self):
+        return 1
+
+class Child(Base):
+    def child_method(self):
+        return 2
+
+c = Child()
+c.inst_attr = 3
+dnames = dir(c)
+assert "inst_attr" in dnames          # instance attr
+assert "child_method" in dnames        # direct class attr
+assert "base_method" in dnames         # inherited from Base
+
 print("vars/dir OK")

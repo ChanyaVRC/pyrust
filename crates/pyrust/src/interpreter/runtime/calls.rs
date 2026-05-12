@@ -2952,7 +2952,15 @@ fn dir_names(value: &Value) -> Vec<String> {
     }
 }
 
-/// Hard-coded list of method names per built-in type for `dir()`.
+/// Hard-coded list of public method names per built-in type for `dir()`.
+///
+/// TODO: also include the dunder methods CPython exposes via `dir([])` /
+/// `dir("")` etc. (`__iter__`, `__len__`, `__getitem__`, `__contains__`,
+/// `__add__`, …). Programs that introspect protocol support via `dir()`
+/// currently get a partial answer. Once `#262` lands, this table should
+/// be derived from `pyrust_builtins::{string,list,…}::METHODS` to remove
+/// the third source of truth — see the PR review thread for the design
+/// discussion.
 fn builtin_method_names(type_name: &str) -> Vec<String> {
     let names: &[&str] = match type_name {
         "str" => &[
