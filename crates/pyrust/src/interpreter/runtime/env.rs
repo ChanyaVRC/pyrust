@@ -217,10 +217,17 @@ impl Interpreter {
                     ))
                 }
             }
-            _ => Err(PyError::Named(
-                "AttributeError".to_string(),
-                format!("object has no attribute '{}'", name),
-            )),
+            _ => {
+                // Built-in type instance method lookup: list.append, str.upper, etc.
+                if builtin_has_method(&target, name) {
+                    return Ok(Value::builtin_bound_method(name, target.clone()));
+                }
+                let type_name = pyrust_core::builtin_type_name(&target);
+                Err(PyError::Named(
+                    "AttributeError".to_string(),
+                    format!("'{type_name}' object has no attribute '{name}'"),
+                ))
+            }
         }
     }
 
@@ -479,4 +486,17 @@ impl Interpreter {
         Ok(value.truthy())
     }
 
+}
+
+/// Returns `true` if `name` is a built-in method on `target`'s type.
+/// Used by `get_attr` to produce `BuiltinBoundMethod` values.
+fn builtin_has_method(target: &Value, name: &str) -> bool {
+    match target.kind() {
+        ValueKind::Str(_) => pyrust_builtins::string::has_method(name),
+        ValueKind::List(_) => pyrust_builtins::list::has_method(name),
+        ValueKind::Tuple(_) => pyrust_builtins::tuple::has_method(name),
+        ValueKind::Dict(_) => pyrust_builtins::dict::has_method(name),
+        ValueKind::Set(_) => pyrust_builtins::set::has_method(name),
+        _ => false,
+    }
 }

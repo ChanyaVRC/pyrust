@@ -281,6 +281,14 @@ pub enum Opaque {
     /// The `NotImplemented` singleton.  Returned by binary dunder methods to
     /// signal that the operation is not supported for the given operand types.
     NotImplemented,
+    /// A method on a built-in type instance with the receiver bound.  Produced
+    /// by `getattr(x, "method")` where `x` is a list/str/dict/tuple/set and
+    /// `"method"` is one of its methods.  When called, dispatches through
+    /// `pyrust-builtins` with `receiver` as `self`.
+    BuiltinBoundMethod {
+        name: Rc<String>,
+        receiver: Value,
+    },
 }
 
 impl Clone for Opaque {
@@ -348,6 +356,10 @@ impl Clone for Opaque {
                 fdel: Rc::clone(fdel),
             },
             Opaque::NotImplemented => Opaque::NotImplemented,
+            Opaque::BuiltinBoundMethod { name, receiver } => Opaque::BuiltinBoundMethod {
+                name: Rc::clone(name),
+                receiver: receiver.clone(),
+            },
         }
     }
 }
@@ -421,6 +433,10 @@ pub enum ValueKind<'a> {
         fdel: &'a Rc<Value>,
     },
     NotImplemented,
+    BuiltinBoundMethod {
+        name: &'a Rc<String>,
+        receiver: &'a Value,
+    },
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -745,6 +761,13 @@ impl Value {
 
     pub fn bound_method(function: Rc<UserFunction>, receiver: Rc<RefCell<PyInstance>>) -> Self {
         Value::opaque(Opaque::BoundMethod { function, receiver })
+    }
+
+    pub fn builtin_bound_method(name: impl Into<String>, receiver: Value) -> Self {
+        Value::opaque(Opaque::BuiltinBoundMethod {
+            name: Rc::new(name.into()),
+            receiver,
+        })
     }
 
     pub fn lazy_enumerate(source: Value, start: i64) -> Self {
@@ -1099,6 +1122,9 @@ impl Value {
                     fdel,
                 },
                 Opaque::NotImplemented => ValueKind::NotImplemented,
+                Opaque::BuiltinBoundMethod { name, receiver } => {
+                    ValueKind::BuiltinBoundMethod { name, receiver }
+                }
             },
             _ => unreachable!(),
         }
@@ -1140,6 +1166,7 @@ impl Value {
             ValueKind::Property { .. } => true,
             ValueKind::PropertyAccessorPartial { .. } => true,
             ValueKind::NotImplemented => true,
+            ValueKind::BuiltinBoundMethod { .. } => true,
         }
     }
 
@@ -1269,6 +1296,12 @@ impl Value {
             ValueKind::Property { .. } => "<property object>".to_string(),
             ValueKind::PropertyAccessorPartial { .. } => "<property accessor partial>".to_string(),
             ValueKind::NotImplemented => "NotImplemented".to_string(),
+            ValueKind::BuiltinBoundMethod { name, receiver } => {
+                format!(
+                    "<built-in method {name} of {} object>",
+                    builtin_type_name(receiver)
+                )
+            }
         }
     }
 
@@ -1457,6 +1490,23 @@ impl fmt::Debug for Value {
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper free functions
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// Returns the built-in type name (e.g. "list", "str") for use in
+/// repr strings like "<built-in method append of list object>".
+pub fn builtin_type_name(value: &Value) -> &'static str {
+    match value.kind() {
+        ValueKind::Str(_) => "str",
+        ValueKind::List(_) => "list",
+        ValueKind::Tuple(_) => "tuple",
+        ValueKind::Dict(_) => "dict",
+        ValueKind::Set(_) => "set",
+        ValueKind::Int(_) | ValueKind::BigInt(_) => "int",
+        ValueKind::Float(_) => "float",
+        ValueKind::Bool(_) => "bool",
+        ValueKind::None => "NoneType",
+        _ => "object",
+    }
+}
 
 fn key_repr(key: &PyKey) -> String {
     match key {

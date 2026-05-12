@@ -716,6 +716,7 @@ impl Interpreter {
                     ValueKind::Property { .. }
                     | ValueKind::PropertyAccessorPartial { .. } => Ok(Value::builtin_function("property")),
                     ValueKind::NotImplemented => Ok(Value::builtin_function("NotImplementedType")),
+                    ValueKind::BuiltinBoundMethod { .. } => Ok(Value::builtin_function("builtin_function_or_method")),
                 }
             }
             ValueKind::BuiltinFunction("id") => {
@@ -806,6 +807,50 @@ impl Interpreter {
                         "TypeError".to_string(),
                         "dict() with arguments is not yet supported".to_string(),
                     ))
+                }
+            }
+            ValueKind::BuiltinBoundMethod { name, receiver } => {
+                let method = name.to_string();
+                let mut receiver = receiver.clone();
+                // Separate positional and keyword args.
+                let mut pos: Vec<Value> = Vec::with_capacity(args.len());
+                let mut kw: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
+                for a in args {
+                    match &a.name {
+                        Some(n) => { kw.insert(PyKey::Str(n.clone()), a.value.clone()); }
+                        None => pos.push(a.value.clone()),
+                    }
+                }
+                match receiver.kind() {
+                    ValueKind::Str(_) => {
+                        pyrust_builtins::string::call(&method, &receiver, pos)
+                    }
+                    ValueKind::List(_) => {
+                        let items = receiver
+                            .as_list_mut()
+                            .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
+                        pyrust_builtins::list::call(&method, items, pos, &kw)
+                    }
+                    ValueKind::Tuple(items) => {
+                        let owned: Vec<Value> = items.clone();
+                        pyrust_builtins::tuple::call(&method, &owned, pos)
+                    }
+                    ValueKind::Dict(_) => {
+                        let dict = receiver
+                            .as_dict_mut()
+                            .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+                        pyrust_builtins::dict::call(&method, dict, pos)
+                    }
+                    ValueKind::Set(_) => {
+                        let set = receiver
+                            .as_set_mut()
+                            .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
+                        pyrust_builtins::set::call(&method, set, pos)
+                    }
+                    _ => Err(PyError::Named(
+                        "TypeError".to_string(),
+                        format!("'{}' object has no method '{method}'", pyrust_core::builtin_type_name(&receiver)),
+                    )),
                 }
             }
             ValueKind::BuiltinFunction(name) if name.starts_with("str.") => {

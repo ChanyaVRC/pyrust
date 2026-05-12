@@ -18,6 +18,58 @@ fn subslice_offset(parent: &str, sub: &str) -> usize {
     off
 }
 
+/// Returns `true` if `method` is the name of a built-in `str` method.
+/// Used by `hasattr` / `getattr` to validate attribute names without
+/// invoking the method.
+pub fn has_method(method: &str) -> bool {
+    matches!(
+        method,
+        "index"
+            | "count"
+            | "split"
+            | "rsplit"
+            | "join"
+            | "splitlines"
+            | "partition"
+            | "rpartition"
+            | "strip"
+            | "lstrip"
+            | "rstrip"
+            | "removeprefix"
+            | "removesuffix"
+            | "center"
+            | "ljust"
+            | "rjust"
+            | "zfill"
+            | "expandtabs"
+            | "upper"
+            | "lower"
+            | "casefold"
+            | "capitalize"
+            | "swapcase"
+            | "title"
+            | "find"
+            | "rfind"
+            | "rindex"
+            | "replace"
+            | "startswith"
+            | "endswith"
+            | "isdigit"
+            | "isalpha"
+            | "isalnum"
+            | "isspace"
+            | "isdecimal"
+            | "isnumeric"
+            | "islower"
+            | "isupper"
+            | "istitle"
+            | "isascii"
+            | "isidentifier"
+            | "isprintable"
+            | "format"
+    )
+}
+
 pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
     let s: &str = src.as_str().unwrap();
     let args = args.as_slice();

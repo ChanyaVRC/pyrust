@@ -4,6 +4,24 @@ use pyrust_core::{PyError, PyKey, Result, Value, ValueKind};
 use crate::mutable_sequence as ms;
 use crate::sequence;
 
+/// Returns `true` if `method` is the name of a built-in `list` method.
+pub fn has_method(method: &str) -> bool {
+    matches!(
+        method,
+        "index"
+            | "count"
+            | "append"
+            | "clear"
+            | "copy"
+            | "extend"
+            | "insert"
+            | "pop"
+            | "remove"
+            | "reverse"
+            | "sort"
+    )
+}
+
 pub fn call(
     method: &str,
     items: &mut Vec<Value>,

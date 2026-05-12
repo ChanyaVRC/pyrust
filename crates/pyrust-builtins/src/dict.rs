@@ -1,6 +1,23 @@
 use indexmap::IndexMap;
 use pyrust_core::{PyError, PyKey, Result, Value, ValueKind};
 
+/// Returns `true` if `method` is the name of a built-in `dict` method.
+pub fn has_method(method: &str) -> bool {
+    matches!(
+        method,
+        "get"
+            | "keys"
+            | "values"
+            | "items"
+            | "update"
+            | "pop"
+            | "popitem"
+            | "clear"
+            | "setdefault"
+            | "copy"
+    )
+}
+
 pub fn call(method: &str, dict: &mut IndexMap<PyKey, Value>, args: Vec<Value>) -> Result<Value> {
     match method {
         "get" => get(dict, args),
