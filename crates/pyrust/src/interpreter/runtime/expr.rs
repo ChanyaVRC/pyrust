@@ -370,6 +370,9 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__sub__", "__rsub__") {
                     return r;
                 }
+                if let Some(r) = set_binary_op(&left, &right, SetOp::Sub) {
+                    return r;
+                }
                 self.sub(left, right)
             }
             BinaryOp::Mul => {
@@ -457,16 +460,25 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__and__", "__rand__") {
                     return r;
                 }
+                if let Some(r) = set_binary_op(&left, &right, SetOp::And) {
+                    return r;
+                }
                 self.bitwise_op(&left, &right, |a, b| Ok(a & b))
             }
             BinaryOp::BitOr => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__or__", "__ror__") {
                     return r;
                 }
+                if let Some(r) = set_binary_op(&left, &right, SetOp::Or) {
+                    return r;
+                }
                 self.bitwise_op(&left, &right, |a, b| Ok(a | b))
             }
             BinaryOp::BitXor => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__xor__", "__rxor__") {
+                    return r;
+                }
+                if let Some(r) = set_binary_op(&left, &right, SetOp::Xor) {
                     return r;
                 }
                 self.bitwise_op(&left, &right, |a, b| Ok(a ^ b))
@@ -836,6 +848,10 @@ impl Interpreter {
                 let key = item.to_key().ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
                 Ok(Value::bool_(items.contains(&key)))
             }
+            ValueKind::FrozenSet(rc) => {
+                let key = item.to_key().ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
+                Ok(Value::bool_(rc.contains(&key)))
+            }
             ValueKind::Str(s) => {
                 match item.kind() {
                     ValueKind::Str(sub) => Ok(Value::bool_(s.contains(sub))),
@@ -940,6 +956,7 @@ fn iter_values(value: Value) -> Result<Vec<Value>> {
         ValueKind::List(items) => Ok(items.clone()),
         ValueKind::Tuple(items) => Ok(items.clone()),
         ValueKind::Set(items) => Ok(items.iter().map(|k| key_to_value(k.clone())).collect()),
+        ValueKind::FrozenSet(rc) => Ok(rc.iter().map(|k| key_to_value(k.clone())).collect()),
         ValueKind::Str(text) => Ok(text.chars().map(|c| Value::string(c.to_string())).collect()),
         ValueKind::Dict(items) => Ok(items.keys().map(|k| key_to_value(k.clone())).collect()),
         ValueKind::DictKeysView(rc) => {
@@ -1037,6 +1054,7 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
         "list" => Some(Value::builtin_function("list")),
         "tuple" => Some(Value::builtin_function("tuple")),
         "set" => Some(Value::builtin_function("set")),
+        "frozenset" => Some(Value::builtin_function("frozenset")),
         "dict" => Some(Value::builtin_function("dict")),
         "str" => Some(Value::builtin_function("str")),
         "int" => Some(Value::builtin_function("int")),
@@ -1079,4 +1097,70 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
         "NotImplemented" => Some(Value::not_implemented()),
         _ => None,
     }
+}
+
+/// Operation tag for set/frozenset binary operators.
+#[derive(Clone, Copy)]
+enum SetOp {
+    Or,  // union
+    And, // intersection
+    Sub, // difference
+    Xor, // symmetric difference
+}
+
+/// Compute a binary set operation when both operands are set/frozenset.
+/// Returns the result wrapped in `Set` if both operands are sets, otherwise
+/// `FrozenSet` (matching CPython: any frozenset operand promotes the result).
+fn set_binary_op(left: &Value, right: &Value, op: SetOp) -> Option<Result<Value>> {
+    let lhs_items = match left.kind() {
+        ValueKind::Set(s) => Some((s.clone(), false)),
+        ValueKind::FrozenSet(rc) => Some(((**rc).clone(), true)),
+        _ => None,
+    }?;
+    let rhs_items = match right.kind() {
+        ValueKind::Set(s) => Some((s.clone(), false)),
+        ValueKind::FrozenSet(rc) => Some(((**rc).clone(), true)),
+        _ => None,
+    }?;
+    let (a, l_frozen) = lhs_items;
+    let (b, r_frozen) = rhs_items;
+    let mut out = indexmap::IndexSet::new();
+    match op {
+        SetOp::Or => {
+            for k in a.iter().chain(b.iter()) {
+                out.insert(k.clone());
+            }
+        }
+        SetOp::And => {
+            for k in a.iter() {
+                if b.contains(k) {
+                    out.insert(k.clone());
+                }
+            }
+        }
+        SetOp::Sub => {
+            for k in a.iter() {
+                if !b.contains(k) {
+                    out.insert(k.clone());
+                }
+            }
+        }
+        SetOp::Xor => {
+            for k in a.iter() {
+                if !b.contains(k) {
+                    out.insert(k.clone());
+                }
+            }
+            for k in b.iter() {
+                if !a.contains(k) {
+                    out.insert(k.clone());
+                }
+            }
+        }
+    }
+    Some(Ok(if l_frozen || r_frozen {
+        Value::frozenset(out)
+    } else {
+        Value::set(out)
+    }))
 }
