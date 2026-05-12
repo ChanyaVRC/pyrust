@@ -101,12 +101,5 @@ pub fn as_property(value: &Value) -> Option<(Rc<Value>, Rc<Value>, Rc<Value>, Op
 }
 
 fn borrow_state(state: &BuiltinState) -> Option<std::cell::Ref<'_, PropertyState>> {
-    let borrow = state.borrow();
-    if borrow.downcast_ref::<PropertyState>().is_some() {
-        Some(std::cell::Ref::map(borrow, |b| {
-            b.downcast_ref::<PropertyState>().unwrap()
-        }))
-    } else {
-        None
-    }
+    std::cell::Ref::filter_map(state.borrow(), |b| b.downcast_ref::<PropertyState>()).ok()
 }

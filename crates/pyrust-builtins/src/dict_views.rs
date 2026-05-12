@@ -207,6 +207,3 @@ fn key_repr(key: &PyKey) -> String {
         }
     }
 }
-
-// keep `Result` import for future call_method impls
-const _: fn() -> Result<()> = || Ok(());

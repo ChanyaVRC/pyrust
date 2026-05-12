@@ -221,6 +221,14 @@ fn format_float(v: f64) -> String {
     }
 }
 
+/// Returns the top 16 bits of a Value's u64 encoding — the tag.
+///
+/// **Caveat:** the sentinels [`UNSET_BITS`] and [`NOT_IMPLEMENTED_BITS`] are
+/// positive-NaN bit patterns whose `top16` is `0x7FF8` (≤ [`TAG_FLOAT_MAX`]).
+/// They will be classified as `Float` by a raw `top16`-based check.  Always
+/// route through [`Value::kind`] (which checks the exact bit pattern first),
+/// [`Value::is_unset`], or [`Value::is_not_implemented`] when distinguishing
+/// these from real floats.
 #[inline(always)]
 fn top16(bits: u64) -> u16 {
     (bits >> 48) as u16
@@ -269,11 +277,10 @@ pub trait BuiltinTypeOps: 'static {
 
     fn setattr(&self, state: &BuiltinState, name: &str, value: Value) -> Result<()> {
         let _ = (state, value);
-        Err(PyError::Runtime(format!(
-            "'{}' object has no attribute '{}'",
-            self.type_name(),
-            name
-        )))
+        Err(PyError::Named(
+            "AttributeError".to_string(),
+            format!("'{}' object has no attribute '{}'", self.type_name(), name),
+        ))
     }
 
     fn call(
@@ -283,10 +290,10 @@ pub trait BuiltinTypeOps: 'static {
         kwargs: &IndexMap<String, Value>,
     ) -> Result<Value> {
         let _ = (state, args, kwargs);
-        Err(PyError::Runtime(format!(
-            "'{}' object is not callable",
-            self.type_name()
-        )))
+        Err(PyError::Named(
+            "TypeError".to_string(),
+            format!("'{}' object is not callable", self.type_name()),
+        ))
     }
 
     fn call_method(
@@ -297,19 +304,18 @@ pub trait BuiltinTypeOps: 'static {
         kwargs: &IndexMap<String, Value>,
     ) -> Result<Value> {
         let _ = (state, args, kwargs);
-        Err(PyError::Runtime(format!(
-            "'{}' object has no method '{}'",
-            self.type_name(),
-            name
-        )))
+        Err(PyError::Named(
+            "AttributeError".to_string(),
+            format!("'{}' object has no attribute '{}'", self.type_name(), name),
+        ))
     }
 
     fn iter_next(&self, state: &BuiltinState) -> Result<Option<Value>> {
         let _ = state;
-        Err(PyError::Runtime(format!(
-            "'{}' object is not iterable",
-            self.type_name()
-        )))
+        Err(PyError::Named(
+            "TypeError".to_string(),
+            format!("'{}' object is not iterable", self.type_name()),
+        ))
     }
 
     fn len(&self, state: &BuiltinState) -> Option<usize> {
@@ -319,26 +325,29 @@ pub trait BuiltinTypeOps: 'static {
 
     fn get_item(&self, state: &BuiltinState, key: &Value) -> Result<Value> {
         let _ = (state, key);
-        Err(PyError::Runtime(format!(
-            "'{}' object is not subscriptable",
-            self.type_name()
-        )))
+        Err(PyError::Named(
+            "TypeError".to_string(),
+            format!("'{}' object is not subscriptable", self.type_name()),
+        ))
     }
 
     fn set_item(&self, state: &BuiltinState, key: &Value, value: Value) -> Result<()> {
         let _ = (state, key, value);
-        Err(PyError::Runtime(format!(
-            "'{}' object does not support item assignment",
-            self.type_name()
-        )))
+        Err(PyError::Named(
+            "TypeError".to_string(),
+            format!(
+                "'{}' object does not support item assignment",
+                self.type_name()
+            ),
+        ))
     }
 
     fn contains(&self, state: &BuiltinState, item: &Value) -> Result<bool> {
         let _ = (state, item);
-        Err(PyError::Runtime(format!(
-            "argument of type '{}' is not iterable",
-            self.type_name()
-        )))
+        Err(PyError::Named(
+            "TypeError".to_string(),
+            format!("argument of type '{}' is not iterable", self.type_name()),
+        ))
     }
 
     /// Returns true if `name` is a method this type exposes.  Used by
@@ -382,6 +391,32 @@ pub fn install_builtin_registry(registry: BuiltinRegistry) {
 /// registry has been installed or the type is unknown.
 pub fn lookup_builtin_ops(type_name: &str) -> Option<&'static dyn BuiltinTypeOps> {
     BUILTIN_REGISTRY.get().and_then(|reg| reg(type_name))
+}
+
+/// Callback for materialising an arbitrary `Value` into its iteration items.
+/// Installed by `pyrust` (which owns the interpreter's `iter_values` impl)
+/// so that `pyrust-builtins` iterator helpers can drain a source value
+/// without depending on the interpreter crate.
+///
+/// The helpers (`enumerate`/`zip`/`reversed`) call this lazily — at first
+/// `iter_next` invocation — to preserve side-effect timing: side effects of
+/// the source (e.g. `open()` reading a file) happen at iteration start, not
+/// at helper construction.
+pub type IterValuesFn = fn(&Value) -> Result<Vec<Value>>;
+
+static ITER_VALUES_FN: std::sync::OnceLock<IterValuesFn> = std::sync::OnceLock::new();
+
+pub fn install_iter_values(f: IterValuesFn) {
+    let _ = ITER_VALUES_FN.set(f);
+}
+
+pub fn iter_values_via_registry(value: &Value) -> Result<Vec<Value>> {
+    match ITER_VALUES_FN.get() {
+        Some(f) => f(value),
+        None => Err(PyError::Runtime(
+            "iter_values callback not installed".to_string(),
+        )),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -985,6 +1020,11 @@ impl Value {
     }
 
     pub fn is_float(&self) -> bool {
+        // Exclude the reserved positive-NaN sentinels (UNSET, NotImplemented)
+        // whose `top16` falls in the float range but which aren't floats.
+        if self.0 == NOT_IMPLEMENTED_BITS || self.0 == UNSET_BITS {
+            return false;
+        }
         top16(self.0) <= TAG_FLOAT_MAX
     }
 
@@ -1815,3 +1855,42 @@ impl fmt::Display for PyError {
 }
 
 pub type Result<T> = std::result::Result<T, PyError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn not_implemented_round_trips_through_kind() {
+        let v = Value::not_implemented();
+        assert!(v.is_not_implemented());
+        assert!(matches!(v.kind(), ValueKind::NotImplemented));
+        assert!(!v.is_unset());
+    }
+
+    #[test]
+    fn not_implemented_is_not_classified_as_float() {
+        // The NaN-box bit pattern shares the float top16 range; `kind()`
+        // must intercept it before the float arm.  Regression guard for the
+        // top16-vs-exact-bits caveat noted on `top16`.
+        let v = Value::not_implemented();
+        assert!(!matches!(v.kind(), ValueKind::Float(_)));
+        assert!(!v.is_float());
+    }
+
+    #[test]
+    fn not_implemented_repr_is_canonical() {
+        assert_eq!(Value::not_implemented().repr(), "NotImplemented");
+    }
+
+    #[test]
+    fn unset_and_not_implemented_are_distinct_patterns() {
+        // Both use the positive-NaN sentinel family; they must not collide.
+        let unset = Value::unset();
+        let nimpl = Value::not_implemented();
+        assert!(unset.is_unset());
+        assert!(!unset.is_not_implemented());
+        assert!(nimpl.is_not_implemented());
+        assert!(!nimpl.is_unset());
+    }
+}

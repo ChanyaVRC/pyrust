@@ -9,8 +9,8 @@ use crate::error::{PyError, Result};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::value::{
-    BuiltinState, BuiltinTypeOps, EnvRef, Environment, PyBigInt, PyClass, PyInstance, PyKey,
-    PyModule, UserFunction, UserFunctionKind, UserFunctionParam, Value, ValueKind, range_len,
+    EnvRef, Environment, PyBigInt, PyClass, PyInstance, PyKey, PyModule, UserFunction,
+    UserFunctionKind, UserFunctionParam, Value, ValueKind, range_len,
 };
 
 type ModuleCache = Rc<RefCell<HashMap<String, Value>>>;
@@ -36,9 +36,18 @@ pub struct Interpreter {
     key_scratch: Vec<crate::value::PyKey>,
 }
 
+/// Thin wrapper around `iter_values` matching pyrust-core's `IterValuesFn`
+/// signature (`&Value -> Result<Vec<Value>>`).  Installed at interpreter
+/// startup so `pyrust-builtins` iterator helpers can drain arbitrary
+/// sources without depending on this crate.
+fn iter_values_for_registry(value: &Value) -> Result<Vec<Value>> {
+    iter_values(value.clone())
+}
+
 impl Default for Interpreter {
     fn default() -> Self {
         pyrust_builtins::install();
+        pyrust_core::install_iter_values(iter_values_for_registry);
         let env = Environment::new(None);
         install_exception_builtins(&env);
         install_singleton_builtins(&env);

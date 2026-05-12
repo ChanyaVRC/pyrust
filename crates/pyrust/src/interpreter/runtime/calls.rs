@@ -168,16 +168,18 @@ impl Interpreter {
                 } else {
                     0i64
                 };
-                let items = self.collect_iterable(args[0].value.clone())?;
-                Ok(pyrust_builtins::iter_helpers::enumerate(items, start))
+                // Pass the source Value directly — `iter_helpers` materialises
+                // lazily on first iter_next so side effects of e.g. `open()`
+                // happen at iteration start, not at construction.
+                Ok(pyrust_builtins::iter_helpers::enumerate(
+                    args[0].value.clone(),
+                    start,
+                ))
             }
 
             ValueKind::BuiltinFunction("zip") => {
                 reject_keyword_args_expanded("zip", args)?;
-                let mut sources: Vec<Vec<Value>> = Vec::with_capacity(args.len());
-                for a in args.iter() {
-                    sources.push(self.collect_iterable(a.value.clone())?);
-                }
+                let sources: Vec<Value> = args.iter().map(|a| a.value.clone()).collect();
                 Ok(pyrust_builtins::iter_helpers::zip(sources))
             }
 
@@ -188,8 +190,7 @@ impl Interpreter {
                         "reversed() takes exactly one argument".to_string(),
                     ));
                 }
-                let items = self.collect_iterable(args[0].value.clone())?;
-                Ok(pyrust_builtins::iter_helpers::reversed(items))
+                Ok(pyrust_builtins::iter_helpers::reversed(args[0].value.clone()))
             }
 
             ValueKind::BuiltinFunction("sorted") => {
