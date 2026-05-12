@@ -940,6 +940,154 @@ fn stmt_has_continue(s: &Stmt) -> bool {
     }
 }
 
+/// Compare two statements for structural equality.  Used by
+/// `rewrite_continue_top` to detect the common suffix between an
+/// `if guard: pre; continue` branch and the statements following the `if`
+/// in the same loop body, so the suffix can be hoisted out and run once.
+///
+/// `Debug` is implemented for every AST node (derived), and the AST does not
+/// carry mutable state, so the `{:?}` formatting is a safe and conservative
+/// structural identity check.  The cost is paid at compile time only.
+fn stmts_eq(a: &Stmt, b: &Stmt) -> bool {
+    format!("{:?}", a) == format!("{:?}", b)
+}
+
+/// Length of the longest common trailing run of statements between `a` and `b`,
+/// compared by structural equality (`stmts_eq`).
+fn common_suffix_len(a: &[Stmt], b: &[Stmt]) -> usize {
+    let mut k = 0usize;
+    while k < a.len() && k < b.len() {
+        let ai = &a[a.len() - 1 - k];
+        let bi = &b[b.len() - 1 - k];
+        if !stmts_eq(ai, bi) {
+            break;
+        }
+        k += 1;
+    }
+    k
+}
+
+/// Rewrite a loop body to collapse the `if guard: ... ; continue` trampoline
+/// (issue #287, sibling of #282 for `break`).
+///
+/// When the loop body contains a single-branch `if guard: <pre…>; continue`
+/// (no else, the if-body ends with an unconditional `Continue`), the literal
+/// lowering emits `JumpIfFalse(guard, +1) + Jump(loop_start)` — a redundant
+/// two-instruction trampoline whose taken/fallthrough roles are inverted from
+/// the common case (the body runs much more often than the continue fires).
+///
+/// We rewrite to either:
+/// - `if not guard: <rest>` when `<pre>` is empty (lowers to a single
+///   `JumpIfTrue(guard, loop_start)` after `pass_not_invert` + `pass_thread_jumps`).
+/// - `if guard: A_pre else: B_pre ; <suffix>` when `<pre>` shares a non-empty
+///   common trailing run with the rest-of-loop body (hoist the shared tail
+///   out so it runs once, regardless of branch).  In the empty-A_pre subcase
+///   this collapses to `if not guard: B_pre ; <suffix>`.  This is the
+///   "hoist tail out" variant explicitly suggested by the issue body.
+///
+/// After hoisting, the loop body may end with `i += 1` again, which lets
+/// `try_compile_while_range` promote the loop to a `ForCount*` counter
+/// (the canonical fast path it would have taken if the `if-continue` were
+/// not present).
+fn rewrite_continue_top(body: Vec<Stmt>) -> Vec<Stmt> {
+    let mut out: Vec<Stmt> = Vec::with_capacity(body.len());
+    let mut iter = body.into_iter();
+    while let Some(stmt) = iter.next() {
+        // Match `if guard: <body>` with single branch, no else, body ending
+        // in Continue.
+        let matches_pattern = matches!(
+            &stmt,
+            Stmt::If { branches, else_branch: None }
+                if branches.len() == 1
+                    && branches[0].1.last().is_some_and(|s| matches!(s, Stmt::Continue))
+        );
+        if !matches_pattern {
+            out.push(stmt);
+            continue;
+        }
+
+        // Decompose the matched if into (guard, if_body_without_trailing_continue).
+        let (guard, mut a_body) = match stmt {
+            Stmt::If { mut branches, .. } => {
+                let (g, mut b) = branches.swap_remove(0);
+                b.pop(); // discard the trailing Continue (it's a no-op at loop tail)
+                (g, b)
+            }
+            _ => unreachable!(),
+        };
+
+        // Collect the rest of the loop body (this is the implicit "else" arm).
+        let mut b_body: Vec<Stmt> = iter.by_ref().collect();
+        // Recurse so that consecutive `if a: continue; if b: continue; rest`
+        // chains collapse one trampoline at a time.
+        b_body = rewrite_continue_top(b_body);
+
+        // Hoist the longest common trailing run of statements out of both arms.
+        let k = common_suffix_len(&a_body, &b_body);
+        let suffix: Vec<Stmt> = a_body.split_off(a_body.len() - k);
+        b_body.truncate(b_body.len() - k);
+
+        // Build the new if-statement.  Drop the if entirely when both arms are
+        // empty AND the guard is a pure name/literal (no side effect to preserve).
+        let drop_guard = a_body.is_empty() && b_body.is_empty() && expr_is_side_effect_free(&guard);
+        if drop_guard {
+            // Branch is pure noise: the guard has no side effects and both arms
+            // are empty after suffix hoisting.  Skip the if entirely.
+        } else if a_body.is_empty() {
+            // `if not guard: B_pre`
+            out.push(Stmt::If {
+                branches: vec![(
+                    Expr::Unary {
+                        op: UnaryOp::Not,
+                        expr: Box::new(guard),
+                    },
+                    b_body,
+                )],
+                else_branch: None,
+            });
+        } else if b_body.is_empty() {
+            // `if guard: A_pre` (the else is empty so don't emit it).
+            out.push(Stmt::If {
+                branches: vec![(guard, a_body)],
+                else_branch: None,
+            });
+        } else {
+            // `if guard: A_pre else: B_pre`
+            out.push(Stmt::If {
+                branches: vec![(guard, a_body)],
+                else_branch: Some(b_body),
+            });
+        }
+        out.extend(suffix);
+        return out;
+    }
+    out
+}
+
+/// Conservatively determine whether evaluating `expr` can have observable
+/// side effects.  Only used by `rewrite_continue_top` to decide whether the
+/// guard of an emptied if-statement can be discarded.
+fn expr_is_side_effect_free(expr: &Expr) -> bool {
+    match expr {
+        Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Complex(_, _)
+        | Expr::Str(_)
+        | Expr::Bytes(_)
+        | Expr::Bool(_)
+        | Expr::None
+        | Expr::Var(_) => true,
+        Expr::Unary { expr, .. } => expr_is_side_effect_free(expr),
+        Expr::Binary { left, right, op: _ } => {
+            expr_is_side_effect_free(left) && expr_is_side_effect_free(right)
+        }
+        Expr::Compare { left, ops } => {
+            expr_is_side_effect_free(left) && ops.iter().all(|(_, e)| expr_is_side_effect_free(e))
+        }
+        _ => false,
+    }
+}
+
 fn collect_body_written(body: &[Stmt]) -> HashSet<String> {
     let mut names = HashSet::new();
     collect_written_in(body, &mut names);
@@ -2376,6 +2524,12 @@ impl Compiler {
 
         let is_infinite = matches!(cond, Expr::Bool(true) | Expr::Int(1));
 
+        // Collapse `if guard: continue; <rest>` at any top-level position in the
+        // loop body (issue #287). The rewrite removes the redundant
+        // `JumpIfFalse(g, +1) + Jump(loop_start)` trampoline.
+        let rewritten = rewrite_continue_top(body.to_vec());
+        let body: &[Stmt] = &rewritten;
+
         if !is_infinite
             && !body_has_continue(body)
             && self.try_compile_while_range(cond, body, else_branch)
@@ -2684,6 +2838,12 @@ impl Compiler {
         body: &[Stmt],
         else_branch: Option<&[Stmt]>,
     ) {
+        // Collapse the `if guard: continue; <rest>` trampoline (issue #287)
+        // before dispatching: this also lets `try_compile_for_range` see the
+        // simpler body shape if the rewrite eliminates all `continue`s.
+        let rewritten = rewrite_continue_top(body.to_vec());
+        let body: &[Stmt] = &rewritten;
+
         if self.try_compile_for_range(target, iter_expr, body, else_branch) {
             return;
         }
