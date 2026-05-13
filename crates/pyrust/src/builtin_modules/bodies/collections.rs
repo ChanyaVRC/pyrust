@@ -304,6 +304,54 @@ pyrust_module! {
                     .collect(),
             ))
         }
+
+        /// `c + d` — add counts element-wise over the union of keys,
+        /// then drop entries whose result is ≤ 0.  `d` may be a Counter
+        /// or a plain dict (matches CPython's "any mapping" acceptance);
+        /// any other type yields `NotImplemented` so the binary-op
+        /// dispatch falls through to `__radd__` / `TypeError`.
+        fn __add__(args) -> Result<Value> {
+            counter_binop(args, CounterOp::Add)
+        }
+
+        /// `c - d` — subtract counts (treat missing as 0), drop ≤ 0.
+        fn __sub__(args) -> Result<Value> {
+            counter_binop(args, CounterOp::Sub)
+        }
+
+        /// `c & d` — element-wise min over the union of keys (missing
+        /// counts treated as 0), drop ≤ 0.  Multiset intersection.
+        fn __and__(args) -> Result<Value> {
+            counter_binop(args, CounterOp::And)
+        }
+
+        /// `c | d` — element-wise max over the union of keys (missing
+        /// counts treated as 0), drop ≤ 0.  Multiset union.
+        fn __or__(args) -> Result<Value> {
+            counter_binop(args, CounterOp::Or)
+        }
+
+        /// `c += d` — mutate `self._counts` in place and return `self`,
+        /// preserving identity (CPython's augmented-op semantics).
+        /// Non-Counter / non-dict RHS yields `NotImplemented` so the
+        /// VM's in-place dispatch retries with plain `__add__`, which
+        /// also returns `NotImplemented` and ultimately raises
+        /// `TypeError`.
+        fn __iadd__(args) -> Result<Value> {
+            counter_inplace_op(args, CounterOp::Add)
+        }
+
+        fn __isub__(args) -> Result<Value> {
+            counter_inplace_op(args, CounterOp::Sub)
+        }
+
+        fn __iand__(args) -> Result<Value> {
+            counter_inplace_op(args, CounterOp::And)
+        }
+
+        fn __ior__(args) -> Result<Value> {
+            counter_inplace_op(args, CounterOp::Or)
+        }
     }
 
     class defaultdict {
@@ -706,4 +754,154 @@ fn key_repr(key: &PyKey) -> String {
         PyKey::None => "None".to_string(),
         PyKey::FrozenSet(_) => "frozenset(...)".to_string(),
     }
+}
+
+// ── Counter arithmetic operators (issue #331) ────────────────────────────────
+//
+// CPython's Counter arithmetic operators (+, -, &, |) share the same
+// shape: walk the union of keys between `self` and `other`, apply the
+// per-key op (treating missing counts as 0), then drop any entry whose
+// resulting count is ≤ 0.  This file factors that into one helper rather
+// than four near-identical method bodies.
+//
+// `other` is accepted as either a Counter PyInstance (read via
+// `_counts`) or a plain dict (matches CPython's "any mapping with int
+// values" acceptance).  Any other type ends with `NotImplemented`,
+// which the binary-op dispatch in `eval_binary` converts into a proper
+// TypeError after also trying the reflected dunder.
+//
+// In-place variants reuse the same merge function, then write the
+// result back to `self._counts` and return `self` — preserving object
+// identity, the property `c += d` is supposed to guarantee.
+
+/// Which Counter arithmetic op to perform.  Kept as a plain enum (rather
+/// than a function pointer) so the merge loop can lean on the optimizer
+/// to specialise the inner match per call site.
+#[derive(Copy, Clone)]
+enum CounterOp {
+    Add,
+    Sub,
+    And,
+    Or,
+}
+
+impl CounterOp {
+    fn apply(self, a: i64, b: i64) -> i64 {
+        match self {
+            CounterOp::Add => a + b,
+            CounterOp::Sub => a - b,
+            CounterOp::And => a.min(b),
+            CounterOp::Or => a.max(b),
+        }
+    }
+}
+
+/// Extract a `_counts`-equivalent map from `other`:
+///
+/// - Counter PyInstance → its `_counts` dict (cloned).
+/// - Anything else → `Ok(None)`, so the caller returns `NotImplemented`
+///   and the binary-op dispatch raises `TypeError`.
+///
+/// We intentionally **do not** accept plain `dict` on the RHS — CPython
+/// rejects `Counter() + {...}` with `TypeError` for `+`, `-`, and `&`,
+/// and only "accepts" `|` because Counter inherits `dict.__or__` (a
+/// path we can't reproduce without dict subclassing).  Routing dict
+/// through here would diverge from CPython parity.
+fn counts_of(other: &Value) -> Option<IndexMap<PyKey, Value>> {
+    let ValueKind::PyInstance(inst) = other.kind() else {
+        return None;
+    };
+    let borrow = inst.borrow();
+    if borrow.class.borrow().name != "Counter" {
+        return None;
+    }
+    match borrow.attrs.get("_counts") {
+        Some(v) => match v.kind() {
+            ValueKind::Dict(map) => Some(map.clone()),
+            _ => Some(IndexMap::new()),
+        },
+        None => Some(IndexMap::new()),
+    }
+}
+
+/// Merge `lhs` and `rhs` per `op`, then drop entries whose result is
+/// ≤ 0.  Shared core of all four binary ops; in-place variants write
+/// the result back to `self._counts` while the regular `__add__`/etc.
+/// return a fresh Counter.
+fn merge_counts(
+    lhs: &IndexMap<PyKey, Value>,
+    rhs: &IndexMap<PyKey, Value>,
+    op: CounterOp,
+) -> IndexMap<PyKey, Value> {
+    let mut out: IndexMap<PyKey, Value> = IndexMap::new();
+    // Walk LHS first so the output preserves LHS insertion order for
+    // shared keys — matches CPython, where `(c + d).keys()` lists
+    // c-only and shared keys in c's order, then d-only keys.
+    for (k, v) in lhs.iter() {
+        let a = value_as_count(v);
+        let b = rhs.get(k).map(value_as_count).unwrap_or(0);
+        let result = op.apply(a, b);
+        if result > 0 {
+            out.insert(k.clone(), Value::int(result));
+        }
+    }
+    for (k, v) in rhs.iter() {
+        if lhs.contains_key(k) {
+            continue;
+        }
+        let b = value_as_count(v);
+        let result = op.apply(0, b);
+        if result > 0 {
+            out.insert(k.clone(), Value::int(result));
+        }
+    }
+    out
+}
+
+/// Shared body for `__add__` / `__sub__` / `__and__` / `__or__`.
+/// Returns a *new* Counter PyInstance with the merged counts.
+fn counter_binop(args: &[ExpandedCallArg], op: CounterOp) -> Result<Value> {
+    let lhs = read_counts(args, "Counter.__binop__")?;
+    let inst = expect_self(args, "Counter.__binop__")?;
+    let user = &args[1..];
+    if user.len() != 1 {
+        return Err(PyError::named(
+            "TypeError",
+            "Counter arithmetic op takes exactly 1 argument".to_string(),
+        ));
+    }
+    let rhs = match counts_of(&user[0].value) {
+        Some(m) => m,
+        None => return Ok(Value::not_implemented()),
+    };
+    let merged = merge_counts(&lhs, &rhs, op);
+    let class = Rc::clone(&inst.borrow().class);
+    let mut attrs: std::collections::HashMap<String, Value> =
+        std::collections::HashMap::new();
+    attrs.insert("_counts".to_string(), Value::dict(merged));
+    Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
+        class,
+        attrs,
+    }))))
+}
+
+/// Shared body for `__iadd__` / `__isub__` / `__iand__` / `__ior__`.
+/// Mutates `self._counts` and returns `self` (identity-preserving).
+fn counter_inplace_op(args: &[ExpandedCallArg], op: CounterOp) -> Result<Value> {
+    let lhs = read_counts(args, "Counter.__inplace__")?;
+    let inst = expect_self(args, "Counter.__inplace__")?;
+    let user = &args[1..];
+    if user.len() != 1 {
+        return Err(PyError::named(
+            "TypeError",
+            "Counter arithmetic op takes exactly 1 argument".to_string(),
+        ));
+    }
+    let rhs = match counts_of(&user[0].value) {
+        Some(m) => m,
+        None => return Ok(Value::not_implemented()),
+    };
+    let merged = merge_counts(&lhs, &rhs, op);
+    store_counts(&inst, merged);
+    Ok(Value::py_instance(inst))
 }
