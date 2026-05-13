@@ -2,6 +2,20 @@
 
 from itertools import chain, islice
 
+
+# Helper for the laziness probe below — counts how many `__next__` calls
+# reach the underlying source.
+class CountingSource:
+    def __init__(self):
+        self.pulled = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        self.pulled += 1
+        return self.pulled
+
 # --- chain: concatenate ---
 print("chain-3-lists", list(chain([1, 2], [3, 4], [5])))
 print("chain-empty", list(chain([])))
@@ -30,3 +44,21 @@ print("islice-none-stop", list(islice(range(5), 1, None)))
 
 # Empty slice
 print("islice-empty", list(islice([1, 2, 3], 0, 0)))
+
+# --- islice laziness probe (the load-bearing test) ---
+# CountingSource records every `__next__` call.  `islice(src, 3)`
+# must only pull what it yields plus any in-step skips — not
+# materialise the whole source up front.
+
+src1 = CountingSource()
+print("islice-lazy-vals", list(islice(src1, 3)))
+print("islice-lazy-pulled", src1.pulled)        # 3
+
+src2 = CountingSource()
+print("islice-step-vals", list(islice(src2, 0, 6, 2)))
+print("islice-step-pulled", src2.pulled)        # 6 (pulled 1,2,3,4,5,6; yielded 1,3,5)
+
+# `start > 0` also pulls eagerly past the prefix (matches CPython).
+src3 = CountingSource()
+print("islice-start-vals", list(islice(src3, 5, 8)))
+print("islice-start-pulled", src3.pulled)       # 8 (skipped 5, then yielded 6,7,8)

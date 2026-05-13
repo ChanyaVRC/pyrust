@@ -1558,10 +1558,10 @@ result = fact(10)
     #[test]
     fn collections_defaultdict_none_factory_raises_key_error() {
         // `defaultdict(None)` matches plain dict semantics: missing key
-        // raises KeyError instead of running a factory.  Pinning this
-        // because the `is_none()` short-circuit in
-        // `missing_factory` is the line that selects between the two
-        // behaviours.
+        // raises KeyError instead of running a factory.  The behaviour
+        // is driven by `defaultdict.__missing__` checking
+        // `self.default_factory is None` and short-circuiting to
+        // KeyError when so — pin both halves of that branch.
         let err = run_program_expect_error(
             "from collections import defaultdict\nd = defaultdict(None)\nd['missing']\n",
         );

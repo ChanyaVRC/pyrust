@@ -8,11 +8,17 @@
 // to ship even though the rest of `os` (`getcwd`, `environ`, `listdir`,
 // …) is still out of scope.
 //
-// The `path` attribute is bound to the `os.path` module at module-
-// construction time via the `constants` block — every `import os` call
-// re-runs `module()` which re-runs `super::os_path::module()`, but
-// `module_cache` ensures both modules are only built once per
-// interpreter session.
+// ## Submodule identity
+//
+// The `path` constant below evaluates `super::os_path::module()`,
+// which builds a *fresh* `os.path` PyModule every time `os.module()`
+// runs — bypassing the interpreter's `module_cache`.  That would
+// diverge from CPython (`os.path is direct_os_path` returning False
+// for two independent imports), so `Interpreter::load_module` in
+// `runtime/env.rs` has a post-processing step that replaces every
+// submodule-shaped attr with its cached version after first build.
+// The net effect: `os.path` and `import os.path as direct` always
+// share identity, regardless of which name the user imported first.
 //
 // Reference: <https://docs.python.org/3/library/os.html>
 

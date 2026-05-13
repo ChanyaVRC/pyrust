@@ -20,9 +20,11 @@ pyrust_module! {
     fn reduce(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() < 2 || args.len() > 3 {
-            return Err(PyError::Runtime(format!(
-                "{FN_NAME}() takes 2 or 3 arguments",
-            )));
+            // CPython raises `TypeError` for wrong-arity calls.
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes 2 or 3 arguments"),
+            ));
         }
         let func = args[0].value.clone();
         let items = iter_values(args[1].value.clone())?;

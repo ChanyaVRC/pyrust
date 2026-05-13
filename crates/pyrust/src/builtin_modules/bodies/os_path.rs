@@ -5,24 +5,17 @@
 // injects `MODULE_NAME = "os.path"` and `FN_PREFIX = "os.path."`, so
 // the registered names look like `"os.path.join"`.
 //
-// ## Import quirk
+// ## Import forms (all three work)
 //
-// pyrust's compiler binds `import os.path` to the *first* component of
-// the dotted name — i.e. the name `os` — to match CPython's package
-// semantics.  But pyrust does not yet ship an `os` parent package, so
-// `import os.path` followed by `os.path.join(...)` fails with
-// `AttributeError: module 'os.path' has no attribute 'path'`.  Use one
-// of the working forms instead:
+// pyrust's compiler binds `import os.path` to the topmost component
+// (the name `os`) to match CPython's package semantics.  The `os`
+// parent package — shipped in `bodies/os.rs` — exposes `path` as an
+// attribute pointing at this module, so all three import patterns
+// resolve correctly:
 //
-//     import os.path as op
-//     op.join('a', 'b')
-//
-//     from os.path import join
-//     join('a', 'b')
-//
-// Proper `os`-as-package support is a separate concern (it requires the
-// import path to build a stub parent module on first dotted-builtin
-// load); tracked outside this PR.
+//     import os.path                  # os.path.join(...)
+//     import os.path as op            # op.join(...)
+//     from os.path import join        # join(...)
 //
 // Reference: <https://docs.python.org/3/library/os.path.html>
 
@@ -47,9 +40,12 @@ pyrust_module! {
     fn join(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.is_empty() {
-            return Err(PyError::Runtime(format!(
-                "{FN_NAME}() takes at least one argument",
-            )));
+            // CPython raises `TypeError` for wrong-arity calls — match
+            // that so user `except TypeError:` blocks catch it.
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes at least one argument"),
+            ));
         }
         // CPython quirk: any absolute component resets the running path
         // to that component and drops everything that came before.
@@ -190,9 +186,11 @@ pyrust_module! {
 fn single_path(fn_name: &str, args: &[ExpandedCallArg]) -> Result<String> {
     reject_keyword_args_expanded(fn_name, args)?;
     if args.len() != 1 {
-        return Err(PyError::Runtime(format!(
-            "{fn_name}() takes exactly one argument",
-        )));
+        // CPython raises `TypeError` for wrong-arity calls.
+        return Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() takes exactly one argument"),
+        ));
     }
     match args[0].value.kind() {
         ValueKind::Str(s) => Ok(s.to_string()),

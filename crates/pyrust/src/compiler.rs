@@ -4058,27 +4058,27 @@ impl Compiler {
                 None => {
                     // `import a.b.c` — CPython binds the *topmost* component
                     // (`a`), and `a.b.c` is reached via attribute chains on
-                    // the loaded packages.  We:
-                    //  1. Load the full dotted module so it's cached and so
-                    //     any parent stubs it triggers get populated.
-                    //  2. Load the topmost component (which the built-in
-                    //     module registry can expose as a package whose
-                    //     attrs include the submodule, e.g. `os` carries
-                    //     `path` → `os.path`).
-                    //  3. Bind the topmost name to that package.
-                    let full_idx = self.intern_name(module_name);
-                    let full_reg = self.alloc_temp();
-                    self.emit(Insn::ImportModule(full_reg, full_idx));
-                    self.free_temp(full_reg);
+                    // the loaded packages.
                     let top = module_name.split('.').next().unwrap_or(module_name);
                     if top == module_name {
-                        // Non-dotted — the value loaded above *is* what we bind.
+                        // Non-dotted: one import that binds directly under
+                        // the name — no parent walk involved.
                         let mod_idx = self.intern_name(module_name);
                         let dst = self.alloc_temp();
                         self.emit(Insn::ImportModule(dst, mod_idx));
                         self.compile_store_name(module_name, dst);
                         self.free_temp(dst);
                     } else {
+                        // Dotted: first ensure the leaf is loaded (which
+                        // populates the cache and lets the parent-package
+                        // identity fix-up in `Interpreter::load_module`
+                        // stitch its submodule attrs to the cached
+                        // value); then load the topmost component and
+                        // bind it.
+                        let full_idx = self.intern_name(module_name);
+                        let full_reg = self.alloc_temp();
+                        self.emit(Insn::ImportModule(full_reg, full_idx));
+                        self.free_temp(full_reg);
                         let top_idx = self.intern_name(top);
                         let top_reg = self.alloc_temp();
                         self.emit(Insn::ImportModule(top_reg, top_idx));

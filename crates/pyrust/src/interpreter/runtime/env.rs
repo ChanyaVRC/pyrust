@@ -382,6 +382,44 @@ impl Interpreter {
         let builtin = crate::builtin_modules::load_builtin_module(name);
         if let Some(val) = builtin {
             self.module_cache.borrow_mut().insert(name.to_string(), val.clone());
+            // Parent-package identity fix-up: a built-in module like
+            // `os` declares `path` as a constant via
+            // `super::os_path::module()`, which builds a *fresh*
+            // os.path Value rather than the one in `module_cache`.
+            // Replace each such submodule-shaped attr with the cached
+            // value so `os.path is direct_os_path` matches CPython.
+            if let ValueKind::PyModule(m) = val.kind() {
+                let submodule_attrs: Vec<String> = {
+                    let borrowed = m.borrow();
+                    borrowed
+                        .attrs
+                        .iter()
+                        .filter_map(|(attr_name, attr_val)| {
+                            // Only consider attrs that are themselves
+                            // PyModules — primitive constants stay as-is.
+                            match attr_val.kind() {
+                                ValueKind::PyModule(_) => Some(attr_name.clone()),
+                                _ => None,
+                            }
+                        })
+                        .filter(|attr_name| {
+                            // And only if there's a registered built-in
+                            // by the dotted name — otherwise leave it.
+                            let dotted = format!("{name}.{attr_name}");
+                            crate::builtin_modules::load_builtin_module(&dotted).is_some()
+                        })
+                        .collect()
+                };
+                for attr_name in submodule_attrs {
+                    let dotted = format!("{name}.{attr_name}");
+                    // Recursive load goes through the cache, so the
+                    // first such call (whether triggered here or by an
+                    // explicit `import os.path`) wins and subsequent
+                    // accesses share its identity.
+                    let cached_submodule = self.load_module(&dotted)?;
+                    m.borrow_mut().attrs.insert(attr_name, cached_submodule);
+                }
+            }
             return Ok(val);
         }
         // User .py file: look for <name>.py relative to script_dir
