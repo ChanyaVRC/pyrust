@@ -1,8 +1,12 @@
 // `itertools` module — body for the `itertools` entry in
-// `pyrust_builtin_modules!`.  Exposes the full CPython itertools
-// surface: `chain`, `islice`, `count`, `repeat`, `cycle`, `takewhile`,
-// `dropwhile`, `starmap`, `accumulate`, `product`, `combinations`,
-// `combinations_with_replacement`, `permutations`, `groupby`.
+// `pyrust_builtin_modules!`.  Currently exposes: `chain`, `islice`,
+// `count`, `repeat`, `cycle`, `takewhile`, `dropwhile`, `starmap`,
+// `accumulate`, `product`, `combinations`, `combinations_with_replacement`,
+// `permutations`, `groupby`.
+//
+// Still missing vs CPython: `pairwise`, `tee`, `compress`,
+// `filterfalse`, `zip_longest`, and `batched` (3.12+).  Tracked in
+// the follow-up to #330.
 //
 // ## Laziness
 //
@@ -22,7 +26,7 @@
 
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
-use crate::interpreter::{iter_values, reject_keyword_args_expanded};
+use crate::interpreter::reject_keyword_args_expanded;
 use crate::value::{PyInstance, Value, ValueKind};
 use pyrust_derive::pyrust_module;
 use std::rc::Rc;
@@ -45,6 +49,7 @@ pyrust_module! {
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
+            reject_keyword_args_expanded(FN_NAME, user)?;
             if user.is_empty() || user.len() > 4 {
                 return Err(PyError::named(
                     "TypeError",
@@ -137,14 +142,23 @@ pyrust_module! {
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
+            reject_keyword_args_expanded(FN_NAME, user)?;
             if user.len() > 2 {
                 return Err(PyError::named(
                     "TypeError",
                     format!("{FN_NAME}() takes at most 2 arguments"),
                 ));
             }
-            let start = user.first().cloned().map(|a| a.value).unwrap_or_else(|| Value::int(0));
-            let step = user.get(1).cloned().map(|a| a.value).unwrap_or_else(|| Value::int(1));
+            let start = user
+                .first()
+                .cloned()
+                .map(|a| a.value)
+                .unwrap_or_else(|| Value::int(0));
+            let step = user
+                .get(1)
+                .cloned()
+                .map(|a| a.value)
+                .unwrap_or_else(|| Value::int(1));
             require_numeric(&start, FN_NAME, "start")?;
             require_numeric(&step, FN_NAME, "step")?;
             let mut a = inst.borrow_mut();
@@ -172,13 +186,16 @@ pyrust_module! {
         }
     }
 
-    /// CPython: itertools.repeat(object, times=None) — yield `object`
-    /// `times` times (forever if `times` is None / omitted).
+    /// CPython: itertools.repeat(object[, times]) — yield `object`
+    /// `times` times, or forever if `times` is *omitted*.  An explicit
+    /// `None` is rejected as `TypeError` (matching CPython — `None`
+    /// isn't an integer).
     /// <https://docs.python.org/3/library/itertools.html#itertools.repeat>
     class repeat {
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
+            reject_keyword_args_expanded(FN_NAME, user)?;
             if user.is_empty() || user.len() > 2 {
                 return Err(PyError::named(
                     "TypeError",
@@ -187,12 +204,12 @@ pyrust_module! {
             }
             let object = user[0].value.clone();
             let times: Option<i64> = match user.get(1).map(|a| a.value.kind()) {
-                None | Some(ValueKind::None) => None,
+                None => None,
                 Some(ValueKind::Int(n)) => Some(n),
                 Some(ValueKind::Bool(b)) => Some(b as i64),
                 _ => return Err(PyError::named(
                     "TypeError",
-                    format!("{FN_NAME}() times argument must be an integer or None"),
+                    format!("{FN_NAME}() times argument must be an integer"),
                 )),
             };
             let mut a = inst.borrow_mut();
@@ -238,6 +255,7 @@ pyrust_module! {
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
+            reject_keyword_args_expanded(FN_NAME, user)?;
             if user.len() != 1 {
                 return Err(PyError::named(
                     "TypeError",
@@ -332,6 +350,7 @@ pyrust_module! {
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
+            reject_keyword_args_expanded(FN_NAME, user)?;
             if user.len() != 2 {
                 return Err(PyError::named(
                     "TypeError",
@@ -373,7 +392,11 @@ pyrust_module! {
                     value: item.clone(),
                 }],
             )?;
-            if verdict.truthy() {
+            // `truthy_value` dispatches `__bool__`/`__len__` on PyInstance
+            // verdicts; the bare Value::truthy short-circuits to `true` for
+            // any unrecognised kind, which would let user predicates
+            // returning instances silently never terminate the iteration.
+            if _interp.truthy_value(&verdict)? {
                 Ok(item)
             } else {
                 inst.borrow_mut()
@@ -393,6 +416,7 @@ pyrust_module! {
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
+            reject_keyword_args_expanded(FN_NAME, user)?;
             if user.len() != 2 {
                 return Err(PyError::named(
                     "TypeError",
@@ -444,7 +468,8 @@ pyrust_module! {
                         value: item.clone(),
                     }],
                 )?;
-                if !verdict.truthy() {
+                // See takewhile — must dispatch __bool__/__len__ for PyInstance verdicts.
+                if !_interp.truthy_value(&verdict)? {
                     inst.borrow_mut()
                         .attrs
                         .insert("_started".to_string(), Value::bool_(true));
@@ -461,6 +486,7 @@ pyrust_module! {
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
+            reject_keyword_args_expanded(FN_NAME, user)?;
             if user.len() != 2 {
                 return Err(PyError::named(
                     "TypeError",
@@ -488,10 +514,12 @@ pyrust_module! {
                 )
             };
             let pack = _interp.call_next(iter, None)?;
-            // Unpack — list, tuple, or any iterable.  Iterate via
-            // `iter_values` so we don't double-walk an already-materialised
-            // tuple/list.
-            let unpacked: Vec<ExpandedCallArg> = iter_values(pack)?
+            // Unpack — any iterable, including generators and instances
+            // with `__iter__`/`__next__`.  `collect_iterable` drives the
+            // iterator protocol, unlike the bare `iter_values` helper
+            // which only handles built-in containers.
+            let unpacked: Vec<ExpandedCallArg> = _interp
+                .collect_iterable(pack)?
                 .into_iter()
                 .map(|v| ExpandedCallArg { name: None, value: v })
                 .collect();
@@ -651,19 +679,27 @@ pyrust_module! {
                 ));
             }
             // Build the pool list — each input iterable materialised, the
-            // whole sequence repeated `repeat` times.
-            let mut pools: Vec<Vec<Value>> = Vec::with_capacity(positional.len() * repeat as usize);
+            // whole sequence repeated `repeat` times.  Use
+            // `collect_iterable` (not the bare `iter_values`) so generator
+            // and `__iter__`/`__next__`-class sources work.
+            let mut pools: Vec<Vec<Value>> =
+                Vec::with_capacity(positional.len() * repeat as usize);
             let single_pass: Vec<Vec<Value>> = positional
                 .iter()
-                .map(|v| iter_values(v.clone()))
+                .map(|v| _interp.collect_iterable(v.clone()))
                 .collect::<Result<_>>()?;
             for _ in 0..repeat {
                 pools.extend(single_pass.iter().cloned());
             }
-            // Empty product (`product()` or any empty pool) yields exactly
-            // one tuple — the empty one — unless `repeat=0`, which yields
-            // the empty tuple once.  An empty input iterable with
-            // `repeat > 0` yields nothing.
+            // Three boundary cases:
+            //   - `product()` with no iterables → `pools` is empty, the
+            //     odometer is zero-width, and we yield one empty tuple.
+            //   - `product(*its, repeat=0)` → also yields one empty tuple
+            //     (the zero-fold product is the empty product).
+            //   - any input iterable is empty AND `repeat > 0` → yield
+            //     nothing (an empty pool short-circuits the Cartesian
+            //     product to ∅).  `empty_input` flips `_exhausted` to
+            //     pre-empt the first `__next__`.
             let empty_input = pools.iter().any(|p| p.is_empty());
             let mut a = inst.borrow_mut();
             a.attrs.insert("_pools".to_string(), Value::list(
@@ -775,13 +811,15 @@ pyrust_module! {
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
+            reject_keyword_args_expanded(FN_NAME, user)?;
             if user.is_empty() || user.len() > 2 {
                 return Err(PyError::named(
                     "TypeError",
                     format!("{FN_NAME}() takes 1 or 2 arguments"),
                 ));
             }
-            let pool: Vec<Value> = iter_values(user[0].value.clone())?;
+            // `collect_iterable` walks generators / __iter__ classes too.
+            let pool: Vec<Value> = _interp.collect_iterable(user[0].value.clone())?;
             // CPython splits negative-r (ValueError) from non-int-r
             // (TypeError); match that so user `except` blocks behave
             // identically.
@@ -800,10 +838,16 @@ pyrust_module! {
             };
             // CPython's algorithm: keep `indices` (running combination) and
             // `cycles` (countdowns per position).  If r > pool, the
-            // generator is immediately exhausted.
+            // generator is immediately exhausted — short-circuit the
+            // cycles computation (where `pool.len() - i` would underflow
+            // for `r > pool.len() + 1`).
             let exhausted = r > pool.len();
             let indices: Vec<usize> = (0..pool.len()).collect();
-            let cycles: Vec<usize> = (0..r).map(|i| pool.len() - i).collect();
+            let cycles: Vec<usize> = if exhausted {
+                Vec::new()
+            } else {
+                (0..r).map(|i| pool.len() - i).collect()
+            };
             let mut a = inst.borrow_mut();
             a.attrs.insert("_pool".to_string(), Value::list(pool));
             a.attrs.insert("_r".to_string(), Value::int(r as i64));
@@ -897,15 +941,36 @@ pyrust_module! {
     class groupby {
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
-            let user = &args[1..];
-            if user.is_empty() || user.len() > 2 {
+            // CPython: `groupby(iterable, key=None)` — `key` accepted both
+            // positionally and as a keyword.  Anything else is a TypeError.
+            let mut positional: Vec<Value> = Vec::new();
+            let mut key_kw: Option<Value> = None;
+            for a in &args[1..] {
+                match a.name.as_deref() {
+                    Some("key") => key_kw = Some(a.value.clone()),
+                    Some(other) => return Err(PyError::named(
+                        "TypeError",
+                        format!("{FN_NAME}() got an unexpected keyword argument '{other}'"),
+                    )),
+                    None => positional.push(a.value.clone()),
+                }
+            }
+            if positional.is_empty() || positional.len() > 2 {
                 return Err(PyError::named(
                     "TypeError",
-                    format!("{FN_NAME}() takes 1 or 2 arguments"),
+                    format!("{FN_NAME}() takes 1 or 2 positional arguments"),
                 ));
             }
-            let iter = make_iter(_interp, user[0].value.clone())?;
-            let key_fn = user.get(1).cloned().map(|a| a.value).unwrap_or_else(Value::none);
+            if positional.len() == 2 && key_kw.is_some() {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() got multiple values for argument 'key'"),
+                ));
+            }
+            let iter = make_iter(_interp, positional[0].clone())?;
+            let key_fn = key_kw
+                .or_else(|| positional.get(1).cloned())
+                .unwrap_or_else(Value::none);
             let mut a = inst.borrow_mut();
             a.attrs.insert("_iter".to_string(), iter);
             a.attrs.insert("_keyfn".to_string(), key_fn);
@@ -982,9 +1047,12 @@ pyrust_module! {
                 // PyInstance, so we must go through `eval_binary(Eq)` to
                 // dispatch `__eq__` — otherwise `groupby(items, key=K)`
                 // would treat every `K(v)` instance as its own group.
-                let eq = _interp
-                    .eval_binary(k.clone(), crate::ast::BinaryOp::Eq, first_key.clone())?
-                    .truthy();
+                // The result must then go through `truthy_value` so a
+                // user `__eq__` returning a PyInstance routes through
+                // `__bool__`/`__len__`.
+                let eq_val =
+                    _interp.eval_binary(k.clone(), crate::ast::BinaryOp::Eq, first_key.clone())?;
+                let eq = _interp.truthy_value(&eq_val)?;
                 if eq {
                     group.push(item);
                 } else {
@@ -1052,10 +1120,15 @@ fn slice_arg(fn_name: &str, v: &Value, slot: &str) -> Result<Option<i64>> {
 }
 
 /// `count.__init__` validation — start/step must be numeric.
+/// BigInt is accepted so `count(10**30)` works the same as
+/// `count(10)` (matching Python's arbitrary-precision ints); the
+/// running `_cur` may then transition between `Int` and `BigInt`
+/// as values cross the i64 boundary, but `eval_binary(Add)`
+/// handles both directions of that conversion.
 fn require_numeric(v: &Value, fn_name: &str, slot: &str) -> Result<()> {
     if matches!(
         v.kind(),
-        ValueKind::Int(_) | ValueKind::Float(_) | ValueKind::Bool(_)
+        ValueKind::Int(_) | ValueKind::Float(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
     ) {
         Ok(())
     } else {
@@ -1177,16 +1250,17 @@ fn init_combo_state(
     fn_name: &str,
     with_replacement: bool,
 ) -> Result<Value> {
-    let _ = interp; // present for signature parity with macro callers.
     let inst = expect_self(args, fn_name)?;
     let user = &args[1..];
+    reject_keyword_args_expanded(fn_name, user)?;
     if user.len() != 2 {
         return Err(PyError::named(
             "TypeError",
             format!("{fn_name}() takes 2 arguments"),
         ));
     }
-    let pool: Vec<Value> = iter_values(user[0].value.clone())?;
+    // `collect_iterable` walks generators / __iter__ classes.
+    let pool: Vec<Value> = interp.collect_iterable(user[0].value.clone())?;
     // Same split as `permutations`: negative-r is ValueError, non-int is
     // TypeError — matches CPython's distinction.
     let r = match user[1].value.kind() {

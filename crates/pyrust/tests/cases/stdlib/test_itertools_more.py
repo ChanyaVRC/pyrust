@@ -145,3 +145,80 @@ print(
     "groupby-custom-eq",
     [(k.v, list(g)) for k, g in groupby([1, 1, 2, 2, 3], key=_K)],
 )
+
+
+# ── self-review regressions ───────────────────────────────────────────
+# Pin the fixes from PR #335's Copilot review so they don't quietly
+# regress.
+
+# starmap/product/permutations/combinations must drive iterables that
+# aren't built-in containers — generators and custom iterator classes.
+def _gen():
+    yield (1, 2)
+    yield (3, 4)
+
+
+print("starmap-generator", list(starmap(lambda a, b: a + b, _gen())))
+
+
+class _Pool:
+    def __init__(self, vs):
+        self._vs = list(vs)
+
+    def __iter__(self):
+        return iter(self._vs)
+
+
+print("product-iterclass", list(product(_Pool([1, 2]), _Pool([3, 4]))))
+print("combinations-iterclass", list(combinations(_Pool([1, 2, 3]), 2)))
+print("perm-iterclass", list(permutations(_Pool([1, 2, 3]), 2)))
+
+# permutations(pool, r) with r > len(pool) + 1 must not panic — the
+# cycles vec used to be `pool.len() - i` (underflow when r > n).
+print("perm-r-far-gt-n", list(permutations([1, 2], 5)))
+
+# repeat(x, times=None) — explicit None is a TypeError, distinct from
+# repeat(x) (no second arg) which is unbounded.
+try:
+    list(islice(repeat("x", None), 3))
+except TypeError:
+    print("repeat-explicit-none TypeError")
+
+# Constructors don't accept stray kwargs.  groupby's `key=` is the only
+# real itertools kwarg in this set; everything else should TypeError.
+for ctor, args, label in [
+    (cycle, ([1, 2],), "cycle"),
+    (takewhile, (lambda x: True, [1]), "takewhile"),
+    (dropwhile, (lambda x: True, [1]), "dropwhile"),
+    (starmap, (lambda a: a, [(1,)]), "starmap"),
+    (permutations, ([1, 2, 3],), "permutations"),
+]:
+    try:
+        ctor(*args, bogus=1)
+    except TypeError:
+        print(f"{label}-bogus-kw TypeError")
+
+# Predicates that return non-bool PyInstance must route through __bool__
+# / __len__, not bare `Value::truthy` (which would accept anything).
+class _NopeViaBool:
+    def __bool__(self):
+        return False
+
+
+class _YesViaLen:
+    def __len__(self):
+        return 1
+
+
+def _pred_nope(x):
+    return _NopeViaBool()
+
+
+def _pred_yes(x):
+    return _YesViaLen()
+
+
+print("takewhile-bool-dunder", list(takewhile(_pred_nope, [1, 2, 3])))
+print("dropwhile-bool-dunder", list(dropwhile(_pred_nope, [1, 2, 3])))
+print("takewhile-len-dunder", list(takewhile(_pred_yes, [1, 2, 3])))
+print("dropwhile-len-dunder", list(dropwhile(_pred_yes, [1, 2, 3])))
