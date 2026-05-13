@@ -38,7 +38,7 @@ use std::rc::Rc;
 use indexmap::{IndexMap, IndexSet};
 
 use crate::error::{PyError, Result};
-use crate::value::{PyKey, Value, ValueKind};
+use crate::value::{PyBigInt, PyKey, PyToPrimitive, Value, ValueKind};
 
 use super::ExpandedCallArg;
 
@@ -89,38 +89,101 @@ fn must_be_error(fn_name: &str, arg_name: &str, expected: &str, actual: &Value) 
 
 // ─── PyInt ────────────────────────────────────────────────────────────────────
 
-/// `int` argument.  Accepts `int` only — strict 1:1 with the Python type.
-/// `bool` does not auto-coerce (declare a `PyBool` overload, or a `PyValue`
-/// fallback, to handle it).
+/// `int` argument.  Strict 1:1 with the Python type, accepting **both**
+/// inline `Int(i64)` and heap-allocated `BigInt` — Python's int is
+/// unbounded, so the wrapper must mirror that.  `bool` still does not
+/// auto-coerce (declare a `PyBool` overload, or a `PyValue` fallback,
+/// to handle it).
+///
+/// # Accessing the value
+///
+/// - [`PyInt::as_i64`] returns `Some(i64)` when the value fits in i64
+///   (the common case for everyday integers, including `BigInt`s whose
+///   actual magnitude fits) and `None` for genuine bignums.
+/// - [`PyInt::expect_i64`] wraps `as_i64` and raises `OverflowError`
+///   with a CPython-style message — use it when the builtin's
+///   semantics require an i64.
+/// - [`PyInt::to_bigint`] always succeeds: returns an owned `BigInt`,
+///   cloning the heap allocation if the source was already heap-stored.
+/// - [`PyInt::is_big`] reports whether the source needed heap storage
+///   — builtins can branch on this to keep their fast path in i64.
 #[derive(Debug, Clone)]
-pub(crate) struct PyInt(pub i64);
+pub(crate) struct PyInt<'a>(PyIntRepr<'a>);
 
-impl Deref for PyInt {
-    type Target = i64;
-    fn deref(&self) -> &i64 {
-        &self.0
+/// Backing representation for [`PyInt`].  The `Small` variant holds the
+/// inline i64 directly (no allocation); `Big` borrows the heap-stored
+/// `BigInt` from the `Value`'s `Opaque::PyBigInt`.
+///
+/// Kept `pub(super)` so the macro-emitted prelude doesn't have to know
+/// the variant names, but tests in this file can pattern-match on it.
+#[derive(Debug, Clone)]
+enum PyIntRepr<'a> {
+    Small(i64),
+    Big(&'a PyBigInt),
+}
+
+impl<'a> PyInt<'a> {
+    /// Extract as `i64`, returning `None` if the value doesn't fit.
+    /// Note that a `Big` representation whose magnitude happens to fit
+    /// still returns `Some` — the variant is about storage, not range.
+    pub fn as_i64(&self) -> Option<i64> {
+        match &self.0 {
+            PyIntRepr::Small(n) => Some(*n),
+            PyIntRepr::Big(b) => b.to_i64(),
+        }
+    }
+
+    /// Like [`as_i64`], but converts overflow into a CPython-style
+    /// `OverflowError` instead of `None`.  Used by builtin bodies that
+    /// can't process bignums (e.g. `chr()` whose codepoint must fit in
+    /// `u32`).
+    pub fn expect_i64(&self, fn_name: &str, arg_name: &str) -> Result<i64> {
+        self.as_i64().ok_or_else(|| {
+            PyError::named(
+                "OverflowError",
+                format!("{fn_name}() argument '{arg_name}' too large to fit in i64",),
+            )
+        })
+    }
+
+    /// Convert to an owned [`PyBigInt`].  Always succeeds.  `Small`
+    /// allocates a fresh `BigInt`; `Big` clones the shared heap form.
+    /// Use when the builtin's arithmetic needs arbitrary precision.
+    pub fn to_bigint(&self) -> PyBigInt {
+        match &self.0 {
+            PyIntRepr::Small(n) => PyBigInt::from(*n),
+            PyIntRepr::Big(b) => (*b).clone(),
+        }
+    }
+
+    /// True if the value is `Big` (heap-stored).  Useful for builtins
+    /// that fast-path the small case (e.g. choose between i64 and
+    /// BigInt arithmetic without an extra conversion).
+    pub fn is_big(&self) -> bool {
+        matches!(self.0, PyIntRepr::Big(_))
     }
 }
 
 /// Ergonomic default-value construction: `#[default(0)] x: PyInt`.
-impl From<i64> for PyInt {
+impl From<i64> for PyInt<'static> {
     fn from(n: i64) -> Self {
-        PyInt(n)
+        PyInt(PyIntRepr::Small(n))
     }
 }
 
-impl<'a> FromValue<'a> for PyInt {
+impl<'a> FromValue<'a> for PyInt<'a> {
     const PY_TYPE_NAME: &'static str = "int";
 
     fn try_from_value(value: &'a Value, fn_name: &str, arg_name: &str) -> Result<Self> {
         match value.kind() {
-            ValueKind::Int(n) => Ok(PyInt(n)),
+            ValueKind::Int(n) => Ok(PyInt(PyIntRepr::Small(n))),
+            ValueKind::BigInt(b) => Ok(PyInt(PyIntRepr::Big(b))),
             _ => Err(must_be_error(fn_name, arg_name, "int", value)),
         }
     }
 
     fn matches(value: &'a Value) -> bool {
-        matches!(value.kind(), ValueKind::Int(_))
+        matches!(value.kind(), ValueKind::Int(_) | ValueKind::BigInt(_))
     }
 }
 
@@ -606,12 +669,14 @@ mod tests {
         }
     }
 
-    // ── PyInt — strict 1:1 with `int`; rejects bool, float, str, …
+    // ── PyInt — accepts both inline `Int(i64)` and heap-stored `BigInt`,
+    //          since Python's int is unbounded.  Rejects bool / float / str.
     #[test]
-    fn pyint_accepts_int_only() {
+    fn pyint_accepts_inline_int() {
         let v = Value::int(42);
         let r = PyInt::try_from_value(&v, "f", "x").expect("int accepted");
-        assert_eq!(r.0, 42);
+        assert_eq!(r.as_i64(), Some(42));
+        assert!(!r.is_big(), "Value::int produces the Small representation");
         assert!(PyInt::matches(&v));
     }
 
@@ -629,6 +694,68 @@ mod tests {
         assert_eq!(err_class(&err), "TypeError");
         assert!(err_msg(&err).contains("'x' must be int"));
         assert!(!PyInt::matches(&v));
+    }
+
+    #[test]
+    fn pyint_bigint_that_fits_collapses_to_small() {
+        // `pyrust-core::Value::kind()` automatically downgrades a
+        // heap-stored BigInt back to `ValueKind::Int` whenever the
+        // magnitude fits in i64.  PyInt sees the post-`kind()` view, so
+        // a BigInt wrapping `i64::MAX` arrives as `Small`, not `Big`.
+        // This means builtin bodies only encounter the `Big` path for
+        // genuine overflow — the common-case fast path stays cheap.
+        let v = Value::bigint(PyBigInt::from(i64::MAX));
+        let r = PyInt::try_from_value(&v, "f", "x").expect("bigint accepted");
+        assert!(
+            !r.is_big(),
+            "fits-in-i64 BigInt downgrades to Small via kind()"
+        );
+        assert_eq!(r.as_i64(), Some(i64::MAX));
+        assert!(PyInt::matches(&v));
+    }
+
+    #[test]
+    fn pyint_accepts_bigint_beyond_i64() {
+        // The whole point of supporting BigInt: Python's int is
+        // unbounded.  `2 ** 100` doesn't fit in i64, but PyInt must
+        // accept it.  `as_i64()` returns None; `to_bigint()` recovers
+        // the value.
+        let huge = PyBigInt::from(1u128 << 100);
+        let v = Value::bigint(huge.clone());
+        let r = PyInt::try_from_value(&v, "f", "x").expect("bigint accepted");
+        assert!(r.is_big());
+        assert_eq!(r.as_i64(), None, "out-of-range bigint must not fit i64");
+        assert_eq!(r.to_bigint(), huge);
+        assert!(PyInt::matches(&v));
+    }
+
+    #[test]
+    fn pyint_expect_i64_raises_overflow_on_bignum() {
+        // The CPython-style `OverflowError` shape for builtins that
+        // genuinely need an i64 (chr, range, sleep, …).  Pinned wording.
+        let huge = PyBigInt::from(1u128 << 100);
+        let v = Value::bigint(huge);
+        let r = PyInt::try_from_value(&v, "f", "x").unwrap();
+        let err = r.expect_i64("chr", "code_point").unwrap_err();
+        assert_eq!(err_class(&err), "OverflowError");
+        assert!(
+            err_msg(&err).contains("chr()")
+                && err_msg(&err).contains("'code_point'")
+                && err_msg(&err).contains("too large to fit in i64"),
+            "unexpected OverflowError wording: {:?}",
+            err_msg(&err),
+        );
+    }
+
+    #[test]
+    fn pyint_to_bigint_works_for_small_repr_too() {
+        // Symmetry check: `to_bigint()` upgrades a Small to a fresh
+        // BigInt without information loss.  Builtins that mix small
+        // and big inputs can normalise to BigInt up front.
+        let v = Value::int(-42);
+        let r = PyInt::try_from_value(&v, "f", "x").unwrap();
+        assert!(!r.is_big());
+        assert_eq!(r.to_bigint(), PyBigInt::from(-42i64));
     }
 
     // ── PyFloat — strict 1:1 with `float`; rejects int, bool, …
@@ -736,7 +863,7 @@ mod tests {
     fn option_t_accepts_t() {
         let v = Value::int(5);
         let r = <Option<PyInt>>::try_from_value(&v, "f", "x").unwrap();
-        assert_eq!(r.unwrap().0, 5);
+        assert_eq!(r.unwrap().as_i64(), Some(5));
         assert!(<Option<PyInt>>::matches(&v));
     }
 
@@ -774,7 +901,7 @@ mod tests {
         // / `#[default("r")]` without forcing the author to write the
         // wrapper constructor explicitly.
         let i: PyInt = 42i64.into();
-        assert_eq!(i.0, 42);
+        assert_eq!(i.as_i64(), Some(42));
         let f: PyFloat = 3.14f64.into();
         assert_eq!(f.0, 3.14);
         let b: PyBool = true.into();
