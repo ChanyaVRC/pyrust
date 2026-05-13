@@ -1230,6 +1230,8 @@ impl Value {
     ///
     /// Returns `None` for primitive types (callers handle those directly).
     pub fn value_id(&self) -> Option<i64> {
+        // `as i64` wraps past 2^63; tracked separately, not specific to this
+        // PR (tuple has the same shape).
         match top16(self.0) {
             TAG_TUPLE => {
                 let hdr = (self.0 & PAYLOAD_MASK) as *const u8;
@@ -1344,22 +1346,6 @@ impl Value {
         }
     }
 
-    /// Read-only access to the shared `Rc<ListInner>` backing, useful for
-    /// callers that want to share storage between Values or pass the handle
-    /// around.  Returns `None` for non-list values.
-    pub fn get_list_rc(&self) -> Option<Rc<ListInner>> {
-        if self.is_list() {
-            // Bump the strong count and hand back an owned Rc.
-            unsafe {
-                let raw = self.list_inner_ptr();
-                Rc::increment_strong_count(raw);
-                Some(Rc::from_raw(raw))
-            }
-        } else {
-            None
-        }
-    }
-
     /// Borrow the tuple's elements as a slice.  Backs both the pool-allocated
     /// path (`TAG_TUPLE`) and the inline small-tuple path
     /// (`Opaque::SmallTuple2/3`); see #281.
@@ -1446,18 +1432,6 @@ impl Value {
     pub fn get_dict_rc(&self) -> Option<&Rc<RefCell<IndexMap<PyKey, Value>>>> {
         self.as_opaque().and_then(|o| {
             if let Opaque::Dict(rc) = o {
-                Some(rc)
-            } else {
-                None
-            }
-        })
-    }
-
-    /// Read-only access to the shared `Rc<SetInner>` backing.  Returns `None`
-    /// for non-set values.
-    pub fn get_set_rc(&self) -> Option<&Rc<SetInner>> {
-        self.as_opaque().and_then(|o| {
-            if let Opaque::Set(rc) = o {
                 Some(rc)
             } else {
                 None
@@ -2323,6 +2297,26 @@ mod tests {
             .expect("clone must still be a set")
             .insert(PyKey::Int(2));
         let items = a.as_set().expect("original must still be a set");
+        assert!(items.contains(&PyKey::Int(1)));
+        assert!(items.contains(&PyKey::Int(2)));
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn set_mutation_through_original_visible_in_clone() {
+        // Symmetric counterpart to `set_clone_shares_storage`: mutate via
+        // the original Value, the clone (alias) sees it.  This pins both
+        // directions of the Rc-shared backing post-#305.
+        let mut a = Value::set({
+            let mut s = IndexSet::new();
+            s.insert(PyKey::Int(1));
+            s
+        });
+        let b = a.clone();
+        a.as_set_mut()
+            .expect("original must still be a set")
+            .insert(PyKey::Int(2));
+        let items = b.as_set().expect("clone must still be a set");
         assert!(items.contains(&PyKey::Int(1)));
         assert!(items.contains(&PyKey::Int(2)));
         assert_eq!(items.len(), 2);
