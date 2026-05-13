@@ -18,12 +18,17 @@
 //!   `Value::clone` shares it.  Mutations via a captured bound method (e.g.
 //!   `m = d.update; m(...)`) propagate to the original.  **Works as CPython.**
 //! - `list`: storage is a `Vec<Value>` in a NaN-boxed pool header.
-//!   `Value::clone` allocates a fresh header with a deep-copied vector, so the
-//!   captured receiver is a *value copy*.  `m = lst.append; m(4)` silently
-//!   discards the mutation.  **Diverges from CPython.**
-//! - `set`: storage is a plain `IndexSet` inside `Opaque::Set`.  Same value
-//!   semantics as list — captured bound methods do not propagate mutations.
-//!   **Diverges from CPython.**
+//!   `Value::clone` allocates a fresh header with a deep-copied vector, so a
+//!   captured bound method's receiver is a *value copy* — `m = lst.append;
+//!   m(4)` would silently no-op against the original.  Rather than silently
+//!   diverge from CPython, the interpreter's bound-method dispatch arm
+//!   (`crates/pyrust/src/interpreter/runtime/calls.rs`) raises a clear
+//!   `TypeError` for captured *mutating* list methods.  Read-only captured
+//!   methods (`count`, `index`, `copy`) work as expected — they don't depend
+//!   on mutation propagation.
+//! - `set`: storage is a plain `IndexSet` inside `Opaque::Set`; same story
+//!   as list — captured mutating set methods raise `TypeError`, read-only
+//!   ones (`union`, `isdisjoint`, …) work fine.
 //!
 //! This divergence is part of pyrust's broader value-vs-reference semantics
 //! gap for list/set (basic `b = a; b.append(x)` also fails to alias).  The
@@ -31,11 +36,12 @@
 //! `CallMethod` bytecode fast path, which hands the VM a mutable register
 //! reference and bypasses bound-method capture entirely.
 //!
-//! Fixing the captured-bound-method case for list/set requires either
+//! Fixing the captured-bound-method case structurally for list/set requires
 //! Rc-sharing the backing storage (a NaN-box layout change for list, an
-//! `Opaque::Set` rewrap for set) or adding an indirection through the
-//! receiver's register.  Both are larger changes than the documented
-//! limitation warrants for the current iteration.  Tracked in #305.
+//! `Opaque::Set` rewrap for set).  That's a larger refactor than is
+//! warranted while the broader value-semantics gap is still open; the
+//! explicit `TypeError` is the pragmatic middle ground — it stops the silent
+//! divergence and points users at the working call form.  Tracked in #305.
 
 use std::any::Any;
 use std::rc::Rc;
@@ -98,9 +104,11 @@ pub fn bound_method(name: impl Into<String>, receiver: Value) -> Value {
 /// **Caveat (issue #305):** for list and set receivers, `Value::clone`
 /// deep-copies the backing storage, so `as_*_mut` on the returned receiver
 /// mutates a private copy — the mutation will not be visible through the
-/// original Value the caller bound the method on.  For dict receivers,
-/// storage is `Rc<RefCell<_>>`-shared inside `Opaque::Dict`, so mutations
-/// propagate correctly.  See the module-level docs for the full rationale.
+/// original Value the caller bound the method on.  The interpreter's
+/// dispatch arm guards against this by raising `TypeError` for captured
+/// *mutating* list/set methods (see the module-level docs).  For dict
+/// receivers, storage is `Rc<RefCell<_>>`-shared inside `Opaque::Dict`, so
+/// mutations propagate correctly.
 pub fn as_bound_method(value: &Value) -> Option<(Rc<String>, Value)> {
     let ValueKind::BuiltinObject { ops, state } = value.kind() else {
         return None;

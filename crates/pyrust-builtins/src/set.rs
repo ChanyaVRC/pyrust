@@ -27,6 +27,28 @@ pub fn has_method(method: &str) -> bool {
     METHODS.contains(&method)
 }
 
+/// Methods that mutate the set in place.  Used by the captured-bound-method
+/// dispatch in `calls.rs` to raise a clear `TypeError` for the
+/// `m = s.method; m(...)` pattern, which silently no-ops today because
+/// `Opaque::Set` stores a plain `IndexSet` that `Value::clone` deep-copies.
+/// See issue #305.
+pub const MUTATING_METHODS: &[&str] = &[
+    "add",
+    "remove",
+    "discard",
+    "pop",
+    "clear",
+    "update",
+    "intersection_update",
+    "difference_update",
+    "symmetric_difference_update",
+];
+
+/// Returns `true` if `method` mutates the set in place.
+pub fn is_mutating_method(method: &str) -> bool {
+    MUTATING_METHODS.contains(&method)
+}
+
 pub fn call(method: &str, items: &mut IndexSet<PyKey>, args: Vec<Value>) -> Result<Value> {
     let args = args.as_slice();
     match method {

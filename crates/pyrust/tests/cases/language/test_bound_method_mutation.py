@@ -4,16 +4,17 @@
 # In CPython all three of list, dict, set mutate-through a captured
 # bound method.  In pyrust, only dict does (because Opaque::Dict is
 # Rc<RefCell<...>> internally).  list/set use value-typed storage, so
-# captured bound methods on those types operate on a private copy and
-# silently discard mutations.
+# captured bound methods on those types operate on a private copy.
 #
-# This file pins the *currently-supported* surface so a future change
-# that accidentally breaks the dict path (or the direct-call path for
-# list/set) will be caught.  The list/set captured-bound-method case is
-# deliberately NOT exercised here because pyrust diverges from CPython
-# on it and the parity harness would (correctly) flag the divergence.
+# To stop the silent divergence, pyrust raises `TypeError` when a
+# captured bound method on a list or set names a *mutating* method
+# (e.g. `m = lst.append; m(4)`).  Read-only captured methods (`count`,
+# `index`, `isdisjoint`, ...) and the direct-call form
+# `lst.append(4)` continue to work.
 #
-# See bound_method.rs module docs and issue #305 for the rationale.
+# This file pins the currently-supported surface.  See
+# `test_bound_method_mutation_error.py` for the `TypeError` path and
+# `bound_method.rs` module docs / issue #305 for the rationale.
 
 # ---- dict: captured bound methods DO propagate mutations ----
 d = {"a": 1}

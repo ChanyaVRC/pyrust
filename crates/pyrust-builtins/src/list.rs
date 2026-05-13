@@ -15,6 +15,19 @@ pub fn has_method(method: &str) -> bool {
     METHODS.contains(&method)
 }
 
+/// Methods that mutate the list in place.  Used by the captured-bound-method
+/// dispatch in `calls.rs` to raise a clear `TypeError` for the
+/// `m = lst.method; m(...)` pattern, which silently no-ops today because
+/// `Value::clone` deep-copies the backing `Vec<Value>`.  See issue #305.
+pub const MUTATING_METHODS: &[&str] = &[
+    "append", "clear", "extend", "insert", "pop", "remove", "reverse", "sort",
+];
+
+/// Returns `true` if `method` mutates the list in place.
+pub fn is_mutating_method(method: &str) -> bool {
+    MUTATING_METHODS.contains(&method)
+}
+
 pub fn call(
     method: &str,
     items: &mut Vec<Value>,

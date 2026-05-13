@@ -1258,4 +1258,114 @@ result = fact(10)
             }
         }
     }
+
+    // ── Issue #305: captured bound methods on mutable list/set ─────────────
+
+    #[test]
+    fn captured_list_mutating_bound_method_raises_type_error() {
+        // `m = lst.append; m(4)` would silently no-op against `lst` because
+        // `Value::clone` deep-copies the backing `Vec<Value>` in the
+        // NaN-box pool layout.  Pyrust now stops the silent divergence by
+        // raising a clear TypeError that points at the working call form.
+        // See `bound_method.rs` module docs and issue #305.
+        let err = run_program_expect_error("lst = [1, 2, 3]\nm = lst.append\nm(4)\n");
+        let msg = err.to_string();
+        assert!(msg.contains("TypeError"), "expected TypeError, got: {msg}");
+        assert!(
+            msg.contains("captured bound method") && msg.contains("list.append"),
+            "error should name the captured method and the receiver type, got: {msg}"
+        );
+        assert!(
+            msg.contains("#305"),
+            "error should link to issue #305, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn captured_set_mutating_bound_method_raises_type_error() {
+        // Same divergence as the list case: `Opaque::Set` stores a plain
+        // `IndexSet` that `Value::clone` deep-copies, so `m = s.add; m(x)`
+        // would silently lose the mutation.  Pin the TypeError path.
+        let err = run_program_expect_error("s = {1, 2}\nm = s.add\nm(3)\n");
+        let msg = err.to_string();
+        assert!(msg.contains("TypeError"), "expected TypeError, got: {msg}");
+        assert!(
+            msg.contains("captured bound method") && msg.contains("set.add"),
+            "error should name the captured method and the receiver type, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn captured_list_readonly_bound_method_still_works() {
+        // `count`, `index`, `copy` don't mutate, so the captured-bound-method
+        // pattern is fine.  Pin that the TypeError guard above is scoped
+        // tightly to mutating methods only.
+        let interp = run_program(
+            "lst = [1, 2, 3, 1, 2, 1]\n\
+             counter = lst.count\n\
+             c1 = counter(1)\n\
+             c2 = counter(2)\n\
+             c3 = counter(3)\n",
+        );
+        assert_eq!(interp.lookup_name("c1").unwrap(), Some(Value::int(3)));
+        assert_eq!(interp.lookup_name("c2").unwrap(), Some(Value::int(2)));
+        assert_eq!(interp.lookup_name("c3").unwrap(), Some(Value::int(1)));
+    }
+
+    #[test]
+    fn captured_set_readonly_bound_method_still_works() {
+        // `isdisjoint`, `union`, `issubset` etc. are read-only.  Captured
+        // bound methods on them work as in CPython.
+        let interp = run_program(
+            "s = {1, 2, 3}\n\
+             disjoint = s.isdisjoint\n\
+             a = disjoint({4, 5})\n\
+             b = disjoint({1, 9})\n",
+        );
+        assert_eq!(interp.lookup_name("a").unwrap(), Some(Value::bool_(true)));
+        assert_eq!(interp.lookup_name("b").unwrap(), Some(Value::bool_(false)));
+    }
+
+    #[test]
+    fn captured_dict_mutating_bound_method_propagates_unchanged() {
+        // Dict is the one mutable Tier 1 container where captured bound
+        // methods propagate correctly today, because `Opaque::Dict` wraps
+        // an `Rc<RefCell<IndexMap>>` that `Value::clone` shares.  The fix
+        // for #305 deliberately leaves this path untouched — pin the
+        // working behaviour so it can't regress.
+        let interp = run_program(
+            "d = {'a': 1}\n\
+             upd = d.update\n\
+             upd({'b': 2})\n\
+             popper = d.pop\n\
+             popper('a')\n",
+        );
+        let d = interp.lookup_name("d").unwrap().expect("d is bound");
+        let mut expected = indexmap::IndexMap::new();
+        expected.insert(crate::value::PyKey::Str("b".to_string()), Value::int(2));
+        assert_eq!(d, Value::dict(expected));
+    }
+
+    #[test]
+    fn direct_call_list_method_still_mutates() {
+        // The `CallMethod` bytecode fast path holds a mutable register
+        // reference and bypasses bound-method capture entirely, so direct
+        // `lst.append(4)` (without capturing) must continue to mutate.
+        let interp = run_program(
+            "lst = [1, 2, 3]\n\
+             lst.append(4)\n\
+             lst.extend([5, 6])\n",
+        );
+        assert_eq!(
+            interp.lookup_name("lst").unwrap(),
+            Some(Value::list(vec![
+                Value::int(1),
+                Value::int(2),
+                Value::int(3),
+                Value::int(4),
+                Value::int(5),
+                Value::int(6),
+            ]))
+        );
+    }
 }

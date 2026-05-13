@@ -83,6 +83,23 @@ impl Interpreter {
                         pyrust_builtins::string::call(method, &receiver, pos)
                     }
                     ValueKind::List(_) => {
+                        // Issue #305: captured bound methods on a list operate
+                        // on a private clone of the backing `Vec<Value>` because
+                        // `Value::clone` deep-copies list storage in the NaN-box
+                        // pool layout.  Mutating methods would silently no-op
+                        // against the original, so reject them with a clear
+                        // `TypeError` instead.  Direct-call form
+                        // `lst.method(args)` is unaffected — it routes through
+                        // the `CallMethod` bytecode fast path which holds a
+                        // mutable register reference and never reaches here.
+                        if pyrust_builtins::list::is_mutating_method(method) {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "captured bound method 'list.{method}' cannot mutate the original list (pyrust limitation, see issue #305); call it directly as 'lst.{method}(...)' or use a dict instead"
+                                ),
+                            ));
+                        }
                         let items = receiver
                             .as_list_mut()
                             .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
@@ -98,6 +115,19 @@ impl Interpreter {
                         pyrust_builtins::dict::call(method, dict, pos)
                     }
                     ValueKind::Set(_) => {
+                        // Issue #305: captured bound methods on a set operate on
+                        // a private clone of the backing `IndexSet` because
+                        // `Opaque::Set` stores it inline and `Value::clone`
+                        // deep-copies it.  See the matching note on the
+                        // `ValueKind::List` arm above.
+                        if pyrust_builtins::set::is_mutating_method(method) {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "captured bound method 'set.{method}' cannot mutate the original set (pyrust limitation, see issue #305); call it directly as 'st.{method}(...)' or use a dict instead"
+                                ),
+                            ));
+                        }
                         let set = receiver
                             .as_set_mut()
                             .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
