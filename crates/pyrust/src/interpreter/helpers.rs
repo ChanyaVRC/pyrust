@@ -179,6 +179,23 @@ pub(crate) fn lookup_class_attr(class: &Rc<RefCell<PyClass>>, name: &str) -> Opt
     base.and_then(|base| lookup_class_attr(&base, name))
 }
 
+thread_local! {
+    static OBJECT_CLASS: Rc<RefCell<PyClass>> = Rc::new(RefCell::new(PyClass {
+        name: "object".to_string(),
+        base: None,
+        attrs: HashMap::new(),
+    }));
+}
+
+/// Returns the singleton synthetic `object` class used as the terminal
+/// entry of every class's `__mro__`. pyrust does not (yet) model `object`
+/// as a real first-class type — every user class chains to `None` — so
+/// this provides a stable, identity-comparable terminator so that
+/// `A.__mro__[-1] is B.__mro__[-1]` holds, matching CPython.
+pub(crate) fn object_class_singleton() -> Rc<RefCell<PyClass>> {
+    OBJECT_CLASS.with(|c| Rc::clone(c))
+}
+
 pub(crate) struct PrintOptions {
     pub(crate) values: Vec<Value>,
     pub(crate) sep: String,

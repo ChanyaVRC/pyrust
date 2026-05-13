@@ -121,6 +121,22 @@ impl Interpreter {
                 if name == "__name__" {
                     return Ok(Value::string(class.borrow().name.clone()));
                 }
+                if name == "__mro__" {
+                    // Walk the single-inheritance `base` chain to build the
+                    // MRO tuple, terminating in the synthetic `object` class.
+                    // Multi-inheritance (C3 linearization) is not yet
+                    // implemented — pyrust's `PyClass` only stores a single
+                    // `base` pointer, so a true C3 walk would have nothing
+                    // extra to traverse.
+                    let mut items: Vec<Value> = Vec::new();
+                    let mut cur = Some(Rc::clone(&class));
+                    while let Some(c) = cur {
+                        items.push(Value::py_class(Rc::clone(&c)));
+                        cur = c.borrow().base.clone();
+                    }
+                    items.push(Value::py_class(object_class_singleton()));
+                    return Ok(Value::tuple(items));
+                }
                 if let Some(value) = lookup_class_attr(&class, name) {
                     return Ok(match value.kind() {
                         ValueKind::UserFunction(f) => match f.kind {
