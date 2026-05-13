@@ -575,8 +575,15 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
         // Build the PyClass at module() time.  `class_name` is *not*
         // qualified (it's just `Counter`, not `collections.Counter`) so
         // `type(c).__name__ == "Counter"` matches CPython.
+        //
+        // `class_attrs` (the `///` doc comments on the `class { … }`
+        // block) are intentionally dropped here.  They document the
+        // class for humans reading the source; emitting them in front
+        // of `attrs.insert(...)` would trip `unused_doc_comments`
+        // because that's a statement, not an item.  Accept the comment
+        // as source-only documentation rather than fighting the lint.
+        let _suppress_unused = class_attrs; // silence the field-read warning
         class_items.push(quote! {
-            #(#class_attrs)*
             attrs.insert(#class_name_lit.to_string(), {
                 use std::cell::RefCell;
                 use std::collections::HashMap;

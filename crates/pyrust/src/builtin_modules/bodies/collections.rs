@@ -33,7 +33,6 @@ use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::{
     NativeIterFrame, invoke_class_method, iter_values, lookup_class_attr,
-    reject_keyword_args_expanded,
 };
 use crate::value::{PyInstance, PyKey, Value, ValueKind};
 use indexmap::IndexMap;

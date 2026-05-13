@@ -93,6 +93,33 @@ print("perm-r-gt-n", list(permutations([1, 2], 3)))    # empty
 print("perm-r-0", list(permutations([1, 2, 3], 0)))    # one empty tuple
 
 
+# ── error parity ──────────────────────────────────────────────────────
+# CPython splits "negative r" (ValueError) from "wrong type r"
+# (TypeError); pyrust must match so user `except ValueError:` blocks
+# don't silently catch wrong-typed args.
+
+try:
+    list(combinations([1, 2, 3], -1))
+except ValueError:
+    print("comb-neg-r ValueError")
+
+try:
+    list(combinations_with_replacement([1, 2, 3], -1))
+except ValueError:
+    print("cwr-neg-r ValueError")
+
+try:
+    list(permutations([1, 2, 3], -1))
+except ValueError:
+    print("perm-neg-r ValueError")
+
+# `accumulate(initial=None)` is equivalent to omitting `initial` —
+# CPython treats None as "no initial", so an empty input yields
+# nothing instead of [None].
+print("acc-explicit-none-init", list(accumulate([1, 2, 3], initial=None)))
+print("acc-empty-none-init", list(accumulate([], initial=None)))
+
+
 # ── groupby ───────────────────────────────────────────────────────────
 print("groupby-str", [(k, list(g)) for k, g in groupby("AAAABBBCCDAABBB")])
 print("groupby-empty", [(k, list(g)) for k, g in groupby([])])
@@ -101,3 +128,20 @@ print(
     [(k, list(g)) for k, g in groupby([1, 2, 3, 4, 5, 6], key=lambda n: n % 2)],
 )
 print("groupby-single", [(k, list(g)) for k, g in groupby([1])])
+
+# groupby must compare keys via `__eq__` (not by reference identity).
+# This pins a bug we hit during self-review where `K(1) == K(1)` was
+# False on the Rust side because `Value::eq` is identity-based for
+# PyInstance — groupby has to route through the interpreter's
+# `BinaryOp::Eq` to dispatch the user's `__eq__`.
+class _K:
+    def __init__(self, v):
+        self.v = v
+    def __eq__(self, other):
+        return isinstance(other, _K) and self.v == other.v
+    def __hash__(self):
+        return hash(self.v)
+print(
+    "groupby-custom-eq",
+    [(k.v, list(g)) for k, g in groupby([1, 1, 2, 2, 3], key=_K)],
+)

@@ -508,11 +508,19 @@ pyrust_module! {
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             // Separate `initial` (keyword-only) from positionals.
+            //
+            // CPython treats `initial=None` as "no initial" — equivalent
+            // to omitting the argument.  Match that by filtering out None
+            // here, so the downstream `use_initial` flag stays meaningful.
             let mut positional: Vec<Value> = Vec::new();
             let mut initial: Option<Value> = None;
             for a in &args[1..] {
                 match a.name.as_deref() {
-                    Some("initial") => initial = Some(a.value.clone()),
+                    Some("initial") => {
+                        if !a.value.is_none() {
+                            initial = Some(a.value.clone());
+                        }
+                    }
                     Some(other) => return Err(PyError::named(
                         "TypeError",
                         format!("{FN_NAME}() got an unexpected keyword argument '{other}'"),
@@ -774,13 +782,20 @@ pyrust_module! {
                 ));
             }
             let pool: Vec<Value> = iter_values(user[0].value.clone())?;
+            // CPython splits negative-r (ValueError) from non-int-r
+            // (TypeError); match that so user `except` blocks behave
+            // identically.
             let r = match user.get(1).map(|a| a.value.kind()) {
                 None | Some(ValueKind::None) => pool.len(),
                 Some(ValueKind::Int(n)) if n >= 0 => n as usize,
+                Some(ValueKind::Int(_)) => return Err(PyError::named(
+                    "ValueError",
+                    format!("{FN_NAME}() r must be non-negative"),
+                )),
                 Some(ValueKind::Bool(b)) => b as usize,
                 _ => return Err(PyError::named(
                     "TypeError",
-                    format!("{FN_NAME}() r must be a non-negative integer or None"),
+                    format!("{FN_NAME}() r must be an integer or None"),
                 )),
             };
             // CPython's algorithm: keep `indices` (running combination) and
@@ -963,7 +978,14 @@ pyrust_module! {
                     Err(e) => return Err(e),
                 };
                 let k = compute_key(_interp, &key_fn, &item)?;
-                if k == first_key {
+                // `==` on Rust-side `Value` is identity-based for
+                // PyInstance, so we must go through `eval_binary(Eq)` to
+                // dispatch `__eq__` — otherwise `groupby(items, key=K)`
+                // would treat every `K(v)` instance as its own group.
+                let eq = _interp
+                    .eval_binary(k.clone(), crate::ast::BinaryOp::Eq, first_key.clone())?
+                    .truthy();
+                if eq {
                     group.push(item);
                 } else {
                     // Stash as pending for the next group.
@@ -1165,12 +1187,18 @@ fn init_combo_state(
         ));
     }
     let pool: Vec<Value> = iter_values(user[0].value.clone())?;
+    // Same split as `permutations`: negative-r is ValueError, non-int is
+    // TypeError — matches CPython's distinction.
     let r = match user[1].value.kind() {
         ValueKind::Int(n) if n >= 0 => n as usize,
+        ValueKind::Int(_) => return Err(PyError::named(
+            "ValueError",
+            format!("{fn_name}() r must be non-negative"),
+        )),
         ValueKind::Bool(b) => b as usize,
         _ => return Err(PyError::named(
             "TypeError",
-            format!("{fn_name}() r must be a non-negative integer"),
+            format!("{fn_name}() r must be an integer"),
         )),
     };
     // For combinations (no replacement), `r > pool.len()` yields nothing.
