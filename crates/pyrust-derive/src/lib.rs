@@ -356,6 +356,22 @@ impl ModuleInput {
     /// Parse one `class ClassName { fn method(args) … fn method(args) … }`
     /// declaration.  The `class` ident is at the head of `input`.
     fn parse_class(input: ParseStream, attrs: Vec<syn::Attribute>) -> syn::Result<ModuleClass> {
+        // We only know how to handle doc-comment attrs on a class — those
+        // are dropped from emission below (statements can't carry doc
+        // comments, and the class block lowers to a statement).  Anything
+        // else (`#[cfg(...)]`, `#[allow(...)]`, etc.) would be silently
+        // discarded with a real semantic effect lost, so reject it up
+        // front rather than letting bug reports come from "my `cfg` did
+        // nothing".
+        for attr in &attrs {
+            if !attr.path().is_ident("doc") {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "only doc-comment attrs are supported on `class { … }`; \
+                     other attrs (e.g. `#[cfg]`, `#[allow]`) would be silently dropped",
+                ));
+            }
+        }
         let class_kw: Ident = input.parse()?;
         debug_assert_eq!(class_kw.to_string(), "class");
         let name: Ident = input.parse()?;
@@ -575,8 +591,15 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
         // Build the PyClass at module() time.  `class_name` is *not*
         // qualified (it's just `Counter`, not `collections.Counter`) so
         // `type(c).__name__ == "Counter"` matches CPython.
+        //
+        // `class_attrs` (the `///` doc comments on the `class { … }`
+        // block) are intentionally dropped here.  They document the
+        // class for humans reading the source; emitting them in front
+        // of `attrs.insert(...)` would trip `unused_doc_comments`
+        // because that's a statement, not an item.  Accept the comment
+        // as source-only documentation rather than fighting the lint.
+        let _suppress_unused = class_attrs; // silence the field-read warning
         class_items.push(quote! {
-            #(#class_attrs)*
             attrs.insert(#class_name_lit.to_string(), {
                 use std::cell::RefCell;
                 use std::collections::HashMap;

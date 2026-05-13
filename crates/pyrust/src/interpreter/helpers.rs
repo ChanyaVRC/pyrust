@@ -259,11 +259,15 @@ fn extract_optional_string(value: Value, name: &str) -> Result<Option<String>> {
 }
 
 pub(crate) fn reject_keyword_args_expanded(function_name: &str, args: &[ExpandedCallArg]) -> Result<()> {
-    if args.iter().any(|arg| arg.name.is_some()) {
-        return Err(PyError::Runtime(format!(
-            "{}() does not accept keyword arguments",
-            function_name
-        )));
+    if let Some(arg) = args.iter().find(|arg| arg.name.is_some()) {
+        // CPython raises TypeError, not RuntimeError, for unexpected
+        // kwargs.  Match that so user code using `except TypeError:` on
+        // builtin call failures keeps working.
+        let kw = arg.name.as_deref().unwrap_or("");
+        return Err(PyError::named(
+            "TypeError",
+            format!("{function_name}() got an unexpected keyword argument '{kw}'"),
+        ));
     }
     Ok(())
 }
