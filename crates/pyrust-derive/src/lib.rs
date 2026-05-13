@@ -702,6 +702,21 @@ fn emit_typed_prelude(params: &[TypedParam]) -> proc_macro2::TokenStream {
         .count();
     let max_pos = params.iter().filter(|p| !p.keyword_only).count();
 
+    // Fast path: every parameter is `#[positional_only]` (the
+    // CPython-builtin shape — `abs`, `repr`, `len`, …).  No
+    // SmallVec collection of positionals (the raw args slice IS the
+    // positional list), no per-param kwarg lookup branch in
+    // `locate_arg`.  Microbench (#403 perf-fix follow-up) showed the
+    // collection + lookup ate ~5-10 ns/call on these one-shot Tier 1
+    // builtins; the fast path closes most of that gap.
+    let all_positional_only = !params.is_empty()
+        && params.iter().all(|p| p.positional_only)
+        && params.iter().all(|p| !p.keyword_only);
+
+    if all_positional_only {
+        return emit_typed_prelude_positional_only(params, min_pos, max_pos);
+    }
+
     let mut per_param: Vec<proc_macro2::TokenStream> = Vec::new();
     // Track the position-in-signature for non-keyword-only params; this is
     // the index passed to `locate_arg`.  Keyword-only params are absent
@@ -748,7 +763,7 @@ fn emit_typed_prelude(params: &[TypedParam]) -> proc_macro2::TokenStream {
         // Pull the validation helpers + FromValue trait into scope.
         #[allow(unused_imports)]
         use crate::interpreter::builtin_args::FromValue as _;
-        let __positional: ::std::vec::Vec<&crate::interpreter::ExpandedCallArg> =
+        let __positional: crate::interpreter::builtin_args::PositionalArgs<'_> =
             crate::interpreter::builtin_args::validate_kwargs_and_collect_positional(
                 __pyrust_args,
                 FN_NAME,
@@ -757,6 +772,60 @@ fn emit_typed_prelude(params: &[TypedParam]) -> proc_macro2::TokenStream {
         crate::interpreter::builtin_args::check_positional_count(
             FN_NAME,
             __positional.len(),
+            #min_pos,
+            #max_pos,
+        )?;
+        #(#per_param)*
+    }
+}
+
+/// Tighter typed-prelude emit for signatures whose every parameter is
+/// `#[positional_only]`.  Skips the `SmallVec<&ExpandedCallArg>`
+/// collection that the general path uses — `__pyrust_args` is already
+/// the positional list when no kwargs can be legal — and avoids the
+/// kwarg-branch in `locate_arg`.  Same wording / same semantics; just
+/// less work per call.  Reachable when `all_positional_only` is true
+/// in [`emit_typed_prelude`].
+fn emit_typed_prelude_positional_only(
+    params: &[TypedParam],
+    min_pos: usize,
+    max_pos: usize,
+) -> proc_macro2::TokenStream {
+    let mut per_param: Vec<proc_macro2::TokenStream> = Vec::new();
+    for (idx, p) in params.iter().enumerate() {
+        let name_ident = &p.name;
+        let name_lit = LitStr::new(&p.name.to_string(), p.name.span());
+        let ty = &p.ty;
+
+        let default_branch = match &p.default {
+            Some(expr) => quote! { Ok::<#ty, crate::error::PyError>(#expr) },
+            None => {
+                quote! { crate::interpreter::builtin_args::missing_arg::<#ty>(FN_NAME, #name_lit) }
+            }
+        };
+
+        per_param.push(quote! {
+            let #name_ident: #ty = {
+                match __pyrust_args.get(#idx).map(|__a| &__a.value) {
+                    Some(__v) => <#ty as crate::interpreter::builtin_args::FromValue>::try_from_value(
+                        __v, FN_NAME, #name_lit,
+                    )?,
+                    None => (#default_branch)?,
+                }
+            };
+        });
+    }
+
+    quote! {
+        // Fast path — all parameters are `#[positional_only]`, so any
+        // keyword argument is a user error and the raw `__pyrust_args`
+        // slice IS the positional list.
+        #[allow(unused_imports)]
+        use crate::interpreter::builtin_args::FromValue as _;
+        crate::interpreter::builtin_args::reject_named_args(__pyrust_args, FN_NAME)?;
+        crate::interpreter::builtin_args::check_positional_count(
+            FN_NAME,
+            __pyrust_args.len(),
             #min_pos,
             #max_pos,
         )?;
@@ -826,6 +895,13 @@ fn emit_overload_set_artefacts(
     let min_pos = ref_params.iter().filter(|p| !p.keyword_only).count();
     let max_pos = min_pos; // overload sets disallow defaults, so min == max
 
+    // Mirror of the single-body fast-path detection.  All-positional-only
+    // overload sets (the CPython-builtin shape — `abs`, `hex`, …) avoid
+    // the SmallVec collection and per-arg kwarg-branch.
+    let all_positional_only = !ref_params.is_empty()
+        && ref_params.iter().all(|p| p.positional_only)
+        && ref_params.iter().all(|p| !p.keyword_only);
+
     // For each parameter, the same positional-index / kw-allowed pair the
     // single-body prelude would compute — overload sets share this.
     let mut per_arg_locate: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -842,15 +918,31 @@ fn emit_overload_set_artefacts(
             pos_index += 1;
             i
         };
-        per_arg_locate.push(quote! {
-            let #__arg_ident: &crate::value::Value =
-                crate::interpreter::builtin_args::locate_arg(
-                    __pyrust_args, &__positional, FN_NAME, #name_lit, #this_pos, #kw_allowed,
-                )?
-                .ok_or_else(|| crate::interpreter::builtin_args::missing_arg::<()>(
-                    FN_NAME, #name_lit,
-                ).unwrap_err())?;
-        });
+        if all_positional_only {
+            // Fast path: direct slice indexing, no kwarg branch.  Since
+            // `check_positional_count` already enforces min == max == arity,
+            // the `get(idx)` is always Some here — the `ok_or_else` is
+            // defence-in-depth and unreachable in practice.
+            let idx = this_pos;
+            per_arg_locate.push(quote! {
+                let #__arg_ident: &crate::value::Value = __pyrust_args
+                    .get(#idx)
+                    .map(|__a| &__a.value)
+                    .ok_or_else(|| crate::interpreter::builtin_args::missing_arg::<()>(
+                        FN_NAME, #name_lit,
+                    ).unwrap_err())?;
+            });
+        } else {
+            per_arg_locate.push(quote! {
+                let #__arg_ident: &crate::value::Value =
+                    crate::interpreter::builtin_args::locate_arg(
+                        __pyrust_args, &__positional, FN_NAME, #name_lit, #this_pos, #kw_allowed,
+                    )?
+                    .ok_or_else(|| crate::interpreter::builtin_args::missing_arg::<()>(
+                        FN_NAME, #name_lit,
+                    ).unwrap_err())?;
+            });
+        }
     }
 
     // Per-overload body fns + dispatcher branches.
@@ -943,18 +1035,22 @@ fn emit_overload_set_artefacts(
         })
         .collect();
 
-    let dispatcher = quote! {
-        #[allow(non_snake_case)]
-        fn #dispatcher_ident(
-            _interp: &mut crate::Interpreter,
-            __pyrust_args: &[ExpandedCallArg],
-        ) -> crate::error::Result<crate::value::Value> {
-            #[allow(non_snake_case)]
-            let FN_NAME: &'static str = *#name_static_ident;
-            let _ = FN_NAME;
-
-            // Phase 1 — shared validation.
-            let __positional: ::std::vec::Vec<&crate::interpreter::ExpandedCallArg> =
+    let phase1 = if all_positional_only {
+        // Fast path — every parameter is `#[positional_only]`, so any
+        // keyword argument is a user error and the raw `__pyrust_args`
+        // slice IS the positional list.  No SmallVec, no kwarg loop.
+        quote! {
+            crate::interpreter::builtin_args::reject_named_args(__pyrust_args, FN_NAME)?;
+            crate::interpreter::builtin_args::check_positional_count(
+                FN_NAME,
+                __pyrust_args.len(),
+                #min_pos,
+                #max_pos,
+            )?;
+        }
+    } else {
+        quote! {
+            let __positional: crate::interpreter::builtin_args::PositionalArgs<'_> =
                 crate::interpreter::builtin_args::validate_kwargs_and_collect_positional(
                     __pyrust_args,
                     FN_NAME,
@@ -966,6 +1062,21 @@ fn emit_overload_set_artefacts(
                 #min_pos,
                 #max_pos,
             )?;
+        }
+    };
+
+    let dispatcher = quote! {
+        #[allow(non_snake_case)]
+        fn #dispatcher_ident(
+            _interp: &mut crate::Interpreter,
+            __pyrust_args: &[ExpandedCallArg],
+        ) -> crate::error::Result<crate::value::Value> {
+            #[allow(non_snake_case)]
+            let FN_NAME: &'static str = *#name_static_ident;
+            let _ = FN_NAME;
+
+            // Phase 1 — shared validation.
+            #phase1
             #(#per_arg_locate)*
 
             // Phase 2 — try each overload in declaration order.

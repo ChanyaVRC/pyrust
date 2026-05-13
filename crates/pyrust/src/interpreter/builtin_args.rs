@@ -54,11 +54,25 @@ use std::ops::Deref;
 use std::rc::Rc;
 
 use indexmap::{IndexMap, IndexSet};
+use smallvec::SmallVec;
 
 use crate::error::{PyError, Result};
 use crate::value::{PyBigInt, PyKey, PyToPrimitive, Value, ValueKind};
 
 use super::ExpandedCallArg;
+
+/// Inline storage for the positional-args list a typed builtin's
+/// dispatcher prelude collects from `validate_kwargs_and_collect_positional`.
+/// All migrated builtins so far have ≤ 4 parameters, so the `Vec` path
+/// is heap-free for them; longer signatures still work via the
+/// `SmallVec` overflow spill.  Sized at 4 to match the
+/// `Interpreter::call_arg_buf` budget used elsewhere in this crate.
+///
+/// Per-call hot-path benchmarks (see PR following #403) showed the
+/// previous `Vec::with_capacity(args.len())` was the dominant per-call
+/// cost (~8 ns/call), shading every Tier 1 migration.  Replacing with
+/// `SmallVec` eliminates the alloc for the common case.
+pub(crate) type PositionalArgs<'a> = SmallVec<[&'a ExpandedCallArg; 4]>;
 
 // ─── Trait ────────────────────────────────────────────────────────────────────
 
@@ -598,14 +612,38 @@ pub(crate) fn locate_arg<'a>(
     }
 }
 
+/// Tightest path through arg validation — for typed signatures whose
+/// every parameter is `#[positional_only]` (the all-CPython-builtin
+/// shape).  Rejects any keyword argument outright and skips the
+/// positional-args collection: when no kwargs are legal, the slice
+/// the caller already holds *is* the positional list, indexable
+/// directly via `args.get(i)`.
+///
+/// The macro emits a call to this — plus a direct `args.get(i)` per
+/// parameter — instead of the slower
+/// `validate_kwargs_and_collect_positional` + `locate_arg` chain when
+/// it can prove at compile time that no parameter accepts kwargs.
+pub(crate) fn reject_named_args(args: &[ExpandedCallArg], fn_name: &str) -> Result<()> {
+    for arg in args {
+        if let Some(name) = &arg.name {
+            return Err(type_error(format!(
+                "{fn_name}() got an unexpected keyword argument '{name}'",
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Build the list of positional args (in source order), checking that every
-/// keyword argument is one we recognise.
+/// keyword argument is one we recognise.  Returns a `SmallVec` so the
+/// common case (≤ 4 args) needs no heap allocation — see
+/// [`PositionalArgs`] for the inline-storage rationale.
 pub(crate) fn validate_kwargs_and_collect_positional<'a>(
     args: &'a [ExpandedCallArg],
     fn_name: &str,
     allowed_kwargs: &[&str],
-) -> Result<Vec<&'a ExpandedCallArg>> {
-    let mut positional = Vec::with_capacity(args.len());
+) -> Result<PositionalArgs<'a>> {
+    let mut positional: PositionalArgs<'a> = SmallVec::new();
     for arg in args {
         match &arg.name {
             None => positional.push(arg),
