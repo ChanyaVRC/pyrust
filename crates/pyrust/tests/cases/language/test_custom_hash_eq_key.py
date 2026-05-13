@@ -52,3 +52,27 @@ b = Plain()
 g = {a: "first"}
 print(g.get(a))                     # first
 print(g.get(b))                     # None — different identity
+
+# pop() on a missing custom-key raises KeyError (not RuntimeError).
+class H:
+    def __init__(self, v): self.v = v
+    def __hash__(self): return hash(self.v)
+    def __eq__(self, other): return isinstance(other, H) and self.v == other.v
+
+d = {H(1): "a"}
+try:
+    d.pop(H(2))
+    print("pop-missing-custom", "FAIL")
+except KeyError:
+    print("pop-missing-custom", "KeyError")
+
+# pop with default — no exception.
+print("pop-default-custom", d.pop(H(2), "fallback"))
+
+# Same fix should cover the plain-key case for symmetry — verify
+# pop() on a missing primitive key also raises KeyError.
+try:
+    {1: "a"}.pop(99)
+    print("pop-missing-plain", "FAIL")
+except KeyError:
+    print("pop-missing-plain", "KeyError")

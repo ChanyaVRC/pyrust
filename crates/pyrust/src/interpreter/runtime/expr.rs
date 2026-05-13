@@ -648,7 +648,7 @@ impl Interpreter {
                         if let Some(default) = iter.next() {
                             Ok(default)
                         } else {
-                            Err(PyError::Runtime(format!("KeyError: {}", key_val.repr())))
+                            Err(PyError::named("KeyError", key_val.repr()))
                         }
                     }
                 }
