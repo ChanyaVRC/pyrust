@@ -174,6 +174,7 @@ pyrust_module! {
         }
         let path = require_str(FN_NAME, &args[0].value, "path")?;
         // `mode` accepted-and-ignored (CPython on Windows does the same).
+        // TODO: apply `mode` on Unix via `OpenOptionsExt::mode`; current behaviour falls back to the umask default.
         if let Some(m) = args.get(1) {
             require_int(FN_NAME, &m.value, "mode")?;
         }
@@ -410,11 +411,15 @@ pyrust_module! {
     #[py_name = "_Environ.__repr__"]
     fn environ_repr(args) -> Result<Value> {
         require_self(args, FN_NAME)?;
-        // CPython renders environ as `environ({...})` — for parity-test
-        // simplicity we render a fixed sentinel string rather than the
-        // full env dump (the dump is process-dependent and would
-        // never match between Python and pyrust under the harness).
-        Ok(Value::string("environ({...})"))
+        // CPython renders the full env dump as `environ({...})`.  We
+        // deliberately don't reproduce the dump because process env
+        // contents differ across machines and would never match in
+        // parity tests under the harness.  Instead we surface the
+        // entry count, which is at least informative in interactive
+        // use without breaking parity (the count itself isn't compared
+        // by any parity test).
+        let n = std::env::vars().count();
+        Ok(Value::string(format!("environ({{...{n} entries...}})")))
     }
 
     #[py_name = "_Environ.get"]
@@ -602,8 +607,14 @@ fn walk_collect(dir: &str, out: &mut Vec<Value>) -> Result<()> {
     for sub in subdirs {
         // Build child path with the platform separator so the yielded
         // dirpath looks like CPython's (`top/sub` on POSIX, `top\sub`
-        // on Windows).
-        let sub_path = format!("{dir}{}{sub}", std::path::MAIN_SEPARATOR);
+        // on Windows).  `Path::join` handles trailing-separator edge
+        // cases (and the case where `dir` was passed in with the
+        // non-native separator) without splicing `MAIN_SEPARATOR`
+        // ourselves and risking a doubled separator.
+        let sub_path = std::path::Path::new(dir)
+            .join(&sub)
+            .to_string_lossy()
+            .into_owned();
         walk_collect(&sub_path, out)?;
     }
     Ok(())
