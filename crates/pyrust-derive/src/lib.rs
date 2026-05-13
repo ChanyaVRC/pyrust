@@ -153,8 +153,16 @@ struct ModuleFn {
 /// dunder dispatch sites already exercised by user-defined classes)
 /// picks up `__init__`, `__iter__`, `__getitem__`, etc.
 ///
-/// Method bodies receive `args` whose **first element is `self`** (the
-/// instance Value).  User-level args start at `args[1..]`.
+/// ## Method-body conventions
+///
+/// - `args` always has `self` as `args[0]` (the instance `Value`).
+///   User-level args start at `args[1..]`.
+/// - `_interp: &mut crate::Interpreter` is in scope, identical to
+///   module-level fns — methods can re-enter the interpreter via
+///   `_interp.call_function_expanded(...)` to dispatch other callables.
+/// - `FN_NAME: &'static str` resolves to the fully-qualified Python
+///   name (e.g. `"collections.Counter.__init__"`), useful for error
+///   messages that don't want to drift from the registry name.
 struct ModuleClass {
     /// Outer attributes (mostly `#[doc = …]`).
     attrs: Vec<syn::Attribute>,
@@ -354,9 +362,37 @@ impl ModuleInput {
         let content;
         syn::braced!(content in input);
         let mut methods: Vec<ModuleFn> = Vec::new();
+        // Track method names within this class so we can flag duplicates
+        // at macro-expand time.  Without this guard, two methods sharing
+        // a Python-level name would both register as `BuiltinReg`s under
+        // the same key — the duplicate-name `assert!` in
+        // `builtin_registry::REGISTRY` catches it at first lookup, but
+        // the macro-time error is far more actionable.
+        let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
         while !content.is_empty() {
             let method_attrs = content.call(syn::Attribute::parse_outer)?;
-            methods.push(Self::parse_fn(&content, method_attrs)?);
+            let method = Self::parse_fn(&content, method_attrs)?;
+            // Use the Python-level name (post `#[py_name]` override) since
+            // that's what reaches the registry — collisions on the
+            // *Rust* ident are caught by rustc later anyway.
+            let py_name = match &method.py_name_override {
+                Some(lit) => lit.value(),
+                None => method
+                    .short_name
+                    .to_string()
+                    .strip_prefix("r#")
+                    .map_or_else(|| method.short_name.to_string(), str::to_owned),
+            };
+            if !seen_names.insert(py_name.clone()) {
+                return Err(syn::Error::new(
+                    method.short_name.span(),
+                    format!(
+                        "duplicate method `{py_name}` in class `{name}` \
+                         (the second declaration would silently shadow the first)",
+                    ),
+                ));
+            }
+            methods.push(method);
         }
         if methods.is_empty() {
             return Err(syn::Error::new(
@@ -418,6 +454,11 @@ fn emit_fn_artefacts(
                 )
             });
 
+        // Class-method dispatch idents look like `__pyfn_Counter____init__`,
+        // which trips `non_snake_case` (the `Counter` segment isn't
+        // lowercase).  This lint is about *user-facing* idents — the macro
+        // names are internal and never appear in the surface API.
+        #[allow(non_snake_case)]
         #(#attrs)*
         fn #rust_fn_ident(
             _interp: &mut crate::Interpreter,

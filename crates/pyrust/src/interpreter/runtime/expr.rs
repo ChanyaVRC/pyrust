@@ -289,34 +289,12 @@ impl Interpreter {
                 items.get(&key).cloned().ok_or_else(|| PyError::Runtime("key error".to_string()))
             }
             ValueKind::BuiltinObject { ops, state } => {
-                // Built-in object types (Counter, defaultdict, …) opt in
-                // to subscripting via `BuiltinTypeOps::get_item`.  The
-                // default impl returns a TypeError shaped like the
-                // legacy "object is not subscriptable" message, so no
-                // per-type plumbing is needed in this dispatch.
-                //
-                // `defaultdict` extension: when `get_item` raises
-                // `KeyError`, consult `missing_factory()`; if a factory
-                // is available, call it with no args and store the
-                // result under the missing key before returning it.
-                // This lets pyrust-core stay ignorant of the Interpreter
-                // type while still supporting CPython's
-                // `defaultdict.__missing__` semantics.
-                match ops.get_item(state, &index) {
-                    Ok(v) => Ok(v),
-                    Err(e) => {
-                        let is_key_error = matches!(&e, PyError::Named(name, _) if name == "KeyError");
-                        if is_key_error
-                            && let Some(factory) = ops.missing_factory(state)
-                        {
-                            let new_val = self.call_function_expanded(factory, &[])?;
-                            ops.set_item(state, &index, new_val.clone())?;
-                            Ok(new_val)
-                        } else {
-                            Err(e)
-                        }
-                    }
-                }
+                // Built-in object types opt in to subscripting via
+                // `BuiltinTypeOps::get_item`.  The default impl returns a
+                // TypeError shaped like the legacy "object is not
+                // subscriptable" message, so non-subscriptable types
+                // don't need per-type plumbing.
+                ops.get_item(state, &index)
             }
             ValueKind::PyInstance(inst) => {
                 let inst_rc = Rc::clone(inst);

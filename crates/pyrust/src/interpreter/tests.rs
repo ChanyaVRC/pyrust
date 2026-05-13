@@ -1598,6 +1598,56 @@ result = fact(10)
     }
 
     #[test]
+    fn collections_counter_dunder_dispatch_exercises_each_site() {
+        // The dispatch unification in `invoke_class_method` routes
+        // `__contains__`, `__setitem__`, `__len__`, and `__getitem__`
+        // through the same helper.  One end-to-end Python program
+        // exercising each ensures the helper handles every dispatch
+        // site (we'd otherwise only cover `__iter__` and
+        // `__getitem__` via the existing tests).
+        let interp = run_program(
+            "from collections import Counter\n\
+             c = Counter('aab')\n\
+             a_present = 'a' in c\n\
+             z_missing = 'z' in c\n\
+             length = len(c)\n\
+             before = c['a']\n\
+             c['a'] = 99\n\
+             after = c['a']\n\
+             # __setitem__ propagation: a fresh `[]` lookup should see\n\
+             # the new value (which proves set_item routed through the\n\
+             # class dunder rather than landing on a clone).\n\
+             after_again = c['a']\n",
+        );
+        assert_eq!(interp.lookup_name("a_present").unwrap(), Some(Value::bool_(true)));
+        assert_eq!(interp.lookup_name("z_missing").unwrap(), Some(Value::bool_(false)));
+        assert_eq!(interp.lookup_name("length").unwrap(), Some(Value::int(2)));
+        assert_eq!(interp.lookup_name("before").unwrap(), Some(Value::int(2)));
+        assert_eq!(interp.lookup_name("after").unwrap(), Some(Value::int(99)));
+        assert_eq!(interp.lookup_name("after_again").unwrap(), Some(Value::int(99)));
+    }
+
+    #[test]
+    fn collections_counter_corrupted_counts_surfaces_type_error() {
+        // `c._counts = "lol"` overwrites the internal storage with a
+        // non-dict.  The next `c[k]` access should surface a TypeError
+        // pointing at the user's tampering — not a `Runtime("internal:
+        // …")` that looks like an interpreter bug.
+        let err = run_program_expect_error(
+            "from collections import Counter\nc = Counter('a')\nc._counts = 'lol'\nc['a']\n",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("TypeError"),
+            "expected TypeError diagnostic, got: {msg}"
+        );
+        assert!(
+            msg.contains("_counts"),
+            "error should name the offending attribute, got: {msg}"
+        );
+    }
+
+    #[test]
     fn collections_counter_is_a_class_instance() {
         // After the migration to `pyrust_module!`'s `class { … }` block,
         // `Counter(...)` returns a real PyInstance whose class name is

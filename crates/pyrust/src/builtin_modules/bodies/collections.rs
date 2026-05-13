@@ -3,17 +3,26 @@
 //
 // `Counter` and `defaultdict` are both real Python classes (defined via
 // `pyrust_module!`'s `class { … }` block).  Their dunder methods
-// (`__init__`, `__getitem__`, `__iter__`, etc.) plug into pyrust's
-// standard class-method dispatch, so iteration / subscript /
+// (`__init__`, `__getitem__`, `__iter__`, `__missing__`, …) plug into
+// pyrust's standard class-method dispatch, so iteration / subscript /
 // `isinstance` work without per-type plumbing in the interpreter.
 //
-// State is stored as a regular Python-level instance attribute
-// (`self._counts` for Counter, `self._items` + `self._factory` for
-// defaultdict).  This matches CPython's "Counter is a dict subclass"
-// model in spirit — we don't currently subclass `dict` in pyrust, so
-// the storage is a *named* dict attribute rather than the instance
-// being a dict.  `isinstance(c, dict)` is False as a result; if/when
-// pyrust grows subclassing of built-in types, that flips on naturally.
+// State is stored as regular Python-level instance attributes:
+//
+// - **Counter**: `self._counts` (a dict).
+// - **defaultdict**: `self.default_factory` (callable or None) +
+//   `self._items` (a dict).
+//
+// This matches CPython's "Counter is a dict subclass" model in spirit —
+// we don't currently subclass `dict` in pyrust, so the storage is a
+// *named* dict attribute rather than the instance being a dict.
+// `isinstance(c, dict)` is False as a result; if/when pyrust grows
+// subclassing of built-in types, that flips on naturally.
+//
+// `defaultdict`'s missing-key path is the only place either class uses
+// the new `__missing__` dunder: when `defaultdict.__getitem__` doesn't
+// find the key, it calls `self.__missing__(key)`, which in turn runs
+// the factory and stores the result.  CPython's exact mechanism.
 //
 // Reference: <https://docs.python.org/3/library/collections.html>
 
@@ -22,7 +31,10 @@ use std::rc::Rc;
 
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
-use crate::interpreter::{iter_values, reject_keyword_args_expanded};
+use crate::interpreter::{
+    NativeIterFrame, invoke_class_method, iter_values, lookup_class_attr,
+    reject_keyword_args_expanded,
+};
 use crate::value::{PyInstance, PyKey, Value, ValueKind};
 use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
@@ -120,20 +132,14 @@ pyrust_module! {
         }
 
         /// `for k in c` — yield the keys in insertion order, matching
-        /// dict iteration semantics.  Materialised through a list so
-        /// re-iteration works (each `iter(c)` snapshot is independent).
+        /// dict iteration semantics.  Materialised through a fresh
+        /// `NativeIterFrame` so re-iteration works (each `iter(c)`
+        /// snapshot is independent) without round-tripping through the
+        /// `iter()` builtin's dispatch.
         fn __iter__(args) -> Result<Value> {
             let counts = read_counts(args, FN_NAME)?;
-            let keys: Vec<Value> = counts.keys().cloned().map(key_to_value).collect();
-            // Wrap the keys list in a native iterator so callers using
-            // `next(iter(c))` get the right object identity for "iterator".
-            Ok(_interp.call_function_expanded(
-                Value::builtin_function("iter"),
-                &[ExpandedCallArg {
-                    name: None,
-                    value: Value::list(keys),
-                }],
-            )?)
+            let items: Vec<Value> = counts.keys().cloned().map(key_to_value).collect();
+            Ok(Value::generator(Box::new(NativeIterFrame { items, pos: 0 })))
         }
 
         /// `repr(c)` — most-common-first, matching CPython.
@@ -238,20 +244,19 @@ pyrust_module! {
                     "copy() takes no arguments".to_string(),
                 ));
             }
-            // Construct a fresh instance via the class so its `_counts`
-            // attribute is wired up cleanly.  We look up the Counter
-            // class from the module's attrs (= the receiver's class).
+            // Construct a fresh instance with the receiver's class and an
+            // independent `_counts` payload.  Cheaper than going through
+            // `Counter.__init__` again (which would re-tally from
+            // scratch) — `c.copy()` is one of the hot paths.
             let inst = expect_self(args, FN_NAME)?;
             let class = Rc::clone(&inst.borrow().class);
-            let new_inst = Rc::new(RefCell::new(PyInstance {
+            let mut attrs: std::collections::HashMap<String, Value> =
+                std::collections::HashMap::new();
+            attrs.insert("_counts".to_string(), Value::dict(counts));
+            Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
                 class,
-                attrs: indexmap::IndexMap::new().into_iter().collect(),
-            }));
-            new_inst
-                .borrow_mut()
-                .attrs
-                .insert("_counts".to_string(), Value::dict(counts));
-            Ok(Value::py_instance(new_inst))
+                attrs,
+            }))))
         }
 
         /// `c.get(key, default=None)` — present-key lookup without the
@@ -302,39 +307,219 @@ pyrust_module! {
         }
     }
 
-    /// CPython: collections.defaultdict(default_factory).
-    ///
-    /// Currently delegates to the existing `pyrust_builtins::defaultdict`
-    /// BuiltinObject impl — the dunder-class migration tracked in #335.
-    /// <https://docs.python.org/3/library/collections.html#collections.defaultdict>
-    fn defaultdict(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() > 1 {
-            return Err(PyError::Runtime(format!(
-                "{FN_NAME}() takes at most one argument",
-            )));
+    class defaultdict {
+        /// CPython: defaultdict([default_factory[, ...]]).
+        /// Stores `self.default_factory` and an empty `self._items` map.
+        /// The factory is callable-checked at construction so users get
+        /// the failure at the right line rather than on first missing
+        /// access.
+        /// <https://docs.python.org/3/library/collections.html#collections.defaultdict>
+        fn __init__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let user = &args[1..];
+            if user.len() > 1 {
+                return Err(PyError::Runtime(format!(
+                    "{FN_NAME}() takes at most one argument",
+                )));
+            }
+            let factory = user
+                .first()
+                .map(|a| a.value.clone())
+                .unwrap_or_else(Value::none);
+            if !factory.is_none() {
+                let callable = matches!(
+                    factory.kind(),
+                    ValueKind::UserFunction(_)
+                        | ValueKind::BuiltinFunction(_)
+                        | ValueKind::BoundMethod { .. }
+                        | ValueKind::ClassBoundMethod { .. }
+                        | ValueKind::PyClass(_)
+                );
+                if !callable {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("{FN_NAME}() first argument must be callable or None"),
+                    ));
+                }
+            }
+            let mut attrs = inst.borrow_mut();
+            attrs.attrs.insert("default_factory".to_string(), factory);
+            attrs
+                .attrs
+                .insert("_items".to_string(), Value::dict(IndexMap::new()));
+            Ok(Value::none())
         }
-        let factory = args.first().map(|a| a.value.clone()).unwrap_or_else(Value::none);
-        if !factory.is_none() {
-            let callable = matches!(
-                factory.kind(),
-                ValueKind::UserFunction(_)
-                    | ValueKind::BuiltinFunction(_)
-                    | ValueKind::BoundMethod { .. }
-                    | ValueKind::ClassBoundMethod { .. }
-                    | ValueKind::PyClass(_)
-            );
-            if !callable {
+
+        /// Subscripted access — on miss, calls `__missing__` (which runs
+        /// the factory) rather than raising KeyError directly.  Matches
+        /// CPython's dict-subclass semantics where `defaultdict[k]` =
+        /// `dict.__getitem__(self, k)` falls back to `self.__missing__(k)`.
+        fn __getitem__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let key = require_key(args, 1, FN_NAME)?;
+            let items = read_items(args, FN_NAME)?;
+            if let Some(v) = items.get(&key) {
+                return Ok(v.clone());
+            }
+            // Miss → __missing__.  Resolved via the class so that
+            // user-defined subclasses (when pyrust grows them) can
+            // override.
+            let class = Rc::clone(&inst.borrow().class);
+            if let Some(missing) = lookup_class_attr(&class, "__missing__") {
+                return invoke_class_method(
+                    _interp,
+                    missing,
+                    Value::py_instance(inst),
+                    &[args[1].clone()],
+                );
+            }
+            Err(PyError::named("KeyError", args[1].value.repr()))
+        }
+
+        /// `__missing__(key)` — call the factory (if non-None), store
+        /// the result, return it.  `default_factory=None` falls through
+        /// to a plain `KeyError`, matching CPython.
+        fn __missing__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let key_arg = args.get(1).cloned().ok_or_else(|| {
+                PyError::Runtime(format!("internal: {FN_NAME}() missing key arg"))
+            })?;
+            let factory = inst
+                .borrow()
+                .attrs
+                .get("default_factory")
+                .cloned()
+                .unwrap_or_else(Value::none);
+            if factory.is_none() {
+                return Err(PyError::named("KeyError", key_arg.value.repr()));
+            }
+            // Call the factory with no args.  The result is stored
+            // under `key` and returned.
+            let new_val = _interp.call_function_expanded(factory, &[])?;
+            let pk = key_arg.value.to_key().ok_or_else(|| {
+                PyError::named("TypeError", "unhashable type".to_string())
+            })?;
+            let mut items = read_items(args, FN_NAME)?;
+            items.insert(pk, new_val.clone());
+            store_items(&inst, items);
+            Ok(new_val)
+        }
+
+        /// `d[k] = v` — straight write-through to the inner dict.
+        fn __setitem__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            if args.len() != 3 {
+                return Err(PyError::Runtime(format!(
+                    "{FN_NAME}() takes exactly 2 arguments",
+                )));
+            }
+            let key = require_key(args, 1, FN_NAME)?;
+            let mut items = read_items(args, FN_NAME)?;
+            items.insert(key, args[2].value.clone());
+            store_items(&inst, items);
+            Ok(Value::none())
+        }
+
+        fn __contains__(args) -> Result<Value> {
+            let items = read_items(args, FN_NAME)?;
+            let key = require_key(args, 1, FN_NAME)?;
+            Ok(Value::bool_(items.contains_key(&key)))
+        }
+
+        fn __len__(args) -> Result<Value> {
+            let items = read_items(args, FN_NAME)?;
+            Ok(Value::int(items.len() as i64))
+        }
+
+        fn __iter__(args) -> Result<Value> {
+            let items = read_items(args, FN_NAME)?;
+            let keys: Vec<Value> = items.keys().cloned().map(key_to_value).collect();
+            Ok(Value::generator(Box::new(NativeIterFrame {
+                items: keys,
+                pos: 0,
+            })))
+        }
+
+        fn __repr__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let items = read_items(args, FN_NAME)?;
+            let factory_repr = inst
+                .borrow()
+                .attrs
+                .get("default_factory")
+                .map(|v| v.repr())
+                .unwrap_or_else(|| "None".to_string());
+            let body: Vec<String> = items
+                .iter()
+                .map(|(k, v)| format!("{}: {}", key_repr(k), v.repr()))
+                .collect();
+            Ok(Value::string(format!(
+                "defaultdict({factory_repr}, {{{}}})",
+                body.join(", ")
+            )))
+        }
+
+        fn get(args) -> Result<Value> {
+            let items = read_items(args, FN_NAME)?;
+            let user = &args[1..];
+            if user.is_empty() || user.len() > 2 {
                 return Err(PyError::named(
                     "TypeError",
-                    format!("{FN_NAME}() first argument must be callable or None"),
+                    "get() takes 1 or 2 arguments".to_string(),
                 ));
             }
+            let key = require_key(args, 1, FN_NAME)?;
+            Ok(match items.get(&key) {
+                Some(v) => v.clone(),
+                None => user.get(1).cloned().map(|a| a.value).unwrap_or_else(Value::none),
+            })
         }
-        Ok(pyrust_builtins::defaultdict::defaultdict(
-            factory,
-            IndexMap::new(),
-        ))
+
+        fn keys(args) -> Result<Value> {
+            let items = read_items(args, FN_NAME)?;
+            require_no_args(args, "keys")?;
+            Ok(Value::list(
+                items.keys().cloned().map(key_to_value).collect(),
+            ))
+        }
+
+        fn values(args) -> Result<Value> {
+            let items = read_items(args, FN_NAME)?;
+            require_no_args(args, "values")?;
+            Ok(Value::list(items.values().cloned().collect()))
+        }
+
+        fn items(args) -> Result<Value> {
+            let items = read_items(args, FN_NAME)?;
+            require_no_args(args, "items")?;
+            Ok(Value::list(
+                items
+                    .iter()
+                    .map(|(k, v)| Value::tuple(vec![key_to_value(k.clone()), v.clone()]))
+                    .collect(),
+            ))
+        }
+
+        fn copy(args) -> Result<Value> {
+            require_no_args(args, "copy")?;
+            let inst = expect_self(args, FN_NAME)?;
+            let items = read_items(args, FN_NAME)?;
+            let factory = inst
+                .borrow()
+                .attrs
+                .get("default_factory")
+                .cloned()
+                .unwrap_or_else(Value::none);
+            let class = Rc::clone(&inst.borrow().class);
+            let mut attrs: std::collections::HashMap<String, Value> =
+                std::collections::HashMap::new();
+            attrs.insert("default_factory".to_string(), factory);
+            attrs.insert("_items".to_string(), Value::dict(items));
+            Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
+                class,
+                attrs,
+            }))))
+        }
     }
 }
 
@@ -362,6 +547,10 @@ fn expect_self(
 /// Read the `_counts` dict off `self`.  Returns an empty IndexMap if the
 /// attribute is missing (which means `__init__` hasn't run yet — should
 /// only happen for direct PyInstance construction, but we tolerate it).
+///
+/// If `_counts` was overwritten externally (e.g. `c._counts = "lol"`),
+/// returns a `TypeError` rather than the internal-error path — the
+/// failure is *user-caused*, not an interpreter bug.
 fn read_counts(
     args: &[ExpandedCallArg],
     fn_name: &str,
@@ -371,9 +560,13 @@ fn read_counts(
     match borrow.attrs.get("_counts") {
         Some(v) => match v.kind() {
             ValueKind::Dict(map) => Ok(map.clone()),
-            _ => Err(PyError::Runtime(format!(
-                "internal: {fn_name}() self._counts is not a dict",
-            ))),
+            _ => Err(PyError::named(
+                "TypeError",
+                format!(
+                    "{fn_name}: Counter._counts has been overwritten with a non-dict; \
+                     don't assign to internal attributes",
+                ),
+            )),
         },
         None => Ok(IndexMap::new()),
     }
@@ -385,6 +578,37 @@ fn store_counts(inst: &Rc<RefCell<PyInstance>>, counts: IndexMap<PyKey, Value>) 
     inst.borrow_mut()
         .attrs
         .insert("_counts".to_string(), Value::dict(counts));
+}
+
+/// `defaultdict`'s storage accessor.  Same shape as `read_counts` but
+/// against `self._items` (the dict slot defaultdict keeps the user's
+/// data in — separate from `self.default_factory`).  TypeError on
+/// external corruption, empty-map fallback when `__init__` hasn't run.
+fn read_items(
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+) -> Result<IndexMap<PyKey, Value>> {
+    let inst = expect_self(args, fn_name)?;
+    let borrow = inst.borrow();
+    match borrow.attrs.get("_items") {
+        Some(v) => match v.kind() {
+            ValueKind::Dict(map) => Ok(map.clone()),
+            _ => Err(PyError::named(
+                "TypeError",
+                format!(
+                    "{fn_name}: defaultdict._items has been overwritten with a non-dict; \
+                     don't assign to internal attributes",
+                ),
+            )),
+        },
+        None => Ok(IndexMap::new()),
+    }
+}
+
+fn store_items(inst: &Rc<RefCell<PyInstance>>, items: IndexMap<PyKey, Value>) {
+    inst.borrow_mut()
+        .attrs
+        .insert("_items".to_string(), Value::dict(items));
 }
 
 /// Hashable-key extraction at index `i` with a uniform TypeError on

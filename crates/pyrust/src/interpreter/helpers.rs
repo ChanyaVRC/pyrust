@@ -227,10 +227,23 @@ pub(crate) fn invoke_class_method(
             combined.extend(args.iter().cloned());
             dispatch(interp, &combined)
         }
-        _ => Err(PyError::named(
-            "TypeError",
-            "attempted to call non-callable class attribute".to_string(),
-        )),
+        _ => {
+            // Resolved class attr is something other than a function —
+            // usually because the user did `Foo.method = 42` or similar.
+            // Surface the class name + the offending value's type so the
+            // diagnostic is actionable.
+            let class_name = match instance.kind() {
+                ValueKind::PyInstance(i) => i.borrow().class.borrow().name.clone(),
+                _ => "<unknown>".to_string(),
+            };
+            Err(PyError::named(
+                "TypeError",
+                format!(
+                    "'{class_name}' class attribute is not callable (got {})",
+                    value_type_name_str(&method_val),
+                ),
+            ))
+        }
     }
 }
 
