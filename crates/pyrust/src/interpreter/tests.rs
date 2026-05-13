@@ -1258,4 +1258,200 @@ result = fact(10)
             }
         }
     }
+
+    // ── stdlib phase-2 modules (issue #250) ──────────────────────────────────
+    //
+    // os.path / functools / itertools / collections live in
+    // `crates/pyrust/src/builtin_modules/bodies/`.  The tests below pin one
+    // representative behaviour per public surface — full method coverage
+    // belongs in CPython-parity test suites once we wire one up.
+
+    #[test]
+    fn os_path_join_handles_absolute_components_like_cpython() {
+        // CPython quirk: any absolute component resets the running path.
+        // `import os.path as op` is the working import form because pyrust
+        // doesn't yet ship the `os` parent package — see bodies/os_path.rs.
+        let interp = run_program(
+            "import os.path as op\n\
+             a = op.join('a', 'b', 'c')\n\
+             b = op.join('/abs', 'rel')\n\
+             c = op.join('rel', '/abs', 'tail')\n",
+        );
+        // Use the platform separator so the test passes on Windows too.
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(
+            interp.lookup_name("a").unwrap(),
+            Some(Value::string(format!("a{sep}b{sep}c")))
+        );
+        assert_eq!(
+            interp.lookup_name("b").unwrap(),
+            Some(Value::string(format!("{sep}abs{sep}rel")))
+        );
+        assert_eq!(
+            interp.lookup_name("c").unwrap(),
+            Some(Value::string(format!("{sep}abs{sep}tail")))
+        );
+    }
+
+    #[test]
+    fn os_path_splitext_treats_leading_dots_as_basename() {
+        // `.bashrc` → ('.bashrc', '') — a leading dot is *not* an
+        // extension separator (CPython rule).  Pinning this because it's
+        // the easy-to-regress branch in `splitext`.
+        let interp = run_program(
+            "from os.path import splitext\n\
+             a = splitext('foo.tar.gz')\n\
+             b = splitext('.bashrc')\n\
+             c = splitext('no_ext')\n",
+        );
+        assert_eq!(
+            interp.lookup_name("a").unwrap(),
+            Some(Value::tuple(vec![
+                Value::string("foo.tar"),
+                Value::string(".gz"),
+            ]))
+        );
+        assert_eq!(
+            interp.lookup_name("b").unwrap(),
+            Some(Value::tuple(vec![
+                Value::string(".bashrc"),
+                Value::string(""),
+            ]))
+        );
+        assert_eq!(
+            interp.lookup_name("c").unwrap(),
+            Some(Value::tuple(vec![Value::string("no_ext"), Value::string("")]))
+        );
+    }
+
+    #[test]
+    fn functools_reduce_with_and_without_initializer() {
+        let interp = run_program(
+            "from functools import reduce\n\
+             a = reduce(lambda x, y: x + y, [1, 2, 3, 4])\n\
+             b = reduce(lambda x, y: x + y, [1, 2, 3, 4], 100)\n\
+             c = reduce(lambda x, y: x * y, [1, 2, 3, 4])\n\
+             d = reduce(lambda x, y: x + y, [], 'seed')\n",
+        );
+        assert_eq!(interp.lookup_name("a").unwrap(), Some(Value::int(10)));
+        assert_eq!(interp.lookup_name("b").unwrap(), Some(Value::int(110)));
+        assert_eq!(interp.lookup_name("c").unwrap(), Some(Value::int(24)));
+        assert_eq!(interp.lookup_name("d").unwrap(), Some(Value::string("seed")));
+    }
+
+    #[test]
+    fn functools_reduce_empty_without_initializer_is_type_error() {
+        let err = run_program_expect_error(
+            "from functools import reduce\nreduce(lambda x, y: x + y, [])\n",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("of empty iterable with no initial value"),
+            "expected canonical CPython error wording, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn itertools_chain_concatenates_iterables() {
+        let interp = run_program(
+            "from itertools import chain\n\
+             a = list(chain([1, 2], [3, 4], [5]))\n\
+             b = list(chain([]))\n\
+             c = list(chain())\n",
+        );
+        assert_eq!(
+            interp.lookup_name("a").unwrap(),
+            Some(Value::list((1..=5).map(Value::int).collect()))
+        );
+        assert_eq!(interp.lookup_name("b").unwrap(), Some(Value::list(vec![])));
+        assert_eq!(interp.lookup_name("c").unwrap(), Some(Value::list(vec![])));
+    }
+
+    #[test]
+    fn itertools_islice_covers_all_arities() {
+        // `islice(seq, stop)`, `islice(seq, start, stop)`, and
+        // `islice(seq, start, stop, step)` — plus `None` in each slot
+        // (which means "default": 0 / drain / 1).
+        let interp = run_program(
+            "from itertools import islice\n\
+             a = list(islice([0,1,2,3,4,5,6,7,8,9], 5))\n\
+             b = list(islice([0,1,2,3,4,5,6,7,8,9], 2, 7))\n\
+             c = list(islice([0,1,2,3,4,5,6,7,8,9], 0, 10, 2))\n\
+             d = list(islice(range(5), None, 10))\n\
+             e = list(islice(range(5), 1, None))\n",
+        );
+        assert_eq!(
+            interp.lookup_name("a").unwrap(),
+            Some(Value::list((0..5).map(Value::int).collect()))
+        );
+        assert_eq!(
+            interp.lookup_name("b").unwrap(),
+            Some(Value::list((2..7).map(Value::int).collect()))
+        );
+        assert_eq!(
+            interp.lookup_name("c").unwrap(),
+            Some(Value::list((0..10).step_by(2).map(Value::int).collect()))
+        );
+        assert_eq!(
+            interp.lookup_name("d").unwrap(),
+            Some(Value::list((0..5).map(Value::int).collect()))
+        );
+        assert_eq!(
+            interp.lookup_name("e").unwrap(),
+            Some(Value::list((1..5).map(Value::int).collect()))
+        );
+    }
+
+    #[test]
+    fn collections_counter_tallies_iterables() {
+        // Counter is shipped as a *function* returning a plain dict — see
+        // `bodies/collections.rs` for why.  Pin the count values; the
+        // wrapper type is deliberately not a Counter instance yet.
+        let interp = run_program(
+            "from collections import Counter\n\
+             a = Counter([1, 2, 1, 3, 2, 1])\n\
+             b = Counter('aabcccd')\n\
+             c = Counter()\n\
+             d = Counter({'x': 5, 'y': 3})\n",
+        );
+        use crate::value::PyKey;
+        let mut a_expected = indexmap::IndexMap::new();
+        a_expected.insert(PyKey::Int(1), Value::int(3));
+        a_expected.insert(PyKey::Int(2), Value::int(2));
+        a_expected.insert(PyKey::Int(3), Value::int(1));
+        let mut b_expected = indexmap::IndexMap::new();
+        b_expected.insert(PyKey::Str("a".to_string()), Value::int(2));
+        b_expected.insert(PyKey::Str("b".to_string()), Value::int(1));
+        b_expected.insert(PyKey::Str("c".to_string()), Value::int(3));
+        b_expected.insert(PyKey::Str("d".to_string()), Value::int(1));
+        let mut d_expected = indexmap::IndexMap::new();
+        d_expected.insert(PyKey::Str("x".to_string()), Value::int(5));
+        d_expected.insert(PyKey::Str("y".to_string()), Value::int(3));
+        assert_eq!(interp.lookup_name("a").unwrap(), Some(Value::dict(a_expected)));
+        assert_eq!(interp.lookup_name("b").unwrap(), Some(Value::dict(b_expected)));
+        assert_eq!(
+            interp.lookup_name("c").unwrap(),
+            Some(Value::dict(indexmap::IndexMap::new()))
+        );
+        assert_eq!(interp.lookup_name("d").unwrap(), Some(Value::dict(d_expected)));
+    }
+
+    #[test]
+    fn collections_defaultdict_raises_with_workaround_hint() {
+        // defaultdict is intentionally deferred — the error must point
+        // callers at the workaround so they don't spelunk through the
+        // interpreter to figure out what's broken.
+        let err = run_program_expect_error(
+            "from collections import defaultdict\ndefaultdict(list)\n",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("NotImplementedError"),
+            "expected NotImplementedError class name in: {msg}"
+        );
+        assert!(
+            msg.contains("d.get(key, default)") || msg.contains("`key in d`"),
+            "error must surface the workaround hint; got: {msg}"
+        );
+    }
 }

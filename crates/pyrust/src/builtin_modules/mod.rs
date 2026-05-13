@@ -124,4 +124,8 @@ pyrust_builtin_modules! {
     math,
     sys,
     @flat builtins,
+    "os.path" as os_path,
+    functools,
+    itertools,
+    collections,
 }
