@@ -2480,7 +2480,10 @@ impl Compiler {
                 }
             }
             // Restore the cleanup stack so the caller (and any sibling
-            // iterations) see the original frames.
+            // iterations) see the original frames.  Unconditional restore
+            // is safe because `compile_block` doesn't return errors — it
+            // routes failures through `self.failed`, which the early-return
+            // guard above catches on the next loop iteration.
             self.except_cleanups.extend(saved_tail);
         }
     }
