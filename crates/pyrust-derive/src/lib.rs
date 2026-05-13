@@ -396,6 +396,43 @@ impl ModuleInput {
                 });
             }
         }
+
+        // Typed dialect — enforce two structural invariants the codegen
+        // assumes downstream:
+        //
+        // 1. Every parameter has an explicit type annotation.  Without
+        //    this guard a user writes `#[default("r".into())] mode` (no
+        //    `: PyStr`), the `()` placeholder leaks into the typed
+        //    prelude, and rustc emits "`FromValue` not implemented for
+        //    `()`" pointed at the macro expansion — a confusing diagnostic
+        //    at the wrong layer.  Reject up front with a clear message.
+        // 2. Parameter names are unique.  Duplicates would silently
+        //    shadow in the generated body (same name → same `let` ident),
+        //    and Rust's "unused variable" lint isn't fired on
+        //    macro-generated bindings.
+        let mut seen: std::collections::HashSet<String> =
+            std::collections::HashSet::with_capacity(params.len());
+        for p in &params {
+            if ty_to_canonical_string(&p.ty).is_empty() {
+                return Err(syn::Error::new(
+                    p.name.span(),
+                    format!(
+                        "typed parameter `{}` requires a type annotation (e.g. `: PyStr`); \
+                         drop the attributes if you intended the legacy `(args)` form",
+                        p.name,
+                    ),
+                ));
+            }
+            if !seen.insert(p.name.to_string()) {
+                return Err(syn::Error::new(
+                    p.name.span(),
+                    format!(
+                        "duplicate parameter name `{}` — each parameter must have a unique name",
+                        p.name,
+                    ),
+                ));
+            }
+        }
         Ok(ModuleFnArgs::Typed { params })
     }
 
@@ -407,7 +444,10 @@ impl ModuleInput {
         let raw_attrs = input.call(syn::Attribute::parse_outer)?;
 
         // Harvest the recognised attributes; reject unknown ones (better
-        // diagnostic than silent drop).
+        // diagnostic than silent drop).  Each attribute that toggles a
+        // flag also checks the dual flag inline, so the conflict-error
+        // span lands on the offending attr (the second one declared)
+        // rather than the parameter ident or a post-hoc cursor position.
         let mut default: Option<syn::Expr> = None;
         let mut positional_only = false;
         let mut keyword_only = false;
@@ -422,8 +462,20 @@ impl ModuleInput {
                 let lit = attr.parse_args::<syn::Expr>()?;
                 default = Some(lit);
             } else if attr.path().is_ident("positional_only") {
+                if keyword_only {
+                    return Err(syn::Error::new_spanned(
+                        attr,
+                        "a parameter cannot be both `#[positional_only]` and `#[keyword_only]`",
+                    ));
+                }
                 positional_only = true;
             } else if attr.path().is_ident("keyword_only") {
+                if positional_only {
+                    return Err(syn::Error::new_spanned(
+                        attr,
+                        "a parameter cannot be both `#[positional_only]` and `#[keyword_only]`",
+                    ));
+                }
                 keyword_only = true;
             } else if attr.path().is_ident("doc")
                 || attr.path().is_ident("cfg")
@@ -439,11 +491,6 @@ impl ModuleInput {
                      `#[default(expr)]`, `#[positional_only]`, `#[keyword_only]`",
                 ));
             }
-        }
-
-        if positional_only && keyword_only {
-            return Err(input
-                .error("a parameter cannot be both `#[positional_only]` and `#[keyword_only]`"));
         }
 
         let name: Ident = input.parse()?;
@@ -657,9 +704,10 @@ fn emit_typed_prelude(params: &[TypedParam]) -> proc_macro2::TokenStream {
 
     let mut per_param: Vec<proc_macro2::TokenStream> = Vec::new();
     // Track the position-in-signature for non-keyword-only params; this is
-    // the index used by `locate_arg`.  Keyword-only params are absent from
-    // the positional list, so we pass `usize::MAX` as a sentinel "never
-    // matches positional" (positional.get(usize::MAX) is always None).
+    // the index passed to `locate_arg`.  Keyword-only params are absent
+    // from the positional list, so they get a sentinel value that the
+    // `positional.get(_)` lookup never matches.
+    const KW_ONLY_POS_SENTINEL: usize = usize::MAX;
     let mut pos_index: usize = 0;
     for p in params {
         let name_ident = &p.name;
@@ -667,7 +715,7 @@ fn emit_typed_prelude(params: &[TypedParam]) -> proc_macro2::TokenStream {
         let ty = &p.ty;
         let kw_allowed = !p.positional_only;
         let this_pos: usize = if p.keyword_only {
-            usize::MAX
+            KW_ONLY_POS_SENTINEL
         } else {
             let i = pos_index;
             pos_index += 1;

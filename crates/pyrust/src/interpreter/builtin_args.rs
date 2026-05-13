@@ -95,6 +95,13 @@ impl Deref for PyInt {
     }
 }
 
+/// Ergonomic default-value construction: `#[default(0)] x: PyInt`.
+impl From<i64> for PyInt {
+    fn from(n: i64) -> Self {
+        PyInt(n)
+    }
+}
+
 impl FromValue for PyInt {
     const PY_TYPE_NAME: &'static str = "int";
 
@@ -122,6 +129,13 @@ impl Deref for PyFloat {
     type Target = f64;
     fn deref(&self) -> &f64 {
         &self.0
+    }
+}
+
+/// Ergonomic default-value construction: `#[default(0.0)] x: PyFloat`.
+impl From<f64> for PyFloat {
+    fn from(f: f64) -> Self {
+        PyFloat(f)
     }
 }
 
@@ -204,6 +218,13 @@ impl Deref for PyBool {
     type Target = bool;
     fn deref(&self) -> &bool {
         &self.0
+    }
+}
+
+/// Ergonomic default-value construction: `#[default(false)] flag: PyBool`.
+impl From<bool> for PyBool {
+    fn from(b: bool) -> Self {
+        PyBool(b)
     }
 }
 
@@ -341,10 +362,17 @@ impl FromValue for PyDict {
 pub(crate) struct PySet(pub Value);
 
 impl PySet {
+    /// Returns the underlying `IndexSet`.  Panics if the wrapper somehow
+    /// doesn't wrap a `Set` — impossible by construction (`try_from_value`
+    /// checks `is_set` and `Value::clone` preserves the kind), but the
+    /// `expect` style matches the sibling wrappers' panic-message wording.
     pub(crate) fn as_set(&self) -> &IndexSet<PyKey> {
+        // `Value::as_set` doesn't exist on `pyrust-core` (only `as_set_mut`
+        // does); match locally and surface the same `.expect()` style the
+        // other wrappers use against their `Option`-returning accessors.
         match self.0.kind() {
             ValueKind::Set(s) => s,
-            _ => unreachable!("PySet wraps a set"),
+            _ => panic!("PySet wraps a set"),
         }
     }
 }
@@ -400,14 +428,30 @@ impl FromValue for PyValue {
 // "may be absent" semantics.
 
 impl<T: FromValue> FromValue for Option<T> {
+    // Kept for trait coherence; consumers that print a parameter type for
+    // an `Option<T>` should compose `T::PY_TYPE_NAME` + " or None" at the
+    // call site (as `try_from_value` does below).  The const can't carry
+    // that suffix because Rust requires `const &'static str` to be
+    // statically-known, and we can't concat at trait-impl time.
     const PY_TYPE_NAME: &'static str = T::PY_TYPE_NAME;
 
     fn try_from_value(value: &Value, fn_name: &str, arg_name: &str) -> Result<Self> {
         if value.is_none() {
-            Ok(None)
-        } else {
-            T::try_from_value(value, fn_name, arg_name).map(Some)
+            return Ok(None);
         }
+        // Use `matches` as the predicate so we know whether `T`'s own
+        // `try_from_value` would succeed before we run it — that lets us
+        // surface the correct "must be X or None" wording on the failure
+        // path without first generating, then discarding, T's stricter
+        // "must be X" message.
+        if T::matches(value) {
+            return T::try_from_value(value, fn_name, arg_name).map(Some);
+        }
+        Err(type_error(format!(
+            "{fn_name}() argument '{arg_name}' must be {} or None, not {}",
+            T::PY_TYPE_NAME,
+            pyrust_core::builtin_type_name(value),
+        )))
     }
 
     fn matches(value: &Value) -> bool {
@@ -483,8 +527,15 @@ pub(crate) fn validate_kwargs_and_collect_positional<'a>(
     Ok(positional)
 }
 
-/// Bound on positional argument count.  Used by macro-generated preludes to
-/// emit `too many` / `missing` errors with CPython-style wording.
+/// Bound on positional argument count — emits the CPython-style "too many"
+/// error when violated.  Branches the wording on `min == max` so a builtin
+/// with no defaults (`min == max == 1`) says `takes 1 positional argument
+/// but 2 were given` rather than the nonsensical `takes from 1 to 1
+/// positional arguments`.
+///
+/// Too-few-positional cases are caught downstream by `missing_arg` per
+/// parameter (which knows the name); this function intentionally does not
+/// check the lower bound.
 pub(crate) fn check_positional_count(
     fn_name: &str,
     positional_len: usize,
@@ -492,9 +543,15 @@ pub(crate) fn check_positional_count(
     max: usize,
 ) -> Result<()> {
     if positional_len > max {
-        return Err(type_error(format!(
-            "{fn_name}() takes from {min} to {max} positional arguments but {positional_len} were given"
-        )));
+        let msg = if min == max {
+            let plural = if max == 1 { "argument" } else { "arguments" };
+            format!("{fn_name}() takes {max} positional {plural} but {positional_len} were given",)
+        } else {
+            format!(
+                "{fn_name}() takes from {min} to {max} positional arguments but {positional_len} were given",
+            )
+        };
+        return Err(type_error(msg));
     }
     Ok(())
 }
@@ -677,6 +734,44 @@ mod tests {
         assert!(!<Option<PyInt>>::matches(&v));
     }
 
+    #[test]
+    fn option_t_error_wording_mentions_or_none() {
+        // Regression for the PR-#396 review: `Option<T>` rejection used to
+        // route through `T::try_from_value` and print "must be int, not str"
+        // — strictly correct for `T = PyInt` but misleading for callers who
+        // can also pass `None`.  The override now says "must be int or None".
+        let v = Value::string("hi");
+        let err = <Option<PyInt>>::try_from_value(&v, "pow", "exp").unwrap_err();
+        let msg = err_msg(&err);
+        assert!(
+            msg.contains("must be int or None"),
+            "expected the wording to mention 'or None'; got: {msg:?}",
+        );
+        assert!(
+            msg.contains("not str"),
+            "should include the actual type: {msg:?}"
+        );
+    }
+
+    // ── From impls — ergonomic `#[default(literal)]` construction.
+    #[test]
+    fn from_impls_for_default_values() {
+        // Each strict wrapper carries a `From<inner>` impl so the macro
+        // can accept `#[default(0)]` / `#[default(0.0)]` / `#[default(true)]`
+        // / `#[default("r")]` without forcing the author to write the
+        // wrapper constructor explicitly.
+        let i: PyInt = 42i64.into();
+        assert_eq!(i.0, 42);
+        let f: PyFloat = 3.14f64.into();
+        assert_eq!(f.0, 3.14);
+        let b: PyBool = true.into();
+        assert!(b.0);
+        let s: PyStr = "r".into();
+        assert_eq!(s.0, "r");
+        let s2: PyStr = String::from("w").into();
+        assert_eq!(s2.0, "w");
+    }
+
     // ── Error messages — CPython parity.
     #[test]
     fn typeerror_must_be_message_format() {
@@ -700,7 +795,8 @@ mod tests {
     }
 
     #[test]
-    fn check_positional_count_rejects_too_many() {
+    fn check_positional_count_rejects_too_many_range() {
+        // min < max — emit the "from M to N" range wording.
         let err = check_positional_count("open", 3, 1, 2).unwrap_err();
         assert!(
             err_msg(&err).contains("from 1 to 2 positional arguments but 3"),
@@ -710,6 +806,41 @@ mod tests {
         // Within bounds — no error.
         assert!(check_positional_count("open", 2, 1, 2).is_ok());
         assert!(check_positional_count("open", 1, 1, 2).is_ok());
+    }
+
+    #[test]
+    fn check_positional_count_min_eq_max_singular() {
+        // Regression for PR-#396 review feedback: a 1-required builtin
+        // hit with 2 positional args used to print
+        // "takes from 1 to 1 positional arguments but 2 were given" —
+        // both nonsensical and divergent from CPython.  Now it prints
+        // "takes 1 positional argument but 2 were given" with the
+        // singular "argument" because max == 1.
+        let err = check_positional_count("len", 2, 1, 1).unwrap_err();
+        let msg = err_msg(&err);
+        assert!(
+            msg.contains("takes 1 positional argument but 2 were given"),
+            "expected singular wording with no from-to range; got: {msg:?}",
+        );
+        assert!(
+            !msg.contains("from 1"),
+            "should not contain 'from 1 to 1': {msg:?}"
+        );
+    }
+
+    #[test]
+    fn check_positional_count_min_eq_max_plural() {
+        // Plural wording when max > 1.
+        let err = check_positional_count("divmod", 3, 2, 2).unwrap_err();
+        let msg = err_msg(&err);
+        assert!(
+            msg.contains("takes 2 positional arguments but 3 were given"),
+            "expected plural 'arguments'; got: {msg:?}",
+        );
+        assert!(
+            !msg.contains("from 2 to 2"),
+            "should not contain 'from 2 to 2': {msg:?}"
+        );
     }
 
     #[test]
