@@ -791,7 +791,7 @@ fn emit_typed_prelude(params: &[TypedParam]) -> proc_macro2::TokenStream {
 ///         return __pyfn_abs_overload_0(_interp, x);
 ///     }
 ///     // … same for PyFloat, then PyValue (always matches) …
-///     no_overload_matched(FN_NAME, &[…actual types…], &[…signatures…])
+///     no_overload_matched(FN_NAME, &[…actual types…])
 /// }
 /// ```
 fn emit_overload_set_artefacts(
@@ -861,7 +861,6 @@ fn emit_overload_set_artefacts(
     // Per-overload body fns + dispatcher branches.
     let mut body_fns: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut dispatch_branches: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut signature_strings: Vec<LitStr> = Vec::new();
     for (idx, f) in group.iter().enumerate() {
         let params = match &f.args {
             ModuleFnArgs::Typed { params } => params,
@@ -932,18 +931,6 @@ fn emit_overload_set_artefacts(
                 return #body_ident(_interp, #(#call_args),*);
             }
         });
-
-        // Render the overload's type signature for the "no overload"
-        // error message: "(int, float)", "(str,)", etc.
-        let sig_str = format!(
-            "({})",
-            params
-                .iter()
-                .map(|p| ty_to_canonical_string(&p.ty))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        signature_strings.push(LitStr::new(&sig_str, f.short_name.span()));
     }
 
     // Build the dispatcher.  When `__pyrust_args` is empty (zero-param
@@ -986,14 +973,14 @@ fn emit_overload_set_artefacts(
             // Phase 2 — try each overload in declaration order.
             #(#dispatch_branches)*
 
-            // No overload matched.  Format the actual arg-type list and
-            // the declared signatures for a clear TypeError.  Unreachable
-            // when any overload uses `PyValue` (whose `matches` is
-            // unconditional).
+            // No overload matched.  Terse `unsupported argument type(s)`
+            // wording matching CPython's binary-op error shape — actual
+            // arg types only, no declared-signature dump (per the design
+            // review on #395, comment 4443208232).  Unreachable when any
+            // overload uses `PyValue` (whose `matches` is unconditional).
             let __actuals: &[&str] = &[#(#no_match_args),*];
-            let __signatures: &[&str] = &[#(#signature_strings),*];
             crate::interpreter::builtin_args::no_overload_matched::<crate::value::Value>(
-                FN_NAME, __actuals, __signatures,
+                FN_NAME, __actuals,
             )
         }
     };
@@ -1196,7 +1183,56 @@ fn validate_overload_set(group: &[&ModuleFn]) -> syn::Result<()> {
             }
         }
     }
+
+    // Catch-all-must-be-last (per design review on #395, concern 1).
+    //
+    // `PyValue::matches` is unconditional, so any overload after a
+    // `PyValue`-only one is reachable only via the (currently absent)
+    // path that doesn't match `PyValue` — i.e. never.  Emit a clear
+    // diagnostic at macro-expand time so users don't get silent dead
+    // code.  An overload counts as a "catch-all" only when *every*
+    // parameter is `PyValue` (a mixed `(PyValue, PyInt)` overload
+    // still requires the second arg to actually be an int, so later
+    // overloads remain reachable for non-int second-args).
+    for (idx, f) in group.iter().enumerate() {
+        if idx == group.len() - 1 {
+            // The last overload is allowed to be a catch-all — that's
+            // the whole point of the pattern.
+            break;
+        }
+        let params = match &f.args {
+            ModuleFnArgs::Typed { params } => params,
+            ModuleFnArgs::Legacy { .. } => unreachable!("checked above"),
+        };
+        if is_catch_all_overload(params) {
+            return Err(syn::Error::new(
+                f.short_name.span(),
+                "a `PyValue`-only catch-all overload must be declared last — \
+                 every overload after it would be unreachable (silently \
+                 shadowed by `PyValue::matches`, which always returns true)",
+            ));
+        }
+    }
+
     Ok(())
+}
+
+/// Returns true if every parameter in `params` is the `PyValue`
+/// pass-through wrapper.  Such an overload's `matches` predicate is
+/// unconditional — it shadows every overload declared after it.
+fn is_catch_all_overload(params: &[TypedParam]) -> bool {
+    if params.is_empty() {
+        // A zero-arg overload is its own thing — kwarg validation
+        // catches mismatches, so the "catch-all" question doesn't apply.
+        return false;
+    }
+    params.iter().all(|p| {
+        let s = ty_to_canonical_string(&p.ty);
+        // Match the bare name plus any fully-qualified path ending in
+        // `::PyValue`.  Users typically `use` the wrapper and write it
+        // bare; the qualified form is supported defensively.
+        s == "PyValue" || s.ends_with("::PyValue")
+    })
 }
 
 /// File-scoped module declaration: see crate-level docs for the full

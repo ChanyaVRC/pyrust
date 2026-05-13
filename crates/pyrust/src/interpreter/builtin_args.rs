@@ -30,6 +30,24 @@
 //!
 //! After the prelude, the user-written body sees typed locals (`path: PyStr`,
 //! `mode: PyStr`, etc.) and can call straightforwardly into native Rust APIs.
+//!
+//! # Deferred: `PyIterable`
+//!
+//! A wrapper that materialises any iterable into `Vec<Value>` is *not*
+//! yet provided.  Per the #395 design review (concern 6), this defers
+//! migration for builtins whose canonical signature is "anything
+//! iterable":
+//!
+//! - `list()`, `tuple()`, `set()`, `dict()`, `frozenset()`
+//! - `sum()`, `min()`, `max()`, `any()`, `all()`
+//! - `sorted()`, `reversed()`
+//! - `map()`, `filter()`, `zip()`, `enumerate()`
+//! - `iter()`, `next()`
+//!
+//! Until `PyIterable` lands, these stay on the legacy `(args)` dialect
+//! or take a `PyValue` parameter and hand-coerce inside the body.
+//! Migrating them adds a follow-up — tracked under the same
+//! per-builtin migration umbrella as the rest of #395.
 
 use std::borrow::Cow;
 use std::ops::Deref;
@@ -649,25 +667,22 @@ pub(crate) fn missing_arg<T>(fn_name: &str, arg_name: &str) -> Result<T> {
 /// reachable otherwise — the user supplied types not covered by any
 /// overload.
 ///
+/// The wording follows CPython's binary-op `unsupported operand type(s)
+/// for +: 'int' and 'str'` shape — terse, prints only the actual
+/// argument types, omits the declared overload signatures.  Per the
+/// design review on #395 (comment 4443208232): "actual types only, no
+/// signature dump unless behind a debug flag."
+///
 /// `actuals` is the type-name list of the *call site*'s args (e.g.
-/// `["str", "int"]`), `signatures` is the source-order list of the
-/// *declared* per-overload signatures (e.g. `["(int, int)",
-/// "(float, float)"]`).  Both are formatted into a single
-/// `TypeError`.
-pub(crate) fn no_overload_matched<T>(
-    fn_name: &str,
-    actuals: &[&str],
-    signatures: &[&str],
-) -> Result<T> {
-    let actual = if actuals.len() == 1 {
-        actuals[0].to_string()
-    } else {
-        format!("({})", actuals.join(", "))
-    };
-    let sigs = signatures.join(", ");
+/// `["str", "int"]`).
+pub(crate) fn no_overload_matched<T>(fn_name: &str, actuals: &[&str]) -> Result<T> {
+    let joined = actuals
+        .iter()
+        .map(|s| format!("'{s}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
     Err(type_error(format!(
-        "{fn_name}(): no overload matches argument types {actual}; \
-         expected one of: {sigs}",
+        "{fn_name}(): unsupported argument type(s): ({joined})",
     )))
 }
 
@@ -971,36 +986,41 @@ mod tests {
     }
 
     // ── no_overload_matched — error wording for the overload dispatcher.
+    //
+    // The wording follows CPython's `unsupported operand type(s) for +:
+    // 'int' and 'str'` shape — terse, actual types only, no declared-
+    // overload-signature dump.  See the design review on #395
+    // (comment 4443208232): CPython doesn't list candidate signatures
+    // for type-dispatch failures; including them here would be a
+    // usability regression for end users.
     #[test]
-    fn no_overload_matched_single_arg_formats_actual_bare() {
-        // Single-arg call sites get the type name printed bare, not
-        // wrapped in a tuple — matches CPython's `abs(): argument of
-        // type 'str'` style for single-arg builtins.
-        let err = no_overload_matched::<()>("abs", &["str"], &["(int,)", "(float,)", "(bool,)"])
-            .unwrap_err();
+    fn no_overload_matched_single_arg() {
+        let err = no_overload_matched::<()>("abs", &["str"]).unwrap_err();
         let msg = err_msg(&err);
         assert_eq!(err_class(&err), "TypeError");
         assert!(
-            msg.contains("abs(): no overload matches argument types str"),
-            "actual list should be bare for single arg: {msg:?}",
+            msg.contains("abs(): unsupported argument type(s): ('str')"),
+            "expected terse 'unsupported argument type(s)' wording: {msg:?}",
+        );
+        // The pre-revision wording (`"no overload matches"` /
+        // `"expected one of"`) is explicitly *not* used anymore.
+        assert!(
+            !msg.contains("expected one of"),
+            "signatures must not appear in the user-facing error: {msg:?}",
         );
         assert!(
-            msg.contains("expected one of: (int,), (float,), (bool,)"),
-            "signatures should be comma-joined: {msg:?}",
+            !msg.contains("no overload"),
+            "must not say 'no overload': {msg:?}",
         );
     }
 
     #[test]
-    fn no_overload_matched_multi_arg_wraps_actuals_in_paren() {
-        // Multi-arg call sites get the actual type list wrapped so the
-        // output reads naturally: `argument types (int, str)`.
-        let err =
-            no_overload_matched::<()>("pow", &["int", "str"], &["(int, int)", "(float, float)"])
-                .unwrap_err();
+    fn no_overload_matched_multi_arg() {
+        let err = no_overload_matched::<()>("pow", &["int", "str"]).unwrap_err();
         let msg = err_msg(&err);
         assert!(
-            msg.contains("argument types (int, str)"),
-            "multi-arg actuals should be parenthesised: {msg:?}",
+            msg.contains("pow(): unsupported argument type(s): ('int', 'str')"),
+            "multi-arg actuals should be quoted + parenthesised: {msg:?}",
         );
     }
 
