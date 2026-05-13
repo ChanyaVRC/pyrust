@@ -155,3 +155,36 @@ print(
     callable(functools.wraps),
     callable(functools.cached_property),
 )
+
+# ── self-review fixes (PR #343 review comment) ────────────────────────
+
+
+# `typed=False`: numerically-equal int and float compare equal even
+# when stored in distinct cache slots — both CPython and pyrust use
+# separate slots here (CPython's `_make_key` returns the bare int via
+# its `fasttypes` fast path but wraps the float in a `_HashedSeq`, so
+# the keys never collide), but the *return values* still compare
+# equal under `==`.  We can't easily expose hit/miss without
+# `cache_info()`, so we assert return-value equality only.  The real
+# validation is the parity diff: CPython and pyrust both print the
+# same thing here.
+def _f(x):
+    return x
+
+
+cached_f = lru_cache()(_f)
+_ = cached_f(1)        # miss → cache
+_ = cached_f(1.0)      # miss → cache (separate slot in both runtimes)
+print("lru-int-float-share", cached_f(1) == cached_f(1.0) == 1)
+
+# Private constructors reject user args.  `_lru_cache_wrapper` is the
+# inner type produced by `lru_cache()`; it's not exported by name but
+# is reachable via `type(cached_f)`.  Calling it directly with user
+# arguments should fail with TypeError rather than silently producing
+# a broken instance.
+try:
+    inner_type = type(cached_f)
+    _ = inner_type("bogus", "args")
+    print("lru-private-init", "FAIL-no-error")
+except TypeError:
+    print("lru-private-init", "TypeError")

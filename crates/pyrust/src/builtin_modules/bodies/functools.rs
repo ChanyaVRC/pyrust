@@ -245,11 +245,18 @@ pyrust_module! {
     /// stores on miss.  LRU eviction when `maxsize` is bounded.
     class _lru_cache_wrapper {
         fn __init__(args) -> Result<Value> {
-            // Init is private; user code goes through `lru_cache()` which
-            // constructs the instance and seeds the attrs directly.  We
-            // accept any args here as a no-op so the class is still
-            // instantiable for introspection.
-            let _ = (args, _interp);
+            let _ = _interp;
+            // Private constructor — only this module's helpers construct
+            // instances of this class (seeding attrs directly via
+            // `make_lru_wrapper`).  Reject any user-provided arguments so
+            // calling `_lru_cache_wrapper(...)` from outside this module
+            // fails loudly rather than producing a broken instance.
+            if args.len() > 1 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() takes no arguments (got {})", args.len() - 1),
+                ));
+            }
             Ok(Value::none())
         }
 
@@ -317,7 +324,16 @@ pyrust_module! {
     /// real `_lru_cache_wrapper`.
     class _lru_cache_factory {
         fn __init__(args) -> Result<Value> {
-            let _ = (args, _interp);
+            let _ = _interp;
+            // Private constructor — `lru_cache(...)` constructs these
+            // factories via `make_lru_factory`.  Reject user args so a
+            // stray `_lru_cache_factory(...)` call fails loudly.
+            if args.len() > 1 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() takes no arguments (got {})", args.len() - 1),
+                ));
+            }
             Ok(Value::none())
         }
 
@@ -379,9 +395,17 @@ pyrust_module! {
     /// metadata and forwarding `__call__` to the wrapper.
     class _wraps_partial {
         fn __init__(args) -> Result<Value> {
+            let _ = _interp;
             // Private constructor — `wraps()` seeds attrs directly via
-            // `make_wraps_partial`.  Accept any args as a no-op.
-            let _ = (args, _interp);
+            // `make_wraps_partial`.  Reject user args so calling
+            // `_wraps_partial(...)` from outside this module fails
+            // loudly rather than producing a broken instance.
+            if args.len() > 1 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() takes no arguments (got {})", args.len() - 1),
+                ));
+            }
             Ok(Value::none())
         }
 
@@ -419,9 +443,16 @@ pyrust_module! {
     /// to the inner wrapper function.
     class _wrapper_attrs {
         fn __init__(args) -> Result<Value> {
+            let _ = _interp;
             // Private constructor — `_wraps_partial.__call__` seeds the
-            // attrs directly.
-            let _ = (args, _interp);
+            // attrs directly via `make_wrapper_attrs`.  Reject user args
+            // so a stray `_wrapper_attrs(...)` call fails loudly.
+            if args.len() > 1 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() takes no arguments (got {})", args.len() - 1),
+                ));
+            }
             Ok(Value::none())
         }
 
@@ -460,6 +491,10 @@ pyrust_module! {
         // the wrapped function's own name — fine for the common
         // `@cached_property def x(self): …` shape (function name and
         // attribute name agree).
+        //
+        // Workaround: if you need the attribute name to differ from the
+        // function's `__name__`, call `desc.__set_name__(cls, 'attr_name')`
+        // after class creation (this is what the parity test does).
         let attr_name = function_name(&func).unwrap_or_else(|| "cached_property".to_string());
         let _ = _interp;
         Ok(pyrust_builtins::cached_property::cached_property(
@@ -515,10 +550,16 @@ fn module_class(name: &str) -> Option<Rc<RefCell<crate::value::PyClass>>> {
 fn make_instance(name: &str, attrs: HashMap<String, Value>) -> Value {
     match module_class(name) {
         Some(class) => Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs }))),
-        // Shouldn't happen — the class is declared in this very module.
-        // Fall back to `None` so the failure surfaces as a clear "not
-        // callable" rather than a panic.
-        None => Value::none(),
+        // "Shouldn't happen" really means "would indicate a macro/build
+        // bug": every class name passed here is declared in this very
+        // module via `class { … }`, which the `pyrust_module!` macro
+        // wires into `module()`.  If a lookup miss ever escapes, it's
+        // a build-time inconsistency — fail loud rather than handing
+        // back a silently-broken `None`.
+        None => unreachable!(
+            "internal: functools module did not register class `{name}` \
+             (declared via `class {{ … }}` in this module — macro build broken)",
+        ),
     }
 }
 
