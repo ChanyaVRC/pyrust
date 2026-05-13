@@ -1,0 +1,5 @@
+error: typed parameter `mode` requires a type annotation (e.g. `: PyStr`); drop the attributes if you intended the legacy `(args)` form
+  --> tests/compile_fail/missing_type_annotation.rs:17:35
+   |
+17 |     fn bad(#[default("r".into())] mode) -> Result<Value> {
+   |                                   ^^^^

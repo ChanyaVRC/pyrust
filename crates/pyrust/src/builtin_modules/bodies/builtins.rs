@@ -18,6 +18,7 @@ use std::rc::Rc;
 use crate::ast::BinaryOp;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
+use crate::interpreter::builtin_args::PyStr;
 use crate::interpreter::{
     NativeIterFrame, apply_format_spec, ascii_repr, class_is_subclass_of, compare_values,
     dir_names, invoke_class_method, is_exception_class, iter_values, lookup_class_attr,
@@ -1495,27 +1496,15 @@ pyrust_module! {
 
     /// CPython: open(file, mode='r', ...).
     /// <https://docs.python.org/3/library/functions.html#open>
-    fn open(args) -> Result<Value> {
-        let path = match args.first().map(|a| a.value.kind()) {
-            Some(ValueKind::Str(s)) => s.to_string(),
-            _ => return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}(): path must be a string"),
-            )),
-        };
-        let mode = {
-            let kw = args.iter().find(|a| a.name.as_deref() == Some("mode"));
-            let positional = args.iter().filter(|a| a.name.is_none()).nth(1);
-            let val = kw.or(positional).map(|a| &a.value);
-            match val.map(|v| v.kind()) {
-                None => "r".to_string(),
-                Some(ValueKind::Str(s)) => s.to_string(),
-                Some(_) => return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}(): mode must be a string"),
-                )),
-            }
-        };
+    ///
+    /// First builtin migrated to the typed-signature dialect (#395) — the
+    /// macro-emitted prelude rejects unknown kwargs, validates the positional
+    /// count, and binds `path` / `mode` as typed Rust locals.
+    fn open(
+        path: PyStr,
+        #[default("r".into())]
+        mode: PyStr,
+    ) -> Result<Value> {
         pyrust_builtins::file::open(&path, &mode)
     }
 

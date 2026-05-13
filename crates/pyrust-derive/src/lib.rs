@@ -139,8 +139,38 @@ struct ModuleFn {
     /// `#[py_name = "..."]`.  Used when the desired Python name is a Rust
     /// strict keyword that can't be a raw identifier (`super`, etc.).
     py_name_override: Option<LitStr>,
-    args_ident: Ident,
+    /// The argument-list dialect this fn uses.  See [`ModuleFnArgs`].
+    args: ModuleFnArgs,
     body: Block,
+}
+
+/// Argument-list dialect — legacy `(args: &[ExpandedCallArg])` or typed.
+///
+/// **Legacy** is the historical form: the body sees one raw `args` slice and
+/// must hand-validate / type-check every parameter.  **Typed** is the new
+/// dialect (#395): per-parameter `name: PyType` declarations, the macro emits
+/// a prelude that validates + binds typed locals, and the body sees them
+/// directly.
+enum ModuleFnArgs {
+    Legacy { args_ident: Ident },
+    Typed { params: Vec<TypedParam> },
+}
+
+/// One parameter in a typed signature.  Outer attrs (`#[default(expr)]`,
+/// `#[positional_only]`, `#[keyword_only]`) are extracted at parse time and
+/// stored on this struct; only doc / cfg / allow attrs remain.
+struct TypedParam {
+    /// Parameter name (the local that gets bound in the body).
+    name: Ident,
+    /// The wrapper type — e.g. `PyInt`, `PyFloat`, `Option<PyStr>`.
+    ty: syn::Type,
+    /// `#[default(expr)]` if present.  Lazy: only evaluated when the slot is
+    /// missing at call time.
+    default: Option<syn::Expr>,
+    /// `#[positional_only]` — passing by keyword is rejected.
+    positional_only: bool,
+    /// `#[keyword_only]` — passing positionally is rejected.
+    keyword_only: bool,
 }
 
 /// A `class ClassName { fn … }` block inside `pyrust_module!`.
@@ -309,35 +339,7 @@ impl ModuleInput {
         }
         let arg_content;
         syn::parenthesized!(arg_content in input);
-        let args_ident: Ident = arg_content.parse()?;
-        // If the user wrote a type annotation, validate it.
-        if arg_content.peek(Token![:]) {
-            let _: Token![:] = arg_content.parse()?;
-            let ty: syn::Type = arg_content.parse()?;
-            let ty_str = ty
-                .to_token_stream()
-                .to_string()
-                .split_whitespace()
-                .collect::<String>();
-            let accepted = matches!(
-                ty_str.as_str(),
-                "&[ExpandedCallArg]" | "&[crate::interpreter::ExpandedCallArg]"
-            );
-            if !accepted {
-                return Err(syn::Error::new(
-                    ty.span(),
-                    "`pyrust_module!` fn args type must be `&[ExpandedCallArg]` \
-                     (the macro injects the canonical signature; omit the type \
-                     annotation entirely if unsure).",
-                ));
-            }
-        }
-        if !arg_content.is_empty() {
-            return Err(arg_content.error(
-                "unexpected token in fn argument list; \
-                 `pyrust_module!` accepts only `(args)` or `(args: &[ExpandedCallArg])`",
-            ));
-        }
+        let args = Self::parse_fn_args(&arg_content)?;
         // Optional return-type annotation (ignored — always Result<Value>).
         if input.peek(Token![->]) {
             let _: Token![->] = input.parse()?;
@@ -348,8 +350,167 @@ impl ModuleInput {
             attrs,
             short_name,
             py_name_override,
-            args_ident,
+            args,
             body,
+        })
+    }
+
+    /// Parse the contents of the fn parameter list.  Two dialects:
+    ///
+    /// - **Legacy** — a single bare `args` ident, optionally annotated with
+    ///   `: &[ExpandedCallArg]`.  Recognised when there is exactly one
+    ///   param without per-param attrs, the type (if any) is the expected
+    ///   slice, and there is no default value.
+    /// - **Typed** — one or more `name: PyType` pairs, each optionally
+    ///   preceded by `#[default(expr)]` / `#[positional_only]` /
+    ///   `#[keyword_only]` attributes.  Selected for anything that isn't
+    ///   the legacy shape, including the empty parameter list `()`.
+    ///
+    /// The "single bare ident" name doesn't have to be literally `args` —
+    /// any single un-annotated ident is treated as a legacy slice binding,
+    /// preserving back-compat with bodies that happen to call it something
+    /// like `xs` or `_args`.
+    fn parse_fn_args(input: ParseStream) -> syn::Result<ModuleFnArgs> {
+        let mut params: Vec<TypedParam> = Vec::new();
+        while !input.is_empty() {
+            params.push(Self::parse_one_param(input)?);
+            if input.peek(Token![,]) {
+                let _: Token![,] = input.parse()?;
+            } else if !input.is_empty() {
+                return Err(input.error("expected `,` or `)` after parameter"));
+            }
+        }
+
+        // Legacy detection — a single bare ident with no attrs / default /
+        // explicit type (or the legacy slice type) → legacy slice binding.
+        if params.len() == 1 {
+            let p = &params[0];
+            let attrs_empty = p.default.is_none() && !p.positional_only && !p.keyword_only;
+            let ty_str = ty_to_canonical_string(&p.ty);
+            let is_legacy_type = ty_str.is_empty()
+                || ty_str == "&[ExpandedCallArg]"
+                || ty_str == "&[crate::interpreter::ExpandedCallArg]";
+            if attrs_empty && is_legacy_type {
+                return Ok(ModuleFnArgs::Legacy {
+                    args_ident: params.into_iter().next().unwrap().name,
+                });
+            }
+        }
+
+        // Typed dialect — enforce two structural invariants the codegen
+        // assumes downstream:
+        //
+        // 1. Every parameter has an explicit type annotation.  Without
+        //    this guard a user writes `#[default("r".into())] mode` (no
+        //    `: PyStr`), the `()` placeholder leaks into the typed
+        //    prelude, and rustc emits "`FromValue` not implemented for
+        //    `()`" pointed at the macro expansion — a confusing diagnostic
+        //    at the wrong layer.  Reject up front with a clear message.
+        // 2. Parameter names are unique.  Duplicates would silently
+        //    shadow in the generated body (same name → same `let` ident),
+        //    and Rust's "unused variable" lint isn't fired on
+        //    macro-generated bindings.
+        let mut seen: std::collections::HashSet<String> =
+            std::collections::HashSet::with_capacity(params.len());
+        for p in &params {
+            if ty_to_canonical_string(&p.ty).is_empty() {
+                return Err(syn::Error::new(
+                    p.name.span(),
+                    format!(
+                        "typed parameter `{}` requires a type annotation (e.g. `: PyStr`); \
+                         drop the attributes if you intended the legacy `(args)` form",
+                        p.name,
+                    ),
+                ));
+            }
+            if !seen.insert(p.name.to_string()) {
+                return Err(syn::Error::new(
+                    p.name.span(),
+                    format!(
+                        "duplicate parameter name `{}` — each parameter must have a unique name",
+                        p.name,
+                    ),
+                ));
+            }
+        }
+        Ok(ModuleFnArgs::Typed { params })
+    }
+
+    /// Parse one parameter: `[#[...]]* name [: Type]`.
+    /// Returns a `TypedParam` whose `ty` defaults to the unit type `()` when
+    /// no annotation is given — `parse_fn_args` then uses the absence of
+    /// type-info to decide between legacy and typed.
+    fn parse_one_param(input: ParseStream) -> syn::Result<TypedParam> {
+        let raw_attrs = input.call(syn::Attribute::parse_outer)?;
+
+        // Harvest the recognised attributes; reject unknown ones (better
+        // diagnostic than silent drop).  Each attribute that toggles a
+        // flag also checks the dual flag inline, so the conflict-error
+        // span lands on the offending attr (the second one declared)
+        // rather than the parameter ident or a post-hoc cursor position.
+        let mut default: Option<syn::Expr> = None;
+        let mut positional_only = false;
+        let mut keyword_only = false;
+        for attr in &raw_attrs {
+            if attr.path().is_ident("default") {
+                if default.is_some() {
+                    return Err(syn::Error::new_spanned(
+                        attr,
+                        "`#[default]` may appear at most once per parameter",
+                    ));
+                }
+                let lit = attr.parse_args::<syn::Expr>()?;
+                default = Some(lit);
+            } else if attr.path().is_ident("positional_only") {
+                if keyword_only {
+                    return Err(syn::Error::new_spanned(
+                        attr,
+                        "a parameter cannot be both `#[positional_only]` and `#[keyword_only]`",
+                    ));
+                }
+                positional_only = true;
+            } else if attr.path().is_ident("keyword_only") {
+                if positional_only {
+                    return Err(syn::Error::new_spanned(
+                        attr,
+                        "a parameter cannot be both `#[positional_only]` and `#[keyword_only]`",
+                    ));
+                }
+                keyword_only = true;
+            } else if attr.path().is_ident("doc")
+                || attr.path().is_ident("cfg")
+                || attr.path().is_ident("allow")
+            {
+                // Permitted but not consumed — `pyrust_module!` doesn't
+                // forward per-param doc comments anywhere yet, but the
+                // user may have written them for source-level documentation.
+            } else {
+                return Err(syn::Error::new_spanned(
+                    attr,
+                    "unsupported parameter attribute — expected one of \
+                     `#[default(expr)]`, `#[positional_only]`, `#[keyword_only]`",
+                ));
+            }
+        }
+
+        let name: Ident = input.parse()?;
+
+        // Optional `: Type` — absent for the bare `(args)` legacy form.
+        let ty: syn::Type = if input.peek(Token![:]) {
+            let _: Token![:] = input.parse()?;
+            input.parse()?
+        } else {
+            // Placeholder unit type that the dialect-detection step in
+            // `parse_fn_args` recognises as "no type given".
+            syn::parse_quote!(())
+        };
+
+        Ok(TypedParam {
+            name,
+            ty,
+            default,
+            positional_only,
+            keyword_only,
         })
     }
 
@@ -458,8 +619,13 @@ fn emit_fn_artefacts(
     let name_static_ident = format_ident!("__pyfn_{}_NAME", rust_ident_suffix, span = short.span());
     let attrs = &f.attrs;
     let body_stmts = &f.body.stmts;
-    let args_ident = &f.args_ident;
     let suffix_lit = LitStr::new(name_suffix, short.span());
+
+    // Dialect-specific binding of the args slice + optional typed prelude.
+    let (args_binding, typed_prelude) = match &f.args {
+        ModuleFnArgs::Legacy { args_ident } => (quote!(#args_ident), quote!()),
+        ModuleFnArgs::Typed { params } => (quote!(__pyrust_args), emit_typed_prelude(params)),
+    };
 
     let fn_item = quote! {
         #[allow(non_upper_case_globals)]
@@ -478,11 +644,12 @@ fn emit_fn_artefacts(
         #(#attrs)*
         fn #rust_fn_ident(
             _interp: &mut crate::Interpreter,
-            #args_ident: &[ExpandedCallArg],
+            #args_binding: &[ExpandedCallArg],
         ) -> Result<Value> {
             #[allow(non_snake_case)]
             let FN_NAME: &'static str = *#name_static_ident;
             let _ = FN_NAME; // suppress unused warning if body ignores it
+            #typed_prelude
             #(#body_stmts)*
         }
     };
@@ -495,6 +662,123 @@ fn emit_fn_artefacts(
     };
 
     (fn_item, reg_entry, name_static_ident)
+}
+
+/// Emit the prelude that validates + binds typed parameters before the
+/// user-written body runs.  See the typed-dialect docs on
+/// [`crate::interpreter::builtin_args`] for the full contract.
+///
+/// Generated shape (for `(path: PyStr, mode: PyStr = "r")`):
+///
+/// ```ignore
+/// use crate::interpreter::builtin_args::{FromValue, PyStr, ...};
+/// // 1. Reject unknown kwargs + collect positionals.
+/// let __positional = crate::interpreter::builtin_args::validate_kwargs_and_collect_positional(
+///     __pyrust_args, FN_NAME, &["path", "mode"],
+/// )?;
+/// // 2. Bound on positional count.
+/// crate::interpreter::builtin_args::check_positional_count(
+///     FN_NAME, __positional.len(), /* required */ 1, /* total */ 2,
+/// )?;
+/// // 3. Per-param extraction.
+/// let path: PyStr = { ... resolve positional/kw, default or missing-arg, FromValue ... };
+/// let mode: PyStr = { ... };
+/// ```
+fn emit_typed_prelude(params: &[TypedParam]) -> proc_macro2::TokenStream {
+    // Names of every parameter that may be passed as a keyword argument.
+    // Positional-only params are excluded so the kwarg-validation step
+    // produces "got an unexpected keyword argument 'x'" for them.
+    let allowed_kwargs: Vec<LitStr> = params
+        .iter()
+        .filter(|p| !p.positional_only)
+        .map(|p| LitStr::new(&p.name.to_string(), p.name.span()))
+        .collect();
+
+    // Min positional = count of params with no default that aren't keyword-only.
+    // Max positional = count of params that aren't keyword-only.
+    let min_pos = params
+        .iter()
+        .filter(|p| !p.keyword_only && p.default.is_none())
+        .count();
+    let max_pos = params.iter().filter(|p| !p.keyword_only).count();
+
+    let mut per_param: Vec<proc_macro2::TokenStream> = Vec::new();
+    // Track the position-in-signature for non-keyword-only params; this is
+    // the index passed to `locate_arg`.  Keyword-only params are absent
+    // from the positional list, so they get a sentinel value that the
+    // `positional.get(_)` lookup never matches.
+    const KW_ONLY_POS_SENTINEL: usize = usize::MAX;
+    let mut pos_index: usize = 0;
+    for p in params {
+        let name_ident = &p.name;
+        let name_lit = LitStr::new(&p.name.to_string(), p.name.span());
+        let ty = &p.ty;
+        let kw_allowed = !p.positional_only;
+        let this_pos: usize = if p.keyword_only {
+            KW_ONLY_POS_SENTINEL
+        } else {
+            let i = pos_index;
+            pos_index += 1;
+            i
+        };
+
+        let default_branch = match &p.default {
+            Some(expr) => quote! { Ok::<#ty, crate::error::PyError>(#expr) },
+            None => {
+                quote! { crate::interpreter::builtin_args::missing_arg::<#ty>(FN_NAME, #name_lit) }
+            }
+        };
+
+        per_param.push(quote! {
+            let #name_ident: #ty = {
+                let __found = crate::interpreter::builtin_args::locate_arg(
+                    __pyrust_args, &__positional, FN_NAME, #name_lit, #this_pos, #kw_allowed,
+                )?;
+                match __found {
+                    Some(__v) => <#ty as crate::interpreter::builtin_args::FromValue>::try_from_value(
+                        __v, FN_NAME, #name_lit,
+                    )?,
+                    None => (#default_branch)?,
+                }
+            };
+        });
+    }
+
+    quote! {
+        // Pull the validation helpers + FromValue trait into scope.
+        #[allow(unused_imports)]
+        use crate::interpreter::builtin_args::FromValue as _;
+        let __positional: ::std::vec::Vec<&crate::interpreter::ExpandedCallArg> =
+            crate::interpreter::builtin_args::validate_kwargs_and_collect_positional(
+                __pyrust_args,
+                FN_NAME,
+                &[#(#allowed_kwargs),*],
+            )?;
+        crate::interpreter::builtin_args::check_positional_count(
+            FN_NAME,
+            __positional.len(),
+            #min_pos,
+            #max_pos,
+        )?;
+        #(#per_param)*
+    }
+}
+
+/// Render a `syn::Type` to its canonical token string with all whitespace
+/// removed.  Used by [`parse_fn_args`] to decide between the legacy slice
+/// dialect (`&[ExpandedCallArg]`) and the typed dialect.
+fn ty_to_canonical_string(ty: &syn::Type) -> String {
+    // The `()` placeholder for "no annotation" must come back as `""` so
+    // the legacy-detection path treats it as un-annotated.
+    if let syn::Type::Tuple(t) = ty
+        && t.elems.is_empty()
+    {
+        return String::new();
+    }
+    ty.to_token_stream()
+        .to_string()
+        .split_whitespace()
+        .collect::<String>()
 }
 
 /// Compute the Python-level short name (with `r#` stripped, `#[py_name]`
