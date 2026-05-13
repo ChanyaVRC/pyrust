@@ -84,6 +84,8 @@ pub struct ZipState {
     /// Min length across columns.
     len: RefCell<usize>,
     pos: RefCell<usize>,
+    /// `strict=True` raises `ValueError` when sources have unequal length.
+    strict: bool,
 }
 
 pub struct ZipOps;
@@ -130,21 +132,66 @@ impl BuiltinTypeOps for ZipOps {
             *pos += 1;
             Ok(Some(Value::tuple(row)))
         } else {
+            // Past the shortest column.  In strict mode we must distinguish:
+            //   - the *first* iterator to stop sits at index `i`; all
+            //     iterators at indices < `i` still have a value at row
+            //     `*pos`, so the stopped iterator is "shorter than args
+            //     1..i" (when i > 0), or
+            //   - the first iterator (index 0) stopped, and a later
+            //     iterator at index `j` still has a value at row `*pos`, so
+            //     "argument j+1 is longer than args 1..j" (when j > 0; for
+            //     j == 1 just "argument 2 is longer than argument 1").
+            if s.strict && cols.len() > 1 {
+                // Find the first iterator that ran out at row `*pos`.
+                let stopped_at = cols.iter().position(|c| c.len() == *pos);
+                if let Some(i) = stopped_at {
+                    if i > 0 {
+                        return Err(PyError::named("ValueError", shorter_message(i)));
+                    }
+                    // i == 0: find next iterator that still has a value.
+                    if let Some(j) = cols.iter().position(|c| c.len() > *pos) {
+                        return Err(PyError::named("ValueError", longer_message(j)));
+                    }
+                }
+            }
             Ok(None)
         }
     }
 }
 
-/// `zip(it1, it2, ...)` — yields tuples drawn pointwise from each source.
-/// Sources are drained on first `iter_next`.
-pub fn zip(sources: Vec<Value>) -> Value {
+/// `zip(it1, it2, ..., strict=False)` — yields tuples drawn pointwise from
+/// each source.  Sources are drained on first `iter_next`.  When `strict` is
+/// true, a length mismatch raises `ValueError` matching CPython's wording.
+pub fn zip(sources: Vec<Value>, strict: bool) -> Value {
     let state = ZipState {
         sources,
         columns: RefCell::new(None),
         len: RefCell::new(0),
         pos: RefCell::new(0),
+        strict,
     };
     Value::builtin_object(ZIP_OPS, Box::new(state))
+}
+
+/// CPython wording for "argument N is shorter than ..." where `i` is the
+/// 0-based index of the iterator that ran short.
+fn shorter_message(i: usize) -> String {
+    if i == 1 {
+        format!("zip() argument {} is shorter than argument 1", i + 1)
+    } else {
+        format!("zip() argument {} is shorter than arguments 1-{}", i + 1, i)
+    }
+}
+
+/// CPython wording for "argument N is longer than ..." where `j` is the
+/// 0-based index of the iterator that still had values when earlier ones
+/// (indices 0..j) had all stopped.
+fn longer_message(j: usize) -> String {
+    if j == 1 {
+        format!("zip() argument {} is longer than argument 1", j + 1)
+    } else {
+        format!("zip() argument {} is longer than arguments 1-{}", j + 1, j)
+    }
 }
 
 // ── reversed ─────────────────────────────────────────────────────────────────

@@ -523,12 +523,31 @@ pyrust_module! {
         ))
     }
 
-    /// CPython: zip(*iterables) — parallel iterator.
+    /// CPython: zip(*iterables, strict=False) — parallel iterator.
+    /// `strict=True` raises `ValueError` if lengths differ.
     /// <https://docs.python.org/3/library/functions.html#zip>
     fn zip(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        let sources: Vec<Value> = args.iter().map(|a| a.value.clone()).collect();
-        Ok(pyrust_builtins::iter_helpers::zip(sources))
+        // `strict` is the only accepted keyword arg; everything else is a
+        // CPython-style `TypeError`.
+        let mut strict = false;
+        for a in args.iter() {
+            if let Some(name) = a.name.as_deref() {
+                if name == "strict" {
+                    strict = a.value.truthy();
+                } else {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("{FN_NAME}() got an unexpected keyword argument '{name}'"),
+                    ));
+                }
+            }
+        }
+        let sources: Vec<Value> = args
+            .iter()
+            .filter(|a| a.name.is_none())
+            .map(|a| a.value.clone())
+            .collect();
+        Ok(pyrust_builtins::iter_helpers::zip(sources, strict))
     }
 
     /// CPython: reversed(seq) — reverse iterator.
