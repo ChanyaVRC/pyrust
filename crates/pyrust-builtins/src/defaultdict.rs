@@ -26,9 +26,11 @@
 //! not a defaultdict-specific bug.  The same gap applies to plain
 //! dicts:
 //!
-//!     d = {'k': [1, 2]}
-//!     d['k'].append(3)
-//!     d['k']  # → [1, 2], not [1, 2, 3] — pyrust deep-copies on read
+//! ```text
+//! d = {'k': [1, 2]}
+//! d['k'].append(3)
+//! d['k']  # → [1, 2], not [1, 2, 3] — pyrust deep-copies on read
+//! ```
 //!
 //! Patterns that re-bind (`d[k] = d[k] + [x]`, `d[k] += 1`) work fine
 //! because the assignment routes back through `set_item`.  Promoting
