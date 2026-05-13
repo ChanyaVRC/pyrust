@@ -38,7 +38,44 @@ impl Interpreter {
                     return Ok(value);
                 }
 
+                // Single MRO walk for the remaining cases.  Two things need
+                // to happen here, and we don't want to walk the MRO twice in
+                // the common (regular method/attr) path:
+                //
+                //   1. `cached_property` — non-data descriptor: only fires
+                //      when the instance __dict__ doesn't already have the
+                //      attribute (checked above).  Once it runs, the result
+                //      is stashed into `instance.attrs` under the descriptor's
+                //      own `attr_name` (set via `__set_name__`, or defaulted
+                //      to the wrapped function's `__name__` at decoration
+                //      time).  This matches CPython's
+                //      `cached_property.__get__` semantics — the cache slot
+                //      is whatever name `__set_name__` recorded, not the
+                //      access-site name.  If `attr_name` differs from the
+                //      access-site name the next access still hits the
+                //      descriptor and recomputes (also matching CPython).
+                //
+                //   2. Regular dispatch — UserFunction → BoundMethod,
+                //      BuiltinFunction → bound builtin, etc.
                 if let Some(value) = lookup_class_attr(&class, name) {
+                    if let Some((func, attr_name)) =
+                        pyrust_builtins::cached_property::with_cached_property(&value, |s| {
+                            (s.func.clone(), s.attr_name.clone())
+                        })
+                    {
+                        let result = self.call_function_expanded(
+                            func,
+                            &[ExpandedCallArg {
+                                name: None,
+                                value: Value::py_instance(Rc::clone(&instance)),
+                            }],
+                        )?;
+                        instance
+                            .borrow_mut()
+                            .attrs
+                            .insert(attr_name, result.clone());
+                        return Ok(result);
+                    }
                     return Ok(match value.kind() {
                         ValueKind::UserFunction(f) => match f.kind {
                             UserFunctionKind::Regular => {
