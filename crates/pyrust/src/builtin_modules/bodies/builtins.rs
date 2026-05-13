@@ -98,55 +98,58 @@ pyrust_module! {
 
     /// CPython: bin(x) — integer to '0b…' / '-0b…' string.
     /// <https://docs.python.org/3/library/functions.html#bin>
-    fn bin(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
-        }
-        match args[0].value.kind() {
-            ValueKind::Int(v) => {
-                if v < 0 {
-                    // Widen to i128 first so `i64::MIN.abs()` doesn't overflow.
-                    Ok(Value::string(format!("-0b{:b}", -(v as i128))))
-                } else {
-                    Ok(Value::string(format!("0b{:b}", v)))
-                }
-            }
-            ValueKind::Bool(b) => Ok(Value::string(if b { "0b1".to_string() } else { "0b0".to_string() })),
-            _ => Err(PyError::named(
-                "TypeError",
-                format!(
-                    "'{}' object cannot be interpreted as an integer",
-                    value_type_name_str(&args[0].value),
-                ),
-            )),
-        }
+    ///
+    /// Migrated to the typed-signature dialect (#400) mirroring `hex`'s
+    /// 3-overload pattern: `PyInt` is the primary path, `PyBool` mirrors
+    /// CPython's `bool ⊆ int` subtyping, and a trailing `PyValue`
+    /// catch-all reproduces CPython's exact "'X' object cannot be
+    /// interpreted as an integer" TypeError wording verbatim.
+    fn bin(#[positional_only] x: PyInt) -> Result<Value> {
+        let v = x.expect_i64(FN_NAME, "x")?;
+        Ok(Value::string(format_bin_i64(v)))
+    }
+
+    fn bin(#[positional_only] x: PyBool) -> Result<Value> {
+        // CPython: `bin(True) == '0b1'`, `bin(False) == '0b0'`.
+        Ok(Value::string(format_bin_i64(if x.0 { 1 } else { 0 })))
+    }
+
+    fn bin(#[positional_only] x: PyValue) -> Result<Value> {
+        Err(PyError::named(
+            "TypeError",
+            format!(
+                "'{}' object cannot be interpreted as an integer",
+                value_type_name_str(&x.0),
+            ),
+        ))
     }
 
     /// CPython: oct(x) — integer to '0o…' / '-0o…' string.
     /// <https://docs.python.org/3/library/functions.html#oct>
-    fn oct(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
-        }
-        match args[0].value.kind() {
-            ValueKind::Int(v) => {
-                if v < 0 {
-                    Ok(Value::string(format!("-0o{:o}", -(v as i128))))
-                } else {
-                    Ok(Value::string(format!("0o{:o}", v)))
-                }
-            }
-            ValueKind::Bool(b) => Ok(Value::string(if b { "0o1".to_string() } else { "0o0".to_string() })),
-            _ => Err(PyError::named(
-                "TypeError",
-                format!(
-                    "'{}' object cannot be interpreted as an integer",
-                    value_type_name_str(&args[0].value),
-                ),
-            )),
-        }
+    ///
+    /// Migrated to the typed-signature dialect (#400) mirroring `hex`'s
+    /// 3-overload pattern: `PyInt` is the primary path, `PyBool` mirrors
+    /// CPython's `bool ⊆ int` subtyping, and a trailing `PyValue`
+    /// catch-all reproduces CPython's exact "'X' object cannot be
+    /// interpreted as an integer" TypeError wording verbatim.
+    fn oct(#[positional_only] x: PyInt) -> Result<Value> {
+        let v = x.expect_i64(FN_NAME, "x")?;
+        Ok(Value::string(format_oct_i64(v)))
+    }
+
+    fn oct(#[positional_only] x: PyBool) -> Result<Value> {
+        // CPython: `oct(True) == '0o1'`, `oct(False) == '0o0'`.
+        Ok(Value::string(format_oct_i64(if x.0 { 1 } else { 0 })))
+    }
+
+    fn oct(#[positional_only] x: PyValue) -> Result<Value> {
+        Err(PyError::named(
+            "TypeError",
+            format!(
+                "'{}' object cannot be interpreted as an integer",
+                value_type_name_str(&x.0),
+            ),
+        ))
     }
 
     /// CPython: hex(x) — integer to '0x…' / '-0x…' string.
@@ -1777,6 +1780,30 @@ fn format_hex_i64(v: i64) -> String {
         format!("-0x{:x}", -(v as i128))
     } else {
         format!("0x{:x}", v)
+    }
+}
+
+/// Format an i64 as Python's `bin()` output — `"0bN"` / `"-0bN"`.  Used
+/// by both the `PyInt` and `PyBool` overloads of the typed `bin`
+/// builtin (#400).  Widens through i128 first so `i64::MIN.abs()`
+/// doesn't overflow.
+fn format_bin_i64(v: i64) -> String {
+    if v < 0 {
+        format!("-0b{:b}", -(v as i128))
+    } else {
+        format!("0b{:b}", v)
+    }
+}
+
+/// Format an i64 as Python's `oct()` output — `"0oN"` / `"-0oN"`.  Used
+/// by both the `PyInt` and `PyBool` overloads of the typed `oct`
+/// builtin (#400).  Widens through i128 first so `i64::MIN.abs()`
+/// doesn't overflow.
+fn format_oct_i64(v: i64) -> String {
+    if v < 0 {
+        format!("-0o{:o}", -(v as i128))
+    } else {
+        format!("0o{:o}", v)
     }
 }
 
