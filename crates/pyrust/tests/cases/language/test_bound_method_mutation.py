@@ -146,4 +146,46 @@ lst_f2 = [1, 2, 3]
 f2(lst_f2)
 assert lst_f2 == [1, 2, 3, 99]
 
+
+# ---- self-alias mutation: lst.extend(lst), s.update(s), etc. ----
+# After #305 the list/set backing is Rc-shared, so the iterable
+# argument and the receiver point at the same storage.  The internal
+# `as_list_mut` / `as_set_mut` helpers return references via
+# `RefCell::as_ptr` (no Ref guard), so the dispatcher must unalias
+# the iterable arg before taking the `&mut` — otherwise we'd produce
+# a simultaneous `&[Value]` + `&mut Vec<Value>` to the same storage.
+# These call patterns produce the right answer under CPython; pin
+# them here to catch any regression in the unaliasing path.
+lst_sa = [1, 2, 3]
+lst_sa.extend(lst_sa)
+assert lst_sa == [1, 2, 3, 1, 2, 3]
+
+s_sa = {1, 2}
+s_sa.update(s_sa)
+assert s_sa == {1, 2}
+
+s_iu = {1, 2, 3}
+s_iu.intersection_update(s_iu)
+assert s_iu == {1, 2, 3}
+
+s_du = {1, 2, 3}
+s_du.difference_update(s_du)
+assert s_du == set()
+
+s_sdu = {1, 2, 3}
+s_sdu.symmetric_difference_update(s_sdu)
+assert s_sdu == set()
+
+# Captured bound method that aliases the receiver — same Rc, captured
+# by the bound_method.
+lst_cb = [1, 2]
+ext_cb = lst_cb.extend
+ext_cb(lst_cb)
+assert lst_cb == [1, 2, 1, 2]
+
+# Dict update with self-alias — same Rc pattern.
+d_sa = {"a": 1, "b": 2}
+d_sa.update(d_sa)
+assert d_sa == {"a": 1, "b": 2}
+
 print("bound-method mutation regression test OK")

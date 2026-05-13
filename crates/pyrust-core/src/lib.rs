@@ -1318,13 +1318,34 @@ impl Value {
         }
     }
 
+    /// Borrow the list's elements as a shared slice.
+    ///
+    /// SAFETY CONTRACT: the returned `&[Value]` borrows the underlying Vec
+    /// through a raw pointer obtained from `RefCell::as_ptr()`; **no
+    /// `Ref<...>` guard is held**.  This means the Rust aliasing model treats
+    /// the read borrow as live for as long as the caller holds the returned
+    /// reference, even though the `RefCell`'s internal counter is not
+    /// incremented.
+    ///
+    /// Callers MUST NOT, while the returned reference is live:
+    ///   1. obtain another borrow (mutable OR shared) on the same `Value`,
+    ///   2. obtain a borrow on **any other `Value` that aliases the same
+    ///      `Rc<ListInner>`** — list backing storage is Rc-shared after
+    ///      #305, so `Value::clone` produces a second `Value` whose
+    ///      `as_list[_mut]` would point at the same Vec,
+    ///   3. call into code that may transitively re-enter this list (e.g.
+    ///      user `__iter__`/`__hash__`).
+    ///
+    /// Single-threaded execution alone is NOT sufficient — the threat model
+    /// here is intra-thread aliasing via Rc-clone, not data races.  When in
+    /// doubt, materialise the read side into an owned `Vec<Value>` via
+    /// `as_list().map(<[_]>::to_vec)` before reaching for a `&mut` borrow on
+    /// any potentially-aliased Value.
+    ///
+    /// See `unalias_args_for_mutation` for the helper used at builtin
+    /// dispatch sites to make this safe automatically.
     pub fn as_list(&self) -> Option<&[Value]> {
         if self.is_list() {
-            // SAFETY: rc.items.as_ptr() yields a *mut Vec<Value> bound by the
-            // Rc's lifetime, which is at least as long as this &self borrow.
-            // No concurrent borrow_mut is held in the single-threaded
-            // interpreter, so dereferencing as a shared slice is sound.  This
-            // is the same pattern used by `as_dict` for dict storage.
             let inner = unsafe { self.list_inner() };
             Some(unsafe { &*inner.items.as_ptr() })
         } else {
@@ -1332,13 +1353,21 @@ impl Value {
         }
     }
 
+    /// Borrow the list's elements as a mutable Vec.
+    ///
+    /// SAFETY CONTRACT: see [`Value::as_list`].  Same constraints apply, with
+    /// the additional rule that the returned `&mut Vec<Value>` is
+    /// exclusive — no other borrow (shared or mutable) on the same backing
+    /// Rc<ListInner> may exist while it is live.  The `&mut self` receiver
+    /// only blocks aliasing **through this Value**; a separately-rooted
+    /// `Value` sharing the same `Rc` can still call `as_list()` or
+    /// `kind()` and produce an aliased read borrow.  Builtin call sites that
+    /// pass `args: Vec<Value>` alongside the receiver `&mut` MUST first
+    /// unalias args that share identity with the receiver
+    /// (`Value::value_id`); the helper `unalias_args_for_mutation` in the VM
+    /// dispatch path does this.
     pub fn as_list_mut(&mut self) -> Option<&mut Vec<Value>> {
         if self.is_list() {
-            // SAFETY: same invariant as `as_dict_mut` — `&mut self` prevents
-            // any other alias *through this Value* from observing the
-            // returned reference.  Two distinct Values may share the same
-            // list (Rc-shared backing, #305) but no concurrent borrow is
-            // active in single-threaded use.
             let inner = unsafe { self.list_inner() };
             Some(unsafe { &mut *inner.items.as_ptr() })
         } else {
@@ -1379,10 +1408,16 @@ impl Value {
         }
     }
 
+    /// Borrow the dict's IndexMap.
+    ///
+    /// SAFETY CONTRACT: see [`Value::as_list`].  Dict storage is
+    /// `Rc<RefCell<IndexMap<...>>>` (Rc-shared since dict was the original
+    /// reference type); the read borrow is unguarded via `RefCell::as_ptr`,
+    /// so callers MUST NOT hold any other borrow (shared or mutable) on any
+    /// Value that shares this `Rc` while the returned reference is live.
     pub fn as_dict(&self) -> Option<&IndexMap<PyKey, Value>> {
         self.as_opaque().and_then(|o| {
             if let Opaque::Dict(rc) = o {
-                // SAFETY: same invariant as in kind() — no concurrent mutable borrow.
                 Some(unsafe { &*rc.as_ref().as_ptr() })
             } else {
                 None
@@ -1390,11 +1425,16 @@ impl Value {
         })
     }
 
+    /// Borrow the dict's IndexMap as mutable.
+    ///
+    /// SAFETY CONTRACT: see [`Value::as_list_mut`].  Same constraints — the
+    /// `&mut self` receiver only blocks aliasing through this Value; an
+    /// Rc-cloned `Value` can still produce an aliased read borrow.  Call
+    /// sites passing `args: Vec<Value>` alongside the `&mut` MUST unalias
+    /// args that share identity with the receiver first.
     pub fn as_dict_mut(&mut self) -> Option<&mut IndexMap<PyKey, Value>> {
         self.as_opaque_mut().and_then(|o| {
             if let Opaque::Dict(rc) = o {
-                // SAFETY: &mut self prevents any other alias to this Value while the
-                // returned reference is live.  No concurrent borrow_mut in single-threaded use.
                 Some(unsafe { &mut *rc.as_ref().as_ptr() })
             } else {
                 None
@@ -1402,13 +1442,13 @@ impl Value {
         })
     }
 
+    /// Borrow the set's IndexSet.
+    ///
+    /// SAFETY CONTRACT: see [`Value::as_list`].  Set storage is `Rc<SetInner>`
+    /// after #305; same Rc-aliasing concerns apply.
     pub fn as_set(&self) -> Option<&IndexSet<PyKey>> {
         self.as_opaque().and_then(|o| {
             if let Opaque::Set(rc) = o {
-                // SAFETY: same invariant as `as_dict` — `&self` blocks concurrent
-                // mutable borrow through this Value; single-threaded execution
-                // prevents racing borrow_mut from a different Value sharing the
-                // same Rc.  See #305.
                 Some(unsafe { &*rc.items.as_ptr() })
             } else {
                 None
@@ -1416,12 +1456,12 @@ impl Value {
         })
     }
 
+    /// Borrow the set's IndexSet as mutable.
+    ///
+    /// SAFETY CONTRACT: see [`Value::as_list_mut`].  Same Rc-aliasing rules.
     pub fn as_set_mut(&mut self) -> Option<&mut IndexSet<PyKey>> {
         self.as_opaque_mut().and_then(|o| {
             if let Opaque::Set(rc) = o {
-                // SAFETY: same as `as_dict_mut` — `&mut self` prevents alias
-                // access through this Value; single-threaded execution prevents
-                // a different aliased Value from holding a live borrow.
                 Some(unsafe { &mut *rc.items.as_ptr() })
             } else {
                 None
@@ -1887,6 +1927,47 @@ impl fmt::Debug for Value {
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper free functions
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// Replace any `Value` in `args` that shares the receiver's backing storage
+/// (Rc-aliased list/set/dict) with an independent deep copy.  Used at builtin
+/// dispatch sites before taking a `&mut` borrow on the receiver: the safety
+/// contracts on [`Value::as_list_mut`], [`Value::as_set_mut`], and
+/// [`Value::as_dict_mut`] forbid simultaneous borrows on aliased Values, so
+/// e.g. `lst.extend(lst)` would otherwise create overlapping `&[Value]` and
+/// `&mut Vec<Value>` references to the same storage even though no user-level
+/// race occurs.
+///
+/// This is identity-based via [`Value::value_id`].  Primitives and types that
+/// are not Rc-shared (tuple, str, etc.) flow through unchanged because their
+/// `&[Value]` slices are stable for the borrow's lifetime regardless of
+/// aliasing.
+pub fn unalias_args_for_mutation(receiver: &Value, args: &mut [Value]) {
+    let rid = match receiver.value_id() {
+        Some(id) => id,
+        None => return,
+    };
+    // Only the receiver kinds that are Rc-shared and mutated through `&mut`
+    // need this treatment; bail early for other kinds.
+    let is_aliasable = matches!(
+        receiver.kind(),
+        ValueKind::List(_) | ValueKind::Set(_) | ValueKind::Dict(_)
+    );
+    if !is_aliasable {
+        return;
+    }
+    for arg in args.iter_mut() {
+        if arg.value_id() == Some(rid) {
+            *arg = match arg.kind() {
+                ValueKind::List(items) => Value::list(items.to_vec()),
+                ValueKind::Set(s) => Value::set(s.clone()),
+                ValueKind::Dict(d) => Value::dict(d.clone()),
+                // Same id but different kind shouldn't happen (id is derived
+                // from the storage variant), but be defensive: leave as-is.
+                _ => arg.clone(),
+            };
+        }
+    }
+}
 
 /// Returns the Python built-in type name (e.g. `"list"`, `"str"`) for a
 /// `Value`.  Used by error messages (`'X' object is not iterable`, attribute
