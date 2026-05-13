@@ -1512,6 +1512,10 @@ pyrust_module! {
         x: Option<PyValue>,
     ) -> Result<Value> {
         match x {
+            // No-arg path returns `Value::bool_(false)` directly, skipping
+            // `_interp.truthy_value`.  This is equivalent (not incidental):
+            // `truthy_value(&Value::none())` would also resolve to False and
+            // has no observable side effects, so the shortcut is intentional.
             None => Ok(Value::bool_(false)),
             Some(v) => {
                 let result = _interp.truthy_value(&v.0)?;
