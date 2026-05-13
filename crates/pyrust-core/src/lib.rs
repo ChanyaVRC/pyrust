@@ -425,13 +425,43 @@ pub fn iter_values_via_registry(value: &Value) -> Result<Vec<Value>> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Shared backing storage for mutable Tier 1 containers
+//
+// Lists and sets share their items behind an `Rc<…RefCell…>` so that
+// `Value::clone` preserves Python's reference semantics for mutable
+// containers: a copy of the Value points at the same backing storage as the
+// original, mutations through either alias propagate, and `id(a) == id(b)`
+// after `b = a`.  Dict already used this shape (`Rc<RefCell<IndexMap<…>>>`
+// inside `Opaque::Dict`); see issue #305.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Shared backing for a Python `list`.  `items` holds the elements; `obj_id`
+/// is a monotonic identity captured at construction and inherited by every
+/// `Rc::clone` so `id(x) == id(y)` whenever `y` is an aliased clone of `x`.
+pub struct ListInner {
+    pub items: RefCell<Vec<Value>>,
+    pub obj_id: u64,
+}
+
+/// Shared backing for a Python `set`.  Same shape and rationale as
+/// [`ListInner`]; `items` is an [`IndexSet`] (insertion-ordered) so iteration
+/// order matches the rest of the interpreter's set surface.
+pub struct SetInner {
+    pub items: RefCell<IndexSet<PyKey>>,
+    pub obj_id: u64,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Opaque — heap-allocated types that don't fit in 48 bits
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub enum Opaque {
     PyBigInt(Rc<BigInt>),
     Dict(Rc<RefCell<IndexMap<PyKey, Value>>>),
-    Set(IndexSet<PyKey>),
+    /// Mutable `set` storage.  Shared via `Rc` so `Value::clone` produces an
+    /// alias rather than a deep copy, matching Python's reference semantics.
+    /// See [`SetInner`] and issue #305.
+    Set(Rc<SetInner>),
     Range {
         start: i64,
         stop: i64,
@@ -507,7 +537,8 @@ impl Clone for Opaque {
         match self {
             Opaque::PyBigInt(rc) => Opaque::PyBigInt(Rc::clone(rc)),
             Opaque::Dict(rc) => Opaque::Dict(Rc::clone(rc)),
-            Opaque::Set(s) => Opaque::Set(s.clone()),
+            // Sets share backing storage on clone; see `SetInner` and #305.
+            Opaque::Set(rc) => Opaque::Set(Rc::clone(rc)),
             Opaque::Range { start, stop, step } => Opaque::Range {
                 start: *start,
                 stop: *stop,
@@ -901,8 +932,12 @@ impl Value {
         Value(TAG_STR_BITS | (ptr as u64 & PAYLOAD_MASK))
     }
 
-    // Shared allocator for list/tuple pool headers. Writes Vec<Value> at offset 0
+    // Shared allocator for the tuple pool header.  Writes Vec<Value> at offset 0
     // and the unique obj_id at offset 24, then tags with the supplied tag bits.
+    //
+    // Tuple is the only TAG_*_BITS payload that still uses this 32-byte slab
+    // layout.  List moved to an `Rc<ListInner>` payload in #305 to make
+    // `Value::clone` an alias rather than a deep copy.
     unsafe fn alloc_seq_hdr(tag_bits: u64, v: Vec<Value>, obj_id: u64) -> Self {
         let hdr = unsafe { pool_vec_hdr_alloc() };
         unsafe {
@@ -912,12 +947,27 @@ impl Value {
         Value(tag_bits | (hdr as u64 & PAYLOAD_MASK))
     }
 
+    /// Construct a new `list` Value.  Storage is an `Rc<ListInner>` so that
+    /// `Value::clone` shares the backing — matching Python's reference
+    /// semantics for mutable containers (#305).
     pub fn list(v: Vec<Value>) -> Self {
-        unsafe { Self::alloc_seq_hdr(TAG_LIST_BITS, v, next_obj_id()) }
+        let inner = Rc::new(ListInner {
+            items: RefCell::new(v),
+            obj_id: next_obj_id(),
+        });
+        unsafe { Self::list_from_rc(inner) }
     }
 
-    fn list_with_id(v: Vec<Value>, obj_id: u64) -> Self {
-        unsafe { Self::alloc_seq_hdr(TAG_LIST_BITS, v, obj_id) }
+    /// Construct a list Value from an existing `Rc<ListInner>` — used when
+    /// multiple Values must share the same backing list (e.g. cloning).
+    /// Caller is responsible for incrementing the strong count *before*
+    /// calling this if they want a logical alias rather than a move.
+    ///
+    /// SAFETY: consumes one strong-count reference from `rc`.  The matching
+    /// drop happens in `Drop for Value` when `TAG_LIST` is observed.
+    unsafe fn list_from_rc(rc: Rc<ListInner>) -> Self {
+        let raw = Rc::into_raw(rc);
+        Value(TAG_LIST_BITS | (raw as u64 & PAYLOAD_MASK))
     }
 
     pub fn tuple(mut v: Vec<Value>) -> Self {
@@ -956,7 +1006,10 @@ impl Value {
     }
 
     pub fn set(s: IndexSet<PyKey>) -> Self {
-        Value::opaque(Opaque::Set(s))
+        Value::opaque(Opaque::Set(Rc::new(SetInner {
+            items: RefCell::new(s),
+            obj_id: next_obj_id(),
+        })))
     }
 
     pub fn bytes(b: Vec<u8>) -> Self {
@@ -1167,22 +1220,34 @@ impl Value {
         top16(self.0) == TAG_LIST
     }
 
-    /// Returns a stable identity value for pool-allocated types:
-    /// - list/tuple: reads the monotonic obj_id stored at hdr+24
-    /// - str: uses the pool pointer address directly
-    ///   Returns `None` for Rc-based and primitive types (callers handle those directly).
+    /// Returns a stable identity value for pool-allocated and Rc-shared types:
+    /// - tuple: reads the monotonic obj_id stored at hdr+24
+    /// - list: reads `obj_id` from the shared [`ListInner`]; aliased clones
+    ///   (Rc-shared) all surface the same id, matching Python's `id()`
+    ///   semantics for `b = a` aliasing (#305).
+    /// - set: reads `obj_id` from the shared [`SetInner`] (same rationale).
+    /// - str: uses the pool pointer address directly.
+    ///
+    /// Returns `None` for primitive types (callers handle those directly).
     pub fn value_id(&self) -> Option<i64> {
         match top16(self.0) {
-            TAG_TUPLE | TAG_LIST => {
+            TAG_TUPLE => {
                 let hdr = (self.0 & PAYLOAD_MASK) as *const u8;
                 Some(unsafe { *(hdr.add(24) as *const u64) } as i64)
             }
+            TAG_LIST => Some(unsafe { self.list_inner() }.obj_id as i64),
             TAG_STR => Some((self.0 & PAYLOAD_MASK) as i64),
-            // Small-tuple variants stash a monotonic obj_id alongside their
-            // inline payload so `id()` stays stable across clones; see #281.
             TAG_OPAQUE => match unsafe { &*self.opaque_ptr() } {
+                // Small-tuple variants stash a monotonic obj_id alongside their
+                // inline payload so `id()` stays stable across clones; see #281.
                 Opaque::SmallTuple2 { obj_id, .. } => Some(*obj_id as i64),
                 Opaque::SmallTuple3 { obj_id, .. } => Some(*obj_id as i64),
+                // Sets are Rc-shared with an obj_id captured at construction;
+                // aliased clones surface the same id (#305).
+                Opaque::Set(rc) => Some(rc.obj_id as i64),
+                // Dicts already share an Rc backing.  Surface the Rc pointer
+                // address so `b = a; id(a) == id(b)` for dicts too (#305).
+                Opaque::Dict(rc) => Some(Rc::as_ptr(rc) as i64),
                 _ => None,
             },
             _ => None,
@@ -1208,8 +1273,16 @@ impl Value {
         (self.0 & PAYLOAD_MASK) as *mut _
     }
 
-    unsafe fn list_ptr(&self) -> *mut Vec<Value> {
-        (self.0 & PAYLOAD_MASK) as *mut _
+    /// Raw pointer to the shared [`ListInner`] backing.  Caller must guarantee
+    /// `self` is a TAG_LIST value.
+    unsafe fn list_inner_ptr(&self) -> *const ListInner {
+        (self.0 & PAYLOAD_MASK) as *const ListInner
+    }
+
+    /// Borrow the inner list header.  SAFETY: `self` must be a TAG_LIST value
+    /// and the Rc must be live (which it is for any reachable `Value`).
+    unsafe fn list_inner(&self) -> &ListInner {
+        unsafe { &*self.list_inner_ptr() }
     }
 
     unsafe fn opaque_ptr(&self) -> *mut Opaque {
@@ -1245,7 +1318,13 @@ impl Value {
 
     pub fn as_list(&self) -> Option<&[Value]> {
         if self.is_list() {
-            Some(unsafe { &*self.list_ptr() })
+            // SAFETY: rc.items.as_ptr() yields a *mut Vec<Value> bound by the
+            // Rc's lifetime, which is at least as long as this &self borrow.
+            // No concurrent borrow_mut is held in the single-threaded
+            // interpreter, so dereferencing as a shared slice is sound.  This
+            // is the same pattern used by `as_dict` for dict storage.
+            let inner = unsafe { self.list_inner() };
+            Some(unsafe { &*inner.items.as_ptr() })
         } else {
             None
         }
@@ -1253,7 +1332,29 @@ impl Value {
 
     pub fn as_list_mut(&mut self) -> Option<&mut Vec<Value>> {
         if self.is_list() {
-            Some(unsafe { &mut *self.list_ptr() })
+            // SAFETY: same invariant as `as_dict_mut` — `&mut self` prevents
+            // any other alias *through this Value* from observing the
+            // returned reference.  Two distinct Values may share the same
+            // list (Rc-shared backing, #305) but no concurrent borrow is
+            // active in single-threaded use.
+            let inner = unsafe { self.list_inner() };
+            Some(unsafe { &mut *inner.items.as_ptr() })
+        } else {
+            None
+        }
+    }
+
+    /// Read-only access to the shared `Rc<ListInner>` backing, useful for
+    /// callers that want to share storage between Values or pass the handle
+    /// around.  Returns `None` for non-list values.
+    pub fn get_list_rc(&self) -> Option<Rc<ListInner>> {
+        if self.is_list() {
+            // Bump the strong count and hand back an owned Rc.
+            unsafe {
+                let raw = self.list_inner_ptr();
+                Rc::increment_strong_count(raw);
+                Some(Rc::from_raw(raw))
+            }
         } else {
             None
         }
@@ -1315,10 +1416,27 @@ impl Value {
         })
     }
 
+    pub fn as_set(&self) -> Option<&IndexSet<PyKey>> {
+        self.as_opaque().and_then(|o| {
+            if let Opaque::Set(rc) = o {
+                // SAFETY: same invariant as `as_dict` — `&self` blocks concurrent
+                // mutable borrow through this Value; single-threaded execution
+                // prevents racing borrow_mut from a different Value sharing the
+                // same Rc.  See #305.
+                Some(unsafe { &*rc.items.as_ptr() })
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn as_set_mut(&mut self) -> Option<&mut IndexSet<PyKey>> {
         self.as_opaque_mut().and_then(|o| {
-            if let Opaque::Set(s) = o {
-                Some(s)
+            if let Opaque::Set(rc) = o {
+                // SAFETY: same as `as_dict_mut` — `&mut self` prevents alias
+                // access through this Value; single-threaded execution prevents
+                // a different aliased Value from holding a live borrow.
+                Some(unsafe { &mut *rc.items.as_ptr() })
             } else {
                 None
             }
@@ -1328,6 +1446,18 @@ impl Value {
     pub fn get_dict_rc(&self) -> Option<&Rc<RefCell<IndexMap<PyKey, Value>>>> {
         self.as_opaque().and_then(|o| {
             if let Opaque::Dict(rc) = o {
+                Some(rc)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Read-only access to the shared `Rc<SetInner>` backing.  Returns `None`
+    /// for non-set values.
+    pub fn get_set_rc(&self) -> Option<&Rc<SetInner>> {
+        self.as_opaque().and_then(|o| {
+            if let Opaque::Set(rc) = o {
                 Some(rc)
             } else {
                 None
@@ -1365,7 +1495,12 @@ impl Value {
             TAG_INT => ValueKind::Int(self.as_int_raw()),
             TAG_STR => ValueKind::Str(unsafe { self.str_as_str() }),
             TAG_TUPLE => ValueKind::Tuple(unsafe { &*self.tuple_ptr() }),
-            TAG_LIST => ValueKind::List(unsafe { &*self.list_ptr() }),
+            // SAFETY: same single-threaded no-concurrent-borrow_mut invariant
+            // as the dict/list cases below; see `as_list`.
+            TAG_LIST => {
+                let inner = unsafe { self.list_inner() };
+                ValueKind::List(unsafe { &*inner.items.as_ptr() })
+            }
             TAG_OPAQUE => match unsafe { &*self.opaque_ptr() } {
                 Opaque::PyBigInt(rc) => {
                     if let Some(n) = rc.to_i64() {
@@ -1379,7 +1514,8 @@ impl Value {
                 // No mutable borrow (borrow_mut) is held concurrently in our single-
                 // threaded interpreter, so the raw-pointer alias is sound.
                 Opaque::Dict(rc) => ValueKind::Dict(unsafe { &*rc.as_ref().as_ptr() }),
-                Opaque::Set(s) => ValueKind::Set(s),
+                // Sets share the same Rc<RefCell<...>> invariant after #305.
+                Opaque::Set(rc) => ValueKind::Set(unsafe { &*rc.items.as_ptr() }),
                 Opaque::Range { start, stop, step } => ValueKind::Range {
                     start: *start,
                     stop: *stop,
@@ -1610,12 +1746,16 @@ impl Clone for Value {
                 let v = unsafe { &*self.tuple_ptr() };
                 Value::tuple_with_id(v.clone(), obj_id)
             }
-            // List — copy the stored obj_id so the clone shares the same identity
+            // List — share the backing Rc<ListInner> with the original so that
+            // mutations through any alias propagate to all clones (#305).  The
+            // NaN-box pattern is reused directly; we only bump the strong
+            // count to keep the Rc alive.  `obj_id` is inherent to the shared
+            // `ListInner`, so identity (`id()`) is automatically stable.
             TAG_LIST => {
-                let hdr = (self.0 & PAYLOAD_MASK) as *const u8;
-                let obj_id = unsafe { *(hdr.add(24) as *const u64) };
-                let v = unsafe { &*self.list_ptr() };
-                Value::list_with_id(v.clone(), obj_id)
+                unsafe {
+                    Rc::increment_strong_count(self.list_inner_ptr());
+                }
+                Value(self.0)
             }
             // Opaque
             TAG_OPAQUE => {
@@ -1663,10 +1803,13 @@ impl Drop for Value {
                 std::ptr::drop_in_place(hdr as *mut Vec<Value>);
                 pool_vec_hdr_dealloc(hdr);
             },
+            // List — decrement the Rc strong count; the Rc layer drops the
+            // underlying `ListInner` (and its `Vec<Value>`) when the count
+            // reaches zero.  Pool allocations from the pre-#305 layout are
+            // gone — the Rc-allocated block is freed by the standard
+            // allocator, not the pool.
             TAG_LIST => unsafe {
-                let hdr = (self.0 & PAYLOAD_MASK) as *mut u8;
-                std::ptr::drop_in_place(hdr as *mut Vec<Value>);
-                pool_vec_hdr_dealloc(hdr);
+                Rc::decrement_strong_count(self.list_inner_ptr());
             },
             TAG_OPAQUE => unsafe {
                 // Matched allocator: `Value::opaque` allocates through
@@ -2135,5 +2278,91 @@ mod tests {
             Rc::ptr_eq(&original, &wrapped_fn),
             "kind-preserving wrap must reuse the original Rc"
         );
+    }
+
+    #[test]
+    fn list_clone_shares_storage_for_bound_method_mutation() {
+        // Regression test for #305.  `Value::clone` on a list must produce an
+        // alias of the same backing storage, so that captured bound methods
+        // (`m = lst.append; m(4)`) and simple aliasing (`b = a; b.append(x)`)
+        // mutate the original list — matching CPython's reference semantics.
+        let a = Value::list(vec![Value::int(1)]);
+        let mut b = a.clone();
+        b.as_list_mut()
+            .expect("clone must still be a list")
+            .push(Value::int(2));
+        let items = a.as_list().expect("original must still be a list");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].as_int(), Some(1));
+        assert_eq!(items[1].as_int(), Some(2));
+    }
+
+    #[test]
+    fn list_clone_preserves_identity() {
+        // `id(b) == id(a)` after `b = a` for list, matching CPython.
+        let a = Value::list(vec![Value::int(1), Value::int(2)]);
+        let b = a.clone();
+        assert_eq!(a.value_id(), b.value_id());
+
+        // Distinct list literals must NOT share identity.
+        let c = Value::list(vec![Value::int(1), Value::int(2)]);
+        assert_ne!(a.value_id(), c.value_id());
+    }
+
+    #[test]
+    fn set_clone_shares_storage() {
+        // Same Rc-sharing invariant as list, exercised through set's mutating
+        // accessor.
+        let a = Value::set({
+            let mut s = IndexSet::new();
+            s.insert(PyKey::Int(1));
+            s
+        });
+        let mut b = a.clone();
+        b.as_set_mut()
+            .expect("clone must still be a set")
+            .insert(PyKey::Int(2));
+        let items = a.as_set().expect("original must still be a set");
+        assert!(items.contains(&PyKey::Int(1)));
+        assert!(items.contains(&PyKey::Int(2)));
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn set_clone_preserves_identity() {
+        let a = Value::set({
+            let mut s = IndexSet::new();
+            s.insert(PyKey::Int(1));
+            s
+        });
+        let b = a.clone();
+        assert_eq!(a.value_id(), b.value_id());
+
+        let c = Value::set({
+            let mut s = IndexSet::new();
+            s.insert(PyKey::Int(1));
+            s
+        });
+        assert_ne!(a.value_id(), c.value_id());
+    }
+
+    #[test]
+    fn dict_clone_preserves_identity() {
+        // Dict already used `Rc<RefCell<...>>` shared storage; #305 added an
+        // `id()` surface for it via `value_id()`.  Pin the invariant.
+        let a = Value::dict({
+            let mut m = IndexMap::new();
+            m.insert(PyKey::Str("k".to_string()), Value::int(1));
+            m
+        });
+        let b = a.clone();
+        assert_eq!(a.value_id(), b.value_id());
+
+        let c = Value::dict({
+            let mut m = IndexMap::new();
+            m.insert(PyKey::Str("k".to_string()), Value::int(1));
+            m
+        });
+        assert_ne!(a.value_id(), c.value_id());
     }
 }

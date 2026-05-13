@@ -1,21 +1,56 @@
 # Regression test for issue #305: captured bound methods on mutable
-# Tier 1 containers.
+# Tier 1 containers (list, dict, set).
 #
-# In CPython all three of list, dict, set mutate-through a captured
-# bound method.  In pyrust, only dict does (because Opaque::Dict is
-# Rc<RefCell<...>> internally).  list/set use value-typed storage, so
-# captured bound methods on those types operate on a private copy and
-# silently discard mutations.
+# Before the fix in this branch, `Value::clone` on a list or set
+# deep-copied the backing storage, so a captured bound method like
+# `m = lst.append` held a private copy of `lst` and its mutations
+# silently disappeared.  CPython has no such bug because list/dict/set
+# are PyObject* references (clones share storage).
 #
-# This file pins the *currently-supported* surface so a future change
-# that accidentally breaks the dict path (or the direct-call path for
-# list/set) will be caught.  The list/set captured-bound-method case is
-# deliberately NOT exercised here because pyrust diverges from CPython
-# on it and the parity harness would (correctly) flag the divergence.
+# The structural fix (Option 1 of #305) routes list and set storage
+# through `Rc<…RefCell<…>>`, the same shape dict already used.  After
+# the fix, `Value::clone` on these types shares the backing — so
+# captured bound methods mutate the original.
 #
-# See bound_method.rs module docs and issue #305 for the rationale.
+# This file pins the fixed behaviour against CPython.  Every assert
+# below produces output identical to CPython's, which is what the
+# parity harness checks.
 
-# ---- dict: captured bound methods DO propagate mutations ----
+# ---- list: captured bound methods now propagate mutations ----
+lst = [1, 2, 3]
+m = lst.append
+m(4)
+assert lst == [1, 2, 3, 4]
+
+ext = lst.extend
+ext([5, 6])
+assert lst == [1, 2, 3, 4, 5, 6]
+
+ins = lst.insert
+ins(0, 0)
+assert lst == [0, 1, 2, 3, 4, 5, 6]
+
+rem = lst.remove
+rem(3)
+assert lst == [0, 1, 2, 4, 5, 6]
+
+pop = lst.pop
+pop()
+assert lst == [0, 1, 2, 4, 5]
+
+rev = lst.reverse
+rev()
+assert lst == [5, 4, 2, 1, 0]
+
+srt = lst.sort
+srt()
+assert lst == [0, 1, 2, 4, 5]
+
+clr = lst.clear
+clr()
+assert lst == []
+
+# ---- dict: captured bound methods (already worked, pinned here too) ----
 d = {"a": 1}
 upd = d.update
 upd({"b": 2})
@@ -26,36 +61,66 @@ popper("a")
 assert "a" not in d
 assert d == {"b": 2}
 
-# clear via captured bound method
 clearer = d.clear
 clearer()
 assert d == {}
 
-# ---- list: direct-call form propagates (CallMethod fast path) ----
-lst = [1, 2, 3]
-lst.append(4)
-assert lst == [1, 2, 3, 4]
-lst.extend([5, 6])
-assert lst == [1, 2, 3, 4, 5, 6]
-lst.pop()
-assert lst == [1, 2, 3, 4, 5]
-
-# ---- set: direct-call form propagates ----
+# ---- set: captured bound methods now propagate mutations ----
 s = {1, 2}
-s.add(3)
+adder = s.add
+adder(3)
 assert s == {1, 2, 3}
-s.discard(1)
+
+disc = s.discard
+disc(1)
 assert s == {2, 3}
 
-# ---- list/set: read-only captured bound methods are stable ----
-lst2 = [3, 1, 2, 1]
-counter = lst2.count
+upd_s = s.update
+upd_s({4, 5})
+assert s == {2, 3, 4, 5}
+
+clr_s = s.clear
+clr_s()
+assert s == set()
+
+# ---- aliasing: b = a; mutation through b is visible via a ----
+a = [1, 2, 3]
+b = a
+b.append(4)
+assert a == [1, 2, 3, 4]
+assert a is b
+assert id(a) == id(b)
+
+da = {"x": 1}
+db = da
+db["y"] = 2
+assert da == {"x": 1, "y": 2}
+assert id(da) == id(db)
+
+sa = {1, 2}
+sb = sa
+sb.add(3)
+assert sa == {1, 2, 3}
+assert id(sa) == id(sb)
+
+# ---- direct-call form still propagates (CallMethod fast path) ----
+lst2 = [1, 2, 3]
+lst2.append(4)
+assert lst2 == [1, 2, 3, 4]
+
+s2 = {1, 2}
+s2.add(3)
+assert s2 == {1, 2, 3}
+
+# ---- read-only captured bound methods still work ----
+lst3 = [3, 1, 2, 1]
+counter = lst3.count
 assert counter(1) == 2
-indexer = lst2.index
+indexer = lst3.index
 assert indexer(2) == 2
 
-s2 = {1, 2, 3}
-disjoint = s2.isdisjoint
+s3 = {1, 2, 3}
+disjoint = s3.isdisjoint
 assert disjoint({4, 5}) is True
 assert disjoint({1}) is False
 
