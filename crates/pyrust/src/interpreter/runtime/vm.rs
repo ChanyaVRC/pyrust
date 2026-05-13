@@ -475,10 +475,11 @@ impl Interpreter {
                         // the entire collection (avoids O(n) clone per GetItem call).
                         // The Dict arm is special: looking up an instance key may run
                         // user `__hash__`/`__eq__`, which requires `&mut self`.  We
-                        // snapshot the dict to drop the register borrow first.
+                        // Rc-clone the dict Value (cheap bump, no IndexMap clone) so
+                        // we can drop the register borrow before reentering `self`.
                         enum FastResult {
                             Value(Value),
-                            DictLookup(indexmap::IndexMap<PyKey, Value>),
+                            DictLookup(Value),
                             Miss,
                         }
                         let fast = if let Some(ov) = regs[*obj as usize].as_some() {
@@ -491,7 +492,7 @@ impl Interpreter {
                                     let i = vm_try!(normalize_index(&idx_val, items.len(), "tuple"));
                                     FastResult::Value(items[i].clone())
                                 }
-                                ValueKind::Dict(dict) => FastResult::DictLookup(dict.clone()),
+                                ValueKind::Dict(_) => FastResult::DictLookup(ov.clone()),
                                 _ => FastResult::Miss,
                             }
                         } else { FastResult::Miss };
@@ -499,9 +500,9 @@ impl Interpreter {
                             FastResult::Value(r) => {
                                 regs[*dst as usize] = r;
                             }
-                            FastResult::DictLookup(dict_snapshot) => {
+                            FastResult::DictLookup(dict_val) => {
                                 let key = vm_try!(self.value_to_pykey(&idx_val));
-                                let lookup = vm_try!(self.dict_lookup(&dict_snapshot, &key));
+                                let lookup = vm_try!(self.dict_lookup(&dict_val, &key));
                                 let r = vm_try!(lookup
                                     .map(|(_, v)| v)
                                     .ok_or_else(|| PyError::Runtime("key error".to_string())));
@@ -564,23 +565,32 @@ impl Interpreter {
                                 let key = vm_try!(self.value_to_pykey(&idx_val));
                                 if matches!(&key, PyKey::Object { .. }) {
                                     // Object keys may need `__eq__` dispatch to dedup
-                                    // against an existing entry — work on a snapshot
-                                    // so we can call `&mut self` helpers.
-                                    let mut snapshot = if let Some(d) = regs
-                                        [*obj as usize]
+                                    // against an existing entry.  Rc-clone the dict
+                                    // Value (cheap) so `dict_lookup` can run with no
+                                    // live alias into the register file; if an entry
+                                    // matches, replace its value in place to preserve
+                                    // insertion order.
+                                    let dict_val = regs[*obj as usize]
                                         .as_some()
-                                        .and_then(|v| v.as_dict())
-                                    {
-                                        d.clone()
-                                    } else {
-                                        vm_try!(Err(PyError::Runtime(
-                                            "SetItem: expected dict".to_string()
-                                        )))
-                                    };
-                                    vm_try!(self.dict_insert(&mut snapshot, key, val_val));
+                                        .cloned()
+                                        .unwrap_or(Value::none());
+                                    let existing = vm_try!(self.dict_lookup(&dict_val, &key));
                                     let dict =
                                         vm_try!(expect_dict_mut(regs, *obj, "SetItem"));
-                                    *dict = snapshot;
+                                    if let Some((idx, _)) = existing {
+                                        // Preserve existing entry's PyKey to
+                                        // keep insertion order; replace value
+                                        // in place.
+                                        let existing_key =
+                                            dict.get_index(idx).map(|(k, _)| k.clone());
+                                        if let Some(k) = existing_key {
+                                            dict.insert(k, val_val);
+                                        } else {
+                                            dict.insert(key, val_val);
+                                        }
+                                    } else {
+                                        dict.insert(key, val_val);
+                                    }
                                 } else {
                                     let dict = vm_try!(expect_dict_mut(regs, *obj, "SetItem"));
                                     dict.insert(key, val_val);
@@ -675,15 +685,16 @@ impl Interpreter {
                             }
                         } else if target_kind == 2 {
                             let key = vm_try!(self.value_to_pykey(&idx_val));
-                            // Resolve user-eq match via snapshot, then shift-remove
-                            // by the located index for O(1)-ish removal.
+                            // For object keys, resolve via user-eq match first
+                            // (Rc-clone the dict Value rather than snapshotting
+                            // the IndexMap), then shift-remove by the located
+                            // index for O(1)-ish removal.
                             if let PyKey::Object { .. } = &key {
-                                let snapshot = regs[*obj as usize]
+                                let dict_val = regs[*obj as usize]
                                     .as_some()
-                                    .and_then(|v| v.as_dict())
                                     .cloned()
-                                    .unwrap_or_default();
-                                let found = vm_try!(self.dict_lookup(&snapshot, &key));
+                                    .unwrap_or(Value::none());
+                                let found = vm_try!(self.dict_lookup(&dict_val, &key));
                                 if let Some((idx, _)) = found
                                     && let Some(ov) = regs[*obj as usize].as_some_mut()
                                     && let Some(dict) = ov.as_dict_mut()
@@ -1083,21 +1094,22 @@ impl Interpreter {
                     let val = vm_try!(vm_read(regs, *val_reg, num_locals));
                     let key = vm_try!(self.value_to_pykey(&val));
                     if let PyKey::Object { .. } = &key {
-                        // Object keys need `__eq__` dispatch for dedup — work on
-                        // a snapshot so we can call `&mut self` helpers.
-                        let mut snapshot = if let Some(s) = regs[*set_reg as usize]
+                        // Object keys need `__eq__` dispatch for dedup.
+                        // Rc-clone the set Value (cheap) so `set_lookup` can
+                        // run without an alias into the register file.
+                        let set_val = regs[*set_reg as usize]
                             .as_some()
-                            .and_then(|v| v.as_set())
-                        {
-                            s.clone()
-                        } else {
-                            vm_try!(Err(PyError::Runtime("SetAdd: not a set".to_string())))
-                        };
-                        vm_try!(self.set_insert(&mut snapshot, key));
-                        let set = vm_try!(regs[*set_reg as usize]
-                            .as_set_mut()
-                            .ok_or_else(|| PyError::Runtime("SetAdd: not a set".to_string())));
-                        *set = snapshot;
+                            .cloned()
+                            .unwrap_or(Value::none());
+                        let found = vm_try!(self.set_lookup(&set_val, &key));
+                        if found.is_none() {
+                            let set = vm_try!(regs[*set_reg as usize]
+                                .as_set_mut()
+                                .ok_or_else(|| PyError::Runtime(
+                                    "SetAdd: not a set".to_string()
+                                )));
+                            set.insert(key);
+                        }
                     } else {
                         let set = vm_try!(regs[*set_reg as usize]
                             .as_set_mut()

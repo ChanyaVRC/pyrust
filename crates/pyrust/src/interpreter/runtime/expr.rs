@@ -112,10 +112,12 @@ impl Interpreter {
                     && let Some(env) = self.resolve_name_env(name) {
                         // Fast-path subscripting that avoids re-evaluating `target`.
                         // We must not call `&mut self` while holding the env borrow,
-                        // so the Dict arm returns a snapshot we look up afterwards.
+                        // so the Dict arm returns an Rc-clone of the dict Value (cheap
+                        // bump, not an O(N) IndexMap snapshot) and we look up after
+                        // dropping the env borrow.
                         enum Fast {
                             Done(Result<Value>),
-                            DictLookup(indexmap::IndexMap<PyKey, Value>),
+                            DictLookup(Value),
                             Fallthrough,
                         }
                         let fast: Fast = {
@@ -138,16 +140,20 @@ impl Interpreter {
                                     normalize_index(&index_value, items.len(), "tuple")
                                         .map(|i| items[i].clone()),
                                 ),
-                                Some(ValueKind::Dict(items)) => Fast::DictLookup(items.clone()),
+                                Some(ValueKind::Dict(_)) => {
+                                    // SAFETY: col is &Value into the env; we clone
+                                    // the Value (Rc bump) before dropping the borrow.
+                                    Fast::DictLookup(col.unwrap().clone())
+                                }
                                 Some(_) => Fast::Fallthrough,
                                 None => Fast::Fallthrough,
                             }
                         };
                         match fast {
                             Fast::Done(r) => return r,
-                            Fast::DictLookup(dict) => {
+                            Fast::DictLookup(dict_val) => {
                                 let key = self.value_to_pykey(&index_value)?;
-                                return match self.dict_lookup(&dict, &key)? {
+                                return match self.dict_lookup(&dict_val, &key)? {
                                     Some((_, v)) => Ok(v),
                                     None => Err(PyError::Runtime("key error".to_string())),
                                 };
@@ -267,6 +273,17 @@ impl Interpreter {
     }
 
     fn eval_index(&mut self, target: Value, index: Value) -> Result<Value> {
+        // Handle Dict separately so the temporary `&IndexMap` from
+        // `target.kind()` doesn't outlive the call into `dict_lookup`
+        // (which may run user `__eq__` that mutates the dict — see the
+        // aliasing notes on `Value::as_dict_mut`).
+        if target.as_dict().is_some() {
+            let key = self.value_to_pykey(&index)?;
+            return match self.dict_lookup(&target, &key)? {
+                Some((_, v)) => Ok(v),
+                None => Err(PyError::Runtime("key error".to_string())),
+            };
+        }
         match target.kind() {
             ValueKind::List(items) => {
                 let idx = normalize_index(&index, items.len(), "list")?;
@@ -285,14 +302,7 @@ impl Interpreter {
                 let idx = normalize_index(&index, rc.len(), "bytes")?;
                 Ok(Value::int(rc[idx] as i64))
             }
-            ValueKind::Dict(items) => {
-                let dict_snapshot = items.clone();
-                let key = self.value_to_pykey(&index)?;
-                match self.dict_lookup(&dict_snapshot, &key)? {
-                    Some((_, v)) => Ok(v),
-                    None => Err(PyError::Runtime("key error".to_string())),
-                }
-            }
+            ValueKind::Dict(_) => unreachable!("handled above"),
             ValueKind::BuiltinObject { ops, state } => {
                 // Built-in object types opt in to subscripting via
                 // `BuiltinTypeOps::get_item`.  The default impl returns a
@@ -472,7 +482,63 @@ impl Interpreter {
     /// entries with the same precomputed hash and dispatch user `__eq__`
     /// for full Python semantics.  Returns `Ok(Some((index, value)))` on
     /// a hit (index returned so callers can implement `pop`/`del`).
+    ///
+    /// Takes the receiver `&Value` (rather than `&IndexMap`) so the dict
+    /// borrow can be scoped tightly: the fast path borrows for `get_full`
+    /// only, and the `__eq__`-dispatching slow path borrows only long
+    /// enough to extract the same-hash candidate list before dropping the
+    /// borrow and running user code.  This avoids the O(N) whole-dict
+    /// snapshot that callers used to have to make for soundness.
     pub(crate) fn dict_lookup(
+        &mut self,
+        receiver: &Value,
+        key: &PyKey,
+    ) -> Result<Option<(usize, Value)>> {
+        // Fast path — dict borrow scoped to this block.
+        {
+            let dict = receiver
+                .as_dict()
+                .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+            if let Some((idx, _, v)) = dict.get_full(key) {
+                return Ok(Some((idx, v.clone())));
+            }
+        }
+        // Slow path — only `Object` keys.  Extract candidates under a
+        // narrow borrow, then drop the borrow before user `__eq__` runs.
+        if let PyKey::Object {
+            hash: target_hash,
+            value: target,
+        } = key
+        {
+            let candidates: Vec<(usize, Value, Value)> = {
+                let dict = receiver
+                    .as_dict()
+                    .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+                dict.iter()
+                    .enumerate()
+                    .filter_map(|(i, (k, v))| match k {
+                        PyKey::Object { hash, value } if hash == target_hash => {
+                            Some((i, value.clone(), v.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            };
+            for (idx, candidate_key, value) in candidates {
+                if self.values_user_eq(&candidate_key, target)? {
+                    return Ok(Some((idx, value)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// `dict_lookup` variant that takes the `IndexMap` directly.  Used by
+    /// callers that already hold a `&IndexMap` (typically because they
+    /// own/snapshotted the dict, so aliasing with mutable access is
+    /// impossible).  Prefer [`Self::dict_lookup`] for new call sites — it
+    /// scopes the dict borrow tightly without a whole-dict clone.
+    pub(crate) fn dict_lookup_in(
         &mut self,
         dict: &indexmap::IndexMap<PyKey, Value>,
         key: &PyKey,
@@ -485,8 +551,6 @@ impl Interpreter {
             value: target,
         } = key
         {
-            // Snapshot candidate entries first so we don't borrow `dict`
-            // while invoking `__eq__` (which can run arbitrary code).
             let candidates: Vec<(usize, Value, Value)> = dict
                 .iter()
                 .enumerate()
@@ -509,7 +573,54 @@ impl Interpreter {
     /// Check whether a set contains `key`, dispatching user `__eq__` for
     /// `PyKey::Object` keys (issue #368).  Returns the entry index so
     /// callers can implement `discard`/`remove`.
+    ///
+    /// Takes the receiver `&Value` so the set borrow is scoped tightly —
+    /// see [`Self::dict_lookup`] for the rationale.
     pub(crate) fn set_lookup(
+        &mut self,
+        receiver: &Value,
+        key: &PyKey,
+    ) -> Result<Option<usize>> {
+        {
+            let set = receiver
+                .as_set()
+                .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
+            if let Some(idx) = set.get_index_of(key) {
+                return Ok(Some(idx));
+            }
+        }
+        if let PyKey::Object {
+            hash: target_hash,
+            value: target,
+        } = key
+        {
+            let candidates: Vec<(usize, Value)> = {
+                let set = receiver
+                    .as_set()
+                    .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
+                set.iter()
+                    .enumerate()
+                    .filter_map(|(i, k)| match k {
+                        PyKey::Object { hash, value } if hash == target_hash => {
+                            Some((i, value.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            };
+            for (idx, candidate) in candidates {
+                if self.values_user_eq(&candidate, target)? {
+                    return Ok(Some(idx));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// `set_lookup` variant that takes the `IndexSet` directly — for
+    /// callers that already hold a `&IndexSet`.  Prefer
+    /// [`Self::set_lookup`] for new call sites.
+    pub(crate) fn set_lookup_in(
         &mut self,
         set: &indexmap::IndexSet<PyKey>,
         key: &PyKey,
@@ -552,7 +663,7 @@ impl Interpreter {
         value: Value,
     ) -> Result<()> {
         if let PyKey::Object { .. } = &key {
-            if let Some((idx, _)) = self.dict_lookup(dict, &key)? {
+            if let Some((idx, _)) = self.dict_lookup_in(dict, &key)? {
                 // Replace value in-place via index access to preserve order.
                 let existing_key = dict.get_index(idx).map(|(k, _)| k.clone());
                 if let Some(k) = existing_key {
@@ -572,7 +683,7 @@ impl Interpreter {
         key: PyKey,
     ) -> Result<()> {
         if let PyKey::Object { .. } = &key {
-            if self.set_lookup(set, &key)?.is_some() {
+            if self.set_lookup_in(set, &key)?.is_some() {
                 return Ok(());
             }
         }
@@ -611,32 +722,20 @@ impl Interpreter {
         match method {
             "get" => {
                 let default = iter.next().unwrap_or_else(Value::none);
-                let snapshot = receiver
-                    .as_dict()
-                    .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?
-                    .clone();
                 Ok(self
-                    .dict_lookup(&snapshot, &pk)?
+                    .dict_lookup(&receiver, &pk)?
                     .map(|(_, v)| v)
                     .unwrap_or(default))
             }
-            "__contains__" => {
-                let snapshot = receiver
-                    .as_dict()
-                    .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?
-                    .clone();
-                Ok(Value::bool_(
-                    self.dict_lookup(&snapshot, &pk)?.is_some(),
-                ))
-            }
+            "__contains__" => Ok(Value::bool_(
+                self.dict_lookup(&receiver, &pk)?.is_some(),
+            )),
             "pop" => {
-                let snapshot = receiver
-                    .as_dict()
-                    .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?
-                    .clone();
-                match self.dict_lookup(&snapshot, &pk)? {
+                match self.dict_lookup(&receiver, &pk)? {
                     Some((idx, v)) => {
                         // Now take the mutable borrow to actually remove.
+                        // `dict_lookup` already dropped its borrow before
+                        // running user code, so the index is still valid.
                         let mut dict_mut = receiver;
                         let dict = dict_mut.as_dict_mut().ok_or_else(|| {
                             PyError::Runtime("internal: expected dict".to_string())
@@ -655,11 +754,7 @@ impl Interpreter {
             }
             "setdefault" => {
                 let default = iter.next().unwrap_or_else(Value::none);
-                let snapshot = receiver
-                    .as_dict()
-                    .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?
-                    .clone();
-                if let Some((_, v)) = self.dict_lookup(&snapshot, &pk)? {
+                if let Some((_, v)) = self.dict_lookup(&receiver, &pk)? {
                     return Ok(v);
                 }
                 let mut dict_mut = receiver;
@@ -688,11 +783,7 @@ impl Interpreter {
         let pk = self.value_to_pykey(&key_val)?;
         match method {
             "add" => {
-                let snapshot = receiver
-                    .as_set()
-                    .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?
-                    .clone();
-                if self.set_lookup(&snapshot, &pk)?.is_some() {
+                if self.set_lookup(&receiver, &pk)?.is_some() {
                     return Ok(Value::none());
                 }
                 let mut set_mut = receiver;
@@ -702,19 +793,9 @@ impl Interpreter {
                 set.insert(pk);
                 Ok(Value::none())
             }
-            "__contains__" => {
-                let snapshot = receiver
-                    .as_set()
-                    .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?
-                    .clone();
-                Ok(Value::bool_(self.set_lookup(&snapshot, &pk)?.is_some()))
-            }
+            "__contains__" => Ok(Value::bool_(self.set_lookup(&receiver, &pk)?.is_some())),
             "discard" => {
-                let snapshot = receiver
-                    .as_set()
-                    .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?
-                    .clone();
-                if let Some(idx) = self.set_lookup(&snapshot, &pk)? {
+                if let Some(idx) = self.set_lookup(&receiver, &pk)? {
                     let mut set_mut = receiver;
                     let set = set_mut.as_set_mut().ok_or_else(|| {
                         PyError::Runtime("internal: expected set".to_string())
@@ -723,26 +804,17 @@ impl Interpreter {
                 }
                 Ok(Value::none())
             }
-            "remove" => {
-                let snapshot = receiver
-                    .as_set()
-                    .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?
-                    .clone();
-                match self.set_lookup(&snapshot, &pk)? {
-                    Some(idx) => {
-                        let mut set_mut = receiver;
-                        let set = set_mut.as_set_mut().ok_or_else(|| {
-                            PyError::Runtime("internal: expected set".to_string())
-                        })?;
-                        set.shift_remove_index(idx);
-                        Ok(Value::none())
-                    }
-                    None => Err(PyError::named(
-                        "KeyError",
-                        key_val.repr(),
-                    )),
+            "remove" => match self.set_lookup(&receiver, &pk)? {
+                Some(idx) => {
+                    let mut set_mut = receiver;
+                    let set = set_mut
+                        .as_set_mut()
+                        .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
+                    set.shift_remove_index(idx);
+                    Ok(Value::none())
                 }
-            }
+                None => Err(PyError::named("KeyError", key_val.repr())),
+            },
             _ => unreachable!(),
         }
     }
@@ -1261,14 +1333,25 @@ impl Interpreter {
     }
 
     fn eval_in(&mut self, container: Value, item: Value) -> Result<Value> {
+        // Handle Dict/Set separately so the temporary `&IndexMap`/`&IndexSet`
+        // from `container.kind()` doesn't outlive the call into
+        // `dict_lookup`/`set_lookup` (which may run user `__eq__`).
+        if container.as_dict().is_some() {
+            let key = self.value_to_pykey(&item)?;
+            return Ok(Value::bool_(
+                self.dict_lookup(&container, &key)?.is_some(),
+            ));
+        }
+        if container.as_set().is_some() {
+            let key = self.value_to_pykey(&item)?;
+            return Ok(Value::bool_(
+                self.set_lookup(&container, &key)?.is_some(),
+            ));
+        }
         match container.kind() {
             ValueKind::List(items) => Ok(Value::bool_(items.iter().any(|b| b == &item))),
             ValueKind::Tuple(items) => Ok(Value::bool_(items.contains(&item))),
-            ValueKind::Set(items) => {
-                let set_snapshot = items.clone();
-                let key = self.value_to_pykey(&item)?;
-                Ok(Value::bool_(self.set_lookup(&set_snapshot, &key)?.is_some()))
-            }
+            ValueKind::Set(_) => unreachable!("handled above"),
             ValueKind::BuiltinObject { ops, state } => {
                 ops.contains(state, &item).map(Value::bool_)
             }
@@ -1290,11 +1373,7 @@ impl Interpreter {
                     _ => Err(PyError::Runtime("'in <string>' requires string as left operand".to_string())),
                 }
             }
-            ValueKind::Dict(items) => {
-                let dict_snapshot = items.clone();
-                let key = self.value_to_pykey(&item)?;
-                Ok(Value::bool_(self.dict_lookup(&dict_snapshot, &key)?.is_some()))
-            }
+            ValueKind::Dict(_) => unreachable!("handled above"),
             ValueKind::Range { start, stop, step } => {
                 match item.kind() {
                     ValueKind::Int(v) => {
