@@ -104,6 +104,9 @@ pyrust_module! {
     /// CPython's `bool ⊆ int` subtyping, and a trailing `PyValue`
     /// catch-all reproduces CPython's exact "'X' object cannot be
     /// interpreted as an integer" TypeError wording verbatim.
+    /// Bignums not yet supported; raises `OverflowError` if `x` doesn't
+    /// fit in i64 (deliberate divergence from CPython, tracked as
+    /// follow-up under #400).
     fn bin(#[positional_only] x: PyInt) -> Result<Value> {
         let v = x.expect_i64(FN_NAME, "x")?;
         Ok(Value::string(format_bin_i64(v)))
@@ -132,6 +135,9 @@ pyrust_module! {
     /// CPython's `bool ⊆ int` subtyping, and a trailing `PyValue`
     /// catch-all reproduces CPython's exact "'X' object cannot be
     /// interpreted as an integer" TypeError wording verbatim.
+    /// Bignums not yet supported; raises `OverflowError` if `x` doesn't
+    /// fit in i64 (deliberate divergence from CPython, tracked as
+    /// follow-up under #400).
     fn oct(#[positional_only] x: PyInt) -> Result<Value> {
         let v = x.expect_i64(FN_NAME, "x")?;
         Ok(Value::string(format_oct_i64(v)))
