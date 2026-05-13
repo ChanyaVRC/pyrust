@@ -151,48 +151,57 @@ pyrust_module! {
 
     /// CPython: hex(x) — integer to '0x…' / '-0x…' string.
     /// <https://docs.python.org/3/library/functions.html#hex>
-    fn hex(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
-        }
-        match args[0].value.kind() {
-            ValueKind::Int(v) => {
-                if v < 0 {
-                    Ok(Value::string(format!("-0x{:x}", -(v as i128))))
-                } else {
-                    Ok(Value::string(format!("0x{:x}", v)))
-                }
-            }
-            ValueKind::Bool(b) => Ok(Value::string(if b { "0x1".to_string() } else { "0x0".to_string() })),
-            _ => Err(PyError::named(
-                "TypeError",
-                format!(
-                    "'{}' object cannot be interpreted as an integer",
-                    value_type_name_str(&args[0].value),
-                ),
-            )),
-        }
+    ///
+    /// Migrated to the typed-signature dialect (#400) as a two-element
+    /// overload set: `PyInt` is the primary path; `PyBool` mirrors
+    /// CPython's `bool ⊆ int` subtyping (without it, strict `PyInt`
+    /// would reject `hex(True)` — `bool` doesn't auto-coerce in the
+    /// typed dialect, see [`builtin_args`]).  A trailing `PyValue`
+    /// catch-all reproduces CPython's exact "'X' object cannot be
+    /// interpreted as an integer" TypeError wording (the macro's own
+    /// "unsupported argument type(s)" fallback would drift from the
+    /// canonical message — preserved verbatim from the legacy body).
+    /// Genuine bignums raise `OverflowError` via `expect_i64`; that's
+    /// a deliberate divergence from CPython, tracked as follow-up.
+    fn hex(#[positional_only] x: PyInt) -> Result<Value> {
+        let v = x.expect_i64(FN_NAME, "x")?;
+        Ok(Value::string(format_hex_i64(v)))
+    }
+
+    fn hex(#[positional_only] x: PyBool) -> Result<Value> {
+        // CPython: `hex(True) == '0x1'`, `hex(False) == '0x0'`.
+        Ok(Value::string(format_hex_i64(if x.0 { 1 } else { 0 })))
+    }
+
+    fn hex(#[positional_only] x: PyValue) -> Result<Value> {
+        Err(PyError::named(
+            "TypeError",
+            format!(
+                "'{}' object cannot be interpreted as an integer",
+                value_type_name_str(&x.0),
+            ),
+        ))
     }
 
     /// CPython: ascii(object) — ASCII-only escaped repr.
     /// <https://docs.python.org/3/library/functions.html#ascii>
-    fn ascii(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
-        }
-        Ok(Value::string(ascii_repr(&args[0].value)))
+    ///
+    /// Migrated to the typed-signature dialect (#400): like `repr`,
+    /// `ascii` accepts every Python object, so `PyValue` is the natural
+    /// wrapper.  The body just delegates to the existing helper.
+    fn ascii(#[positional_only] obj: PyValue) -> Result<Value> {
+        Ok(Value::string(ascii_repr(&obj.0)))
     }
 
     /// CPython: id(object) — identity (CPython returns memory address).
     /// <https://docs.python.org/3/library/functions.html#id>
-    fn id(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly 1 argument")));
-        }
-        let id_val: i64 = match args[0].value.kind() {
+    ///
+    /// Migrated to the typed-signature dialect (#400).  `PyValue` is the
+    /// catch-all wrapper since `id` accepts every Python object; the
+    /// existing per-kind dispatch becomes the body's only concern.
+    fn id(#[positional_only] obj: PyValue) -> Result<Value> {
+        let value = &obj.0;
+        let id_val: i64 = match value.kind() {
             ValueKind::PyInstance(rc) => Rc::as_ptr(rc) as i64,
             ValueKind::PyClass(rc) => Rc::as_ptr(rc) as i64,
             ValueKind::PyModule(rc) => Rc::as_ptr(rc) as i64,
@@ -200,7 +209,7 @@ pyrust_module! {
             ValueKind::Int(n) => n,
             ValueKind::Bool(b) => b as i64,
             ValueKind::None => 0,
-            _ => args[0].value.value_id().unwrap_or(0),
+            _ => value.value_id().unwrap_or(0),
         };
         Ok(Value::int(id_val))
     }
@@ -324,12 +333,14 @@ pyrust_module! {
 
     /// CPython: repr(object) — printable representation string.
     /// <https://docs.python.org/3/library/functions.html#repr>
-    fn repr(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
-        }
-        let obj = args[0].value.clone();
+    ///
+    /// Migrated to the typed-signature dialect (#400): the macro-emitted
+    /// prelude validates positional count, rejects unknown kwargs, and
+    /// binds `obj` as a typed local.  `PyValue` is the catch-all wrapper
+    /// — `repr` accepts every Python object, so type-checking the input
+    /// is exactly the prelude's "validate arity / reject kwargs" job.
+    fn repr(#[positional_only] obj: PyValue) -> Result<Value> {
+        let obj = obj.0;
         if let ValueKind::PyInstance(instance) = obj.kind() {
             let instance_rc = Rc::clone(instance);
             let class = Rc::clone(&instance_rc.borrow().class);
@@ -354,12 +365,15 @@ pyrust_module! {
 
     /// CPython: hash(object) — hash value if hashable.
     /// <https://docs.python.org/3/library/functions.html#hash>
-    fn hash(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
-        }
-        let hash_val = match args[0].value.kind() {
+    ///
+    /// Migrated to the typed-signature dialect (#400).  `PyValue`
+    /// accepts every input; the body's per-kind match preserves the
+    /// existing CPython-compatible numeric hashing (int / bool / float
+    /// with `1.0 == 1` parity), FNV-1a-style string hashing, and the
+    /// per-kind "unhashable type: 'X'" errors for list / dict / set.
+    fn hash(#[positional_only] obj: PyValue) -> Result<Value> {
+        let value = obj.0;
+        let hash_val = match value.kind() {
             ValueKind::Int(v) => v,
             ValueKind::Bool(b) => b as i64,
             ValueKind::Float(v) => {
@@ -1751,6 +1765,18 @@ pyrust_module! {
             _ => false,
         };
         Ok(Value::bool_(is_callable))
+    }
+}
+
+/// Format an i64 as Python's `hex()` output — `"0xN"` / `"-0xN"`.  Used
+/// by both the `PyInt` and `PyBool` overloads of the typed `hex`
+/// builtin (#400).  Widens through i128 first so `i64::MIN.abs()`
+/// doesn't overflow.
+fn format_hex_i64(v: i64) -> String {
+    if v < 0 {
+        format!("-0x{:x}", -(v as i128))
+    } else {
+        format!("0x{:x}", v)
     }
 }
 
