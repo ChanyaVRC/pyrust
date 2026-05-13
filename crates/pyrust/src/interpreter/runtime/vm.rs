@@ -1982,16 +1982,36 @@ impl Interpreter {
             }
         };
 
-        // NativeIterFrame (returned by `iter()` on a built-in): close is a
-        // no-op — there's nothing user-visible to clean up.
+        // Re-entrancy guard: if the generator is currently executing (its
+        // state RefCell is already borrowed by an in-flight `resume_*` call),
+        // CPython raises ValueError("generator already executing") rather
+        // than panicking.  We detect this via `try_borrow_mut`.
         {
-            let mut borrow = state_rc.borrow_mut();
+            let mut borrow = match state_rc.try_borrow_mut() {
+                Ok(b) => b,
+                Err(_) => {
+                    return Err(PyError::named(
+                        "ValueError",
+                        "generator already executing".to_string(),
+                    ));
+                }
+            };
+            // NativeIterFrame (returned by `iter()` on a built-in): close is a
+            // no-op — there's nothing user-visible to clean up.
             if borrow.downcast_mut::<NativeIterFrame>().is_some() {
                 return Ok(Value::none());
             }
         }
 
-        let mut borrow = state_rc.borrow_mut();
+        let mut borrow = match state_rc.try_borrow_mut() {
+            Ok(b) => b,
+            Err(_) => {
+                return Err(PyError::named(
+                    "ValueError",
+                    "generator already executing".to_string(),
+                ));
+            }
+        };
         let frame = borrow
             .downcast_mut::<GeneratorFrame>()
             .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;
@@ -2053,23 +2073,42 @@ impl Interpreter {
         // hand it to the VM via `PyError::Raised`.  Accepts the same shapes as
         // a `raise` statement: an exception class (auto-instantiates) or an
         // exception instance.  CPython raises `TypeError` (not `RuntimeError`)
-        // when the argument is neither, so remap here.
+        // when the argument is neither, so remap that specific case here.
         let exc_val = self.coerce_to_exception(exc).map_err(|e| match e {
-            PyError::Runtime(msg) => PyError::named("TypeError", msg),
+            PyError::Runtime(ref msg) if msg.contains("exceptions must derive") => {
+                PyError::named("TypeError", msg.clone())
+            }
             other => other,
         })?;
 
-        // NativeIterFrame: throw at a built-in iterator simply propagates the
-        // exception (matching CPython, where the iterator has no Python frame
-        // to inject into).
+        // Re-entrancy guard: see generator_close for rationale.
         {
-            let mut borrow = state_rc.borrow_mut();
+            let mut borrow = match state_rc.try_borrow_mut() {
+                Ok(b) => b,
+                Err(_) => {
+                    return Err(PyError::named(
+                        "ValueError",
+                        "generator already executing".to_string(),
+                    ));
+                }
+            };
+            // NativeIterFrame: throw at a built-in iterator simply propagates
+            // the exception (matching CPython, where the iterator has no
+            // Python frame to inject into).
             if borrow.downcast_mut::<NativeIterFrame>().is_some() {
                 return Err(PyError::Raised(exc_val));
             }
         }
 
-        let mut borrow = state_rc.borrow_mut();
+        let mut borrow = match state_rc.try_borrow_mut() {
+            Ok(b) => b,
+            Err(_) => {
+                return Err(PyError::named(
+                    "ValueError",
+                    "generator already executing".to_string(),
+                ));
+            }
+        };
         let frame = borrow
             .downcast_mut::<GeneratorFrame>()
             .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;

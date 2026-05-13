@@ -110,3 +110,22 @@ try:
     print("throw-finally", "FAIL")
 except ValueError as e:
     print("throw-finally", "ValueError:" + str(e))
+
+# --- Re-entrant close — generator captures itself and tries to close while running ---
+container = []
+def reentrant():
+    try:
+        yield 1
+        container[0].close()  # would deadlock the RefCell; CPython: ValueError
+        yield 2
+    finally:
+        pass
+
+g = reentrant()
+container.append(g)
+next(g)
+try:
+    next(g)
+    print("reentrant-close", "FAIL")
+except ValueError:
+    print("reentrant-close", "ValueError")
