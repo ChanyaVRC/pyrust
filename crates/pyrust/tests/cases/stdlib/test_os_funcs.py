@@ -76,14 +76,13 @@ except KeyError:
     print("env-missing-delitem", "KeyError")
 
 # ── listdir on a known directory ─────────────────────────────────────
-# Use the system tmp dir — exists on both Linux and macOS, and on
-# Windows when the harness is run under WSL.  We assert structural
-# facts only (entries is a list of strings, length >= 0) so we don't
-# depend on what happens to be in /tmp at test time.
-tmp_entries = os.listdir("/tmp")
-print("listdir-is-list", isinstance(tmp_entries, list))
-print("listdir-nonneg", len(tmp_entries) >= 0)
+# Use the cwd ("."), guaranteed to exist on every platform.  Structural
+# assertions only (entries is a list of strings) so the test doesn't
+# depend on what happens to be alongside the script at run time.
+cwd_entries = os.listdir(".")
+print("listdir-is-list", isinstance(cwd_entries, list))
+print("listdir-nonneg", len(cwd_entries) >= 0)
 print(
     "listdir-all-strings",
-    all([isinstance(e, str) for e in tmp_entries]),
+    all([isinstance(e, str) for e in cwd_entries]),
 )

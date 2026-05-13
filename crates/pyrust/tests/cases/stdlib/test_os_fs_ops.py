@@ -18,13 +18,24 @@
 import os
 import os.path
 
-# Pick a tempdir name that's stable across CPython and pyrust runs of
-# the same script but very unlikely to collide with anyone else.  The
-# value of `__name__` for a top-level script is "__main__" in both
-# interpreters, so we can't use that; instead the script bakes its own
-# discriminator into the path.  Manually-chosen suffix is fine for an
-# initial landing.
-TMP_ROOT = "/tmp/pyrust-os-test-328"
+# Locate a writeable tempdir that exists on every CI platform — Linux
+# has /tmp; macOS has /tmp + TMPDIR; Windows CI has TEMP/TMP but no
+# /tmp.  Mirror the order tempfile.gettempdir() consults so behaviour
+# stays predictable across the parity harness.
+def _pick_tempdir_base():
+    for var in ("TMPDIR", "TEMP", "TMP"):
+        candidate = os.environ.get(var)
+        if candidate and os.path.isdir(candidate):
+            return candidate
+    if os.path.isdir("/tmp"):
+        return "/tmp"
+    # Last resort — the cwd is guaranteed to exist.  Concrete CI paths
+    # land in one of the env vars above, so this branch is for the
+    # extremely unusual case of no TMPDIR + no /tmp.
+    return "."
+
+
+TMP_ROOT = os.path.join(_pick_tempdir_base(), "pyrust-os-test-328")
 
 # Belt-and-suspenders cleanup of any leftover state from a prior run.
 def best_effort_cleanup(path):
@@ -36,7 +47,7 @@ def best_effort_cleanup(path):
     for dirpath, _dirs, files in walk:
         for f in files:
             try:
-                os.remove(dirpath + "/" + f)
+                os.remove(os.path.join(dirpath, f))
             except OSError:
                 pass
     walk = list(os.walk(path))
@@ -53,7 +64,7 @@ best_effort_cleanup(TMP_ROOT)
 os.mkdir(TMP_ROOT)
 print("mkdir-1", os.path.isdir(TMP_ROOT))
 
-deep = TMP_ROOT + "/a/b/c"
+deep = os.path.join(TMP_ROOT, "a", "b", "c")
 os.makedirs(deep)
 print("makedirs-1", os.path.isdir(deep))
 
@@ -72,8 +83,8 @@ except OSError:
 # pyrust doesn't yet have a plain `open(path, 'w')` write path here —
 # but the issue's scope is `os`, so we'll create files by way of a
 # `makedirs`-then-`open` flow that exists in both interpreters.
-f1 = deep + "/one.txt"
-f2 = deep + "/two.txt"
+f1 = os.path.join(deep, "one.txt")
+f2 = os.path.join(deep, "two.txt")
 
 # Write a file via the built-in `open` (lands in PR #290).
 with open(f1, "w") as h:
@@ -105,43 +116,51 @@ print("listdir-empty", os.listdir(deep))
 #         c/    (empty)
 #         f1
 #       f2
-with open(TMP_ROOT + "/a/f2", "w") as h:
+with open(os.path.join(TMP_ROOT, "a", "f2"), "w") as h:
     h.write("x")
-with open(TMP_ROOT + "/a/b/f1", "w") as h:
+with open(os.path.join(TMP_ROOT, "a", "b", "f1"), "w") as h:
     h.write("y")
 
-# Collect (path, sorted_subdirs, sorted_files) so the comparison is
-# stable across `read_dir` permutations.  pyrust's parser currently
-# trips on a comment that's the first line inside an indented block
-# (issue tracked separately), so the body of the loop sticks to
-# executable statements.
+# Collect (relpath_under_root, sorted_subdirs, sorted_files) so the
+# comparison is stable across `read_dir` permutations AND across
+# platforms whose separator differs.  pyrust's parser currently trips
+# on a comment that's the first line inside an indented block (issue
+# tracked separately), so the body of the loop sticks to executable
+# statements.
+# Build `norm` entries as (tail_under_root, sorted_dirs, sorted_files).
+# `tail` is the suffix below TMP_ROOT in forward-slash form so the
+# output is stable across platforms whose path separator differs
+# (Windows backslashes don't leak into the expected output).
 norm = []
 for dirpath, dirs, files in os.walk(TMP_ROOT):
-    norm.append((dirpath, sorted(dirs), sorted(files)))
+    tail = dirpath[len(TMP_ROOT):].replace("\\", "/")
+    if tail.startswith("/"):
+        tail = tail[1:]
+    norm.append((tail, sorted(dirs), sorted(files)))
 norm.sort()
 for entry in norm:
     print("walk", entry)
 
 # ── teardown ─────────────────────────────────────────────────────────
 # Order matters — remove files first, then directories bottom-up.
-os.remove(TMP_ROOT + "/a/f2")
-os.remove(TMP_ROOT + "/a/b/f1")
-os.rmdir(TMP_ROOT + "/a/b/c")
-os.rmdir(TMP_ROOT + "/a/b")
-os.rmdir(TMP_ROOT + "/a")
+os.remove(os.path.join(TMP_ROOT, "a", "f2"))
+os.remove(os.path.join(TMP_ROOT, "a", "b", "f1"))
+os.rmdir(os.path.join(TMP_ROOT, "a", "b", "c"))
+os.rmdir(os.path.join(TMP_ROOT, "a", "b"))
+os.rmdir(os.path.join(TMP_ROOT, "a"))
 os.rmdir(TMP_ROOT)
 print("teardown", not os.path.exists(TMP_ROOT))
 
 # ── error: remove a missing file → OSError ───────────────────────────
 try:
-    os.remove(TMP_ROOT + "/nope")
+    os.remove(os.path.join(TMP_ROOT, "nope"))
     print("remove-missing", "FAIL-no-error")
 except OSError:
     print("remove-missing", "OSError")
 
 # ── error: rmdir on a missing dir → OSError ──────────────────────────
 try:
-    os.rmdir(TMP_ROOT + "/nope")
+    os.rmdir(os.path.join(TMP_ROOT, "nope"))
     print("rmdir-missing", "FAIL-no-error")
 except OSError:
     print("rmdir-missing", "OSError")
