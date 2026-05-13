@@ -18,7 +18,7 @@ use std::rc::Rc;
 use crate::ast::BinaryOp;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
-use crate::interpreter::builtin_args::{PyBool, PyFloat, PyInt, PyStr, PyValue};
+use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
     NativeIterFrame, apply_format_spec, ascii_repr, class_is_subclass_of, compare_values,
     dir_names, invoke_class_method, is_exception_class, iter_values, lookup_class_attr,
@@ -31,69 +31,100 @@ use pyrust_derive::pyrust_module;
 pyrust_module! {
     /// CPython: chr(i) — return the string of one Unicode codepoint i.
     /// <https://docs.python.org/3/library/functions.html#chr>
-    fn chr(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
-        }
-        let code_point = match args[0].value.kind() {
-            ValueKind::Int(v) => v,
-            ValueKind::Bool(b) => b as i64,
-            _ => return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "an integer is required (got type {})",
-                    value_type_name_str(&args[0].value),
-                ),
-            )),
-        };
-        if !(0..=1114111).contains(&code_point) {
-            return Err(PyError::named(
-                "ValueError",
-                format!("{FN_NAME}() arg not in range(0x110000): {code_point}"),
-            ));
-        }
-        let ch = char::from_u32(code_point as u32).ok_or_else(|| {
-            PyError::named(
-                "ValueError",
-                format!("{FN_NAME}() arg not in range(0x110000): {code_point}"),
-            )
-        })?;
-        Ok(Value::string(ch.to_string()))
+    ///
+    /// Migrated to the typed-signature dialect (#400) as a three-element
+    /// overload set: `PyInt` is the primary path; `PyBool` mirrors
+    /// CPython's `bool ⊆ int` subtyping (`chr(True) == '\x01'`), since
+    /// strict `PyInt` doesn't auto-coerce `bool` in the typed dialect.
+    /// A trailing `PyValue` catch-all preserves the legacy
+    /// `"an integer is required (got type X)"` TypeError verbatim — the
+    /// macro's default "unsupported argument type(s)" fallback would
+    /// drift from that canonical wording.  All parameters are
+    /// `#[positional_only]` so the macro's positional-only fast-path
+    /// applies (no kwarg-validation work).  Bignum inputs raise
+    /// `OverflowError` via `PyInt::expect_i64` *before* the range
+    /// check — a deliberate CPython-parity improvement over the
+    /// legacy body, which raised `ValueError("chr() arg not in
+    /// range(0x110000)")` via the range check.  Modern CPython
+    /// raises `OverflowError` here too (compare `hex(bignum)`
+    /// behaviour above).
+    fn chr(#[positional_only] i: PyInt) -> Result<Value> {
+        let code_point = i.expect_i64(FN_NAME, "i")?;
+        chr_from_code_point(code_point)
+    }
+
+    fn chr(#[positional_only] i: PyBool) -> Result<Value> {
+        // CPython: `chr(True) == '\x01'`, `chr(False) == '\x00'`.
+        chr_from_code_point(if i.0 { 1 } else { 0 })
+    }
+
+    fn chr(#[positional_only] i: PyValue) -> Result<Value> {
+        Err(PyError::named(
+            "TypeError",
+            format!(
+                "an integer is required (got type {})",
+                value_type_name_str(&i.0),
+            ),
+        ))
     }
 
     /// CPython: ord(c) — return the Unicode codepoint of a one-character string.
     /// <https://docs.python.org/3/library/functions.html#ord>
-    fn ord(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
-        }
-        match args[0].value.kind() {
-            ValueKind::Str(s) => {
-                let mut chars = s.chars();
-                let first = chars.next();
-                let second = chars.next();
-                match (first, second) {
-                    (Some(c), None) => Ok(Value::int(c as i64)),
-                    (None, _) => Err(PyError::named(
-                        "TypeError",
-                        format!("{FN_NAME}() expected a character, but string of length 0 found"),
-                    )),
-                    (Some(_), Some(_)) => Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "{FN_NAME}() expected a character, but string of length {} found",
-                            s.chars().count()
-                        ),
-                    )),
-                }
-            }
-            _ => Err(PyError::named(
+    ///
+    /// Migrated to the typed-signature dialect (#400) as a three-element
+    /// overload set: `PyStr` is the primary path; `PyBytes` mirrors
+    /// CPython's acceptance of one-byte bytes (`ord(b"A") == 65`); a
+    /// trailing `PyValue` catch-all preserves the legacy
+    /// `"expected string of length 1, but got non-string"` TypeError
+    /// verbatim.  Length-mismatch wording on the `PyStr` overload is also
+    /// preserved verbatim from the legacy body so parity output is
+    /// stable.  All parameters are `#[positional_only]` so the macro's
+    /// positional-only fast-path applies.  The `PyBytes` overload is a
+    /// new CPython-parity feature — the legacy body rejected `bytes`
+    /// outright, but CPython has always accepted a 1-byte `bytes`
+    /// (`ord(b"A") == 65`).
+    fn ord(#[positional_only] c: PyStr) -> Result<Value> {
+        let s: &str = &c;
+        let mut chars = s.chars();
+        let first = chars.next();
+        let second = chars.next();
+        match (first, second) {
+            (Some(ch), None) => Ok(Value::int(ch as i64)),
+            (None, _) => Err(PyError::named(
                 "TypeError",
-                format!("{FN_NAME}() expected string of length 1, but got non-string"),
+                format!("{FN_NAME}() expected a character, but string of length 0 found"),
+            )),
+            (Some(_), Some(_)) => Err(PyError::named(
+                "TypeError",
+                format!(
+                    "{FN_NAME}() expected a character, but string of length {} found",
+                    s.chars().count()
+                ),
             )),
         }
+    }
+
+    fn ord(#[positional_only] c: PyBytes) -> Result<Value> {
+        // CPython: `ord(b"A") == 65`; reject empty/multi-byte with the
+        // same wording shape used by the `PyStr` overload above.
+        match c.0.as_slice() {
+            [b] => Ok(Value::int(*b as i64)),
+            other => Err(PyError::named(
+                "TypeError",
+                format!(
+                    "{FN_NAME}() expected a character, but string of length {} found",
+                    other.len()
+                ),
+            )),
+        }
+    }
+
+    fn ord(#[positional_only] c: PyValue) -> Result<Value> {
+        let _ = c;
+        Err(PyError::named(
+            "TypeError",
+            format!("{FN_NAME}() expected string of length 1, but got non-string"),
+        ))
     }
 
     /// CPython: bin(x) — integer to '0b…' / '-0b…' string.
@@ -1801,6 +1832,26 @@ fn format_hex_i64(v: i64) -> String {
     } else {
         format!("0x{:x}", v)
     }
+}
+
+/// Validate a codepoint and return the corresponding single-char `str`
+/// `Value`.  Shared by the `PyInt` and `PyBool` overloads of the typed
+/// `chr` builtin (#400).  Out-of-range codepoints raise `ValueError`
+/// with CPython-style wording preserved verbatim from the legacy body.
+fn chr_from_code_point(code_point: i64) -> Result<Value> {
+    if !(0..=1114111).contains(&code_point) {
+        return Err(PyError::named(
+            "ValueError",
+            format!("chr() arg not in range(0x110000): {code_point}"),
+        ));
+    }
+    let ch = char::from_u32(code_point as u32).ok_or_else(|| {
+        PyError::named(
+            "ValueError",
+            format!("chr() arg not in range(0x110000): {code_point}"),
+        )
+    })?;
+    Ok(Value::string(ch.to_string()))
 }
 
 /// Format an i64 as Python's `bin()` output — `"0bN"` / `"-0bN"`.  Used
