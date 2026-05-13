@@ -41,7 +41,13 @@ pyrust_module! {
     /// macro's default "unsupported argument type(s)" fallback would
     /// drift from that canonical wording.  All parameters are
     /// `#[positional_only]` so the macro's positional-only fast-path
-    /// applies (no kwarg-validation work).
+    /// applies (no kwarg-validation work).  Bignum inputs raise
+    /// `OverflowError` via `PyInt::expect_i64` *before* the range
+    /// check — a deliberate CPython-parity improvement over the
+    /// legacy body, which raised `ValueError("chr() arg not in
+    /// range(0x110000)")` via the range check.  Modern CPython
+    /// raises `OverflowError` here too (compare `hex(bignum)`
+    /// behaviour above).
     fn chr(#[positional_only] i: PyInt) -> Result<Value> {
         let code_point = i.expect_i64(FN_NAME, "i")?;
         chr_from_code_point(code_point)
@@ -73,7 +79,10 @@ pyrust_module! {
     /// verbatim.  Length-mismatch wording on the `PyStr` overload is also
     /// preserved verbatim from the legacy body so parity output is
     /// stable.  All parameters are `#[positional_only]` so the macro's
-    /// positional-only fast-path applies.
+    /// positional-only fast-path applies.  The `PyBytes` overload is a
+    /// new CPython-parity feature — the legacy body rejected `bytes`
+    /// outright, but CPython has always accepted a 1-byte `bytes`
+    /// (`ord(b"A") == 65`).
     fn ord(#[positional_only] c: PyStr) -> Result<Value> {
         let s: &str = &c;
         let mut chars = s.chars();
