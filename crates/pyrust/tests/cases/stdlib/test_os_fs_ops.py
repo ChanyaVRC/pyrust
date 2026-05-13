@@ -3,17 +3,16 @@
 #
 # Issue #328: every fs op talks to `std::fs` and surfaces failures as
 # `OSError`.  This script exercises the happy path end-to-end inside
-# a per-run unique temp directory; cleanup is part of the script, not
+# a fixed-name temp directory; cleanup is part of the script, not
 # the test runner, so a failure mid-script doesn't leave litter.
 #
-# The unique-temp-dir suffix is derived from a hash of the file's
-# bytes plus the script's own identity — there's no `os.getpid()` in
-# pyrust yet (#TODO), and a hard-coded suffix would race with concurrent
-# CPython parity runs.  Hash-of-cwd is stable across the two
-# interpreters under the harness (both are invoked with the same
-# cwd) and stable across re-runs of the same harness, so leftover
-# state from a previous run is reused-then-replaced rather than
-# colliding.
+# The temp-dir name is a fixed `pyrust-os-test-328` — the harness runs
+# parity scripts sequentially, so collisions between the CPython and
+# pyrust runs on the same machine don't occur.  Re-runs reuse the same
+# directory after the `best_effort_cleanup` below clears it.  Parallel
+# runs of this script outside the harness would conflict; we accept
+# that to keep the path string identical across the two interpreters,
+# which simplifies parity comparison.
 
 import os
 import os.path

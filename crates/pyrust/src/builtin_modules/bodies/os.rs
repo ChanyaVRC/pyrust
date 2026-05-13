@@ -31,6 +31,13 @@
 // builtin-function lookup path) while letting us hand-build the
 // class + singleton in one step.
 //
+// Reads use `std::env::var_os` (returns `Option<OsString>`) rather
+// than `std::env::var`, which would force us to disambiguate
+// `VarError::NotPresent` from `VarError::NotUnicode`.  A non-UTF-8
+// env var is surfaced via `to_string_lossy`, so `os.environ['FOO']`
+// always returns a `str`.  Writes go through `set_var` / `remove_var`
+// under `ENV_LOCK` (see below) to serialise pyrust-side env mutation.
+//
 // ## Submodule identity (carried over from PR #327)
 //
 // The `path` constant evaluates `super::os_path::module()`, which
@@ -53,8 +60,21 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::{LazyLock, Mutex};
 
 use crate::error::{PyError, Result};
+
+/// Process-global lock guarding every read and write of the env via
+/// this module.  `std::env::set_var` / `remove_var` are `unsafe` in
+/// modern Rust editions because env mutation isn't thread-safe even
+/// from Rust's perspective — linked C libraries, allocators, and
+/// signal handlers may concurrently read the env block.  pyrust runs
+/// its interpreter single-threaded today, but a per-module mutex is
+/// cheap insurance: it serialises every pyrust-side env access so at
+/// least the calls we control don't race each other.  It is *not* a
+/// guarantee against races with other threads in the process that
+/// don't go through this lock (best-effort).
+static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::reject_keyword_args_expanded;
 use crate::interpreter::{NativeIterFrame, value_type_name_str};
@@ -109,21 +129,80 @@ pyrust_module! {
     /// unset.
     /// <https://docs.python.org/3/library/os.html#os.getenv>
     fn getenv(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.is_empty() || args.len() > 2 {
-            return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}() takes 1 or 2 arguments ({} given)", args.len()),
-            ));
+        // CPython's `os.getenv(key, default=None)` accepts both
+        // positionally and by keyword (`os.getenv(key='PATH')`).  Walk
+        // the args once, tracking which slot each entry filled, and
+        // reject duplicates / unknown kwargs.
+        let mut key_value: Option<Value> = None;
+        let mut default_value: Option<Value> = None;
+        let mut key_from_kw = false;
+        let mut default_from_kw = false;
+        for (i, a) in args.iter().enumerate() {
+            match a.name.as_deref() {
+                Some("key") => {
+                    if key_value.is_some() {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!("{FN_NAME}() got multiple values for argument 'key'"),
+                        ));
+                    }
+                    key_value = Some(a.value.clone());
+                    key_from_kw = true;
+                }
+                Some("default") => {
+                    if default_value.is_some() {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "{FN_NAME}() got multiple values for argument 'default'"
+                            ),
+                        ));
+                    }
+                    default_value = Some(a.value.clone());
+                    default_from_kw = true;
+                }
+                Some(other) => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "{FN_NAME}() got an unexpected keyword argument '{other}'",
+                        ),
+                    ));
+                }
+                None => match i {
+                    0 if !key_from_kw => {
+                        key_value = Some(a.value.clone());
+                    }
+                    1 if !default_from_kw => {
+                        default_value = Some(a.value.clone());
+                    }
+                    _ => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "{FN_NAME}() takes 1 or 2 arguments ({} given)",
+                                args.len()
+                            ),
+                        ));
+                    }
+                },
+            }
         }
-        let key = require_str(FN_NAME, &args[0].value, "key")?;
-        let default = args
-            .get(1)
-            .map(|a| a.value.clone())
-            .unwrap_or_else(Value::none);
-        match std::env::var(&key) {
-            Ok(v) => Ok(Value::string(v)),
-            Err(_) => Ok(default),
+        let key_value = key_value.ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() missing required argument: 'key'"),
+            )
+        })?;
+        let key = require_str(FN_NAME, &key_value, "key")?;
+        let default = default_value.unwrap_or_else(Value::none);
+        // `var_os` sidesteps `VarError`'s NotPresent/NotUnicode split:
+        // any non-UTF-8 env var is decoded lossily so the result is
+        // always a `str`.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        match std::env::var_os(&key) {
+            Some(v) => Ok(Value::string(v.to_string_lossy().into_owned())),
+            None => Ok(default),
         }
     }
 
@@ -191,7 +270,9 @@ pyrust_module! {
     fn makedirs(args) -> Result<Value> {
         // Keyword-arg shape (`exist_ok=True`) is common — preserve it.
         // The fast positional-only path stays a tight loop, and we
-        // pull `exist_ok` out of either position 2 or a kw entry.
+        // pull `mode` / `exist_ok` from either positional slot or kw
+        // entry, rejecting duplicates the way CPython does (TypeError
+        // "got multiple values for argument 'X'").
         if args.is_empty() {
             return Err(PyError::named(
                 "TypeError",
@@ -200,15 +281,35 @@ pyrust_module! {
         }
         let path = require_str(FN_NAME, &args[0].value, "path")?;
         let mut exist_ok = false;
-        let mut seen_mode = false;
+        let mut seen_mode_positional = false;
+        let mut seen_mode_keyword = false;
+        let mut seen_exist_ok_positional = false;
+        let mut seen_exist_ok_keyword = false;
         for (i, a) in args.iter().enumerate().skip(1) {
             match a.name.as_deref() {
                 Some("mode") => {
+                    if seen_mode_positional || seen_mode_keyword {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "{FN_NAME}() got multiple values for argument 'mode'",
+                            ),
+                        ));
+                    }
                     require_int(FN_NAME, &a.value, "mode")?;
-                    seen_mode = true;
+                    seen_mode_keyword = true;
                 }
                 Some("exist_ok") => {
+                    if seen_exist_ok_positional || seen_exist_ok_keyword {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "{FN_NAME}() got multiple values for argument 'exist_ok'",
+                            ),
+                        ));
+                    }
                     exist_ok = value_is_truthy(&a.value);
+                    seen_exist_ok_keyword = true;
                 }
                 Some(other) => {
                     return Err(PyError::named(
@@ -219,12 +320,13 @@ pyrust_module! {
                     ));
                 }
                 None => match i {
-                    1 if !seen_mode => {
+                    1 if !seen_mode_positional && !seen_mode_keyword => {
                         require_int(FN_NAME, &a.value, "mode")?;
-                        seen_mode = true;
+                        seen_mode_positional = true;
                     }
-                    2 => {
+                    2 if !seen_exist_ok_positional && !seen_exist_ok_keyword => {
                         exist_ok = value_is_truthy(&a.value);
+                        seen_exist_ok_positional = true;
                     }
                     _ => {
                         return Err(PyError::named(
@@ -239,12 +341,17 @@ pyrust_module! {
         // `create_dir_all` already returns Ok on pre-existing
         // directories, but CPython raises FileExistsError when
         // `exist_ok=False` and the leaf already exists — recreate that
-        // branch by probing the target up front.
+        // branch by probing the target up front, then provoking the
+        // real OS error from `create_dir` so the message + errno match
+        // the underlying platform (no hard-coded English in the path).
         if !exist_ok && std::path::Path::new(&path).exists() {
-            return Err(PyError::named(
-                "OSError",
-                format!("[Errno 17] File exists: '{path}'"),
-            ));
+            // Race window: if the path disappears between `exists()`
+            // and `create_dir`, `create_dir` returns Ok — treat that as
+            // success rather than fabricating an error.
+            return match std::fs::create_dir(&path) {
+                Ok(()) => Ok(Value::none()),
+                Err(e) => Err(PyError::named("OSError", e.to_string())),
+            };
         }
         std::fs::create_dir_all(&path)
             .map_err(|e| PyError::named("OSError", e.to_string()))?;
@@ -329,11 +436,15 @@ pyrust_module! {
     #[py_name = "_Environ.__getitem__"]
     fn environ_getitem(args) -> Result<Value> {
         let key = require_key_arg(FN_NAME, args)?;
-        match std::env::var(&key) {
-            Ok(v) => Ok(Value::string(v)),
-            // Missing env var maps to KeyError (CPython parity — `os.environ`
-            // is a Mapping, not a defaulting view).
-            Err(_) => Err(PyError::named("KeyError", format!("'{key}'"))),
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // `var_os` returns `Option<OsString>`; a non-unicode value is
+        // surfaced via lossy decode rather than the awkward
+        // `VarError::NotUnicode` branch that `std::env::var` exposes.
+        // Missing env var maps to KeyError (CPython parity — `os.environ`
+        // is a Mapping, not a defaulting view).
+        match std::env::var_os(&key) {
+            Some(v) => Ok(Value::string(v.to_string_lossy().into_owned())),
+            None => Err(PyError::named("KeyError", format!("'{key}'"))),
         }
     }
 
@@ -349,9 +460,12 @@ pyrust_module! {
         let key = require_str(FN_NAME, &args[1].value, "key")?;
         let value = require_str(FN_NAME, &args[2].value, "value")?;
         // SAFETY: `std::env::set_var` is marked unsafe in newer Rust
-        // editions because the process env isn't thread-safe.  pyrust
-        // runs the interpreter single-threaded, so the soundness
-        // precondition holds.  Mirror CPython's straight-through write.
+        // editions because the process env isn't thread-safe.  We
+        // serialise every pyrust-side env access through `ENV_LOCK`
+        // so concurrent calls from within pyrust don't race; this is
+        // best-effort against threads in other linked libraries that
+        // don't take this lock.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::set_var(&key, &value) };
         Ok(Value::none())
     }
@@ -361,7 +475,11 @@ pyrust_module! {
         let key = require_key_arg(FN_NAME, args)?;
         // CPython raises KeyError on delete-of-missing — match that by
         // probing first, since `remove_var` itself is infallible.
-        if std::env::var(&key).is_err() {
+        // SAFETY: see `environ_setitem` — same `ENV_LOCK` guard
+        // covers the probe-then-remove pair so the two halves can't be
+        // interleaved with another pyrust-side write.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        if std::env::var_os(&key).is_none() {
             return Err(PyError::named("KeyError", format!("'{key}'")));
         }
         unsafe { std::env::remove_var(&key) };
@@ -371,7 +489,11 @@ pyrust_module! {
     #[py_name = "_Environ.__contains__"]
     fn environ_contains(args) -> Result<Value> {
         let key = require_key_arg(FN_NAME, args)?;
-        Ok(Value::bool_(std::env::var(&key).is_ok()))
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // `var_os` returns None only for genuinely-missing keys —
+        // `var`'s `NotUnicode` branch would have falsely reported a
+        // present-but-non-UTF-8 var as absent.
+        Ok(Value::bool_(std::env::var_os(&key).is_some()))
     }
 
     #[py_name = "_Environ.__iter__"]
@@ -436,9 +558,10 @@ pyrust_module! {
             .get(2)
             .map(|a| a.value.clone())
             .unwrap_or_else(Value::none);
-        match std::env::var(&key) {
-            Ok(v) => Ok(Value::string(v)),
-            Err(_) => Ok(default),
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        match std::env::var_os(&key) {
+            Some(v) => Ok(Value::string(v.to_string_lossy().into_owned())),
+            None => Ok(default),
         }
     }
 
@@ -640,8 +763,8 @@ fn walk_collect(dir: &str, out: &mut Vec<Value>) -> Result<()> {
 thread_local! {
     static ENVIRON_CLASS: Rc<RefCell<PyClass>> = {
         let mut attrs: HashMap<String, Value> = HashMap::new();
-        for (short, py_full) in environ_method_table() {
-            attrs.insert(short.to_string(), Value::builtin_function(py_full));
+        for (short, py_full) in ENVIRON_METHODS {
+            attrs.insert((*short).to_string(), Value::builtin_function(py_full));
         }
         Rc::new(RefCell::new(PyClass {
             name: "_Environ".to_string(),
@@ -653,34 +776,24 @@ thread_local! {
 
 /// (method-short, registry-name) pairs for every `_Environ` method.
 ///
-/// The full names are leaked once via `Box::leak` so we can hand them
-/// to `Value::builtin_function`, which wants `&'static str`.  Cost is
-/// one tiny per-method allocation across the whole process lifetime;
-/// the alternative (string-literal `&'static`s baked in here) would
-/// double the source of truth — once in the `#[py_name]` annotations
-/// above, once here.
-fn environ_method_table() -> Vec<(&'static str, &'static str)> {
-    let shorts = [
-        "__getitem__",
-        "__setitem__",
-        "__delitem__",
-        "__contains__",
-        "__iter__",
-        "__len__",
-        "__repr__",
-        "get",
-        "keys",
-        "values",
-        "items",
-    ];
-    shorts
-        .iter()
-        .map(|s| {
-            let full: &'static str = Box::leak(format!("os._Environ.{s}").into_boxed_str());
-            (*s, full)
-        })
-        .collect()
-}
+/// Static, so there's no `Box::leak` and no per-thread init cost.  The
+/// registry names must match the `#[py_name = "_Environ.<method>"]`
+/// annotations on the dispatch fns above — the `FN_PREFIX` injected by
+/// `pyrust_builtin_modules!` resolves to `"os."`, so the full
+/// registry path is `"os._Environ.<method>"`.
+const ENVIRON_METHODS: &[(&str, &str)] = &[
+    ("__getitem__", "os._Environ.__getitem__"),
+    ("__setitem__", "os._Environ.__setitem__"),
+    ("__delitem__", "os._Environ.__delitem__"),
+    ("__contains__", "os._Environ.__contains__"),
+    ("__iter__", "os._Environ.__iter__"),
+    ("__len__", "os._Environ.__len__"),
+    ("__repr__", "os._Environ.__repr__"),
+    ("get", "os._Environ.get"),
+    ("keys", "os._Environ.keys"),
+    ("values", "os._Environ.values"),
+    ("items", "os._Environ.items"),
+];
 
 /// Construct the `os.environ` singleton.  Called from the constants
 /// block on every `module()` invocation, which the interpreter calls
