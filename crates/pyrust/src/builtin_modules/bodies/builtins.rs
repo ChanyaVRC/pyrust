@@ -129,55 +129,64 @@ pyrust_module! {
 
     /// CPython: bin(x) — integer to '0b…' / '-0b…' string.
     /// <https://docs.python.org/3/library/functions.html#bin>
-    fn bin(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
-        }
-        match args[0].value.kind() {
-            ValueKind::Int(v) => {
-                if v < 0 {
-                    // Widen to i128 first so `i64::MIN.abs()` doesn't overflow.
-                    Ok(Value::string(format!("-0b{:b}", -(v as i128))))
-                } else {
-                    Ok(Value::string(format!("0b{:b}", v)))
-                }
-            }
-            ValueKind::Bool(b) => Ok(Value::string(if b { "0b1".to_string() } else { "0b0".to_string() })),
-            _ => Err(PyError::named(
-                "TypeError",
-                format!(
-                    "'{}' object cannot be interpreted as an integer",
-                    value_type_name_str(&args[0].value),
-                ),
-            )),
-        }
+    ///
+    /// Migrated to the typed-signature dialect (#400) mirroring `hex`'s
+    /// 3-overload pattern: `PyInt` is the primary path, `PyBool` mirrors
+    /// CPython's `bool ⊆ int` subtyping, and a trailing `PyValue`
+    /// catch-all reproduces CPython's exact "'X' object cannot be
+    /// interpreted as an integer" TypeError wording verbatim.
+    /// Bignums not yet supported; raises `OverflowError` if `x` doesn't
+    /// fit in i64 (deliberate divergence from CPython, tracked as
+    /// follow-up under #400).
+    fn bin(#[positional_only] x: PyInt) -> Result<Value> {
+        let v = x.expect_i64(FN_NAME, "x")?;
+        Ok(Value::string(format_bin_i64(v)))
+    }
+
+    fn bin(#[positional_only] x: PyBool) -> Result<Value> {
+        // CPython: `bin(True) == '0b1'`, `bin(False) == '0b0'`.
+        Ok(Value::string(format_bin_i64(if x.0 { 1 } else { 0 })))
+    }
+
+    fn bin(#[positional_only] x: PyValue) -> Result<Value> {
+        Err(PyError::named(
+            "TypeError",
+            format!(
+                "'{}' object cannot be interpreted as an integer",
+                value_type_name_str(&x.0),
+            ),
+        ))
     }
 
     /// CPython: oct(x) — integer to '0o…' / '-0o…' string.
     /// <https://docs.python.org/3/library/functions.html#oct>
-    fn oct(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
-        }
-        match args[0].value.kind() {
-            ValueKind::Int(v) => {
-                if v < 0 {
-                    Ok(Value::string(format!("-0o{:o}", -(v as i128))))
-                } else {
-                    Ok(Value::string(format!("0o{:o}", v)))
-                }
-            }
-            ValueKind::Bool(b) => Ok(Value::string(if b { "0o1".to_string() } else { "0o0".to_string() })),
-            _ => Err(PyError::named(
-                "TypeError",
-                format!(
-                    "'{}' object cannot be interpreted as an integer",
-                    value_type_name_str(&args[0].value),
-                ),
-            )),
-        }
+    ///
+    /// Migrated to the typed-signature dialect (#400) mirroring `hex`'s
+    /// 3-overload pattern: `PyInt` is the primary path, `PyBool` mirrors
+    /// CPython's `bool ⊆ int` subtyping, and a trailing `PyValue`
+    /// catch-all reproduces CPython's exact "'X' object cannot be
+    /// interpreted as an integer" TypeError wording verbatim.
+    /// Bignums not yet supported; raises `OverflowError` if `x` doesn't
+    /// fit in i64 (deliberate divergence from CPython, tracked as
+    /// follow-up under #400).
+    fn oct(#[positional_only] x: PyInt) -> Result<Value> {
+        let v = x.expect_i64(FN_NAME, "x")?;
+        Ok(Value::string(format_oct_i64(v)))
+    }
+
+    fn oct(#[positional_only] x: PyBool) -> Result<Value> {
+        // CPython: `oct(True) == '0o1'`, `oct(False) == '0o0'`.
+        Ok(Value::string(format_oct_i64(if x.0 { 1 } else { 0 })))
+    }
+
+    fn oct(#[positional_only] x: PyValue) -> Result<Value> {
+        Err(PyError::named(
+            "TypeError",
+            format!(
+                "'{}' object cannot be interpreted as an integer",
+                value_type_name_str(&x.0),
+            ),
+        ))
     }
 
     /// CPython: hex(x) — integer to '0x…' / '-0x…' string.
@@ -1530,16 +1539,28 @@ pyrust_module! {
 
     /// CPython: bool(x=False) — bool constructor.
     /// <https://docs.python.org/3/library/functions.html#bool>
-    fn bool(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        match args.len() {
-            0 => Ok(Value::bool_(false)),
-            1 => {
-                let val = args[0].value.clone();
-                let result = _interp.truthy_value(&val)?;
+    ///
+    /// Migrated to the typed-signature dialect (#400).  `Option<PyValue>`
+    /// + `#[default(None)]` is the natural shape for a single optional
+    /// positional: `None` means "no arg" → False, `Some(v)` means
+    /// "compute truthiness of v".  Conflating `bool()` with `bool(None)`
+    /// is safe because CPython's truthiness of `None` is also False, so
+    /// both paths land on the same answer.
+    fn bool(
+        #[positional_only]
+        #[default(None)]
+        x: Option<PyValue>,
+    ) -> Result<Value> {
+        match x {
+            // No-arg path returns `Value::bool_(false)` directly, skipping
+            // `_interp.truthy_value`.  This is equivalent (not incidental):
+            // `truthy_value(&Value::none())` would also resolve to False and
+            // has no observable side effects, so the shortcut is intentional.
+            None => Ok(Value::bool_(false)),
+            Some(v) => {
+                let result = _interp.truthy_value(&v.0)?;
                 Ok(Value::bool_(result))
             }
-            _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most one argument"))),
         }
     }
 
@@ -1614,20 +1635,21 @@ pyrust_module! {
 
     /// CPython: format(value[, format_spec]).
     /// <https://docs.python.org/3/library/functions.html#format>
-    fn format(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        let (value, spec) = match args.len() {
-            1 => (args[0].value.clone(), String::new()),
-            2 => {
-                let value = args[0].value.clone();
-                let spec = match args[1].value.kind() {
-                    ValueKind::Str(s) => s.to_string(),
-                    _ => return Err(PyError::Runtime("format spec must be a string".to_string())),
-                };
-                (value, spec)
-            }
-            _ => return Err(PyError::Runtime(format!("{FN_NAME}() takes 1 or 2 arguments"))),
-        };
+    ///
+    /// Migrated to the typed-signature dialect (#400).  Both params are
+    /// `#[positional_only]` so the macro emits the fast-path prelude that
+    /// skips kwarg validation entirely.  The optional `format_spec` is
+    /// encoded as `Option<PyStr>` — absent → `None` (treated as `""`),
+    /// present-and-str → `Some(PyStr)`, present-and-non-str → the typed
+    /// dialect's standard "must be str or None" TypeError.
+    fn format(
+        #[positional_only] value: PyValue,
+        #[positional_only]
+        #[default(None)]
+        format_spec: Option<PyStr>,
+    ) -> Result<Value> {
+        let value = &value.0;
+        let spec: &str = format_spec.as_ref().map(|s| s.as_ref()).unwrap_or("");
         // Dispatch __format__(spec) for user instances.
         if let ValueKind::PyInstance(instance) = value.kind() {
             let instance_rc = Rc::clone(instance);
@@ -1639,7 +1661,7 @@ pyrust_module! {
                     Value::py_instance(instance_rc),
                     &[ExpandedCallArg {
                         name: None,
-                        value: Value::string(spec.clone()),
+                        value: Value::string(spec),
                     }],
                 )?;
                 return match result.kind() {
@@ -1654,7 +1676,7 @@ pyrust_module! {
                 };
             }
         }
-        apply_format_spec(&value, &spec)
+        apply_format_spec(value, spec)
     }
 
     /// CPython: classmethod(function) — class-method descriptor.
@@ -1771,12 +1793,13 @@ pyrust_module! {
 
     /// CPython: callable(object) — true if the object is callable.
     /// <https://docs.python.org/3/library/functions.html#callable>
-    fn callable(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
-        }
-        let is_callable = match args[0].value.kind() {
+    ///
+    /// Migrated to the typed-signature dialect (#400).  Mirrors `ascii`
+    /// / `id`: a single-body `PyValue` catch-all, since `callable`
+    /// accepts every Python object and never raises `TypeError`.
+    fn callable(#[positional_only] obj: PyValue) -> Result<Value> {
+        let value = &obj.0;
+        let is_callable = match value.kind() {
             ValueKind::UserFunction(_)
             | ValueKind::BuiltinFunction(_)
             | ValueKind::BoundMethod { .. }
@@ -1786,7 +1809,7 @@ pyrust_module! {
             // prop.setter / prop.getter / prop.deleter) are callable —
             // a plain property descriptor isn't.
             ValueKind::BuiltinObject { .. } => {
-                pyrust_builtins::property::property_partial_slot(&args[0].value)
+                pyrust_builtins::property::property_partial_slot(value)
                     .is_some_and(|slot| slot.is_some())
             }
             ValueKind::PyInstance(inst) => {
@@ -1829,6 +1852,30 @@ fn chr_from_code_point(code_point: i64) -> Result<Value> {
         )
     })?;
     Ok(Value::string(ch.to_string()))
+}
+
+/// Format an i64 as Python's `bin()` output — `"0bN"` / `"-0bN"`.  Used
+/// by both the `PyInt` and `PyBool` overloads of the typed `bin`
+/// builtin (#400).  Widens through i128 first so `i64::MIN.abs()`
+/// doesn't overflow.
+fn format_bin_i64(v: i64) -> String {
+    if v < 0 {
+        format!("-0b{:b}", -(v as i128))
+    } else {
+        format!("0b{:b}", v)
+    }
+}
+
+/// Format an i64 as Python's `oct()` output — `"0oN"` / `"-0oN"`.  Used
+/// by both the `PyInt` and `PyBool` overloads of the typed `oct`
+/// builtin (#400).  Widens through i128 first so `i64::MIN.abs()`
+/// doesn't overflow.
+fn format_oct_i64(v: i64) -> String {
+    if v < 0 {
+        format!("-0o{:o}", -(v as i128))
+    } else {
+        format!("0o{:o}", v)
+    }
 }
 
 /// Shared implementation for `min` / `max` — both accept the same
