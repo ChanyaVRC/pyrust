@@ -742,6 +742,7 @@ fn key_to_value(key: PyKey) -> Value {
         PyKey::FrozenSet(items) => {
             pyrust_builtins::frozenset::frozenset(items.into_iter().collect())
         }
+        PyKey::Object { value, .. } => value,
     }
 }
 
@@ -753,6 +754,7 @@ fn key_repr(key: &PyKey) -> String {
         PyKey::Bool(b) => if *b { "True" } else { "False" }.to_string(),
         PyKey::None => "None".to_string(),
         PyKey::FrozenSet(_) => "frozenset(...)".to_string(),
+        PyKey::Object { value, .. } => value.repr(),
     }
 }
 

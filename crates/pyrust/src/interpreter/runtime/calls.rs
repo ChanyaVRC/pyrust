@@ -101,18 +101,8 @@ impl Interpreter {
                     ValueKind::Tuple(items) => {
                         pyrust_builtins::tuple::call(method, items, pos)
                     }
-                    ValueKind::Dict(_) => {
-                        let dict = receiver
-                            .as_dict_mut()
-                            .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
-                        pyrust_builtins::dict::call(method, dict, pos)
-                    }
-                    ValueKind::Set(_) => {
-                        let set = receiver
-                            .as_set_mut()
-                            .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
-                        pyrust_builtins::set::call(method, set, pos)
-                    }
+                    ValueKind::Dict(_) => self.call_dict_method(method, receiver, pos),
+                    ValueKind::Set(_) => self.call_set_method(method, receiver, pos),
                     ValueKind::Complex(re, im) if method == "conjugate" => {
                         Ok(Value::complex(re, -im))
                     }

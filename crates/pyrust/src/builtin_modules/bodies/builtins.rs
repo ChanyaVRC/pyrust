@@ -1326,10 +1326,8 @@ pyrust_module! {
                 let items = _interp.collect_iterable(args[0].value.clone())?;
                 let mut set = indexmap::IndexSet::new();
                 for item in items {
-                    let key = item.to_key().ok_or_else(|| {
-                        PyError::Runtime("unhashable type in set".to_string())
-                    })?;
-                    set.insert(key);
+                    let key = _interp.value_to_pykey(&item)?;
+                    _interp.set_insert(&mut set, key)?;
                 }
                 Ok(Value::set(set))
             }
@@ -1351,10 +1349,8 @@ pyrust_module! {
                 let items = _interp.collect_iterable(args[0].value.clone())?;
                 let mut set = indexmap::IndexSet::new();
                 for item in items {
-                    let key = item.to_key().ok_or_else(|| {
-                        PyError::named("TypeError", "unhashable type in frozenset".to_string())
-                    })?;
-                    set.insert(key);
+                    let key = _interp.value_to_pykey(&item)?;
+                    _interp.set_insert(&mut set, key)?;
                 }
                 Ok(pyrust_builtins::frozenset::frozenset(set))
             }

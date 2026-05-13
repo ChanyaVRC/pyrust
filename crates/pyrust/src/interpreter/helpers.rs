@@ -466,6 +466,7 @@ fn key_to_value(key: PyKey) -> Value {
             }
             pyrust_builtins::frozenset::frozenset(set)
         }
+        PyKey::Object { value, .. } => value,
     }
 }
 

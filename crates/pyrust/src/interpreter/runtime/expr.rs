@@ -31,11 +31,9 @@ impl Interpreter {
                 let mut out = indexmap::IndexMap::new();
                 for (kexpr, vexpr) in items {
                     let key_val = self.eval_expr(kexpr)?;
-                    let key = key_val.to_key().ok_or_else(|| {
-                        PyError::Runtime("unhashable type in dict key".to_string())
-                    })?;
+                    let key = self.value_to_pykey(&key_val)?;
                     let value = self.eval_expr(vexpr)?;
-                    out.insert(key, value);
+                    self.dict_insert(&mut out, key, value)?;
                 }
                 Ok(Value::dict(out))
             }
@@ -112,7 +110,17 @@ impl Interpreter {
                 let index_value = self.eval_expr(index)?;
                 if let Expr::Var(name) = target.as_ref()
                     && let Some(env) = self.resolve_name_env(name) {
-                        let result: Option<Result<Value>> = {
+                        // Fast-path subscripting that avoids re-evaluating `target`.
+                        // We must not call `&mut self` while holding the env borrow,
+                        // so the Dict arm returns an Rc-clone of the dict Value (cheap
+                        // bump, not an O(N) IndexMap snapshot) and we look up after
+                        // dropping the env borrow.
+                        enum Fast {
+                            Done(Result<Value>),
+                            DictLookup(Value),
+                            Fallthrough,
+                        }
+                        let fast: Fast = {
                             let borrowed = env.borrow();
                             let col = if let Some(fl) = &borrowed.fastlocals {
                                 if let Some(&idx) = fl.index.get(name.as_str()) {
@@ -123,31 +131,34 @@ impl Interpreter {
                             } else {
                                 borrowed.values.get(name.as_str())
                             };
-                            col.map(|col| match col.kind() {
-                                ValueKind::List(items) => {
-                                    let idx = normalize_index(&index_value, items.len(), "list")?;
-                                    Ok(items[idx].clone())
+                            match col.map(|c| c.kind()) {
+                                Some(ValueKind::List(items)) => Fast::Done(
+                                    normalize_index(&index_value, items.len(), "list")
+                                        .map(|i| items[i].clone()),
+                                ),
+                                Some(ValueKind::Tuple(items)) => Fast::Done(
+                                    normalize_index(&index_value, items.len(), "tuple")
+                                        .map(|i| items[i].clone()),
+                                ),
+                                Some(ValueKind::Dict(_)) => {
+                                    // SAFETY: col is &Value into the env; we clone
+                                    // the Value (Rc bump) before dropping the borrow.
+                                    Fast::DictLookup(col.unwrap().clone())
                                 }
-                                ValueKind::Tuple(items) => {
-                                    let idx = normalize_index(&index_value, items.len(), "tuple")?;
-                                    Ok(items[idx].clone())
-                                }
-                                ValueKind::Dict(items) => {
-                                    let key = index_value.to_key().ok_or_else(|| {
-                                        PyError::Runtime("unhashable key type".to_string())
-                                    })?;
-                                    items
-                                        .get(&key)
-                                        .cloned()
-                                        .ok_or_else(|| PyError::Runtime("key error".to_string()))
-                                }
-                                _ => Err(PyError::Runtime(
-                                    "object is not subscriptable".to_string(),
-                                )),
-                            })
+                                Some(_) => Fast::Fallthrough,
+                                None => Fast::Fallthrough,
+                            }
                         };
-                        if let Some(r) = result {
-                            return r;
+                        match fast {
+                            Fast::Done(r) => return r,
+                            Fast::DictLookup(dict_val) => {
+                                let key = self.value_to_pykey(&index_value)?;
+                                return match self.dict_lookup(&dict_val, &key)? {
+                                    Some((_, v)) => Ok(v),
+                                    None => Err(PyError::Runtime("key error".to_string())),
+                                };
+                            }
+                            Fast::Fallthrough => {}
                         }
                     }
                 let target_value = self.eval_expr(target)?;
@@ -169,10 +180,8 @@ impl Interpreter {
                 let mut out = indexmap::IndexSet::new();
                 for item in items {
                     let v = self.eval_expr(item)?;
-                    let key = v.to_key().ok_or_else(|| {
-                        PyError::Runtime("unhashable type in set".to_string())
-                    })?;
-                    out.insert(key);
+                    let key = self.value_to_pykey(&v)?;
+                    self.set_insert(&mut out, key)?;
                 }
                 Ok(Value::set(out))
             }
@@ -264,6 +273,17 @@ impl Interpreter {
     }
 
     fn eval_index(&mut self, target: Value, index: Value) -> Result<Value> {
+        // Handle Dict separately so the temporary `&IndexMap` from
+        // `target.kind()` doesn't outlive the call into `dict_lookup`
+        // (which may run user `__eq__` that mutates the dict — see the
+        // aliasing notes on `Value::as_dict_mut`).
+        if target.as_dict().is_some() {
+            let key = self.value_to_pykey(&index)?;
+            return match self.dict_lookup(&target, &key)? {
+                Some((_, v)) => Ok(v),
+                None => Err(PyError::Runtime("key error".to_string())),
+            };
+        }
         match target.kind() {
             ValueKind::List(items) => {
                 let idx = normalize_index(&index, items.len(), "list")?;
@@ -282,12 +302,7 @@ impl Interpreter {
                 let idx = normalize_index(&index, rc.len(), "bytes")?;
                 Ok(Value::int(rc[idx] as i64))
             }
-            ValueKind::Dict(items) => {
-                let key = index
-                    .to_key()
-                    .ok_or_else(|| PyError::Runtime("unhashable key type".to_string()))?;
-                items.get(&key).cloned().ok_or_else(|| PyError::Runtime("key error".to_string()))
-            }
+            ValueKind::Dict(_) => unreachable!("handled above"),
             ValueKind::BuiltinObject { ops, state } => {
                 // Built-in object types opt in to subscripting via
                 // `BuiltinTypeOps::get_item`.  The default impl returns a
@@ -384,6 +399,445 @@ impl Interpreter {
             }
         }
         None
+    }
+
+    /// Convert a `Value` to a `PyKey`, dispatching the user's `__hash__`
+    /// when the value is a `PyInstance` so user-defined classes can be used
+    /// as dict/set keys (issue #368).
+    ///
+    /// For values that already map cleanly to a hashable `PyKey` variant
+    /// via `Value::to_key`, this is a thin wrapper that surfaces the
+    /// canonical "unhashable type" error.  For `PyInstance`, it looks up
+    /// `__hash__` on the class, invokes it, and packages the resulting
+    /// `u64` (mod 2^64 reduction matches CPython's `hash()` builtin) into
+    /// a `PyKey::Object` along with the instance value.
+    pub(crate) fn value_to_pykey(&mut self, value: &Value) -> Result<PyKey> {
+        if let Some(k) = value.to_key() {
+            return Ok(k);
+        }
+        if let ValueKind::PyInstance(inst) = value.kind() {
+            let class = Rc::clone(&inst.borrow().class);
+            // CPython treats a class that explicitly sets `__hash__ = None`
+            // as unhashable.  In pyrust we treat the absence of `__hash__`
+            // the same way for now.
+            if let Some(hash_method) = lookup_class_attr(&class, "__hash__") {
+                if matches!(hash_method.kind(), ValueKind::None) {
+                    let class_name = class.borrow().name.clone();
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("unhashable type: '{class_name}'"),
+                    ));
+                }
+                if is_callable_method(&hash_method) {
+                    let result = invoke_class_method(
+                        self,
+                        hash_method,
+                        Value::py_instance(Rc::clone(inst)),
+                        &[],
+                    )?;
+                    let hash = match result.kind() {
+                        ValueKind::Int(n) => n as u64,
+                        ValueKind::Bool(b) => b as u64,
+                        ValueKind::BigInt(n) => {
+                            // CPython folds arbitrary-precision hash results
+                            // mod 2^64; mimic that by taking the low 64 bits.
+                            let (_sign, digits) = n.to_u64_digits();
+                            *digits.first().unwrap_or(&0)
+                        }
+                        _ => {
+                            return Err(PyError::named(
+                                "TypeError",
+                                "__hash__ method should return an integer".to_string(),
+                            ));
+                        }
+                    };
+                    return Ok(PyKey::Object {
+                        hash,
+                        value: value.clone(),
+                    });
+                }
+            }
+            // No usable __hash__: fall back to the default object-identity
+            // hash so `class Foo: pass` instances remain hashable just like
+            // CPython's default `object.__hash__`.
+            let ptr = Rc::as_ptr(inst) as usize as u64;
+            return Ok(PyKey::Object {
+                hash: ptr,
+                value: value.clone(),
+            });
+        }
+        let type_name = value_type_name_str(value);
+        Err(PyError::named(
+            "TypeError",
+            format!("unhashable type: '{type_name}'"),
+        ))
+    }
+
+    /// Look up a key in a dict where the key may be a `PyKey::Object`.
+    ///
+    /// IndexMap's `get` will find entries whose `PyKey` matches by
+    /// pointer-identity (because `PyKey::Object`'s `PartialEq` defers to
+    /// `Value::eq`, which uses `Rc::ptr_eq` for `PyInstance`).  When the
+    /// fast path misses and the key is an `Object`, we linearly scan
+    /// entries with the same precomputed hash and dispatch user `__eq__`
+    /// for full Python semantics.  Returns `Ok(Some((index, value)))` on
+    /// a hit (index returned so callers can implement `pop`/`del`).
+    ///
+    /// Takes the receiver `&Value` (rather than `&IndexMap`) so the dict
+    /// borrow can be scoped tightly: the fast path borrows for `get_full`
+    /// only, and the `__eq__`-dispatching slow path borrows only long
+    /// enough to extract the same-hash candidate list before dropping the
+    /// borrow and running user code.  This avoids the O(N) whole-dict
+    /// snapshot that callers used to have to make for soundness.
+    pub(crate) fn dict_lookup(
+        &mut self,
+        receiver: &Value,
+        key: &PyKey,
+    ) -> Result<Option<(usize, Value)>> {
+        // Fast path — dict borrow scoped to this block.
+        {
+            let dict = receiver
+                .as_dict()
+                .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+            if let Some((idx, _, v)) = dict.get_full(key) {
+                return Ok(Some((idx, v.clone())));
+            }
+        }
+        // Slow path — only `Object` keys.  Extract candidates under a
+        // narrow borrow, then drop the borrow before user `__eq__` runs.
+        if let PyKey::Object {
+            hash: target_hash,
+            value: target,
+        } = key
+        {
+            let candidates: Vec<(usize, Value, Value)> = {
+                let dict = receiver
+                    .as_dict()
+                    .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+                dict.iter()
+                    .enumerate()
+                    .filter_map(|(i, (k, v))| match k {
+                        PyKey::Object { hash, value } if hash == target_hash => {
+                            Some((i, value.clone(), v.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            };
+            for (idx, candidate_key, value) in candidates {
+                if self.values_user_eq(&candidate_key, target)? {
+                    return Ok(Some((idx, value)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// `dict_lookup` variant that takes the `IndexMap` directly.  Used by
+    /// callers that already hold a `&IndexMap` (typically because they
+    /// own/snapshotted the dict, so aliasing with mutable access is
+    /// impossible).  Prefer [`Self::dict_lookup`] for new call sites — it
+    /// scopes the dict borrow tightly without a whole-dict clone.
+    pub(crate) fn dict_lookup_in(
+        &mut self,
+        dict: &indexmap::IndexMap<PyKey, Value>,
+        key: &PyKey,
+    ) -> Result<Option<(usize, Value)>> {
+        if let Some((idx, _, v)) = dict.get_full(key) {
+            return Ok(Some((idx, v.clone())));
+        }
+        if let PyKey::Object {
+            hash: target_hash,
+            value: target,
+        } = key
+        {
+            let candidates: Vec<(usize, Value, Value)> = dict
+                .iter()
+                .enumerate()
+                .filter_map(|(i, (k, v))| match k {
+                    PyKey::Object { hash, value } if hash == target_hash => {
+                        Some((i, value.clone(), v.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            for (idx, candidate_key, value) in candidates {
+                if self.values_user_eq(&candidate_key, target)? {
+                    return Ok(Some((idx, value)));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Check whether a set contains `key`, dispatching user `__eq__` for
+    /// `PyKey::Object` keys (issue #368).  Returns the entry index so
+    /// callers can implement `discard`/`remove`.
+    ///
+    /// Takes the receiver `&Value` so the set borrow is scoped tightly —
+    /// see [`Self::dict_lookup`] for the rationale.
+    pub(crate) fn set_lookup(
+        &mut self,
+        receiver: &Value,
+        key: &PyKey,
+    ) -> Result<Option<usize>> {
+        {
+            let set = receiver
+                .as_set()
+                .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
+            if let Some(idx) = set.get_index_of(key) {
+                return Ok(Some(idx));
+            }
+        }
+        if let PyKey::Object {
+            hash: target_hash,
+            value: target,
+        } = key
+        {
+            let candidates: Vec<(usize, Value)> = {
+                let set = receiver
+                    .as_set()
+                    .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
+                set.iter()
+                    .enumerate()
+                    .filter_map(|(i, k)| match k {
+                        PyKey::Object { hash, value } if hash == target_hash => {
+                            Some((i, value.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            };
+            for (idx, candidate) in candidates {
+                if self.values_user_eq(&candidate, target)? {
+                    return Ok(Some(idx));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// `set_lookup` variant that takes the `IndexSet` directly — for
+    /// callers that already hold a `&IndexSet`.  Prefer
+    /// [`Self::set_lookup`] for new call sites.
+    pub(crate) fn set_lookup_in(
+        &mut self,
+        set: &indexmap::IndexSet<PyKey>,
+        key: &PyKey,
+    ) -> Result<Option<usize>> {
+        if let Some(idx) = set.get_index_of(key) {
+            return Ok(Some(idx));
+        }
+        if let PyKey::Object {
+            hash: target_hash,
+            value: target,
+        } = key
+        {
+            let candidates: Vec<(usize, Value)> = set
+                .iter()
+                .enumerate()
+                .filter_map(|(i, k)| match k {
+                    PyKey::Object { hash, value } if hash == target_hash => {
+                        Some((i, value.clone()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            for (idx, candidate) in candidates {
+                if self.values_user_eq(&candidate, target)? {
+                    return Ok(Some(idx));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Insert `(key, value)` into a dict that lives at register/local
+    /// `dict_value`, dispatching user `__eq__` to deduplicate against an
+    /// existing entry when `key` is a `PyKey::Object`.  This is the
+    /// write-side counterpart to [`dict_lookup`].
+    pub(crate) fn dict_insert(
+        &mut self,
+        dict: &mut indexmap::IndexMap<PyKey, Value>,
+        key: PyKey,
+        value: Value,
+    ) -> Result<()> {
+        if let PyKey::Object { .. } = &key {
+            if let Some((idx, _)) = self.dict_lookup_in(dict, &key)? {
+                // Replace value in-place via index access to preserve order.
+                let existing_key = dict.get_index(idx).map(|(k, _)| k.clone());
+                if let Some(k) = existing_key {
+                    dict.insert(k, value);
+                    return Ok(());
+                }
+            }
+        }
+        dict.insert(key, value);
+        Ok(())
+    }
+
+    /// Insert `key` into a set, dispatching user `__eq__` for dedup.
+    pub(crate) fn set_insert(
+        &mut self,
+        set: &mut indexmap::IndexSet<PyKey>,
+        key: PyKey,
+    ) -> Result<()> {
+        if let PyKey::Object { .. } = &key {
+            if self.set_lookup_in(set, &key)?.is_some() {
+                return Ok(());
+            }
+        }
+        set.insert(key);
+        Ok(())
+    }
+
+    /// Compare two values via `__eq__`, used by the dict/set runtime when
+    /// resolving `PyKey::Object` collisions.  Falls back to `Value::eq`
+    /// (pointer-identity for `PyInstance`) when no `__eq__` is defined.
+    fn values_user_eq(&mut self, a: &Value, b: &Value) -> Result<bool> {
+        if a == b {
+            return Ok(true);
+        }
+        if let Some(r) = self.try_dunder_binary(a, b, "__eq__", "__eq__") {
+            return Ok(r?.truthy());
+        }
+        Ok(false)
+    }
+
+    /// Dispatch any dict method.  Methods that read or write keys
+    /// (`get`/`pop`/`setdefault`/`__contains__`) route through
+    /// `dict_lookup`/`dict_insert` so user-defined `__hash__`/`__eq__`
+    /// fire (issue #368).  Everything else delegates to the
+    /// interpreter-free `pyrust_builtins::dict::call`.
+    ///
+    /// Callers don't need to know which methods are which — this is the
+    /// single entry point for dict method dispatch.
+    pub(crate) fn call_dict_method(
+        &mut self,
+        method: &str,
+        mut receiver: Value,
+        args: Vec<Value>,
+    ) -> Result<Value> {
+        match method {
+            "get" | "__contains__" | "pop" | "setdefault" => {
+                let mut iter = args.into_iter();
+                let key_val = iter.next().ok_or_else(|| {
+                    PyError::Runtime(format!("dict.{method}() requires at least 1 argument"))
+                })?;
+                let pk = self.value_to_pykey(&key_val)?;
+                match method {
+                    "get" => {
+                        let default = iter.next().unwrap_or_else(Value::none);
+                        Ok(self
+                            .dict_lookup(&receiver, &pk)?
+                            .map(|(_, v)| v)
+                            .unwrap_or(default))
+                    }
+                    "__contains__" => Ok(Value::bool_(
+                        self.dict_lookup(&receiver, &pk)?.is_some(),
+                    )),
+                    "pop" => match self.dict_lookup(&receiver, &pk)? {
+                        Some((idx, v)) => {
+                            // `dict_lookup` already dropped its borrow before
+                            // running user code, so the index is still valid.
+                            let dict = receiver.as_dict_mut().ok_or_else(|| {
+                                PyError::Runtime("internal: expected dict".to_string())
+                            })?;
+                            dict.shift_remove_index(idx);
+                            Ok(v)
+                        }
+                        None => {
+                            if let Some(default) = iter.next() {
+                                Ok(default)
+                            } else {
+                                Err(PyError::named("KeyError", key_val.repr()))
+                            }
+                        }
+                    },
+                    "setdefault" => {
+                        let default = iter.next().unwrap_or_else(Value::none);
+                        if let Some((_, v)) = self.dict_lookup(&receiver, &pk)? {
+                            return Ok(v);
+                        }
+                        let dict = receiver.as_dict_mut().ok_or_else(|| {
+                            PyError::Runtime("internal: expected dict".to_string())
+                        })?;
+                        dict.insert(pk, default.clone());
+                        Ok(default)
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            _ => {
+                let dict = receiver
+                    .as_dict_mut()
+                    .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+                pyrust_builtins::dict::call(method, dict, args)
+            }
+        }
+    }
+
+    /// Dispatch any set method.  Methods that read or write keys
+    /// (`add`/`discard`/`remove`/`__contains__`) route through
+    /// `set_lookup`/`set_insert` so user-defined `__hash__`/`__eq__`
+    /// fire (issue #368).  Everything else delegates to the
+    /// interpreter-free `pyrust_builtins::set::call`.
+    pub(crate) fn call_set_method(
+        &mut self,
+        method: &str,
+        mut receiver: Value,
+        args: Vec<Value>,
+    ) -> Result<Value> {
+        match method {
+            "add" | "__contains__" | "discard" | "remove" => {
+                let mut iter = args.into_iter();
+                let key_val = iter.next().ok_or_else(|| {
+                    PyError::Runtime(format!("set.{method}() requires at least 1 argument"))
+                })?;
+                let pk = self.value_to_pykey(&key_val)?;
+                match method {
+                    "add" => {
+                        if self.set_lookup(&receiver, &pk)?.is_some() {
+                            return Ok(Value::none());
+                        }
+                        let set = receiver.as_set_mut().ok_or_else(|| {
+                            PyError::Runtime("internal: expected set".to_string())
+                        })?;
+                        set.insert(pk);
+                        Ok(Value::none())
+                    }
+                    "__contains__" => {
+                        Ok(Value::bool_(self.set_lookup(&receiver, &pk)?.is_some()))
+                    }
+                    "discard" => {
+                        if let Some(idx) = self.set_lookup(&receiver, &pk)? {
+                            let set = receiver.as_set_mut().ok_or_else(|| {
+                                PyError::Runtime("internal: expected set".to_string())
+                            })?;
+                            set.shift_remove_index(idx);
+                        }
+                        Ok(Value::none())
+                    }
+                    "remove" => match self.set_lookup(&receiver, &pk)? {
+                        Some(idx) => {
+                            let set = receiver.as_set_mut().ok_or_else(|| {
+                                PyError::Runtime("internal: expected set".to_string())
+                            })?;
+                            set.shift_remove_index(idx);
+                            Ok(Value::none())
+                        }
+                        None => Err(PyError::named("KeyError", key_val.repr())),
+                    },
+                    _ => unreachable!(),
+                }
+            }
+            _ => {
+                let set = receiver
+                    .as_set_mut()
+                    .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
+                pyrust_builtins::set::call(method, set, args)
+            }
+        }
     }
 
     pub(crate) fn eval_binary(&mut self, left: Value, op: BinaryOp, right: Value) -> Result<Value> {
@@ -900,13 +1354,25 @@ impl Interpreter {
     }
 
     fn eval_in(&mut self, container: Value, item: Value) -> Result<Value> {
+        // Handle Dict/Set separately so the temporary `&IndexMap`/`&IndexSet`
+        // from `container.kind()` doesn't outlive the call into
+        // `dict_lookup`/`set_lookup` (which may run user `__eq__`).
+        if container.as_dict().is_some() {
+            let key = self.value_to_pykey(&item)?;
+            return Ok(Value::bool_(
+                self.dict_lookup(&container, &key)?.is_some(),
+            ));
+        }
+        if container.as_set().is_some() {
+            let key = self.value_to_pykey(&item)?;
+            return Ok(Value::bool_(
+                self.set_lookup(&container, &key)?.is_some(),
+            ));
+        }
         match container.kind() {
             ValueKind::List(items) => Ok(Value::bool_(items.iter().any(|b| b == &item))),
             ValueKind::Tuple(items) => Ok(Value::bool_(items.contains(&item))),
-            ValueKind::Set(items) => {
-                let key = item.to_key().ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
-                Ok(Value::bool_(items.contains(&key)))
-            }
+            ValueKind::Set(_) => unreachable!("handled above"),
             ValueKind::BuiltinObject { ops, state } => {
                 ops.contains(state, &item).map(Value::bool_)
             }
@@ -928,10 +1394,7 @@ impl Interpreter {
                     _ => Err(PyError::Runtime("'in <string>' requires string as left operand".to_string())),
                 }
             }
-            ValueKind::Dict(items) => {
-                let key = item.to_key().ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
-                Ok(Value::bool_(items.contains_key(&key)))
-            }
+            ValueKind::Dict(_) => unreachable!("handled above"),
             ValueKind::Range { start, stop, step } => {
                 match item.kind() {
                     ValueKind::Int(v) => {
