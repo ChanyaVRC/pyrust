@@ -124,4 +124,26 @@ disjoint = s3.isdisjoint
 assert disjoint({4, 5}) is True
 assert disjoint({1}) is False
 
+# ---- list: function-parameter mutations propagate to the caller ----
+# Both forms — direct `l.append(...)` and the captured-bound-method form
+# `a = l.append; a(...)` — flow through the Rc-shared backing, so the
+# caller's `lst_f` / `lst_f2` sees the mutation.
+def f(l: list):
+    l.append(42)
+
+
+lst_f = [1, 2, 3]
+f(lst_f)
+assert lst_f == [1, 2, 3, 42]
+
+
+def f2(l: list):
+    a = l.append
+    a(99)
+
+
+lst_f2 = [1, 2, 3]
+f2(lst_f2)
+assert lst_f2 == [1, 2, 3, 99]
+
 print("bound-method mutation regression test OK")
