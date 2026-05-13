@@ -31,23 +31,29 @@
 //! After the prelude, the user-written body sees typed locals (`path: PyStr`,
 //! `mode: PyStr`, etc.) and can call straightforwardly into native Rust APIs.
 //!
-//! # Deferred: `PyIterable`
+//! # `PyIterable` — "anything iterable" argument
 //!
-//! A wrapper that materialises any iterable into `Vec<Value>` is *not*
-//! yet provided.  Per the #395 design review (concern 6), this defers
-//! migration for builtins whose canonical signature is "anything
-//! iterable":
+//! [`PyIterable`] is the wrapper for builtins whose canonical signature
+//! is "anything iterable" — `list()`, `tuple()`, `set()`, `dict()`,
+//! `sum()`, `min()`, `max()`, `any()`, `all()`, `sorted()`,
+//! `reversed()`, `map()`, `filter()`, `zip()`, `enumerate()`, `iter()`,
+//! `next()`, etc.  It materialises the source into a `Vec<Value>` at
+//! `try_from_value` time (eager, matching the existing
+//! `pyrust_builtins::iter_helpers` shape).  A future lazy `PyIter<'a>`
+//! variant can be added if profiles show the materialisation cost
+//! matters.
 //!
-//! - `list()`, `tuple()`, `set()`, `dict()`, `frozenset()`
-//! - `sum()`, `min()`, `max()`, `any()`, `all()`
-//! - `sorted()`, `reversed()`
-//! - `map()`, `filter()`, `zip()`, `enumerate()`
-//! - `iter()`, `next()`
+//! Materialisation routes through
+//! [`pyrust_core::iter_values_via_registry`], which the interpreter
+//! installs at startup ([`Interpreter::default`] in
+//! `crates/pyrust/src/interpreter.rs`).  That removes the need for an
+//! interpreter handle on the [`FromValue`] trait — the wrapper drains
+//! lists, tuples, dicts, sets, strings, bytes, ranges, generators,
+//! iterable `BuiltinObject`s, and user-class `PyInstance`s with
+//! `__iter__` via the same path the rest of the interpreter uses.
 //!
-//! Until `PyIterable` lands, these stay on the legacy `(args)` dialect
-//! or take a `PyValue` parameter and hand-coerce inside the body.
-//! Migrating them adds a follow-up — tracked under the same
-//! per-builtin migration umbrella as the rest of #395.
+//! Per-builtin migrations off the legacy `(args)` dialect are tracked
+//! under #400; landing the wrapper alone (this module) is #398.
 
 use std::borrow::Cow;
 use std::ops::Deref;
@@ -513,6 +519,117 @@ impl<'a> FromValue<'a> for PyValue {
     }
 }
 
+// ─── PyIterable ───────────────────────────────────────────────────────────────
+
+/// `iterable` argument — materialises any iterable source into
+/// `Vec<Value>` on construction.  Eager (matches the existing
+/// `pyrust_builtins::iter_helpers` shape); a lazy single-pass `PyIter<'a>`
+/// can be added later if profiles show the materialisation cost matters.
+///
+/// # Sources accepted
+///
+/// Anything the interpreter's `iter_values` already handles:
+///
+/// - Built-in iterables: `list`, `tuple`, `dict` (yields keys, matching
+///   CPython), `set`, `str` (yields 1-character strings), `bytes`
+///   (yields `int` codepoints), `range`.
+/// - User classes whose `__iter__` is callable.
+/// - Iterable `BuiltinObject`s (e.g. frozenset, dict views), via the
+///   type's `BuiltinTypeOps::is_iterable` predicate.
+/// - Generators (drained — iterating a generator consumes it; this is
+///   intentional, matching the eager materialisation contract).
+///
+/// # Errors
+///
+/// `try_from_value` returns `TypeError: <fn>() argument '<name>' must be
+/// iterable, not <type>` when the source isn't iterable.  Errors raised
+/// *during* iteration (e.g. a user-defined `__next__` that raises)
+/// propagate through `iter_values_via_registry`.
+///
+/// # Registry dependency
+///
+/// Materialisation goes through [`pyrust_core::iter_values_via_registry`],
+/// which the interpreter installs in [`Interpreter::default`]
+/// (`crates/pyrust/src/interpreter.rs`) before any builtin can be called.
+/// In standalone tests that exercise `PyIterable::try_from_value` without
+/// first constructing an `Interpreter`, install the callback manually —
+/// the `mod tests` block below does this once via [`std::sync::Once`].
+#[derive(Debug, Clone)]
+pub(crate) struct PyIterable<'a> {
+    items: Vec<Value>,
+    _phantom: std::marker::PhantomData<&'a Value>,
+}
+
+impl<'a> PyIterable<'a> {
+    /// Read-only view of the materialised items.
+    pub fn as_slice(&self) -> &[Value] {
+        &self.items
+    }
+
+    /// Take ownership of the materialised items.  Use when the builtin
+    /// builds its result (e.g. `list(iterable)`) directly from them.
+    pub fn into_items(self) -> Vec<Value> {
+        self.items
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+}
+
+impl<'a> FromValue<'a> for PyIterable<'a> {
+    const PY_TYPE_NAME: &'static str = "iterable";
+
+    fn try_from_value(value: &'a Value, fn_name: &str, arg_name: &str) -> Result<Self> {
+        if !Self::matches(value) {
+            return Err(must_be_error(fn_name, arg_name, "iterable", value));
+        }
+        // Drain through the interpreter-installed callback.  `matches`
+        // already filtered out the obviously-non-iterable kinds; what
+        // remains is either iterable, or a user class whose `__iter__`
+        // turns out to be non-callable (which surfaces from the
+        // registry call as a structured error — CPython parity).
+        let items = pyrust_core::iter_values_via_registry(value)?;
+        Ok(PyIterable {
+            items,
+            _phantom: std::marker::PhantomData,
+        })
+    }
+
+    /// Structural type-match — allocation-free.  Cannot materialise to
+    /// check (the overload dispatcher requires `matches` not to
+    /// allocate), so the predicate inspects `ValueKind` against the set
+    /// of known iterable kinds and, for `PyInstance`, probes the class
+    /// for `__iter__` without calling it.
+    ///
+    /// A user class whose `__iter__` is structurally present but not
+    /// callable will pass this predicate; the actual call later in
+    /// `try_from_value` may then fail.  That mirrors CPython, where the
+    /// caller learns at iteration time rather than at dispatch.
+    fn matches(value: &'a Value) -> bool {
+        match value.kind() {
+            ValueKind::List(_)
+            | ValueKind::Tuple(_)
+            | ValueKind::Dict(_)
+            | ValueKind::Set(_)
+            | ValueKind::Str(_)
+            | ValueKind::Bytes(_)
+            | ValueKind::Range { .. }
+            | ValueKind::Generator(_) => true,
+            ValueKind::BuiltinObject { ops, .. } => ops.is_iterable(),
+            ValueKind::PyInstance(inst) => {
+                let class = Rc::clone(&inst.borrow().class);
+                crate::interpreter::lookup_class_attr(&class, "__iter__").is_some()
+            }
+            _ => false,
+        }
+    }
+}
+
 // ─── Option<T> — for default-None args ────────────────────────────────────────
 //
 // An `Option<T>` argument accepts either:
@@ -893,6 +1010,188 @@ mod tests {
         ] {
             assert!(PyValue::matches(&v));
         }
+    }
+
+    // ── PyIterable — anything iterable; structurally allocation-free `matches`,
+    //                 materialising `try_from_value` via the iter callback.
+    //
+    // `iter_values_via_registry` reads a `OnceLock<IterValuesFn>` that the
+    // interpreter installs in `Interpreter::default()`.  The unit tests below
+    // run without an interpreter, so the helper here installs the same
+    // callback once per test run — `OnceLock::set` ignores subsequent calls,
+    // so this is harmless under cargo's parallel test scheduling.
+    fn ensure_iter_registry_installed() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            pyrust_core::install_iter_values(|v| crate::interpreter::iter_values(v.clone()));
+        });
+    }
+
+    #[test]
+    fn pyiterable_matches_builtin_iterables() {
+        // Structural `matches` — no materialisation, no registry needed.
+        // Each kind in the "known iterable" set must report `true`.
+        let cases = [
+            Value::list(vec![Value::int(1)]),
+            Value::tuple(vec![Value::int(1)]),
+            Value::dict(indexmap::IndexMap::new()),
+            Value::set(indexmap::IndexSet::new()),
+            Value::string("abc"),
+            Value::bytes(vec![1, 2, 3]),
+            Value::range(0, 3, 1),
+        ];
+        for v in &cases {
+            assert!(
+                PyIterable::matches(v),
+                "expected iterable: {:?}",
+                pyrust_core::builtin_type_name(v),
+            );
+        }
+    }
+
+    #[test]
+    fn pyiterable_rejects_scalars() {
+        // `matches` must report `false` for the canonical non-iterable
+        // kinds — guards the overload dispatcher from accidentally
+        // routing `int`/`float`/`bool`/`None` through an iterable
+        // overload.
+        for v in [
+            Value::int(0),
+            Value::float(0.0),
+            Value::bool_(true),
+            Value::none(),
+        ] {
+            assert!(
+                !PyIterable::matches(&v),
+                "scalar should not match iterable: {:?}",
+                pyrust_core::builtin_type_name(&v),
+            );
+        }
+    }
+
+    #[test]
+    fn pyiterable_materialises_list() {
+        ensure_iter_registry_installed();
+        let v = Value::list(vec![Value::int(1), Value::int(2), Value::int(3)]);
+        let it = PyIterable::try_from_value(&v, "list", "iterable").unwrap();
+        assert_eq!(it.len(), 3);
+        assert!(!it.is_empty());
+        let items = it.as_slice();
+        assert_eq!(items[0].as_int(), Some(1));
+        assert_eq!(items[2].as_int(), Some(3));
+    }
+
+    #[test]
+    fn pyiterable_materialises_tuple() {
+        ensure_iter_registry_installed();
+        let v = Value::tuple(vec![Value::int(7), Value::int(8)]);
+        let it = PyIterable::try_from_value(&v, "list", "iterable").unwrap();
+        let items = it.into_items();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[1].as_int(), Some(8));
+    }
+
+    #[test]
+    fn pyiterable_materialises_dict_yields_keys() {
+        // CPython parity: iterating a dict yields its keys, not its
+        // items.  The interpreter's `iter_values` already does this; the
+        // wrapper inherits the behaviour.
+        ensure_iter_registry_installed();
+        let mut map = indexmap::IndexMap::new();
+        map.insert(PyKey::Str("a".into()), Value::int(1));
+        map.insert(PyKey::Str("b".into()), Value::int(2));
+        let v = Value::dict(map);
+        let it = PyIterable::try_from_value(&v, "list", "iterable").unwrap();
+        let items = it.into_items();
+        assert_eq!(items.len(), 2);
+        // Keys arrive as strings, not (key, value) pairs.
+        assert_eq!(items[0].as_str(), Some("a"));
+        assert_eq!(items[1].as_str(), Some("b"));
+    }
+
+    #[test]
+    fn pyiterable_materialises_set() {
+        ensure_iter_registry_installed();
+        let mut s = indexmap::IndexSet::new();
+        s.insert(PyKey::Int(9));
+        let v = Value::set(s);
+        let it = PyIterable::try_from_value(&v, "list", "iterable").unwrap();
+        assert_eq!(it.len(), 1);
+        assert_eq!(it.as_slice()[0].as_int(), Some(9));
+    }
+
+    #[test]
+    fn pyiterable_materialises_str_to_chars() {
+        ensure_iter_registry_installed();
+        let v = Value::string("hi");
+        let it = PyIterable::try_from_value(&v, "list", "iterable").unwrap();
+        let items = it.into_items();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].as_str(), Some("h"));
+        assert_eq!(items[1].as_str(), Some("i"));
+    }
+
+    #[test]
+    fn pyiterable_materialises_bytes_to_codepoints() {
+        ensure_iter_registry_installed();
+        let v = Value::bytes(vec![0x41, 0x42]);
+        let it = PyIterable::try_from_value(&v, "list", "iterable").unwrap();
+        let items = it.into_items();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].as_int(), Some(0x41));
+        assert_eq!(items[1].as_int(), Some(0x42));
+    }
+
+    #[test]
+    fn pyiterable_materialises_range() {
+        ensure_iter_registry_installed();
+        let v = Value::range(0, 3, 1);
+        let it = PyIterable::try_from_value(&v, "list", "iterable").unwrap();
+        let items = it.into_items();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].as_int(), Some(0));
+        assert_eq!(items[2].as_int(), Some(2));
+    }
+
+    #[test]
+    fn pyiterable_rejects_int_with_typeerror() {
+        ensure_iter_registry_installed();
+        let v = Value::int(5);
+        let err = PyIterable::try_from_value(&v, "list", "iterable").unwrap_err();
+        assert_eq!(err_class(&err), "TypeError");
+        let msg = err_msg(&err);
+        assert!(
+            msg.contains("list()")
+                && msg.contains("'iterable'")
+                && msg.contains("must be iterable")
+                && msg.contains("not int"),
+            "unexpected error wording: {msg:?}",
+        );
+    }
+
+    #[test]
+    fn pyiterable_rejects_float() {
+        ensure_iter_registry_installed();
+        let v = Value::float(3.14);
+        let err = PyIterable::try_from_value(&v, "sum", "iterable").unwrap_err();
+        assert!(err_msg(&err).contains("not float"));
+    }
+
+    #[test]
+    fn pyiterable_rejects_bool() {
+        ensure_iter_registry_installed();
+        let v = Value::bool_(false);
+        let err = PyIterable::try_from_value(&v, "any", "iterable").unwrap_err();
+        assert!(err_msg(&err).contains("not bool"));
+    }
+
+    #[test]
+    fn pyiterable_rejects_none() {
+        ensure_iter_registry_installed();
+        let v = Value::none();
+        let err = PyIterable::try_from_value(&v, "iter", "iterable").unwrap_err();
+        assert!(err_msg(&err).contains("not NoneType"));
     }
 
     // ── Option<T> — accepts None or T.
