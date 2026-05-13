@@ -1,0 +1,5 @@
+error: a `PyValue`-only catch-all overload must be declared last — every overload after it would be unreachable (silently shadowed by `PyValue::matches`, which always returns true)
+  --> tests/compile_fail/overload_option_pyvalue_catch_all.rs:17:8
+   |
+17 |     fn bad(x: Option<PyValue>) -> Result<Value> {
+   |        ^^^

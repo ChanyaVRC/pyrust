@@ -764,6 +764,248 @@ fn emit_typed_prelude(params: &[TypedParam]) -> proc_macro2::TokenStream {
     }
 }
 
+/// Emit a singleton group's worth of artefacts for an overload set:
+/// one shared name static, N typed-arg body fns, one dispatcher, one
+/// reg entry, returning the artefacts in the form
+/// [`pyrust_module`]'s main loop expects.
+///
+/// Generated shape (for `abs(PyInt)` + `abs(PyFloat)` + `abs(PyValue)`):
+///
+/// ```ignore
+/// static __pyfn_abs_NAME: LazyLock<&'static str> = …;
+///
+/// fn __pyfn_abs_overload_0(_interp, x: PyInt<'_>) -> Result<Value> { /* int body */ }
+/// fn __pyfn_abs_overload_1(_interp, x: PyFloat)   -> Result<Value> { /* float body */ }
+/// fn __pyfn_abs_overload_2(_interp, x: PyValue)   -> Result<Value> { /* catch-all */ }
+///
+/// fn __pyfn_abs(_interp, __pyrust_args: &[ExpandedCallArg]) -> Result<Value> {
+///     let FN_NAME = *__pyfn_abs_NAME;
+///     // Phase 1 — shared kwarg + arity validation.
+///     let __positional = validate_kwargs_and_collect_positional(__pyrust_args, FN_NAME, &["x"])?;
+///     check_positional_count(FN_NAME, __positional.len(), 1, 1)?;
+///     let __arg_x = locate_arg(__pyrust_args, &__positional, FN_NAME, "x", 0, true)?
+///         .ok_or_else(|| missing_arg::<()>(FN_NAME, "x").unwrap_err())?;
+///     // Phase 2 — try each overload's predicate in declaration order.
+///     if <PyInt as FromValue>::matches(__arg_x) {
+///         let x = <PyInt as FromValue>::try_from_value(__arg_x, FN_NAME, "x")?;
+///         return __pyfn_abs_overload_0(_interp, x);
+///     }
+///     // … same for PyFloat, then PyValue (always matches) …
+///     no_overload_matched(FN_NAME, &[…actual types…])
+/// }
+/// ```
+fn emit_overload_set_artefacts(
+    group: &[&ModuleFn],
+    py_short: &str,
+    rust_short: &str,
+) -> syn::Result<(
+    Vec<proc_macro2::TokenStream>,
+    proc_macro2::TokenStream,
+    Ident,
+)> {
+    let head = group[0];
+    let head_span = head.short_name.span();
+    let suffix_lit = LitStr::new(py_short, head_span);
+    let name_static_ident = format_ident!("__pyfn_{}_NAME", rust_short, span = head_span);
+    let dispatcher_ident = format_ident!("__pyfn_{}", rust_short, span = head_span);
+
+    // The reference signature (validated to be uniform) — use it to drive
+    // Phase 1 of the dispatcher.
+    let ref_params = match &head.args {
+        ModuleFnArgs::Typed { params } => params,
+        // group_funcs_by_name's validation already rejected non-typed
+        // overloads; this is unreachable in practice.
+        ModuleFnArgs::Legacy { .. } => unreachable!("legacy in overload set"),
+    };
+
+    let allowed_kwargs: Vec<LitStr> = ref_params
+        .iter()
+        .filter(|p| !p.positional_only)
+        .map(|p| LitStr::new(&p.name.to_string(), p.name.span()))
+        .collect();
+    let min_pos = ref_params.iter().filter(|p| !p.keyword_only).count();
+    let max_pos = min_pos; // overload sets disallow defaults, so min == max
+
+    // For each parameter, the same positional-index / kw-allowed pair the
+    // single-body prelude would compute — overload sets share this.
+    let mut per_arg_locate: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut pos_index: usize = 0;
+    const KW_ONLY_POS_SENTINEL: usize = usize::MAX;
+    for p in ref_params {
+        let name_lit = LitStr::new(&p.name.to_string(), p.name.span());
+        let __arg_ident = format_ident!("__arg_{}", p.name, span = p.name.span());
+        let kw_allowed = !p.positional_only;
+        let this_pos: usize = if p.keyword_only {
+            KW_ONLY_POS_SENTINEL
+        } else {
+            let i = pos_index;
+            pos_index += 1;
+            i
+        };
+        per_arg_locate.push(quote! {
+            let #__arg_ident: &crate::value::Value =
+                crate::interpreter::builtin_args::locate_arg(
+                    __pyrust_args, &__positional, FN_NAME, #name_lit, #this_pos, #kw_allowed,
+                )?
+                .ok_or_else(|| crate::interpreter::builtin_args::missing_arg::<()>(
+                    FN_NAME, #name_lit,
+                ).unwrap_err())?;
+        });
+    }
+
+    // Per-overload body fns + dispatcher branches.
+    let mut body_fns: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut dispatch_branches: Vec<proc_macro2::TokenStream> = Vec::new();
+    for (idx, f) in group.iter().enumerate() {
+        let params = match &f.args {
+            ModuleFnArgs::Typed { params } => params,
+            ModuleFnArgs::Legacy { .. } => unreachable!(),
+        };
+        let body_ident = format_ident!(
+            "__pyfn_{}_overload_{}",
+            rust_short,
+            idx,
+            span = f.short_name.span()
+        );
+
+        // Compose the typed-arg list for the body fn.
+        let body_typed_params: Vec<proc_macro2::TokenStream> = params
+            .iter()
+            .map(|p| {
+                let n = &p.name;
+                let t = &p.ty;
+                quote!(#n: #t)
+            })
+            .collect();
+
+        // The body itself — same shape as a single-body typed fn, minus
+        // the kwarg/arity prelude (the dispatcher already did that work).
+        let attrs = &f.attrs;
+        let body_stmts = &f.body.stmts;
+        body_fns.push(quote! {
+            #[allow(non_snake_case)]
+            #(#attrs)*
+            fn #body_ident(
+                _interp: &mut crate::Interpreter,
+                #(#body_typed_params),*
+            ) -> crate::error::Result<crate::value::Value> {
+                #[allow(non_snake_case)]
+                let FN_NAME: &'static str = *#name_static_ident;
+                let _ = FN_NAME;
+                #(#body_stmts)*
+            }
+        });
+
+        // Dispatcher branch: predicate over every param, then convert + call.
+        let predicate_terms: Vec<proc_macro2::TokenStream> = params
+            .iter()
+            .map(|p| {
+                let ty = &p.ty;
+                let __arg_ident = format_ident!("__arg_{}", p.name, span = p.name.span());
+                quote!(<#ty as crate::interpreter::builtin_args::FromValue>::matches(#__arg_ident))
+            })
+            .collect();
+        let convert_args: Vec<proc_macro2::TokenStream> = params
+            .iter()
+            .map(|p| {
+                let n = &p.name;
+                let ty = &p.ty;
+                let name_lit = LitStr::new(&p.name.to_string(), p.name.span());
+                let __arg_ident = format_ident!("__arg_{}", p.name, span = p.name.span());
+                quote! {
+                    let #n: #ty = <#ty as crate::interpreter::builtin_args::FromValue>::try_from_value(
+                        #__arg_ident, FN_NAME, #name_lit,
+                    )?;
+                }
+            })
+            .collect();
+        let call_args: Vec<&Ident> = params.iter().map(|p| &p.name).collect();
+        dispatch_branches.push(quote! {
+            if #(#predicate_terms)&&* {
+                #(#convert_args)*
+                return #body_ident(_interp, #(#call_args),*);
+            }
+        });
+    }
+
+    // Build the dispatcher.  When `__pyrust_args` is empty (zero-param
+    // overload) we still emit the kwarg / count guard so unexpected
+    // input is rejected the same way single-body builtins reject it.
+    //
+    // The `__actuals` slice formats the *actual* arg types observed at
+    // the call site — used by `no_overload_matched` for the "no
+    // overload matches" TypeError on the unreachable-when-PyValue path.
+    let no_match_args: Vec<proc_macro2::TokenStream> = ref_params
+        .iter()
+        .map(|p| {
+            let __arg_ident = format_ident!("__arg_{}", p.name, span = p.name.span());
+            quote! { pyrust_core::builtin_type_name(#__arg_ident) }
+        })
+        .collect();
+
+    let dispatcher = quote! {
+        #[allow(non_snake_case)]
+        fn #dispatcher_ident(
+            _interp: &mut crate::Interpreter,
+            __pyrust_args: &[ExpandedCallArg],
+        ) -> crate::error::Result<crate::value::Value> {
+            #[allow(non_snake_case)]
+            let FN_NAME: &'static str = *#name_static_ident;
+            let _ = FN_NAME;
+
+            // Phase 1 — shared validation.
+            let __positional: ::std::vec::Vec<&crate::interpreter::ExpandedCallArg> =
+                crate::interpreter::builtin_args::validate_kwargs_and_collect_positional(
+                    __pyrust_args,
+                    FN_NAME,
+                    &[#(#allowed_kwargs),*],
+                )?;
+            crate::interpreter::builtin_args::check_positional_count(
+                FN_NAME,
+                __positional.len(),
+                #min_pos,
+                #max_pos,
+            )?;
+            #(#per_arg_locate)*
+
+            // Phase 2 — try each overload in declaration order.
+            #(#dispatch_branches)*
+
+            // No overload matched.  Terse `unsupported argument type(s)`
+            // wording matching CPython's binary-op error shape — actual
+            // arg types only, no declared-signature dump (per the design
+            // review on #395, comment 4443208232).  Unreachable when any
+            // overload uses `PyValue` (whose `matches` is unconditional).
+            let __actuals: &[&str] = &[#(#no_match_args),*];
+            crate::interpreter::builtin_args::no_overload_matched::<crate::value::Value>(
+                FN_NAME, __actuals,
+            )
+        }
+    };
+
+    let mut items: Vec<proc_macro2::TokenStream> = Vec::new();
+    items.push(quote! {
+        #[allow(non_upper_case_globals)]
+        static #name_static_ident: std::sync::LazyLock<&'static str> =
+            std::sync::LazyLock::new(|| {
+                ::std::boxed::Box::leak(
+                    format!("{}{}", FN_PREFIX, #suffix_lit).into_boxed_str(),
+                )
+            });
+    });
+    items.extend(body_fns);
+    items.push(dispatcher);
+
+    let reg_entry = quote! {
+        crate::builtin_registry::BuiltinReg {
+            name: *#name_static_ident,
+            dispatch: #dispatcher_ident,
+        }
+    };
+
+    Ok((items, reg_entry, name_static_ident))
+}
+
 /// Render a `syn::Type` to its canonical token string with all whitespace
 /// removed.  Used by [`parse_fn_args`] to decide between the legacy slice
 /// dialect (`&[ExpandedCallArg]`) and the typed dialect.
@@ -797,6 +1039,213 @@ fn py_short_and_rust_short(f: &ModuleFn) -> (String, String) {
     (py_short, rust_short)
 }
 
+/// Group module-level `fn` declarations by Python-level short name.
+/// Singleton groups → single-body builtins.  Multi-fn groups → overload
+/// sets that get dispatched at the same registry name; the per-group
+/// order preserves source order (which the dispatcher relies on — first
+/// matching overload wins).  Groups themselves are returned in
+/// source-order-of-first-declaration so emit output is deterministic.
+///
+/// Returns an error if any overload set is internally inconsistent —
+/// see [`validate_overload_set`] for the rules.
+fn group_funcs_by_name(funcs: &[ModuleFn]) -> syn::Result<Vec<Vec<&ModuleFn>>> {
+    let mut groups: Vec<Vec<&ModuleFn>> = Vec::new();
+    let mut name_to_idx: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for f in funcs {
+        let (py_short, _) = py_short_and_rust_short(f);
+        match name_to_idx.get(&py_short).copied() {
+            Some(idx) => groups[idx].push(f),
+            None => {
+                name_to_idx.insert(py_short, groups.len());
+                groups.push(vec![f]);
+            }
+        }
+    }
+    for group in &groups {
+        if group.len() > 1 {
+            validate_overload_set(group)?;
+        }
+    }
+    Ok(groups)
+}
+
+/// Enforce structural compatibility across overloads of a single
+/// Python-level name.  Rules (v1):
+///
+/// 1. All overloads must use the **typed** dialect — mixing the legacy
+///    `(args)` form into an overload set would defeat the type-based
+///    dispatch.
+/// 2. Same **arity** (parameter count).  Different arities should live
+///    on separate Python names; for "0-or-1 trailing arg" patterns,
+///    declare a single signature with `Option<T>` + `#[default(None)]`.
+/// 3. Same **parameter names** in the same positions, and same
+///    `#[positional_only]` / `#[keyword_only]` flags.  Otherwise the
+///    dispatcher's shared kwarg-validation step couldn't unify them.
+/// 4. **No `#[default(...)]`** on any parameter.  The dispatcher
+///    applies defaults before knowing which overload matches, but the
+///    default's *type* would have to be compatible with every
+///    overload's parameter — that's the same chicken-and-egg the
+///    overload mechanism is meant to break.  Mix overloads with
+///    defaults via a single signature using a typed-overload-aware
+///    helper inside the body.
+fn validate_overload_set(group: &[&ModuleFn]) -> syn::Result<()> {
+    // Reference signature — the first overload — defines the shape.
+    let reference = group[0];
+    let ref_params = match &reference.args {
+        ModuleFnArgs::Typed { params } => params,
+        ModuleFnArgs::Legacy { args_ident } => {
+            return Err(syn::Error::new(
+                args_ident.span(),
+                "overload sets must use the typed dialect — the legacy `(args)` \
+                 form cannot participate in type-based dispatch",
+            ));
+        }
+    };
+    for p in ref_params {
+        if p.default.is_some() {
+            return Err(syn::Error::new(
+                p.name.span(),
+                format!(
+                    "parameter `{}` has a `#[default(...)]`, which is not \
+                     allowed in overload sets — declare a single signature \
+                     instead, or move the default into the dispatched body",
+                    p.name,
+                ),
+            ));
+        }
+    }
+    for (idx, f) in group.iter().enumerate().skip(1) {
+        let params = match &f.args {
+            ModuleFnArgs::Typed { params } => params,
+            ModuleFnArgs::Legacy { args_ident } => {
+                return Err(syn::Error::new(
+                    args_ident.span(),
+                    "overload sets must use the typed dialect — the legacy \
+                     `(args)` form cannot participate in type-based dispatch",
+                ));
+            }
+        };
+        if params.len() != ref_params.len() {
+            return Err(syn::Error::new(
+                f.short_name.span(),
+                format!(
+                    "overload #{idx} has {} parameter(s) but the first \
+                     overload has {}; all overloads must share the same arity",
+                    params.len(),
+                    ref_params.len(),
+                ),
+            ));
+        }
+        for (i, (a, b)) in ref_params.iter().zip(params.iter()).enumerate() {
+            if a.name != b.name {
+                return Err(syn::Error::new(
+                    b.name.span(),
+                    format!(
+                        "overload parameter #{i} is named `{}` here but `{}` \
+                         in the first overload; all overloads must agree on \
+                         parameter names",
+                        b.name, a.name,
+                    ),
+                ));
+            }
+            if a.positional_only != b.positional_only {
+                return Err(syn::Error::new(
+                    b.name.span(),
+                    format!(
+                        "parameter `{}` has conflicting `#[positional_only]` \
+                         flags across overloads",
+                        b.name,
+                    ),
+                ));
+            }
+            if a.keyword_only != b.keyword_only {
+                return Err(syn::Error::new(
+                    b.name.span(),
+                    format!(
+                        "parameter `{}` has conflicting `#[keyword_only]` \
+                         flags across overloads",
+                        b.name,
+                    ),
+                ));
+            }
+            if b.default.is_some() {
+                return Err(syn::Error::new(
+                    b.name.span(),
+                    format!(
+                        "parameter `{}` has a `#[default(...)]`, which is \
+                         not allowed in overload sets",
+                        b.name,
+                    ),
+                ));
+            }
+        }
+    }
+
+    // Catch-all-must-be-last (per design review on #395, concern 1).
+    //
+    // `PyValue::matches` is unconditional, so any overload after a
+    // `PyValue`-only one is reachable only via the (currently absent)
+    // path that doesn't match `PyValue` — i.e. never.  Emit a clear
+    // diagnostic at macro-expand time so users don't get silent dead
+    // code.  An overload counts as a "catch-all" only when *every*
+    // parameter is `PyValue` (a mixed `(PyValue, PyInt)` overload
+    // still requires the second arg to actually be an int, so later
+    // overloads remain reachable for non-int second-args).
+    for (idx, f) in group.iter().enumerate() {
+        if idx == group.len() - 1 {
+            // The last overload is allowed to be a catch-all — that's
+            // the whole point of the pattern.
+            break;
+        }
+        let params = match &f.args {
+            ModuleFnArgs::Typed { params } => params,
+            ModuleFnArgs::Legacy { .. } => unreachable!("checked above"),
+        };
+        if is_catch_all_overload(params) {
+            return Err(syn::Error::new(
+                f.short_name.span(),
+                "a `PyValue`-only catch-all overload must be declared last — \
+                 every overload after it would be unreachable (silently \
+                 shadowed by `PyValue::matches`, which always returns true)",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Returns true if every parameter in `params` is an *unconditional*
+/// matcher — either bare `PyValue` or `Option<PyValue>`.  Both shadow
+/// every overload declared after them (the former because
+/// `PyValue::matches` is unconditional, the latter because `None ||
+/// PyValue::matches` is also unconditional).  Per the review on #397:
+/// without the `Option<PyValue>` arm, that form silently slips past
+/// the catch-all-must-be-last guard.
+fn is_catch_all_overload(params: &[TypedParam]) -> bool {
+    if params.is_empty() {
+        // A zero-arg overload is its own thing — kwarg validation
+        // catches mismatches, so the "catch-all" question doesn't apply.
+        return false;
+    }
+    params.iter().all(|p| is_unconditional_matcher_ty(&p.ty))
+}
+
+/// True if the given type's `FromValue::matches` is unconditional —
+/// `PyValue` and `Option<PyValue>` (in any qualified form).  Used by
+/// the catch-all-must-be-last check; missing one of these arms would
+/// let an overload silently shadow everything after it.
+fn is_unconditional_matcher_ty(ty: &syn::Type) -> bool {
+    let s = ty_to_canonical_string(ty);
+    // Users typically `use` the wrapper and write it bare; the
+    // qualified form is supported defensively.
+    s == "PyValue"
+        || s.ends_with("::PyValue")
+        || s == "Option<PyValue>"
+        || s.ends_with("<PyValue>") && s.starts_with("Option<")
+        || s.ends_with("::PyValue>") && s.starts_with("Option<")
+}
+
 /// File-scoped module declaration: see crate-level docs for the full
 /// syntax and the contract with `pyrust_builtin_modules!`.
 #[proc_macro]
@@ -814,16 +1263,35 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
 
     // ── module-level fns ────────────────────────────────────────────────
     //
-    // The Rust ident is always derived from the fn name (with `r#` stripped
-    // off raw idents).  The Python-level name is the same *unless* the
-    // user supplied `#[py_name = "..."]` — used for Python names that are
-    // strict Rust keywords with no raw form (`super`).
-    for f in &funcs {
-        let (py_short, rust_short) = py_short_and_rust_short(f);
-        let short = &f.short_name;
+    // Group declarations by their Python-level short name.  A singleton
+    // group emits the existing single-body shape; multi-fn groups emit
+    // an overload set (dispatcher + per-overload body fns).  Source
+    // order is preserved so the dispatcher tries overloads in
+    // declaration order — strict overloads first, `PyValue` catch-all
+    // last, by convention.
+    let groups = match group_funcs_by_name(&funcs) {
+        Ok(g) => g,
+        Err(e) => return e.to_compile_error().into(),
+    };
+    for group in &groups {
+        let (py_short, rust_short) = py_short_and_rust_short(group[0]);
+        let short = &group[0].short_name;
         let short_lit = LitStr::new(&py_short, short.span());
-        let (fn_item, reg_entry, name_static_ident) = emit_fn_artefacts(f, &py_short, &rust_short);
-        fn_items.push(fn_item);
+
+        let (group_fn_items, reg_entry, name_static_ident) = if group.len() == 1 {
+            let (fn_item, reg_entry, name_static_ident) =
+                emit_fn_artefacts(group[0], &py_short, &rust_short);
+            (vec![fn_item], reg_entry, name_static_ident)
+        } else {
+            match emit_overload_set_artefacts(group, &py_short, &rust_short) {
+                Ok(triple) => triple,
+                Err(e) => return e.to_compile_error().into(),
+            }
+        };
+
+        for it in group_fn_items {
+            fn_items.push(it);
+        }
         reg_entries.push(reg_entry);
         attr_entries.push(quote! {
             attrs.insert(

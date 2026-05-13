@@ -1,0 +1,5 @@
+error: parameter `x` has conflicting `#[keyword_only]` flags across overloads
+  --> tests/compile_fail/overload_keyword_only_mismatch.rs:15:12
+   |
+15 |     fn bad(x: PyFloat) -> Result<Value> {
+   |            ^

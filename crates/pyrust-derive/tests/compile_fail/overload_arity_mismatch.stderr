@@ -1,0 +1,5 @@
+error: overload #1 has 2 parameter(s) but the first overload has 1; all overloads must share the same arity
+  --> tests/compile_fail/overload_arity_mismatch.rs:15:8
+   |
+15 |     fn bad(x: PyFloat, y: PyFloat) -> Result<Value> {
+   |        ^^^
