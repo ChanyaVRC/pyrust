@@ -74,6 +74,12 @@ impl PartialEq for PyKey {
         // (e.g. `{True: 1, 1: 2}` keeps `True` as the visible key) by storing
         // `PyKey::Bool` distinctly, but we make `Bool(b) == Int(b as i64)` so
         // lookups across the two types succeed.
+        //
+        // Two `Object` keys compare equal only when the underlying value
+        // identity matches.  This is intentionally strict: the dict/set
+        // runtime layer dispatches user-defined `__eq__` separately when the
+        // precomputed hashes coincide so that distinct instances which the
+        // user considers equal still collapse.
         match (self, other) {
             (PyKey::Int(a), PyKey::Int(b)) => a == b,
             (PyKey::Bool(a), PyKey::Bool(b)) => a == b,
@@ -82,6 +88,7 @@ impl PartialEq for PyKey {
             (PyKey::Str(a), PyKey::Str(b)) => a == b,
             (PyKey::None, PyKey::None) => true,
             (PyKey::FrozenSet(a), PyKey::FrozenSet(b)) => a == b,
+            (PyKey::Object { value: a, .. }, PyKey::Object { value: b, .. }) => a == b,
             _ => false,
         }
     }
@@ -125,28 +132,6 @@ impl Hash for PyKey {
         }
     }
 }
-
-impl PartialEq for PyKey {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (PyKey::Int(a), PyKey::Int(b)) => a == b,
-            (PyKey::Float(a), PyKey::Float(b)) => a == b,
-            (PyKey::Str(a), PyKey::Str(b)) => a == b,
-            (PyKey::Bool(a), PyKey::Bool(b)) => a == b,
-            (PyKey::None, PyKey::None) => true,
-            (PyKey::FrozenSet(a), PyKey::FrozenSet(b)) => a == b,
-            // Two `Object` keys compare equal only when the underlying value
-            // identity matches.  This is intentionally strict: the dict/set
-            // runtime layer dispatches user-defined `__eq__` separately when
-            // the precomputed hashes coincide so that distinct instances
-            // which the user considers equal still collapse.
-            (PyKey::Object { value: a, .. }, PyKey::Object { value: b, .. }) => a == b,
-            _ => false,
-        }
-    }
-}
-
-impl Eq for PyKey {}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared types
