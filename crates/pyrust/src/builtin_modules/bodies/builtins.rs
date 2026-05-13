@@ -1596,7 +1596,7 @@ pyrust_module! {
         #[default(None)]
         format_spec: Option<PyStr>,
     ) -> Result<Value> {
-        let value = value.0;
+        let value = &value.0;
         let spec: &str = format_spec.as_ref().map(|s| s.as_ref()).unwrap_or("");
         // Dispatch __format__(spec) for user instances.
         if let ValueKind::PyInstance(instance) = value.kind() {
@@ -1609,7 +1609,7 @@ pyrust_module! {
                     Value::py_instance(instance_rc),
                     &[ExpandedCallArg {
                         name: None,
-                        value: Value::string(spec.to_string()),
+                        value: Value::string(spec),
                     }],
                 )?;
                 return match result.kind() {
@@ -1624,7 +1624,7 @@ pyrust_module! {
                 };
             }
         }
-        apply_format_spec(&value, spec)
+        apply_format_spec(value, spec)
     }
 
     /// CPython: classmethod(function) — class-method descriptor.
