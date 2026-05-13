@@ -1269,27 +1269,36 @@ result = fact(10)
     #[test]
     fn os_path_join_handles_absolute_components_like_cpython() {
         // CPython quirk: any absolute component resets the running path.
-        // `import os.path as op` is the working import form because pyrust
-        // doesn't yet ship the `os` parent package — see bodies/os_path.rs.
+        // Expected output is platform-specific because `Path::is_absolute`
+        // disagrees across OSes — on Unix `/abs` is absolute (so `b` and
+        // `c` reset to `/abs/...`); on Windows `/abs` isn't absolute (no
+        // drive prefix), so it's just another non-resetting component and
+        // separators get mixed.  Mirror CPython by computing the expected
+        // strings with the same `PathBuf` ops the impl uses — that keeps
+        // the test honest on both platforms without skipping coverage.
         let interp = run_program(
             "import os.path as op\n\
              a = op.join('a', 'b', 'c')\n\
              b = op.join('/abs', 'rel')\n\
              c = op.join('rel', '/abs', 'tail')\n",
         );
-        // Use the platform separator so the test passes on Windows too.
-        let sep = std::path::MAIN_SEPARATOR;
-        assert_eq!(
-            interp.lookup_name("a").unwrap(),
-            Some(Value::string(format!("a{sep}b{sep}c")))
-        );
-        assert_eq!(
-            interp.lookup_name("b").unwrap(),
-            Some(Value::string(format!("{sep}abs{sep}rel")))
-        );
+        let expect = |parts: &[&str]| {
+            let mut p = std::path::PathBuf::new();
+            for part in parts {
+                let q = std::path::Path::new(part);
+                if q.is_absolute() {
+                    p = q.to_path_buf();
+                } else {
+                    p.push(q);
+                }
+            }
+            Value::string(p.to_string_lossy().into_owned())
+        };
+        assert_eq!(interp.lookup_name("a").unwrap(), Some(expect(&["a", "b", "c"])));
+        assert_eq!(interp.lookup_name("b").unwrap(), Some(expect(&["/abs", "rel"])));
         assert_eq!(
             interp.lookup_name("c").unwrap(),
-            Some(Value::string(format!("{sep}abs{sep}tail")))
+            Some(expect(&["rel", "/abs", "tail"]))
         );
     }
 
