@@ -343,6 +343,21 @@ pub trait BuiltinTypeOps: 'static {
         ))
     }
 
+    /// Missing-key hook.  When `get_item` raises `KeyError`, the interpreter
+    /// consults this; if it returns `Some(factory)`, the interpreter calls
+    /// `factory()` with no args and stores the result under `key` before
+    /// returning it.  Used by `collections.defaultdict` so its
+    /// `default_factory` runs from inside the interpreter loop without
+    /// pyrust-core having to know about the `Interpreter` type.
+    ///
+    /// The returned `Value` must be callable; the interpreter invokes it
+    /// through its normal call dispatch, so any callable (UserFunction,
+    /// BuiltinFunction, BoundMethod, …) is fine.
+    fn missing_factory(&self, state: &BuiltinState) -> Option<Value> {
+        let _ = state;
+        None
+    }
+
     fn contains(&self, state: &BuiltinState, item: &Value) -> Result<bool> {
         let _ = (state, item);
         Err(PyError::named(

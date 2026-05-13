@@ -537,6 +537,7 @@ impl Interpreter {
                             ValueKind::List(_) => 1u8,
                             ValueKind::Dict(_) => 2u8,
                             ValueKind::PyInstance(_) => 3u8,
+                            ValueKind::BuiltinObject { .. } => 4u8,
                             _ => 0u8,
                         }).unwrap_or(0);
                         match target_kind {
@@ -575,6 +576,21 @@ impl Interpreter {
                                     "TypeError",
                                     "object does not support item assignment".to_string(),
                                 )));
+                            }
+                            4 => {
+                                // BuiltinObject (Counter, …) — route through
+                                // `BuiltinTypeOps::set_item`.  The default
+                                // impl returns a TypeError shaped like the
+                                // dict-fallback message, so non-mutating
+                                // types don't need extra plumbing.
+                                let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
+                                if let ValueKind::BuiltinObject { ops, state } = obj_val.kind() {
+                                    vm_try!(ops.set_item(state, &idx_val, val_val));
+                                } else {
+                                    vm_try!(Err(PyError::Runtime(
+                                        "internal: BuiltinObject kind probe drifted".to_string(),
+                                    )));
+                                }
                             }
                             _ => {
                                 vm_try!(Err(PyError::Runtime(

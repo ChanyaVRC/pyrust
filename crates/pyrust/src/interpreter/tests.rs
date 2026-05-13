@@ -1437,21 +1437,136 @@ result = fact(10)
     }
 
     #[test]
-    fn collections_defaultdict_raises_with_workaround_hint() {
-        // defaultdict is intentionally deferred — the error must point
-        // callers at the workaround so they don't spelunk through the
-        // interpreter to figure out what's broken.
+    fn os_path_dotted_import_works_via_parent_package() {
+        // The `os` parent module is synthesised in `bodies/os.rs` and
+        // its `path` constant points at the `os.path` module, so the
+        // bare `import os.path; os.path.join(...)` pattern (which the
+        // compiler binds under the topmost component `os`) resolves.
+        let interp = run_program(
+            "import os.path\nresult = os.path.join('a', 'b')\n",
+        );
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(
+            interp.lookup_name("result").unwrap(),
+            Some(Value::string(format!("a{sep}b")))
+        );
+    }
+
+    #[test]
+    fn itertools_islice_is_lazy_over_huge_source() {
+        // The point of moving islice off the eager `Vec<Value>` path is
+        // that it must *not* drain a huge source when the consumer only
+        // asks for a handful.  Pull three elements from a 100k-range and
+        // confirm the rest never materialises by relying on the test
+        // wall-clock; with the eager implementation, the same test ran
+        // visibly slower because it had to walk the full range.
+        let interp = run_program(
+            "from itertools import islice\n\
+             it = islice(range(100000), 3)\n\
+             a = next(it); b = next(it); c = next(it)\n",
+        );
+        assert_eq!(interp.lookup_name("a").unwrap(), Some(Value::int(0)));
+        assert_eq!(interp.lookup_name("b").unwrap(), Some(Value::int(1)));
+        assert_eq!(interp.lookup_name("c").unwrap(), Some(Value::int(2)));
+    }
+
+    #[test]
+    fn collections_counter_exposes_full_method_surface() {
+        // Counter is now a real BuiltinObject — pin each of the methods
+        // that lights up only with the BuiltinTypeOps implementation
+        // (missing-key returns 0, most_common, elements, update,
+        // subtract, copy independence).
+        let interp = run_program(
+            "from collections import Counter\n\
+             c = Counter('aabbc')\n\
+             missing = c['z']\n\
+             top2 = c.most_common(2)\n\
+             elts = c.elements()\n\
+             c.update('aa')\n\
+             after_update = c['a']\n\
+             c.subtract('aaaaa')\n\
+             after_subtract = c['a']\n\
+             c2 = c.copy()\n\
+             c2['a'] = 999\n\
+             original_a = c['a']\n\
+             copy_a = c2['a']\n",
+        );
+        assert_eq!(interp.lookup_name("missing").unwrap(), Some(Value::int(0)));
+        assert_eq!(
+            interp.lookup_name("top2").unwrap(),
+            Some(Value::list(vec![
+                Value::tuple(vec![Value::string("a"), Value::int(2)]),
+                Value::tuple(vec![Value::string("b"), Value::int(2)]),
+            ]))
+        );
+        // elements() lists 'a' twice, 'b' twice, 'c' once — insertion
+        // order preserved.
+        assert_eq!(
+            interp.lookup_name("elts").unwrap(),
+            Some(Value::list(vec![
+                Value::string("a"), Value::string("a"),
+                Value::string("b"), Value::string("b"),
+                Value::string("c"),
+            ]))
+        );
+        assert_eq!(interp.lookup_name("after_update").unwrap(), Some(Value::int(4)));
+        assert_eq!(interp.lookup_name("after_subtract").unwrap(), Some(Value::int(-1)));
+        assert_eq!(interp.lookup_name("original_a").unwrap(), Some(Value::int(-1)));
+        assert_eq!(interp.lookup_name("copy_a").unwrap(), Some(Value::int(999)));
+    }
+
+    #[test]
+    fn collections_defaultdict_runs_factory_on_missing_key() {
+        // Two complementary uses pin the missing-key dispatch:
+        //
+        //   - `defaultdict(int)` for the canonical `counts[c] += 1` idiom
+        //     — `+=` re-binds via `set_item` so the increment persists
+        //     across iterations, matching CPython.
+        //   - `defaultdict(None)` falls through to KeyError, matching a
+        //     plain dict — there's no factory to call.
+        let interp = run_program(
+            "from collections import defaultdict\n\
+             counts = defaultdict(int)\n\
+             for c in 'aabbbc':\n    \
+             counts[c] += 1\n\
+             a = counts['a']\n\
+             b = counts['b']\n\
+             c = counts['c']\n",
+        );
+        assert_eq!(interp.lookup_name("a").unwrap(), Some(Value::int(2)));
+        assert_eq!(interp.lookup_name("b").unwrap(), Some(Value::int(3)));
+        assert_eq!(interp.lookup_name("c").unwrap(), Some(Value::int(1)));
+    }
+
+    #[test]
+    fn collections_defaultdict_none_factory_raises_key_error() {
+        // `defaultdict(None)` matches plain dict semantics: missing key
+        // raises KeyError instead of running a factory.  Pinning this
+        // because the `is_none()` short-circuit in
+        // `missing_factory` is the line that selects between the two
+        // behaviours.
         let err = run_program_expect_error(
-            "from collections import defaultdict\ndefaultdict(list)\n",
+            "from collections import defaultdict\nd = defaultdict(None)\nd['missing']\n",
         );
         let msg = err.to_string();
         assert!(
-            msg.contains("NotImplementedError"),
-            "expected NotImplementedError class name in: {msg}"
+            msg.contains("KeyError"),
+            "expected KeyError, got: {msg}"
         );
+    }
+
+    #[test]
+    fn collections_defaultdict_rejects_non_callable_factory() {
+        // The eager check in `bodies/collections.rs` surfaces a clean
+        // TypeError at construction time instead of letting the
+        // interpreter blow up on the first missing-key access.
+        let err = run_program_expect_error(
+            "from collections import defaultdict\ndefaultdict(42)\n",
+        );
+        let msg = err.to_string();
         assert!(
-            msg.contains("d.get(key, default)") || msg.contains("`key in d`"),
-            "error must surface the workaround hint; got: {msg}"
+            msg.contains("TypeError") && msg.contains("callable"),
+            "expected `must be callable` TypeError; got: {msg}"
         );
     }
 }

@@ -125,6 +125,10 @@ pyrust_builtin_modules! {
     sys,
     @flat builtins,
     "os.path" as os_path,
+    // `os` is a parent for `os.path` — see `bodies/os.rs`.  Must come
+    // after `os.path` in the order so the `super::os_path::module()`
+    // reference in `os`'s `constants` block resolves cleanly.
+    os,
     functools,
     itertools,
     collections,

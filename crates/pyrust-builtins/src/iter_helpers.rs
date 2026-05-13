@@ -212,6 +212,163 @@ pub fn reversed(source: Value) -> Value {
     Value::builtin_object(REVERSED_OPS, Box::new(state))
 }
 
+// ── chain ────────────────────────────────────────────────────────────────────
+
+pub struct ChainState {
+    sources: Vec<Value>,
+    /// Cursor over `sources`; advanced past each one as it's drained.
+    source_idx: RefCell<usize>,
+    /// Materialised items for the source at `source_idx`; refilled when we
+    /// move on.  Holding the current source as a `Vec<Value>` (rather than
+    /// re-iterating piecewise) keeps the surface aligned with the rest of
+    /// this file's lazy helpers — `iter_values_via_registry` returns a
+    /// `Vec`, so each *source* is drained eagerly but the chain as a whole
+    /// only walks to the current source.
+    current_items: RefCell<Option<Vec<Value>>>,
+    pos: RefCell<usize>,
+}
+
+pub struct ChainOps;
+pub const CHAIN_OPS: &ChainOps = &ChainOps;
+pub const CHAIN_TYPE_NAME: &str = "itertools.chain";
+
+impl BuiltinTypeOps for ChainOps {
+    fn type_name(&self) -> &'static str {
+        CHAIN_TYPE_NAME
+    }
+
+    fn repr(&self, _state: &BuiltinState) -> String {
+        "<itertools.chain object>".to_string()
+    }
+
+    fn truthy(&self, _state: &BuiltinState) -> bool {
+        true
+    }
+
+    fn is_iterable(&self) -> bool {
+        true
+    }
+
+    fn iter_next(&self, state: &BuiltinState) -> Result<Option<Value>> {
+        let borrow = state.borrow();
+        let s = borrow
+            .downcast_ref::<ChainState>()
+            .ok_or_else(|| PyError::Runtime("internal: bad chain state".to_string()))?;
+        loop {
+            // Drain the current source.
+            {
+                let items_ref = s.current_items.borrow();
+                if let Some(items) = items_ref.as_ref() {
+                    let mut pos = s.pos.borrow_mut();
+                    if *pos < items.len() {
+                        let v = items[*pos].clone();
+                        *pos += 1;
+                        return Ok(Some(v));
+                    }
+                }
+            }
+            // Move to the next source (or stop).
+            let mut idx = s.source_idx.borrow_mut();
+            if *idx >= s.sources.len() {
+                return Ok(None);
+            }
+            let next = iter_values_via_registry(&s.sources[*idx])?;
+            *idx += 1;
+            *s.current_items.borrow_mut() = Some(next);
+            *s.pos.borrow_mut() = 0;
+        }
+    }
+}
+
+/// `itertools.chain(*iterables)` — concatenate iterables lazily.  Each
+/// source is materialised when we reach it during iteration, so the
+/// pattern `chain(huge_source_1, huge_source_2)` only pays for what's
+/// actually consumed.
+pub fn chain(sources: Vec<Value>) -> Value {
+    let state = ChainState {
+        sources,
+        source_idx: RefCell::new(0),
+        current_items: RefCell::new(None),
+        pos: RefCell::new(0),
+    };
+    Value::builtin_object(CHAIN_OPS, Box::new(state))
+}
+
+// ── islice ───────────────────────────────────────────────────────────────────
+
+pub struct IsliceState {
+    source: Value,
+    /// `None` = no upper bound (`islice(seq, None)` semantics).
+    stop: Option<usize>,
+    step: usize,
+    /// Materialised lazily on first `iter_next`.
+    items: RefCell<Option<Vec<Value>>>,
+    /// Next absolute index to *attempt*.  Starts at `start`; advances by
+    /// `step` each successful yield.
+    pos: RefCell<usize>,
+}
+
+pub struct IsliceOps;
+pub const ISLICE_OPS: &IsliceOps = &IsliceOps;
+pub const ISLICE_TYPE_NAME: &str = "itertools.islice";
+
+impl BuiltinTypeOps for IsliceOps {
+    fn type_name(&self) -> &'static str {
+        ISLICE_TYPE_NAME
+    }
+
+    fn repr(&self, _state: &BuiltinState) -> String {
+        "<itertools.islice object>".to_string()
+    }
+
+    fn truthy(&self, _state: &BuiltinState) -> bool {
+        true
+    }
+
+    fn is_iterable(&self) -> bool {
+        true
+    }
+
+    fn iter_next(&self, state: &BuiltinState) -> Result<Option<Value>> {
+        let borrow = state.borrow();
+        let s = borrow
+            .downcast_ref::<IsliceState>()
+            .ok_or_else(|| PyError::Runtime("internal: bad islice state".to_string()))?;
+        ensure_materialized(&s.items, || iter_values_via_registry(&s.source))?;
+        let items_ref = s.items.borrow();
+        let items = items_ref.as_ref().unwrap();
+        let mut pos = s.pos.borrow_mut();
+        // Bound by both items.len() and (when set) stop.
+        let upper = match s.stop {
+            Some(stop) => stop.min(items.len()),
+            None => items.len(),
+        };
+        if *pos >= upper {
+            return Ok(None);
+        }
+        let out = items[*pos].clone();
+        *pos = pos.checked_add(s.step).unwrap_or(usize::MAX);
+        Ok(Some(out))
+    }
+}
+
+/// `itertools.islice(iterable, start, stop, step)` — lazy slice.
+///
+/// `stop = None` means "no upper bound" (drain to the end of the source).
+/// `step` must be a strictly positive `usize`.  Argument validation lives
+/// in the caller (`bodies/itertools.rs`'s `islice` dispatcher) so we get
+/// CPython-shaped error messages with `FN_NAME` substituted.
+pub fn islice(source: Value, start: usize, stop: Option<usize>, step: usize) -> Value {
+    let state = IsliceState {
+        source,
+        stop,
+        step,
+        items: RefCell::new(None),
+        pos: RefCell::new(start),
+    };
+    Value::builtin_object(ISLICE_OPS, Box::new(state))
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 fn ensure_materialized<F>(slot: &RefCell<Option<Vec<Value>>>, fill: F) -> Result<()>

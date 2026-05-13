@@ -1,4 +1,6 @@
 pub mod bound_method;
+pub mod counter;
+pub mod defaultdict;
 pub mod dict;
 pub mod dict_views;
 pub mod file;
@@ -22,11 +24,15 @@ pub fn lookup_ops(type_name: &str) -> Option<&'static dyn pyrust_core::BuiltinTy
         iter_helpers::ENUMERATE_TYPE_NAME => Some(iter_helpers::ENUMERATE_OPS),
         iter_helpers::ZIP_TYPE_NAME => Some(iter_helpers::ZIP_OPS),
         iter_helpers::REVERSED_TYPE_NAME => Some(iter_helpers::REVERSED_OPS),
+        iter_helpers::CHAIN_TYPE_NAME => Some(iter_helpers::CHAIN_OPS),
+        iter_helpers::ISLICE_TYPE_NAME => Some(iter_helpers::ISLICE_OPS),
         dict_views::DICT_KEYS_TYPE_NAME => Some(dict_views::DICT_KEYS_OPS),
         dict_views::DICT_VALUES_TYPE_NAME => Some(dict_views::DICT_VALUES_OPS),
         dict_views::DICT_ITEMS_TYPE_NAME => Some(dict_views::DICT_ITEMS_OPS),
         property::TYPE_NAME => Some(property::PROPERTY_OPS),
         bound_method::TYPE_NAME => Some(bound_method::BOUND_METHOD_OPS),
+        counter::TYPE_NAME => Some(counter::COUNTER_OPS),
+        defaultdict::TYPE_NAME => Some(defaultdict::DEFAULTDICT_OPS),
         _ => None,
     }
 }

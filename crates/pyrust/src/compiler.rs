@@ -4044,14 +4044,49 @@ impl Compiler {
 
     fn compile_import(&mut self, names: &[(String, Option<String>)]) {
         for (module_name, alias) in names {
-            let mod_idx = self.intern_name(module_name);
-            let dst = self.alloc_temp();
-            self.emit(Insn::ImportModule(dst, mod_idx));
-            let bound = alias
-                .as_deref()
-                .unwrap_or_else(|| module_name.split('.').next().unwrap_or(module_name));
-            self.compile_store_name(bound, dst);
-            self.free_temp(dst);
+            match alias {
+                Some(alias) => {
+                    // `import a.b.c as alias` — bind the leaf module under
+                    // the alias directly.  No parent walk needed because
+                    // the user explicitly renamed.
+                    let mod_idx = self.intern_name(module_name);
+                    let dst = self.alloc_temp();
+                    self.emit(Insn::ImportModule(dst, mod_idx));
+                    self.compile_store_name(alias, dst);
+                    self.free_temp(dst);
+                }
+                None => {
+                    // `import a.b.c` — CPython binds the *topmost* component
+                    // (`a`), and `a.b.c` is reached via attribute chains on
+                    // the loaded packages.  We:
+                    //  1. Load the full dotted module so it's cached and so
+                    //     any parent stubs it triggers get populated.
+                    //  2. Load the topmost component (which the built-in
+                    //     module registry can expose as a package whose
+                    //     attrs include the submodule, e.g. `os` carries
+                    //     `path` → `os.path`).
+                    //  3. Bind the topmost name to that package.
+                    let full_idx = self.intern_name(module_name);
+                    let full_reg = self.alloc_temp();
+                    self.emit(Insn::ImportModule(full_reg, full_idx));
+                    self.free_temp(full_reg);
+                    let top = module_name.split('.').next().unwrap_or(module_name);
+                    if top == module_name {
+                        // Non-dotted — the value loaded above *is* what we bind.
+                        let mod_idx = self.intern_name(module_name);
+                        let dst = self.alloc_temp();
+                        self.emit(Insn::ImportModule(dst, mod_idx));
+                        self.compile_store_name(module_name, dst);
+                        self.free_temp(dst);
+                    } else {
+                        let top_idx = self.intern_name(top);
+                        let top_reg = self.alloc_temp();
+                        self.emit(Insn::ImportModule(top_reg, top_idx));
+                        self.compile_store_name(top, top_reg);
+                        self.free_temp(top_reg);
+                    }
+                }
+            }
         }
     }
 
