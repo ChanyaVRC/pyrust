@@ -2277,9 +2277,11 @@ impl Compiler {
     }
 
     fn intern_const(&mut self, val: Value) -> u16 {
-        // Bool(true) and Int(1) share the same PyKey::Int(1) after normalisation, so
-        // skip the hash-map fast path for booleans to avoid the two kinds colliding in
-        // the constant pool.  Use the type-exact linear scan for them instead.
+        // PyKey treats `Bool(b)` and `Int(b as i64)` as hash/eq-equal (matching
+        // CPython's `True == 1`), so they would collide in the constant pool's
+        // hash index even though they are type-distinct values.  Skip the
+        // hash-map fast path for booleans and rely on the type-exact linear
+        // scan instead.
         let is_bool = matches!(val.kind(), ValueKind::Bool(_));
         if !is_bool && let Some(key) = val.to_key() {
             if let Some(&idx) = self.const_index.get(&key) {
