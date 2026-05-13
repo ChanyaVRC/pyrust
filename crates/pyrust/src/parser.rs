@@ -27,20 +27,20 @@ impl Parser {
 
     fn parse_stmt_sequence(&mut self) -> Result<Vec<Stmt>> {
         let mut stmts = Vec::new();
-        stmts.push(self.parse_stmt()?);
+        stmts.extend(self.parse_stmt()?);
         while self.is(&Token::Semicolon) {
             self.bump();
             if self.at_stmt_end() {
                 break;
             }
-            stmts.push(self.parse_stmt()?);
+            stmts.extend(self.parse_stmt()?);
         }
         Ok(stmts)
     }
 
     // ── Statements ─────────────────────────────────────────────────────────
 
-    fn parse_stmt(&mut self) -> Result<Stmt> {
+    fn parse_stmt(&mut self) -> Result<Vec<Stmt>> {
         // Collect decorators before def/class
         let mut decorators: Vec<Expr> = Vec::new();
         while self.is(&Token::At) {
@@ -49,44 +49,46 @@ impl Parser {
         }
 
         match self.current() {
-            Some(Token::Def) => self.parse_def(decorators),
-            Some(Token::Class) => self.parse_class(decorators),
+            Some(Token::Def) => Ok(vec![self.parse_def(decorators)?]),
+            Some(Token::Class) => Ok(vec![self.parse_class(decorators)?]),
             _ if !decorators.is_empty() => Err(PyError::Parse(
                 "decorator must be followed by def or class".to_string(),
             )),
-            Some(Token::Global) => self.parse_global(),
-            Some(Token::Nonlocal) => self.parse_nonlocal(),
-            Some(Token::If) => self.parse_if(),
-            Some(Token::While) => self.parse_while(),
-            Some(Token::For) => self.parse_for(),
-            Some(Token::Try) => self.parse_try(),
-            Some(Token::Raise) => self.parse_raise(),
-            Some(Token::Import) => self.parse_import(),
-            Some(Token::From) => self.parse_import_from(),
-            Some(Token::Del) => self.parse_del(),
-            Some(Token::Assert) => self.parse_assert(),
-            Some(Token::With) => self.parse_with(),
+            Some(Token::Global) => Ok(vec![self.parse_global()?]),
+            Some(Token::Nonlocal) => Ok(vec![self.parse_nonlocal()?]),
+            Some(Token::If) => Ok(vec![self.parse_if()?]),
+            Some(Token::While) => Ok(vec![self.parse_while()?]),
+            Some(Token::For) => Ok(vec![self.parse_for()?]),
+            Some(Token::Try) => Ok(vec![self.parse_try()?]),
+            Some(Token::Raise) => Ok(vec![self.parse_raise()?]),
+            Some(Token::Import) => Ok(vec![self.parse_import()?]),
+            Some(Token::From) => Ok(vec![self.parse_import_from()?]),
+            Some(Token::Del) => Ok(vec![self.parse_del()?]),
+            Some(Token::Assert) => Ok(vec![self.parse_assert()?]),
+            Some(Token::With) => Ok(vec![self.parse_with()?]),
             // `match` is a soft keyword: `match <expr>:` followed by indented `case` arms.
-            Some(Token::Ident(kw)) if kw == "match" && self.is_match_stmt() => self.parse_match(),
+            Some(Token::Ident(kw)) if kw == "match" && self.is_match_stmt() => {
+                Ok(vec![self.parse_match()?])
+            }
             Some(Token::Return) => {
                 self.bump();
                 if self.at_stmt_end() {
-                    Ok(Stmt::Return(None))
+                    Ok(vec![Stmt::Return(None)])
                 } else {
-                    Ok(Stmt::Return(Some(self.parse_expr()?)))
+                    Ok(vec![Stmt::Return(Some(self.parse_expr()?))])
                 }
             }
             Some(Token::Break) => {
                 self.bump();
-                Ok(Stmt::Break)
+                Ok(vec![Stmt::Break])
             }
             Some(Token::Continue) => {
                 self.bump();
-                Ok(Stmt::Continue)
+                Ok(vec![Stmt::Continue])
             }
             Some(Token::Pass) => {
                 self.bump();
-                Ok(Stmt::Pass)
+                Ok(vec![Stmt::Pass])
             }
             _ => self.parse_expr_stmt(),
         }
@@ -365,7 +367,7 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_expr_stmt(&mut self) -> Result<Stmt> {
+    fn parse_expr_stmt(&mut self) -> Result<Vec<Stmt>> {
         // Detect starred assignment target at the start: *name, ... = rhs
         // We need to check if the first token is Star before parsing as an expression,
         // since *name is not a valid expression.
@@ -432,28 +434,15 @@ impl Parser {
             if self.is(&Token::Assign) {
                 self.bump(); // consume =
                 let rhs = self.parse_expr()?;
-                return match &targets[0] {
-                    Expr::Var(name) => Ok(Stmt::Assign(AssignTarget::Name(name.clone()), rhs)),
-                    Expr::Attr { target, name } => Ok(Stmt::AttrAssign {
-                        target: *target.clone(),
-                        name: name.clone(),
-                        expr: rhs,
-                    }),
-                    Expr::Index { target, index } => Ok(Stmt::IndexAssign {
-                        target: target.clone(),
-                        index: index.clone(),
-                        expr: rhs,
-                    }),
-                    _ => unreachable!(),
-                };
+                return Ok(vec![lhs_to_assign_stmt(&targets[0], rhs)?]);
             }
             // Bare annotation declaration without value: no-op at runtime.
-            return Ok(Stmt::Pass);
+            return Ok(vec![Stmt::Pass]);
         }
 
-        // Assignment: = rhs
+        // Assignment: = rhs   (possibly chained: t1 = t2 = ... = rhs)
         if self.is(&Token::Assign) {
-            // Validate starred flags: at most one starred item
+            // Validate starred flags on the first target group.
             let star_count = starred_flags.iter().filter(|&&s| s).count();
             if star_count > 1 {
                 return Err(PyError::Parse(
@@ -466,62 +455,92 @@ impl Parser {
                     "starred assignment target must be in a list or tuple".to_string(),
                 ));
             }
-            self.bump(); // consume =
-            // Parse the RHS; collect commas so "a, b = 1, 2" gives rhs=Tuple([1,2])
-            let rhs_first = self.parse_expr()?;
-            let rhs = if self.is(&Token::Comma) {
-                let mut items = vec![rhs_first];
-                while self.is(&Token::Comma) {
-                    self.bump();
-                    if self.at_stmt_end() {
-                        break;
-                    }
-                    items.push(self.parse_expr()?);
-                }
-                Expr::Tuple(items)
-            } else {
-                rhs_first
-            };
 
-            // Convert targets+flags into AssignTargets
-            if targets.len() == 1 && !starred_flags[0] {
-                return match &targets[0] {
-                    Expr::Var(name) => Ok(Stmt::Assign(AssignTarget::Name(name.clone()), rhs)),
-                    Expr::Attr { target, name } => Ok(Stmt::AttrAssign {
-                        target: *target.clone(),
-                        name: name.clone(),
-                        expr: rhs,
-                    }),
-                    Expr::Index { target, index } => Ok(Stmt::IndexAssign {
-                        target: target.clone(),
-                        index: index.clone(),
-                        expr: rhs,
-                    }),
-                    Expr::Slice {
-                        target,
-                        lower,
-                        upper,
-                        step,
-                    } => Ok(Stmt::SliceAssign {
-                        target: target.clone(),
-                        lower: lower.clone(),
-                        upper: upper.clone(),
-                        step: step.clone(),
-                        expr: rhs,
-                    }),
-                    Expr::Tuple(elems) => {
-                        let assign_targets =
-                            exprs_to_assign_targets(elems, &vec![false; elems.len()])?;
-                        Ok(Stmt::Assign(AssignTarget::Tuple(assign_targets), rhs))
-                    }
-                    _ => Err(PyError::Parse(
-                        "cannot assign to this expression".to_string(),
-                    )),
+            // Collect every target group separated by `=`.  Python parses
+            // `a = b = c = expr` as multiple target groups followed by a
+            // single RHS expression.  Each `target_groups` entry is a
+            // `(targets, starred_flags, had_comma)` triple matching the
+            // first one we just parsed above.
+            let mut target_groups: Vec<(Vec<Expr>, Vec<bool>, bool)> =
+                vec![(targets, starred_flags, had_comma)];
+
+            // The final RHS expression (after the last `=`).
+            let rhs;
+            loop {
+                self.bump(); // consume `=`
+                // Parse the next group: comma-separated expressions.  Star
+                // is only valid for an assignment target — we tentatively
+                // parse it as such, and reject below if it turns out to be
+                // the RHS.
+                let first_is_star_next = self.is(&Token::Star);
+                let (next_first_expr, next_first_starred) = if first_is_star_next {
+                    self.bump();
+                    let inner = self.parse_postfix()?;
+                    (inner, true)
+                } else {
+                    (self.parse_expr()?, false)
                 };
+                let mut next_had_comma = false;
+                let (next_items, next_flags) = if self.is(&Token::Comma) {
+                    next_had_comma = true;
+                    let mut items = vec![next_first_expr];
+                    let mut flags = vec![next_first_starred];
+                    while self.is(&Token::Comma) {
+                        self.bump();
+                        if self.at_stmt_end() {
+                            break;
+                        }
+                        if self.is(&Token::Star) {
+                            self.bump();
+                            let inner = self.parse_postfix()?;
+                            items.push(inner);
+                            flags.push(true);
+                        } else {
+                            items.push(self.parse_expr()?);
+                            flags.push(false);
+                        }
+                    }
+                    (items, flags)
+                } else {
+                    (vec![next_first_expr], vec![next_first_starred])
+                };
+
+                if self.is(&Token::Assign) {
+                    // Another `=` follows — this group is another target list.
+                    let star_count = next_flags.iter().filter(|&&s| s).count();
+                    if star_count > 1 {
+                        return Err(PyError::Parse(
+                            "multiple starred expressions in assignment".to_string(),
+                        ));
+                    }
+                    if star_count == 1 && next_items.len() == 1 && !next_had_comma {
+                        return Err(PyError::Parse(
+                            "starred assignment target must be in a list or tuple".to_string(),
+                        ));
+                    }
+                    target_groups.push((next_items, next_flags, next_had_comma));
+                    continue;
+                }
+
+                // No more `=`: this last group is the RHS.  Stars are not
+                // permitted in the RHS expression.
+                if next_flags.iter().any(|&s| s) {
+                    return Err(PyError::Parse(
+                        "starred expression is not valid in this context".to_string(),
+                    ));
+                }
+                rhs = if next_items.len() == 1 {
+                    next_items.into_iter().next().unwrap()
+                } else {
+                    Expr::Tuple(next_items)
+                };
+                break;
             }
-            // Multi-target or starred tuple unpack
-            let assign_targets = exprs_to_assign_targets(&targets, &starred_flags)?;
-            return Ok(Stmt::Assign(AssignTarget::Tuple(assign_targets), rhs));
+
+            // Build a Stmt::Assign / AttrAssign / IndexAssign / SliceAssign for
+            // each target group.  For chained assignment we evaluate the RHS
+            // exactly once and reuse the value for every target.
+            return Ok(build_assign_stmts(target_groups, rhs)?);
         }
 
         // Starred item outside assignment is invalid
@@ -542,18 +561,18 @@ impl Parser {
                     "invalid augmented assignment target".to_string(),
                 ));
             };
-            return Ok(Stmt::AugAssign {
+            return Ok(vec![Stmt::AugAssign {
                 target,
                 op: aug_op,
                 expr: rhs,
-            });
+            }]);
         }
 
         // Plain expression statement
         if targets.len() == 1 {
-            Ok(Stmt::Expr(targets.into_iter().next().unwrap()))
+            Ok(vec![Stmt::Expr(targets.into_iter().next().unwrap())])
         } else {
-            Ok(Stmt::Expr(Expr::Tuple(targets)))
+            Ok(vec![Stmt::Expr(Expr::Tuple(targets))])
         }
     }
 
@@ -1950,6 +1969,98 @@ fn parse_expr_str(src: &str) -> Result<Expr> {
     let mut p = Parser::new(tokens);
     let expr = p.parse_expr()?;
     Ok(expr)
+}
+
+/// Build a single assignment statement assigning `rhs` to the LHS `target`.
+/// Used by annotation assignment, where exactly one bare target appears.
+fn lhs_to_assign_stmt(target: &Expr, rhs: Expr) -> Result<Stmt> {
+    match target {
+        Expr::Var(name) => Ok(Stmt::Assign(AssignTarget::Name(name.clone()), rhs)),
+        Expr::Attr { target, name } => Ok(Stmt::AttrAssign {
+            target: *target.clone(),
+            name: name.clone(),
+            expr: rhs,
+        }),
+        Expr::Index { target, index } => Ok(Stmt::IndexAssign {
+            target: target.clone(),
+            index: index.clone(),
+            expr: rhs,
+        }),
+        Expr::Slice {
+            target,
+            lower,
+            upper,
+            step,
+        } => Ok(Stmt::SliceAssign {
+            target: target.clone(),
+            lower: lower.clone(),
+            upper: upper.clone(),
+            step: step.clone(),
+            expr: rhs,
+        }),
+        Expr::Tuple(elems) => {
+            let assign_targets = exprs_to_assign_targets(elems, &vec![false; elems.len()])?;
+            Ok(Stmt::Assign(AssignTarget::Tuple(assign_targets), rhs))
+        }
+        _ => Err(PyError::Parse(
+            "cannot assign to this expression".to_string(),
+        )),
+    }
+}
+
+/// Build assignment statements for one target group with the given value
+/// expression.  A "group" is the parsed left-hand side of one `=`, which is
+/// a comma-separated list of expressions (already classified for starred-ness)
+/// plus a flag for whether a trailing comma was seen.
+fn group_to_assign_stmt(
+    items: Vec<Expr>,
+    starred_flags: Vec<bool>,
+    had_comma: bool,
+    value: Expr,
+) -> Result<Stmt> {
+    if items.len() == 1 && !starred_flags[0] && !had_comma {
+        return lhs_to_assign_stmt(&items[0], value);
+    }
+    // Multi-target or starred tuple unpack: a, b = ...   or   *a, b = ...
+    let assign_targets = exprs_to_assign_targets(&items, &starred_flags)?;
+    Ok(Stmt::Assign(AssignTarget::Tuple(assign_targets), value))
+}
+
+/// Build the lowered statement sequence for one or more target groups
+/// assigned from the single RHS `rhs`.  For a single group this is one
+/// statement, with `rhs` used directly.  For N > 1 groups (chained
+/// assignment), the RHS is evaluated once into a hidden temporary, then
+/// each group is assigned from that temporary in left-to-right order so
+/// side-effects on the targets (e.g. `obj.x = obj.y = expr`) match
+/// CPython's semantics.
+fn build_assign_stmts(groups: Vec<(Vec<Expr>, Vec<bool>, bool)>, rhs: Expr) -> Result<Vec<Stmt>> {
+    debug_assert!(!groups.is_empty());
+    if groups.len() == 1 {
+        let (items, flags, had_comma) = groups.into_iter().next().unwrap();
+        return Ok(vec![group_to_assign_stmt(items, flags, had_comma, rhs)?]);
+    }
+    // Chained: evaluate rhs into a unique hidden temporary, then assign
+    // from that temporary to each target group left-to-right.
+    //
+    // The temporary name uses angle brackets and a space so it cannot
+    // collide with any user-written Python identifier.  It is local to
+    // the enclosing scope; each chained-assignment site uses a distinct
+    // name to avoid aliasing across sites.
+    static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp_name = format!("<chain_assign {n}>");
+
+    let mut out: Vec<Stmt> = Vec::with_capacity(groups.len() + 1);
+    out.push(Stmt::Assign(AssignTarget::Name(tmp_name.clone()), rhs));
+    for (items, flags, had_comma) in groups {
+        out.push(group_to_assign_stmt(
+            items,
+            flags,
+            had_comma,
+            Expr::Var(tmp_name.clone()),
+        )?);
+    }
+    Ok(out)
 }
 
 fn expr_to_assign_target(expr: &Expr) -> Result<AssignTarget> {
