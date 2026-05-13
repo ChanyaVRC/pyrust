@@ -1741,26 +1741,22 @@ impl Interpreter {
             }
             2 => {
                 if matches!(method.as_str(), "keys" | "values" | "items") {
+                    // Lazy views need the Rc to share storage with the
+                    // source dict — separate from the regular method
+                    // dispatch path, which only sees the Vec<Value> form.
                     let rc = regs[obj as usize]
                         .get_dict_rc()
                         .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?
                         .clone();
                     return match method.as_str() {
-                        "keys"   => Ok(pyrust_builtins::dict_views::dict_keys(rc)),
+                        "keys" => Ok(pyrust_builtins::dict_views::dict_keys(rc)),
                         "values" => Ok(pyrust_builtins::dict_views::dict_values(rc)),
-                        "items"  => Ok(pyrust_builtins::dict_views::dict_items(rc)),
+                        "items" => Ok(pyrust_builtins::dict_views::dict_items(rc)),
                         _ => unreachable!(),
                     };
                 }
-                // Key-taking methods need user `__hash__`/`__eq__` dispatch.
-                if matches!(method.as_str(), "get" | "pop" | "setdefault" | "__contains__") {
-                    let receiver = vm_read(regs, obj, num_locals)?;
-                    return self.dict_key_method(method.as_str(), receiver, args);
-                }
-                let dict = regs[obj as usize]
-                    .as_dict_mut()
-                    .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
-                pyrust_builtins::dict::call(&method, dict, args)
+                let receiver = vm_read(regs, obj, num_locals)?;
+                self.call_dict_method(method.as_str(), receiver, args)
             }
             3 => {
                 if let Some(ValueKind::Tuple(items)) = regs[obj as usize].as_some().map(|v| v.kind()) {
@@ -1781,14 +1777,8 @@ impl Interpreter {
                 } else { unreachable!() }
             }
             5 => {
-                if matches!(method.as_str(), "add" | "discard" | "remove" | "__contains__") {
-                    let receiver = vm_read(regs, obj, num_locals)?;
-                    return self.set_key_method(method.as_str(), receiver, args);
-                }
-                let set = regs[obj as usize]
-                    .as_set_mut()
-                    .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
-                pyrust_builtins::set::call(&method, set, args)
+                let receiver = vm_read(regs, obj, num_locals)?;
+                self.call_set_method(method.as_str(), receiver, args)
             }
             _ => {
                 // Generator methods (close, throw, __next__, __iter__) are
@@ -1919,25 +1909,21 @@ impl Interpreter {
             }
             2 => {
                 if matches!(method.as_str(), "keys" | "values" | "items") {
+                    // Lazy views need the Rc to share storage with the
+                    // source dict — see `exec_call_method`.
                     let rc = regs[obj as usize]
                         .get_dict_rc()
                         .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?
                         .clone();
                     return match method.as_str() {
-                        "keys"   => Ok(pyrust_builtins::dict_views::dict_keys(rc)),
+                        "keys" => Ok(pyrust_builtins::dict_views::dict_keys(rc)),
                         "values" => Ok(pyrust_builtins::dict_views::dict_values(rc)),
-                        "items"  => Ok(pyrust_builtins::dict_views::dict_items(rc)),
+                        "items" => Ok(pyrust_builtins::dict_views::dict_items(rc)),
                         _ => unreachable!(),
                     };
                 }
-                if matches!(method.as_str(), "get" | "pop" | "setdefault" | "__contains__") {
-                    let receiver = vm_read(regs, obj, num_locals)?;
-                    return self.dict_key_method(method.as_str(), receiver, pos_items);
-                }
-                let dict = regs[obj as usize]
-                    .as_dict_mut()
-                    .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
-                pyrust_builtins::dict::call(&method, dict, pos_items)
+                let receiver = vm_read(regs, obj, num_locals)?;
+                self.call_dict_method(method.as_str(), receiver, pos_items)
             }
             3 => {
                 if let Some(ValueKind::Tuple(items)) = regs[obj as usize].as_some().map(|v| v.kind()) {
@@ -1964,14 +1950,8 @@ impl Interpreter {
                 } else { unreachable!() }
             }
             5 => {
-                if matches!(method.as_str(), "add" | "discard" | "remove" | "__contains__") {
-                    let receiver = vm_read(regs, obj, num_locals)?;
-                    return self.set_key_method(method.as_str(), receiver, pos_items);
-                }
-                let set = regs[obj as usize]
-                    .as_set_mut()
-                    .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
-                pyrust_builtins::set::call(&method, set, pos_items)
+                let receiver = vm_read(regs, obj, num_locals)?;
+                self.call_set_method(method.as_str(), receiver, pos_items)
             }
             _ => {
                 // Generator methods — see `exec_call_method` for context.

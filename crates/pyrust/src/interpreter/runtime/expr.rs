@@ -704,118 +704,139 @@ impl Interpreter {
         Ok(false)
     }
 
-    /// Dispatch a dict method whose semantics depend on user-defined
-    /// `__hash__`/`__eq__` (issue #368).  Handled separately from the
-    /// interpreter-free `pyrust_builtins::dict::call` path so we have
-    /// `&mut self` to invoke user code.
-    pub(crate) fn dict_key_method(
+    /// Dispatch any dict method.  Methods that read or write keys
+    /// (`get`/`pop`/`setdefault`/`__contains__`) route through
+    /// `dict_lookup`/`dict_insert` so user-defined `__hash__`/`__eq__`
+    /// fire (issue #368).  Everything else delegates to the
+    /// interpreter-free `pyrust_builtins::dict::call`.
+    ///
+    /// Callers don't need to know which methods are which — this is the
+    /// single entry point for dict method dispatch.
+    pub(crate) fn call_dict_method(
         &mut self,
         method: &str,
-        receiver: Value,
+        mut receiver: Value,
         args: Vec<Value>,
     ) -> Result<Value> {
-        let mut iter = args.into_iter();
-        let key_val = iter.next().ok_or_else(|| {
-            PyError::Runtime(format!("dict.{method}() requires at least 1 argument"))
-        })?;
-        let pk = self.value_to_pykey(&key_val)?;
         match method {
-            "get" => {
-                let default = iter.next().unwrap_or_else(Value::none);
-                Ok(self
-                    .dict_lookup(&receiver, &pk)?
-                    .map(|(_, v)| v)
-                    .unwrap_or(default))
-            }
-            "__contains__" => Ok(Value::bool_(
-                self.dict_lookup(&receiver, &pk)?.is_some(),
-            )),
-            "pop" => {
-                match self.dict_lookup(&receiver, &pk)? {
-                    Some((idx, v)) => {
-                        // Now take the mutable borrow to actually remove.
-                        // `dict_lookup` already dropped its borrow before
-                        // running user code, so the index is still valid.
-                        let mut dict_mut = receiver;
-                        let dict = dict_mut.as_dict_mut().ok_or_else(|| {
+            "get" | "__contains__" | "pop" | "setdefault" => {
+                let mut iter = args.into_iter();
+                let key_val = iter.next().ok_or_else(|| {
+                    PyError::Runtime(format!("dict.{method}() requires at least 1 argument"))
+                })?;
+                let pk = self.value_to_pykey(&key_val)?;
+                match method {
+                    "get" => {
+                        let default = iter.next().unwrap_or_else(Value::none);
+                        Ok(self
+                            .dict_lookup(&receiver, &pk)?
+                            .map(|(_, v)| v)
+                            .unwrap_or(default))
+                    }
+                    "__contains__" => Ok(Value::bool_(
+                        self.dict_lookup(&receiver, &pk)?.is_some(),
+                    )),
+                    "pop" => match self.dict_lookup(&receiver, &pk)? {
+                        Some((idx, v)) => {
+                            // `dict_lookup` already dropped its borrow before
+                            // running user code, so the index is still valid.
+                            let dict = receiver.as_dict_mut().ok_or_else(|| {
+                                PyError::Runtime("internal: expected dict".to_string())
+                            })?;
+                            dict.shift_remove_index(idx);
+                            Ok(v)
+                        }
+                        None => {
+                            if let Some(default) = iter.next() {
+                                Ok(default)
+                            } else {
+                                Err(PyError::named("KeyError", key_val.repr()))
+                            }
+                        }
+                    },
+                    "setdefault" => {
+                        let default = iter.next().unwrap_or_else(Value::none);
+                        if let Some((_, v)) = self.dict_lookup(&receiver, &pk)? {
+                            return Ok(v);
+                        }
+                        let dict = receiver.as_dict_mut().ok_or_else(|| {
                             PyError::Runtime("internal: expected dict".to_string())
                         })?;
-                        dict.shift_remove_index(idx);
-                        Ok(v)
+                        dict.insert(pk, default.clone());
+                        Ok(default)
                     }
-                    None => {
-                        if let Some(default) = iter.next() {
-                            Ok(default)
-                        } else {
-                            Err(PyError::named("KeyError", key_val.repr()))
-                        }
-                    }
+                    _ => unreachable!(),
                 }
             }
-            "setdefault" => {
-                let default = iter.next().unwrap_or_else(Value::none);
-                if let Some((_, v)) = self.dict_lookup(&receiver, &pk)? {
-                    return Ok(v);
-                }
-                let mut dict_mut = receiver;
-                let dict = dict_mut
+            _ => {
+                let dict = receiver
                     .as_dict_mut()
                     .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
-                dict.insert(pk, default.clone());
-                Ok(default)
+                pyrust_builtins::dict::call(method, dict, args)
             }
-            _ => unreachable!(),
         }
     }
 
-    /// Dispatch a set method whose semantics depend on user-defined
-    /// `__hash__`/`__eq__` (issue #368).
-    pub(crate) fn set_key_method(
+    /// Dispatch any set method.  Methods that read or write keys
+    /// (`add`/`discard`/`remove`/`__contains__`) route through
+    /// `set_lookup`/`set_insert` so user-defined `__hash__`/`__eq__`
+    /// fire (issue #368).  Everything else delegates to the
+    /// interpreter-free `pyrust_builtins::set::call`.
+    pub(crate) fn call_set_method(
         &mut self,
         method: &str,
-        receiver: Value,
+        mut receiver: Value,
         args: Vec<Value>,
     ) -> Result<Value> {
-        let mut iter = args.into_iter();
-        let key_val = iter.next().ok_or_else(|| {
-            PyError::Runtime(format!("set.{method}() requires at least 1 argument"))
-        })?;
-        let pk = self.value_to_pykey(&key_val)?;
         match method {
-            "add" => {
-                if self.set_lookup(&receiver, &pk)?.is_some() {
-                    return Ok(Value::none());
+            "add" | "__contains__" | "discard" | "remove" => {
+                let mut iter = args.into_iter();
+                let key_val = iter.next().ok_or_else(|| {
+                    PyError::Runtime(format!("set.{method}() requires at least 1 argument"))
+                })?;
+                let pk = self.value_to_pykey(&key_val)?;
+                match method {
+                    "add" => {
+                        if self.set_lookup(&receiver, &pk)?.is_some() {
+                            return Ok(Value::none());
+                        }
+                        let set = receiver.as_set_mut().ok_or_else(|| {
+                            PyError::Runtime("internal: expected set".to_string())
+                        })?;
+                        set.insert(pk);
+                        Ok(Value::none())
+                    }
+                    "__contains__" => {
+                        Ok(Value::bool_(self.set_lookup(&receiver, &pk)?.is_some()))
+                    }
+                    "discard" => {
+                        if let Some(idx) = self.set_lookup(&receiver, &pk)? {
+                            let set = receiver.as_set_mut().ok_or_else(|| {
+                                PyError::Runtime("internal: expected set".to_string())
+                            })?;
+                            set.shift_remove_index(idx);
+                        }
+                        Ok(Value::none())
+                    }
+                    "remove" => match self.set_lookup(&receiver, &pk)? {
+                        Some(idx) => {
+                            let set = receiver.as_set_mut().ok_or_else(|| {
+                                PyError::Runtime("internal: expected set".to_string())
+                            })?;
+                            set.shift_remove_index(idx);
+                            Ok(Value::none())
+                        }
+                        None => Err(PyError::named("KeyError", key_val.repr())),
+                    },
+                    _ => unreachable!(),
                 }
-                let mut set_mut = receiver;
-                let set = set_mut
+            }
+            _ => {
+                let set = receiver
                     .as_set_mut()
                     .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
-                set.insert(pk);
-                Ok(Value::none())
+                pyrust_builtins::set::call(method, set, args)
             }
-            "__contains__" => Ok(Value::bool_(self.set_lookup(&receiver, &pk)?.is_some())),
-            "discard" => {
-                if let Some(idx) = self.set_lookup(&receiver, &pk)? {
-                    let mut set_mut = receiver;
-                    let set = set_mut.as_set_mut().ok_or_else(|| {
-                        PyError::Runtime("internal: expected set".to_string())
-                    })?;
-                    set.shift_remove_index(idx);
-                }
-                Ok(Value::none())
-            }
-            "remove" => match self.set_lookup(&receiver, &pk)? {
-                Some(idx) => {
-                    let mut set_mut = receiver;
-                    let set = set_mut
-                        .as_set_mut()
-                        .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
-                    set.shift_remove_index(idx);
-                    Ok(Value::none())
-                }
-                None => Err(PyError::named("KeyError", key_val.repr())),
-            },
-            _ => unreachable!(),
         }
     }
 
