@@ -125,6 +125,7 @@ pub fn pyfunction(attr: TokenStream, item: TokenStream) -> TokenStream {
 struct ModuleInput {
     constants: Vec<(LitStr, Expr)>,
     funcs: Vec<ModuleFn>,
+    classes: Vec<ModuleClass>,
 }
 
 /// A single `fn` declaration inside `pyrust_module!`.
@@ -142,11 +143,40 @@ struct ModuleFn {
     body: Block,
 }
 
+/// A `class ClassName { fn … }` block inside `pyrust_module!`.
+///
+/// Each method generates a separate registry entry under the qualified
+/// name `<FN_PREFIX><ClassName>.<method>` (e.g.
+/// `"collections.Counter.__init__"`).  At `module()` construction time,
+/// the class is built as a real `PyClass` with the methods bound as
+/// `BuiltinFunction` attrs, so pyrust's standard class machinery (the
+/// dunder dispatch sites already exercised by user-defined classes)
+/// picks up `__init__`, `__iter__`, `__getitem__`, etc.
+///
+/// ## Method-body conventions
+///
+/// - `args` always has `self` as `args[0]` (the instance `Value`).
+///   User-level args start at `args[1..]`.
+/// - `_interp: &mut crate::Interpreter` is in scope, identical to
+///   module-level fns — methods can re-enter the interpreter via
+///   `_interp.call_function_expanded(...)` to dispatch other callables.
+/// - `FN_NAME: &'static str` resolves to the fully-qualified Python
+///   name (e.g. `"collections.Counter.__init__"`), useful for error
+///   messages that don't want to drift from the registry name.
+struct ModuleClass {
+    /// Outer attributes (mostly `#[doc = …]`).
+    attrs: Vec<syn::Attribute>,
+    name: Ident,
+    methods: Vec<ModuleFn>,
+}
+
 impl Parse for ModuleInput {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        // Optional `constants { ... }` block — function declarations begin
-        // with the `fn` keyword, so peeking for an Ident here cleanly
-        // distinguishes the two cases.
+        // Optional `constants { ... }` block — declarations begin with
+        // either `fn` (kw) or one of the contextual idents `class` /
+        // `constants`.  Only consume here if the leading ident is
+        // literally "constants"; everything else falls through to the
+        // main loop below.
         let mut constants: Vec<(LitStr, Expr)> = Vec::new();
         if input.peek(Ident) {
             let lookahead: Ident = input.fork().parse()?;
@@ -166,125 +196,217 @@ impl Parse for ModuleInput {
                 if input.peek(Token![,]) {
                     let _: Token![,] = input.parse()?;
                 }
-            } else {
-                return Err(syn::Error::new(
-                    lookahead.span(),
-                    format!(
-                        "unexpected `{lookahead}`; expected either `constants {{ … }}` or a `fn` declaration",
-                    ),
-                ));
             }
+            // Otherwise the ident is `class` (handled below) or an
+            // unexpected token (`fn`-led decls don't trip this branch
+            // because `Token![fn]` isn't peeked as `Ident`).  The main
+            // loop's error reporting is sharper for invalid input than
+            // a generic message here.
         }
 
-        // One or more `fn` declarations.
+        // Zero-or-more `fn` and `class` declarations, in any order.
         let mut funcs: Vec<ModuleFn> = Vec::new();
+        let mut classes: Vec<ModuleClass> = Vec::new();
         while !input.is_empty() {
+            // Pull outer attrs once at the head; we'll route them to either
+            // the fn or the class depending on what comes next.  `#[py_name]`
+            // is fn-only; classes don't accept it.
             let raw_attrs = input.call(syn::Attribute::parse_outer)?;
-            // Pull `#[py_name = "..."]` out of the attr list so it's not
-            // emitted on the generated Rust fn (which wouldn't recognise it).
-            let mut py_name_override: Option<LitStr> = None;
-            let mut attrs: Vec<syn::Attribute> = Vec::with_capacity(raw_attrs.len());
-            for attr in raw_attrs {
-                if attr.path().is_ident("py_name") {
-                    let nv = attr.meta.require_name_value().map_err(|_| {
-                        syn::Error::new_spanned(
-                            &attr,
-                            "`#[py_name = \"...\"]` must use the name-value form",
-                        )
-                    })?;
-                    if let Expr::Lit(syn::ExprLit {
-                        lit: syn::Lit::Str(s),
-                        ..
-                    }) = &nv.value
-                    {
-                        if py_name_override.is_some() {
-                            return Err(syn::Error::new_spanned(
-                                &attr,
-                                "`#[py_name]` may appear at most once per fn",
-                            ));
-                        }
-                        py_name_override = Some(s.clone());
-                    } else {
-                        return Err(syn::Error::new_spanned(
-                            &nv.value,
-                            "`#[py_name = \"...\"]` value must be a string literal",
-                        ));
-                    }
-                } else {
-                    attrs.push(attr);
-                }
-            }
-            let _fn_kw: Token![fn] = input.parse()?;
-            // Function ident must be snake_case so the generated
-            // SCREAMING_SNAKE constant name is unique without lossy
-            // case-folding (e.g. `fn isDir` and `fn isdir` would both
-            // produce the same const ident).  Accepts raw identifiers
-            // (`r#type`) so callables whose Python name collides with a
-            // Rust keyword can be declared without uglifying the name.
-            let short_name: Ident = input.parse()?;
-            // `Ident::to_string()` keeps the `r#` prefix on raw idents
-            // (e.g. `r#type` round-trips as `"r#type"`).  Strip it so the
-            // Python-level registration name is just `"type"`.
-            let short_str = short_name
-                .to_string()
-                .strip_prefix("r#")
-                .map_or_else(|| short_name.to_string(), str::to_owned);
-            if !is_snake_case(&short_str) {
-                return Err(syn::Error::new(
-                    short_name.span(),
-                    format!(
-                        "`pyrust_module!` function names must be snake_case (got `{short_str}`); \
-                         CamelCase would risk const-ident collisions with other functions",
-                    ),
-                ));
-            }
-            let arg_content;
-            syn::parenthesized!(arg_content in input);
-            let args_ident: Ident = arg_content.parse()?;
-            // If the user wrote a type annotation, validate it.
-            if arg_content.peek(Token![:]) {
-                let _: Token![:] = arg_content.parse()?;
-                let ty: syn::Type = arg_content.parse()?;
-                let ty_str = ty
-                    .to_token_stream()
-                    .to_string()
-                    .split_whitespace()
-                    .collect::<String>();
-                let accepted = matches!(
-                    ty_str.as_str(),
-                    "&[ExpandedCallArg]" | "&[crate::interpreter::ExpandedCallArg]"
-                );
-                if !accepted {
-                    return Err(syn::Error::new(
-                        ty.span(),
-                        "`pyrust_module!` fn args type must be `&[ExpandedCallArg]` \
-                         (the macro injects the canonical signature; omit the type \
-                         annotation entirely if unsure).",
+
+            // Peek the next ident to disambiguate `class Foo { … }` from
+            // `fn name(...)`.  `class` is not a Rust keyword, so it parses
+            // as a regular ident — we treat it as a contextual keyword.
+            let is_class = input.peek(Ident) && {
+                let lookahead: Ident = input.fork().parse()?;
+                lookahead == "class"
+            };
+
+            if is_class {
+                // `#[py_name = "..."]` doesn't apply to class declarations.
+                if raw_attrs.iter().any(|a| a.path().is_ident("py_name")) {
+                    return Err(syn::Error::new_spanned(
+                        &raw_attrs[0],
+                        "`#[py_name = \"...\"]` may not appear on a `class` declaration; \
+                         use it on individual methods if a Python-level name needs overriding",
                     ));
                 }
+                classes.push(Self::parse_class(input, raw_attrs)?);
+            } else {
+                funcs.push(Self::parse_fn(input, raw_attrs)?);
             }
-            if !arg_content.is_empty() {
-                return Err(arg_content.error(
-                    "unexpected token in fn argument list; \
-                     `pyrust_module!` accepts only `(args)` or `(args: &[ExpandedCallArg])`",
-                ));
-            }
-            // Optional return-type annotation (ignored — always Result<Value>).
-            if input.peek(Token![->]) {
-                let _: Token![->] = input.parse()?;
-                let _: syn::Type = input.parse()?;
-            }
-            let body: Block = input.parse()?;
-            funcs.push(ModuleFn {
-                attrs,
-                short_name,
-                py_name_override,
-                args_ident,
-                body,
-            });
         }
 
-        Ok(ModuleInput { constants, funcs })
+        Ok(ModuleInput {
+            constants,
+            funcs,
+            classes,
+        })
+    }
+}
+
+impl ModuleInput {
+    /// Parse one `fn name(args) [-> Type] { body }` declaration.  `raw_attrs`
+    /// is the outer-attr list already harvested by the caller (so `#[py_name]`
+    /// dispatch happens once at the boundary between fn and class blocks).
+    fn parse_fn(input: ParseStream, raw_attrs: Vec<syn::Attribute>) -> syn::Result<ModuleFn> {
+        // Pull `#[py_name = "..."]` out of the attr list so it's not
+        // emitted on the generated Rust fn (which wouldn't recognise it).
+        let mut py_name_override: Option<LitStr> = None;
+        let mut attrs: Vec<syn::Attribute> = Vec::with_capacity(raw_attrs.len());
+        for attr in raw_attrs {
+            if attr.path().is_ident("py_name") {
+                let nv = attr.meta.require_name_value().map_err(|_| {
+                    syn::Error::new_spanned(
+                        &attr,
+                        "`#[py_name = \"...\"]` must use the name-value form",
+                    )
+                })?;
+                if let Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(s),
+                    ..
+                }) = &nv.value
+                {
+                    if py_name_override.is_some() {
+                        return Err(syn::Error::new_spanned(
+                            &attr,
+                            "`#[py_name]` may appear at most once per fn",
+                        ));
+                    }
+                    py_name_override = Some(s.clone());
+                } else {
+                    return Err(syn::Error::new_spanned(
+                        &nv.value,
+                        "`#[py_name = \"...\"]` value must be a string literal",
+                    ));
+                }
+            } else {
+                attrs.push(attr);
+            }
+        }
+        let _fn_kw: Token![fn] = input.parse()?;
+        // Function ident must be snake_case so the generated
+        // SCREAMING_SNAKE constant name is unique without lossy
+        // case-folding (e.g. `fn isDir` and `fn isdir` would both
+        // produce the same const ident).  Accepts raw identifiers
+        // (`r#type`) so callables whose Python name collides with a
+        // Rust keyword can be declared without uglifying the name.
+        let short_name: Ident = input.parse()?;
+        // `Ident::to_string()` keeps the `r#` prefix on raw idents
+        // (e.g. `r#type` round-trips as `"r#type"`).  Strip it so the
+        // Python-level registration name is just `"type"`.
+        let short_str = short_name
+            .to_string()
+            .strip_prefix("r#")
+            .map_or_else(|| short_name.to_string(), str::to_owned);
+        if !is_snake_case(&short_str) {
+            return Err(syn::Error::new(
+                short_name.span(),
+                format!(
+                    "`pyrust_module!` function names must be snake_case (got `{short_str}`); \
+                     CamelCase would risk const-ident collisions with other functions",
+                ),
+            ));
+        }
+        let arg_content;
+        syn::parenthesized!(arg_content in input);
+        let args_ident: Ident = arg_content.parse()?;
+        // If the user wrote a type annotation, validate it.
+        if arg_content.peek(Token![:]) {
+            let _: Token![:] = arg_content.parse()?;
+            let ty: syn::Type = arg_content.parse()?;
+            let ty_str = ty
+                .to_token_stream()
+                .to_string()
+                .split_whitespace()
+                .collect::<String>();
+            let accepted = matches!(
+                ty_str.as_str(),
+                "&[ExpandedCallArg]" | "&[crate::interpreter::ExpandedCallArg]"
+            );
+            if !accepted {
+                return Err(syn::Error::new(
+                    ty.span(),
+                    "`pyrust_module!` fn args type must be `&[ExpandedCallArg]` \
+                     (the macro injects the canonical signature; omit the type \
+                     annotation entirely if unsure).",
+                ));
+            }
+        }
+        if !arg_content.is_empty() {
+            return Err(arg_content.error(
+                "unexpected token in fn argument list; \
+                 `pyrust_module!` accepts only `(args)` or `(args: &[ExpandedCallArg])`",
+            ));
+        }
+        // Optional return-type annotation (ignored — always Result<Value>).
+        if input.peek(Token![->]) {
+            let _: Token![->] = input.parse()?;
+            let _: syn::Type = input.parse()?;
+        }
+        let body: Block = input.parse()?;
+        Ok(ModuleFn {
+            attrs,
+            short_name,
+            py_name_override,
+            args_ident,
+            body,
+        })
+    }
+
+    /// Parse one `class ClassName { fn method(args) … fn method(args) … }`
+    /// declaration.  The `class` ident is at the head of `input`.
+    fn parse_class(input: ParseStream, attrs: Vec<syn::Attribute>) -> syn::Result<ModuleClass> {
+        let class_kw: Ident = input.parse()?;
+        debug_assert_eq!(class_kw.to_string(), "class");
+        let name: Ident = input.parse()?;
+        let content;
+        syn::braced!(content in input);
+        let mut methods: Vec<ModuleFn> = Vec::new();
+        // Track method names within this class so we can flag duplicates
+        // at macro-expand time.  Without this guard, two methods sharing
+        // a Python-level name would both register as `BuiltinReg`s under
+        // the same key — the duplicate-name `assert!` in
+        // `builtin_registry::REGISTRY` catches it at first lookup, but
+        // the macro-time error is far more actionable.
+        let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        while !content.is_empty() {
+            let method_attrs = content.call(syn::Attribute::parse_outer)?;
+            let method = Self::parse_fn(&content, method_attrs)?;
+            // Use the Python-level name (post `#[py_name]` override) since
+            // that's what reaches the registry — collisions on the
+            // *Rust* ident are caught by rustc later anyway.
+            let py_name = match &method.py_name_override {
+                Some(lit) => lit.value(),
+                None => method
+                    .short_name
+                    .to_string()
+                    .strip_prefix("r#")
+                    .map_or_else(|| method.short_name.to_string(), str::to_owned),
+            };
+            if !seen_names.insert(py_name.clone()) {
+                return Err(syn::Error::new(
+                    method.short_name.span(),
+                    format!(
+                        "duplicate method `{py_name}` in class `{name}` \
+                         (the second declaration would silently shadow the first)",
+                    ),
+                ));
+            }
+            methods.push(method);
+        }
+        if methods.is_empty() {
+            return Err(syn::Error::new(
+                name.span(),
+                format!(
+                    "`class {name}` must declare at least one method (`fn __init__(args) {{ … }}`)",
+                ),
+            ));
+        }
+        Ok(ModuleClass {
+            attrs,
+            name,
+            methods,
+        })
     }
 }
 
@@ -296,90 +418,177 @@ fn is_snake_case(s: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
+/// Emit the per-fn artefacts for one method:
+/// - a dispatch `fn` named `__pyfn_<rust_ident>` (or namespaced under a class)
+/// - a module-scope `LazyLock<&'static str>` holding the leaked Python name
+/// - a `BuiltinReg { name, dispatch }` entry for the registry
+///
+/// `name_suffix` is what gets concatenated after `FN_PREFIX` to form the
+/// Python-level name: `"sqrt"` for a top-level fn, `"Counter.__init__"`
+/// for a class method.  `rust_ident_suffix` is what gets concatenated
+/// after `__pyfn_` to form the Rust ident.
+///
+/// Returns `(fn_item, reg_entry, name_static_ident)`.  The class-builder
+/// path uses `name_static_ident` to thread the same leaked pointer into
+/// the class's method attrs; module-level fns use it via the module's
+/// attr_entries.
+fn emit_fn_artefacts(
+    f: &ModuleFn,
+    name_suffix: &str,
+    rust_ident_suffix: &str,
+) -> (proc_macro2::TokenStream, proc_macro2::TokenStream, Ident) {
+    let short = &f.short_name;
+    let rust_fn_ident = format_ident!("__pyfn_{}", rust_ident_suffix, span = short.span());
+    let name_static_ident = format_ident!("__pyfn_{}_NAME", rust_ident_suffix, span = short.span());
+    let attrs = &f.attrs;
+    let body_stmts = &f.body.stmts;
+    let args_ident = &f.args_ident;
+    let suffix_lit = LitStr::new(name_suffix, short.span());
+
+    let fn_item = quote! {
+        #[allow(non_upper_case_globals)]
+        static #name_static_ident: std::sync::LazyLock<&'static str> =
+            std::sync::LazyLock::new(|| {
+                ::std::boxed::Box::leak(
+                    format!("{}{}", FN_PREFIX, #suffix_lit).into_boxed_str(),
+                )
+            });
+
+        // Class-method dispatch idents look like `__pyfn_Counter____init__`,
+        // which trips `non_snake_case` (the `Counter` segment isn't
+        // lowercase).  This lint is about *user-facing* idents — the macro
+        // names are internal and never appear in the surface API.
+        #[allow(non_snake_case)]
+        #(#attrs)*
+        fn #rust_fn_ident(
+            _interp: &mut crate::Interpreter,
+            #args_ident: &[ExpandedCallArg],
+        ) -> Result<Value> {
+            #[allow(non_snake_case)]
+            let FN_NAME: &'static str = *#name_static_ident;
+            let _ = FN_NAME; // suppress unused warning if body ignores it
+            #(#body_stmts)*
+        }
+    };
+
+    let reg_entry = quote! {
+        crate::builtin_registry::BuiltinReg {
+            name: *#name_static_ident,
+            dispatch: #rust_fn_ident,
+        }
+    };
+
+    (fn_item, reg_entry, name_static_ident)
+}
+
+/// Compute the Python-level short name (with `r#` stripped, `#[py_name]`
+/// applied if present) for one method-or-fn.  Returned alongside the
+/// raw Rust-side ident for downstream codegen.
+fn py_short_and_rust_short(f: &ModuleFn) -> (String, String) {
+    let short = &f.short_name;
+    let rust_short = short
+        .to_string()
+        .strip_prefix("r#")
+        .map_or_else(|| short.to_string(), str::to_owned);
+    let py_short = match &f.py_name_override {
+        Some(lit) => lit.value(),
+        None => rust_short.clone(),
+    };
+    (py_short, rust_short)
+}
+
 /// File-scoped module declaration: see crate-level docs for the full
 /// syntax and the contract with `pyrust_builtin_modules!`.
 #[proc_macro]
 pub fn pyrust_module(input: TokenStream) -> TokenStream {
-    let ModuleInput { constants, funcs } = parse_macro_input!(input as ModuleInput);
+    let ModuleInput {
+        constants,
+        funcs,
+        classes,
+    } = parse_macro_input!(input as ModuleInput);
 
     let mut fn_items = Vec::new();
     let mut reg_entries: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut attr_entries: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut class_items: Vec<proc_macro2::TokenStream> = Vec::new();
 
+    // ── module-level fns ────────────────────────────────────────────────
+    //
+    // The Rust ident is always derived from the fn name (with `r#` stripped
+    // off raw idents).  The Python-level name is the same *unless* the
+    // user supplied `#[py_name = "..."]` — used for Python names that are
+    // strict Rust keywords with no raw form (`super`).
     for f in &funcs {
+        let (py_short, rust_short) = py_short_and_rust_short(f);
         let short = &f.short_name;
-        // The Rust ident is always derived from the fn name (with `r#` stripped
-        // off raw idents).  The Python-level name is the same *unless* the
-        // user supplied `#[py_name = "..."]` — used for Python names that are
-        // strict Rust keywords with no raw form (`super`).
-        let rust_short = short
-            .to_string()
-            .strip_prefix("r#")
-            .map_or_else(|| short.to_string(), str::to_owned);
-        let py_short = match &f.py_name_override {
-            Some(lit) => lit.value(),
-            None => rust_short.clone(),
-        };
-        // Rust ident for the dispatch fn — `__pyfn_<rust_short>` keeps the
-        // generated ident from clashing with user-defined helpers in scope.
-        let rust_fn_ident = format_ident!("__pyfn_{}", rust_short, span = short.span());
-        // Per-fn module-scope static holding the leaked Python-level full
-        // name.  One alloc per built-in at first use, shared by all three
-        // consumers (the `FN_NAME` local in the dispatch fn, the
-        // `BuiltinReg.name` field, and the `Value::builtin_function(...)`
-        // bound into `module()`'s attrs).  Previously each consumer leaked
-        // its own copy, producing 3 distinct `&'static str` pointers per
-        // built-in for what is logically one canonical name.
-        let name_static_ident = format_ident!("__pyfn_{}_NAME", rust_short, span = short.span());
-        let attrs = &f.attrs;
-        let body_stmts = &f.body.stmts;
-        let args_ident = &f.args_ident;
         let short_lit = LitStr::new(&py_short, short.span());
-
-        // Emit unqualified `Result<Value>` and `ExpandedCallArg` so the
-        // body's `use crate::{error::Result, value::Value, interpreter::ExpandedCallArg};`
-        // imports are actually consumed by the expansion (otherwise rustc
-        // reports them unused — the macro consumes the surface-level mentions
-        // in `fn foo(args) -> Result<Value>` before name resolution sees them).
-        //
-        // `FN_PREFIX` is injected by `pyrust_builtin_modules!` and is
-        // either `"<module>."` (prefixed module) or `""` (flat / builtins).
-        fn_items.push(quote! {
-            #[allow(non_upper_case_globals)]
-            static #name_static_ident: std::sync::LazyLock<&'static str> =
-                std::sync::LazyLock::new(|| {
-                    ::std::boxed::Box::leak(
-                        format!("{}{}", FN_PREFIX, #short_lit).into_boxed_str(),
-                    )
-                });
-
-            #(#attrs)*
-            fn #rust_fn_ident(
-                _interp: &mut crate::Interpreter,
-                #args_ident: &[ExpandedCallArg],
-            ) -> Result<Value> {
-                #[allow(non_snake_case)]
-                let FN_NAME: &'static str = *#name_static_ident;
-                let _ = FN_NAME; // suppress unused warning if body ignores it
-                #(#body_stmts)*
-            }
-        });
-
-        // Registry entry and module-attr entry both read the shared
-        // `'static` pointer from `#name_static_ident`, so a built-in's
-        // canonical name lives at exactly one address.
-        reg_entries.push(quote! {
-            crate::builtin_registry::BuiltinReg {
-                name: *#name_static_ident,
-                dispatch: #rust_fn_ident,
-            }
-        });
-
+        let (fn_item, reg_entry, name_static_ident) = emit_fn_artefacts(f, &py_short, &rust_short);
+        fn_items.push(fn_item);
+        reg_entries.push(reg_entry);
         attr_entries.push(quote! {
             attrs.insert(
                 #short_lit.to_string(),
                 crate::value::Value::builtin_function(*#name_static_ident),
             );
+        });
+    }
+
+    // ── classes (`class Foo { fn … }`) ──────────────────────────────────
+    //
+    // Each class's methods register as `"<FN_PREFIX><ClassName>.<method>"`.
+    // The class is constructed at `module()` build time as a `PyClass`
+    // whose `attrs` map every method's short name → its leaked
+    // BuiltinFunction Value.  pyrust's existing class machinery
+    // (subscript / iter / call / __init__ / __len__ / __bool__ / __contains__
+    // / __delitem__ / __setitem__ / __next__ dispatch sites — all
+    // recently unified through `invoke_class_method`) picks up dunders
+    // without per-type plumbing.
+    for class in &classes {
+        let class_name_ident = &class.name;
+        let class_name_str = class_name_ident.to_string();
+        let class_name_lit = LitStr::new(&class_name_str, class_name_ident.span());
+        let class_attrs = &class.attrs;
+
+        let mut method_attr_inserts: Vec<proc_macro2::TokenStream> = Vec::new();
+        for method in &class.methods {
+            let (py_short, rust_short) = py_short_and_rust_short(method);
+            let method_short = &method.short_name;
+            let short_lit = LitStr::new(&py_short, method_short.span());
+            // Method's Python-level name is `<ClassName>.<method>` so the
+            // registry key tells you which class it belongs to.
+            let name_suffix = format!("{class_name_str}.{py_short}");
+            // Rust-side namespacing — `__pyfn_<Class>__<method>` — avoids
+            // collisions between two classes' `__init__` etc.
+            let rust_suffix = format!("{class_name_str}__{rust_short}");
+            let (fn_item, reg_entry, name_static_ident) =
+                emit_fn_artefacts(method, &name_suffix, &rust_suffix);
+            fn_items.push(fn_item);
+            reg_entries.push(reg_entry);
+            method_attr_inserts.push(quote! {
+                attrs.insert(
+                    #short_lit.to_string(),
+                    crate::value::Value::builtin_function(*#name_static_ident),
+                );
+            });
+        }
+
+        // Build the PyClass at module() time.  `class_name` is *not*
+        // qualified (it's just `Counter`, not `collections.Counter`) so
+        // `type(c).__name__ == "Counter"` matches CPython.
+        class_items.push(quote! {
+            #(#class_attrs)*
+            attrs.insert(#class_name_lit.to_string(), {
+                use std::cell::RefCell;
+                use std::collections::HashMap;
+                use std::rc::Rc;
+                let mut attrs: HashMap<String, crate::value::Value> = HashMap::new();
+                #(#method_attr_inserts)*
+                crate::value::Value::py_class(Rc::new(RefCell::new(crate::value::PyClass {
+                    name: #class_name_lit.to_string(),
+                    base: None,
+                    attrs,
+                })))
+            });
         });
     }
 
@@ -427,6 +636,12 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
             let mut attrs: HashMap<String, crate::value::Value> = HashMap::new();
             #(#const_entries)*
             #(#attr_entries)*
+            // `class` blocks expand to `attrs.insert(<ClassName>, …PyClass…)`.
+            // Each PyClass is built with its method table populated from
+            // the registry-leaked `&'static str` names — see
+            // `emit_fn_artefacts` for the alloc-once leak pattern that's
+            // shared with module-level fns.
+            #(#class_items)*
             crate::value::Value::py_module(Rc::new(RefCell::new(crate::value::PyModule {
                 name: MODULE_NAME.to_string(),
                 attrs,

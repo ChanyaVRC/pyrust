@@ -84,6 +84,13 @@ macro_rules! pyrust_builtin_modules_internal {
                 /// `"math."` so `sqrt` becomes `"math.sqrt"`).  Empty
                 /// for `@flat` modules whose functions live in the
                 /// global namespace (`abs`, `len`, …).
+                ///
+                /// `dead_code` allow because constants-only bodies
+                /// (`os.rs`, …) declare no fns, so the macro-emitted
+                /// `pyrust_module!` expansion doesn't reference this
+                /// const.  The other 99% of bodies use it via
+                /// `emit_fn_artefacts`.
+                #[allow(dead_code)]
                 pub(crate) const FN_PREFIX: &str = $fn_prefix;
 
                 include!(concat!("bodies/", stringify!($ident), ".rs"));
@@ -124,4 +131,12 @@ pyrust_builtin_modules! {
     math,
     sys,
     @flat builtins,
+    "os.path" as os_path,
+    // `os` is a parent for `os.path` — see `bodies/os.rs`.  Must come
+    // after `os.path` in the order so the `super::os_path::module()`
+    // reference in `os`'s `constants` block resolves cleanly.
+    os,
+    functools,
+    itertools,
+    collections,
 }

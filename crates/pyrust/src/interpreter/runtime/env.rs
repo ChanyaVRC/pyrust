@@ -56,6 +56,19 @@ impl Interpreter {
                             // so this arm is unreachable; satisfy exhaustiveness.
                             UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(f)),
                         },
+                        ValueKind::BuiltinFunction(_) => {
+                            // Class method backed by a BuiltinFunction —
+                            // emitted by `pyrust_module!`'s `class { … }` block
+                            // (e.g. `Counter.most_common`).  Wrap so the call
+                            // dispatch prepends `self` before invoking the
+                            // registered Rust dispatcher; see the
+                            // `as_bound_method` arm in
+                            // `calls.rs::call_function_expanded`.
+                            pyrust_builtins::bound_method::bound_method(
+                                name.to_string(),
+                                Value::py_instance(Rc::clone(&instance)),
+                            )
+                        }
                         _ => value,
                     });
                 }
@@ -369,6 +382,44 @@ impl Interpreter {
         let builtin = crate::builtin_modules::load_builtin_module(name);
         if let Some(val) = builtin {
             self.module_cache.borrow_mut().insert(name.to_string(), val.clone());
+            // Parent-package identity fix-up: a built-in module like
+            // `os` declares `path` as a constant via
+            // `super::os_path::module()`, which builds a *fresh*
+            // os.path Value rather than the one in `module_cache`.
+            // Replace each such submodule-shaped attr with the cached
+            // value so `os.path is direct_os_path` matches CPython.
+            if let ValueKind::PyModule(m) = val.kind() {
+                let submodule_attrs: Vec<String> = {
+                    let borrowed = m.borrow();
+                    borrowed
+                        .attrs
+                        .iter()
+                        .filter_map(|(attr_name, attr_val)| {
+                            // Only consider attrs that are themselves
+                            // PyModules — primitive constants stay as-is.
+                            match attr_val.kind() {
+                                ValueKind::PyModule(_) => Some(attr_name.clone()),
+                                _ => None,
+                            }
+                        })
+                        .filter(|attr_name| {
+                            // And only if there's a registered built-in
+                            // by the dotted name — otherwise leave it.
+                            let dotted = format!("{name}.{attr_name}");
+                            crate::builtin_modules::load_builtin_module(&dotted).is_some()
+                        })
+                        .collect()
+                };
+                for attr_name in submodule_attrs {
+                    let dotted = format!("{name}.{attr_name}");
+                    // Recursive load goes through the cache, so the
+                    // first such call (whether triggered here or by an
+                    // explicit `import os.path`) wins and subsequent
+                    // accesses share its identity.
+                    let cached_submodule = self.load_module(&dotted)?;
+                    m.borrow_mut().attrs.insert(attr_name, cached_submodule);
+                }
+            }
             return Ok(val);
         }
         // User .py file: look for <name>.py relative to script_dir
@@ -491,44 +542,42 @@ impl Interpreter {
             let inst_rc = Rc::clone(inst);
             let class = Rc::clone(&inst_rc.borrow().class);
             // Try __bool__ first.
-            if let Some(method_val) = lookup_class_attr(&class, "__bool__")
-                && let ValueKind::UserFunction(f) = method_val.kind() {
-                    let func = Rc::clone(f);
-                    let result = self.call_user_function_expanded(
-                        func,
-                        &[],
-                        &[Value::py_instance(inst_rc)],
-                    )?;
-                    return match result.kind() {
-                        ValueKind::Bool(b) => Ok(b),
-                        ValueKind::Int(_) => Err(PyError::named(
-                            "TypeError",
-                            "__bool__ should return bool, not int".to_string(),
-                        )),
-                        _ => Err(PyError::named(
-                            "TypeError",
-                            "__bool__ should return bool".to_string(),
-                        )),
-                    };
-                }
+            if let Some(method_val) = lookup_class_attr(&class, "__bool__") {
+                let result = invoke_class_method(
+                    self,
+                    method_val,
+                    Value::py_instance(Rc::clone(&inst_rc)),
+                    &[],
+                )?;
+                return match result.kind() {
+                    ValueKind::Bool(b) => Ok(b),
+                    ValueKind::Int(_) => Err(PyError::named(
+                        "TypeError",
+                        "__bool__ should return bool, not int".to_string(),
+                    )),
+                    _ => Err(PyError::named(
+                        "TypeError",
+                        "__bool__ should return bool".to_string(),
+                    )),
+                };
+            }
             // Fall back to __len__.
-            if let Some(method_val) = lookup_class_attr(&class, "__len__")
-                && let ValueKind::UserFunction(f) = method_val.kind() {
-                    let func = Rc::clone(f);
-                    let result = self.call_user_function_expanded(
-                        func,
-                        &[],
-                        &[Value::py_instance(inst_rc)],
-                    )?;
-                    return match result.kind() {
-                        ValueKind::Int(n) => Ok(n != 0),
-                        ValueKind::Bool(b) => Ok(b),
-                        _ => Err(PyError::named(
-                            "TypeError",
-                            "__len__ returned non-int".to_string(),
-                        )),
-                    };
-                }
+            if let Some(method_val) = lookup_class_attr(&class, "__len__") {
+                let result = invoke_class_method(
+                    self,
+                    method_val,
+                    Value::py_instance(inst_rc),
+                    &[],
+                )?;
+                return match result.kind() {
+                    ValueKind::Int(n) => Ok(n != 0),
+                    ValueKind::Bool(b) => Ok(b),
+                    _ => Err(PyError::named(
+                        "TypeError",
+                        "__len__ returned non-int".to_string(),
+                    )),
+                };
+            }
             // No __bool__ or __len__: always truthy.
             return Ok(true);
         }

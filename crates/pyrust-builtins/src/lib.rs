@@ -22,6 +22,7 @@ pub fn lookup_ops(type_name: &str) -> Option<&'static dyn pyrust_core::BuiltinTy
         iter_helpers::ENUMERATE_TYPE_NAME => Some(iter_helpers::ENUMERATE_OPS),
         iter_helpers::ZIP_TYPE_NAME => Some(iter_helpers::ZIP_OPS),
         iter_helpers::REVERSED_TYPE_NAME => Some(iter_helpers::REVERSED_OPS),
+        iter_helpers::CHAIN_TYPE_NAME => Some(iter_helpers::CHAIN_OPS),
         dict_views::DICT_KEYS_TYPE_NAME => Some(dict_views::DICT_KEYS_OPS),
         dict_views::DICT_VALUES_TYPE_NAME => Some(dict_views::DICT_VALUES_OPS),
         dict_views::DICT_ITEMS_TYPE_NAME => Some(dict_views::DICT_ITEMS_OPS),

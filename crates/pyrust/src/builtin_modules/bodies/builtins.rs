@@ -20,9 +20,9 @@ use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::{
     NativeIterFrame, apply_format_spec, ascii_repr, class_is_subclass_of, compare_values,
-    dir_names, is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_mod_i64,
-    py_round_half_even, py_round_half_even_f64, reject_keyword_args_expanded, value_to_float,
-    value_type_name_str,
+    dir_names, invoke_class_method, is_exception_class, iter_values, lookup_class_attr,
+    modpow_i64, py_mod_i64, py_round_half_even, py_round_half_even_f64,
+    reject_keyword_args_expanded, value_to_float, value_type_name_str,
 };
 use crate::value::{PyClass, PyKey, Value, ValueKind, range_len};
 use pyrust_derive::pyrust_module;
@@ -215,14 +215,12 @@ pyrust_module! {
         if let ValueKind::PyInstance(inst) = val.kind() {
             let inst_rc = Rc::clone(inst);
             let class = Rc::clone(&inst_rc.borrow().class);
-            if let Some(method_val) = lookup_class_attr(&class, "__abs__")
-                && let ValueKind::UserFunction(f) = method_val.kind()
-            {
-                let func = Rc::clone(f);
-                return _interp.call_user_function_expanded(
-                    func,
+            if let Some(method_val) = lookup_class_attr(&class, "__abs__") {
+                return invoke_class_method(
+                    _interp,
+                    method_val,
+                    Value::py_instance(inst_rc),
                     &[],
-                    &[Value::py_instance(inst_rc)],
                 );
             }
             return Err(PyError::named(
@@ -298,14 +296,12 @@ pyrust_module! {
         if let ValueKind::PyInstance(instance) = obj.kind() {
             let instance_rc = Rc::clone(instance);
             let class = Rc::clone(&instance_rc.borrow().class);
-            if let Some(method_val) = lookup_class_attr(&class, "__repr__")
-                && let ValueKind::UserFunction(f) = method_val.kind()
-            {
-                let func = Rc::clone(f);
-                let result = _interp.call_user_function_expanded(
-                    func,
+            if let Some(method_val) = lookup_class_attr(&class, "__repr__") {
+                let result = invoke_class_method(
+                    _interp,
+                    method_val,
+                    Value::py_instance(instance_rc),
                     &[],
-                    &[Value::py_instance(instance_rc)],
                 )?;
                 return match result.kind() {
                     ValueKind::Str(_) => Ok(result),
@@ -608,14 +604,12 @@ pyrust_module! {
             ValueKind::PyInstance(inst) => {
                 let inst_rc = Rc::clone(inst);
                 let class = Rc::clone(&inst_rc.borrow().class);
-                if let Some(method_val) = lookup_class_attr(&class, "__iter__")
-                    && let ValueKind::UserFunction(f) = method_val.kind()
-                {
-                    let func = Rc::clone(f);
-                    _interp.call_user_function_expanded(
-                        func,
+                if let Some(method_val) = lookup_class_attr(&class, "__iter__") {
+                    invoke_class_method(
+                        _interp,
+                        method_val,
+                        Value::py_instance(inst_rc),
                         &[],
-                        &[Value::py_instance(inst_rc)],
                     )
                 } else if lookup_class_attr(&class, "__next__").is_some() {
                     // Already an iterator (has __next__ but no separate __iter__).
@@ -1023,27 +1017,23 @@ pyrust_module! {
                 let inst_rc = Rc::clone(inst);
                 let class = Rc::clone(&inst_rc.borrow().class);
                 if let Some(method_val) = lookup_class_attr(&class, "__len__") {
-                    if let ValueKind::UserFunction(f) = method_val.kind() {
-                        let func = Rc::clone(f);
-                        let result = _interp.call_user_function_expanded(
-                            func,
-                            &[],
-                            &[Value::py_instance(inst_rc)],
-                        )?;
-                        match result.kind() {
-                            ValueKind::Int(n) if n >= 0 => n,
-                            ValueKind::Int(_) => return Err(PyError::named(
-                                "ValueError",
-                                "__len__() should return >= 0".to_string(),
-                            )),
-                            ValueKind::Bool(b) => if b { 1 } else { 0 },
-                            _ => return Err(PyError::named(
-                                "TypeError",
-                                "__len__ returned non-int".to_string(),
-                            )),
-                        }
-                    } else {
-                        return Err(PyError::Runtime("object has no len()".to_string()));
+                    let result = invoke_class_method(
+                        _interp,
+                        method_val,
+                        Value::py_instance(inst_rc),
+                        &[],
+                    )?;
+                    match result.kind() {
+                        ValueKind::Int(n) if n >= 0 => n,
+                        ValueKind::Int(_) => return Err(PyError::named(
+                            "ValueError",
+                            "__len__() should return >= 0".to_string(),
+                        )),
+                        ValueKind::Bool(b) => if b { 1 } else { 0 },
+                        _ => return Err(PyError::named(
+                            "TypeError",
+                            "__len__ returned non-int".to_string(),
+                        )),
                     }
                 } else {
                     return Err(PyError::Runtime("object has no len()".to_string()));
@@ -1515,15 +1505,15 @@ pyrust_module! {
         if let ValueKind::PyInstance(instance) = value.kind() {
             let instance_rc = Rc::clone(instance);
             let class = Rc::clone(&instance_rc.borrow().class);
-            if let Some(method_val) = lookup_class_attr(&class, "__format__")
-                && let ValueKind::UserFunction(f) = method_val.kind()
-            {
-                let func = Rc::clone(f);
-                let spec_val = Value::string(spec.clone());
-                let result = _interp.call_user_function_expanded(
-                    func,
-                    &[],
-                    &[Value::py_instance(instance_rc), spec_val],
+            if let Some(method_val) = lookup_class_attr(&class, "__format__") {
+                let result = invoke_class_method(
+                    _interp,
+                    method_val,
+                    Value::py_instance(instance_rc),
+                    &[ExpandedCallArg {
+                        name: None,
+                        value: Value::string(spec.clone()),
+                    }],
                 )?;
                 return match result.kind() {
                     ValueKind::Str(_) => Ok(result),
@@ -1775,14 +1765,12 @@ fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result
         return Ok(value.to_py_str());
     }
     for dunder in &["__str__", "__repr__"] {
-        if let Some(method_val) = lookup_class_attr(&class, dunder)
-            && let ValueKind::UserFunction(f) = method_val.kind()
-        {
-            let func = Rc::clone(&f);
-            let result = interp.call_user_function_expanded(
-                func,
+        if let Some(method_val) = lookup_class_attr(&class, dunder) {
+            let result = invoke_class_method(
+                interp,
+                method_val,
+                Value::py_instance(Rc::clone(&inst_rc)),
                 &[],
-                &[Value::py_instance(Rc::clone(&inst_rc))],
             )?;
             return match result.kind() {
                 ValueKind::Str(s) => Ok(s.to_string()),

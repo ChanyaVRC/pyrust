@@ -212,6 +212,88 @@ pub fn reversed(source: Value) -> Value {
     Value::builtin_object(REVERSED_OPS, Box::new(state))
 }
 
+// ── chain ────────────────────────────────────────────────────────────────────
+
+pub struct ChainState {
+    sources: Vec<Value>,
+    /// Cursor over `sources`; advanced past each one as it's drained.
+    source_idx: RefCell<usize>,
+    /// Materialised items for the source at `source_idx`; refilled when we
+    /// move on.  Holding the current source as a `Vec<Value>` (rather than
+    /// re-iterating piecewise) keeps the surface aligned with the rest of
+    /// this file's lazy helpers — `iter_values_via_registry` returns a
+    /// `Vec`, so each *source* is drained eagerly but the chain as a whole
+    /// only walks to the current source.
+    current_items: RefCell<Option<Vec<Value>>>,
+    pos: RefCell<usize>,
+}
+
+pub struct ChainOps;
+pub const CHAIN_OPS: &ChainOps = &ChainOps;
+pub const CHAIN_TYPE_NAME: &str = "itertools.chain";
+
+impl BuiltinTypeOps for ChainOps {
+    fn type_name(&self) -> &'static str {
+        CHAIN_TYPE_NAME
+    }
+
+    fn repr(&self, _state: &BuiltinState) -> String {
+        "<itertools.chain object>".to_string()
+    }
+
+    fn truthy(&self, _state: &BuiltinState) -> bool {
+        true
+    }
+
+    fn is_iterable(&self) -> bool {
+        true
+    }
+
+    fn iter_next(&self, state: &BuiltinState) -> Result<Option<Value>> {
+        let borrow = state.borrow();
+        let s = borrow
+            .downcast_ref::<ChainState>()
+            .ok_or_else(|| PyError::Runtime("internal: bad chain state".to_string()))?;
+        loop {
+            // Drain the current source.
+            {
+                let items_ref = s.current_items.borrow();
+                if let Some(items) = items_ref.as_ref() {
+                    let mut pos = s.pos.borrow_mut();
+                    if *pos < items.len() {
+                        let v = items[*pos].clone();
+                        *pos += 1;
+                        return Ok(Some(v));
+                    }
+                }
+            }
+            // Move to the next source (or stop).
+            let mut idx = s.source_idx.borrow_mut();
+            if *idx >= s.sources.len() {
+                return Ok(None);
+            }
+            let next = iter_values_via_registry(&s.sources[*idx])?;
+            *idx += 1;
+            *s.current_items.borrow_mut() = Some(next);
+            *s.pos.borrow_mut() = 0;
+        }
+    }
+}
+
+/// `itertools.chain(*iterables)` — concatenate iterables lazily.  Each
+/// source is materialised when we reach it during iteration, so the
+/// pattern `chain(huge_source_1, huge_source_2)` only pays for what's
+/// actually consumed.
+pub fn chain(sources: Vec<Value>) -> Value {
+    let state = ChainState {
+        sources,
+        source_idx: RefCell::new(0),
+        current_items: RefCell::new(None),
+        pos: RefCell::new(0),
+    };
+    Value::builtin_object(CHAIN_OPS, Box::new(state))
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 fn ensure_materialized<F>(slot: &RefCell<Option<Vec<Value>>>, fill: F) -> Result<()>

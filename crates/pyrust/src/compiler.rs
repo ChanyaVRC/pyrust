@@ -4044,14 +4044,49 @@ impl Compiler {
 
     fn compile_import(&mut self, names: &[(String, Option<String>)]) {
         for (module_name, alias) in names {
-            let mod_idx = self.intern_name(module_name);
-            let dst = self.alloc_temp();
-            self.emit(Insn::ImportModule(dst, mod_idx));
-            let bound = alias
-                .as_deref()
-                .unwrap_or_else(|| module_name.split('.').next().unwrap_or(module_name));
-            self.compile_store_name(bound, dst);
-            self.free_temp(dst);
+            match alias {
+                Some(alias) => {
+                    // `import a.b.c as alias` — bind the leaf module under
+                    // the alias directly.  No parent walk needed because
+                    // the user explicitly renamed.
+                    let mod_idx = self.intern_name(module_name);
+                    let dst = self.alloc_temp();
+                    self.emit(Insn::ImportModule(dst, mod_idx));
+                    self.compile_store_name(alias, dst);
+                    self.free_temp(dst);
+                }
+                None => {
+                    // `import a.b.c` — CPython binds the *topmost* component
+                    // (`a`), and `a.b.c` is reached via attribute chains on
+                    // the loaded packages.
+                    let top = module_name.split('.').next().unwrap_or(module_name);
+                    if top == module_name {
+                        // Non-dotted: one import that binds directly under
+                        // the name — no parent walk involved.
+                        let mod_idx = self.intern_name(module_name);
+                        let dst = self.alloc_temp();
+                        self.emit(Insn::ImportModule(dst, mod_idx));
+                        self.compile_store_name(module_name, dst);
+                        self.free_temp(dst);
+                    } else {
+                        // Dotted: first ensure the leaf is loaded (which
+                        // populates the cache and lets the parent-package
+                        // identity fix-up in `Interpreter::load_module`
+                        // stitch its submodule attrs to the cached
+                        // value); then load the topmost component and
+                        // bind it.
+                        let full_idx = self.intern_name(module_name);
+                        let full_reg = self.alloc_temp();
+                        self.emit(Insn::ImportModule(full_reg, full_idx));
+                        self.free_temp(full_reg);
+                        let top_idx = self.intern_name(top);
+                        let top_reg = self.alloc_temp();
+                        self.emit(Insn::ImportModule(top_reg, top_idx));
+                        self.compile_store_name(top, top_reg);
+                        self.free_temp(top_reg);
+                    }
+                }
+            }
         }
     }
 

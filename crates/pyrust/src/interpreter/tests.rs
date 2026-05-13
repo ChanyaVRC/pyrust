@@ -1258,4 +1258,424 @@ result = fact(10)
             }
         }
     }
+
+    // ── stdlib phase-2 modules (issue #250) ──────────────────────────────────
+    //
+    // os.path / functools / itertools / collections live in
+    // `crates/pyrust/src/builtin_modules/bodies/`.  The tests below pin one
+    // representative behaviour per public surface — full method coverage
+    // belongs in CPython-parity test suites once we wire one up.
+
+    #[test]
+    fn os_path_join_handles_absolute_components_like_cpython() {
+        // CPython quirk: any absolute component resets the running path.
+        // Expected output is platform-specific because `Path::is_absolute`
+        // disagrees across OSes — on Unix `/abs` is absolute (so `b` and
+        // `c` reset to `/abs/...`); on Windows `/abs` isn't absolute (no
+        // drive prefix), so it's just another non-resetting component and
+        // separators get mixed.  Mirror CPython by computing the expected
+        // strings with the same `PathBuf` ops the impl uses — that keeps
+        // the test honest on both platforms without skipping coverage.
+        let interp = run_program(
+            "import os.path as op\n\
+             a = op.join('a', 'b', 'c')\n\
+             b = op.join('/abs', 'rel')\n\
+             c = op.join('rel', '/abs', 'tail')\n",
+        );
+        let expect = |parts: &[&str]| {
+            let mut p = std::path::PathBuf::new();
+            for part in parts {
+                let q = std::path::Path::new(part);
+                if q.is_absolute() {
+                    p = q.to_path_buf();
+                } else {
+                    p.push(q);
+                }
+            }
+            Value::string(p.to_string_lossy().into_owned())
+        };
+        assert_eq!(interp.lookup_name("a").unwrap(), Some(expect(&["a", "b", "c"])));
+        assert_eq!(interp.lookup_name("b").unwrap(), Some(expect(&["/abs", "rel"])));
+        assert_eq!(
+            interp.lookup_name("c").unwrap(),
+            Some(expect(&["rel", "/abs", "tail"]))
+        );
+    }
+
+    #[test]
+    fn os_path_splitext_treats_leading_dots_as_basename() {
+        // `.bashrc` → ('.bashrc', '') — a leading dot is *not* an
+        // extension separator (CPython rule).  Pinning this because it's
+        // the easy-to-regress branch in `splitext`.
+        let interp = run_program(
+            "from os.path import splitext\n\
+             a = splitext('foo.tar.gz')\n\
+             b = splitext('.bashrc')\n\
+             c = splitext('no_ext')\n",
+        );
+        assert_eq!(
+            interp.lookup_name("a").unwrap(),
+            Some(Value::tuple(vec![
+                Value::string("foo.tar"),
+                Value::string(".gz"),
+            ]))
+        );
+        assert_eq!(
+            interp.lookup_name("b").unwrap(),
+            Some(Value::tuple(vec![
+                Value::string(".bashrc"),
+                Value::string(""),
+            ]))
+        );
+        assert_eq!(
+            interp.lookup_name("c").unwrap(),
+            Some(Value::tuple(vec![Value::string("no_ext"), Value::string("")]))
+        );
+    }
+
+    #[test]
+    fn functools_reduce_with_and_without_initializer() {
+        let interp = run_program(
+            "from functools import reduce\n\
+             a = reduce(lambda x, y: x + y, [1, 2, 3, 4])\n\
+             b = reduce(lambda x, y: x + y, [1, 2, 3, 4], 100)\n\
+             c = reduce(lambda x, y: x * y, [1, 2, 3, 4])\n\
+             d = reduce(lambda x, y: x + y, [], 'seed')\n",
+        );
+        assert_eq!(interp.lookup_name("a").unwrap(), Some(Value::int(10)));
+        assert_eq!(interp.lookup_name("b").unwrap(), Some(Value::int(110)));
+        assert_eq!(interp.lookup_name("c").unwrap(), Some(Value::int(24)));
+        assert_eq!(interp.lookup_name("d").unwrap(), Some(Value::string("seed")));
+    }
+
+    #[test]
+    fn functools_reduce_empty_without_initializer_is_type_error() {
+        let err = run_program_expect_error(
+            "from functools import reduce\nreduce(lambda x, y: x + y, [])\n",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("of empty iterable with no initial value"),
+            "expected canonical CPython error wording, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn itertools_chain_concatenates_iterables() {
+        let interp = run_program(
+            "from itertools import chain\n\
+             a = list(chain([1, 2], [3, 4], [5]))\n\
+             b = list(chain([]))\n\
+             c = list(chain())\n",
+        );
+        assert_eq!(
+            interp.lookup_name("a").unwrap(),
+            Some(Value::list((1..=5).map(Value::int).collect()))
+        );
+        assert_eq!(interp.lookup_name("b").unwrap(), Some(Value::list(vec![])));
+        assert_eq!(interp.lookup_name("c").unwrap(), Some(Value::list(vec![])));
+    }
+
+    #[test]
+    fn itertools_islice_covers_all_arities() {
+        // `islice(seq, stop)`, `islice(seq, start, stop)`, and
+        // `islice(seq, start, stop, step)` — plus `None` in each slot
+        // (which means "default": 0 / drain / 1).
+        let interp = run_program(
+            "from itertools import islice\n\
+             a = list(islice([0,1,2,3,4,5,6,7,8,9], 5))\n\
+             b = list(islice([0,1,2,3,4,5,6,7,8,9], 2, 7))\n\
+             c = list(islice([0,1,2,3,4,5,6,7,8,9], 0, 10, 2))\n\
+             d = list(islice(range(5), None, 10))\n\
+             e = list(islice(range(5), 1, None))\n",
+        );
+        assert_eq!(
+            interp.lookup_name("a").unwrap(),
+            Some(Value::list((0..5).map(Value::int).collect()))
+        );
+        assert_eq!(
+            interp.lookup_name("b").unwrap(),
+            Some(Value::list((2..7).map(Value::int).collect()))
+        );
+        assert_eq!(
+            interp.lookup_name("c").unwrap(),
+            Some(Value::list((0..10).step_by(2).map(Value::int).collect()))
+        );
+        assert_eq!(
+            interp.lookup_name("d").unwrap(),
+            Some(Value::list((0..5).map(Value::int).collect()))
+        );
+        assert_eq!(
+            interp.lookup_name("e").unwrap(),
+            Some(Value::list((1..5).map(Value::int).collect()))
+        );
+    }
+
+    #[test]
+    fn collections_counter_tallies_iterables() {
+        // Counter is now a real Python class (defined via `pyrust_module!`'s
+        // `class { … }` block).  Pin the counts via `c[key]` (which routes
+        // through `__getitem__`) and `len(c)` rather than comparing to a
+        // plain dict — Counter instances are PyInstances, not dicts.
+        let interp = run_program(
+            "from collections import Counter\n\
+             a = Counter([1, 2, 1, 3, 2, 1])\n\
+             a_one = a[1]\n\
+             a_two = a[2]\n\
+             a_three = a[3]\n\
+             a_missing = a[99]\n\
+             a_len = len(a)\n\
+             b = Counter('aabcccd')\n\
+             b_a = b['a']\n\
+             b_c = b['c']\n\
+             c = Counter()\n\
+             c_len = len(c)\n\
+             c_missing = c['anything']\n\
+             d = Counter({'x': 5, 'y': 3})\n\
+             d_x = d['x']\n\
+             d_y = d['y']\n",
+        );
+        // Counter([1, 2, 1, 3, 2, 1])
+        assert_eq!(interp.lookup_name("a_one").unwrap(), Some(Value::int(3)));
+        assert_eq!(interp.lookup_name("a_two").unwrap(), Some(Value::int(2)));
+        assert_eq!(interp.lookup_name("a_three").unwrap(), Some(Value::int(1)));
+        // Missing-key returns 0 (the dict-subclass quirk).
+        assert_eq!(interp.lookup_name("a_missing").unwrap(), Some(Value::int(0)));
+        assert_eq!(interp.lookup_name("a_len").unwrap(), Some(Value::int(3)));
+        // Counter('aabcccd')
+        assert_eq!(interp.lookup_name("b_a").unwrap(), Some(Value::int(2)));
+        assert_eq!(interp.lookup_name("b_c").unwrap(), Some(Value::int(3)));
+        // Counter() — empty.
+        assert_eq!(interp.lookup_name("c_len").unwrap(), Some(Value::int(0)));
+        assert_eq!(interp.lookup_name("c_missing").unwrap(), Some(Value::int(0)));
+        // Counter({'x': 5, 'y': 3}) — mapping form preserves the values.
+        assert_eq!(interp.lookup_name("d_x").unwrap(), Some(Value::int(5)));
+        assert_eq!(interp.lookup_name("d_y").unwrap(), Some(Value::int(3)));
+    }
+
+    #[test]
+    fn os_path_dotted_import_works_via_parent_package() {
+        // The `os` parent module is synthesised in `bodies/os.rs` and
+        // its `path` constant points at the `os.path` module, so the
+        // bare `import os.path; os.path.join(...)` pattern (which the
+        // compiler binds under the topmost component `os`) resolves.
+        let interp = run_program(
+            "import os.path\nresult = os.path.join('a', 'b')\n",
+        );
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(
+            interp.lookup_name("result").unwrap(),
+            Some(Value::string(format!("a{sep}b")))
+        );
+    }
+
+    #[test]
+    fn itertools_islice_is_lazy_over_huge_source() {
+        // The point of moving islice off the eager `Vec<Value>` path is
+        // that it must *not* drain a huge source when the consumer only
+        // asks for a handful.  Pull three elements from a 100k-range and
+        // confirm the rest never materialises by relying on the test
+        // wall-clock; with the eager implementation, the same test ran
+        // visibly slower because it had to walk the full range.
+        let interp = run_program(
+            "from itertools import islice\n\
+             it = islice(range(100000), 3)\n\
+             a = next(it); b = next(it); c = next(it)\n",
+        );
+        assert_eq!(interp.lookup_name("a").unwrap(), Some(Value::int(0)));
+        assert_eq!(interp.lookup_name("b").unwrap(), Some(Value::int(1)));
+        assert_eq!(interp.lookup_name("c").unwrap(), Some(Value::int(2)));
+    }
+
+    #[test]
+    fn collections_counter_exposes_full_method_surface() {
+        // Counter is now a real BuiltinObject — pin each of the methods
+        // that lights up only with the BuiltinTypeOps implementation
+        // (missing-key returns 0, most_common, elements, update,
+        // subtract, copy independence).
+        let interp = run_program(
+            "from collections import Counter\n\
+             c = Counter('aabbc')\n\
+             missing = c['z']\n\
+             top2 = c.most_common(2)\n\
+             elts = c.elements()\n\
+             c.update('aa')\n\
+             after_update = c['a']\n\
+             c.subtract('aaaaa')\n\
+             after_subtract = c['a']\n\
+             c2 = c.copy()\n\
+             c2['a'] = 999\n\
+             original_a = c['a']\n\
+             copy_a = c2['a']\n",
+        );
+        assert_eq!(interp.lookup_name("missing").unwrap(), Some(Value::int(0)));
+        assert_eq!(
+            interp.lookup_name("top2").unwrap(),
+            Some(Value::list(vec![
+                Value::tuple(vec![Value::string("a"), Value::int(2)]),
+                Value::tuple(vec![Value::string("b"), Value::int(2)]),
+            ]))
+        );
+        // elements() lists 'a' twice, 'b' twice, 'c' once — insertion
+        // order preserved.
+        assert_eq!(
+            interp.lookup_name("elts").unwrap(),
+            Some(Value::list(vec![
+                Value::string("a"), Value::string("a"),
+                Value::string("b"), Value::string("b"),
+                Value::string("c"),
+            ]))
+        );
+        assert_eq!(interp.lookup_name("after_update").unwrap(), Some(Value::int(4)));
+        assert_eq!(interp.lookup_name("after_subtract").unwrap(), Some(Value::int(-1)));
+        assert_eq!(interp.lookup_name("original_a").unwrap(), Some(Value::int(-1)));
+        assert_eq!(interp.lookup_name("copy_a").unwrap(), Some(Value::int(999)));
+    }
+
+    #[test]
+    fn collections_defaultdict_runs_factory_on_missing_key() {
+        // Two complementary uses pin the missing-key dispatch:
+        //
+        //   - `defaultdict(int)` for the canonical `counts[c] += 1` idiom
+        //     — `+=` re-binds via `set_item` so the increment persists
+        //     across iterations, matching CPython.
+        //   - `defaultdict(None)` falls through to KeyError, matching a
+        //     plain dict — there's no factory to call.
+        let interp = run_program(
+            "from collections import defaultdict\n\
+             counts = defaultdict(int)\n\
+             for c in 'aabbbc':\n    \
+             counts[c] += 1\n\
+             a = counts['a']\n\
+             b = counts['b']\n\
+             c = counts['c']\n",
+        );
+        assert_eq!(interp.lookup_name("a").unwrap(), Some(Value::int(2)));
+        assert_eq!(interp.lookup_name("b").unwrap(), Some(Value::int(3)));
+        assert_eq!(interp.lookup_name("c").unwrap(), Some(Value::int(1)));
+    }
+
+    #[test]
+    fn collections_defaultdict_none_factory_raises_key_error() {
+        // `defaultdict(None)` matches plain dict semantics: missing key
+        // raises KeyError instead of running a factory.  The behaviour
+        // is driven by `defaultdict.__missing__` checking
+        // `self.default_factory is None` and short-circuiting to
+        // KeyError when so — pin both halves of that branch.
+        let err = run_program_expect_error(
+            "from collections import defaultdict\nd = defaultdict(None)\nd['missing']\n",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("KeyError"),
+            "expected KeyError, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn collections_counter_iterates_keys_in_insertion_order() {
+        // This pins the original bug that motivated migrating Counter to a
+        // class-based implementation: the previous `BuiltinTypeOps` Counter
+        // returned `None` from `iter_next`, so `for k in c` and `list(c)`
+        // both silently yielded nothing.  With `__iter__` defined as a
+        // dunder, iteration goes through pyrust's normal class machinery.
+        let interp = run_program(
+            "from collections import Counter\n\
+             c = Counter('aab')\n\
+             keys_list = list(c)\n\
+             # Re-iteration must work too (each iter(c) takes a fresh snapshot).\n\
+             keys_again = list(c)\n",
+        );
+        // Insertion order: 'a' (first seen), 'b' (second seen).
+        assert_eq!(
+            interp.lookup_name("keys_list").unwrap(),
+            Some(Value::list(vec![Value::string("a"), Value::string("b")]))
+        );
+        assert_eq!(
+            interp.lookup_name("keys_again").unwrap(),
+            Some(Value::list(vec![Value::string("a"), Value::string("b")]))
+        );
+    }
+
+    #[test]
+    fn collections_counter_dunder_dispatch_exercises_each_site() {
+        // The dispatch unification in `invoke_class_method` routes
+        // `__contains__`, `__setitem__`, `__len__`, and `__getitem__`
+        // through the same helper.  One end-to-end Python program
+        // exercising each ensures the helper handles every dispatch
+        // site (we'd otherwise only cover `__iter__` and
+        // `__getitem__` via the existing tests).
+        let interp = run_program(
+            "from collections import Counter\n\
+             c = Counter('aab')\n\
+             a_present = 'a' in c\n\
+             z_missing = 'z' in c\n\
+             length = len(c)\n\
+             before = c['a']\n\
+             c['a'] = 99\n\
+             after = c['a']\n\
+             # __setitem__ propagation: a fresh `[]` lookup should see\n\
+             # the new value (which proves set_item routed through the\n\
+             # class dunder rather than landing on a clone).\n\
+             after_again = c['a']\n",
+        );
+        assert_eq!(interp.lookup_name("a_present").unwrap(), Some(Value::bool_(true)));
+        assert_eq!(interp.lookup_name("z_missing").unwrap(), Some(Value::bool_(false)));
+        assert_eq!(interp.lookup_name("length").unwrap(), Some(Value::int(2)));
+        assert_eq!(interp.lookup_name("before").unwrap(), Some(Value::int(2)));
+        assert_eq!(interp.lookup_name("after").unwrap(), Some(Value::int(99)));
+        assert_eq!(interp.lookup_name("after_again").unwrap(), Some(Value::int(99)));
+    }
+
+    #[test]
+    fn collections_counter_corrupted_counts_surfaces_type_error() {
+        // `c._counts = "lol"` overwrites the internal storage with a
+        // non-dict.  The next `c[k]` access should surface a TypeError
+        // pointing at the user's tampering — not a `Runtime("internal:
+        // …")` that looks like an interpreter bug.
+        let err = run_program_expect_error(
+            "from collections import Counter\nc = Counter('a')\nc._counts = 'lol'\nc['a']\n",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("TypeError"),
+            "expected TypeError diagnostic, got: {msg}"
+        );
+        assert!(
+            msg.contains("_counts"),
+            "error should name the offending attribute, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn collections_counter_is_a_class_instance() {
+        // After the migration to `pyrust_module!`'s `class { … }` block,
+        // `Counter(...)` returns a real PyInstance whose class name is
+        // exactly `"Counter"` (not `"collections.Counter"`).  This pins the
+        // `class_name_lit` codepath in the macro's class emission.
+        let interp = run_program(
+            "from collections import Counter\n\
+             c = Counter([1, 2])\n\
+             tname = type(c).__name__\n",
+        );
+        assert_eq!(
+            interp.lookup_name("tname").unwrap(),
+            Some(Value::string("Counter"))
+        );
+    }
+
+    #[test]
+    fn collections_defaultdict_rejects_non_callable_factory() {
+        // The eager check in `bodies/collections.rs` surfaces a clean
+        // TypeError at construction time instead of letting the
+        // interpreter blow up on the first missing-key access.
+        let err = run_program_expect_error(
+            "from collections import defaultdict\ndefaultdict(42)\n",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("TypeError") && msg.contains("callable"),
+            "expected `must be callable` TypeError; got: {msg}"
+        );
+    }
 }
