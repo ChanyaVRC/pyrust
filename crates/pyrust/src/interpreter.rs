@@ -71,4 +71,6 @@ include!("interpreter/runtime.rs");
 
 include!("interpreter/helpers.rs");
 
+pub(crate) mod builtin_args;
+
 include!("interpreter/tests.rs");
