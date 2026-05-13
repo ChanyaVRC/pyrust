@@ -67,16 +67,56 @@ pub enum PyKey {
     },
 }
 
+impl PartialEq for PyKey {
+    fn eq(&self, other: &Self) -> bool {
+        // In CPython, `True == 1` and `False == 0`, and they hash equal, so
+        // dict/set treat them as the same key.  We preserve the original key
+        // (e.g. `{True: 1, 1: 2}` keeps `True` as the visible key) by storing
+        // `PyKey::Bool` distinctly, but we make `Bool(b) == Int(b as i64)` so
+        // lookups across the two types succeed.
+        match (self, other) {
+            (PyKey::Int(a), PyKey::Int(b)) => a == b,
+            (PyKey::Bool(a), PyKey::Bool(b)) => a == b,
+            (PyKey::Bool(a), PyKey::Int(b)) | (PyKey::Int(b), PyKey::Bool(a)) => *b == *a as i64,
+            (PyKey::Float(a), PyKey::Float(b)) => a == b,
+            (PyKey::Str(a), PyKey::Str(b)) => a == b,
+            (PyKey::None, PyKey::None) => true,
+            (PyKey::FrozenSet(a), PyKey::FrozenSet(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for PyKey {}
+
 impl Hash for PyKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        std::mem::discriminant(self).hash(state);
+        // NOTE: `Bool(b)` must hash equal to `Int(b as i64)` so that the two
+        // collide in dict/set buckets and PartialEq can deduplicate them.
+        // We therefore deliberately omit `std::mem::discriminant` here and
+        // hash a per-variant tag instead, treating Bool as Int.
         match self {
-            PyKey::Int(v) => v.hash(state),
-            PyKey::Bool(b) => b.hash(state),
-            PyKey::Float(bits) => bits.hash(state),
-            PyKey::Str(s) => s.hash(state),
-            PyKey::None => {}
+            PyKey::Int(v) => {
+                0u8.hash(state);
+                v.hash(state);
+            }
+            PyKey::Bool(b) => {
+                0u8.hash(state);
+                (*b as i64).hash(state);
+            }
+            PyKey::Float(bits) => {
+                1u8.hash(state);
+                bits.hash(state);
+            }
+            PyKey::Str(s) => {
+                2u8.hash(state);
+                s.hash(state);
+            }
+            PyKey::None => {
+                3u8.hash(state);
+            }
             PyKey::FrozenSet(items) => {
+                4u8.hash(state);
                 for k in items {
                     k.hash(state);
                 }
@@ -1763,7 +1803,7 @@ impl Value {
                 .or_else(|| Some(PyKey::Str(v.to_string()))),
             ValueKind::Float(v) => Some(PyKey::Float(v.to_bits())),
             ValueKind::Str(v) => Some(PyKey::Str(v.to_string())),
-            ValueKind::Bool(v) => Some(PyKey::Int(v as i64)),
+            ValueKind::Bool(v) => Some(PyKey::Bool(v)),
             ValueKind::None => Some(PyKey::None),
             ValueKind::BuiltinObject { ops, state } => ops.to_key(state),
             _ => None,
