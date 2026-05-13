@@ -18,7 +18,7 @@ use std::rc::Rc;
 use crate::ast::BinaryOp;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
-use crate::interpreter::builtin_args::PyStr;
+use crate::interpreter::builtin_args::{PyBool, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
     NativeIterFrame, apply_format_spec, ascii_repr, class_is_subclass_of, compare_values,
     dir_names, invoke_class_method, is_exception_class, iter_values, lookup_class_attr,
@@ -207,12 +207,43 @@ pyrust_module! {
 
     /// CPython: abs(x) — absolute value.
     /// <https://docs.python.org/3/library/functions.html#abs>
-    fn abs(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
+    ///
+    /// First builtin migrated to the overload-dispatch dialect (#395):
+    /// declare one `fn abs` per concrete arg-type combination, with
+    /// `PyValue` as the trailing catch-all for `complex`, `PyInstance`
+    /// with `__abs__`, and the not-a-number error path.  The macro
+    /// generates a dispatcher that tries each overload in declaration
+    /// order.
+    fn abs(#[positional_only] x: PyInt) -> Result<Value> {
+        // i64 fast path; fall back to BigInt for genuine bignums.  We
+        // can't call `BigInt::abs` here without pulling `num_traits` in
+        // as a direct dep, so do the negate-if-negative dance manually
+        // — equivalent and limited to the rare overflow path.
+        match x.as_i64() {
+            Some(n) => Ok(Value::int(n.wrapping_abs())),
+            None => {
+                let big = x.to_bigint();
+                let zero: crate::value::PyBigInt = 0i64.into();
+                let abs = if big < zero { -big } else { big };
+                Ok(Value::bigint(abs))
+            }
         }
-        let val = args[0].value.clone();
+    }
+
+    fn abs(#[positional_only] x: PyFloat) -> Result<Value> {
+        Ok(Value::float(x.0.abs()))
+    }
+
+    fn abs(#[positional_only] x: PyBool) -> Result<Value> {
+        // CPython: abs(True) == 1, abs(False) == 0 — promoted to int.
+        Ok(Value::int(if x.0 { 1 } else { 0 }))
+    }
+
+    fn abs(#[positional_only] x: PyValue) -> Result<Value> {
+        // Catch-all: complex magnitude, user-defined `__abs__`, and the
+        // "not a number" error otherwise.  Reached when none of the
+        // typed overloads above matched the call's argument.
+        let val = x.0;
         if let ValueKind::PyInstance(inst) = val.kind() {
             let inst_rc = Rc::clone(inst);
             let class = Rc::clone(&inst_rc.borrow().class);
@@ -229,13 +260,13 @@ pyrust_module! {
                 format!("bad operand type for abs(): '{}'", class.borrow().name),
             ));
         }
-        match val.kind() {
-            ValueKind::Int(v) => Ok(Value::int(v.abs())),
-            ValueKind::Float(v) => Ok(Value::float(v.abs())),
-            ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
-            ValueKind::Complex(re, im) => Ok(Value::float((re * re + im * im).sqrt())),
-            _ => Err(PyError::Runtime(format!("{FN_NAME}() argument must be a number"))),
+        if let ValueKind::Complex(re, im) = val.kind() {
+            return Ok(Value::float((re * re + im * im).sqrt()));
         }
+        Err(PyError::named(
+            "TypeError",
+            format!("bad operand type for abs(): '{}'", value_type_name_str(&val)),
+        ))
     }
 
     /// CPython: sum(iterable, /, start=0) — sum elements of an iterable.

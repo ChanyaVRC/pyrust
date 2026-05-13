@@ -1,0 +1,5 @@
+error: overload parameter #0 is named `y` here but `x` in the first overload; all overloads must agree on parameter names
+  --> tests/compile_fail/overload_param_name_mismatch.rs:15:12
+   |
+15 |     fn bad(y: PyFloat) -> Result<Value> {
+   |            ^

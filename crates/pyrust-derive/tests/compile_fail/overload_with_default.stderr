@@ -1,0 +1,5 @@
+error: parameter `x` has a `#[default(...)]`, which is not allowed in overload sets — declare a single signature instead, or move the default into the dispatched body
+  --> tests/compile_fail/overload_with_default.rs:14:26
+   |
+14 |     fn bad(#[default(0)] x: PyInt) -> Result<Value> {
+   |                          ^

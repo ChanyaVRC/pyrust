@@ -641,6 +641,36 @@ pub(crate) fn missing_arg<T>(fn_name: &str, arg_name: &str) -> Result<T> {
     )))
 }
 
+/// Construct the "no overload matched" error.  Emitted by the macro-
+/// generated dispatcher of a typed-overload builtin when every declared
+/// overload's parameter types failed `FromValue::matches` against the
+/// actual call args.  Unreachable in practice when the overload set
+/// includes a `PyValue` catch-all (whose `matches` is unconditional);
+/// reachable otherwise — the user supplied types not covered by any
+/// overload.
+///
+/// `actuals` is the type-name list of the *call site*'s args (e.g.
+/// `["str", "int"]`), `signatures` is the source-order list of the
+/// *declared* per-overload signatures (e.g. `["(int, int)",
+/// "(float, float)"]`).  Both are formatted into a single
+/// `TypeError`.
+pub(crate) fn no_overload_matched<T>(
+    fn_name: &str,
+    actuals: &[&str],
+    signatures: &[&str],
+) -> Result<T> {
+    let actual = if actuals.len() == 1 {
+        actuals[0].to_string()
+    } else {
+        format!("({})", actuals.join(", "))
+    };
+    let sigs = signatures.join(", ");
+    Err(type_error(format!(
+        "{fn_name}(): no overload matches argument types {actual}; \
+         expected one of: {sigs}",
+    )))
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -937,6 +967,40 @@ mod tests {
         assert!(
             matches!(s.0, Cow::Borrowed(_)),
             "PyStr::from(&'static str) should produce Cow::Borrowed",
+        );
+    }
+
+    // ── no_overload_matched — error wording for the overload dispatcher.
+    #[test]
+    fn no_overload_matched_single_arg_formats_actual_bare() {
+        // Single-arg call sites get the type name printed bare, not
+        // wrapped in a tuple — matches CPython's `abs(): argument of
+        // type 'str'` style for single-arg builtins.
+        let err = no_overload_matched::<()>("abs", &["str"], &["(int,)", "(float,)", "(bool,)"])
+            .unwrap_err();
+        let msg = err_msg(&err);
+        assert_eq!(err_class(&err), "TypeError");
+        assert!(
+            msg.contains("abs(): no overload matches argument types str"),
+            "actual list should be bare for single arg: {msg:?}",
+        );
+        assert!(
+            msg.contains("expected one of: (int,), (float,), (bool,)"),
+            "signatures should be comma-joined: {msg:?}",
+        );
+    }
+
+    #[test]
+    fn no_overload_matched_multi_arg_wraps_actuals_in_paren() {
+        // Multi-arg call sites get the actual type list wrapped so the
+        // output reads naturally: `argument types (int, str)`.
+        let err =
+            no_overload_matched::<()>("pow", &["int", "str"], &["(int, int)", "(float, float)"])
+                .unwrap_err();
+        let msg = err_msg(&err);
+        assert!(
+            msg.contains("argument types (int, str)"),
+            "multi-arg actuals should be parenthesised: {msg:?}",
         );
     }
 
