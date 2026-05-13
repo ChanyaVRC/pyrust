@@ -127,6 +127,7 @@ impl Interpreter {
             Vec::new(),
             0,
             None,
+            None,
         )
     }
 
@@ -145,6 +146,7 @@ impl Interpreter {
             Vec::new(),
             0,
             Some(fn_id),
+            None,
         )
     }
 
@@ -154,7 +156,30 @@ impl Interpreter {
     /// - `Err(GeneratorYield(val))` — generator yielded; frame updated in-place
     /// - `Err(other)` — propagating exception
     pub(crate) fn resume_generator(&mut self, frame: &mut GeneratorFrame) -> Result<Value> {
+        self.resume_generator_with_exc(frame, None)
+    }
+
+    /// Resume a generator, optionally injecting `inject_exc` as if it had been
+    /// raised at the current yield point.  Underpins both `generator.close()`
+    /// (with a `GeneratorExit`) and `generator.throw()` (with the user-supplied
+    /// exception).
+    ///
+    /// Returns:
+    /// - `Ok(val)` — generator returned (StopIteration); frame.done = true
+    /// - `Err(GeneratorYield(val))` — generator yielded; frame updated in-place
+    /// - `Err(other)` — propagating exception
+    pub(crate) fn resume_generator_with_exc(
+        &mut self,
+        frame: &mut GeneratorFrame,
+        inject_exc: Option<PyError>,
+    ) -> Result<Value> {
         if frame.done {
+            // A done generator can't be resumed; if the caller is injecting an
+            // exception, propagate it unchanged so close()/throw() can decide
+            // how to handle it.
+            if let Some(e) = inject_exc {
+                return Err(e);
+            }
             return Err(PyError::named(
                 "StopIteration",
                 String::new(),
@@ -171,6 +196,7 @@ impl Interpreter {
             std::mem::take(&mut frame.exc_handlers),
             frame.pc,
             None,
+            inject_exc,
         );
 
         // Restore env.
@@ -211,6 +237,11 @@ impl Interpreter {
         exc_handlers_init: Vec<usize>,
         start_pc: usize,
         current_fn_id: Option<u64>,
+        // When `Some`, dispatched through the existing exception-handler stack
+        // before executing the first instruction.  Used by
+        // `resume_generator_with_exc` to inject `GeneratorExit` (for `close()`)
+        // or a user-supplied exception (for `throw()`) at the current yield.
+        inject_exc: Option<PyError>,
     ) -> Result<Value> {
         use crate::bytecode::Insn;
         use std::collections::HashMap;
@@ -222,6 +253,7 @@ impl Interpreter {
         // Counts self-tail-call iterations so that infinite tail recursion
         // eventually raises RecursionError instead of looping forever.
         let mut tco_iters: usize = 0;
+        let mut pending_inject: Option<PyError> = inject_exc;
 
         'vm: loop {
         // Dispatch errors through the active exception handler stack.
@@ -272,6 +304,13 @@ impl Interpreter {
                 }
             };
         }
+            // Inject a pending exception (set by resume_generator_with_exc for
+            // generator.close()/throw()) before dispatching the next
+            // instruction.  Routes through the existing handler stack so that
+            // try/except/finally inside the generator can observe the throw.
+            if let Some(e) = pending_inject.take() {
+                vm_try!(Err::<(), _>(e));
+            }
             let Some(insn) = code.insns.get(pc) else {
                 if pc == code.insns.len() {
                     return Ok(Value::none());
@@ -1658,6 +1697,17 @@ impl Interpreter {
                 pyrust_builtins::set::call(&method, set, args)
             }
             _ => {
+                // Generator methods (close, throw, __next__, __iter__) are
+                // dispatched directly here — they need access to the VM/frame
+                // and are not regular attributes on the Generator value.
+                let is_generator = matches!(
+                    regs[obj as usize].as_some().map(|v| v.kind()),
+                    Some(ValueKind::Generator(_))
+                );
+                if is_generator {
+                    let obj_val = vm_read(regs, obj, num_locals)?;
+                    return self.call_generator_method(obj_val, &method, args);
+                }
                 let obj_val = vm_read(regs, obj, num_locals)?;
                 let method_val = self.get_attr(obj_val, &method)?;
                 let mut buf = std::mem::take(&mut self.call_arg_buf);
@@ -1822,6 +1872,21 @@ impl Interpreter {
                 pyrust_builtins::set::call(&method, set, pos_items)
             }
             _ => {
+                // Generator methods — see `exec_call_method` for context.
+                let is_generator = matches!(
+                    regs[obj as usize].as_some().map(|v| v.kind()),
+                    Some(ValueKind::Generator(_))
+                );
+                if is_generator {
+                    if !kw_map.is_empty() {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!("generator.{method}() takes no keyword arguments"),
+                        ));
+                    }
+                    let obj_val = vm_read(regs, obj, num_locals)?;
+                    return self.call_generator_method(obj_val, &method, pos_items);
+                }
                 let obj_val = vm_read(regs, obj, num_locals)?;
                 let method_val = self.get_attr(obj_val, &method)?;
                 let mut expanded: Vec<ExpandedCallArg> = pos_items
@@ -1840,6 +1905,230 @@ impl Interpreter {
                 self.call_arg_buf = buf;
                 r
             }
+        }
+    }
+
+    /// Dispatch a method call on a `Generator` value (`g.close()`, `g.throw()`,
+    /// `g.__next__()`, `g.__iter__()`).  Other names raise `AttributeError`.
+    pub(crate) fn call_generator_method(
+        &mut self,
+        receiver: Value,
+        method: &str,
+        args: Vec<Value>,
+    ) -> Result<Value> {
+        match method {
+            "__iter__" => {
+                if !args.is_empty() {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "generator.__iter__() takes no arguments".to_string(),
+                    ));
+                }
+                Ok(receiver)
+            }
+            "__next__" => {
+                if !args.is_empty() {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "generator.__next__() takes no arguments".to_string(),
+                    ));
+                }
+                self.call_next(receiver, None)
+            }
+            "close" => {
+                if !args.is_empty() {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "generator.close() takes no arguments".to_string(),
+                    ));
+                }
+                self.generator_close(receiver)
+            }
+            "throw" => {
+                if args.is_empty() || args.len() > 3 {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "generator.throw() takes 1 to 3 arguments".to_string(),
+                    ));
+                }
+                // CPython's throw(type, value=None, traceback=None) — we only
+                // honour the first argument (the type or instance) and ignore
+                // the legacy 3-arg form's value/traceback.
+                let exc = args.into_iter().next().unwrap();
+                self.generator_throw(receiver, exc)
+            }
+            other => Err(PyError::named(
+                "AttributeError",
+                format!("'generator' object has no attribute '{}'", other),
+            )),
+        }
+    }
+
+    /// Implementation of `generator.close()`.
+    ///
+    /// Raises `GeneratorExit` at the current yield point.  Returns silently if
+    /// the generator finishes (normally, by re-raising `GeneratorExit`, or by
+    /// raising `StopIteration`); raises `RuntimeError("generator ignored
+    /// GeneratorExit")` if the generator yields again; propagates any other
+    /// exception unchanged.
+    fn generator_close(&mut self, receiver: Value) -> Result<Value> {
+        let state_rc = match receiver.kind() {
+            ValueKind::Generator(rc) => Rc::clone(rc),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "generator.close() called on non-generator".to_string(),
+                ));
+            }
+        };
+
+        // Re-entrancy guard: if the generator is currently executing (its
+        // state RefCell is already borrowed by an in-flight `resume_*` call),
+        // CPython raises ValueError("generator already executing") rather
+        // than panicking.  We detect this via `try_borrow_mut`.
+        {
+            let mut borrow = match state_rc.try_borrow_mut() {
+                Ok(b) => b,
+                Err(_) => {
+                    return Err(PyError::named(
+                        "ValueError",
+                        "generator already executing".to_string(),
+                    ));
+                }
+            };
+            // NativeIterFrame (returned by `iter()` on a built-in): close is a
+            // no-op — there's nothing user-visible to clean up.
+            if borrow.downcast_mut::<NativeIterFrame>().is_some() {
+                return Ok(Value::none());
+            }
+        }
+
+        let mut borrow = match state_rc.try_borrow_mut() {
+            Ok(b) => b,
+            Err(_) => {
+                return Err(PyError::named(
+                    "ValueError",
+                    "generator already executing".to_string(),
+                ));
+            }
+        };
+        let frame = borrow
+            .downcast_mut::<GeneratorFrame>()
+            .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;
+        if frame.done {
+            return Ok(Value::none());
+        }
+
+        let inject = PyError::named("GeneratorExit", String::new());
+        match self.resume_generator_with_exc(frame, Some(inject)) {
+            // Generator yielded again — that's an error in CPython.
+            Err(PyError::GeneratorYield(_)) => {
+                // Mark as done so subsequent calls don't re-execute.
+                frame.done = true;
+                Err(PyError::named(
+                    "RuntimeError",
+                    "generator ignored GeneratorExit".to_string(),
+                ))
+            }
+            // Generator returned normally (StopIteration synthesised).
+            Err(PyError::Named(ref cls, _)) if cls == "StopIteration" => Ok(Value::none()),
+            // Generator re-raised GeneratorExit — that's the expected close
+            // behaviour, swallow it.
+            Err(PyError::Named(ref cls, _)) if cls == "GeneratorExit" => Ok(Value::none()),
+            Err(PyError::Raised(ref exc)) => {
+                let cls_name = match exc.kind() {
+                    ValueKind::PyInstance(inst) => inst.borrow().class.borrow().name.clone(),
+                    ValueKind::PyClass(cls) => cls.borrow().name.clone(),
+                    _ => String::new(),
+                };
+                if cls_name == "GeneratorExit" || cls_name == "StopIteration" {
+                    Ok(Value::none())
+                } else {
+                    Err(PyError::Raised(exc.clone()))
+                }
+            }
+            Err(e) => Err(e),
+            Ok(_) => unreachable!("resume_generator_with_exc always returns Err"),
+        }
+    }
+
+    /// Implementation of `generator.throw(exc)`.
+    ///
+    /// Injects `exc` at the current yield point.  If the generator catches it
+    /// and yields, returns that value.  If it returns normally, raises
+    /// `StopIteration`.  Otherwise propagates the (re-raised or new)
+    /// exception.
+    fn generator_throw(&mut self, receiver: Value, exc: Value) -> Result<Value> {
+        let state_rc = match receiver.kind() {
+            ValueKind::Generator(rc) => Rc::clone(rc),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "generator.throw() called on non-generator".to_string(),
+                ));
+            }
+        };
+
+        // Convert `exc` argument into a concrete exception instance so we can
+        // hand it to the VM via `PyError::Raised`.  Accepts the same shapes as
+        // a `raise` statement: an exception class (auto-instantiates) or an
+        // exception instance.  CPython raises `TypeError` (not `RuntimeError`)
+        // when the argument is neither, so remap that specific case here.
+        let exc_val = self.coerce_to_exception(exc).map_err(|e| match e {
+            PyError::Runtime(ref msg) if msg.contains("exceptions must derive") => {
+                PyError::named("TypeError", msg.clone())
+            }
+            other => other,
+        })?;
+
+        // Re-entrancy guard: see generator_close for rationale.
+        {
+            let mut borrow = match state_rc.try_borrow_mut() {
+                Ok(b) => b,
+                Err(_) => {
+                    return Err(PyError::named(
+                        "ValueError",
+                        "generator already executing".to_string(),
+                    ));
+                }
+            };
+            // NativeIterFrame: throw at a built-in iterator simply propagates
+            // the exception (matching CPython, where the iterator has no
+            // Python frame to inject into).
+            if borrow.downcast_mut::<NativeIterFrame>().is_some() {
+                return Err(PyError::Raised(exc_val));
+            }
+        }
+
+        let mut borrow = match state_rc.try_borrow_mut() {
+            Ok(b) => b,
+            Err(_) => {
+                return Err(PyError::named(
+                    "ValueError",
+                    "generator already executing".to_string(),
+                ));
+            }
+        };
+        let frame = borrow
+            .downcast_mut::<GeneratorFrame>()
+            .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;
+        if frame.done {
+            // throw() on an exhausted generator re-raises the exception
+            // immediately (CPython behaviour).
+            return Err(PyError::Raised(exc_val));
+        }
+
+        let inject = PyError::Raised(exc_val);
+        match self.resume_generator_with_exc(frame, Some(inject)) {
+            Err(PyError::GeneratorYield(v)) => Ok(v),
+            // Generator returned normally — convert to StopIteration.
+            Err(PyError::Named(ref cls, _)) if cls == "StopIteration" => {
+                Err(PyError::named("StopIteration", String::new()))
+            }
+            // Any other propagating error (including a re-raise of the
+            // injected exception) flows through unchanged.
+            Err(e) => Err(e),
+            Ok(_) => unreachable!("resume_generator_with_exc always returns Err"),
         }
     }
 }

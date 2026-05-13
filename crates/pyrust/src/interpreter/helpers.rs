@@ -326,7 +326,10 @@ pub(crate) fn is_exception_class(class: &Rc<RefCell<PyClass>>) -> bool {
         let borrowed = class.borrow();
         (borrowed.name.clone(), borrowed.base.clone())
     };
-    if name == "Exception" {
+    // `Exception` is the canonical root for catchable exceptions.
+    // `GeneratorExit` is a sibling root in CPython (derives from `BaseException`,
+    // not `Exception`); we treat its name as a root for the same reason.
+    if name == "Exception" || name == "GeneratorExit" {
         return true;
     }
     base.is_some_and(|base| is_exception_class(&base))
@@ -371,6 +374,15 @@ fn install_exception_builtins(env: &EnvRef) {
     // FileNotFoundError inherits from OSError in CPython; we just register it
     // as a sibling for now.
     let file_not_found_error = make_child("FileNotFoundError");
+    // `GeneratorExit` is a sibling root in CPython (derives from
+    // `BaseException`, not `Exception`).  Modelled here as a class with no
+    // base so that `except Exception:` does NOT catch it, while
+    // `except GeneratorExit:` and bare `except:` / `finally` still do.
+    let generator_exit = Rc::new(RefCell::new(PyClass {
+        name: "GeneratorExit".to_string(),
+        base: None,
+        attrs: HashMap::new(),
+    }));
 
     let mut module = env.borrow_mut();
     module
@@ -424,6 +436,9 @@ fn install_exception_builtins(env: &EnvRef) {
     module
         .values
         .insert("FileNotFoundError".to_string(), Value::py_class(file_not_found_error));
+    module
+        .values
+        .insert("GeneratorExit".to_string(), Value::py_class(generator_exit));
 }
 
 /// Register built-in singleton values (currently just `NotImplemented`).
