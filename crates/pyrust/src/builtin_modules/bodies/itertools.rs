@@ -292,23 +292,16 @@ pyrust_module! {
                     .ok_or_else(|| internal(FN_NAME))?;
                 match _interp.call_next(iter, None) {
                     Ok(v) => {
-                        // Append to cache via re-binding (pyrust's mutable-
-                        // container semantics deep-copy on read, so we can't
-                        // just .as_list_mut() through a snapshot — read,
-                        // append, write back).
-                        let mut new_cache: Vec<Value> = match inst
-                            .borrow()
+                        // Append in place via as_list_mut so first-pass cost is
+                        // amortised O(1) per element instead of O(n) per yield
+                        // (the old code re-built the cache Vec from a slice clone).
+                        let mut attrs = inst.borrow_mut();
+                        let cache = attrs
                             .attrs
-                            .get("_cache")
-                            .map(|v| v.kind())
-                        {
-                            Some(ValueKind::List(items)) => items.to_vec(),
-                            _ => return Err(internal(FN_NAME)),
-                        };
-                        new_cache.push(v.clone());
-                        inst.borrow_mut()
-                            .attrs
-                            .insert("_cache".to_string(), Value::list(new_cache));
+                            .get_mut("_cache")
+                            .and_then(Value::as_list_mut)
+                            .ok_or_else(|| internal(FN_NAME))?;
+                        cache.push(v.clone());
                         return Ok(v);
                     }
                     Err(e) if is_stop_iteration(&e) => {
@@ -321,24 +314,34 @@ pyrust_module! {
                     Err(e) => return Err(e),
                 }
             }
-            // Cached walk.
-            let cache: Vec<Value> = match inst.borrow().attrs.get("_cache").map(|v| v.kind()) {
-                Some(ValueKind::List(items)) => items.to_vec(),
-                _ => return Err(internal(FN_NAME)),
+            // Cached walk — read one element by index without cloning the
+            // entire cache.  The old version did `items.to_vec()` per
+            // yield, making each cached step O(n) on the cache length.
+            let (item, cache_len, pos) = {
+                let attrs = inst.borrow();
+                let cache_val = attrs
+                    .attrs
+                    .get("_cache")
+                    .ok_or_else(|| internal(FN_NAME))?;
+                let pos = match attrs.attrs.get("_pos").map(|v| v.kind()) {
+                    Some(ValueKind::Int(n)) => n,
+                    _ => return Err(internal(FN_NAME)),
+                };
+                match cache_val.kind() {
+                    ValueKind::List(items) if !items.is_empty() => {
+                        let idx = (pos as usize) % items.len();
+                        (items[idx].clone(), items.len(), pos)
+                    }
+                    ValueKind::List(_) => {
+                        // Source was empty — nothing to cycle through.
+                        return Err(PyError::named("StopIteration", String::new()));
+                    }
+                    _ => return Err(internal(FN_NAME)),
+                }
             };
-            if cache.is_empty() {
-                // Source was empty — nothing to cycle through.
-                return Err(PyError::named("StopIteration", String::new()));
-            }
-            let pos: i64 = match inst.borrow().attrs.get("_pos").map(|v| v.kind()) {
-                Some(ValueKind::Int(n)) => n,
-                _ => return Err(internal(FN_NAME)),
-            };
-            let item = cache[pos as usize % cache.len()].clone();
-            inst.borrow_mut().attrs.insert(
-                "_pos".to_string(),
-                Value::int((pos + 1) % cache.len() as i64),
-            );
+            inst.borrow_mut()
+                .attrs
+                .insert("_pos".to_string(), Value::int((pos + 1) % cache_len as i64));
             Ok(item)
         }
     }
@@ -720,52 +723,96 @@ pyrust_module! {
 
         fn __next__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
-            if matches!(
-                inst.borrow().attrs.get("_exhausted").map(|v| v.kind()),
-                Some(ValueKind::Bool(true))
-            ) {
-                return Err(PyError::named("StopIteration", String::new()));
-            }
-            // Read pools as Vec<Vec<Value>>.
-            let pools: Vec<Vec<Value>> = read_list_of_lists(&inst, "_pools", FN_NAME)?;
-            let started = matches!(
-                inst.borrow().attrs.get("_started").map(|v| v.kind()),
-                Some(ValueKind::Bool(true))
-            );
-            let mut indices: Vec<usize> = if started {
-                read_indices(&inst, "_indices", FN_NAME)?
-            } else {
-                vec![0; pools.len()]
+            // One immutable borrow does all the reading: pool lengths,
+            // current indices, and the element at each index for the
+            // outgoing tuple.  No full-pool clone (the old
+            // `read_list_of_lists` path was O(total input size) per
+            // yield).
+            let outcome: ProductStep = {
+                let attrs = inst.borrow();
+                if matches!(
+                    attrs.attrs.get("_exhausted").map(|v| v.kind()),
+                    Some(ValueKind::Bool(true))
+                ) {
+                    return Err(PyError::named("StopIteration", String::new()));
+                }
+                let started = matches!(
+                    attrs.attrs.get("_started").map(|v| v.kind()),
+                    Some(ValueKind::Bool(true))
+                );
+                let pools_outer = match attrs.attrs.get("_pools").map(|v| v.kind()) {
+                    Some(ValueKind::List(outer)) => outer,
+                    _ => return Err(internal(FN_NAME)),
+                };
+                let mut indices: Vec<usize> = if started {
+                    match attrs.attrs.get("_indices").map(|v| v.kind()) {
+                        Some(ValueKind::List(items)) => items
+                            .iter()
+                            .map(|v| match v.kind() {
+                                ValueKind::Int(n) => n as usize,
+                                _ => 0,
+                            })
+                            .collect(),
+                        _ => return Err(internal(FN_NAME)),
+                    }
+                } else {
+                    vec![0; pools_outer.len()]
+                };
+                if started {
+                    let mut i = pools_outer.len();
+                    let exhausted = loop {
+                        if i == 0 {
+                            break true;
+                        }
+                        i -= 1;
+                        let len_i = match pools_outer[i].kind() {
+                            ValueKind::List(items) => items.len(),
+                            _ => 0,
+                        };
+                        indices[i] += 1;
+                        if indices[i] < len_i {
+                            break false;
+                        }
+                        indices[i] = 0;
+                    };
+                    if exhausted {
+                        ProductStep::Exhausted
+                    } else {
+                        ProductStep::Yield {
+                            tuple: tuple_from_pools(pools_outer, &indices),
+                            indices,
+                            already_started: true,
+                        }
+                    }
+                } else {
+                    ProductStep::Yield {
+                        tuple: tuple_from_pools(pools_outer, &indices),
+                        indices,
+                        already_started: false,
+                    }
+                }
             };
-            if started {
-                // Advance the indices odometer-style, rightmost-first.
-                let mut i = pools.len();
-                loop {
-                    if i == 0 {
+            match outcome {
+                ProductStep::Exhausted => {
+                    inst.borrow_mut()
+                        .attrs
+                        .insert("_exhausted".to_string(), Value::bool_(true));
+                    Err(PyError::named("StopIteration", String::new()))
+                }
+                ProductStep::Yield {
+                    tuple,
+                    indices,
+                    already_started,
+                } => {
+                    if !already_started {
                         inst.borrow_mut()
                             .attrs
-                            .insert("_exhausted".to_string(), Value::bool_(true));
-                        return Err(PyError::named("StopIteration", String::new()));
+                            .insert("_started".to_string(), Value::bool_(true));
                     }
-                    i -= 1;
-                    indices[i] += 1;
-                    if indices[i] < pools[i].len() {
-                        break;
-                    }
-                    indices[i] = 0;
+                    write_indices(&inst, "_indices", &indices);
+                    Ok(Value::tuple(tuple))
                 }
-            } else {
-                inst.borrow_mut()
-                    .attrs
-                    .insert("_started".to_string(), Value::bool_(true));
             }
-            let tuple: Vec<Value> = indices
-                .iter()
-                .enumerate()
-                .map(|(i, &j)| pools[i][j].clone())
-                .collect();
-            write_indices(&inst, "_indices", &indices);
-            Ok(Value::tuple(tuple))
         }
     }
 
@@ -870,61 +917,101 @@ pyrust_module! {
 
         fn __next__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
-            if matches!(
-                inst.borrow().attrs.get("_exhausted").map(|v| v.kind()),
-                Some(ValueKind::Bool(true))
-            ) {
-                return Err(PyError::named("StopIteration", String::new()));
+            // Single immutable borrow to read pool, r, indices, cycles,
+            // started — and build the outgoing tuple by direct index
+            // lookup.  The old version did `pool.to_vec()` per yield,
+            // making each step O(n).
+            enum Step {
+                Yield {
+                    tuple: Vec<Value>,
+                    indices: Vec<usize>,
+                    cycles: Vec<usize>,
+                    already_started: bool,
+                },
+                Exhausted,
             }
-            let pool: Vec<Value> = match inst.borrow().attrs.get("_pool").map(|v| v.kind()) {
-                Some(ValueKind::List(items)) => items.to_vec(),
-                _ => return Err(internal(FN_NAME)),
-            };
-            let r = match inst.borrow().attrs.get("_r").map(|v| v.kind()) {
-                Some(ValueKind::Int(n)) => n as usize,
-                _ => return Err(internal(FN_NAME)),
-            };
-            let mut indices: Vec<usize> = read_indices(&inst, "_indices", FN_NAME)?;
-            let mut cycles: Vec<usize> = read_indices(&inst, "_cycles", FN_NAME)?;
-            let started = matches!(
-                inst.borrow().attrs.get("_started").map(|v| v.kind()),
-                Some(ValueKind::Bool(true))
-            );
-            if started {
-                // Advance.  Loop from i = r-1 down to 0 looking for a
-                // position whose `cycles[i]` is still > 1; rotate that
-                // segment of `indices`.
-                let n = pool.len();
-                let mut i = r;
-                loop {
-                    if i == 0 {
-                        inst.borrow_mut()
-                            .attrs
-                            .insert("_exhausted".to_string(), Value::bool_(true));
-                        return Err(PyError::named("StopIteration", String::new()));
-                    }
-                    i -= 1;
-                    cycles[i] -= 1;
-                    if cycles[i] == 0 {
-                        let head = indices[i];
-                        // Rotate indices[i..n] left by 1.
-                        for k in i..(n - 1) {
-                            indices[k] = indices[k + 1];
+            let outcome: Step = {
+                let attrs = inst.borrow();
+                if matches!(
+                    attrs.attrs.get("_exhausted").map(|v| v.kind()),
+                    Some(ValueKind::Bool(true))
+                ) {
+                    return Err(PyError::named("StopIteration", String::new()));
+                }
+                let pool_items = match attrs.attrs.get("_pool").map(|v| v.kind()) {
+                    Some(ValueKind::List(items)) => items,
+                    _ => return Err(internal(FN_NAME)),
+                };
+                let r = match attrs.attrs.get("_r").map(|v| v.kind()) {
+                    Some(ValueKind::Int(n)) => n as usize,
+                    _ => return Err(internal(FN_NAME)),
+                };
+                let mut indices: Vec<usize> = read_indices(&inst, "_indices", FN_NAME)?;
+                let mut cycles: Vec<usize> = read_indices(&inst, "_cycles", FN_NAME)?;
+                let started = matches!(
+                    attrs.attrs.get("_started").map(|v| v.kind()),
+                    Some(ValueKind::Bool(true))
+                );
+                if started {
+                    let n = pool_items.len();
+                    let mut i = r;
+                    let exhausted = loop {
+                        if i == 0 {
+                            break true;
                         }
-                        indices[n - 1] = head;
-                        cycles[i] = n - i;
+                        i -= 1;
+                        cycles[i] -= 1;
+                        if cycles[i] == 0 {
+                            let head = indices[i];
+                            for k in i..(n - 1) {
+                                indices[k] = indices[k + 1];
+                            }
+                            indices[n - 1] = head;
+                            cycles[i] = n - i;
+                        } else {
+                            let j = n - cycles[i];
+                            indices.swap(i, j);
+                            break false;
+                        }
+                    };
+                    if exhausted {
+                        Step::Exhausted
                     } else {
-                        let j = n - cycles[i];
-                        indices.swap(i, j);
-                        break;
+                        Step::Yield {
+                            tuple: tuple_from_pool(pool_items, &indices, r),
+                            indices,
+                            cycles,
+                            already_started: true,
+                        }
+                    }
+                } else {
+                    Step::Yield {
+                        tuple: tuple_from_pool(pool_items, &indices, r),
+                        indices,
+                        cycles,
+                        already_started: false,
                     }
                 }
-            } else {
+            };
+            let (tuple, indices, cycles, already_started) = match outcome {
+                Step::Exhausted => {
+                    inst.borrow_mut()
+                        .attrs
+                        .insert("_exhausted".to_string(), Value::bool_(true));
+                    return Err(PyError::named("StopIteration", String::new()));
+                }
+                Step::Yield {
+                    tuple,
+                    indices,
+                    cycles,
+                    already_started,
+                } => (tuple, indices, cycles, already_started),
+            };
+            if !already_started {
                 inst.borrow_mut()
                     .attrs
                     .insert("_started".to_string(), Value::bool_(true));
             }
-            let tuple: Vec<Value> = indices.iter().take(r).map(|&i| pool[i].clone()).collect();
             write_indices(&inst, "_indices", &indices);
             write_indices(&inst, "_cycles", &cycles);
             Ok(Value::tuple(tuple))
@@ -1187,30 +1274,6 @@ fn internal(fn_name: &str) -> PyError {
     PyError::Runtime(format!("internal: {fn_name}() instance state corrupted"))
 }
 
-/// Read a `Vec<Vec<Value>>` from an attribute holding a list-of-lists.
-fn read_list_of_lists(
-    inst: &Rc<std::cell::RefCell<PyInstance>>,
-    name: &str,
-    fn_name: &str,
-) -> Result<Vec<Vec<Value>>> {
-    let outer = inst
-        .borrow()
-        .attrs
-        .get(name)
-        .cloned()
-        .ok_or_else(|| internal(fn_name))?;
-    match outer.kind() {
-        ValueKind::List(rows) => rows
-            .iter()
-            .map(|r| match r.kind() {
-                ValueKind::List(items) => Ok(items.to_vec()),
-                _ => Err(internal(fn_name)),
-            })
-            .collect(),
-        _ => Err(internal(fn_name)),
-    }
-}
-
 /// Read an `_indices`/`_cycles` attribute back as `Vec<usize>`.
 fn read_indices(
     inst: &Rc<std::cell::RefCell<PyInstance>>,
@@ -1240,6 +1303,36 @@ fn write_indices(inst: &Rc<std::cell::RefCell<PyInstance>>, name: &str, indices:
         name.to_string(),
         Value::list(indices.iter().map(|&i| Value::int(i as i64)).collect()),
     );
+}
+
+/// product.__next__ outcome — built under the inst borrow and consumed
+/// after the borrow drops to update state without aliasing the cell.
+enum ProductStep {
+    Yield {
+        tuple: Vec<Value>,
+        indices: Vec<usize>,
+        already_started: bool,
+    },
+    Exhausted,
+}
+
+/// Build a tuple by reading `pools[i][indices[i]]` from a `[Value]`
+/// holding nested lists.  Per-element clone is unavoidable (each Value
+/// gets returned by value), but no whole-pool clone happens.
+fn tuple_from_pools(pools: &[Value], indices: &[usize]) -> Vec<Value> {
+    indices
+        .iter()
+        .enumerate()
+        .map(|(i, &j)| match pools[i].kind() {
+            ValueKind::List(items) => items[j].clone(),
+            _ => Value::none(),
+        })
+        .collect()
+}
+
+/// Build a tuple by reading `pool[indices[k]]` for `k in 0..take`.
+fn tuple_from_pool(pool: &[Value], indices: &[usize], take: usize) -> Vec<Value> {
+    indices.iter().take(take).map(|&i| pool[i].clone()).collect()
 }
 
 // ── combinations / combinations_with_replacement shared algorithm ────────────
@@ -1302,75 +1395,107 @@ fn advance_combinations(
     with_replacement: bool,
 ) -> Result<Value> {
     let inst = expect_self(args, fn_name)?;
-    if matches!(
-        inst.borrow().attrs.get("_exhausted").map(|v| v.kind()),
-        Some(ValueKind::Bool(true))
-    ) {
-        return Err(PyError::named("StopIteration", String::new()));
+    enum Outcome {
+        Yield { tuple: Vec<Value>, indices: Vec<usize>, set_started: bool },
+        EmptyTuple,
+        Exhausted,
     }
-    let pool: Vec<Value> = match inst.borrow().attrs.get("_pool").map(|v| v.kind()) {
-        Some(ValueKind::List(items)) => items.to_vec(),
-        _ => return Err(internal(fn_name)),
+    // Single immutable borrow: read pool slice (no clone), r, started,
+    // indices; build the tuple by direct index lookup.
+    let outcome: Outcome = {
+        let attrs = inst.borrow();
+        if matches!(
+            attrs.attrs.get("_exhausted").map(|v| v.kind()),
+            Some(ValueKind::Bool(true))
+        ) {
+            return Err(PyError::named("StopIteration", String::new()));
+        }
+        let pool_items = match attrs.attrs.get("_pool").map(|v| v.kind()) {
+            Some(ValueKind::List(items)) => items,
+            _ => return Err(internal(fn_name)),
+        };
+        let r = match attrs.attrs.get("_r").map(|v| v.kind()) {
+            Some(ValueKind::Int(n)) => n as usize,
+            _ => return Err(internal(fn_name)),
+        };
+        let n = pool_items.len();
+        let started = matches!(
+            attrs.attrs.get("_started").map(|v| v.kind()),
+            Some(ValueKind::Bool(true))
+        );
+        // Edge case: r == 0 yields exactly one empty tuple, then stops.
+        if r == 0 {
+            if started {
+                Outcome::Exhausted
+            } else {
+                Outcome::EmptyTuple
+            }
+        } else if n == 0 {
+            // Empty pool, r > 0 — only with_replacement path can hit
+            // this; no-replacement marks _exhausted at init.
+            Outcome::Exhausted
+        } else {
+            let mut indices = read_indices(&inst, "_indices", fn_name)?;
+            if started {
+                // Find rightmost index that can still grow.
+                let mut i = r;
+                let exhausted = loop {
+                    if i == 0 {
+                        break true;
+                    }
+                    i -= 1;
+                    let max_val = if with_replacement { n - 1 } else { n - r + i };
+                    if indices[i] < max_val {
+                        indices[i] += 1;
+                        for j in (i + 1)..r {
+                            indices[j] = if with_replacement {
+                                indices[i]
+                            } else {
+                                indices[j - 1] + 1
+                            };
+                        }
+                        break false;
+                    }
+                };
+                if exhausted {
+                    Outcome::Exhausted
+                } else {
+                    Outcome::Yield {
+                        tuple: tuple_from_pool(pool_items, &indices, r),
+                        indices,
+                        set_started: false,
+                    }
+                }
+            } else {
+                Outcome::Yield {
+                    tuple: tuple_from_pool(pool_items, &indices, r),
+                    indices,
+                    set_started: true,
+                }
+            }
+        }
     };
-    let r = match inst.borrow().attrs.get("_r").map(|v| v.kind()) {
-        Some(ValueKind::Int(n)) => n as usize,
-        _ => return Err(internal(fn_name)),
-    };
-    let n = pool.len();
-    let mut indices = read_indices(&inst, "_indices", fn_name)?;
-    let started = matches!(
-        inst.borrow().attrs.get("_started").map(|v| v.kind()),
-        Some(ValueKind::Bool(true))
-    );
-    // Edge case: r == 0 yields exactly one empty tuple, then stops.
-    if r == 0 {
-        if started {
+    match outcome {
+        Outcome::Yield { tuple, indices, set_started } => {
+            if set_started {
+                inst.borrow_mut()
+                    .attrs
+                    .insert("_started".to_string(), Value::bool_(true));
+            }
+            write_indices(&inst, "_indices", &indices);
+            Ok(Value::tuple(tuple))
+        }
+        Outcome::EmptyTuple => {
+            inst.borrow_mut()
+                .attrs
+                .insert("_started".to_string(), Value::bool_(true));
+            Ok(Value::tuple(Vec::new()))
+        }
+        Outcome::Exhausted => {
             inst.borrow_mut()
                 .attrs
                 .insert("_exhausted".to_string(), Value::bool_(true));
-            return Err(PyError::named("StopIteration", String::new()));
+            Err(PyError::named("StopIteration", String::new()))
         }
-        inst.borrow_mut()
-            .attrs
-            .insert("_started".to_string(), Value::bool_(true));
-        return Ok(Value::tuple(Vec::new()));
     }
-    // Edge case: empty pool with r > 0 yields nothing (only triggers
-    // for with_replacement; the no-replacement case already marked
-    // `_exhausted` at init).
-    if n == 0 {
-        inst.borrow_mut()
-            .attrs
-            .insert("_exhausted".to_string(), Value::bool_(true));
-        return Err(PyError::named("StopIteration", String::new()));
-    }
-    if started {
-        // Advance.  Find rightmost index that can still grow.
-        let mut i = r;
-        loop {
-            if i == 0 {
-                inst.borrow_mut()
-                    .attrs
-                    .insert("_exhausted".to_string(), Value::bool_(true));
-                return Err(PyError::named("StopIteration", String::new()));
-            }
-            i -= 1;
-            // Upper bound depends on whether repeats are allowed.
-            let max_val = if with_replacement { n - 1 } else { n - r + i };
-            if indices[i] < max_val {
-                indices[i] += 1;
-                for j in (i + 1)..r {
-                    indices[j] = if with_replacement { indices[i] } else { indices[j - 1] + 1 };
-                }
-                break;
-            }
-        }
-    } else {
-        inst.borrow_mut()
-            .attrs
-            .insert("_started".to_string(), Value::bool_(true));
-    }
-    let tuple: Vec<Value> = indices.iter().map(|&i| pool[i].clone()).collect();
-    write_indices(&inst, "_indices", &indices);
-    Ok(Value::tuple(tuple))
 }
