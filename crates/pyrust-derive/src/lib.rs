@@ -825,11 +825,6 @@ fn emit_overload_set_artefacts(
         .collect();
     let min_pos = ref_params.iter().filter(|p| !p.keyword_only).count();
     let max_pos = min_pos; // overload sets disallow defaults, so min == max
-    let arg_names: Vec<&Ident> = ref_params.iter().map(|p| &p.name).collect();
-    let arg_name_lits: Vec<LitStr> = ref_params
-        .iter()
-        .map(|p| LitStr::new(&p.name.to_string(), p.name.span()))
-        .collect();
 
     // For each parameter, the same positional-index / kw-allowed pair the
     // single-body prelude would compute — overload sets share this.
@@ -936,14 +931,17 @@ fn emit_overload_set_artefacts(
     // Build the dispatcher.  When `__pyrust_args` is empty (zero-param
     // overload) we still emit the kwarg / count guard so unexpected
     // input is rejected the same way single-body builtins reject it.
-    let no_match_args: Vec<proc_macro2::TokenStream> = arg_names
+    //
+    // The `__actuals` slice formats the *actual* arg types observed at
+    // the call site — used by `no_overload_matched` for the "no
+    // overload matches" TypeError on the unreachable-when-PyValue path.
+    let no_match_args: Vec<proc_macro2::TokenStream> = ref_params
         .iter()
-        .map(|n| {
-            let __arg_ident = format_ident!("__arg_{}", n, span = n.span());
+        .map(|p| {
+            let __arg_ident = format_ident!("__arg_{}", p.name, span = p.name.span());
             quote! { pyrust_core::builtin_type_name(#__arg_ident) }
         })
         .collect();
-    let _ = arg_name_lits;
 
     let dispatcher = quote! {
         #[allow(non_snake_case)]
@@ -1217,22 +1215,35 @@ fn validate_overload_set(group: &[&ModuleFn]) -> syn::Result<()> {
     Ok(())
 }
 
-/// Returns true if every parameter in `params` is the `PyValue`
-/// pass-through wrapper.  Such an overload's `matches` predicate is
-/// unconditional — it shadows every overload declared after it.
+/// Returns true if every parameter in `params` is an *unconditional*
+/// matcher — either bare `PyValue` or `Option<PyValue>`.  Both shadow
+/// every overload declared after them (the former because
+/// `PyValue::matches` is unconditional, the latter because `None ||
+/// PyValue::matches` is also unconditional).  Per the review on #397:
+/// without the `Option<PyValue>` arm, that form silently slips past
+/// the catch-all-must-be-last guard.
 fn is_catch_all_overload(params: &[TypedParam]) -> bool {
     if params.is_empty() {
         // A zero-arg overload is its own thing — kwarg validation
         // catches mismatches, so the "catch-all" question doesn't apply.
         return false;
     }
-    params.iter().all(|p| {
-        let s = ty_to_canonical_string(&p.ty);
-        // Match the bare name plus any fully-qualified path ending in
-        // `::PyValue`.  Users typically `use` the wrapper and write it
-        // bare; the qualified form is supported defensively.
-        s == "PyValue" || s.ends_with("::PyValue")
-    })
+    params.iter().all(|p| is_unconditional_matcher_ty(&p.ty))
+}
+
+/// True if the given type's `FromValue::matches` is unconditional —
+/// `PyValue` and `Option<PyValue>` (in any qualified form).  Used by
+/// the catch-all-must-be-last check; missing one of these arms would
+/// let an overload silently shadow everything after it.
+fn is_unconditional_matcher_ty(ty: &syn::Type) -> bool {
+    let s = ty_to_canonical_string(ty);
+    // Users typically `use` the wrapper and write it bare; the
+    // qualified form is supported defensively.
+    s == "PyValue"
+        || s.ends_with("::PyValue")
+        || s == "Option<PyValue>"
+        || s.ends_with("<PyValue>") && s.starts_with("Option<")
+        || s.ends_with("::PyValue>") && s.starts_with("Option<")
 }
 
 /// File-scoped module declaration: see crate-level docs for the full

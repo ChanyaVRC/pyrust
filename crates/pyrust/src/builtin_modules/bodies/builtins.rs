@@ -215,19 +215,24 @@ pyrust_module! {
     /// generates a dispatcher that tries each overload in declaration
     /// order.
     fn abs(#[positional_only] x: PyInt) -> Result<Value> {
-        // i64 fast path; fall back to BigInt for genuine bignums.  We
-        // can't call `BigInt::abs` here without pulling `num_traits` in
-        // as a direct dep, so do the negate-if-negative dance manually
-        // — equivalent and limited to the rare overflow path.
-        match x.as_i64() {
-            Some(n) => Ok(Value::int(n.wrapping_abs())),
-            None => {
-                let big = x.to_bigint();
-                let zero: crate::value::PyBigInt = 0i64.into();
-                let abs = if big < zero { -big } else { big };
-                Ok(Value::bigint(abs))
-            }
+        // i64 fast path; fall back to BigInt for both genuine bignums
+        // *and* the `i64::MIN` boundary case — `i64::MIN.checked_abs()`
+        // returns `None` because `-i64::MIN` doesn't fit in i64 (one
+        // more positive value than negative in two's complement).
+        // CPython returns `9223372036854775808` for `abs(-i64::MIN)`;
+        // matching that requires the BigInt path even though `as_i64`
+        // succeeded.  We can't call `BigInt::abs` here without pulling
+        // `num_traits` in as a direct dep, so do the negate-if-negative
+        // dance manually.
+        if let Some(n) = x.as_i64()
+            && let Some(abs) = n.checked_abs()
+        {
+            return Ok(Value::int(abs));
         }
+        let big = x.to_bigint();
+        let zero: crate::value::PyBigInt = 0i64.into();
+        let abs = if big < zero { -big } else { big };
+        Ok(Value::bigint(abs))
     }
 
     fn abs(#[positional_only] x: PyFloat) -> Result<Value> {

@@ -1,0 +1,5 @@
+error: overload sets must use the typed dialect — the legacy `(args)` form cannot participate in type-based dispatch
+  --> tests/compile_fail/overload_legacy_mixed.rs:16:12
+   |
+16 |     fn bad(args) -> Result<Value> {
+   |            ^^^^
