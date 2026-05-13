@@ -111,6 +111,41 @@ impl Interpreter {
                             indexmap::IndexMap::new();
                         ops.call_method(state, method, pos, &empty_kw)
                     }
+                    ValueKind::PyInstance(inst) => {
+                        // Class method backed by a `BuiltinFunction` — emitted
+                        // by `pyrust_module!`'s `class { … }` block.  `get_attr`
+                        // wrapped the method-name-on-instance pair as a
+                        // bound_method; here we re-resolve the method on the
+                        // class and dispatch with `self` prepended through the
+                        // unified helper.
+                        let class = Rc::clone(&inst.borrow().class);
+                        let method_val = lookup_class_attr(&class, method)
+                            .ok_or_else(|| PyError::named(
+                                "AttributeError",
+                                format!(
+                                    "'{}' object has no attribute '{method}'",
+                                    class.borrow().name,
+                                ),
+                            ))?;
+                        // Reconstitute kwargs as ExpandedCallArgs (the
+                        // bound_method dispatch split them into pos+kw maps).
+                        let mut combined: Vec<ExpandedCallArg> =
+                            Vec::with_capacity(pos.len() + kw.len());
+                        for v in pos {
+                            combined.push(ExpandedCallArg { name: None, value: v });
+                        }
+                        for (k, v) in kw {
+                            if let PyKey::Str(name) = k {
+                                combined.push(ExpandedCallArg { name: Some(name), value: v });
+                            }
+                        }
+                        invoke_class_method(
+                            self,
+                            method_val,
+                            Value::py_instance(inst.clone()),
+                            &combined,
+                        )
+                    }
                     _ => Err(PyError::named(
                         "TypeError",
                         format!("'{}' object has no method '{method}'", pyrust_core::builtin_type_name(&receiver)),
@@ -219,21 +254,17 @@ impl Interpreter {
             ValueKind::PyInstance(inst) => {
                 let inst_rc = Rc::clone(inst);
                 let class = Rc::clone(&inst_rc.borrow().class);
-                if let Some(method_val) = lookup_class_attr(&class, "__call__")
-                    && let ValueKind::UserFunction(f) = method_val.kind() {
-                        let func = Rc::clone(f);
-                        return self.call_user_function_expanded(
-                            func,
-                            args,
-                            &[Value::py_instance(inst_rc)],
-                        );
-                    }
+                if let Some(method_val) = lookup_class_attr(&class, "__call__") {
+                    return invoke_class_method(
+                        self,
+                        method_val,
+                        Value::py_instance(inst_rc),
+                        args,
+                    );
+                }
                 Err(PyError::named(
                     "TypeError",
-                    format!(
-                        "'{}' object is not callable",
-                        class.borrow().name
-                    ),
+                    format!("'{}' object is not callable", class.borrow().name),
                 ))
             }
             _ => Err(PyError::Runtime("object is not callable".to_string())),
@@ -283,14 +314,12 @@ impl Interpreter {
             let iterator = {
                 let inst_rc = Rc::clone(inst);
                 let class = Rc::clone(&inst_rc.borrow().class);
-                if let Some(method_val) = lookup_class_attr(&class, "__iter__")
-                    && let ValueKind::UserFunction(f) = method_val.kind()
-                {
-                    let func = Rc::clone(f);
-                    self.call_user_function_expanded(
-                        func,
+                if let Some(method_val) = lookup_class_attr(&class, "__iter__") {
+                    invoke_class_method(
+                        self,
+                        method_val,
+                        Value::py_instance(inst_rc),
                         &[],
-                        &[Value::py_instance(inst_rc)],
                     )?
                 } else if lookup_class_attr(&class, "__next__").is_some() {
                     val.clone()
@@ -373,11 +402,8 @@ impl Interpreter {
         } else if let ValueKind::PyInstance(inst) = val.kind() {
             let inst_rc = Rc::clone(inst);
             let class = Rc::clone(&inst_rc.borrow().class);
-            if let Some(method_val) = lookup_class_attr(&class, "__next__")
-                && let ValueKind::UserFunction(f) = method_val.kind()
-            {
-                let func = Rc::clone(f);
-                match self.call_user_function_expanded(func, &[], &[Value::py_instance(inst_rc)]) {
+            if let Some(method_val) = lookup_class_attr(&class, "__next__") {
+                match invoke_class_method(self, method_val, Value::py_instance(inst_rc), &[]) {
                     Ok(v) => Ok(v),
                     Err(PyError::Raised(exc)) => {
                         let is_stop = match exc.kind() {
@@ -965,14 +991,17 @@ impl Interpreter {
 
         let init = lookup_class_attr(&class, "__init__");
         match init {
-            Some(ref v) if matches!(v.kind(), ValueKind::UserFunction(_)) => {
-                let function = if let ValueKind::UserFunction(f) = v.kind() {
-                    Rc::clone(f)
-                } else { unreachable!() };
-                let result = self.call_user_function_expanded(
-                    function,
+            Some(method_val)
+                if matches!(
+                    method_val.kind(),
+                    ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_)
+                ) =>
+            {
+                let result = invoke_class_method(
+                    self,
+                    method_val,
+                    Value::py_instance(Rc::clone(&instance)),
                     args,
-                    &[Value::py_instance(Rc::clone(&instance))],
                 )?;
                 if !result.is_none() {
                     return Err(PyError::Runtime(

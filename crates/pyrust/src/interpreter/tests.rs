@@ -1413,36 +1413,44 @@ result = fact(10)
 
     #[test]
     fn collections_counter_tallies_iterables() {
-        // Counter is shipped as a *function* returning a plain dict — see
-        // `bodies/collections.rs` for why.  Pin the count values; the
-        // wrapper type is deliberately not a Counter instance yet.
+        // Counter is now a real Python class (defined via `pyrust_module!`'s
+        // `class { … }` block).  Pin the counts via `c[key]` (which routes
+        // through `__getitem__`) and `len(c)` rather than comparing to a
+        // plain dict — Counter instances are PyInstances, not dicts.
         let interp = run_program(
             "from collections import Counter\n\
              a = Counter([1, 2, 1, 3, 2, 1])\n\
+             a_one = a[1]\n\
+             a_two = a[2]\n\
+             a_three = a[3]\n\
+             a_missing = a[99]\n\
+             a_len = len(a)\n\
              b = Counter('aabcccd')\n\
+             b_a = b['a']\n\
+             b_c = b['c']\n\
              c = Counter()\n\
-             d = Counter({'x': 5, 'y': 3})\n",
+             c_len = len(c)\n\
+             c_missing = c['anything']\n\
+             d = Counter({'x': 5, 'y': 3})\n\
+             d_x = d['x']\n\
+             d_y = d['y']\n",
         );
-        use crate::value::PyKey;
-        let mut a_expected = indexmap::IndexMap::new();
-        a_expected.insert(PyKey::Int(1), Value::int(3));
-        a_expected.insert(PyKey::Int(2), Value::int(2));
-        a_expected.insert(PyKey::Int(3), Value::int(1));
-        let mut b_expected = indexmap::IndexMap::new();
-        b_expected.insert(PyKey::Str("a".to_string()), Value::int(2));
-        b_expected.insert(PyKey::Str("b".to_string()), Value::int(1));
-        b_expected.insert(PyKey::Str("c".to_string()), Value::int(3));
-        b_expected.insert(PyKey::Str("d".to_string()), Value::int(1));
-        let mut d_expected = indexmap::IndexMap::new();
-        d_expected.insert(PyKey::Str("x".to_string()), Value::int(5));
-        d_expected.insert(PyKey::Str("y".to_string()), Value::int(3));
-        assert_eq!(interp.lookup_name("a").unwrap(), Some(Value::dict(a_expected)));
-        assert_eq!(interp.lookup_name("b").unwrap(), Some(Value::dict(b_expected)));
-        assert_eq!(
-            interp.lookup_name("c").unwrap(),
-            Some(Value::dict(indexmap::IndexMap::new()))
-        );
-        assert_eq!(interp.lookup_name("d").unwrap(), Some(Value::dict(d_expected)));
+        // Counter([1, 2, 1, 3, 2, 1])
+        assert_eq!(interp.lookup_name("a_one").unwrap(), Some(Value::int(3)));
+        assert_eq!(interp.lookup_name("a_two").unwrap(), Some(Value::int(2)));
+        assert_eq!(interp.lookup_name("a_three").unwrap(), Some(Value::int(1)));
+        // Missing-key returns 0 (the dict-subclass quirk).
+        assert_eq!(interp.lookup_name("a_missing").unwrap(), Some(Value::int(0)));
+        assert_eq!(interp.lookup_name("a_len").unwrap(), Some(Value::int(3)));
+        // Counter('aabcccd')
+        assert_eq!(interp.lookup_name("b_a").unwrap(), Some(Value::int(2)));
+        assert_eq!(interp.lookup_name("b_c").unwrap(), Some(Value::int(3)));
+        // Counter() — empty.
+        assert_eq!(interp.lookup_name("c_len").unwrap(), Some(Value::int(0)));
+        assert_eq!(interp.lookup_name("c_missing").unwrap(), Some(Value::int(0)));
+        // Counter({'x': 5, 'y': 3}) — mapping form preserves the values.
+        assert_eq!(interp.lookup_name("d_x").unwrap(), Some(Value::int(5)));
+        assert_eq!(interp.lookup_name("d_y").unwrap(), Some(Value::int(3)));
     }
 
     #[test]
@@ -1561,6 +1569,48 @@ result = fact(10)
         assert!(
             msg.contains("KeyError"),
             "expected KeyError, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn collections_counter_iterates_keys_in_insertion_order() {
+        // This pins the original bug that motivated migrating Counter to a
+        // class-based implementation: the previous `BuiltinTypeOps` Counter
+        // returned `None` from `iter_next`, so `for k in c` and `list(c)`
+        // both silently yielded nothing.  With `__iter__` defined as a
+        // dunder, iteration goes through pyrust's normal class machinery.
+        let interp = run_program(
+            "from collections import Counter\n\
+             c = Counter('aab')\n\
+             keys_list = list(c)\n\
+             # Re-iteration must work too (each iter(c) takes a fresh snapshot).\n\
+             keys_again = list(c)\n",
+        );
+        // Insertion order: 'a' (first seen), 'b' (second seen).
+        assert_eq!(
+            interp.lookup_name("keys_list").unwrap(),
+            Some(Value::list(vec![Value::string("a"), Value::string("b")]))
+        );
+        assert_eq!(
+            interp.lookup_name("keys_again").unwrap(),
+            Some(Value::list(vec![Value::string("a"), Value::string("b")]))
+        );
+    }
+
+    #[test]
+    fn collections_counter_is_a_class_instance() {
+        // After the migration to `pyrust_module!`'s `class { … }` block,
+        // `Counter(...)` returns a real PyInstance whose class name is
+        // exactly `"Counter"` (not `"collections.Counter"`).  This pins the
+        // `class_name_lit` codepath in the macro's class emission.
+        let interp = run_program(
+            "from collections import Counter\n\
+             c = Counter([1, 2])\n\
+             tname = type(c).__name__\n",
+        );
+        assert_eq!(
+            interp.lookup_name("tname").unwrap(),
+            Some(Value::string("Counter"))
         );
     }
 

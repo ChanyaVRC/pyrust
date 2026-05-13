@@ -56,6 +56,19 @@ impl Interpreter {
                             // so this arm is unreachable; satisfy exhaustiveness.
                             UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(f)),
                         },
+                        ValueKind::BuiltinFunction(_) => {
+                            // Class method backed by a BuiltinFunction —
+                            // emitted by `pyrust_module!`'s `class { … }` block
+                            // (e.g. `Counter.most_common`).  Wrap so the call
+                            // dispatch prepends `self` before invoking the
+                            // registered Rust dispatcher; see the
+                            // `as_bound_method` arm in
+                            // `calls.rs::call_function_expanded`.
+                            pyrust_builtins::bound_method::bound_method(
+                                name.to_string(),
+                                Value::py_instance(Rc::clone(&instance)),
+                            )
+                        }
                         _ => value,
                     });
                 }
@@ -491,44 +504,42 @@ impl Interpreter {
             let inst_rc = Rc::clone(inst);
             let class = Rc::clone(&inst_rc.borrow().class);
             // Try __bool__ first.
-            if let Some(method_val) = lookup_class_attr(&class, "__bool__")
-                && let ValueKind::UserFunction(f) = method_val.kind() {
-                    let func = Rc::clone(f);
-                    let result = self.call_user_function_expanded(
-                        func,
-                        &[],
-                        &[Value::py_instance(inst_rc)],
-                    )?;
-                    return match result.kind() {
-                        ValueKind::Bool(b) => Ok(b),
-                        ValueKind::Int(_) => Err(PyError::named(
-                            "TypeError",
-                            "__bool__ should return bool, not int".to_string(),
-                        )),
-                        _ => Err(PyError::named(
-                            "TypeError",
-                            "__bool__ should return bool".to_string(),
-                        )),
-                    };
-                }
+            if let Some(method_val) = lookup_class_attr(&class, "__bool__") {
+                let result = invoke_class_method(
+                    self,
+                    method_val,
+                    Value::py_instance(Rc::clone(&inst_rc)),
+                    &[],
+                )?;
+                return match result.kind() {
+                    ValueKind::Bool(b) => Ok(b),
+                    ValueKind::Int(_) => Err(PyError::named(
+                        "TypeError",
+                        "__bool__ should return bool, not int".to_string(),
+                    )),
+                    _ => Err(PyError::named(
+                        "TypeError",
+                        "__bool__ should return bool".to_string(),
+                    )),
+                };
+            }
             // Fall back to __len__.
-            if let Some(method_val) = lookup_class_attr(&class, "__len__")
-                && let ValueKind::UserFunction(f) = method_val.kind() {
-                    let func = Rc::clone(f);
-                    let result = self.call_user_function_expanded(
-                        func,
-                        &[],
-                        &[Value::py_instance(inst_rc)],
-                    )?;
-                    return match result.kind() {
-                        ValueKind::Int(n) => Ok(n != 0),
-                        ValueKind::Bool(b) => Ok(b),
-                        _ => Err(PyError::named(
-                            "TypeError",
-                            "__len__ returned non-int".to_string(),
-                        )),
-                    };
-                }
+            if let Some(method_val) = lookup_class_attr(&class, "__len__") {
+                let result = invoke_class_method(
+                    self,
+                    method_val,
+                    Value::py_instance(inst_rc),
+                    &[],
+                )?;
+                return match result.kind() {
+                    ValueKind::Int(n) => Ok(n != 0),
+                    ValueKind::Bool(b) => Ok(b),
+                    _ => Err(PyError::named(
+                        "TypeError",
+                        "__len__ returned non-int".to_string(),
+                    )),
+                };
+            }
             // No __bool__ or __len__: always truthy.
             return Ok(true);
         }

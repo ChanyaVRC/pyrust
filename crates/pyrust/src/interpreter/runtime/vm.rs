@@ -558,19 +558,20 @@ impl Interpreter {
                                 if let ValueKind::PyInstance(inst) = obj_val.kind() {
                                     let inst_rc = Rc::clone(inst);
                                     let class = Rc::clone(&inst_rc.borrow().class);
-                                    if let Some(method_val) = lookup_class_attr(&class, "__setitem__")
-                                        && let ValueKind::UserFunction(f) = method_val.kind() {
-                                            let func = Rc::clone(f);
-                                            vm_try!(self.call_user_function_expanded(
-                                                func,
-                                                &[
-                                                    ExpandedCallArg { name: None, value: idx_val },
-                                                    ExpandedCallArg { name: None, value: val_val },
-                                                ],
-                                                &[Value::py_instance(inst_rc)],
-                                            ));
-                                            continue;
-                                        }
+                                    if let Some(method_val) =
+                                        lookup_class_attr(&class, "__setitem__")
+                                    {
+                                        vm_try!(invoke_class_method(
+                                            self,
+                                            method_val,
+                                            Value::py_instance(inst_rc),
+                                            &[
+                                                ExpandedCallArg { name: None, value: idx_val },
+                                                ExpandedCallArg { name: None, value: val_val },
+                                            ],
+                                        ));
+                                        continue;
+                                    }
                                 }
                                 vm_try!(Err(PyError::named(
                                     "TypeError",
@@ -643,16 +644,17 @@ impl Interpreter {
                             if let ValueKind::PyInstance(inst) = obj_val.kind() {
                                 let inst_rc = Rc::clone(inst);
                                 let class = Rc::clone(&inst_rc.borrow().class);
-                                if let Some(method_val) = lookup_class_attr(&class, "__delitem__")
-                                    && let ValueKind::UserFunction(f) = method_val.kind() {
-                                        let func = Rc::clone(f);
-                                        vm_try!(self.call_user_function_expanded(
-                                            func,
-                                            &[ExpandedCallArg { name: None, value: idx_val }],
-                                            &[Value::py_instance(inst_rc)],
-                                        ));
-                                        continue;
-                                    }
+                                if let Some(method_val) =
+                                    lookup_class_attr(&class, "__delitem__")
+                                {
+                                    vm_try!(invoke_class_method(
+                                        self,
+                                        method_val,
+                                        Value::py_instance(inst_rc),
+                                        &[ExpandedCallArg { name: None, value: idx_val }],
+                                    ));
+                                    continue;
+                                }
                                 let class_name = class.borrow().name.clone();
                                 vm_try!(Err(PyError::named(
                                     "TypeError",
@@ -1188,21 +1190,13 @@ impl Interpreter {
                                 let inst_rc = Rc::clone(inst);
                                 let class = Rc::clone(&inst_rc.borrow().class);
                                 if let Some(method_val) = lookup_class_attr(&class, "__iter__") {
-                                    if let ValueKind::UserFunction(f) = method_val.kind() {
-                                        let func = Rc::clone(f);
-                                        let iter_obj = vm_try!(self.call_user_function_expanded(
-                                            func,
-                                            &[],
-                                            &[Value::py_instance(inst_rc)],
-                                        ));
-                                        IterState::UserDefined(iter_obj)
-                                    } else {
-                                        vm_try!(Err(PyError::named(
-                                            "TypeError",
-                                            "__iter__ is not callable".to_string(),
-                                        )));
-                                        unreachable!()
-                                    }
+                                    let iter_obj = vm_try!(invoke_class_method(
+                                        self,
+                                        method_val,
+                                        Value::py_instance(inst_rc),
+                                        &[],
+                                    ));
+                                    IterState::UserDefined(iter_obj)
                                 } else {
                                     // No __iter__: try to materialise via iter_values (will fail)
                                     IterState::Materialized(vm_try!(iter_values(src_val)), 0)
@@ -1303,16 +1297,18 @@ impl Interpreter {
                                 } else if let ValueKind::PyInstance(inst) = iter_val.kind() {
                                     let inst_rc = Rc::clone(inst);
                                     let class = Rc::clone(&inst_rc.borrow().class);
-                                    if let Some(method_val) = lookup_class_attr(&class, "__next__") {
-                                        if let ValueKind::UserFunction(f) = method_val.kind() {
-                                            let func = Rc::clone(f);
-                                            Some(self.call_user_function_expanded(
-                                                func,
-                                                &[],
-                                                &[Value::py_instance(inst_rc)],
-                                            ))
-                                        } else { None }
-                                    } else { None }
+                                    if let Some(method_val) =
+                                        lookup_class_attr(&class, "__next__")
+                                    {
+                                        Some(invoke_class_method(
+                                            self,
+                                            method_val,
+                                            Value::py_instance(inst_rc),
+                                            &[],
+                                        ))
+                                    } else {
+                                        None
+                                    }
                                 } else if let ValueKind::BuiltinObject { ops, state } =
                                     iter_val.kind()
                                 {

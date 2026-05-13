@@ -191,6 +191,49 @@ pub(crate) struct ExpandedCallArg {
     pub(crate) value: Value,
 }
 
+/// Invoke a method that was looked up on a class — handling both
+/// `UserFunction` methods (compiled Python bytecode, bound via the
+/// interpreter's user-function path) and `BuiltinFunction` methods
+/// (registered Rust dispatch fns from `pyrust_module!`'s `class` block).
+///
+/// In both cases `instance` is prepended as the implicit `self` —
+/// matching how `inst.method(...)` semantics work in CPython.  This
+/// helper centralises the binding rule so dunder dispatch sites
+/// (`__getitem__`, `__iter__`, `__call__`, `__len__`, `__init__`,
+/// …) don't have to repeat the UserFunction-vs-BuiltinFunction
+/// branching at every call site.
+pub(crate) fn invoke_class_method(
+    interp: &mut Interpreter,
+    method_val: Value,
+    instance: Value,
+    args: &[ExpandedCallArg],
+) -> Result<Value> {
+    match method_val.kind() {
+        ValueKind::UserFunction(f) => {
+            let func = Rc::clone(f);
+            interp.call_user_function_expanded(func, args, &[instance])
+        }
+        ValueKind::BuiltinFunction(name) => {
+            let dispatch = crate::builtin_registry::lookup(name).ok_or_else(|| {
+                PyError::Runtime(format!(
+                    "internal: builtin method '{name}' not in registry"
+                ))
+            })?;
+            let mut combined: Vec<ExpandedCallArg> = Vec::with_capacity(args.len() + 1);
+            combined.push(ExpandedCallArg {
+                name: None,
+                value: instance,
+            });
+            combined.extend(args.iter().cloned());
+            dispatch(interp, &combined)
+        }
+        _ => Err(PyError::named(
+            "TypeError",
+            "attempted to call non-callable class attribute".to_string(),
+        )),
+    }
+}
+
 fn extract_optional_string(value: Value, name: &str) -> Result<Option<String>> {
     match value.kind() {
         ValueKind::Str(text) => Ok(Some(text.to_string())),

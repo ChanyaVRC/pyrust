@@ -321,21 +321,20 @@ impl Interpreter {
             ValueKind::PyInstance(inst) => {
                 let inst_rc = Rc::clone(inst);
                 let class = Rc::clone(&inst_rc.borrow().class);
-                if let Some(method_val) = lookup_class_attr(&class, "__getitem__")
-                    && let ValueKind::UserFunction(f) = method_val.kind() {
-                        let func = Rc::clone(f);
-                        return self.call_user_function_expanded(
-                            func,
-                            &[ExpandedCallArg { name: None, value: index }],
-                            &[Value::py_instance(inst_rc)],
-                        );
-                    }
+                if let Some(method_val) = lookup_class_attr(&class, "__getitem__") {
+                    return invoke_class_method(
+                        self,
+                        method_val,
+                        Value::py_instance(inst_rc),
+                        &[ExpandedCallArg {
+                            name: None,
+                            value: index,
+                        }],
+                    );
+                }
                 Err(PyError::named(
                     "TypeError",
-                    format!(
-                        "'{}' object is not subscriptable",
-                        class.borrow().name
-                    ),
+                    format!("'{}' object is not subscriptable", class.borrow().name),
                 ))
             }
             _ => Err(PyError::Runtime("object is not subscriptable".to_string())),
@@ -952,25 +951,25 @@ impl Interpreter {
                 let inst_rc = Rc::clone(inst);
                 let class = Rc::clone(&inst_rc.borrow().class);
                 if let Some(method_val) = lookup_class_attr(&class, "__contains__") {
-                    if let ValueKind::UserFunction(f) = method_val.kind() {
-                        let func = Rc::clone(f);
-                        let self_val = Value::py_instance(inst_rc);
-                        let result = self.call_user_function_expanded(func, &[], &[self_val, item])?;
-                        return Ok(Value::bool_(result.truthy()));
-                    } else {
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!("argument of type '{}' is not iterable", class.borrow().name),
-                        ));
-                    }
+                    let result = invoke_class_method(
+                        self,
+                        method_val,
+                        Value::py_instance(Rc::clone(&inst_rc)),
+                        &[ExpandedCallArg {
+                            name: None,
+                            value: item.clone(),
+                        }],
+                    )?;
+                    return Ok(Value::bool_(result.truthy()));
                 }
                 // No __contains__: fall back to __iter__ if available.
-                if let Some(iter_method) = lookup_class_attr(&class, "__iter__")
-                    && let ValueKind::UserFunction(f) = iter_method.kind()
-                {
-                    let func = Rc::clone(f);
-                    let iter_obj = self
-                        .call_user_function_expanded(func, &[], &[Value::py_instance(Rc::clone(&inst_rc))])?;
+                if let Some(iter_method) = lookup_class_attr(&class, "__iter__") {
+                    let iter_obj = invoke_class_method(
+                        self,
+                        iter_method,
+                        Value::py_instance(Rc::clone(&inst_rc)),
+                        &[],
+                    )?;
                     loop {
                         match self.call_next(iter_obj.clone(), None) {
                             Ok(elem) => {
