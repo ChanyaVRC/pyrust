@@ -473,34 +473,45 @@ impl Interpreter {
                     } else {
                         // Fast path: read directly from the register without cloning
                         // the entire collection (avoids O(n) clone per GetItem call).
-                        let result = if let Some(ov) = regs[*obj as usize].as_some() {
+                        // The Dict arm is special: looking up an instance key may run
+                        // user `__hash__`/`__eq__`, which requires `&mut self`.  We
+                        // snapshot the dict to drop the register borrow first.
+                        enum FastResult {
+                            Value(Value),
+                            DictLookup(indexmap::IndexMap<PyKey, Value>),
+                            Miss,
+                        }
+                        let fast = if let Some(ov) = regs[*obj as usize].as_some() {
                             match ov.kind() {
                                 ValueKind::List(items) => {
                                     let i = vm_try!(normalize_index(&idx_val, items.len(), "list"));
-                                    Some(items[i].clone())
+                                    FastResult::Value(items[i].clone())
                                 }
                                 ValueKind::Tuple(items) => {
                                     let i = vm_try!(normalize_index(&idx_val, items.len(), "tuple"));
-                                    Some(items[i].clone())
+                                    FastResult::Value(items[i].clone())
                                 }
-                                ValueKind::Dict(dict) => {
-                                    let key = vm_try!(idx_val.to_key().ok_or_else(|| {
-                                        PyError::Runtime("unhashable key type".to_string())
-                                    }));
-                                    Some(vm_try!(dict
-                                        .get(&key)
-                                        .cloned()
-                                        .ok_or_else(|| PyError::Runtime("key error".to_string()))))
-                                }
-                                _ => None,
+                                ValueKind::Dict(dict) => FastResult::DictLookup(dict.clone()),
+                                _ => FastResult::Miss,
                             }
-                        } else { None };
-                        if let Some(r) = result {
-                            regs[*dst as usize] = r;
-                        } else {
-                            let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
-                            let r = vm_try!(self.eval_index(obj_val, idx_val));
-                            regs[*dst as usize] = r;
+                        } else { FastResult::Miss };
+                        match fast {
+                            FastResult::Value(r) => {
+                                regs[*dst as usize] = r;
+                            }
+                            FastResult::DictLookup(dict_snapshot) => {
+                                let key = vm_try!(self.value_to_pykey(&idx_val));
+                                let lookup = vm_try!(self.dict_lookup(&dict_snapshot, &key));
+                                let r = vm_try!(lookup
+                                    .map(|(_, v)| v)
+                                    .ok_or_else(|| PyError::Runtime("key error".to_string())));
+                                regs[*dst as usize] = r;
+                            }
+                            FastResult::Miss => {
+                                let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
+                                let r = vm_try!(self.eval_index(obj_val, idx_val));
+                                regs[*dst as usize] = r;
+                            }
                         }
                     }
                 }
@@ -547,11 +558,33 @@ impl Interpreter {
                                 items[i] = val_val;
                             }
                             2 => {
-                                let dict = vm_try!(expect_dict_mut(regs, *obj, "SetItem"));
-                                let key = vm_try!(idx_val.to_key().ok_or_else(|| {
-                                    PyError::Runtime("unhashable type".to_string())
-                                }));
-                                dict.insert(key, val_val);
+                                // For PyInstance keys we need `__hash__` (and possibly
+                                // `__eq__`), both of which require `&mut self`.  Compute
+                                // the key first, then take the dict-mut borrow.
+                                let key = vm_try!(self.value_to_pykey(&idx_val));
+                                if matches!(&key, PyKey::Object { .. }) {
+                                    // Object keys may need `__eq__` dispatch to dedup
+                                    // against an existing entry — work on a snapshot
+                                    // so we can call `&mut self` helpers.
+                                    let mut snapshot = if let Some(d) = regs
+                                        [*obj as usize]
+                                        .as_some()
+                                        .and_then(|v| v.as_dict())
+                                    {
+                                        d.clone()
+                                    } else {
+                                        vm_try!(Err(PyError::Runtime(
+                                            "SetItem: expected dict".to_string()
+                                        )))
+                                    };
+                                    vm_try!(self.dict_insert(&mut snapshot, key, val_val));
+                                    let dict =
+                                        vm_try!(expect_dict_mut(regs, *obj, "SetItem"));
+                                    *dict = snapshot;
+                                } else {
+                                    let dict = vm_try!(expect_dict_mut(regs, *obj, "SetItem"));
+                                    dict.insert(key, val_val);
+                                }
                             }
                             3 => {
                                 let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
@@ -621,8 +654,17 @@ impl Interpreter {
                         }
                     } else {
                         let mut handled = false;
-                        if let Some(ov) = regs[*obj as usize].as_some_mut() {
-                            if let Some(items) = ov.as_list_mut() {
+                        // Tag the target type without holding a long-lived borrow so
+                        // we can call `&mut self` helpers below for instance keys.
+                        let target_kind = regs[*obj as usize].as_some().map(|v| match v.kind() {
+                            ValueKind::List(_) => 1u8,
+                            ValueKind::Dict(_) => 2u8,
+                            _ => 0u8,
+                        }).unwrap_or(0);
+                        if target_kind == 1 {
+                            if let Some(ov) = regs[*obj as usize].as_some_mut()
+                                && let Some(items) = ov.as_list_mut()
+                            {
                                 let i = vm_try!(normalize_index(&idx_val, items.len(), "list"));
                                 if i == items.len() - 1 {
                                     items.pop();
@@ -630,13 +672,30 @@ impl Interpreter {
                                     items.remove(i);
                                 }
                                 handled = true;
-                            } else if let Some(dict) = ov.as_dict_mut() {
-                                let key = vm_try!(idx_val.to_key().ok_or_else(|| {
-                                    PyError::Runtime("unhashable type".to_string())
-                                }));
-                                dict.shift_remove(&key);
-                                handled = true;
                             }
+                        } else if target_kind == 2 {
+                            let key = vm_try!(self.value_to_pykey(&idx_val));
+                            // Resolve user-eq match via snapshot, then shift-remove
+                            // by the located index for O(1)-ish removal.
+                            if let PyKey::Object { .. } = &key {
+                                let snapshot = regs[*obj as usize]
+                                    .as_some()
+                                    .and_then(|v| v.as_dict())
+                                    .cloned()
+                                    .unwrap_or_default();
+                                let found = vm_try!(self.dict_lookup(&snapshot, &key));
+                                if let Some((idx, _)) = found
+                                    && let Some(ov) = regs[*obj as usize].as_some_mut()
+                                    && let Some(dict) = ov.as_dict_mut()
+                                {
+                                    dict.shift_remove_index(idx);
+                                }
+                            } else if let Some(ov) = regs[*obj as usize].as_some_mut()
+                                && let Some(dict) = ov.as_dict_mut()
+                            {
+                                dict.shift_remove(&key);
+                            }
+                            handled = true;
                         }
                         if !handled {
                             // Try __delitem__ on user-defined instances.
@@ -1015,22 +1074,36 @@ impl Interpreter {
                     for i in 0..crate::bytecode::Reg::from(*n) {
                         let k_val = vm_try!(vm_read(regs, *base + i * 2, num_locals));
                         let v_val = vm_try!(vm_read(regs, *base + i * 2 + 1, num_locals));
-                        let key = vm_try!(k_val.to_key().ok_or_else(|| {
-                            PyError::Runtime("unhashable type in dict key".to_string())
-                        }));
-                        dict.insert(key, v_val);
+                        let key = vm_try!(self.value_to_pykey(&k_val));
+                        vm_try!(self.dict_insert(&mut dict, key, v_val));
                     }
                     regs[*dst as usize] = Value::dict(dict);
                 }
                 Insn::SetAdd(set_reg, val_reg) => {
                     let val = vm_try!(vm_read(regs, *val_reg, num_locals));
-                    let key = vm_try!(val.to_key().ok_or_else(|| PyError::Runtime(
-                        "unhashable type in set comprehension".to_string()
-                    )));
-                    let set = vm_try!(regs[*set_reg as usize]
-                        .as_set_mut()
-                        .ok_or_else(|| PyError::Runtime("SetAdd: not a set".to_string())));
-                    set.insert(key);
+                    let key = vm_try!(self.value_to_pykey(&val));
+                    if let PyKey::Object { .. } = &key {
+                        // Object keys need `__eq__` dispatch for dedup — work on
+                        // a snapshot so we can call `&mut self` helpers.
+                        let mut snapshot = if let Some(s) = regs[*set_reg as usize]
+                            .as_some()
+                            .and_then(|v| v.as_set())
+                        {
+                            s.clone()
+                        } else {
+                            vm_try!(Err(PyError::Runtime("SetAdd: not a set".to_string())))
+                        };
+                        vm_try!(self.set_insert(&mut snapshot, key));
+                        let set = vm_try!(regs[*set_reg as usize]
+                            .as_set_mut()
+                            .ok_or_else(|| PyError::Runtime("SetAdd: not a set".to_string())));
+                        *set = snapshot;
+                    } else {
+                        let set = vm_try!(regs[*set_reg as usize]
+                            .as_set_mut()
+                            .ok_or_else(|| PyError::Runtime("SetAdd: not a set".to_string())));
+                        set.insert(key);
+                    }
                 }
                 Insn::ListAppend(list_reg, val_reg) => {
                     let val = vm_try!(vm_read(regs, *val_reg, num_locals));
@@ -1628,6 +1701,11 @@ impl Interpreter {
                         _ => unreachable!(),
                     };
                 }
+                // Key-taking methods need user `__hash__`/`__eq__` dispatch.
+                if matches!(method.as_str(), "get" | "pop" | "setdefault" | "__contains__") {
+                    let receiver = vm_read(regs, obj, num_locals)?;
+                    return self.dict_key_method(method.as_str(), receiver, args);
+                }
                 let dict = regs[obj as usize]
                     .as_dict_mut()
                     .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
@@ -1652,6 +1730,10 @@ impl Interpreter {
                 } else { unreachable!() }
             }
             5 => {
+                if matches!(method.as_str(), "add" | "discard" | "remove" | "__contains__") {
+                    let receiver = vm_read(regs, obj, num_locals)?;
+                    return self.set_key_method(method.as_str(), receiver, args);
+                }
                 let set = regs[obj as usize]
                     .as_set_mut()
                     .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
@@ -1786,6 +1868,10 @@ impl Interpreter {
                         _ => unreachable!(),
                     };
                 }
+                if matches!(method.as_str(), "get" | "pop" | "setdefault" | "__contains__") {
+                    let receiver = vm_read(regs, obj, num_locals)?;
+                    return self.dict_key_method(method.as_str(), receiver, pos_items);
+                }
                 let dict = regs[obj as usize]
                     .as_dict_mut()
                     .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
@@ -1816,6 +1902,10 @@ impl Interpreter {
                 } else { unreachable!() }
             }
             5 => {
+                if matches!(method.as_str(), "add" | "discard" | "remove" | "__contains__") {
+                    let receiver = vm_read(regs, obj, num_locals)?;
+                    return self.set_key_method(method.as_str(), receiver, pos_items);
+                }
                 let set = regs[obj as usize]
                     .as_set_mut()
                     .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;

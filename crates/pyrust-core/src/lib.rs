@@ -41,7 +41,7 @@ fn next_obj_id() -> u64 {
 // PyKey — hashable subset of Value used as dict/set keys (unchanged)
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum PyKey {
     Int(i64),
     Float(u64),
@@ -51,6 +51,20 @@ pub enum PyKey {
     /// Hashable frozenset key.  Stores a sorted-canonical Vec of inner keys
     /// so equality and hashing are content-based (matching CPython).
     FrozenSet(Vec<PyKey>),
+    /// Key constructed for a user-defined `PyInstance` (or any non-builtin
+    /// Value that defines `__hash__`).  The `hash` is precomputed by the
+    /// caller — pyrust-core has no interpreter reference, so dispatching
+    /// `__hash__` happens in the runtime layer before constructing the key.
+    ///
+    /// `PartialEq` for `Object` uses `Value::eq`, which for a `PyInstance`
+    /// performs `Rc::ptr_eq`.  Full `__eq__` semantics (so distinct instances
+    /// that compare equal collapse to one entry) require runtime cooperation:
+    /// the dict/set helpers in the runtime perform a linear scan dispatching
+    /// `__eq__` via the interpreter when the lookup key is `PyKey::Object`.
+    Object {
+        hash: u64,
+        value: Value,
+    },
 }
 
 impl Hash for PyKey {
@@ -67,9 +81,32 @@ impl Hash for PyKey {
                     k.hash(state);
                 }
             }
+            PyKey::Object { hash, .. } => hash.hash(state),
         }
     }
 }
+
+impl PartialEq for PyKey {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (PyKey::Int(a), PyKey::Int(b)) => a == b,
+            (PyKey::Float(a), PyKey::Float(b)) => a == b,
+            (PyKey::Str(a), PyKey::Str(b)) => a == b,
+            (PyKey::Bool(a), PyKey::Bool(b)) => a == b,
+            (PyKey::None, PyKey::None) => true,
+            (PyKey::FrozenSet(a), PyKey::FrozenSet(b)) => a == b,
+            // Two `Object` keys compare equal only when the underlying value
+            // identity matches.  This is intentionally strict: the dict/set
+            // runtime layer dispatches user-defined `__eq__` separately when
+            // the precomputed hashes coincide so that distinct instances
+            // which the user considers equal still collapse.
+            (PyKey::Object { value: a, .. }, PyKey::Object { value: b, .. }) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for PyKey {}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared types
@@ -2101,6 +2138,7 @@ fn key_repr(key: &PyKey) -> String {
                 format!("frozenset({{{inner}}})")
             }
         }
+        PyKey::Object { value, .. } => value.repr(),
     }
 }
 

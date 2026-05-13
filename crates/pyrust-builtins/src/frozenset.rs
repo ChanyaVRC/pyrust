@@ -195,5 +195,6 @@ fn key_repr(key: &PyKey) -> String {
                 format!("frozenset({{{inner}}})")
             }
         }
+        PyKey::Object { value, .. } => value.repr(),
     }
 }

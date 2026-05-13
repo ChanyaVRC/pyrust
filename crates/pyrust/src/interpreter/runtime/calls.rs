@@ -102,16 +102,28 @@ impl Interpreter {
                         pyrust_builtins::tuple::call(method, items, pos)
                     }
                     ValueKind::Dict(_) => {
-                        let dict = receiver
-                            .as_dict_mut()
-                            .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
-                        pyrust_builtins::dict::call(method, dict, pos)
+                        // Intercept key-taking methods so user `__hash__`/`__eq__`
+                        // dispatch works (issue #368).  Other methods (`keys`,
+                        // `values`, `items`, `clear`, `copy`, `popitem`) fall
+                        // through to the interpreter-free builtin dispatch.
+                        if matches!(method, "get" | "pop" | "setdefault" | "__contains__") {
+                            self.dict_key_method(method, receiver, pos)
+                        } else {
+                            let dict = receiver
+                                .as_dict_mut()
+                                .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+                            pyrust_builtins::dict::call(method, dict, pos)
+                        }
                     }
                     ValueKind::Set(_) => {
-                        let set = receiver
-                            .as_set_mut()
-                            .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
-                        pyrust_builtins::set::call(method, set, pos)
+                        if matches!(method, "add" | "discard" | "remove" | "__contains__") {
+                            self.set_key_method(method, receiver, pos)
+                        } else {
+                            let set = receiver
+                                .as_set_mut()
+                                .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
+                            pyrust_builtins::set::call(method, set, pos)
+                        }
                     }
                     ValueKind::Complex(re, im) if method == "conjugate" => {
                         Ok(Value::complex(re, -im))

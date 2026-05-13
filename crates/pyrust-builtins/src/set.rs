@@ -308,5 +308,6 @@ fn key_to_value(k: PyKey) -> Value {
             }
             crate::frozenset::frozenset(set)
         }
+        PyKey::Object { value, .. } => value,
     }
 }
