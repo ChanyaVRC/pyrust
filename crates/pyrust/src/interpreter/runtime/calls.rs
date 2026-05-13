@@ -78,6 +78,16 @@ impl Interpreter {
                         None => pos.push(a.value.clone()),
                     }
                 }
+                // Bound-method dispatch: receiver is `&mut`-borrowed below
+                // for list/set/dict.  Args may alias the receiver (e.g.
+                // `lst.extend(lst)`) — the Rc-shared backing on these types
+                // means an aliased arg points at the same storage the
+                // `&mut` will borrow.  Resolve aliasing up front so the
+                // builtin can read the iterable without producing a
+                // simultaneous `&` + `&mut` to the same Vec/Set/Map.  See
+                // SAFETY contracts on `Value::as_list_mut` / `as_set_mut` /
+                // `as_dict_mut`.
+                pyrust_core::unalias_args_for_mutation(&receiver, &mut pos);
                 match receiver.kind() {
                     ValueKind::Str(_) => {
                         pyrust_builtins::string::call(method, &receiver, pos)

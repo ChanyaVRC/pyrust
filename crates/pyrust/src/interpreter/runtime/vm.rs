@@ -1596,10 +1596,18 @@ impl Interpreter {
             _ => 0u8,
         }).unwrap_or(0);
 
+        // For Rc-shared mutable types (list/set/dict), args may alias the
+        // receiver (e.g. `lst.extend(lst)`).  Resolve up front so the builtin
+        // can read iterables without producing a simultaneous `&` + `&mut` to
+        // the same Vec/Set/Map.  See `Value::as_list_mut` safety contract.
+        if matches!(obj_kind_tag, 1 | 2 | 5) {
+            pyrust_core::unalias_args_for_mutation(&regs[obj as usize], &mut args);
+        }
+
         match obj_kind_tag {
             1 => {
-                // as_list_mut is safe: we confirmed tag==List above (single-threaded).
-                // obj_reg and dst_reg may coincide; the mutable borrow of the Vec ends
+                // as_list_mut is safe: we confirmed tag==List above and
+                // pre-unaliased args; the mutable borrow of the Vec ends
                 // before exec_call_method returns, so no alias with the later store.
                 let items = regs[obj as usize]
                     .as_list_mut()
@@ -1698,6 +1706,13 @@ impl Interpreter {
             ValueKind::Set(_) => 5u8,
             _ => 0u8,
         }).unwrap_or(0);
+
+        // See `exec_call_method`: unalias args sharing the receiver's
+        // Rc-backing before the `&mut` is taken.
+        let mut pos_items = pos_items;
+        if matches!(obj_kind_tag, 1 | 2 | 5) {
+            pyrust_core::unalias_args_for_mutation(&regs[obj as usize], &mut pos_items);
+        }
 
         match obj_kind_tag {
             1 => {
