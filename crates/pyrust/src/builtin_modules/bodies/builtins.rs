@@ -1604,20 +1604,21 @@ pyrust_module! {
 
     /// CPython: format(value[, format_spec]).
     /// <https://docs.python.org/3/library/functions.html#format>
-    fn format(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        let (value, spec) = match args.len() {
-            1 => (args[0].value.clone(), String::new()),
-            2 => {
-                let value = args[0].value.clone();
-                let spec = match args[1].value.kind() {
-                    ValueKind::Str(s) => s.to_string(),
-                    _ => return Err(PyError::Runtime("format spec must be a string".to_string())),
-                };
-                (value, spec)
-            }
-            _ => return Err(PyError::Runtime(format!("{FN_NAME}() takes 1 or 2 arguments"))),
-        };
+    ///
+    /// Migrated to the typed-signature dialect (#400).  Both params are
+    /// `#[positional_only]` so the macro emits the fast-path prelude that
+    /// skips kwarg validation entirely.  The optional `format_spec` is
+    /// encoded as `Option<PyStr>` — absent → `None` (treated as `""`),
+    /// present-and-str → `Some(PyStr)`, present-and-non-str → the typed
+    /// dialect's standard "must be str or None" TypeError.
+    fn format(
+        #[positional_only] value: PyValue,
+        #[positional_only]
+        #[default(None)]
+        format_spec: Option<PyStr>,
+    ) -> Result<Value> {
+        let value = &value.0;
+        let spec: &str = format_spec.as_ref().map(|s| s.as_ref()).unwrap_or("");
         // Dispatch __format__(spec) for user instances.
         if let ValueKind::PyInstance(instance) = value.kind() {
             let instance_rc = Rc::clone(instance);
@@ -1629,7 +1630,7 @@ pyrust_module! {
                     Value::py_instance(instance_rc),
                     &[ExpandedCallArg {
                         name: None,
-                        value: Value::string(spec.clone()),
+                        value: Value::string(spec),
                     }],
                 )?;
                 return match result.kind() {
@@ -1644,7 +1645,7 @@ pyrust_module! {
                 };
             }
         }
-        apply_format_spec(&value, &spec)
+        apply_format_spec(value, spec)
     }
 
     /// CPython: classmethod(function) — class-method descriptor.
