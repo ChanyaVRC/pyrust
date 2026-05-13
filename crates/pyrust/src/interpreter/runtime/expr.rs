@@ -322,6 +322,12 @@ impl Interpreter {
     /// Try to call a binary dunder method on `left` (named `method`), then on
     /// `right` (named `rmethod`).  Returns `Some(result)` if a dunder was found
     /// and called, or `None` if neither operand has the method.
+    ///
+    /// Routes both `UserFunction` (pure-Python class methods) and
+    /// `BuiltinFunction` (methods defined via `pyrust_module!`'s
+    /// `class { … }` block, e.g. `Counter.__add__`) through
+    /// `invoke_class_method` so operator-overloading works for both
+    /// kinds of class — issue #331.
     fn try_dunder_binary(
         &mut self,
         left: &Value,
@@ -332,11 +338,14 @@ impl Interpreter {
         if let ValueKind::PyInstance(inst) = left.kind() {
             let class = Rc::clone(&inst.borrow().class);
             if let Some(m) = lookup_class_attr(&class, method)
-                && let ValueKind::UserFunction(f) = m.kind()
+                && is_callable_method(&m)
             {
-                let func = Rc::clone(f);
                 let self_val = Value::py_instance(Rc::clone(inst));
-                match self.call_user_function_expanded(func, &[], &[self_val, right.clone()]) {
+                let arg = ExpandedCallArg {
+                    name: None,
+                    value: right.clone(),
+                };
+                match invoke_class_method(self, m, self_val, &[arg]) {
                     Ok(v) if is_not_implemented(&v) => {}
                     result => return Some(result),
                 }
@@ -345,11 +354,14 @@ impl Interpreter {
         if let ValueKind::PyInstance(inst) = right.kind() {
             let class = Rc::clone(&inst.borrow().class);
             if let Some(m) = lookup_class_attr(&class, rmethod)
-                && let ValueKind::UserFunction(f) = m.kind()
+                && is_callable_method(&m)
             {
-                let func = Rc::clone(f);
                 let self_val = Value::py_instance(Rc::clone(inst));
-                match self.call_user_function_expanded(func, &[], &[self_val, left.clone()]) {
+                let arg = ExpandedCallArg {
+                    name: None,
+                    value: left.clone(),
+                };
+                match invoke_class_method(self, m, self_val, &[arg]) {
                     Ok(v) if is_not_implemented(&v) => {}
                     result => return Some(result),
                 }
@@ -358,16 +370,17 @@ impl Interpreter {
         None
     }
 
-    /// Try to call a unary dunder method on a PyInstance.
+    /// Try to call a unary dunder method on a PyInstance.  Routes both
+    /// `UserFunction` and `BuiltinFunction` class methods through
+    /// `invoke_class_method` — same parity with `try_dunder_binary`.
     fn try_dunder_unary(&mut self, val: &Value, method: &str) -> Option<Result<Value>> {
         if let ValueKind::PyInstance(inst) = val.kind() {
             let class = Rc::clone(&inst.borrow().class);
             if let Some(m) = lookup_class_attr(&class, method)
-                && let ValueKind::UserFunction(f) = m.kind()
+                && is_callable_method(&m)
             {
-                let func = Rc::clone(f);
                 let self_val = Value::py_instance(Rc::clone(inst));
-                return Some(self.call_user_function_expanded(func, &[], &[self_val]));
+                return Some(invoke_class_method(self, m, self_val, &[]));
             }
         }
         None
@@ -609,6 +622,14 @@ impl Interpreter {
         }
     }
 
+    /// Dispatch a single binary method (e.g. `__iadd__`) on a
+    /// PyInstance receiver.  Returns `Some(result)` when the method
+    /// exists and was called (possibly returning `NotImplemented`),
+    /// `None` when the method isn't defined on the class.  Like
+    /// `try_dunder_binary`, this routes both user-defined and
+    /// `pyrust_module!`-generated class methods through
+    /// `invoke_class_method` so Counter's `__iadd__` (a BuiltinFunction
+    /// in the class's attr map) participates in `+=` dispatch.
     fn try_call_binary_method(
         &mut self,
         receiver: &Value,
@@ -623,16 +644,15 @@ impl Interpreter {
         let Some(method_value) = lookup_class_attr(&class, method) else {
             return Ok(None);
         };
-
-        let function = match method_value.kind() {
-            ValueKind::UserFunction(f) => Rc::clone(f),
-            _ => return Ok(None),
+        if !is_callable_method(&method_value) {
+            return Ok(None);
+        }
+        let self_val = Value::py_instance(Rc::clone(&inst));
+        let arg = ExpandedCallArg {
+            name: None,
+            value: other,
         };
-        let result = self.call_user_function(
-            function,
-            &[],
-            &[Value::py_instance(Rc::clone(&inst)), other],
-        )?;
+        let result = invoke_class_method(self, method_value, self_val, &[arg])?;
         Ok(Some(result))
     }
 
@@ -975,6 +995,20 @@ impl Interpreter {
 
 fn is_not_implemented(v: &Value) -> bool {
     matches!(v.kind(), ValueKind::NotImplemented)
+}
+
+/// Does a class-attribute value look like a callable method?  Accepts
+/// both pure-Python user functions and the `BuiltinFunction` entries
+/// that `pyrust_module!`'s `class { … }` block produces — anything
+/// else (descriptor, raw int set via `Foo.x = 1`, …) should fall
+/// through dunder dispatch without being invoked.  Issue #331 added
+/// `BuiltinFunction` to the accepted set so Counter's `__add__`
+/// participates in the binary-op path.
+fn is_callable_method(v: &Value) -> bool {
+    matches!(
+        v.kind(),
+        ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_)
+    )
 }
 
 fn coerce_numeric(v: Value) -> Value {
