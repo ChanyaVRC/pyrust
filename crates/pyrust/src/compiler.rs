@@ -2444,21 +2444,29 @@ impl Compiler {
     ///
     /// Called before `break`, `continue`, or `return` to unwind any active
     /// `try`/`except` guards that the early exit crosses.
+    ///
+    /// While the inlined finally/handler-cleanup block for frame `i` is being
+    /// compiled, `except_cleanups` is temporarily truncated to `[..i]` so that
+    /// an early exit (e.g. `return`) inside that inlined block does not re-walk
+    /// the frame we are currently unwinding — which would cause infinite
+    /// recursion (see issue #365: `try: return X finally: return Y`).
     fn emit_early_exit_cleanups(&mut self, from_depth: usize) {
-        if self.except_cleanups.len() <= from_depth {
+        let total = self.except_cleanups.len();
+        if total <= from_depth {
             return;
         }
-        // Clone to avoid borrow-checker conflicts when `compile_block` borrows
-        // `self` mutably while we still hold a reference to the cleanup vec.
-        let cleanups: Vec<EarlyExitCleanup> = self.except_cleanups[from_depth..]
-            .iter()
-            .rev()
-            .cloned()
-            .collect();
-        for cleanup in cleanups {
+        // Walk from innermost (top) down to `from_depth`.
+        for i in (from_depth..total).rev() {
             if self.failed {
                 return;
             }
+            // Clone the entry so we can mutate `self` while compiling the
+            // inlined finally block.
+            let cleanup = self.except_cleanups[i].clone();
+            // Shadow the cleanup stack: any nested cleanup emission triggered
+            // by `compile_block` below must not see frames `[i..]` (we are
+            // already in the process of unwinding them).
+            let saved_tail: Vec<EarlyExitCleanup> = self.except_cleanups.split_off(i);
             match cleanup {
                 EarlyExitCleanup::TryBody { finally_stmts } => {
                     self.emit(Insn::PopExcept);
@@ -2473,6 +2481,12 @@ impl Compiler {
                     }
                 }
             }
+            // Restore the cleanup stack so the caller (and any sibling
+            // iterations) see the original frames.  Unconditional restore
+            // is safe because `compile_block` doesn't return errors — it
+            // routes failures through `self.failed`, which the early-return
+            // guard above catches on the next loop iteration.
+            self.except_cleanups.extend(saved_tail);
         }
     }
 
