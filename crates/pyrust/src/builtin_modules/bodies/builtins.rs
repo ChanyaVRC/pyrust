@@ -1508,16 +1508,28 @@ pyrust_module! {
 
     /// CPython: bool(x=False) — bool constructor.
     /// <https://docs.python.org/3/library/functions.html#bool>
-    fn bool(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        match args.len() {
-            0 => Ok(Value::bool_(false)),
-            1 => {
-                let val = args[0].value.clone();
-                let result = _interp.truthy_value(&val)?;
+    ///
+    /// Migrated to the typed-signature dialect (#400).  `Option<PyValue>`
+    /// + `#[default(None)]` is the natural shape for a single optional
+    /// positional: `None` means "no arg" → False, `Some(v)` means
+    /// "compute truthiness of v".  Conflating `bool()` with `bool(None)`
+    /// is safe because CPython's truthiness of `None` is also False, so
+    /// both paths land on the same answer.
+    fn bool(
+        #[positional_only]
+        #[default(None)]
+        x: Option<PyValue>,
+    ) -> Result<Value> {
+        match x {
+            // No-arg path returns `Value::bool_(false)` directly, skipping
+            // `_interp.truthy_value`.  This is equivalent (not incidental):
+            // `truthy_value(&Value::none())` would also resolve to False and
+            // has no observable side effects, so the shortcut is intentional.
+            None => Ok(Value::bool_(false)),
+            Some(v) => {
+                let result = _interp.truthy_value(&v.0)?;
                 Ok(Value::bool_(result))
             }
-            _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most one argument"))),
         }
     }
 
@@ -1749,12 +1761,13 @@ pyrust_module! {
 
     /// CPython: callable(object) — true if the object is callable.
     /// <https://docs.python.org/3/library/functions.html#callable>
-    fn callable(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
-        }
-        let is_callable = match args[0].value.kind() {
+    ///
+    /// Migrated to the typed-signature dialect (#400).  Mirrors `ascii`
+    /// / `id`: a single-body `PyValue` catch-all, since `callable`
+    /// accepts every Python object and never raises `TypeError`.
+    fn callable(#[positional_only] obj: PyValue) -> Result<Value> {
+        let value = &obj.0;
+        let is_callable = match value.kind() {
             ValueKind::UserFunction(_)
             | ValueKind::BuiltinFunction(_)
             | ValueKind::BoundMethod { .. }
@@ -1764,7 +1777,7 @@ pyrust_module! {
             // prop.setter / prop.getter / prop.deleter) are callable —
             // a plain property descriptor isn't.
             ValueKind::BuiltinObject { .. } => {
-                pyrust_builtins::property::property_partial_slot(&args[0].value)
+                pyrust_builtins::property::property_partial_slot(value)
                     .is_some_and(|slot| slot.is_some())
             }
             ValueKind::PyInstance(inst) => {
