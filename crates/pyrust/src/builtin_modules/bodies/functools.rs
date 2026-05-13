@@ -97,17 +97,29 @@ pyrust_module! {
         fn __init__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let user = &args[1..];
-            if user.is_empty() {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME} expected at least 1 argument, got 0"),
-                ));
-            }
             // First positional is `func`; remaining positional+keyword are
             // the pre-bound args/kwargs.  `func` itself is positional-only
             // in CPython (the `/` in the signature) so we don't accept
             // `func=` as a keyword.
-            let func = user[0].value.clone();
+            let func = match user.first() {
+                Some(a) if a.name.is_none() => a.value.clone(),
+                Some(a) => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "{FN_NAME}() got an unexpected keyword argument '{}' \
+                             ('func' is positional-only)",
+                            a.name.as_deref().unwrap_or(""),
+                        ),
+                    ));
+                }
+                None => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("{FN_NAME} expected at least 1 argument, got 0"),
+                    ));
+                }
+            };
             let mut bound_args: Vec<Value> = Vec::new();
             let mut bound_kwargs: IndexMap<PyKey, Value> = IndexMap::new();
             for a in &user[1..] {

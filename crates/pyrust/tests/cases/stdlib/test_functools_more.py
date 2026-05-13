@@ -188,3 +188,34 @@ try:
     print("lru-private-init", "FAIL-no-error")
 except TypeError:
     print("lru-private-init", "TypeError")
+
+
+# ── self-review Copilot fixes (PR #343 review) ────────────────────────
+
+# partial(func=...) raises TypeError — func is positional-only.
+try:
+    functools.partial(func=lambda x: x)(1)
+    print("partial-kw-func", "FAIL-no-error")
+except TypeError:
+    print("partial-kw-func", "TypeError")
+
+# cached_property.__set_name__ records the attr_name and __get__ stashes
+# under that name (not the access-site name or the wrapped function's
+# own name).  We can't reach `h.__dict__` directly in pyrust yet, so we
+# inspect via `vars(h)` — that returns the instance dict in both
+# runtimes.
+class HasOffName:
+    def _compute(self):
+        return 42
+
+
+desc = functools.cached_property(HasOffName._compute)
+desc.__set_name__(HasOffName, "answer")
+HasOffName.answer = desc
+h = HasOffName()
+v = h.answer
+assert v == 42
+d = vars(h)
+assert "answer" in d
+assert "_compute" not in d  # stashed under the set_name, not func name
+print("cached-property-set-name", "ok")
