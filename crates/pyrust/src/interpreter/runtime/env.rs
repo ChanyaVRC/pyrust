@@ -38,6 +38,36 @@ impl Interpreter {
                     return Ok(value);
                 }
 
+                // `cached_property` — non-data descriptor: only fires when the
+                // instance __dict__ doesn't already have the attribute.  Once
+                // it runs, the result is stashed into `instance.attrs` under
+                // the *access name* (`name`) so the next `get_attr` for the
+                // same name hits the instance-attrs check above and skips the
+                // descriptor entirely.  This is exactly CPython's
+                // `cached_property.__get__` semantics — and using `name`
+                // here (rather than the function's own name) is how
+                // CPython's `__set_name__`-recorded slot is supposed to
+                // work, just driven directly off the access site instead.
+                if let Some(class_val) = lookup_class_attr(&class, name)
+                    && let Some(func) =
+                        pyrust_builtins::cached_property::with_cached_property(&class_val, |s| {
+                            s.func.clone()
+                        })
+                {
+                    let result = self.call_function_expanded(
+                        func,
+                        &[ExpandedCallArg {
+                            name: None,
+                            value: Value::py_instance(Rc::clone(&instance)),
+                        }],
+                    )?;
+                    instance
+                        .borrow_mut()
+                        .attrs
+                        .insert(name.to_string(), result.clone());
+                    return Ok(result);
+                }
+
                 if let Some(value) = lookup_class_attr(&class, name) {
                     return Ok(match value.kind() {
                         ValueKind::UserFunction(f) => match f.kind {
