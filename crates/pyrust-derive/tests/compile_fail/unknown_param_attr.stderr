@@ -1,0 +1,5 @@
+error: unsupported parameter attribute — expected one of `#[default(expr)]`, `#[positional_only]`, `#[keyword_only]`
+  --> tests/compile_fail/unknown_param_attr.rs:12:12
+   |
+12 |     fn bad(#[positionalonly] x: PyInt) -> Result<Value> {
+   |            ^^^^^^^^^^^^^^^^^

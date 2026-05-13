@@ -1,0 +1,5 @@
+error: duplicate parameter name `x` — each parameter must have a unique name
+  --> tests/compile_fail/duplicate_param_name.rs:12:22
+   |
+12 |     fn bad(x: PyInt, x: PyStr) -> Result<Value> {
+   |                      ^

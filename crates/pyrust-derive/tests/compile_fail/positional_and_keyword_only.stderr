@@ -1,0 +1,5 @@
+error: a parameter cannot be both `#[positional_only]` and `#[keyword_only]`
+  --> tests/compile_fail/positional_and_keyword_only.rs:12:31
+   |
+12 |     fn bad(#[positional_only] #[keyword_only] x: PyInt) -> Result<Value> {
+   |                               ^^^^^^^^^^^^^^^

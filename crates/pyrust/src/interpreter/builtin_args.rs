@@ -31,6 +31,7 @@
 //! After the prelude, the user-written body sees typed locals (`path: PyStr`,
 //! `mode: PyStr`, etc.) and can call straightforwardly into native Rust APIs.
 
+use std::borrow::Cow;
 use std::ops::Deref;
 use std::rc::Rc;
 
@@ -45,7 +46,13 @@ use super::ExpandedCallArg;
 
 /// Convert a `Value` into a typed Rust local with CPython-style error
 /// messages.  Implemented by every wrapper used in a typed builtin signature.
-pub(crate) trait FromValue: Sized {
+///
+/// The `'a` lifetime is the lifetime of the `Value` reference handed to
+/// `try_from_value`.  Owned wrappers (like `PyInt`) don't use it; borrowing
+/// wrappers (like `PyStr<'a>` carrying a `Cow<'a, str>`) tie their interior
+/// reference back to the call's args slice — zero-copy when the value is
+/// already a string in the VM's frame.
+pub(crate) trait FromValue<'a>: Sized {
     /// Python-level type name for error messages ("int", "str", ...).
     /// Used by both the missing-arg error path and `try_from_value`'s
     /// "must be X, not Y" message.
@@ -54,15 +61,15 @@ pub(crate) trait FromValue: Sized {
     /// Attempt the conversion.  `fn_name` is the Python-level fully-qualified
     /// name of the calling builtin (e.g. `"math.sqrt"`); `arg_name` is the
     /// parameter name (e.g. `"x"`) used in error messages.
-    fn try_from_value(value: &Value, fn_name: &str, arg_name: &str) -> Result<Self>;
+    fn try_from_value(value: &'a Value, fn_name: &str, arg_name: &str) -> Result<Self>;
 
     /// Allocation-free type-match predicate used by overload dispatch.
     /// Returns `true` iff `try_from_value` would succeed for this value.
-    /// The default delegates to `try_from_value`; strict wrappers (where
-    /// the conversion is just a kind check) should override for speed.
-    fn matches(value: &Value) -> bool {
-        // Default — implementations with a cheap predicate path should
-        // override to avoid the (possibly allocating) full conversion.
+    /// Takes `&'a Value` so the default can delegate to `try_from_value`
+    /// without an unsafe lifetime extension; impls with a cheap kind-only
+    /// predicate path should override for speed (and to keep the
+    /// dispatcher allocation-free).
+    fn matches(value: &'a Value) -> bool {
         Self::try_from_value(value, "", "").is_ok()
     }
 }
@@ -85,7 +92,7 @@ fn must_be_error(fn_name: &str, arg_name: &str, expected: &str, actual: &Value) 
 /// `int` argument.  Accepts `int` only — strict 1:1 with the Python type.
 /// `bool` does not auto-coerce (declare a `PyBool` overload, or a `PyValue`
 /// fallback, to handle it).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct PyInt(pub i64);
 
 impl Deref for PyInt {
@@ -102,17 +109,17 @@ impl From<i64> for PyInt {
     }
 }
 
-impl FromValue for PyInt {
+impl<'a> FromValue<'a> for PyInt {
     const PY_TYPE_NAME: &'static str = "int";
 
-    fn try_from_value(value: &Value, fn_name: &str, arg_name: &str) -> Result<Self> {
+    fn try_from_value(value: &'a Value, fn_name: &str, arg_name: &str) -> Result<Self> {
         match value.kind() {
             ValueKind::Int(n) => Ok(PyInt(n)),
             _ => Err(must_be_error(fn_name, arg_name, "int", value)),
         }
     }
 
-    fn matches(value: &Value) -> bool {
+    fn matches(value: &'a Value) -> bool {
         matches!(value.kind(), ValueKind::Int(_))
     }
 }
@@ -122,7 +129,7 @@ impl FromValue for PyInt {
 /// `float` argument.  Accepts `float` only — strict 1:1 with the Python type.
 /// `int` and `bool` do not auto-coerce; declare additional overloads for
 /// those combinations, or use a `PyValue` fallback for mixed-type handling.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct PyFloat(pub f64);
 
 impl Deref for PyFloat {
@@ -139,17 +146,17 @@ impl From<f64> for PyFloat {
     }
 }
 
-impl FromValue for PyFloat {
+impl<'a> FromValue<'a> for PyFloat {
     const PY_TYPE_NAME: &'static str = "float";
 
-    fn try_from_value(value: &Value, fn_name: &str, arg_name: &str) -> Result<Self> {
+    fn try_from_value(value: &'a Value, fn_name: &str, arg_name: &str) -> Result<Self> {
         match value.kind() {
             ValueKind::Float(f) => Ok(PyFloat(f)),
             _ => Err(must_be_error(fn_name, arg_name, "float", value)),
         }
     }
 
-    fn matches(value: &Value) -> bool {
+    fn matches(value: &'a Value) -> bool {
         matches!(value.kind(), ValueKind::Float(_))
     }
 }
@@ -159,49 +166,55 @@ impl FromValue for PyFloat {
 /// `str` argument.  Accepts `str` only — no auto-coercion (matches CPython
 /// for APIs like `open(path, mode)` that require an actual string).
 ///
-/// Stores an owned `String`; cheap to construct since builtin call boundaries
-/// already allocate.  Derefs to `&str` so callers can pass it directly to
-/// `&str`-taking APIs.
-#[derive(Debug)]
-pub(crate) struct PyStr(pub String);
+/// Stores a `Cow<'a, str>` so:
+/// - **`try_from_value`** populates `Cow::Borrowed(&'a str)` directly from
+///   the `Value`'s backing buffer (zero-copy through the call boundary).
+/// - **`#[default(...)]`** literals like `"r".into()` produce
+///   `Cow::Borrowed("r")` at `'static` (also zero-copy).
+/// - Owned strings work via `Cow::Owned(String)` for the rare case where the
+///   body needs to construct a fresh `String` as a default.
+///
+/// Derefs to `&str`, so call sites pass it to `&str`-taking APIs unchanged.
+#[derive(Debug, Clone)]
+pub(crate) struct PyStr<'a>(pub Cow<'a, str>);
 
-impl Deref for PyStr {
+impl<'a> Deref for PyStr<'a> {
     type Target = str;
     fn deref(&self) -> &str {
         &self.0
     }
 }
 
-impl AsRef<str> for PyStr {
+impl<'a> AsRef<str> for PyStr<'a> {
     fn as_ref(&self) -> &str {
         &self.0
     }
 }
 
 /// Ergonomic default-value construction: `#[default("r".into())] mode: PyStr`.
-impl From<&str> for PyStr {
-    fn from(s: &str) -> Self {
-        PyStr(s.to_string())
+impl From<&'static str> for PyStr<'static> {
+    fn from(s: &'static str) -> Self {
+        PyStr(Cow::Borrowed(s))
     }
 }
 
-impl From<String> for PyStr {
+impl From<String> for PyStr<'static> {
     fn from(s: String) -> Self {
-        PyStr(s)
+        PyStr(Cow::Owned(s))
     }
 }
 
-impl FromValue for PyStr {
+impl<'a> FromValue<'a> for PyStr<'a> {
     const PY_TYPE_NAME: &'static str = "str";
 
-    fn try_from_value(value: &Value, fn_name: &str, arg_name: &str) -> Result<Self> {
+    fn try_from_value(value: &'a Value, fn_name: &str, arg_name: &str) -> Result<Self> {
         match value.as_str() {
-            Some(s) => Ok(PyStr(s.to_string())),
+            Some(s) => Ok(PyStr(Cow::Borrowed(s))),
             None => Err(must_be_error(fn_name, arg_name, "str", value)),
         }
     }
 
-    fn matches(value: &Value) -> bool {
+    fn matches(value: &'a Value) -> bool {
         value.is_str()
     }
 }
@@ -211,7 +224,7 @@ impl FromValue for PyStr {
 /// `bool` argument.  Accepts `bool` only.  (CPython is lenient here, accepting
 /// any truthy value, but typed APIs that want strict bool are common enough
 /// to justify a separate wrapper from `PyValue`.)
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct PyBool(pub bool);
 
 impl Deref for PyBool {
@@ -228,17 +241,17 @@ impl From<bool> for PyBool {
     }
 }
 
-impl FromValue for PyBool {
+impl<'a> FromValue<'a> for PyBool {
     const PY_TYPE_NAME: &'static str = "bool";
 
-    fn try_from_value(value: &Value, fn_name: &str, arg_name: &str) -> Result<Self> {
+    fn try_from_value(value: &'a Value, fn_name: &str, arg_name: &str) -> Result<Self> {
         match value.kind() {
             ValueKind::Bool(b) => Ok(PyBool(b)),
             _ => Err(must_be_error(fn_name, arg_name, "bool", value)),
         }
     }
 
-    fn matches(value: &Value) -> bool {
+    fn matches(value: &'a Value) -> bool {
         value.is_bool()
     }
 }
@@ -247,7 +260,7 @@ impl FromValue for PyBool {
 
 /// `bytes` argument.  Stored as an Rc-shared `Vec<u8>` (matching the underlying
 /// `Opaque::Bytes` representation), so cloning is cheap.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct PyBytes(pub Rc<Vec<u8>>);
 
 impl Deref for PyBytes {
@@ -257,17 +270,17 @@ impl Deref for PyBytes {
     }
 }
 
-impl FromValue for PyBytes {
+impl<'a> FromValue<'a> for PyBytes {
     const PY_TYPE_NAME: &'static str = "bytes";
 
-    fn try_from_value(value: &Value, fn_name: &str, arg_name: &str) -> Result<Self> {
+    fn try_from_value(value: &'a Value, fn_name: &str, arg_name: &str) -> Result<Self> {
         match value.kind() {
             ValueKind::Bytes(rc) => Ok(PyBytes(Rc::clone(rc))),
             _ => Err(must_be_error(fn_name, arg_name, "bytes", value)),
         }
     }
 
-    fn matches(value: &Value) -> bool {
+    fn matches(value: &'a Value) -> bool {
         matches!(value.kind(), ValueKind::Bytes(_))
     }
 }
@@ -278,7 +291,7 @@ impl FromValue for PyBytes {
 // map / set with one method call.  No copy at construction time.
 
 /// `list` argument.  Use [`PyList::as_slice`] to read elements.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct PyList(pub Value);
 
 impl PyList {
@@ -289,10 +302,10 @@ impl PyList {
     }
 }
 
-impl FromValue for PyList {
+impl<'a> FromValue<'a> for PyList {
     const PY_TYPE_NAME: &'static str = "list";
 
-    fn try_from_value(value: &Value, fn_name: &str, arg_name: &str) -> Result<Self> {
+    fn try_from_value(value: &'a Value, fn_name: &str, arg_name: &str) -> Result<Self> {
         if Self::matches(value) {
             Ok(PyList(value.clone()))
         } else {
@@ -300,13 +313,13 @@ impl FromValue for PyList {
         }
     }
 
-    fn matches(value: &Value) -> bool {
+    fn matches(value: &'a Value) -> bool {
         value.is_list()
     }
 }
 
 /// `tuple` argument.  Use [`PyTuple::as_slice`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct PyTuple(pub Value);
 
 impl PyTuple {
@@ -315,10 +328,10 @@ impl PyTuple {
     }
 }
 
-impl FromValue for PyTuple {
+impl<'a> FromValue<'a> for PyTuple {
     const PY_TYPE_NAME: &'static str = "tuple";
 
-    fn try_from_value(value: &Value, fn_name: &str, arg_name: &str) -> Result<Self> {
+    fn try_from_value(value: &'a Value, fn_name: &str, arg_name: &str) -> Result<Self> {
         if Self::matches(value) {
             Ok(PyTuple(value.clone()))
         } else {
@@ -326,13 +339,13 @@ impl FromValue for PyTuple {
         }
     }
 
-    fn matches(value: &Value) -> bool {
+    fn matches(value: &'a Value) -> bool {
         value.is_tuple()
     }
 }
 
 /// `dict` argument.  Use [`PyDict::as_map`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct PyDict(pub Value);
 
 impl PyDict {
@@ -341,10 +354,10 @@ impl PyDict {
     }
 }
 
-impl FromValue for PyDict {
+impl<'a> FromValue<'a> for PyDict {
     const PY_TYPE_NAME: &'static str = "dict";
 
-    fn try_from_value(value: &Value, fn_name: &str, arg_name: &str) -> Result<Self> {
+    fn try_from_value(value: &'a Value, fn_name: &str, arg_name: &str) -> Result<Self> {
         if Self::matches(value) {
             Ok(PyDict(value.clone()))
         } else {
@@ -352,13 +365,13 @@ impl FromValue for PyDict {
         }
     }
 
-    fn matches(value: &Value) -> bool {
+    fn matches(value: &'a Value) -> bool {
         matches!(value.kind(), ValueKind::Dict(_))
     }
 }
 
 /// `set` argument.  Use [`PySet::as_set`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct PySet(pub Value);
 
 impl PySet {
@@ -377,10 +390,10 @@ impl PySet {
     }
 }
 
-impl FromValue for PySet {
+impl<'a> FromValue<'a> for PySet {
     const PY_TYPE_NAME: &'static str = "set";
 
-    fn try_from_value(value: &Value, fn_name: &str, arg_name: &str) -> Result<Self> {
+    fn try_from_value(value: &'a Value, fn_name: &str, arg_name: &str) -> Result<Self> {
         if Self::matches(value) {
             Ok(PySet(value.clone()))
         } else {
@@ -388,7 +401,7 @@ impl FromValue for PySet {
         }
     }
 
-    fn matches(value: &Value) -> bool {
+    fn matches(value: &'a Value) -> bool {
         matches!(value.kind(), ValueKind::Set(_))
     }
 }
@@ -397,7 +410,7 @@ impl FromValue for PySet {
 
 /// `Any` — accepts any value, no type checking.  Use when the builtin handles
 /// its own polymorphism (e.g. `repr(obj)`, `id(obj)`).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct PyValue(pub Value);
 
 impl Deref for PyValue {
@@ -407,14 +420,14 @@ impl Deref for PyValue {
     }
 }
 
-impl FromValue for PyValue {
+impl<'a> FromValue<'a> for PyValue {
     const PY_TYPE_NAME: &'static str = "object";
 
-    fn try_from_value(value: &Value, _fn_name: &str, _arg_name: &str) -> Result<Self> {
+    fn try_from_value(value: &'a Value, _fn_name: &str, _arg_name: &str) -> Result<Self> {
         Ok(PyValue(value.clone()))
     }
 
-    fn matches(_value: &Value) -> bool {
+    fn matches(_value: &'a Value) -> bool {
         true
     }
 }
@@ -427,7 +440,7 @@ impl FromValue for PyValue {
 // Use together with `#[default(None)]` in the macro signature for clean
 // "may be absent" semantics.
 
-impl<T: FromValue> FromValue for Option<T> {
+impl<'a, T: FromValue<'a>> FromValue<'a> for Option<T> {
     // Kept for trait coherence; consumers that print a parameter type for
     // an `Option<T>` should compose `T::PY_TYPE_NAME` + " or None" at the
     // call site (as `try_from_value` does below).  The const can't carry
@@ -435,7 +448,7 @@ impl<T: FromValue> FromValue for Option<T> {
     // statically-known, and we can't concat at trait-impl time.
     const PY_TYPE_NAME: &'static str = T::PY_TYPE_NAME;
 
-    fn try_from_value(value: &Value, fn_name: &str, arg_name: &str) -> Result<Self> {
+    fn try_from_value(value: &'a Value, fn_name: &str, arg_name: &str) -> Result<Self> {
         if value.is_none() {
             return Ok(None);
         }
@@ -454,7 +467,7 @@ impl<T: FromValue> FromValue for Option<T> {
         )))
     }
 
-    fn matches(value: &Value) -> bool {
+    fn matches(value: &'a Value) -> bool {
         value.is_none() || T::matches(value)
     }
 }
@@ -766,10 +779,38 @@ mod tests {
         assert_eq!(f.0, 3.14);
         let b: PyBool = true.into();
         assert!(b.0);
-        let s: PyStr = "r".into();
-        assert_eq!(s.0, "r");
-        let s2: PyStr = String::from("w").into();
-        assert_eq!(s2.0, "w");
+        let s: PyStr<'static> = "r".into();
+        assert_eq!(&*s, "r");
+        let s2: PyStr<'static> = String::from("w").into();
+        assert_eq!(&*s2, "w");
+    }
+
+    #[test]
+    fn pystr_borrows_zero_copy_from_value() {
+        // Regression for the Cow refactor: `try_from_value` must produce
+        // `Cow::Borrowed`, not `Cow::Owned`, when extracting from a
+        // `Value` — that's the whole point of the lifetime-carrying
+        // wrapper.  If a future change reverts to `s.to_string()` the
+        // assertion below catches it.
+        let v = Value::string("hello");
+        let s = PyStr::try_from_value(&v, "f", "x").unwrap();
+        assert!(
+            matches!(s.0, Cow::Borrowed(_)),
+            "PyStr should borrow from the Value, not allocate a fresh String",
+        );
+        assert_eq!(&*s, "hello");
+    }
+
+    #[test]
+    fn pystr_default_via_into_is_zero_copy() {
+        // `"r".into()` (used by `#[default("r".into())]`) creates a
+        // `Cow::Borrowed(&'static str)` — also zero-copy.  Symmetric with
+        // the Value-extraction path above.
+        let s: PyStr<'static> = "r".into();
+        assert!(
+            matches!(s.0, Cow::Borrowed(_)),
+            "PyStr::from(&'static str) should produce Cow::Borrowed",
+        );
     }
 
     // ── Error messages — CPython parity.
