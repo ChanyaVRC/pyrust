@@ -500,25 +500,67 @@ pyrust_module! {
     /// CPython: enumerate(iterable, start=0) — enumerate iterator.
     /// <https://docs.python.org/3/library/functions.html#enumerate>
     fn enumerate(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.is_empty() || args.len() > 2 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes 1 or 2 arguments")));
-        }
-        let start = if args.len() == 2 {
-            match args[1].value.kind() {
-                ValueKind::Int(n) => n,
-                _ => return Err(PyError::Runtime(format!(
-                    "{FN_NAME}() start argument must be an integer",
-                ))),
+        // Parse `iterable` and `start` (positional or keyword). CPython's
+        // signature is `enumerate(iterable, start=0)`.
+        let mut iterable: Option<Value> = None;
+        let mut start_val: Option<Value> = None;
+        for (i, arg) in args.iter().enumerate() {
+            match arg.name.as_deref() {
+                None => match i {
+                    0 => iterable = Some(arg.value.clone()),
+                    1 => start_val = Some(arg.value.clone()),
+                    _ => return Err(PyError::named(
+                        "TypeError",
+                        format!("{FN_NAME}() takes at most 2 arguments ({} given)", args.len()),
+                    )),
+                },
+                Some("iterable") => {
+                    if iterable.is_some() {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!("{FN_NAME}() got multiple values for argument 'iterable'"),
+                        ));
+                    }
+                    iterable = Some(arg.value.clone());
+                }
+                Some("start") => {
+                    if start_val.is_some() {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!("{FN_NAME}() got multiple values for argument 'start'"),
+                        ));
+                    }
+                    start_val = Some(arg.value.clone());
+                }
+                Some(k) => return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() got an unexpected keyword argument '{k}'"),
+                )),
             }
-        } else {
-            0i64
+        }
+        let iterable = iterable.ok_or_else(|| PyError::named(
+            "TypeError",
+            format!("{FN_NAME}() missing required argument: 'iterable'"),
+        ))?;
+        let start = match start_val {
+            None => 0i64,
+            Some(v) => match v.kind() {
+                ValueKind::Int(n) => n,
+                ValueKind::Bool(b) => b as i64,
+                _ => return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "'{}' object cannot be interpreted as an integer",
+                        value_type_name_str(&v),
+                    ),
+                )),
+            },
         };
         // Pass the source Value directly — `iter_helpers` materialises
         // lazily on first iter_next so side effects of e.g. `open()`
         // happen at iteration start, not at construction.
         Ok(pyrust_builtins::iter_helpers::enumerate(
-            args[0].value.clone(),
+            iterable,
             start,
         ))
     }
