@@ -1,7 +1,17 @@
 use indexmap::IndexMap;
 use pyrust_core::{PyError, PyKey, Result, Value, ValueKind};
 
-/// Canonical list of method names dispatched by `call`.
+/// Canonical list of method names exposed for `dict`.
+///
+/// **Note** (#425): of these, `get`, `pop`, `setdefault`, and `__contains__`
+/// are NOT dispatched by `call` below — `Interpreter::call_dict_method`
+/// (`crates/pyrust/src/interpreter/runtime/expr.rs`) intercepts those four
+/// before delegating, because they need to fire user-defined `__hash__` /
+/// `__eq__` (#368) which an interpreter-free dispatcher can't do.
+/// `has_method` still must report them (instance-attr `d.pop` resolution
+/// goes through `builtin_has_method` → this list), so they stay listed
+/// here.  The unreachable function bodies that used to live below them in
+/// this file are gone (only the `match` arms in `call` were dead — see #425).
 pub const METHODS: &[&str] = &[
     "get",
     "keys",
@@ -34,9 +44,6 @@ pub fn call(method: &str, receiver: &Value, args: Vec<Value>) -> Result<Value> {
         )
     };
     match method {
-        "get" => receiver
-            .dict_with(|dict| get(dict, args))
-            .ok_or_else(not_dict)?,
         "keys" => receiver
             .dict_with(|dict| Value::list(dict.keys().cloned().map(key_to_value).collect()))
             .ok_or_else(not_dict),
@@ -74,17 +81,11 @@ pub fn call(method: &str, receiver: &Value, args: Vec<Value>) -> Result<Value> {
                 .ok_or_else(not_dict)?;
             Ok(Value::none())
         }
-        "pop" => receiver
-            .dict_with_mut(|dict| pop(dict, args))
-            .ok_or_else(not_dict)?,
         "popitem" => receiver.dict_with_mut(popitem).ok_or_else(not_dict)?,
         "clear" => {
             receiver.dict_clear()?;
             Ok(Value::none())
         }
-        "setdefault" => receiver
-            .dict_with_mut(|dict| setdefault(dict, args))
-            .ok_or_else(not_dict)?,
         "copy" => receiver
             .dict_with(|dict| Value::dict(dict.clone()))
             .ok_or_else(not_dict),
@@ -175,56 +176,6 @@ fn snapshot_update_arg(receiver: &Value, args: &[Value]) -> Result<Vec<(PyKey, V
     Ok(out)
 }
 
-fn get(dict: &IndexMap<PyKey, Value>, args: Vec<Value>) -> Result<Value> {
-    let mut iter = args.into_iter();
-    let key = iter.next().ok_or_else(|| {
-        PyError::named(
-            "TypeError",
-            "get expected at least 1 argument, got 0".to_string(),
-        )
-    })?;
-    let default = iter.next().unwrap_or_else(Value::none);
-    let pk = key.to_key().ok_or_else(|| {
-        PyError::named(
-            "TypeError",
-            format!(
-                "unhashable type: '{}'",
-                pyrust_core::builtin_type_name(&key)
-            ),
-        )
-    })?;
-    Ok(dict.get(&pk).cloned().unwrap_or(default))
-}
-
-fn pop(dict: &mut IndexMap<PyKey, Value>, args: Vec<Value>) -> Result<Value> {
-    let mut iter = args.into_iter();
-    let key = iter.next().ok_or_else(|| {
-        PyError::named(
-            "TypeError",
-            "pop expected at least 1 argument, got 0".to_string(),
-        )
-    })?;
-    let pk = key.to_key().ok_or_else(|| {
-        PyError::named(
-            "TypeError",
-            format!(
-                "unhashable type: '{}'",
-                pyrust_core::builtin_type_name(&key)
-            ),
-        )
-    })?;
-    match dict.shift_remove(&pk) {
-        Some(v) => Ok(v),
-        None => {
-            if let Some(default) = iter.next() {
-                Ok(default)
-            } else {
-                Err(PyError::named("KeyError", key.repr()))
-            }
-        }
-    }
-}
-
 fn popitem(dict: &mut IndexMap<PyKey, Value>) -> Result<Value> {
     match dict.pop() {
         Some((k, v)) => Ok(Value::tuple(vec![key_to_value(k), v])),
@@ -233,27 +184,6 @@ fn popitem(dict: &mut IndexMap<PyKey, Value>) -> Result<Value> {
             "'popitem(): dictionary is empty'".to_string(),
         )),
     }
-}
-
-fn setdefault(dict: &mut IndexMap<PyKey, Value>, args: Vec<Value>) -> Result<Value> {
-    let mut iter = args.into_iter();
-    let key = iter.next().ok_or_else(|| {
-        PyError::named(
-            "TypeError",
-            "setdefault expected at least 1 argument, got 0".to_string(),
-        )
-    })?;
-    let default = iter.next().unwrap_or_else(Value::none);
-    let pk = key.to_key().ok_or_else(|| {
-        PyError::named(
-            "TypeError",
-            format!(
-                "unhashable type: '{}'",
-                pyrust_core::builtin_type_name(&key)
-            ),
-        )
-    })?;
-    Ok(dict.entry(pk).or_insert(default).clone())
 }
 
 fn key_to_value(k: PyKey) -> Value {
