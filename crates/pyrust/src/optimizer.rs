@@ -320,10 +320,17 @@ fn pass_cmpjump_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
 /// which path was taken at runtime, and also at loop headers (targets of
 /// backward jumps) to avoid incorrectly folding loop conditions.
 fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn> {
-    // Pre-pass: collect every instruction index that is the target of a backward
-    // jump.  At these loop headers the known-constant map must be cleared so we
-    // do not fold values that differ across iterations.
-    let mut loop_headers: HashSet<usize> = HashSet::new();
+    // Pre-pass: collect every instruction index that is the target of *any*
+    // jump (forward or backward).  At every such basic-block boundary the
+    // known-constant map must be cleared, otherwise a value that was assigned
+    // along one incoming path can be incorrectly propagated to the merge
+    // instruction — e.g. the `then`-arm of a ternary unconditionally jumps
+    // over the `else`-arm; at the merge point the destination register's true
+    // value depends on which arm ran, but a linear forward scan would see the
+    // `else`-arm's write as the most recent and fold the wrong constant
+    // downstream.  Loop headers (backward-jump targets) are a special case of
+    // the same problem.
+    let mut bb_starts: HashSet<usize> = HashSet::new();
     for (i, insn) in insns.iter().enumerate() {
         let k: Option<i32> = match insn {
             Insn::Jump(k) => Some(*k),
@@ -340,11 +347,11 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn> {
             | Insn::SetupExcept(k) => Some(*k),
             _ => None,
         };
-        if let Some(k) = k
-            && k < 0
-        {
+        if let Some(k) = k {
             let target = (i as i64 + 1 + k as i64) as usize;
-            loop_headers.insert(target);
+            if target < insns.len() {
+                bb_starts.insert(target);
+            }
         }
     }
 
@@ -352,7 +359,7 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn> {
     let mut out = Vec::with_capacity(insns.len());
 
     for (i, insn) in insns.into_iter().enumerate() {
-        if loop_headers.contains(&i) {
+        if bb_starts.contains(&i) {
             known.clear();
         }
         match insn {
@@ -1363,9 +1370,27 @@ fn pass_not_invert(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
 /// instruction that writes `r`?  This is strictly more precise than
 /// `reg_is_read_in` for dead-store analysis: it stops as soon as it sees a
 /// write to `r`, because that write kills any previous value.
+///
+/// ## Control-flow caveat
+///
+/// The scan walks `insns` linearly.  Any control-flow instruction (jump,
+/// branch, raise, return, exception setup, yield, tail-call) is treated as
+/// "read" — i.e. conservatively keep the candidate store.  This is required
+/// for correctness when the candidate store sits inside one arm of a
+/// branch (e.g. a ternary's `then`-arm): the unconditional jump that ends
+/// the arm skips the other arm's write, so the "next write" found by a
+/// linear scan does not actually kill the candidate value along the taken
+/// execution path.  Reads further down (after the branch merge) would
+/// otherwise see an unset register.
 fn reg_is_read_before_next_write(insns: &[Insn], r: u32) -> bool {
     for insn in insns {
         if insn_reads_reg(insn, r) {
+            return true;
+        }
+        // Any control-flow disruption invalidates the linear "next write
+        // kills the value" reasoning — conservatively report a read so the
+        // candidate store is preserved.
+        if is_control_flow(insn) {
             return true;
         }
         // Stop at the next write to r (the old value is dead from here on).
@@ -1379,6 +1404,39 @@ fn reg_is_read_before_next_write(insns: &[Insn], r: u32) -> bool {
         }
     }
     false
+}
+
+/// Does `insn` change control flow non-trivially?  Used by
+/// `reg_is_read_before_next_write` to bail before incorrectly concluding
+/// that a later write kills an earlier store along all paths.
+fn is_control_flow(insn: &Insn) -> bool {
+    use Insn::*;
+    matches!(
+        insn,
+        Jump(..)
+            | JumpIfFalse(..)
+            | JumpIfTrue(..)
+            | CmpJumpIfFalse(..)
+            | CmpJumpIfTrue(..)
+            | CmpJumpIfFalseConst(..)
+            | CmpJumpIfTrueConst(..)
+            | ForIter(..)
+            | ForCountReg(..)
+            | ForCountConst(..)
+            | ForCountConstInline(..)
+            | Return(..)
+            | ReturnNone
+            | RaiseAssert(..)
+            | RaiseValue(..)
+            | RaiseFrom(..)
+            | RaiseReRaise
+            | SetupExcept(..)
+            | PopExcept
+            | EndExcept
+            | MatchExcept(..)
+            | Yield { .. }
+            | TailCall { .. }
+    )
 }
 
 /// Remove writes to temp registers whose stored value is never read before
@@ -2688,6 +2746,40 @@ mod tests {
     }
 
     #[test]
+    fn const_fold_clears_at_forward_jump_target() {
+        use crate::ast::BinaryOp;
+        use crate::value::Value;
+        // Models the post-ternary merge point.  The `then`-arm writes
+        // r2 = consts[0]=10 and jumps over the `else`-arm.  At the merge
+        // instruction (index 3, the Jump target) the known-constant map
+        // must be cleared — otherwise a linear forward scan would see the
+        // else-arm's write (r2 = consts[1]=20) as the most recent and fold
+        // BinOpConst on r2 to a constant, producing a stale result on the
+        // taken-then path.
+        //
+        //   [0] JumpIfFalse(0, 2)              # if !cond, skip to [3]
+        //   [1] LoadConst(2, 0)                # then: r2 = 10
+        //   [2] Jump(1)                        # → [4]   (target of forward jump = [4])
+        //   [3] LoadConst(2, 1)                # else: r2 = 20
+        //   [4] BinOpConst(3, 2, Add, 2)       # consts[2] = 1  → must not fold
+        //   [5] Return(3)
+        let mut consts = vec![Value::int(10), Value::int(20), Value::int(1)];
+        let insns = vec![
+            Insn::JumpIfFalse(0, 2),
+            Insn::LoadConst(2, 0),
+            Insn::Jump(1),
+            Insn::LoadConst(2, 1),
+            Insn::BinOpConst(3, 2, BinaryOp::Add, 2),
+            Insn::Return(3),
+        ];
+        let out = pass_const_fold(insns, &mut consts);
+        assert!(
+            matches!(out[4], Insn::BinOpConst(3, 2, BinaryOp::Add, 2)),
+            "merge point must clear known map; BinOpConst on a phi'd value must not fold",
+        );
+    }
+
+    #[test]
     fn const_fold_does_not_fold_loop_condition() {
         use crate::ast::BinaryOp;
         use crate::value::Value;
@@ -3452,6 +3544,37 @@ mod tests {
         let out = pass_dead_store_elim(insns, 2);
         assert_eq!(out.len(), 3, "dead Move should be removed");
         assert!(matches!(out[1], Insn::BinOp(3, 2, BinaryOp::Add, 2)));
+    }
+
+    #[test]
+    fn dse_keeps_then_branch_write_across_jump() {
+        // Issue #361: a ternary's `then`-arm writes a temp, then jumps over the
+        // `else`-arm's write to the same temp.  A purely linear scan would see
+        // the else-arm's LoadConst as the "next write" and incorrectly delete
+        // the then-arm's store — leaving the temp unset on the taken path.
+        //
+        //   [0] JumpIfFalse(0, 2)     # if !c, skip to [3]
+        //   [1] LoadConst(2, 0)       # then-arm: r2 = consts[0]
+        //   [2] Jump(1)               # skip [3]
+        //   [3] LoadConst(2, 1)       # else-arm: r2 = consts[1]
+        //   [4] Return(2)
+        //
+        // The store at [1] is REACHABLE and consumed by [4] along the taken
+        // path (c truthy).  DSE must keep it.
+        let insns = vec![
+            Insn::JumpIfFalse(0, 2),
+            Insn::LoadConst(2, 0), // <-- must NOT be removed
+            Insn::Jump(1),
+            Insn::LoadConst(2, 1),
+            Insn::Return(2),
+        ];
+        let out = pass_dead_store_elim(insns, 2);
+        assert_eq!(
+            out.len(),
+            5,
+            "the then-arm's LoadConst must survive — its value is read on the taken path",
+        );
+        assert!(matches!(out[1], Insn::LoadConst(2, 0)));
     }
 
     // ── pass_exit_inline ─────────────────────────────────────────────────────
