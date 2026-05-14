@@ -832,7 +832,10 @@ pub(crate) fn missing_arg<T>(fn_name: &str, arg_name: &str) -> Result<T> {
 ///
 /// `actuals` is the type-name list of the *call site*'s args (e.g.
 /// `["str", "int"]`).
-pub(crate) fn no_overload_matched<T>(fn_name: &str, actuals: &[&str]) -> Result<T> {
+pub(crate) fn no_overload_matched<T>(
+    fn_name: &str,
+    actuals: &[std::borrow::Cow<'static, str>],
+) -> Result<T> {
     let joined = actuals
         .iter()
         .map(|s| format!("'{s}'"))
@@ -1334,7 +1337,8 @@ mod tests {
     // usability regression for end users.
     #[test]
     fn no_overload_matched_single_arg() {
-        let err = no_overload_matched::<()>("abs", &["str"]).unwrap_err();
+        let err =
+            no_overload_matched::<()>("abs", &[std::borrow::Cow::Borrowed("str")]).unwrap_err();
         let msg = err_msg(&err);
         assert_eq!(err_class(&err), "TypeError");
         assert!(
@@ -1355,7 +1359,14 @@ mod tests {
 
     #[test]
     fn no_overload_matched_multi_arg() {
-        let err = no_overload_matched::<()>("pow", &["int", "str"]).unwrap_err();
+        let err = no_overload_matched::<()>(
+            "pow",
+            &[
+                std::borrow::Cow::Borrowed("int"),
+                std::borrow::Cow::Borrowed("str"),
+            ],
+        )
+        .unwrap_err();
         let msg = err_msg(&err);
         assert!(
             msg.contains("pow(): unsupported argument type(s): ('int', 'str')"),

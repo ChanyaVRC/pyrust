@@ -112,8 +112,10 @@ fn eval_binary_float(op: BinaryOp, a: f64, b: f64) -> Option<Result<Value>> {
 /// Returns the Python type name string for a `Value`, used in error messages.
 ///
 /// Thin alias for [`pyrust_core::builtin_type_name`] — kept locally so the
-/// many interpreter call sites stay short.
-pub(crate) fn value_type_name_str(v: &Value) -> &'static str {
+/// many interpreter call sites stay short.  Returns `Cow<'static, str>` so
+/// `PyInstance` can report its runtime class name without a leak; static
+/// names stay zero-allocation.
+pub(crate) fn value_type_name_str(v: &Value) -> std::borrow::Cow<'static, str> {
     pyrust_core::builtin_type_name(v)
 }
 
