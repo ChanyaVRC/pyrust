@@ -445,11 +445,14 @@ fn lambda_captures_in_expr(
 }
 
 /// Walk a class body and record names bound at the top level in their
-/// *textual* order — the order CPython preserves for `vars(C)` /
-/// `C.__dict__`.  Only the assigns / defs / class-defs that contribute
-/// to the class namespace are tracked.  Names not in `body_local` are
-/// skipped (they're declared `global` / `nonlocal` and don't become
-/// class-dict entries).
+/// *textual* order — used only to assign **register slot numbers** for
+/// the class-body sub-compiler.  Slot order has **no** influence on
+/// class-namespace insertion order any more (`vars(C)` follows runtime
+/// stores via `Insn::RecordClassStore`); we keep this textual walk so
+/// register assignments remain deterministic across runs (HashSet
+/// iteration order is randomised).  Names not in `body_local` are
+/// skipped (they're declared `global` / `nonlocal` and don't get a
+/// class-body slot).
 fn collect_class_body_names_textual(
     body: &[Stmt],
     ordered: &mut Vec<String>,
@@ -2285,6 +2288,13 @@ struct Compiler {
     fn_protos: Vec<FnProto>,
     /// Names of pure (side-effect-free) functions defined in this scope.
     pure_locals: HashSet<String>,
+    /// True when this Compiler is producing the body of a `class` block.
+    /// In that mode, every store into a top-level class-body local is
+    /// instrumented with `Insn::RecordClassStore(slot)` so the VM can
+    /// recover **runtime** insertion order for `vars(C)` / `C.__dict__`.
+    /// CPython guarantees class-namespace order follows the order names
+    /// are first bound at runtime — not source-walk / slot-allocation order.
+    is_class_body: bool,
 }
 
 impl Compiler {
@@ -2327,6 +2337,27 @@ impl Compiler {
             def_set: def_bound_mask,
             fn_protos: Vec::new(),
             pure_locals: HashSet::new(),
+            is_class_body: false,
+        }
+    }
+
+    /// If this compiler is producing a class body and `reg` is one of the
+    /// class-body's local slots, emit a `RecordClassStore(reg)` insn so the
+    /// VM can append the slot to the class-namespace store-order list.
+    /// No-op outside class bodies and for temp / cell registers — keeping
+    /// regular function compilation untouched.
+    fn maybe_record_class_store(&mut self, reg: Reg) {
+        if self.is_class_body && reg < self.base_temp {
+            self.emit(Insn::RecordClassStore(reg));
+        }
+    }
+
+    /// Companion to `maybe_record_class_store`: emit a `RecordClassDel`
+    /// after a `DeleteLocal` so the slot is removed from the class-namespace
+    /// store-order list while preserving the order of remaining entries.
+    fn maybe_record_class_del(&mut self, reg: Reg) {
+        if self.is_class_body && reg < self.base_temp {
+            self.emit(Insn::RecordClassDel(reg));
         }
     }
 
@@ -2663,6 +2694,12 @@ impl Compiler {
             if src != reg {
                 self.emit(Insn::Move(reg, src));
             }
+            // Record the runtime store for class-namespace ordering. We emit
+            // even when `src == reg` (no Move emitted) because the store
+            // still semantically happened — e.g. `for i in range(3):` writes
+            // `i` directly via `ForIter(reg, ...)` and then `compile_for`
+            // calls back through here for synthetic stores.
+            self.maybe_record_class_store(reg);
         } else {
             let idx = self.intern_name(name);
             self.emit(Insn::StoreGlobal(idx, src));
@@ -2895,6 +2932,10 @@ impl Compiler {
             AssignTarget::Name(name) => {
                 if let Some(reg) = self.local_reg(name) {
                     self.compile_expr_into(expr, reg);
+                    // Class-body `x = expr` is the common case; record the store
+                    // for class-namespace insertion order.  (Outside class
+                    // bodies this is a no-op — see `maybe_record_class_store`.)
+                    self.maybe_record_class_store(reg);
                 } else {
                     // global / nonlocal / cell var → go through env
                     let src = self.compile_expr(expr);
@@ -2990,6 +3031,7 @@ impl Compiler {
                                 if *src_tmp != dst {
                                     self.emit(Insn::Move(dst, *src_tmp));
                                 }
+                                self.maybe_record_class_store(dst);
                             }
                         }
                         self.next_temp = saved_next;
@@ -3022,6 +3064,7 @@ impl Compiler {
                         AssignTarget::Name(name) => {
                             if let Some(reg) = self.local_reg(name) {
                                 self.emit(Insn::Move(reg, base + i));
+                                self.maybe_record_class_store(reg);
                             } else {
                                 let name_idx = self.intern_name(name);
                                 self.emit(Insn::StoreGlobal(name_idx, base + i));
@@ -3094,6 +3137,7 @@ impl Compiler {
                     if reg != src_reg {
                         self.emit(Insn::Move(reg, src_reg));
                     }
+                    self.maybe_record_class_store(reg);
                 } else {
                     let name_idx = self.intern_name(name);
                     self.emit(Insn::StoreGlobal(name_idx, src_reg));
@@ -3125,6 +3169,7 @@ impl Compiler {
             AssignTarget::Name(name) => {
                 if let Some(reg) = self.local_reg(name) {
                     self.emit_aug_binop(reg, op, expr);
+                    self.maybe_record_class_store(reg);
                 } else {
                     // cell / global: load, compute, store
                     let name_idx = self.intern_name(name);
@@ -3872,6 +3917,11 @@ impl Compiler {
         // ── 3. Body ──────────────────────────────────────────────────────
         //    `continue` → loop_start (ForCount does the increment automatically)
         self.mark_def(var_reg);
+        // In a class body, the iteration variable becomes a class attr — but only
+        // when at least one iteration actually runs.  ForCount* falls through to
+        // the body only after the bounds test passes, so emitting RecordClassStore
+        // here gives us the correct conditional semantics for free.
+        self.maybe_record_class_store(var_reg);
         self.loops.push(LoopCtx {
             break_patches: Vec::new(),
             continue_target: Some(loop_start),
@@ -3938,12 +3988,16 @@ impl Compiler {
         let exit_jmp = self.emit(Insn::ForIter(for_dst, iter_slot, 0));
         match target {
             AssignTarget::Name(name) => {
-                if self.local_reg(name).is_none() {
+                if let Some(reg) = self.local_reg(name) {
+                    // local case: for_dst == reg, already written — no Move needed.
+                    // Still record the store so class-body for-loops register the
+                    // iteration variable in `vars(C)`.
+                    self.maybe_record_class_store(reg);
+                } else {
                     let name_idx = self.intern_name(name);
                     self.emit(Insn::StoreGlobal(name_idx, for_dst));
                     self.free_temp(for_dst);
                 }
-                // local case: for_dst == var_reg, already written — no Move needed
             }
             AssignTarget::Tuple(targets) => {
                 let star_pos = targets
@@ -3998,6 +4052,7 @@ impl Compiler {
                             AssignTarget::Name(name) => {
                                 if let Some(reg) = self.local_reg(name) {
                                     self.emit(Insn::Move(reg, base + i));
+                                    self.maybe_record_class_store(reg);
                                 } else {
                                     let name_idx = self.intern_name(name);
                                     self.emit(Insn::StoreGlobal(name_idx, base + i));
@@ -4127,6 +4182,7 @@ impl Compiler {
             Expr::Var(name) => {
                 if let Some(reg) = self.local_reg(name) {
                     self.emit(Insn::DeleteLocal(reg));
+                    self.maybe_record_class_del(reg);
                 } else {
                     let name_idx = self.intern_name(name);
                     self.emit(Insn::DeleteName(name_idx));
@@ -4426,13 +4482,15 @@ impl Compiler {
         let empty_nonlocal: Rc<HashSet<String>> = Rc::new(HashSet::new());
         let body_local =
             crate::interpreter::collect_local_names(&[], body, &empty_global, &empty_nonlocal);
-        // Assign slot numbers in *textual* order so the MakeClass instruction
-        // can iterate `local_index` by slot and materialise `attrs` in
-        // definition order — CPython guarantees `vars(C)` preserves the order
-        // names were first bound in the class body. `body_local` is a HashSet
-        // and its iteration order is random, so we walk the body separately
-        // and only fall back to `body_local` for any names HashSet has that
-        // we didn't pick up textually.
+        // Allocate a register slot for every potential class-body local.
+        // Slot order is **not** used to encode class-namespace insertion
+        // order any more — the order CPython exposes via `vars(C)` is the
+        // order stores actually executed at runtime, not source-walk order.
+        // Each store now emits `Insn::RecordClassStore(slot)` and the VM
+        // builds the attrs dict from that runtime trace inside `MakeClass`.
+        // We still walk the body textually here so register numbers stay
+        // stable across runs (HashSet iteration order is randomised, which
+        // would otherwise cause spurious bytecode diffs).
         let mut ordered: Vec<String> = Vec::with_capacity(body_local.len());
         let mut seen: HashSet<String> = HashSet::new();
         collect_class_body_names_textual(body, &mut ordered, &mut seen, &body_local);
@@ -4449,6 +4507,7 @@ impl Compiler {
         let cell_vars = collect_cell_vars(body, &body_index_rc);
 
         let mut sub = Compiler::new(Rc::clone(&body_index_rc), 0, cell_vars);
+        sub.is_class_body = true;
         sub.compile_block(body);
         // Add implicit ReturnNone at end of class body
         sub.emit(Insn::ReturnNone);

@@ -3,8 +3,9 @@
 # CPython 3.7+ guarantees every dict — including `__dict__` of class
 # instances and class objects — iterates in insertion order.  pyrust
 # previously stored attrs in `HashMap`, which produced non-deterministic
-# orderings.  Switching the underlying store to `IndexMap` (and emitting
-# class-body slots in textual order) is what this test pins.
+# orderings.  Switching the underlying store to `IndexMap` (with the class
+# dict driven by **runtime stores** via `Insn::RecordClassStore` — not by
+# a source-order walk) is what this test pins.
 
 # ── Instance attrs assigned directly ────────────────────────────────────
 class C:
@@ -60,7 +61,9 @@ e.s = 4
 del e.q
 print(list(vars(e).keys()))                 # ['p', 'r', 's']
 
-# ── `**obj.__dict__` splat into another dict preserves order ────────────
+# ── `**vars(obj)` splat into another dict preserves order ─────────────
+# pyrust does not expose `obj.__dict__` as an attribute yet — `vars()` is
+# the documented public accessor for the same dict, so we exercise that.
 class F:
     pass
 
@@ -87,3 +90,50 @@ class G:
 # names match the textual order of the class body.
 keys = list(vars(G).keys())
 print([k for k in keys if k in {"a", "m", "b", "n"}])  # ['a', 'm', 'b', 'n']
+
+
+# ── Conditional branch — only the executed branch contributes ───────────
+# The compiler used to pre-allocate slots by walking the body textually, so
+# names from a never-executed `if False:` branch were inserted into the
+# class dict ahead of names from the branch that actually ran.  After the
+# Copilot fix, insertion order follows runtime stores, so the dead branch
+# leaves no trace.
+class C1:
+    if False:
+        b = 1
+    else:
+        a = 1
+    b = 2
+
+print([k for k in vars(C1).keys() if not k.startswith("__")])  # ['a', 'b']
+
+# ── Loop in class body — first store wins on order, last store wins on value ──
+# The for-loop iteration variable `i` is also a class-body local — its
+# first stored value (from iteration 0) anchors its position in the dict;
+# subsequent iterations update the value but not the order.
+class C2:
+    for i in range(3):
+        x = i
+    y = 99
+
+print([k for k in vars(C2).keys() if not k.startswith("__")])  # ['i', 'x', 'y']
+
+# ── `del` removes the entry and preserves the order of remaining keys ──
+class C3:
+    a = 1
+    b = 2
+    c = 3
+    del b
+
+print([k for k in vars(C3).keys() if not k.startswith("__")])  # ['a', 'c']
+
+# ── Re-storing a name does NOT bump it to the end ───────────────────────
+# CPython IndexMap semantics: updating an existing key keeps its position;
+# only the *first* store determines order.
+class C5:
+    a = 1
+    b = 2
+    a = 3   # update — `a` keeps its first position
+    c = 4
+
+print([k for k in vars(C5).keys() if not k.startswith("__")])  # ['a', 'b', 'c']
