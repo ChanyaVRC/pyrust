@@ -31,7 +31,6 @@
 // Reference: <https://docs.python.org/3/library/functools.html>
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::error::{PyError, Result};
@@ -559,7 +558,7 @@ fn module_class(name: &str) -> Option<Rc<RefCell<crate::value::PyClass>>> {
 /// Construct a `PyInstance` of class `name` with the supplied attrs,
 /// bypassing `__init__`.  Used by the LRU and wraps helpers below to
 /// seed private state without going through a public constructor.
-fn make_instance(name: &str, attrs: HashMap<String, Value>) -> Value {
+fn make_instance(name: &str, attrs: IndexMap<String, Value>) -> Value {
     match module_class(name) {
         Some(class) => Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs }))),
         // "Shouldn't happen" really means "would indicate a macro/build
@@ -737,7 +736,7 @@ fn insert_cache(
 /// Construct a `_lru_cache_wrapper` instance seeded with `func` /
 /// `maxsize` / `typed`.
 fn make_lru_wrapper(func: Value, maxsize: Option<i64>, typed: bool) -> Value {
-    let mut attrs: HashMap<String, Value> = HashMap::new();
+    let mut attrs: IndexMap<String, Value> = IndexMap::new();
     attrs.insert("_func".to_string(), func);
     attrs.insert(
         "_maxsize".to_string(),
@@ -752,7 +751,7 @@ fn make_lru_wrapper(func: Value, maxsize: Option<i64>, typed: bool) -> Value {
 /// Construct a `_lru_cache_factory` instance — the decorator returned
 /// by `lru_cache(maxsize=N)` / `lru_cache()`.
 fn make_lru_factory(maxsize: Option<i64>, typed: bool) -> Value {
-    let mut attrs: HashMap<String, Value> = HashMap::new();
+    let mut attrs: IndexMap<String, Value> = IndexMap::new();
     attrs.insert(
         "_maxsize".to_string(),
         maxsize.map_or_else(Value::none, Value::int),
@@ -764,14 +763,14 @@ fn make_lru_factory(maxsize: Option<i64>, typed: bool) -> Value {
 // ── wraps helpers ────────────────────────────────────────────────────────────
 
 fn make_wraps_partial(name: Value, doc: Value) -> Value {
-    let mut attrs: HashMap<String, Value> = HashMap::new();
+    let mut attrs: IndexMap<String, Value> = IndexMap::new();
     attrs.insert("__wraps_name".to_string(), name);
     attrs.insert("__wraps_doc".to_string(), doc);
     make_instance("_wraps_partial", attrs)
 }
 
 fn make_wrapper_attrs(func: Value, name: Value, doc: Value) -> Value {
-    let mut attrs: HashMap<String, Value> = HashMap::new();
+    let mut attrs: IndexMap<String, Value> = IndexMap::new();
     attrs.insert("__wraps_func".to_string(), func);
     // Stash the orig's name/doc under their dunder forms so
     // `wrapper.__name__` / `wrapper.__doc__` hit the instance-attrs

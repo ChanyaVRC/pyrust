@@ -415,7 +415,10 @@ impl Interpreter {
                         Ok(())
                     };
                 }
-                instance.borrow_mut().attrs.remove(name);
+                // `shift_remove` keeps the remaining entries in their
+                // original insertion order so `vars(obj)` after `del obj.x`
+                // still matches CPython's stable ordering contract.
+                instance.borrow_mut().attrs.shift_remove(name);
                 Ok(())
             }
             _ => Err(PyError::Runtime(

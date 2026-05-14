@@ -183,7 +183,7 @@ thread_local! {
     static OBJECT_CLASS: Rc<RefCell<PyClass>> = Rc::new(RefCell::new(PyClass {
         name: "object".to_string(),
         base: None,
-        attrs: HashMap::new(),
+        attrs: IndexMap::new(),
     }));
 }
 
@@ -336,7 +336,7 @@ pub(crate) fn is_exception_class(class: &Rc<RefCell<PyClass>>) -> bool {
 }
 
 pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value>) -> Value {
-    let mut attrs = HashMap::new();
+    let mut attrs = IndexMap::new();
     attrs.insert("args".to_string(), Value::list(args));
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
@@ -345,14 +345,14 @@ fn install_exception_builtins(env: &EnvRef) {
     let exception = Rc::new(RefCell::new(PyClass {
         name: "Exception".to_string(),
         base: None,
-        attrs: HashMap::new(),
+        attrs: IndexMap::new(),
     }));
 
     let make_child = |name: &str| {
         Rc::new(RefCell::new(PyClass {
             name: name.to_string(),
             base: Some(Rc::clone(&exception)),
-            attrs: HashMap::new(),
+            attrs: IndexMap::new(),
         }))
     };
 
@@ -381,7 +381,7 @@ fn install_exception_builtins(env: &EnvRef) {
     let generator_exit = Rc::new(RefCell::new(PyClass {
         name: "GeneratorExit".to_string(),
         base: None,
-        attrs: HashMap::new(),
+        attrs: IndexMap::new(),
     }));
 
     let mut module = env.borrow_mut();

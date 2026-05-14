@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 
+use indexmap::IndexMap;
 use smallvec::smallvec;
 
 use crate::ast::{AssignTarget, BinaryOp, CallArg, CmpOp, Expr, Stmt, UnaryOp};
@@ -36,6 +37,12 @@ pub struct Interpreter {
     /// Reusable scratch buffer for building fn_cache probe keys — avoids a
     /// per-probe heap allocation in CallMemo's cache-hit path.
     key_scratch: Vec<crate::value::PyKey>,
+    /// Stack of class-namespace store-order lists, pushed by `MakeClass` before
+    /// running a class body and popped after.  Each entry tracks the slot numbers
+    /// for class-body locals in the **order stores actually executed** at
+    /// runtime — CPython's `__dict__` ordering rule.  A stack (not a single Vec)
+    /// supports nested `class A: class B: ...` bodies cleanly.
+    pub(crate) class_store_order: Vec<Vec<u32>>,
 }
 
 /// Thin wrapper around `iter_values` matching pyrust-core's `IterValuesFn`
@@ -63,6 +70,7 @@ impl Default for Interpreter {
             spec_cache: HashMap::new(),
             call_arg_buf: Vec::new(),
             key_scratch: Vec::new(),
+            class_store_order: Vec::new(),
         }
     }
 }

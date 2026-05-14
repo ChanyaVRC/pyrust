@@ -781,7 +781,9 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | BinOpConst(_, s, _, _)
         | CmpJumpIfFalseConst(s, _, _, _)
         | CmpJumpIfTrueConst(s, _, _, _)
-        | MatchExcept(s, _) => *s == r,
+        | MatchExcept(s, _)
+        | RecordClassStore(s)
+        | RecordClassDel(s) => *s == r,
 
         // Two source registers.
         BinOp(_, a, _, b)
@@ -1264,6 +1266,8 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | ListAppend(..)
         | ListExtend(..)
         | DictUpdate(..)
+        | RecordClassStore(..)
+        | RecordClassDel(..)
         | TailCall { .. } => {}
     }
 }

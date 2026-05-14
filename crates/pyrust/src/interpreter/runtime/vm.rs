@@ -1707,13 +1707,36 @@ impl Interpreter {
                     };
                     let num_class_regs = class_code.num_regs as usize;
                     let mut class_regs: RegsBuf = smallvec![Value::unset(); num_class_regs];
-                    vm_try!(self.run_bytecode(&class_code, &mut class_regs));
-                    let mut attrs = HashMap::new();
-                    for (attr_name, &slot) in local_index.iter() {
+                    // Push a fresh class-store-order list onto the interpreter
+                    // stack so `RecordClassStore` / `RecordClassDel` insns
+                    // emitted inside the class body record into *this* class
+                    // — supports `class A: class B: ...` nesting cleanly.
+                    self.class_store_order.push(Vec::new());
+                    let body_result = self.run_bytecode(&class_code, &mut class_regs);
+                    // Always pop, even on error, to keep the stack balanced.
+                    let mut store_order = self
+                        .class_store_order
+                        .pop()
+                        .expect("class_store_order stack popped to empty");
+                    vm_try!(body_result);
+                    // Build a reverse lookup so we can name each slot in the
+                    // recorded runtime store order.
+                    let mut slot_to_name: Vec<Option<&String>> = vec![None; num_class_regs];
+                    for (name, &slot) in local_index.iter() {
+                        if (slot as usize) < slot_to_name.len() {
+                            slot_to_name[slot as usize] = Some(name);
+                        }
+                    }
+                    let mut attrs = IndexMap::new();
+                    for slot in store_order.drain(..) {
+                        let Some(name) = slot_to_name.get(slot as usize).and_then(|n| *n) else {
+                            continue;
+                        };
                         if let Some(v) = class_regs.get(slot as usize)
-                            && !v.is_unset() {
-                                attrs.insert(attr_name.clone(), v.clone());
-                            }
+                            && !v.is_unset()
+                        {
+                            attrs.insert(name.clone(), v.clone());
+                        }
                     }
                     let base = if *bases_n > 0 {
                         let base_val = vm_try!(vm_read(regs, *bases_base, num_locals));
@@ -1746,6 +1769,26 @@ impl Interpreter {
                     let val = vm_try!(vm_read(regs, *src, num_locals));
                     if !val.is_none() {
                         println!("{}", val.repr());
+                    }
+                }
+
+                // ── Class-namespace insertion-order tracking ─────────────
+                // Emitted by the compiler only inside class bodies; the
+                // surrounding `MakeClass` always sets up the stack frame so
+                // the `last_mut()` call below is safe.  If we somehow hit
+                // these insns outside a class body the stack will be empty
+                // — ignore them silently rather than panic, since reordering
+                // / inlining passes could in principle hoist them.
+                Insn::RecordClassStore(slot) => {
+                    if let Some(order) = self.class_store_order.last_mut() {
+                        if !order.contains(slot) {
+                            order.push(*slot);
+                        }
+                    }
+                }
+                Insn::RecordClassDel(slot) => {
+                    if let Some(order) = self.class_store_order.last_mut() {
+                        order.retain(|s| s != slot);
                     }
                 }
             }

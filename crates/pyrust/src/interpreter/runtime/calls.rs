@@ -1083,7 +1083,7 @@ impl Interpreter {
 
         let instance = Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(&class),
-            attrs: HashMap::new(),
+            attrs: IndexMap::new(),
         }));
 
         let init = lookup_class_attr(&class, "__init__");

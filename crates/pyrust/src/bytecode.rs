@@ -201,6 +201,19 @@ pub enum Insn {
     /// and the callee is the same function as the one being executed.  Falls back to a normal
     /// call+return if the callee turns out to be a different function at runtime.
     TailCall { args_base: Reg, nargs: u8 },
+    /// Record a runtime store to class-body local R[slot] for class-namespace
+    /// insertion order.  Emitted **only** inside a class body, immediately after
+    /// any instruction that stores into a top-level class-body local.  The VM
+    /// appends slot to the active class-store-order list (if not already
+    /// present), so MakeClass can later materialise vars(C) in the order
+    /// stores actually executed — matching CPython __dict__ ordering.
+    RecordClassStore(Reg),
+    /// Record a runtime del C.name for class-namespace insertion order.
+    /// Emitted only inside a class body, immediately after DeleteLocal(slot).
+    /// The VM removes slot from the active class-store-order list so that the
+    /// dict produced by MakeClass drops the entry while preserving the order
+    /// of the remaining entries.
+    RecordClassDel(Reg),
 }
 
 #[derive(Debug, Clone)]
