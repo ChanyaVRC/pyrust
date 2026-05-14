@@ -110,6 +110,23 @@ impl Interpreter {
                     });
                 }
 
+                // PEP 3134 attributes on exception instances default to
+                // `None` when not yet set by the raise machinery.  This
+                // mirrors CPython, where `BaseException.__context__` and
+                // `BaseException.__cause__` are initialised to `None` on
+                // every exception instance.
+                if (name == "__context__"
+                    || name == "__cause__"
+                    || name == "__suppress_context__")
+                    && is_exception_class(&class)
+                {
+                    return Ok(if name == "__suppress_context__" {
+                        Value::bool_(false)
+                    } else {
+                        Value::none()
+                    });
+                }
+
                 let class_name = class.borrow().name.clone();
                 Err(PyError::named(
                     "AttributeError",

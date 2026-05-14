@@ -149,6 +149,46 @@ impl Interpreter {
         Ok(())
     }
 
+    /// Returns true when the two `Value`s wrap the same `PyInstance`
+    /// (pointer-equal).  Used to detect when control is inside an
+    /// active `except` handler body — i.e. when the interpreter's
+    /// `active_exception` is the same instance as the top of
+    /// `handled_exc_stack`.
+    pub(crate) fn values_are_same_exception(a: &Value, b: &Value) -> bool {
+        match (a.kind(), b.kind()) {
+            (ValueKind::PyInstance(x), ValueKind::PyInstance(y)) => Rc::ptr_eq(x, y),
+            _ => false,
+        }
+    }
+
+    /// PEP 3134 implicit exception chaining: if a `raise` happens inside an
+    /// active `except` handler, attach the currently-handled exception as
+    /// the new exception's `__context__`.  Skipped if `__context__` is
+    /// already set (e.g. via prior `raise X from Y`) or if the new
+    /// exception IS the currently-handled one (a bare re-raise) — both
+    /// cases would create a self-referential cycle.
+    pub(crate) fn attach_implicit_context(&self, exc: &Value) {
+        let Some(ctx) = self.handled_exc_stack.last() else {
+            return;
+        };
+        let ValueKind::PyInstance(inst) = exc.kind() else {
+            return;
+        };
+        // Avoid setting context to self (bare `raise` inside an except).
+        if let ValueKind::PyInstance(ctx_inst) = ctx.kind()
+            && Rc::ptr_eq(inst, ctx_inst)
+        {
+            return;
+        }
+        let mut borrow = inst.borrow_mut();
+        // Don't clobber an existing __context__ (already attached on a
+        // previous raise that propagated through here).
+        if borrow.attrs.contains_key("__context__") {
+            return;
+        }
+        borrow.attrs.insert("__context__".to_string(), ctx.clone());
+    }
+
     fn coerce_to_exception(&self, value: Value) -> Result<Value> {
         match value.kind() {
             ValueKind::PyInstance(instance) => {

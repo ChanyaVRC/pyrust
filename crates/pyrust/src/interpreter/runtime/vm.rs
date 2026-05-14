@@ -61,12 +61,37 @@ pub(crate) struct GeneratorFrame {
     pub(crate) done: bool,
     /// The environment (closure captures) active when the generator was created.
     pub(crate) saved_env: EnvRef,
+    /// PEP 3134 per-frame exception state snapshot, persisted across a
+    /// `yield` and re-installed on resume.  Stores the slice of
+    /// `Interpreter::handled_exc_stack` that belongs to *this* generator
+    /// frame (entries pushed above the caller's base depth at yield time).
+    /// Without this, a generator that yields while inside an
+    /// `except` / `finally` body would leak its handled-exception context
+    /// onto the caller's `Interpreter` between `next()` calls.
+    pub(crate) handled_exc_slice: Vec<Value>,
+    /// The interpreter's `active_exception` at the moment of yield.
+    /// Saved and restored alongside `handled_exc_slice` so that resume
+    /// can re-establish the suspended frame's exception view without
+    /// disturbing the caller's.
+    pub(crate) active_exception: Option<Value>,
 }
 
 // Thread-local used to pass generator suspension state back from the VM loop
 // to the resume_generator() caller without an extra return value or RefCell on
 // the hot path.  Set immediately before `return Err(GeneratorYield(...))`.
-type GenSaveState = (Vec<Option<IterState>>, Vec<usize>, usize);
+//
+// Fields, in order: saved `iters`, saved `exc_handlers`, saved `pc`, the
+// generator-owned slice of `handled_exc_stack` (entries above the caller's
+// base depth at the moment of yield), and `active_exception` at the moment
+// of yield.  The two trailing fields are what fixes the PEP 3134
+// "yield-inside-handler leaks context" gap.
+type GenSaveState = (
+    Vec<Option<IterState>>,
+    Vec<usize>,
+    usize,
+    Vec<Value>,
+    Option<Value>,
+);
 thread_local! {
     static GEN_SAVE: std::cell::RefCell<Option<GenSaveState>>
         = const { std::cell::RefCell::new(None) };
@@ -155,6 +180,8 @@ impl Interpreter {
             0,
             None,
             None,
+            Vec::new(),
+            None,
         )
     }
 
@@ -173,6 +200,8 @@ impl Interpreter {
             Vec::new(),
             0,
             Some(fn_id),
+            None,
+            Vec::new(),
             None,
         )
     }
@@ -216,6 +245,15 @@ impl Interpreter {
         // Swap the saved env in.
         let previous_env = std::mem::replace(&mut self.env, Rc::clone(&frame.saved_env));
 
+        // PEP 3134: hand the generator's persisted exception state into
+        // `run_bytecode_inner`, which will push it onto
+        // `handled_exc_stack` AFTER capturing the caller's base depth.
+        // The matching split-off on a subsequent yield, plus the
+        // wrapper's truncate-on-exit, then keep the caller's view of
+        // `handled_exc_stack` untouched throughout.
+        let gen_handled = std::mem::take(&mut frame.handled_exc_slice);
+        let gen_active = frame.active_exception.take();
+
         let result = self.run_bytecode_inner(
             &frame.code.clone(),
             &mut frame.regs,
@@ -224,6 +262,8 @@ impl Interpreter {
             frame.pc,
             None,
             inject_exc,
+            gen_handled,
+            gen_active,
         );
 
         // Restore env.
@@ -233,10 +273,19 @@ impl Interpreter {
             Err(PyError::GeneratorYield(val)) => {
                 // Retrieve the saved state from the thread-local.
                 let saved = GEN_SAVE.with(|cell| cell.borrow_mut().take());
-                if let Some((saved_iters, saved_handlers, saved_pc)) = saved {
+                if let Some((
+                    saved_iters,
+                    saved_handlers,
+                    saved_pc,
+                    saved_handled_slice,
+                    saved_active,
+                )) = saved
+                {
                     frame.iters = saved_iters;
                     frame.exc_handlers = saved_handlers;
                     frame.pc = saved_pc;
+                    frame.handled_exc_slice = saved_handled_slice;
+                    frame.active_exception = saved_active;
                 } else {
                     unreachable!("GEN_SAVE must be set before every GeneratorYield");
                 }
@@ -256,6 +305,7 @@ impl Interpreter {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_bytecode_inner(
         &mut self,
         code: &crate::bytecode::FnCode,
@@ -269,6 +319,64 @@ impl Interpreter {
         // `resume_generator_with_exc` to inject `GeneratorExit` (for `close()`)
         // or a user-supplied exception (for `throw()`) at the current yield.
         inject_exc: Option<PyError>,
+        // For generator resumes: this frame's persisted slice of
+        // `handled_exc_stack` (PEP 3134) and the `active_exception` it had
+        // at the last yield, both stashed in the `GeneratorFrame`.  The
+        // wrapper pushes the slice onto `self.handled_exc_stack` AFTER
+        // capturing the caller's base depth, so the slice is treated as
+        // belonging to this frame; the next yield re-captures it via
+        // `split_off(exc_ctx_frame_base)`.  Pass `Vec::new()` and `None`
+        // for fresh, non-generator invocations.
+        gen_handled_slice: Vec<Value>,
+        gen_active_exception: Option<Value>,
+    ) -> Result<Value> {
+        // Record per-frame exception state at entry.  On any exit path
+        // restore so the caller's frame sees the same `active_exception`
+        // it left behind, regardless of whether this callee raised,
+        // returned, ran past the end, or yielded.
+        //
+        // For yields, the `Yield` opcode itself has already split the
+        // generator's slice of `handled_exc_stack` off into thread-local
+        // storage and cleared `active_exception`, so the stack length is
+        // back at the caller's depth.  For non-yield exits, truncate
+        // any leftover handler-stack entries.  In both cases re-install
+        // the caller's `active_exception`, since the generator's view of
+        // it must never persist outside this frame.
+        let exc_ctx_entry_depth = self.handled_exc_stack.len();
+        let saved_active = self.active_exception.clone();
+
+        let result = self.run_bytecode_inner_impl(
+            code,
+            regs,
+            iters_init,
+            exc_handlers_init,
+            start_pc,
+            current_fn_id,
+            inject_exc,
+            gen_handled_slice,
+            gen_active_exception,
+        );
+
+        self.handled_exc_stack.truncate(exc_ctx_entry_depth);
+        self.active_exception = saved_active;
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_bytecode_inner_impl(
+        &mut self,
+        code: &crate::bytecode::FnCode,
+        regs: &mut [Value],
+        iters_init: Vec<Option<IterState>>,
+        exc_handlers_init: Vec<usize>,
+        start_pc: usize,
+        current_fn_id: Option<u64>,
+        inject_exc: Option<PyError>,
+        // Generator-only: persisted slice + active to push AFTER we've
+        // captured `exc_ctx_frame_base`, so they sit strictly above the
+        // caller's stack entries and are owned by this frame.
+        gen_handled_slice: Vec<Value>,
+        gen_active_exception: Option<Value>,
     ) -> Result<Value> {
         use crate::bytecode::Insn;
         use std::collections::HashMap;
@@ -281,6 +389,25 @@ impl Interpreter {
         // eventually raises RecursionError instead of looping forever.
         let mut tco_iters: usize = 0;
         let mut pending_inject: Option<PyError> = inject_exc;
+
+        // Depth of `handled_exc_stack` belonging to *caller* frames at the
+        // time this VM frame started executing.  Used by `vm_try!` to bound
+        // its "propagating out of a handler body" pop so it never reaches
+        // into the caller's entries.
+        let exc_ctx_frame_base: usize = self.handled_exc_stack.len();
+
+        // PEP 3134: re-install the generator's persisted slice of
+        // `handled_exc_stack` and its `active_exception` AFTER fixing the
+        // frame base.  These entries are now owned by this frame, and the
+        // next `Yield` opcode's `split_off(exc_ctx_frame_base)` will
+        // collect them again (plus anything new) into
+        // `frame.handled_exc_slice`.  No-op for fresh, non-generator calls.
+        if !gen_handled_slice.is_empty() {
+            self.handled_exc_stack.extend(gen_handled_slice);
+        }
+        if gen_active_exception.is_some() {
+            self.active_exception = gen_active_exception;
+        }
 
         'vm: loop {
         // Dispatch errors through the active exception handler stack.
@@ -307,6 +434,41 @@ impl Interpreter {
                                 }
                                 other => return Err(other),
                             };
+                            // PEP 3134 implicit chaining for *VM-implicit*
+                            // raises (e.g. `1/0` producing
+                            // `PyError::Named("ZeroDivisionError", ...)`
+                            // from a `BinOp` opcode).  Explicit `raise`
+                            // opcodes call `attach_implicit_context` at
+                            // the raise site; this call covers everything
+                            // else by attaching context at the point the
+                            // VM materialises the exception value, BEFORE
+                            // the pop-then-push reshuffle below removes
+                            // the very entry we want to chain from.  The
+                            // method is idempotent (it skips when
+                            // `__context__` is already set), so the
+                            // explicit-raise path is unaffected.
+                            self.attach_implicit_context(&exc_val);
+                            // If the exception we're now dispatching was
+                            // raised *inside* an existing handler body in
+                            // THIS frame, we are leaving that body — pop
+                            // its context-stack entry so a future raise
+                            // here doesn't pick it up.  Detection: the
+                            // existing `active_exception` matches the top
+                            // of `handled_exc_stack` exactly when control
+                            // is currently inside a handler/finally body.
+                            // The depth check protects entries belonging
+                            // to caller frames.
+                            if self.handled_exc_stack.len() > exc_ctx_frame_base
+                                && let Some(top) = self.handled_exc_stack.last()
+                                && let Some(active) = self.active_exception.as_ref()
+                                && Self::values_are_same_exception(top, active)
+                            {
+                                self.handled_exc_stack.pop();
+                            }
+                            // Push the new exception so a `raise` inside
+                            // the about-to-run handler/finally body sees
+                            // it as the implicit `__context__`.
+                            self.handled_exc_stack.push(exc_val.clone());
                             self.active_exception = Some(exc_val);
                             pc = h;
                             continue 'vm;
@@ -916,9 +1078,20 @@ impl Interpreter {
                     if !vm_try!(self.exception_matches(&exc, &type_val)) {
                         pc = jump_pc!(*offset);
                     }
+                    // No stack push on match: the dispatch already pushed
+                    // the exception onto `handled_exc_stack` when vm_try!
+                    // routed us here, so MatchExcept is purely a filter.
                 }
                 Insn::EndExcept => {
-                    self.active_exception = None;
+                    // Leaving an `except` handler body — pop the entry
+                    // that vm_try! pushed on dispatch.  Restore
+                    // `active_exception` to the outer handler's exception
+                    // (if any), bounded by this frame's base depth so we
+                    // never pop into caller-frame entries.
+                    if self.handled_exc_stack.len() > exc_ctx_frame_base {
+                        self.handled_exc_stack.pop();
+                    }
+                    self.active_exception = self.handled_exc_stack.last().cloned();
                 }
                 Insn::RaiseAssert(msg_reg) => {
                     let msg = vm_try!(vm_read(regs, *msg_reg, num_locals));
@@ -929,17 +1102,23 @@ impl Interpreter {
                     };
                     let exc =
                         vm_try!(self.instantiate_named_exception("AssertionError", msg_str));
+                    self.attach_implicit_context(&exc);
                     vm_try!(Err::<(), _>(PyError::Raised(exc)));
                 }
                 Insn::RaiseValue(src) => {
                     let val = vm_try!(vm_read(regs, *src, num_locals));
                     let exc = vm_try!(self.coerce_to_exception(val));
+                    self.attach_implicit_context(&exc);
                     vm_try!(Err::<(), _>(PyError::Raised(exc)));
                 }
                 Insn::RaiseFrom(src, cause_reg) => {
                     let val = vm_try!(vm_read(regs, *src, num_locals));
                     let cause = vm_try!(vm_read(regs, *cause_reg, num_locals));
                     let exc = vm_try!(self.coerce_to_exception(val));
+                    // PEP 3134: `raise X from Y` sets `__cause__` AND
+                    // `__suppress_context__`, but `__context__` is still
+                    // populated so that the chain is observable.
+                    self.attach_implicit_context(&exc);
                     if let ValueKind::PyInstance(inst) = exc.kind() {
                         inst.borrow_mut().attrs.insert("__cause__".to_string(), cause);
                         inst.borrow_mut().attrs.insert("__suppress_context__".to_string(), Value::bool_(true));
@@ -950,6 +1129,18 @@ impl Interpreter {
                     let exc = vm_try!(self.active_exception.clone().ok_or_else(|| {
                         PyError::Runtime("no active exception to re-raise".to_string())
                     }));
+                    // RaiseReRaise is emitted by the compiler at three
+                    // logical "exit-this-handler" points: bare `raise`
+                    // inside an except, the fall-through after a chain of
+                    // unmatched MatchExcepts, and the implicit re-raise
+                    // at the end of a finally exception-path.  In all
+                    // three cases we are leaving the dispatch / handler
+                    // body, so pop the corresponding context-stack entry
+                    // pushed by vm_try!.  Bounded by this frame's base
+                    // depth so we never reach into caller entries.
+                    if self.handled_exc_stack.len() > exc_ctx_frame_base {
+                        self.handled_exc_stack.pop();
+                    }
                     vm_try!(Err::<(), _>(PyError::Raised(exc)));
                 }
 
@@ -1221,6 +1412,16 @@ impl Interpreter {
                     // yield expression evaluates to on resumption.  Proper
                     // send() support would overwrite this in resume_generator.
                     regs[*dst as usize] = Value::none();
+                    // PEP 3134: split the interpreter's handled-exception
+                    // stack at this frame's base.  Entries pushed by THIS
+                    // generator frame (above `exc_ctx_frame_base`) are saved
+                    // onto the generator, then removed from the interpreter
+                    // so the caller's frame sees only its own entries.  The
+                    // generator's `active_exception` is likewise stashed and
+                    // its slot cleared.  Both are re-installed on resume.
+                    let saved_handled_slice: Vec<Value> =
+                        self.handled_exc_stack.split_off(exc_ctx_frame_base);
+                    let saved_active = self.active_exception.take();
                     // Save current iters/exc_handlers/pc to the thread-local
                     // so that resume_generator() can write them back into the
                     // GeneratorFrame after we unwind.
@@ -1229,6 +1430,8 @@ impl Interpreter {
                             iters.clone(),
                             exc_handlers.clone(),
                             pc, // already past the Yield instruction
+                            saved_handled_slice,
+                            saved_active,
                         ));
                     });
                     return Err(PyError::GeneratorYield(yielded));
