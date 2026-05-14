@@ -598,6 +598,34 @@ pub fn iter_values_via_registry(value: &Value) -> Result<Vec<Value>> {
     }
 }
 
+/// Callback for the canonical Python `<` ordering between two `Value`s.
+/// Installed by `pyrust` (which owns the interpreter's `compare_values`
+/// in `interpreter/helpers.rs`) so that `pyrust-builtins` sort helpers
+/// can route through the same predicate the `<` / `>` operators use —
+/// covering BigInt, nested List, and any other types the interpreter
+/// supports — without depending on the interpreter crate.
+///
+/// Mirrors the [`IterValuesFn`] / [`install_iter_values`] pattern (see
+/// issue #428 — duplicate `compare_values` in `pyrust-builtins::list`
+/// was missing BigInt and List support, so `list.sort()` / `sorted()`
+/// raised `TypeError` on values the `<` operator accepted).
+pub type CompareValuesFn = fn(&Value, &Value) -> Result<std::cmp::Ordering>;
+
+static COMPARE_VALUES_FN: std::sync::OnceLock<CompareValuesFn> = std::sync::OnceLock::new();
+
+pub fn install_compare_values(f: CompareValuesFn) {
+    let _ = COMPARE_VALUES_FN.set(f);
+}
+
+pub fn compare_values_via_registry(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
+    match COMPARE_VALUES_FN.get() {
+        Some(f) => f(a, b),
+        None => Err(PyError::Runtime(
+            "compare_values callback not installed".to_string(),
+        )),
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared backing storage for mutable Tier 1 containers
 //
