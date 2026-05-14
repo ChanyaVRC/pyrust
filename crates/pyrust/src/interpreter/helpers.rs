@@ -16,6 +16,29 @@ pub(crate) enum SpecState {
     Megamorphic,
 }
 
+/// `a ** b` for non-negative integer exponent, promoting to `BigInt` if the
+/// result would overflow `i64`.  Matches CPython's arbitrary-precision int
+/// semantics — `2 ** 64` returns the BigInt `18446744073709551616`, not the
+/// wrapped value `0`.  The fast path is a single `checked_pow` (≈free), so
+/// non-overflowing call sites pay no measurable cost over `wrapping_pow`.
+fn int_pow_promoting(a: i64, b: i64) -> Value {
+    debug_assert!(b >= 0, "int_pow_promoting: caller must guard b < 0");
+    let exp = match u32::try_from(b) {
+        Ok(e) => e,
+        // Exponent doesn't fit in u32 — `a == 0` or `a == 1` or `a == -1` are
+        // the only finite-result cases; everything else is astronomically
+        // large.  Promote unconditionally; BigInt::pow handles the trivial
+        // bases cheaply and produces an honest BigInt for the rest.
+        Err(_) => {
+            return Value::bigint(PyPow::pow(PyBigInt::from(a), b as u64));
+        }
+    };
+    match a.checked_pow(exp) {
+        Some(r) => Value::int(r),
+        None => Value::bigint(PyPow::pow(PyBigInt::from(a), exp)),
+    }
+}
+
 /// Attempt a pure-integer binary operation. Returns Some(Result<Value>) on success,
 /// None if the operation is not applicable to integers (e.g. Str concat).
 fn eval_binary_int(op: BinaryOp, a: i64, b: i64) -> Option<Result<Value>> {
@@ -64,7 +87,7 @@ fn eval_binary_int(op: BinaryOp, a: i64, b: i64) -> Option<Result<Value>> {
             }
         }
         BinaryOp::Pow => Some(Ok(if b >= 0 {
-            Value::int(a.wrapping_pow(b as u32))
+            int_pow_promoting(a, b)
         } else {
             Value::float((a as f64).powi(b as i32))
         })),

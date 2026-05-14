@@ -26,8 +26,24 @@ use crate::interpreter::{
     reject_keyword_args_expanded, snapshot_current_locals, snapshot_module_namespace,
     value_to_float, value_type_name_str,
 };
-use crate::value::{PyClass, PyKey, Value, ValueKind, range_len};
+use crate::value::{PyBigInt, PyClass, PyKey, PyPow, Value, ValueKind, range_len};
 use pyrust_derive::pyrust_module;
+
+/// `a ** b` for non-negative integer exponent, promoting to `BigInt` if the
+/// result would overflow `i64`.  Mirrors the operator helper of the same
+/// name in `interpreter/helpers.rs` so `pow(a, b)` and `a ** b` agree (CPython
+/// parity — Python ints are arbitrary precision).  See issue #421.
+fn int_pow_promoting(a: i64, b: i64) -> Value {
+    debug_assert!(b >= 0, "int_pow_promoting: caller must guard b < 0");
+    let exp = match u32::try_from(b) {
+        Ok(e) => e,
+        Err(_) => return Value::bigint(PyPow::pow(PyBigInt::from(a), b as u64)),
+    };
+    match a.checked_pow(exp) {
+        Some(r) => Value::int(r),
+        None => Value::bigint(PyPow::pow(PyBigInt::from(a), exp)),
+    }
+}
 
 pyrust_module! {
     /// CPython: chr(i) — return the string of one Unicode codepoint i.
@@ -545,10 +561,10 @@ pyrust_module! {
         } else {
             match (args[0].value.kind(), args[1].value.kind()) {
                 (ValueKind::Int(a), ValueKind::Int(b)) if b >= 0 => {
-                    Ok(Value::int(a.wrapping_pow(b as u32)))
+                    Ok(int_pow_promoting(a, b))
                 }
                 (ValueKind::Bool(a), ValueKind::Int(b)) if b >= 0 => {
-                    Ok(Value::int((a as i64).wrapping_pow(b as u32)))
+                    Ok(int_pow_promoting(a as i64, b))
                 }
                 _ => {
                     let a = value_to_float(&args[0].value, FN_NAME)?;

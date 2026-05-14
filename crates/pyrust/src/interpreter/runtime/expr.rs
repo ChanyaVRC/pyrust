@@ -81,9 +81,13 @@ impl Interpreter {
                             return r;
                         }
                         match value.kind() {
-                            ValueKind::Int(v) => Ok(Value::int(-v)),
+                            ValueKind::Int(v) => Ok(match v.checked_neg() {
+                                Some(r) => Value::int(r),
+                                None => Value::bigint(-PyBigInt::from(v)),
+                            }),
                             ValueKind::Float(v) => Ok(Value::float(-v)),
                             ValueKind::Complex(re, im) => Ok(Value::complex(-re, -im)),
+                            ValueKind::BigInt(v) => Ok(Value::bigint(-v)),
                             _ => Err(PyError::named("TypeError", "bad operand type for unary -".to_string())),
                         }
                     }
@@ -1021,7 +1025,7 @@ impl Interpreter {
                 }
                 match (left.kind(), right.kind()) {
                     (ValueKind::Int(a), ValueKind::Int(b)) if b >= 0 => {
-                        Ok(Value::int(a.wrapping_pow(b as u32)))
+                        Ok(int_pow_promoting(a, b))
                     }
                     _ => {
                         let a = value_to_float(&left, "**")?;
@@ -1096,6 +1100,15 @@ impl Interpreter {
                 (ValueKind::Int(a), ValueKind::Float(b)) => Ok(Value::float((a as f64) + b)),
                 (ValueKind::Float(a), ValueKind::Int(b)) => Ok(Value::float(a + (b as f64))),
                 (ValueKind::Float(a), ValueKind::Float(b)) => Ok(Value::float(a + b)),
+                (ValueKind::BigInt(a), ValueKind::BigInt(b)) => Ok(Value::bigint(a + b)),
+                (ValueKind::BigInt(a), ValueKind::Int(b)) => Ok(Value::bigint(a + PyBigInt::from(b))),
+                (ValueKind::Int(a), ValueKind::BigInt(b)) => Ok(Value::bigint(PyBigInt::from(a) + b)),
+                (ValueKind::BigInt(a), ValueKind::Float(b)) => {
+                    Ok(Value::float(a.to_f64().unwrap_or(f64::INFINITY) + b))
+                }
+                (ValueKind::Float(a), ValueKind::BigInt(b)) => {
+                    Ok(Value::float(a + b.to_f64().unwrap_or(f64::INFINITY)))
+                }
                 (ValueKind::Str(a), ValueKind::Str(b)) => Ok(Value::string(format!("{a}{b}"))),
                 (ValueKind::List(a), ValueKind::List(b)) => {
                     let mut out = a.to_vec();
@@ -1124,6 +1137,15 @@ impl Interpreter {
             (ValueKind::Int(a), ValueKind::Float(b)) => Ok(Value::float((a as f64) - b)),
             (ValueKind::Float(a), ValueKind::Int(b)) => Ok(Value::float(a - (b as f64))),
             (ValueKind::Float(a), ValueKind::Float(b)) => Ok(Value::float(a - b)),
+            (ValueKind::BigInt(a), ValueKind::BigInt(b)) => Ok(Value::bigint(a - b)),
+            (ValueKind::BigInt(a), ValueKind::Int(b)) => Ok(Value::bigint(a - PyBigInt::from(b))),
+            (ValueKind::Int(a), ValueKind::BigInt(b)) => Ok(Value::bigint(PyBigInt::from(a) - b)),
+            (ValueKind::BigInt(a), ValueKind::Float(b)) => {
+                Ok(Value::float(a.to_f64().unwrap_or(f64::INFINITY) - b))
+            }
+            (ValueKind::Float(a), ValueKind::BigInt(b)) => {
+                Ok(Value::float(a - b.to_f64().unwrap_or(f64::INFINITY)))
+            }
             _ => Err(Self::unsupported_binary_operand("-")),
         }
     }
@@ -1142,6 +1164,15 @@ impl Interpreter {
             (ValueKind::Int(a), ValueKind::Float(b)) => Ok(Value::float((a as f64) * b)),
             (ValueKind::Float(a), ValueKind::Int(b)) => Ok(Value::float(a * (b as f64))),
             (ValueKind::Float(a), ValueKind::Float(b)) => Ok(Value::float(a * b)),
+            (ValueKind::BigInt(a), ValueKind::BigInt(b)) => Ok(Value::bigint(a * b)),
+            (ValueKind::BigInt(a), ValueKind::Int(b)) => Ok(Value::bigint(a * PyBigInt::from(b))),
+            (ValueKind::Int(a), ValueKind::BigInt(b)) => Ok(Value::bigint(PyBigInt::from(a) * b)),
+            (ValueKind::BigInt(a), ValueKind::Float(b)) => {
+                Ok(Value::float(a.to_f64().unwrap_or(f64::INFINITY) * b))
+            }
+            (ValueKind::Float(a), ValueKind::BigInt(b)) => {
+                Ok(Value::float(a * b.to_f64().unwrap_or(f64::INFINITY)))
+            }
             (ValueKind::Str(text), ValueKind::Int(n)) => {
                 if n <= 0 { Ok(Value::string(String::new())) }
                 else { Ok(Value::string(text.repeat(n as usize))) }

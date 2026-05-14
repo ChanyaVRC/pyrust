@@ -12,8 +12,8 @@ use crate::error::{PyError, Result};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::value::{
-    EnvRef, Environment, PyBigInt, PyClass, PyInstance, PyKey, PyModule, UserFunction,
-    UserFunctionKind, UserFunctionParam, Value, ValueKind,
+    EnvRef, Environment, PyBigInt, PyClass, PyInstance, PyKey, PyModule, PyPow, PyToPrimitive,
+    UserFunction, UserFunctionKind, UserFunctionParam, Value, ValueKind,
 };
 
 type ModuleCache = Rc<RefCell<HashMap<String, Value>>>;

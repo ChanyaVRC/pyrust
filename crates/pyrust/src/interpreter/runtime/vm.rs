@@ -2597,9 +2597,13 @@ fn vm_read(regs: &[Value], reg: crate::bytecode::Reg, num_locals: crate::bytecod
 fn vm_eval_unary(op: UnaryOp, val: Value) -> Result<Value> {
     match op {
         UnaryOp::Neg => match val.kind() {
-            ValueKind::Int(v) => Ok(Value::int(-v)),
+            ValueKind::Int(v) => Ok(match v.checked_neg() {
+                Some(r) => Value::int(r),
+                None => Value::bigint(-PyBigInt::from(v)),
+            }),
             ValueKind::Float(v) => Ok(Value::float(-v)),
             ValueKind::Complex(re, im) => Ok(Value::complex(-re, -im)),
+            ValueKind::BigInt(v) => Ok(Value::bigint(-v)),
             _ => Err(PyError::named("TypeError", "bad operand type for unary -".to_string())),
         },
         UnaryOp::Not => Ok(Value::bool_(!val.truthy())),

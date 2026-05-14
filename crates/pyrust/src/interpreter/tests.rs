@@ -905,10 +905,10 @@ result = fact(10)
     // ── Edge-case tests (issue #57) ───────────────────────────────────────────
 
     #[test]
-    fn int_add_at_i64_max_wraps() {
-        // Documents current behavior: i64 arithmetic wraps (issue #49).
-        // When arbitrary-precision integers are added, update this test to
-        // assert the result equals 9223372036854775808 instead of i64::MIN.
+    fn int_add_at_i64_max_promotes_to_bigint() {
+        // Issue #421: integer overflow must promote to BigInt rather than
+        // wrap.  `i64::MAX + 1 == 9223372036854775808` in CPython; pyrust
+        // must agree.
         let tokens = Lexer::new("x = 9223372036854775807\nx = x + 1\n")
             .unwrap()
             .into_tokens();
@@ -916,10 +916,11 @@ result = fact(10)
         let program = parser.parse_program().unwrap();
         let mut interpreter = Interpreter::default();
         interpreter.exec_program(&program, false).unwrap();
+        let expected = Value::bigint(crate::value::PyBigInt::from(i64::MAX) + 1);
         assert_eq!(
             interpreter.lookup_name("x").unwrap(),
-            Some(Value::int(i64::MIN)),
-            "i64 arithmetic currently wraps; update when #49 is fixed"
+            Some(expected),
+            "i64::MAX + 1 must promote to BigInt"
         );
     }
 
