@@ -72,7 +72,22 @@ impl Interpreter {
         let num_regs = code.num_regs as usize;
         let mut regs: RegsBuf = smallvec![Value::unset(); num_regs];
         let _depth_guard = CallDepthGuard::enter();
+        // Issue #389: publish a view of the active script frame so
+        // `globals()` / `locals()` can surface module-level fastlocal
+        // names mid-execution (otherwise the regs only spill to
+        // `env.values` AFTER this fn returns).  `vars()` doesn't yet
+        // consult `vm_frame_views` — calling it at module scope only
+        // sees `env.values`; unifying it with `snapshot_current_locals`
+        // is a separate cleanup.  Push before `run_bytecode`, pop
+        // afterwards so the raw pointer never outlives the local `regs`.
+        self.vm_frame_views.push(VmFrameView {
+            kind: FrameKind::Script,
+            regs_ptr: regs.as_ptr(),
+            regs_len: regs.len(),
+            local_index: Rc::clone(&local_index),
+        });
         let vm_result = self.run_bytecode(&code, &mut regs);
+        self.vm_frame_views.pop();
         // Write fastlocal registers back to the module env so that imported
         // modules and post-run inspection can find all names.
         for (name, &idx) in local_index.iter() {

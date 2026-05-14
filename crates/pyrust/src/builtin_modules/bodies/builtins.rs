@@ -23,7 +23,8 @@ use crate::interpreter::{
     NativeIterFrame, apply_format_spec, ascii_repr, class_is_subclass_of, compare_values,
     dir_names, instance_attrs_snapshot, invoke_class_method, is_exception_class, iter_values,
     lookup_class_attr, modpow_i64, py_mod_i64, py_round_half_even, py_round_half_even_f64,
-    reject_keyword_args_expanded, value_to_float, value_type_name_str,
+    reject_keyword_args_expanded, snapshot_current_locals, snapshot_module_namespace,
+    value_to_float, value_type_name_str,
 };
 use crate::value::{PyClass, PyKey, Value, ValueKind, range_len};
 use pyrust_derive::pyrust_module;
@@ -1084,6 +1085,57 @@ pyrust_module! {
                 ),
             )),
         }
+    }
+
+    /// CPython: globals() — dict snapshot of the current module's namespace.
+    /// <https://docs.python.org/3/library/functions.html#globals>
+    ///
+    /// Built via `snapshot_module_namespace`, which merges:
+    ///   * the module-level `Environment::values` (built-in exceptions,
+    ///     `NotImplemented`, plus any names that have been spilled out
+    ///     of registers by the script-end flush in `program.rs`), and
+    ///   * the active script frame's fastlocal registers (so a top-level
+    ///     `x = 5; print(globals())` actually shows `x`, even though `x`
+    ///     lives in a register until the script exits).
+    ///
+    /// When called from inside a function, this still returns the
+    /// *module* globals — never the calling frame's locals.  CPython
+    /// returns a live view of the module dict (mutations write through);
+    /// pyrust returns a snapshot for v1 because the env values map is a
+    /// `HashMap<String, Value>` plus a register slice, not a single
+    /// `Value::dict` we can hand back by reference.  Issue #389 calls
+    /// out the snapshot limitation as acceptable, and the common
+    /// read-only iteration use case is fully supported.
+    fn globals(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if !args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes no arguments ({} given)", args.len()),
+            ));
+        }
+        Ok(Value::dict(snapshot_module_namespace(_interp)))
+    }
+
+    /// CPython: locals() — dict snapshot of the current local namespace.
+    /// <https://docs.python.org/3/library/functions.html#locals>
+    ///
+    /// At module scope, `locals()` returns the same dict as `globals()`
+    /// (CPython parity: at module level the two namespaces are the same
+    /// object).  Inside a function body it returns a snapshot of the
+    /// function's locals — CPython also snapshots and its docs warn that
+    /// mutations to the returned dict aren't guaranteed to propagate.
+    /// Both fastlocal-register and env-stored bindings are merged via
+    /// `snapshot_current_locals`.
+    fn locals(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if !args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes no arguments ({} given)", args.len()),
+            ));
+        }
+        Ok(Value::dict(snapshot_current_locals(_interp)))
     }
 
     /// CPython: dir([object]) — list of attribute names.

@@ -74,6 +74,15 @@ pub(crate) struct GeneratorFrame {
     /// can re-establish the suspended frame's exception view without
     /// disturbing the caller's.
     pub(crate) active_exception: Option<Value>,
+    /// Name -> fastlocal register slot for this generator's body, cloned
+    /// from the originating `UserFunction`.  Published to
+    /// `Interpreter::vm_frame_views` for the duration of each resume so
+    /// that `locals()` invoked inside the generator body sees the
+    /// generator's own fastlocals rather than the caller's frame
+    /// (issue #483 review: PR #483 originally pushed function frame
+    /// views only in `call_user_function_expanded`, leaving generators
+    /// to fall back to the caller's view).
+    pub(crate) local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
 }
 
 // Thread-local used to pass generator suspension state back from the VM loop
@@ -269,6 +278,19 @@ impl Interpreter {
         let gen_handled = std::mem::take(&mut frame.handled_exc_slice);
         let gen_active = frame.active_exception.take();
 
+        // Issue #483 review: publish a Function frame view so `locals()`
+        // called inside the generator body sees the generator's own
+        // fastlocals instead of the caller's frame.  Popped immediately
+        // after `run_bytecode_inner` returns — including on yield, where
+        // the regs slice stays valid (it's owned by `frame.regs`) but
+        // the view is no longer the innermost frame from the caller's
+        // perspective.
+        self.vm_frame_views.push(VmFrameView {
+            kind: FrameKind::Function,
+            regs_ptr: frame.regs.as_ptr(),
+            regs_len: frame.regs.len(),
+            local_index: Rc::clone(&frame.local_index),
+        });
         let result = self.run_bytecode_inner(
             &frame.code.clone(),
             &mut frame.regs,
@@ -280,6 +302,7 @@ impl Interpreter {
             gen_handled,
             gen_active,
         );
+        self.vm_frame_views.pop();
 
         // Restore env.
         self.env = previous_env;

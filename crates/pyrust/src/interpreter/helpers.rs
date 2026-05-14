@@ -823,7 +823,131 @@ fn key_to_value(key: PyKey) -> Value {
     }
 }
 
-fn module_env(env: &EnvRef) -> EnvRef {
+/// Merge the registers of a single VM frame view into `dict`,
+/// dereferencing the view's raw pointer.  Shared by
+/// [`snapshot_module_namespace`] and [`snapshot_current_locals`].
+///
+/// SAFETY: `view.regs_ptr` / `view.regs_len` describe a VM frame's
+/// register slice.  `Interpreter::vm_frame_views` is pushed
+/// immediately before each `run_bytecode_inner` invocation and
+/// popped immediately after.  Push/pop sites:
+///   * `program.rs::try_exec_vm_script_with_index` — `FrameKind::Script`
+///     for the module/script body.
+///   * `calls.rs::call_user_function_expanded` — `FrameKind::Function`
+///     for both the simple and variadic user-function call paths.
+///   * `vm.rs::resume_generator_with_exc` — `FrameKind::Function` for
+///     each generator resume (the frame view's regs pointer comes
+///     from the heap-allocated `GeneratorFrame::regs`, which is
+///     stable across yields).
+/// Class-body evaluation (`Insn::MakeClass`) deliberately does NOT
+/// publish a frame view; class-body `locals()` is tracked as a
+/// known follow-up (issue #487).
+/// The slice is read-only here.
+fn merge_frame_view_into_dict(
+    view: &VmFrameView,
+    dict: &mut indexmap::IndexMap<PyKey, Value>,
+) {
+    // Stable iteration order: walk the fastlocal slot table sorted by
+    // slot index, mirroring the compiler's name-allocation order.
+    let mut by_slot: Vec<(usize, &String)> = view
+        .local_index
+        .iter()
+        .map(|(name, &slot)| (slot as usize, name))
+        .collect();
+    by_slot.sort_by_key(|(slot, _)| *slot);
+    let regs: &[Value] = unsafe { std::slice::from_raw_parts(view.regs_ptr, view.regs_len) };
+    for (slot, name) in by_slot {
+        if let Some(val) = regs.get(slot)
+            && !val.is_unset()
+        {
+            dict.insert(PyKey::Str(name.clone()), val.clone());
+        }
+    }
+}
+
+/// Take a snapshot of the current module's user-visible namespace
+/// (issue #389: backing for `globals()`).  Combines:
+///   * the module-level `Environment::values` (where the script's spilled
+///     bindings, imported names, and the built-in exception classes live),
+///   * the bottom-most `Script` entry in `Interpreter::vm_frame_views`,
+///     which exposes the active script frame's fastlocal registers so
+///     module-level `x = 5` surfaces mid-execution (without this, the
+///     regs are only spilled back to `env.values` AFTER `exec_program`
+///     returns — see `try_exec_vm_script_with_index`).
+///
+/// Inside a function frame, this still returns the module globals: we
+/// walk the frame stack from the bottom and pick the first `Script`
+/// entry, never the calling function's locals.
+pub(crate) fn snapshot_module_namespace(
+    interp: &Interpreter,
+) -> indexmap::IndexMap<PyKey, Value> {
+    let mut dict: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
+    let me = module_env(&interp.env);
+    for (k, v) in me.borrow().values.iter() {
+        dict.insert(PyKey::Str(k.clone()), v.clone());
+    }
+    if let Some(script_view) = interp
+        .vm_frame_views
+        .iter()
+        .find(|v| v.kind == FrameKind::Script)
+    {
+        merge_frame_view_into_dict(script_view, &mut dict);
+    }
+    dict
+}
+
+/// Take a snapshot of the innermost VM frame's local namespace
+/// (issue #389: backing for `locals()`).  Reads the top of
+/// `Interpreter::vm_frame_views` regardless of kind — at module scope
+/// the top entry IS the `Script` frame (so `locals()` == `globals()`,
+/// matching CPython parity), and inside a function it's the
+/// `Function` frame.  Falls back to the current env's `values` map
+/// when no frame is published (e.g. evaluating in a non-VM context).
+pub(crate) fn snapshot_current_locals(
+    interp: &Interpreter,
+) -> indexmap::IndexMap<PyKey, Value> {
+    let mut dict: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
+    match interp.vm_frame_views.last() {
+        Some(view) if view.kind == FrameKind::Script => {
+            // Module scope: include the module env (built-in
+            // classes + already-spilled bindings) so the user sees the
+            // same complete view as `globals()`.
+            let me = module_env(&interp.env);
+            for (k, v) in me.borrow().values.iter() {
+                dict.insert(PyKey::Str(k.clone()), v.clone());
+            }
+            merge_frame_view_into_dict(view, &mut dict);
+        }
+        Some(view) => {
+            // Function scope: only the function's own fastlocals.
+            // Matches CPython — `locals()` inside a function does NOT
+            // include module globals or names from enclosing functions.
+            //
+            // The frame view's `local_index` enumerates exactly the
+            // names the compiler allocated for THIS function call, so
+            // `merge_frame_view_into_dict` covers them precisely.  We
+            // deliberately do NOT also walk `interp.env.values`: when
+            // the callee did not need its own local env (the
+            // `needs_local_env == false` path in
+            // `call_user_function_expanded`), `interp.env` points at
+            // the function's *defining* env, and walking that would
+            // leak enclosing-scope names into the snapshot.  Cell
+            // vars / `nonlocal` / `global` bindings that the function
+            // legitimately reads but doesn't store as fastlocals are a
+            // known follow-up — tracked as issue #486.
+            merge_frame_view_into_dict(view, &mut dict);
+        }
+        None => {
+            // No active VM frame: fall back to env.values.
+            for (k, v) in interp.env.borrow().values.iter() {
+                dict.insert(PyKey::Str(k.clone()), v.clone());
+            }
+        }
+    }
+    dict
+}
+
+pub(crate) fn module_env(env: &EnvRef) -> EnvRef {
     let mut current = Rc::clone(env);
     loop {
         let parent = current.borrow().parent.clone();
