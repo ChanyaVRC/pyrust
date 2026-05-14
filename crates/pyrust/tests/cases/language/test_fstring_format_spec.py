@@ -103,4 +103,47 @@ try:
 except ValueError:
     pass
 
+# --- Non-decimal grouping (groups of 4) ---
+assert f"{0xdeadbeef:_x}" == "dead_beef"
+assert f"{0xdeadbeef:_X}" == "DEAD_BEEF"
+# Zero-pad combined with '_' grouping on non-decimal bases must re-group
+# the leading zeros every 4 digits (not every 3 like decimal).
+assert f"{0xdeadbeef:014_x}" == "0000_dead_beef"
+assert f"{0xdeadbeef:014_X}" == "0000_DEAD_BEEF"
+assert f"{0xdeadbeef:016_x}" == "0_0000_dead_beef"
+assert f"{0b11111111:_b}" == "1111_1111"
+assert f"{0b11111111:012_b}" == "00_1111_1111"
+assert f"{0o12345670:_o}" == "1234_5670"
+assert f"{0o12345670:013_o}" == "000_1234_5670"
+
+# --- Complex bare width / align (no explicit type) ---
+# Routes through format_complex_value rather than format_float_value, so
+# Complex no longer errors with TypeError on width / align specs.
+c = 1 + 2j
+assert f"{c}" == "(1+2j)"
+assert f"{c:>10}" == "    (1+2j)"
+assert f"{c:<10}|" == "(1+2j)    |"
+assert f"{c:^10}|" == "  (1+2j)  |"
+assert f"{c:*>10}" == "****(1+2j)"
+
+# --- Width / precision overflow -> ValueError ---
+# CPython raises ValueError ("Too many decimal digits in format string") on
+# parse failure for digit runs that exceed usize / size_t.  pyrust must not
+# silently clamp to 0.  Use format() so the digit run is built dynamically
+# (an f-string spec is required to fit usize at compile time).
+_huge = "9" * 25  # 25 nines is well above 64-bit usize::MAX (20 digits)
+try:
+    _ = ("{:." + _huge + "f}").format(1.0)
+except ValueError:
+    pass
+else:
+    raise AssertionError("expected ValueError on enormous precision")
+
+try:
+    _ = ("{:" + _huge + "d}").format(1)
+except ValueError:
+    pass
+else:
+    raise AssertionError("expected ValueError on enormous width")
+
 print("fstring format spec OK")

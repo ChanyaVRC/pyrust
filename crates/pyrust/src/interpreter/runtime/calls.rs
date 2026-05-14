@@ -1095,10 +1095,15 @@ impl Interpreter {
 /// - **precision** `.N` for floats and strings
 /// - **type** `b`, `c`, `d`, `e`, `E`, `f`, `F`, `g`, `G`, `n`, `o`, `s`, `x`, `X`, `%`
 ///
-/// Not yet implemented: locale-aware grouping (`n` and float `n` types) and
-/// non-ASCII fill characters in nested f-string specs round-trip through
-/// `str.format` as bytes rather than chars.  Both gaps mirror documented
-/// pyrust limitations.
+/// Complex values support the bare width / fill / align spec (matching
+/// CPython's `format(1+2j, ">10")` -> `"    (1+2j)"`) but do not yet accept
+/// numeric type codes (`e`/`f`/`g`) or sign / precision / grouping / `#` /
+/// `0` — those will raise ValueError.
+///
+/// Not yet implemented: locale-aware grouping (`n` and float `n` types),
+/// Complex with explicit numeric type codes, and non-ASCII fill characters
+/// in nested f-string specs round-trip through `str.format` as bytes rather
+/// than chars.  These gaps mirror documented pyrust limitations.
 ///
 /// [docs]: https://docs.python.org/3/library/string.html#format-specification-mini-language
 pub(crate) fn apply_format_spec(value: &Value, spec: &str) -> Result<Value> {
@@ -1183,11 +1188,13 @@ fn parse_format_spec(spec: &str) -> Result<FormatSpec> {
         pos += 1;
     }
     let width: usize = if pos > width_start {
-        chars[width_start..pos]
-            .iter()
-            .collect::<String>()
-            .parse()
-            .unwrap_or(0)
+        let raw: String = chars[width_start..pos].iter().collect();
+        raw.parse::<usize>().map_err(|_| {
+            PyError::named(
+                "ValueError",
+                "Too many decimal digits in format string".to_string(),
+            )
+        })?
     } else {
         0
     };
@@ -1209,13 +1216,13 @@ fn parse_format_spec(spec: &str) -> Result<FormatSpec> {
             pos += 1;
         }
         if pos > prec_start {
-            Some(
-                chars[prec_start..pos]
-                    .iter()
-                    .collect::<String>()
-                    .parse::<usize>()
-                    .unwrap_or(0),
-            )
+            let raw: String = chars[prec_start..pos].iter().collect();
+            Some(raw.parse::<usize>().map_err(|_| {
+                PyError::named(
+                    "ValueError",
+                    "Too many decimal digits in format string".to_string(),
+                )
+            })?)
         } else {
             // '.' with no digits is a syntax error in CPython.
             return Err(PyError::named(
@@ -1274,7 +1281,13 @@ fn render_format_spec(value: &Value, fs: &FormatSpec) -> Result<String> {
     if fs.type_char.is_none() {
         match value.kind() {
             ValueKind::Int(_) | ValueKind::Bool(_) => return format_int_value(value, fs, None),
-            ValueKind::Float(_) | ValueKind::Complex(_, _) => return format_float_value(value, fs, None),
+            ValueKind::Float(_) => return format_float_value(value, fs, None),
+            // Complex with no explicit type code: render via complex_repr
+            // (matching CPython's `format(1+2j)` -> "(1+2j)") and then apply
+            // width / align / fill to the resulting string.  The float
+            // format codes are rejected for Complex in format_float_value,
+            // so we must short-circuit here for the bare-spec case.
+            ValueKind::Complex(_, _) => return format_complex_value(value, fs),
             _ => {
                 // Anything else: fall back to str() then pad like a string.
                 return format_as_string(value, fs);
@@ -1466,12 +1479,14 @@ fn format_int_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -> 
     // Apply grouping to the digit body.  For non-decimal bases (b/o/x/X),
     // CPython groups every 4 digits with '_'.  For decimal, every 3 digits
     // with either ',' or '_'.
+    let group_size = if effective_t == 'd' { 3 } else { 4 };
     if let Some(g) = fs.grouping {
-        let group_size = if effective_t == 'd' { 3 } else { 4 };
         body = group_digits(&body, g, group_size);
     }
 
-    // Apply zero-pad / width / alignment.
+    // Apply zero-pad / width / alignment.  Pass `group_size` so that
+    // zero-pad + grouping with non-decimal bases (e.g. `{:0_12x}`) re-groups
+    // the zero-padded body every 4 digits rather than every 3.
     Ok(assemble_numeric(
         sign_prefix,
         alt_prefix,
@@ -1479,16 +1494,20 @@ fn format_int_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -> 
         fs,
         // Numeric default alignment is right.
         '>',
+        group_size,
     ))
 }
 
 fn format_float_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -> Result<String> {
-    // Complex numbers are not supported by the float format codes here (they
-    // have their own dispatch in __format__).  Reject early for clarity.
+    // Complex numbers don't yet support the explicit float / int type codes
+    // here.  The bare-spec (no type char) path routes Complex through
+    // `format_complex_value` before reaching this function, so a Complex
+    // value here means the user supplied an unsupported type code.
     if matches!(value.kind(), ValueKind::Complex(_, _)) {
+        let code = type_char.unwrap_or('\0');
         return Err(PyError::named(
-            "TypeError",
-            "unsupported format string passed to complex.__format__".to_string(),
+            "ValueError",
+            format!("Unknown format code '{code}' for object of type 'complex'"),
         ));
     }
 
@@ -1506,7 +1525,7 @@ fn format_float_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -
         } else {
             "nan".to_string()
         };
-        return Ok(assemble_numeric("", "", body, fs, '>'));
+        return Ok(assemble_numeric("", "", body, fs, '>', 3));
     }
     if f.is_infinite() {
         let body = if matches!(t, 'F' | 'G' | 'E') {
@@ -1514,7 +1533,7 @@ fn format_float_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -
         } else {
             "inf".to_string()
         };
-        return Ok(assemble_numeric(sign_prefix, "", body, fs, '>'));
+        return Ok(assemble_numeric(sign_prefix, "", body, fs, '>', 3));
     }
 
     // Validate grouping vs type.  Comma allowed on all float types; '_'
@@ -1585,7 +1604,50 @@ fn format_float_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -
         }
     }
 
-    Ok(assemble_numeric(sign_prefix, alt_prefix, body, fs, '>'))
+    Ok(assemble_numeric(sign_prefix, alt_prefix, body, fs, '>', 3))
+}
+
+/// Format a Complex value when no explicit numeric type code was given.
+///
+/// CPython's `format(1+2j)` returns `"(1+2j)"` and applying width / align /
+/// fill (e.g. `format(1+2j, ">10")` -> `"    (1+2j)"`) pads that string.
+///
+/// This handles only the bare-spec case (fill / align / width); full Complex
+/// formatting with type codes (`e`, `f`, `g`) is not yet implemented and
+/// would be a larger feature.  Zero-padding and `=` alignment are rejected
+/// because the leading `(` makes them ill-defined for Complex.
+fn format_complex_value(value: &Value, fs: &FormatSpec) -> Result<String> {
+    if fs.zero_pad && !fs.fill_explicit {
+        return Err(PyError::named(
+            "ValueError",
+            "Zero padding is not allowed in complex format specifier".to_string(),
+        ));
+    }
+    if matches!(fs.align, Some('=')) {
+        return Err(PyError::named(
+            "ValueError",
+            "'=' alignment flag is not allowed in complex format specifier".to_string(),
+        ));
+    }
+    // Sign / precision / grouping / alt with no type code would require
+    // re-rendering the components; not supported here.  Reject explicitly so
+    // the user gets a clear error instead of silently dropping the flag.
+    if fs.sign.is_some()
+        || fs.alt
+        || fs.precision.is_some()
+        || fs.grouping.is_some()
+    {
+        return Err(PyError::named(
+            "ValueError",
+            "Format specifier missing precision".to_string(),
+        ));
+    }
+
+    // Use the canonical Complex repr (mirrors CPython's `format(c)`).
+    let raw = value.to_py_str();
+    // CPython right-aligns Complex on width (numeric default), matching the
+    // behavior of the bare format spec.
+    Ok(pad_value(&raw, fs, '>', fs.fill))
 }
 
 fn sign_prefix_for(negative: bool, sign: Option<char>) -> &'static str {
@@ -1630,12 +1692,17 @@ fn group_float_int_part(body: &str, sep: char) -> String {
 
 /// Assemble the final string with sign / alt-prefix / body and apply width
 /// + alignment + zero-pad rules.
+///
+/// `group_size` controls how zero-pad interleaves with the grouping
+/// separator: `3` for decimal / float grouping, `4` for `_` grouping with
+/// non-decimal integer bases (`b`/`o`/`x`/`X`), matching CPython.
 fn assemble_numeric(
     sign_prefix: &str,
     alt_prefix: &str,
     body: String,
     fs: &FormatSpec,
     default_align: char,
+    group_size: usize,
 ) -> String {
     let raw_len = sign_prefix.chars().count() + alt_prefix.chars().count() + body.chars().count();
 
@@ -1671,7 +1738,7 @@ fn assemble_numeric(
                 // pad characters so the resulting body still groups in
                 // threes-or-fours.  Apply by left-padding the body with
                 // zeros first, then re-grouping the integer portion.
-                regroup_with_zero_pad(&body, pad, fs.grouping.unwrap(), alt_prefix)
+                regroup_with_zero_pad(&body, pad, fs.grouping.unwrap(), group_size, alt_prefix)
             } else {
                 let mut s = String::with_capacity(pad + body.len());
                 s.push_str(&fill_str);
@@ -1698,11 +1765,29 @@ fn assemble_numeric(
 /// so the leading zeros are themselves separated by the group char.  The
 /// final grouped string must be at least `current_int_len + pad` characters
 /// long.
-fn regroup_with_zero_pad(body: &str, pad: usize, sep: char, _alt_prefix: &str) -> String {
-    // Split body into integer / fractional / suffix parts.
-    let (int_part, rest) = match body.find(|c: char| matches!(c, '.' | 'e' | 'E' | '%')) {
-        Some(i) => (&body[..i], &body[i..]),
-        None => (body, ""),
+///
+/// `group_size` is `3` for decimal grouping (`,` or `_` with `d`/`n`/no type
+/// or with floats), and `4` for `_` grouping with non-decimal integer bases
+/// (`b`/`o`/`x`/`X`), matching CPython's rules.
+fn regroup_with_zero_pad(
+    body: &str,
+    pad: usize,
+    sep: char,
+    group_size: usize,
+    _alt_prefix: &str,
+) -> String {
+    // Split body into integer / fractional / suffix parts.  For non-decimal
+    // integer bases (group_size == 4) the body is hex/oct/bin digits only —
+    // including `e`, which is a legitimate hex digit — so skip the split.
+    // For decimal / float (group_size == 3) the body may contain `.`, `e`,
+    // `E`, or `%` which mark the end of the integer portion.
+    let (int_part, rest) = if group_size == 3 {
+        match body.find(|c: char| matches!(c, '.' | 'e' | 'E' | '%')) {
+            Some(i) => (&body[..i], &body[i..]),
+            None => (body, ""),
+        }
+    } else {
+        (body, "")
     };
 
     // Strip existing separators from the integer part.
@@ -1711,7 +1796,6 @@ fn regroup_with_zero_pad(body: &str, pad: usize, sep: char, _alt_prefix: &str) -
 
     // Iteratively prepend zeros and regroup until length matches target.
     // Bounded by `target_int_len` iterations.
-    let group_size = 3;
     let mut digits = bare_int;
     for _ in 0..=target_int_len {
         let grouped = group_digits(&digits, sep, group_size);
