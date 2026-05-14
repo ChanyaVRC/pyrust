@@ -810,32 +810,16 @@ pyrust_module! {
         if args.len() != 2 {
             return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly 2 arguments")));
         }
-        let cls = match args[0].value.kind() {
-            ValueKind::PyClass(c) => Rc::clone(c),
-            _ => return Err(PyError::named(
+        // `cls` may be either a user-defined class (`PyClass`) or a
+        // built-in type token (`BuiltinFunction("int")` etc.); anything
+        // else is a `TypeError`, matching CPython.
+        if !is_class_like(&args[0].value) {
+            return Err(PyError::named(
                 "TypeError",
                 format!("{FN_NAME}() arg 1 must be a class"),
-            )),
-        };
-        let result = match args[1].value.kind() {
-            ValueKind::PyClass(expected) => class_is_subclass_of(&cls, expected),
-            ValueKind::Tuple(items) => {
-                let mut found = false;
-                for item in items {
-                    if let ValueKind::PyClass(expected) = item.kind()
-                        && class_is_subclass_of(&cls, expected)
-                    {
-                        found = true;
-                        break;
-                    }
-                }
-                found
-            }
-            _ => return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}() arg 2 must be a class or tuple of classes"),
-            )),
-        };
+            ));
+        }
+        let result = issubclass_check(FN_NAME, &args[0].value, &args[1].value)?;
         Ok(Value::bool_(result))
     }
 
@@ -890,28 +874,7 @@ pyrust_module! {
         if args.len() != 2 {
             return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly 2 arguments")));
         }
-        let obj = &args[0].value;
-        let cls = &args[1].value;
-        let result = match (obj.kind(), cls.kind()) {
-            (ValueKind::PyInstance(inst), ValueKind::PyClass(expected)) => {
-                class_is_subclass_of(&inst.borrow().class, expected)
-            }
-            (ValueKind::Int(_) | ValueKind::Bool(_), ValueKind::BuiltinFunction("int")) => true,
-            (ValueKind::Float(_), ValueKind::BuiltinFunction("float")) => true,
-            (ValueKind::Str(_), ValueKind::BuiltinFunction("str")) => true,
-            (ValueKind::Bool(_), ValueKind::BuiltinFunction("bool")) => true,
-            (ValueKind::None, ValueKind::BuiltinFunction("NoneType")) => true,
-            (ValueKind::List(_), ValueKind::BuiltinFunction("list")) => true,
-            (ValueKind::Tuple(_), ValueKind::BuiltinFunction("tuple")) => true,
-            (ValueKind::Set(_), ValueKind::BuiltinFunction("set")) => true,
-            (ValueKind::BuiltinObject { ops, .. }, ValueKind::BuiltinFunction(name)) => {
-                ops.type_name() == name
-            }
-            (ValueKind::Bytes(_), ValueKind::BuiltinFunction("bytes")) => true,
-            (ValueKind::Complex(_, _), ValueKind::BuiltinFunction("complex")) => true,
-            (ValueKind::Dict(_), ValueKind::BuiltinFunction("dict")) => true,
-            _ => false,
-        };
+        let result = isinstance_check(FN_NAME, &args[0].value, &args[1].value)?;
         Ok(Value::bool_(result))
     }
 
@@ -1820,6 +1783,111 @@ pyrust_module! {
         };
         Ok(Value::bool_(is_callable))
     }
+}
+
+/// Single-class `isinstance` check — `obj` against one concrete class
+/// value (i.e. *not* a tuple).  Mirrors the original match arms from
+/// `isinstance` and is reused by the tuple-recursive entry point.
+fn isinstance_single(obj: &Value, cls: &Value) -> bool {
+    match (obj.kind(), cls.kind()) {
+        (ValueKind::PyInstance(inst), ValueKind::PyClass(expected)) => {
+            class_is_subclass_of(&inst.borrow().class, expected)
+        }
+        (ValueKind::Int(_) | ValueKind::Bool(_), ValueKind::BuiltinFunction("int")) => true,
+        (ValueKind::Float(_), ValueKind::BuiltinFunction("float")) => true,
+        (ValueKind::Str(_), ValueKind::BuiltinFunction("str")) => true,
+        (ValueKind::Bool(_), ValueKind::BuiltinFunction("bool")) => true,
+        (ValueKind::None, ValueKind::BuiltinFunction("NoneType")) => true,
+        (ValueKind::List(_), ValueKind::BuiltinFunction("list")) => true,
+        (ValueKind::Tuple(_), ValueKind::BuiltinFunction("tuple")) => true,
+        (ValueKind::Set(_), ValueKind::BuiltinFunction("set")) => true,
+        (ValueKind::BuiltinObject { ops, .. }, ValueKind::BuiltinFunction(name)) => {
+            ops.type_name() == name
+        }
+        (ValueKind::Bytes(_), ValueKind::BuiltinFunction("bytes")) => true,
+        (ValueKind::Complex(_, _), ValueKind::BuiltinFunction("complex")) => true,
+        (ValueKind::Dict(_), ValueKind::BuiltinFunction("dict")) => true,
+        (ValueKind::BigInt(_), ValueKind::BuiltinFunction("int")) => true,
+        _ => false,
+    }
+}
+
+/// `isinstance(obj, classinfo)` — accept a class *or* an
+/// arbitrarily-nested tuple of classes, matching CPython's recursive
+/// contract.  Raises `TypeError` if a leaf is neither a class nor a
+/// tuple.  See <https://docs.python.org/3/library/functions.html#isinstance>.
+fn isinstance_check(fn_name: &str, obj: &Value, cls: &Value) -> Result<bool> {
+    if let ValueKind::Tuple(items) = cls.kind() {
+        for item in items {
+            if isinstance_check(fn_name, obj, item)? {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+    if !is_class_like(cls) {
+        return Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() arg 2 must be a type, a tuple of types, or a union"),
+        ));
+    }
+    Ok(isinstance_single(obj, cls))
+}
+
+/// `issubclass(cls, classinfo)` — same tuple-recursive contract as
+/// `isinstance_check`, but compares classes rather than instances.
+fn issubclass_check(fn_name: &str, cls: &Value, classinfo: &Value) -> Result<bool> {
+    if let ValueKind::Tuple(items) = classinfo.kind() {
+        for item in items {
+            if issubclass_check(fn_name, cls, item)? {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+    match (cls.kind(), classinfo.kind()) {
+        // User-defined → user-defined: walk the `base` chain.
+        (ValueKind::PyClass(c), ValueKind::PyClass(expected)) => {
+            Ok(class_is_subclass_of(&c, &expected))
+        }
+        // User-defined → builtin type token: never a match in PyRust
+        // (user classes don't inherit from built-in types here).
+        (ValueKind::PyClass(_), ValueKind::BuiltinFunction(_)) => Ok(false),
+        // Builtin type token → builtin type token: handle the small
+        // hard-coded relations (`bool` ⊂ `int`, anything ⊂ itself,
+        // anything ⊂ `object`).
+        (ValueKind::BuiltinFunction(a), ValueKind::BuiltinFunction(b)) => {
+            Ok(builtin_is_subclass_of(a, b))
+        }
+        // Builtin → user-defined: never matches.
+        (ValueKind::BuiltinFunction(_), ValueKind::PyClass(_)) => Ok(false),
+        (_, ValueKind::PyClass(_) | ValueKind::BuiltinFunction(_)) => Ok(false),
+        _ => Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() arg 2 must be a class, a tuple of classes, or a union"),
+        )),
+    }
+}
+
+/// True if built-in type token `a` is a subclass of token `b`.  Only
+/// the CPython-documented built-in relations matter here: every type
+/// is a subclass of itself and of `object`; `bool` is a subclass of
+/// `int`.
+fn builtin_is_subclass_of(a: &str, b: &str) -> bool {
+    if a == b || b == "object" {
+        return true;
+    }
+    matches!((a, b), ("bool", "int"))
+}
+
+/// True if `v` looks like a class-info leaf accepted by
+/// `isinstance`/`issubclass` — either a user-defined `PyClass` or a
+/// built-in type token (`BuiltinFunction("int")` etc.).
+fn is_class_like(v: &Value) -> bool {
+    matches!(
+        v.kind(),
+        ValueKind::PyClass(_) | ValueKind::BuiltinFunction(_),
+    )
 }
 
 /// Format an i64 as Python's `hex()` output — `"0xN"` / `"-0xN"`.  Used
