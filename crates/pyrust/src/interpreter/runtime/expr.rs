@@ -459,16 +459,174 @@ impl Interpreter {
     }
 
     /// Compare two values via `__eq__`, used by the dict/set runtime when
-    /// resolving `PyKey::Object` collisions.  Falls back to `Value::eq`
-    /// (pointer-identity for `PyInstance`) when no `__eq__` is defined.
-    fn values_user_eq(&mut self, a: &Value, b: &Value) -> Result<bool> {
+    /// resolving `PyKey::Object` collisions and by `BinaryOp::Eq`/`Ne`'s
+    /// container fall-through path (issue #436).
+    ///
+    /// The fast `Value::eq` path covers primitives and identity-equal
+    /// containers (e.g. `[1,2,3] == [1,2,3]`).  When it returns false we
+    /// look for cases that need dunder dispatch:
+    ///
+    /// - `PyInstance` on either side: try `__eq__` (issue #368).
+    /// - Same-kind container (`List`/`Tuple`/`Dict`): recurse element-wise
+    ///   so a `PyInstance` element with `__eq__` participates correctly
+    ///   instead of the inner `Rc::ptr_eq` returning false (issue #436).
+    /// - `Set`: same-size + each lhs element in rhs via `set_lookup`
+    ///   (which already routes `PyKey::Object` through `values_user_eq`).
+    ///
+    /// Cycle detection mirrors `Value::eq`'s `EqGuard`: a recursive call
+    /// for the same `(value_id(a), value_id(b))` pair returns true (the
+    /// recursion bottoms out as "we've already proven the prefix equal"),
+    /// so `a.append(a); b.append(b); a == b` doesn't blow the stack.
+    pub(crate) fn values_user_eq(&mut self, a: &Value, b: &Value) -> Result<bool> {
+        // Primitive / identity fast path: `Value::eq` handles
+        // Int/Float/Bool/Str/Bytes/Complex/None and identity-equal
+        // collections without any dunder dispatch.  When it returns true
+        // we're done — this also preserves the branch-free
+        // `[1,2,3] == [1,2,3]` shortcut.
         if a == b {
             return Ok(true);
         }
+
+        // Same-kind container recursion.  Each kind has element-wise
+        // semantics where `Value::eq` doesn't dispatch user `__eq__`:
+        //   - `Vec::eq` element-by-element via `Value::eq`
+        //   - `IndexMap`/`IndexSet`: keyed by `PyKey` (which for
+        //     `PyKey::Object` uses ptr-identity, not user `__eq__`)
+        // Snapshot element slices when both operands are list-shaped or
+        // tuple-shaped.  Tuple `ValueKind` yields `&[Value]` and List
+        // yields `Ref<'_, Vec<Value>>`, so we extract the snapshot in a
+        // mini-scope and recurse below.  Element clones are cheap
+        // (Rc/NaN-box copy); the snapshot also prevents user code from
+        // invalidating the borrow during recursion.
+        let pair_slices: Option<(Vec<Value>, Vec<Value>)> = match (a.kind(), b.kind()) {
+            (ValueKind::List(la), ValueKind::List(lb)) => {
+                Some((la.iter().cloned().collect(), lb.iter().cloned().collect()))
+            }
+            (ValueKind::Tuple(la), ValueKind::Tuple(lb)) => {
+                Some((la.iter().cloned().collect(), lb.iter().cloned().collect()))
+            }
+            _ => None,
+        };
+        if let Some((av, bv)) = pair_slices {
+            if av.len() != bv.len() {
+                return Ok(false);
+            }
+            if self.eq_cycle_enter(a, b) {
+                // Already comparing this pair further up the stack —
+                // treat as equal to terminate the recursion (matching
+                // `Value::eq`'s `EqGuard` policy).
+                return Ok(true);
+            }
+            let result = (|| -> Result<bool> {
+                for (x, y) in av.iter().zip(bv.iter()) {
+                    if !self.values_user_eq(x, y)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            })();
+            self.eq_cycle_exit(a, b);
+            return result;
+        }
+
+        match (a.kind(), b.kind()) {
+            (ValueKind::Dict(da), ValueKind::Dict(db)) => {
+                if da.len() != db.len() {
+                    return Ok(false);
+                }
+                if self.eq_cycle_enter(a, b) {
+                    return Ok(true);
+                }
+                // Snapshot (PyKey, Value) pairs from `a` so user `__eq__`
+                // (run while looking up in `b`) can't invalidate the dict
+                // borrow.  We pass the snapshotted `PyKey` straight to
+                // `dict_lookup` so `__hash__` / `__eq__` dispatch on
+                // `PyKey::Object` keys still works (issue #368).
+                let entries: Vec<(PyKey, Value)> = da
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                let result = (|| -> Result<bool> {
+                    for (pk, v_lhs) in entries {
+                        match self.dict_lookup(b, &pk)? {
+                            Some((_, v_rhs)) => {
+                                if !self.values_user_eq(&v_lhs, &v_rhs)? {
+                                    return Ok(false);
+                                }
+                            }
+                            None => return Ok(false),
+                        }
+                    }
+                    Ok(true)
+                })();
+                self.eq_cycle_exit(a, b);
+                return result;
+            }
+            (ValueKind::Set(sa), ValueKind::Set(sb)) => {
+                if sa.len() != sb.len() {
+                    return Ok(false);
+                }
+                if self.eq_cycle_enter(a, b) {
+                    return Ok(true);
+                }
+                let keys: Vec<PyKey> = sa.iter().cloned().collect();
+                let result = (|| -> Result<bool> {
+                    for pk in keys {
+                        if self.set_lookup(b, &pk)?.is_none() {
+                            return Ok(false);
+                        }
+                    }
+                    Ok(true)
+                })();
+                self.eq_cycle_exit(a, b);
+                return result;
+            }
+            _ => {}
+        }
+
+        // PyInstance (either side) — dispatch `__eq__`/reflected
+        // `__eq__`.  This is the original `values_user_eq` body.
         if let Some(r) = self.try_dunder_binary(a, b, "__eq__", "__eq__") {
             return Ok(r?.truthy());
         }
         Ok(false)
+    }
+
+    /// Enter equality recursion for the `(value_id(a), value_id(b))`
+    /// pair.  Returns `true` when a cycle is detected (the caller should
+    /// short-circuit to "equal" without pushing); returns `false`
+    /// otherwise after pushing the pair onto the recursion stack.  Each
+    /// `false` return must be matched by an `eq_cycle_exit` call.
+    ///
+    /// Primitives (no `value_id`) can't form cycles, so we return
+    /// `false` without recording anything — the missing push is paired
+    /// with a no-op `eq_cycle_exit`.
+    fn eq_cycle_enter(&mut self, a: &Value, b: &Value) -> bool {
+        let (Some(a_id), Some(b_id)) = (a.value_id(), b.value_id()) else {
+            return false;
+        };
+        let pair = (a_id, b_id);
+        if self.eq_in_progress.contains(&pair) {
+            return true;
+        }
+        self.eq_in_progress.push(pair);
+        false
+    }
+
+    /// Pop the matching pair from the recursion stack.  No-op when the
+    /// pair wasn't pushed (one operand was a primitive without
+    /// `value_id`).
+    fn eq_cycle_exit(&mut self, a: &Value, b: &Value) {
+        let (Some(a_id), Some(b_id)) = (a.value_id(), b.value_id()) else {
+            return;
+        };
+        if let Some(pos) = self
+            .eq_in_progress
+            .iter()
+            .rposition(|p| *p == (a_id, b_id))
+        {
+            self.eq_in_progress.remove(pos);
+        }
     }
 
     /// Dispatch any dict method.  Methods that read or write keys
@@ -649,13 +807,18 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__eq__", "__eq__") {
                     return r;
                 }
-                Ok(Value::bool_(left == right))
+                // Containers fall through here: `Value::eq` would call
+                // `Rc::ptr_eq` on `PyInstance` elements, missing user
+                // `__eq__`.  Route through `values_user_eq` so list /
+                // tuple / dict / set element comparison dispatches
+                // `__eq__` recursively (issue #436).
+                Ok(Value::bool_(self.values_user_eq(&left, &right)?))
             }
             BinaryOp::Ne => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__ne__", "__ne__") {
                     return r;
                 }
-                Ok(Value::bool_(left != right))
+                Ok(Value::bool_(!self.values_user_eq(&left, &right)?))
             }
             BinaryOp::Lt => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__lt__", "__gt__") {

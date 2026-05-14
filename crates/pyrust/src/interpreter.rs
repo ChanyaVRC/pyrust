@@ -83,6 +83,19 @@ pub struct Interpreter {
     /// `locals()` inside a class body falls through to the module-
     /// globals path.  Tracked as a known limitation (issue #487).
     pub(crate) vm_frame_views: Vec<VmFrameView>,
+    /// Recursion stack for `values_user_eq` cycle detection (issue
+    /// #436).  Each entry is the ordered `(value_id(lhs), value_id(rhs))`
+    /// of a container pair currently being compared element-wise.
+    /// Encountering the same pair again means the recursion has hit a
+    /// cycle (e.g. `a.append(a); b.append(b); a == b`); the recursion
+    /// short-circuits to `true` instead of blowing the stack — matching
+    /// `Value::eq`'s `EqGuard` policy and CPython's effective behaviour
+    /// for self-referential containers under `==`.
+    ///
+    /// Lives on the interpreter (rather than a `thread_local!`) because
+    /// the helper is only reachable through `&mut self`; the field
+    /// avoids the per-recursive-call thread-local borrow.
+    pub(crate) eq_in_progress: Vec<(i64, i64)>,
 }
 
 /// Discriminator for `VmFrameView`: script-level (module-scope) vs.
@@ -147,6 +160,7 @@ impl Default for Interpreter {
             key_scratch: Vec::new(),
             class_store_order: Vec::new(),
             vm_frame_views: Vec::new(),
+            eq_in_progress: Vec::new(),
         }
     }
 }
