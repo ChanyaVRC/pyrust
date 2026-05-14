@@ -1078,33 +1078,78 @@ impl Interpreter {
 }
 
 /// Apply a Python format spec string to a `Value` and return the formatted string.
-/// Supports common numeric specs: `d`, `f`, `e`, `g`, `x`, `X`, `o`, `b`, `s`,
-/// with optional width, fill/align, sign, and precision.
+///
+/// Implements the [Python format-spec mini-language][docs]:
+///
+/// ```text
+/// [[fill]align][sign][#][0][width][grouping][.precision][type]
+/// ```
+///
+/// Supported components for the built-in numeric / string types:
+/// - **fill / align** (`<`, `>`, `^`, `=`) with any single fill character
+/// - **sign** (`+`, `-`, ` `)
+/// - **alternate form** `#` for `b`, `o`, `x`, `X` (and float types)
+/// - **zero-pad** `0` (implies sign-aware `=` alignment)
+/// - **width** (decimal integer)
+/// - **grouping** `,` (comma) or `_` (underscore)
+/// - **precision** `.N` for floats and strings
+/// - **type** `b`, `c`, `d`, `e`, `E`, `f`, `F`, `g`, `G`, `n`, `o`, `s`, `x`, `X`, `%`
+///
+/// Not yet implemented: locale-aware grouping (`n` and float `n` types) and
+/// non-ASCII fill characters in nested f-string specs round-trip through
+/// `str.format` as bytes rather than chars.  Both gaps mirror documented
+/// pyrust limitations.
+///
+/// [docs]: https://docs.python.org/3/library/string.html#format-specification-mini-language
 pub(crate) fn apply_format_spec(value: &Value, spec: &str) -> Result<Value> {
     if spec.is_empty() {
         return Ok(Value::string(value.to_py_str()));
     }
 
-    // Parse the format spec.  We support the most common subset:
-    //   [[fill]align][sign][#][0][width][.precision][type]
-    // where align is <, >, ^; sign is +, -, ' '; type is one of s d f e g x X o b.
+    let parsed = parse_format_spec(spec)?;
+    let formatted = render_format_spec(value, &parsed)?;
+    Ok(Value::string(formatted))
+}
+
+#[derive(Debug, Clone)]
+struct FormatSpec {
+    fill: char,
+    align: Option<char>,
+    /// True when the user explicitly supplied a fill character (the
+    /// two-character `[fill]align` form).  When false, a subsequent `0`
+    /// flag promotes the fill to `'0'`.
+    fill_explicit: bool,
+    sign: Option<char>,
+    alt: bool,
+    zero_pad: bool,
+    width: usize,
+    grouping: Option<char>,
+    precision: Option<usize>,
+    type_char: Option<char>,
+}
+
+fn parse_format_spec(spec: &str) -> Result<FormatSpec> {
     let chars: Vec<char> = spec.chars().collect();
     let len = chars.len();
     let mut pos = 0;
 
-    // fill + align
-    let (fill, align) = if len >= 2 && matches!(chars[1], '<' | '>' | '^') {
-        let f = chars[0];
-        let a = chars[1];
-        pos += 2;
-        (f, Some(a))
-    } else if len >= 1 && matches!(chars[0], '<' | '>' | '^') {
-        let a = chars[0];
-        pos += 1;
-        (' ', Some(a))
-    } else {
-        (' ', None)
-    };
+    // fill + align: the align character (one of <>=^) must be at index 1
+    // when a fill is present.  A bare align character at index 0 means
+    // fill defaults to space.  '{' and '}' are not legal fill characters
+    // (they would terminate the replacement field) — guard explicitly.
+    let (fill, align, fill_explicit) =
+        if len >= 2 && matches!(chars[1], '<' | '>' | '=' | '^') && !matches!(chars[0], '{' | '}') {
+            let f = chars[0];
+            let a = chars[1];
+            pos += 2;
+            (f, Some(a), true)
+        } else if len >= 1 && matches!(chars[0], '<' | '>' | '=' | '^') {
+            let a = chars[0];
+            pos += 1;
+            (' ', Some(a), false)
+        } else {
+            (' ', None, false)
+        };
 
     // sign
     let sign = if pos < len && matches!(chars[pos], '+' | '-' | ' ') {
@@ -1123,14 +1168,14 @@ pub(crate) fn apply_format_spec(value: &Value, spec: &str) -> Result<Value> {
         false
     };
 
-    // zero-padding '0'
+    // zero-padding '0' — always consumed when present at this position.
+    // Semantics depend on whether align/fill were explicit (see render).
     let zero_pad = if pos < len && chars[pos] == '0' {
         pos += 1;
         true
     } else {
         false
     };
-    let fill = if zero_pad && align.is_none() { '0' } else { fill };
 
     // width
     let width_start = pos;
@@ -1147,6 +1192,15 @@ pub(crate) fn apply_format_spec(value: &Value, spec: &str) -> Result<Value> {
         0
     };
 
+    // grouping option (',' or '_') — sits between width and precision.
+    let grouping = if pos < len && (chars[pos] == ',' || chars[pos] == '_') {
+        let g = chars[pos];
+        pos += 1;
+        Some(g)
+    } else {
+        None
+    };
+
     // precision
     let precision = if pos < len && chars[pos] == '.' {
         pos += 1;
@@ -1160,184 +1214,605 @@ pub(crate) fn apply_format_spec(value: &Value, spec: &str) -> Result<Value> {
                     .iter()
                     .collect::<String>()
                     .parse::<usize>()
-                    .unwrap_or(6),
+                    .unwrap_or(0),
             )
         } else {
-            Some(6)
+            // '.' with no digits is a syntax error in CPython.
+            return Err(PyError::named(
+                "ValueError",
+                "Format specifier missing precision".to_string(),
+            ));
         }
     } else {
         None
     };
 
-    // type char
-    let type_char = if pos < len { Some(chars[pos]) } else { None };
+    // type char (must be the last character if present)
+    let type_char = if pos < len {
+        let t = chars[pos];
+        pos += 1;
+        Some(t)
+    } else {
+        None
+    };
 
-    // Format the value into a raw string (without width/alignment).
-    let raw = match type_char {
-        None | Some('s') => match value.kind() {
-            ValueKind::Str(s) => {
-                let s = s.to_string();
-                match precision {
-                    Some(p) => s.chars().take(p).collect(),
-                    None => s,
-                }
+    if pos != len {
+        return Err(PyError::named(
+            "ValueError",
+            "Invalid format specifier".to_string(),
+        ));
+    }
+
+    Ok(FormatSpec {
+        fill,
+        align,
+        fill_explicit,
+        sign,
+        alt,
+        zero_pad,
+        width,
+        grouping,
+        precision,
+        type_char,
+    })
+}
+
+/// Apply the parsed spec to the value.  Splits into a string-typed branch
+/// and a numeric branch so type-specific validation stays close to formatting.
+fn render_format_spec(value: &Value, fs: &FormatSpec) -> Result<String> {
+    // Treat the value as a string when the type code is 's' (or absent and
+    // the value is a string).  For non-string values with no type code, fall
+    // back to numeric handling so width / zero-pad / sign still apply.
+    let is_string_target = matches!(fs.type_char, Some('s'))
+        || (fs.type_char.is_none() && matches!(value.kind(), ValueKind::Str(_)));
+
+    if is_string_target {
+        return format_as_string(value, fs);
+    }
+
+    // No type code and a non-string value: route by value kind.
+    if fs.type_char.is_none() {
+        match value.kind() {
+            ValueKind::Int(_) | ValueKind::Bool(_) => return format_int_value(value, fs, None),
+            ValueKind::Float(_) | ValueKind::Complex(_, _) => return format_float_value(value, fs, None),
+            _ => {
+                // Anything else: fall back to str() then pad like a string.
+                return format_as_string(value, fs);
             }
-            _ => value.to_py_str(),
-        },
-        Some('d') => match value.kind() {
-            ValueKind::Int(n) => format_int_with_sign(n, sign),
-            ValueKind::Bool(b) => format_int_with_sign(if b { 1 } else { 0 }, sign),
-            _ => return Err(PyError::named(
-                "ValueError",
-                format!("unknown format code 'd' for object of type '{}'", value_type_name_str(value)),
-            )),
-        },
-        Some('f') | Some('F') => {
-            let prec = precision.unwrap_or(6);
-            let f = fmt_value_to_float(value)?;
-            let s = if type_char == Some('F') {
-                format!("{:.prec$}", f).to_uppercase()
+        }
+    }
+
+    let t = fs.type_char.unwrap();
+    match t {
+        'd' | 'b' | 'o' | 'x' | 'X' | 'c' | 'n' => format_int_value(value, fs, Some(t)),
+        'e' | 'E' | 'f' | 'F' | 'g' | 'G' | '%' => format_float_value(value, fs, Some(t)),
+        's' => format_as_string(value, fs),
+        _ => Err(PyError::named(
+            "ValueError",
+            format!(
+                "Unknown format code '{t}' for object of type '{}'",
+                value_type_name_str(value)
+            ),
+        )),
+    }
+}
+
+fn format_as_string(value: &Value, fs: &FormatSpec) -> Result<String> {
+    // Reject numeric-only options on strings, matching CPython.
+    if matches!(fs.type_char, Some('s')) && !matches!(value.kind(), ValueKind::Str(_)) {
+        return Err(PyError::named(
+            "ValueError",
+            format!(
+                "Unknown format code 's' for object of type '{}'",
+                value_type_name_str(value)
+            ),
+        ));
+    }
+    if fs.sign.is_some() {
+        return Err(PyError::named(
+            "ValueError",
+            "Sign not allowed in string format specifier".to_string(),
+        ));
+    }
+    if fs.alt {
+        return Err(PyError::named(
+            "ValueError",
+            "Alternate form (#) not allowed in string format specifier".to_string(),
+        ));
+    }
+    if fs.grouping.is_some() {
+        return Err(PyError::named(
+            "ValueError",
+            "Cannot specify ',' or '_' with 's'.".to_string(),
+        ));
+    }
+    if matches!(fs.align, Some('=')) {
+        return Err(PyError::named(
+            "ValueError",
+            "'=' alignment not allowed in string format specifier".to_string(),
+        ));
+    }
+
+    let raw = match value.kind() {
+        ValueKind::Str(s) => s.to_string(),
+        _ => value.to_py_str(),
+    };
+    let raw = match fs.precision {
+        Some(p) => raw.chars().take(p).collect::<String>(),
+        None => raw,
+    };
+    // CPython accepts the `0` zero-pad flag on strings (with a
+    // DeprecationWarning) — it promotes the fill character to '0' but keeps
+    // the default left-alignment.  We just match the run-time behavior.
+    let effective_fill = if fs.zero_pad && !fs.fill_explicit {
+        '0'
+    } else {
+        fs.fill
+    };
+    Ok(pad_value(&raw, fs, '<', effective_fill))
+}
+
+/// Produce the digit-only "body" of an integer formatting (no sign / prefix).
+fn int_body(magnitude: u64, type_char: char) -> String {
+    match type_char {
+        'd' => format!("{magnitude}"),
+        'b' => format!("{magnitude:b}"),
+        'o' => format!("{magnitude:o}"),
+        'x' => format!("{magnitude:x}"),
+        'X' => format!("{magnitude:X}"),
+        _ => format!("{magnitude}"),
+    }
+}
+
+fn prefix_for(type_char: char, alt: bool) -> &'static str {
+    if !alt {
+        return "";
+    }
+    match type_char {
+        'b' => "0b",
+        'o' => "0o",
+        'x' => "0x",
+        'X' => "0X",
+        _ => "",
+    }
+}
+
+fn format_int_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -> Result<String> {
+    let n: i128 = match value.kind() {
+        ValueKind::Int(n) => n as i128,
+        ValueKind::Bool(b) => {
+            if b {
+                1
             } else {
-                format!("{:.prec$}", f)
-            };
-            apply_sign_str(s, f, sign)
+                0
+            }
         }
-        Some('e') | Some('E') => {
-            let prec = precision.unwrap_or(6);
-            let f = fmt_value_to_float(value)?;
-            let s = if type_char == Some('E') {
-                format!("{:.prec$E}", f)
-            } else {
-                format!("{:.prec$e}", f)
-            };
-            // Python uses e+XX not e+0XX — Rust uses two digits for small exponents.
-            // Normalise to match Python's format.
-            normalise_exp_str(s, f, sign)
-        }
-        Some('g') | Some('G') => {
-            let prec = precision.unwrap_or(6);
-            let prec = if prec == 0 { 1 } else { prec };
-            let f = fmt_value_to_float(value)?;
-            let s = format_g(f, prec, type_char == Some('G'));
-            apply_sign_str(s, f, sign)
-        }
-        Some('%') => {
-            let prec = precision.unwrap_or(6);
-            let f = fmt_value_to_float(value)?;
-            format!("{:.prec$}%", f * 100.0)
-        }
-        Some('x') => match value.kind() {
-            ValueKind::Int(n) => {
-                let s = if n < 0 {
-                    format!("-{:x}", (-n) as u64)
-                } else {
-                    format!("{:x}", n as u64)
-                };
-                if alt { format!("0x{s}") } else { s }
-            }
-            ValueKind::Bool(b) => {
-                let n: i64 = if b { 1 } else { 0 };
-                if alt { format!("0x{n:x}") } else { format!("{n:x}") }
-            }
-            _ => return Err(PyError::named(
-                "ValueError",
-                format!("unknown format code 'x' for object of type '{}'", value_type_name_str(value)),
-            )),
-        },
-        Some('X') => match value.kind() {
-            ValueKind::Int(n) => {
-                let s = if n < 0 {
-                    format!("-{:X}", (-n) as u64)
-                } else {
-                    format!("{:X}", n as u64)
-                };
-                if alt { format!("0X{s}") } else { s }
-            }
-            ValueKind::Bool(b) => {
-                let n: i64 = if b { 1 } else { 0 };
-                if alt { format!("0X{n:X}") } else { format!("{n:X}") }
-            }
-            _ => return Err(PyError::named(
-                "ValueError",
-                format!("unknown format code 'X' for object of type '{}'", value_type_name_str(value)),
-            )),
-        },
-        Some('o') => match value.kind() {
-            ValueKind::Int(n) => {
-                let s = if n < 0 {
-                    format!("-{:o}", (-n) as u64)
-                } else {
-                    format!("{:o}", n as u64)
-                };
-                if alt { format!("0o{s}") } else { s }
-            }
-            ValueKind::Bool(b) => {
-                let n: i64 = if b { 1 } else { 0 };
-                if alt { format!("0o{n:o}") } else { format!("{n:o}") }
-            }
-            _ => return Err(PyError::named(
-                "ValueError",
-                format!("unknown format code 'o' for object of type '{}'", value_type_name_str(value)),
-            )),
-        },
-        Some('b') => match value.kind() {
-            ValueKind::Int(n) => {
-                let s = if n < 0 {
-                    format!("-{:b}", (-n) as u64)
-                } else {
-                    format!("{:b}", n as u64)
-                };
-                if alt { format!("0b{s}") } else { s }
-            }
-            ValueKind::Bool(b) => {
-                let n: i64 = if b { 1 } else { 0 };
-                if alt { format!("0b{n:b}") } else { format!("{n:b}") }
-            }
-            _ => return Err(PyError::named(
-                "ValueError",
-                format!("unknown format code 'b' for object of type '{}'", value_type_name_str(value)),
-            )),
-        },
-        Some(other) => {
+        _ => {
+            let code = type_char.unwrap_or('d');
             return Err(PyError::named(
                 "ValueError",
-                format!("unknown format code '{other}' for object of type '{}'", value_type_name_str(value)),
-            ))
+                format!(
+                    "Unknown format code '{code}' for object of type '{}'",
+                    value_type_name_str(value)
+                ),
+            ));
         }
     };
 
-    // Apply width / alignment.
-    if width == 0 || raw.chars().count() >= width {
-        return Ok(Value::string(raw));
+    if fs.precision.is_some() {
+        return Err(PyError::named(
+            "ValueError",
+            "Precision not allowed in integer format specifier".to_string(),
+        ));
     }
-    let pad = width - raw.chars().count();
-    let effective_align = align.unwrap_or(if matches!(type_char, Some('d' | 'f' | 'e' | 'E' | 'g' | 'G' | 'x' | 'X' | 'o' | 'b') | None) && !matches!(value.kind(), ValueKind::Str(_)) {
-        '>'
-    } else {
-        '<'
-    });
-    let padded = match effective_align {
-        '>' => {
-            let mut s = fill.to_string().repeat(pad);
-            s.push_str(&raw);
-            s
+
+    let t = type_char.unwrap_or('d');
+
+    // 'c': render as the unicode character.
+    if t == 'c' {
+        if fs.sign.is_some() || fs.alt || fs.grouping.is_some() {
+            return Err(PyError::named(
+                "ValueError",
+                "Cannot specify ',' or '_', sign, or '#' with 'c'.".to_string(),
+            ));
         }
+        if n < 0 || n > 0x10FFFF {
+            return Err(PyError::named(
+                "OverflowError",
+                "%c arg not in range(0x110000)".to_string(),
+            ));
+        }
+        let ch = char::from_u32(n as u32).ok_or_else(|| {
+            PyError::named(
+                "OverflowError",
+                "%c arg not in range(0x110000)".to_string(),
+            )
+        })?;
+        let raw = ch.to_string();
+        return Ok(pad_value(&raw, fs, '<', fs.fill));
+    }
+
+    // 'n' = same as 'd' for now (no locale-aware grouping).
+    let effective_t = if t == 'n' { 'd' } else { t };
+
+    // Validate grouping vs type.
+    if let Some(g) = fs.grouping {
+        let ok = match (g, effective_t) {
+            (',', 'd') => true,
+            (',', _) => false,
+            ('_', 'd' | 'b' | 'o' | 'x' | 'X') => true,
+            _ => false,
+        };
+        if !ok {
+            return Err(PyError::named(
+                "ValueError",
+                format!("Cannot specify '{g}' with '{effective_t}'."),
+            ));
+        }
+    }
+
+    let negative = n < 0;
+    let magnitude: u64 = if negative {
+        // i64::MIN edge case: -(i128) fits in u64 via wrap.
+        (-n) as u64
+    } else {
+        n as u64
+    };
+
+    let sign_prefix = sign_prefix_for(negative, fs.sign);
+    let alt_prefix = prefix_for(effective_t, fs.alt);
+    let mut body = int_body(magnitude, effective_t);
+
+    // Apply grouping to the digit body.  For non-decimal bases (b/o/x/X),
+    // CPython groups every 4 digits with '_'.  For decimal, every 3 digits
+    // with either ',' or '_'.
+    if let Some(g) = fs.grouping {
+        let group_size = if effective_t == 'd' { 3 } else { 4 };
+        body = group_digits(&body, g, group_size);
+    }
+
+    // Apply zero-pad / width / alignment.
+    Ok(assemble_numeric(
+        sign_prefix,
+        alt_prefix,
+        body,
+        fs,
+        // Numeric default alignment is right.
+        '>',
+    ))
+}
+
+fn format_float_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -> Result<String> {
+    // Complex numbers are not supported by the float format codes here (they
+    // have their own dispatch in __format__).  Reject early for clarity.
+    if matches!(value.kind(), ValueKind::Complex(_, _)) {
+        return Err(PyError::named(
+            "TypeError",
+            "unsupported format string passed to complex.__format__".to_string(),
+        ));
+    }
+
+    let f = fmt_value_to_float(value)?;
+    let t = type_char.unwrap_or('\0'); // '\0' = no type, use shortest repr-ish
+
+    let negative = f.is_sign_negative() && !f.is_nan();
+    let sign_prefix = sign_prefix_for(negative, fs.sign);
+    let abs_f = f.abs();
+
+    // Special values: inf / nan ignore precision / alt / grouping.
+    if f.is_nan() {
+        let body = if matches!(t, 'F' | 'G' | 'E') {
+            "NAN".to_string()
+        } else {
+            "nan".to_string()
+        };
+        return Ok(assemble_numeric("", "", body, fs, '>'));
+    }
+    if f.is_infinite() {
+        let body = if matches!(t, 'F' | 'G' | 'E') {
+            "INF".to_string()
+        } else {
+            "inf".to_string()
+        };
+        return Ok(assemble_numeric(sign_prefix, "", body, fs, '>'));
+    }
+
+    // Validate grouping vs type.  Comma allowed on all float types; '_'
+    // similarly per CPython.
+    let (mut body, alt_prefix) = match t {
+        'f' | 'F' => {
+            let prec = fs.precision.unwrap_or(6);
+            let s = format!("{:.prec$}", abs_f);
+            let s = if t == 'F' { s.to_uppercase() } else { s };
+            (ensure_alt_float(s, fs.alt, fs.precision), "")
+        }
+        'e' | 'E' => {
+            let prec = fs.precision.unwrap_or(6);
+            let s = if t == 'E' {
+                format!("{:.prec$E}", abs_f)
+            } else {
+                format!("{:.prec$e}", abs_f)
+            };
+            let s = normalise_exp_digits(s);
+            (ensure_alt_float(s, fs.alt, fs.precision), "")
+        }
+        'g' | 'G' => {
+            let prec = fs.precision.unwrap_or(6);
+            let prec = if prec == 0 { 1 } else { prec };
+            let s = format_g(abs_f, prec, t == 'G');
+            // Alternate '#': keep trailing zeros / decimal point.
+            let s = if fs.alt {
+                ensure_g_trailing_zeros(s, prec, t == 'G', abs_f)
+            } else {
+                s
+            };
+            (s, "")
+        }
+        '%' => {
+            let prec = fs.precision.unwrap_or(6);
+            let s = format!("{:.prec$}", abs_f * 100.0);
+            let s = ensure_alt_float(s, fs.alt, fs.precision);
+            (format!("{s}%"), "")
+        }
+        _ => {
+            // No type: like 'g' but with at least one digit after the decimal
+            // point and a shortest-roundtrip-ish repr.  We approximate by
+            // calling Python's default via `to_py_str` for the magnitude.
+            let s = match value.kind() {
+                ValueKind::Float(_) => {
+                    let raw = Value::float(abs_f).to_py_str();
+                    if !raw.contains('.') && !raw.contains('e') && !raw.contains('n') {
+                        format!("{raw}.0")
+                    } else {
+                        raw
+                    }
+                }
+                ValueKind::Int(n) => {
+                    let n = if n < 0 { -n } else { n };
+                    format!("{n}.0")
+                }
+                ValueKind::Bool(b) => if b { "1.0" } else { "0.0" }.to_string(),
+                _ => format!("{abs_f}"),
+            };
+            (s, "")
+        }
+    };
+
+    // Apply grouping on the integer part of the float body.
+    if let Some(g) = fs.grouping {
+        if g == ',' || g == '_' {
+            body = group_float_int_part(&body, g);
+        }
+    }
+
+    Ok(assemble_numeric(sign_prefix, alt_prefix, body, fs, '>'))
+}
+
+fn sign_prefix_for(negative: bool, sign: Option<char>) -> &'static str {
+    if negative {
+        return "-";
+    }
+    match sign {
+        Some('+') => "+",
+        Some(' ') => " ",
+        _ => "",
+    }
+}
+
+/// Insert grouping characters into a digit string (right-to-left).
+fn group_digits(digits: &str, sep: char, group_size: usize) -> String {
+    let bytes: Vec<char> = digits.chars().collect();
+    let mut out: Vec<char> = Vec::with_capacity(bytes.len() + bytes.len() / group_size);
+    for (i, c) in bytes.iter().rev().enumerate() {
+        if i > 0 && i % group_size == 0 {
+            out.push(sep);
+        }
+        out.push(*c);
+    }
+    out.iter().rev().collect()
+}
+
+/// Apply decimal grouping to the integer part of a float body (e.g. "1234.50"
+/// → "1,234.50").  Leaves any exponent / suffix portion intact.
+fn group_float_int_part(body: &str, sep: char) -> String {
+    // Find the integer portion: up to the first '.' or 'e' / 'E' or '%'.
+    let mut end = body.len();
+    for (i, c) in body.char_indices() {
+        if matches!(c, '.' | 'e' | 'E' | '%') {
+            end = i;
+            break;
+        }
+    }
+    let (int_part, rest) = body.split_at(end);
+    let grouped = group_digits(int_part, sep, 3);
+    format!("{grouped}{rest}")
+}
+
+/// Assemble the final string with sign / alt-prefix / body and apply width
+/// + alignment + zero-pad rules.
+fn assemble_numeric(
+    sign_prefix: &str,
+    alt_prefix: &str,
+    body: String,
+    fs: &FormatSpec,
+    default_align: char,
+) -> String {
+    let raw_len = sign_prefix.chars().count() + alt_prefix.chars().count() + body.chars().count();
+
+    // Determine effective alignment.  If zero-pad is set and no explicit
+    // align was given, alignment becomes '=' (pad between sign/prefix and
+    // digits).
+    let effective_align = if let Some(a) = fs.align {
+        a
+    } else if fs.zero_pad {
+        '='
+    } else {
+        default_align
+    };
+    // Zero-pad promotes fill to '0' unless the user explicitly supplied a
+    // fill character via the two-character `[fill]align` form.
+    let effective_fill = if fs.zero_pad && !fs.fill_explicit {
+        '0'
+    } else {
+        fs.fill
+    };
+
+    if fs.width == 0 || raw_len >= fs.width {
+        return format!("{sign_prefix}{alt_prefix}{body}");
+    }
+    let pad = fs.width - raw_len;
+    let fill_str: String = std::iter::repeat(effective_fill).take(pad).collect();
+
+    match effective_align {
+        '=' => {
+            // sign + prefix + fill + body
+            let body_grouped = if effective_fill == '0' && fs.grouping.is_some() {
+                // CPython interleaves the grouping separator with the zero
+                // pad characters so the resulting body still groups in
+                // threes-or-fours.  Apply by left-padding the body with
+                // zeros first, then re-grouping the integer portion.
+                regroup_with_zero_pad(&body, pad, fs.grouping.unwrap(), alt_prefix)
+            } else {
+                let mut s = String::with_capacity(pad + body.len());
+                s.push_str(&fill_str);
+                s.push_str(&body);
+                s
+            };
+            format!("{sign_prefix}{alt_prefix}{body_grouped}")
+        }
+        '>' => format!("{fill_str}{sign_prefix}{alt_prefix}{body}"),
+        '<' => format!("{sign_prefix}{alt_prefix}{body}{fill_str}"),
         '^' => {
             let left = pad / 2;
             let right = pad - left;
-            let mut s = fill.to_string().repeat(left);
-            s.push_str(&raw);
-            s.push_str(&fill.to_string().repeat(right));
-            s
+            let left_fill: String = std::iter::repeat(effective_fill).take(left).collect();
+            let right_fill: String = std::iter::repeat(effective_fill).take(right).collect();
+            format!("{left_fill}{sign_prefix}{alt_prefix}{body}{right_fill}")
         }
-        _ => {
-            // '<' or default
-            let mut s = raw;
-            s.push_str(&fill.to_string().repeat(pad));
-            s
-        }
+        _ => format!("{sign_prefix}{alt_prefix}{body}"),
+    }
+}
+
+/// When zero-padding combines with thousands grouping (e.g. `{-12345:08,}` ->
+/// `-012,345`), CPython expands the integer portion with zeros then regroups
+/// so the leading zeros are themselves separated by the group char.  The
+/// final grouped string must be at least `current_int_len + pad` characters
+/// long.
+fn regroup_with_zero_pad(body: &str, pad: usize, sep: char, _alt_prefix: &str) -> String {
+    // Split body into integer / fractional / suffix parts.
+    let (int_part, rest) = match body.find(|c: char| matches!(c, '.' | 'e' | 'E' | '%')) {
+        Some(i) => (&body[..i], &body[i..]),
+        None => (body, ""),
     };
-    Ok(Value::string(padded))
+
+    // Strip existing separators from the integer part.
+    let bare_int: String = int_part.chars().filter(|c| *c != sep).collect();
+    let target_int_len = int_part.chars().count() + pad;
+
+    // Iteratively prepend zeros and regroup until length matches target.
+    // Bounded by `target_int_len` iterations.
+    let group_size = 3;
+    let mut digits = bare_int;
+    for _ in 0..=target_int_len {
+        let grouped = group_digits(&digits, sep, group_size);
+        if grouped.chars().count() >= target_int_len {
+            return format!("{grouped}{rest}");
+        }
+        digits.insert(0, '0');
+    }
+    // Safety fallback (unreachable in practice).
+    let grouped = group_digits(&digits, sep, group_size);
+    format!("{grouped}{rest}")
+}
+
+/// When the alternate form '#' is given to f/e/E/%, force a decimal point in
+/// the body even if precision was 0.
+fn ensure_alt_float(s: String, alt: bool, precision: Option<usize>) -> String {
+    if !alt {
+        return s;
+    }
+    if precision == Some(0) && !s.contains('.') {
+        // Insert '.' before exponent if present, else append.
+        if let Some(e_pos) = s.find(|c: char| matches!(c, 'e' | 'E')) {
+            let (a, b) = s.split_at(e_pos);
+            format!("{a}.{b}")
+        } else {
+            format!("{s}.")
+        }
+    } else {
+        s
+    }
+}
+
+/// For 'g'/'G' with '#': keep the trailing zeros that Python's '#g' preserves.
+fn ensure_g_trailing_zeros(s: String, prec: usize, _upper: bool, _abs_f: f64) -> String {
+    // For exponential form we already keep zeros via the format string; trim
+    // happens only in the trailing-zero pass which `#g` opts out of.
+    if s.contains('e') || s.contains('E') {
+        return s;
+    }
+    if !s.contains('.') {
+        // Append decimal point and pad zeros to `prec` significant figures.
+        let total_digits: usize = s.chars().filter(|c| c.is_ascii_digit()).count();
+        let zeros_needed = prec.saturating_sub(total_digits);
+        let mut out = s;
+        if zeros_needed == 0 && prec > total_digits {
+            out.push('.');
+        } else {
+            out.push('.');
+            for _ in 0..zeros_needed {
+                out.push('0');
+            }
+        }
+        return out;
+    }
+    s
+}
+
+/// Pad a string-typed value per the format spec.
+fn pad_value(raw: &str, fs: &FormatSpec, default_align: char, fill: char) -> String {
+    let raw_len = raw.chars().count();
+    if fs.width == 0 || raw_len >= fs.width {
+        return raw.to_string();
+    }
+    let pad = fs.width - raw_len;
+    let align = fs.align.unwrap_or(default_align);
+    let fill_str: String = std::iter::repeat(fill).take(pad).collect();
+    match align {
+        '>' => format!("{fill_str}{raw}"),
+        '<' => format!("{raw}{fill_str}"),
+        '^' => {
+            let left = pad / 2;
+            let right = pad - left;
+            let left_fill: String = std::iter::repeat(fill).take(left).collect();
+            let right_fill: String = std::iter::repeat(fill).take(right).collect();
+            format!("{left_fill}{raw}{right_fill}")
+        }
+        _ => format!("{raw}{fill_str}"),
+    }
+}
+
+/// Normalise Rust's e-notation digits to Python's: always at least two
+/// exponent digits and an explicit sign.
+fn normalise_exp_digits(s: String) -> String {
+    let e_pos = match s.find(|c: char| matches!(c, 'e' | 'E')) {
+        Some(p) => p,
+        None => return s,
+    };
+    let (mantissa, exp_part) = s.split_at(e_pos);
+    let e_char = &exp_part[..1];
+    let exp_digits = &exp_part[1..];
+    let (exp_sign, exp_num) = if exp_digits.starts_with('+') || exp_digits.starts_with('-') {
+        (&exp_digits[..1], &exp_digits[1..])
+    } else {
+        ("+", exp_digits)
+    };
+    let exp_num_padded = if exp_num.len() < 2 {
+        format!("0{exp_num}")
+    } else {
+        exp_num.to_string()
+    };
+    format!("{mantissa}{e_char}{exp_sign}{exp_num_padded}")
 }
 
 fn fmt_value_to_float(value: &Value) -> Result<f64> {
@@ -1349,18 +1824,6 @@ fn fmt_value_to_float(value: &Value) -> Result<f64> {
             "TypeError",
             format!("must be real number, not {}", value_type_name_str(value)),
         )),
-    }
-}
-
-fn format_int_with_sign(n: i64, sign: Option<char>) -> String {
-    match sign {
-        Some('+') => {
-            if n >= 0 { format!("+{n}") } else { format!("{n}") }
-        }
-        Some(' ') => {
-            if n >= 0 { format!(" {n}") } else { format!("{n}") }
-        }
-        _ => format!("{n}"),
     }
 }
 
