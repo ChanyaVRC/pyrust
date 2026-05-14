@@ -1125,11 +1125,23 @@ pyrust_module! {
                         )),
                     }
                 } else {
-                    return Err(PyError::Runtime("object has no len()".to_string()));
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "object of type '{}' has no len()",
+                            inst_rc.borrow().class.borrow().name,
+                        ),
+                    ));
                 }
             }
             _ => {
-                return Err(PyError::Runtime("object has no len()".to_string()));
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "object of type '{}' has no len()",
+                        pyrust_core::builtin_type_name(&value),
+                    ),
+                ));
             }
         };
         Ok(Value::int(size))

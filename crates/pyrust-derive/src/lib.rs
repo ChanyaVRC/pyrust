@@ -1087,7 +1087,7 @@ fn emit_overload_set_artefacts(
             // arg types only, no declared-signature dump (per the design
             // review on #395, comment 4443208232).  Unreachable when any
             // overload uses `PyValue` (whose `matches` is unconditional).
-            let __actuals: &[&str] = &[#(#no_match_args),*];
+            let __actuals: &[std::borrow::Cow<'static, str>] = &[#(#no_match_args),*];
             crate::interpreter::builtin_args::no_overload_matched::<crate::value::Value>(
                 FN_NAME, __actuals,
             )

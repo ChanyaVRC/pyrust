@@ -2443,31 +2443,36 @@ impl fmt::Debug for Value {
 /// routes type-name lookup through this function so naming stays consistent.
 /// The match is exhaustive over [`ValueKind`]; new variants must be added
 /// here, not in per-crate copies.
-pub fn builtin_type_name(value: &Value) -> &'static str {
+/// Python-visible type name for a value, used in error messages and `type(x).__name__`.
+///
+/// Returns `Cow<'static, str>` so the common builtin arms stay zero-allocation
+/// (`Cow::Borrowed`), while `PyInstance` can honestly report its runtime class
+/// name (`Cow::Owned`) instead of the placeholder `"object"` (issue #437).
+pub fn builtin_type_name(value: &Value) -> Cow<'static, str> {
     match value.kind() {
-        ValueKind::None => "NoneType",
-        ValueKind::Bool(_) => "bool",
-        ValueKind::Int(_) | ValueKind::BigInt(_) => "int",
-        ValueKind::Float(_) => "float",
-        ValueKind::Str(_) => "str",
-        ValueKind::List(_) => "list",
-        ValueKind::Tuple(_) => "tuple",
-        ValueKind::Dict(_) => "dict",
-        ValueKind::Set(_) => "set",
-        ValueKind::Range { .. } => "range",
-        ValueKind::Bytes(_) => "bytes",
-        ValueKind::Complex(_, _) => "complex",
+        ValueKind::None => Cow::Borrowed("NoneType"),
+        ValueKind::Bool(_) => Cow::Borrowed("bool"),
+        ValueKind::Int(_) | ValueKind::BigInt(_) => Cow::Borrowed("int"),
+        ValueKind::Float(_) => Cow::Borrowed("float"),
+        ValueKind::Str(_) => Cow::Borrowed("str"),
+        ValueKind::List(_) => Cow::Borrowed("list"),
+        ValueKind::Tuple(_) => Cow::Borrowed("tuple"),
+        ValueKind::Dict(_) => Cow::Borrowed("dict"),
+        ValueKind::Set(_) => Cow::Borrowed("set"),
+        ValueKind::Range { .. } => Cow::Borrowed("range"),
+        ValueKind::Bytes(_) => Cow::Borrowed("bytes"),
+        ValueKind::Complex(_, _) => Cow::Borrowed("complex"),
         ValueKind::BuiltinFunction(_)
         | ValueKind::UserFunction(_)
         | ValueKind::BoundMethod { .. }
-        | ValueKind::ClassBoundMethod { .. } => "function",
-        ValueKind::PyClass(_) => "type",
-        ValueKind::PyInstance(_) => "object",
-        ValueKind::PyModule(_) => "module",
-        ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => "super",
-        ValueKind::Generator(_) => "generator",
-        ValueKind::NotImplemented => "NotImplementedType",
-        ValueKind::BuiltinObject { ops, .. } => ops.type_name(),
+        | ValueKind::ClassBoundMethod { .. } => Cow::Borrowed("function"),
+        ValueKind::PyClass(_) => Cow::Borrowed("type"),
+        ValueKind::PyInstance(inst) => Cow::Owned(inst.borrow().class.borrow().name.clone()),
+        ValueKind::PyModule(_) => Cow::Borrowed("module"),
+        ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => Cow::Borrowed("super"),
+        ValueKind::Generator(_) => Cow::Borrowed("generator"),
+        ValueKind::NotImplemented => Cow::Borrowed("NotImplementedType"),
+        ValueKind::BuiltinObject { ops, .. } => Cow::Borrowed(ops.type_name()),
     }
 }
 
