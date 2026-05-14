@@ -140,6 +140,16 @@ impl Interpreter {
                 if name == "__name__" {
                     return Ok(Value::string(class.borrow().name.clone()));
                 }
+                if name == "__bases__" {
+                    // `__bases__` reports the immediate parents — a 1-tuple
+                    // containing `base` if set, else a 1-tuple containing
+                    // the synthetic `object` (CPython: every class without
+                    // an explicit base is `(object,)`).  Multi-inheritance
+                    // isn't modelled — `PyClass.base` is single-valued.
+                    let base = class.borrow().base.clone();
+                    let parent = base.unwrap_or_else(object_class_singleton);
+                    return Ok(Value::tuple(vec![Value::py_class(parent)]));
+                }
                 if name == "__mro__" {
                     // Walk the single-inheritance `base` chain to build the
                     // MRO tuple, terminating in the synthetic `object` class.
@@ -177,7 +187,6 @@ impl Interpreter {
                         None => value,
                     });
                 }
-
                 let class_name = class.borrow().name.clone();
                 Err(PyError::named(
                     "AttributeError",
@@ -406,6 +415,21 @@ impl Interpreter {
                 Ok(())
             }
             ValueKind::PyClass(class) => {
+                // Primitive class singletons are shared across every
+                // `Interpreter` on the same thread (per-thread
+                // `PRIMITIVE_CLASSES` thread_local), so mutating their
+                // attrs would leak state across runs.  Match CPython,
+                // which raises TypeError on `int.x = 1`.  Copilot
+                // review on #463.
+                if crate::interpreter::is_primitive_class(class) {
+                    let n = class.borrow().name.clone();
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "cannot set '{name}' attribute of immutable type '{n}'"
+                        ),
+                    ));
+                }
                 class.borrow_mut().attrs.insert(name.to_string(), value);
                 Ok(())
             }
@@ -466,6 +490,28 @@ impl Interpreter {
         // never has to change.
         let builtin = crate::builtin_modules::load_builtin_module(name);
         if let Some(val) = builtin {
+            // `builtins` post-process: replace the auto-generated
+            // `BuiltinFunction("int")` / `"str"` / etc. attrs with the
+            // per-thread `PyClass` singletons so that
+            // `builtins.int is int` and `isinstance(5, builtins.int)`
+            // match the global lookup path (issue #462; Copilot review
+            // on #463).
+            if name == "builtins"
+                && let ValueKind::PyModule(m) = val.kind()
+            {
+                for prim in [
+                    "bool", "bytes", "complex", "dict", "float", "frozenset",
+                    "int", "list", "set", "str", "tuple",
+                ] {
+                    if let Some(class) =
+                        crate::interpreter::primitive_class_by_name(prim)
+                    {
+                        m.borrow_mut()
+                            .attrs
+                            .insert(prim.to_string(), Value::py_class(class));
+                    }
+                }
+            }
             self.module_cache.borrow_mut().insert(name.to_string(), val.clone());
             // Parent-package identity fix-up: a built-in module like
             // `os` declares `path` as a constant via

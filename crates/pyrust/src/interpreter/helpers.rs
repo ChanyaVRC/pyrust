@@ -191,6 +191,207 @@ thread_local! {
         base: None,
         attrs: IndexMap::new(),
     }));
+
+    /// Per-primitive `PyClass` singletons.  Issue #462 — `int`, `str`,
+    /// `list`, … are now real `PyClass` values, not `BuiltinFunction(name)`
+    /// sentinels.  `type(x)` returns the matching entry here; the names
+    /// resolve to these classes via `resolve_builtin`; and `isinstance`
+    /// works through the standard `class_is_subclass_of` walk.
+    ///
+    /// Each class's `__init__` is the existing `BuiltinFunction("<name>")`
+    /// constructor (so `int("42")` etc. keep their established behaviour);
+    /// the call-site dispatch in `call_class_expanded` recognises primitive
+    /// classes and returns the constructor's `Value` directly instead of
+    /// wrapping it in a `PyInstance`.
+    ///
+    /// `bool` chains its `base` to `int`, matching CPython's
+    /// `bool.__bases__ == (int,)`.  Storage-variant constraints prevent
+    /// subclassing primitives in pyrust today; the migration is purely
+    /// metadata + dispatch routing.
+    static PRIMITIVE_CLASSES: PrimitiveClasses = build_primitive_classes();
+
+    /// O(1) dispatch table for primitive classes (#462 perf): maps the
+    /// `Rc<RefCell<PyClass>>` identity (by raw pointer) to the registry's
+    /// `BuiltinDispatchFn` for the corresponding constructor.  Populated
+    /// once per thread alongside `PRIMITIVE_CLASSES`.
+    ///
+    /// Hot path: `call_function_expanded`'s `ValueKind::PyClass(class)`
+    /// arm looks up `Rc::as_ptr(class)` here; on hit it dispatches
+    /// directly to the registry fn, skipping `call_class_expanded`'s
+    /// PyInstance allocation + `lookup_class_attr("__init__")` walk +
+    /// recursive `call_function_expanded` step.  The lookup is one
+    /// `HashMap::get` (cap = 11) + a fn pointer call.
+    static PRIMITIVE_CLASS_DISPATCH:
+        std::cell::RefCell<
+            std::collections::HashMap<
+                *const std::cell::RefCell<PyClass>,
+                crate::builtin_registry::BuiltinDispatchFn,
+            >,
+        > = {
+        let cell = std::cell::RefCell::new(std::collections::HashMap::with_capacity(11));
+        PRIMITIVE_CLASSES.with(|c| {
+            let mut m = cell.borrow_mut();
+            for (class, name) in [
+                (&c.bool_class, "bool"),
+                (&c.bytes_class, "bytes"),
+                (&c.complex_class, "complex"),
+                (&c.dict_class, "dict"),
+                (&c.float_class, "float"),
+                (&c.frozenset_class, "frozenset"),
+                (&c.int_class, "int"),
+                (&c.list_class, "list"),
+                (&c.set_class, "set"),
+                (&c.str_class, "str"),
+                (&c.tuple_class, "tuple"),
+            ] {
+                if let Some(dispatch) = crate::builtin_registry::lookup(name) {
+                    m.insert(Rc::as_ptr(class), dispatch);
+                }
+            }
+        });
+        cell
+    };
+}
+
+/// Holder for the per-primitive `PyClass` Rc's.  Constructed once per
+/// thread at startup, then cloned cheaply (Rc::clone) on every `type(x)` /
+/// `resolve_builtin("int")` etc. call.
+pub(crate) struct PrimitiveClasses {
+    pub(crate) bool_class: Rc<RefCell<PyClass>>,
+    pub(crate) bytes_class: Rc<RefCell<PyClass>>,
+    pub(crate) complex_class: Rc<RefCell<PyClass>>,
+    pub(crate) dict_class: Rc<RefCell<PyClass>>,
+    pub(crate) float_class: Rc<RefCell<PyClass>>,
+    pub(crate) frozenset_class: Rc<RefCell<PyClass>>,
+    pub(crate) int_class: Rc<RefCell<PyClass>>,
+    pub(crate) list_class: Rc<RefCell<PyClass>>,
+    pub(crate) set_class: Rc<RefCell<PyClass>>,
+    pub(crate) str_class: Rc<RefCell<PyClass>>,
+    pub(crate) tuple_class: Rc<RefCell<PyClass>>,
+}
+
+/// Build the per-primitive `PyClass` singletons.  Called once per thread
+/// (via `thread_local!` init).  Each class's `__init__` slot is the
+/// existing builtin constructor (`BuiltinFunction("int")` etc.) so that
+/// `T(args)` keeps its existing behaviour through `call_class_expanded`'s
+/// primitive short-circuit.
+///
+/// `#[cold]` + `#[inline(never)]` keeps this one-time init code out of the
+/// hot-path icache footprint of `call_function_expanded`, `get_attr`, etc.
+/// — observable as a small but uniform speedup on benches that never touch
+/// primitive classes (`literal_int`, `literal_dict`).
+#[cold]
+#[inline(never)]
+fn build_primitive_classes() -> PrimitiveClasses {
+    #[cold]
+    #[inline(never)]
+    fn make(name: &'static str, base: Option<Rc<RefCell<PyClass>>>) -> Rc<RefCell<PyClass>> {
+let attrs: IndexMap<String, Value> = IndexMap::new();
+        // Note: no `__init__` is installed.  Direct `int(5)` / `str(x)` calls
+        // dispatch via `PRIMITIVE_CLASS_DISPATCH` (HashMap → registry fn),
+        // bypassing `__init__` entirely.  Installing the BuiltinFunction
+        // constructor as `__init__` would leak it to subclasses via
+        // `lookup_class_attr`, where `invoke_class_method` prepends the
+        // fresh `PyInstance` receiver and breaks the constructor signature
+        // (`class S(int): pass; S(5)` → `int(PyInstance, 5)` argument
+        // mismatch).  See Copilot review on #463.
+        Rc::new(RefCell::new(PyClass {
+            name: name.to_string(),
+            base,
+            attrs,
+        }))
+    }
+    let int_class = make("int", None);
+    let str_class = make("str", None);
+    let list_class = make("list", None);
+    let tuple_class = make("tuple", None);
+    let dict_class = make("dict", None);
+    let set_class = make("set", None);
+    populate_primitive_methods(&str_class, "str", STR_METHODS);
+    populate_primitive_methods(&list_class, "list", LIST_METHODS);
+    populate_primitive_methods(&tuple_class, "tuple", TUPLE_METHODS);
+    populate_primitive_methods(&dict_class, "dict", DICT_METHODS);
+    populate_primitive_methods(&set_class, "set", SET_METHODS);
+    PrimitiveClasses {
+        bytes_class: make("bytes", None),
+        complex_class: make("complex", None),
+        dict_class,
+        float_class: make("float", None),
+        frozenset_class: make("frozenset", None),
+        list_class,
+        set_class,
+        str_class,
+        tuple_class,
+        // `bool` inherits from `int` (CPython: `bool.__bases__ == (int,)`).
+        bool_class: make("bool", Some(Rc::clone(&int_class))),
+        int_class,
+    }
+}
+
+/// Authoritative per-primitive method registries.  Keep each in sync with
+/// the corresponding `match method` in `pyrust_builtins::<type>::call`
+/// (or `Interpreter::call_<type>_method` for dict/set, which also have
+/// their own `pyrust_builtins::<type>::call` fallback).  Class-attr access
+/// (`list.append`) returns a `BuiltinFunction("list.append")` sentinel
+/// dispatched by the unified `<type>.<method>` arm in
+/// `call_function_expanded`.
+const STR_METHODS: &[&str] = &[
+    "index", "count",
+    "split", "rsplit", "join", "splitlines", "partition", "rpartition",
+    "strip", "lstrip", "rstrip", "removeprefix", "removesuffix",
+    "center", "ljust", "rjust", "zfill", "expandtabs",
+    "upper", "lower", "casefold", "capitalize", "swapcase", "title",
+    "find", "rfind", "rindex",
+    "replace", "format",
+    "startswith", "endswith",
+    "isdigit", "isalpha", "isalnum", "isspace", "isdecimal", "isnumeric",
+    "islower", "isupper", "istitle", "isascii", "isidentifier", "isprintable",
+];
+
+const LIST_METHODS: &[&str] = &[
+    "index", "count",
+    "append", "clear", "copy", "extend", "insert", "pop", "remove", "reverse",
+    "sort",
+];
+
+const TUPLE_METHODS: &[&str] = &["index", "count"];
+
+// `fromkeys` is a classmethod in CPython and isn't implemented by
+// `dict::call`/`call_dict_method`; leaving it out until it lands.
+const DICT_METHODS: &[&str] = &[
+    "get", "keys", "values", "items", "update", "pop", "popitem", "clear",
+    "setdefault", "copy",
+];
+
+const SET_METHODS: &[&str] = &[
+    "add", "remove", "discard", "pop", "clear",
+    "update", "intersection_update", "difference_update", "symmetric_difference_update",
+    "copy", "union", "intersection", "difference", "symmetric_difference",
+    "issubset", "issuperset", "isdisjoint",
+];
+
+/// Install `BuiltinFunction("<type>.<name>")` sentinels into the class's
+/// `attrs` for every name in `methods`.  Each qualified name is leaked
+/// once per thread — the storage is fixed-size and permanent (one entry
+/// per method per type), and `Value::builtin_function` requires
+/// `&'static str`.  See [`populate_str_methods`]'s removed predecessor
+/// for the prior shape; this generalised form drives str/list/tuple/dict/
+/// set together.
+#[cold]
+#[inline(never)]
+fn populate_primitive_methods(
+    class: &Rc<RefCell<PyClass>>,
+    type_name: &'static str,
+    methods: &[&'static str],
+) {
+    let mut cls = class.borrow_mut();
+    cls.attrs.reserve(methods.len());
+    for &name in methods {
+        let qualified: &'static str =
+            Box::leak(format!("{type_name}.{name}").into_boxed_str());
+        cls.attrs
+            .insert(name.to_string(), Value::builtin_function(qualified));
+    }
 }
 
 /// Returns the singleton synthetic `object` class used as the terminal
@@ -200,6 +401,132 @@ thread_local! {
 /// `A.__mro__[-1] is B.__mro__[-1]` holds, matching CPython.
 pub(crate) fn object_class_singleton() -> Rc<RefCell<PyClass>> {
     OBJECT_CLASS.with(|c| Rc::clone(c))
+}
+
+/// Look up the per-primitive `PyClass` singleton for one of the 11 migrated
+/// primitive type names (`int`, `str`, `list`, …).  Returns `None` for any
+/// other name — callers fall through to the legacy `BuiltinFunction(name)`
+/// path.  See [`PRIMITIVE_CLASSES`].
+pub(crate) fn primitive_class_by_name(name: &str) -> Option<Rc<RefCell<PyClass>>> {
+    PRIMITIVE_CLASSES.with(|c| {
+        Some(Rc::clone(match name {
+            "bool" => &c.bool_class,
+            "bytes" => &c.bytes_class,
+            "complex" => &c.complex_class,
+            "dict" => &c.dict_class,
+            "float" => &c.float_class,
+            "frozenset" => &c.frozenset_class,
+            "int" => &c.int_class,
+            "list" => &c.list_class,
+            "set" => &c.set_class,
+            "str" => &c.str_class,
+            "tuple" => &c.tuple_class,
+            _ => return None,
+        }))
+    })
+}
+
+/// Return the `PyClass` that `type(v)` should yield for any of the 11
+/// migrated primitive types.  Returns `None` for variants that aren't
+/// part of this migration (functions, modules, instances, …) — the
+/// caller falls back to its existing per-variant logic.
+pub(crate) fn primitive_class_for_value(v: &Value) -> Option<Rc<RefCell<PyClass>>> {
+    let name: &'static str = match v.kind() {
+        ValueKind::Bool(_) => "bool",
+        ValueKind::Int(_) | ValueKind::BigInt(_) => "int",
+        ValueKind::Float(_) => "float",
+        ValueKind::Str(_) => "str",
+        ValueKind::List(_) => "list",
+        ValueKind::Tuple(_) => "tuple",
+        ValueKind::Dict(_) => "dict",
+        ValueKind::Set(_) => "set",
+        ValueKind::Bytes(_) => "bytes",
+        ValueKind::Complex(_, _) => "complex",
+        ValueKind::BuiltinObject { ops, .. } if ops.type_name() == "frozenset" => "frozenset",
+        _ => return None,
+    };
+    primitive_class_by_name(name)
+}
+
+/// True iff `class` is one of the 11 migrated-primitive class singletons.
+/// O(1) via the [`PRIMITIVE_CLASS_DISPATCH`] table.
+pub(crate) fn is_primitive_class(class: &Rc<RefCell<PyClass>>) -> bool {
+    primitive_class_dispatch(class).is_some()
+}
+
+/// Fast-path dispatch lookup for primitive classes (#462 perf).
+/// Returns the registry's `BuiltinDispatchFn` for the constructor of
+/// the named primitive (`int`, `str`, …), or `None` for any other
+/// class.  Called from `call_function_expanded`'s `PyClass` arm to
+/// skip the `call_class_expanded` PyInstance-alloc + `__init__`-walk
+/// + recursive `call_function_expanded` chain — three layers of
+/// dispatch collapsed into one `HashMap` lookup and one fn-pointer
+/// call.
+#[inline]
+pub(crate) fn primitive_class_dispatch(
+    class: &Rc<RefCell<PyClass>>,
+) -> Option<crate::builtin_registry::BuiltinDispatchFn> {
+    let ptr = Rc::as_ptr(class);
+    PRIMITIVE_CLASS_DISPATCH.with(|m| m.borrow().get(&ptr).copied())
+}
+
+/// Fast `isinstance(obj, primitive_class)` — when `cls` is one of the
+/// 11 primitive class singletons, skip the `class_is_subclass_of`
+/// walk (which would require materialising `obj`'s class via
+/// `primitive_class_for_value`'s thread_local + Rc::clone) and do a
+/// direct `ValueKind` tag check.  `Some(true/false)` on a hit,
+/// `None` if `cls` isn't a primitive class — fall through to the
+/// general walk.  Issue #462 perf.
+#[inline]
+pub(crate) fn primitive_class_isinstance_fast(
+    obj: &Value,
+    cls: &Rc<RefCell<PyClass>>,
+) -> Option<bool> {
+    let cls_ptr = Rc::as_ptr(cls);
+    PRIMITIVE_CLASSES.with(|c| {
+        // bool ⊂ int: an int-class test matches both Int and Bool.
+        // Every other primitive is a tag identity.
+        if cls_ptr == Rc::as_ptr(&c.int_class) {
+            return Some(matches!(
+                obj.kind(),
+                ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+            ));
+        }
+        if cls_ptr == Rc::as_ptr(&c.bool_class) {
+            return Some(matches!(obj.kind(), ValueKind::Bool(_)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.str_class) {
+            return Some(matches!(obj.kind(), ValueKind::Str(_)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.float_class) {
+            return Some(matches!(obj.kind(), ValueKind::Float(_)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.list_class) {
+            return Some(matches!(obj.kind(), ValueKind::List(_)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.tuple_class) {
+            return Some(matches!(obj.kind(), ValueKind::Tuple(_)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.dict_class) {
+            return Some(matches!(obj.kind(), ValueKind::Dict(_)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.set_class) {
+            return Some(matches!(obj.kind(), ValueKind::Set(_)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.bytes_class) {
+            return Some(matches!(obj.kind(), ValueKind::Bytes(_)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.complex_class) {
+            return Some(matches!(obj.kind(), ValueKind::Complex(_, _)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.frozenset_class) {
+            return Some(matches!(
+                obj.kind(),
+                ValueKind::BuiltinObject { ops, .. } if ops.type_name() == "frozenset"
+            ));
+        }
+        None
+    })
 }
 
 pub(crate) struct PrintOptions {
@@ -321,6 +648,14 @@ fn normalize_index(index: &Value, len: usize, label: &str) -> Result<usize> {
 
 pub(crate) fn class_is_subclass_of(class: &Rc<RefCell<PyClass>>, expected: &Rc<RefCell<PyClass>>) -> bool {
     if Rc::ptr_eq(class, expected) {
+        return true;
+    }
+    // The synthetic `object` class is a universal parent: every PyClass
+    // (primitive or user-defined) reports it as the terminal of
+    // `__mro__`.  `class_is_subclass_of(_, object)` must agree so
+    // `issubclass(int, int.__bases__[0])` and `isinstance(x, object)`
+    // hold — see Copilot review on #463.
+    if Rc::ptr_eq(expected, &object_class_singleton()) {
         return true;
     }
     let base = class.borrow().base.clone();

@@ -190,23 +190,82 @@ impl Interpreter {
                 }
                 format_str_template(&template, &positional, &keyword)
             }
-            ValueKind::BuiltinFunction(name) if name.starts_with("str.") => {
-                let method = &name[4..];
+            // #462: class-method-of-primitive dispatch.  When a primitive
+            // class's attr is `BuiltinFunction("<type>.<method>")` — populated
+            // by `populate_*_methods` in `helpers.rs` — calling it dispatches
+            // like a bound method with `args[0]` as the receiver.  Mirrors the
+            // bound-method arm above so `str.upper(s)` and `s.upper()` go
+            // through the same per-type `call` fn.  `str.format` is handled
+            // by the preceding arm because it threads kwargs into the template.
+            ValueKind::BuiltinFunction(name)
+                if name
+                    .split_once('.')
+                    .is_some_and(|(t, _)| matches!(t, "str" | "list" | "tuple" | "dict" | "set")) =>
+            {
+                let (type_name, method) = name.split_once('.').unwrap();
                 let self_val = args
                     .first()
-                    .map(|a| &a.value)
+                    .map(|a| a.value.clone())
                     .ok_or_else(|| PyError::named(
                         "TypeError",
-                        format!("descriptor '{method}' of 'str' object needs an argument"),
+                        format!("descriptor '{method}' of '{type_name}' object needs an argument"),
                     ))?;
-                let rest: Vec<Value> = args[1..].iter().map(|a| a.value.clone()).collect();
-                pyrust_builtins::string::call(method, self_val, rest)
+                let mut pos: Vec<Value> = Vec::with_capacity(args.len().saturating_sub(1));
+                let mut kw: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
+                for a in &args[1..] {
+                    match &a.name {
+                        Some(n) => { kw.insert(PyKey::Str(n.clone()), a.value.clone()); }
+                        None => pos.push(a.value.clone()),
+                    }
+                }
+                // Receiver-type guard: validate `self_val`'s kind matches
+                // `type_name` before dispatch — otherwise the per-type call fn
+                // surfaces an internal `"expected dict"` / `"receiver is not a
+                // list"` runtime error instead of the descriptor TypeError that
+                // CPython raises.  See Copilot review on #463.
+                let kind_ok = match (type_name, self_val.kind()) {
+                    ("str", ValueKind::Str(_)) => true,
+                    ("list", ValueKind::List(_)) => true,
+                    ("tuple", ValueKind::Tuple(_)) => true,
+                    ("dict", ValueKind::Dict(_)) => true,
+                    ("set", ValueKind::Set(_)) => true,
+                    _ => false,
+                };
+                if !kind_ok {
+                    let actual = pyrust_core::builtin_type_name(&self_val);
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "descriptor '{method}' for '{type_name}' objects doesn't apply to a '{actual}' object",
+                        ),
+                    ));
+                }
+                match type_name {
+                    "str" => pyrust_builtins::string::call(method, &self_val, pos),
+                    "list" => pyrust_builtins::list::call(method, &self_val, pos, &kw),
+                    "tuple" => match self_val.kind() {
+                        ValueKind::Tuple(items) => pyrust_builtins::tuple::call(method, items, pos),
+                        _ => unreachable!("kind_ok guard above"),
+                    },
+                    "dict" => self.call_dict_method(method, self_val, pos),
+                    "set" => self.call_set_method(method, self_val, pos),
+                    _ => unreachable!("guard matched type_name above"),
+                }
             }
             ValueKind::UserFunction(function) => {
                 let function = Rc::clone(function);
                 self.call_user_function_expanded(function, args, &[])
             }
             ValueKind::PyClass(class) => {
+                // #462 perf: primitive classes (`int`, `str`, …) bypass
+                // `call_class_expanded` entirely and dispatch straight
+                // to the same registry fn that `BuiltinFunction("int")`
+                // would.  One `HashMap` lookup + fn pointer call vs.
+                // the three-layer Pyinstance-alloc / lookup / re-call
+                // chain.
+                if let Some(dispatch) = primitive_class_dispatch(class) {
+                    return dispatch(self, args);
+                }
                 let class = Rc::clone(class);
                 self.call_class_expanded(class, args)
             }
@@ -1119,6 +1178,15 @@ impl Interpreter {
             return Ok(instantiate_exception(class, values));
         }
 
+        // Primitive classes never reach this fn — the `PyClass` arm in
+        // `call_function_expanded` short-circuits them via
+        // `PRIMITIVE_CLASS_DISPATCH` (issue #462).  Subclasses of
+        // primitives (`class S(int): pass`) DO reach here but without an
+        // inherited `__init__` (helpers.rs deliberately leaves primitive
+        // class attrs empty so the BuiltinFunction constructor isn't
+        // exposed to PyInstance-based subclass dispatch — see #463
+        // Copilot review).  They land in the `None` arm of the
+        // init match below.
         let instance = Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(&class),
             attrs: IndexMap::new(),
