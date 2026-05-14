@@ -218,15 +218,34 @@ impl Interpreter {
                         None => pos.push(a.value.clone()),
                     }
                 }
+                // Receiver-type guard: validate `self_val`'s kind matches
+                // `type_name` before dispatch — otherwise the per-type call fn
+                // surfaces an internal `"expected dict"` / `"receiver is not a
+                // list"` runtime error instead of the descriptor TypeError that
+                // CPython raises.  See Copilot review on #463.
+                let kind_ok = match (type_name, self_val.kind()) {
+                    ("str", ValueKind::Str(_)) => true,
+                    ("list", ValueKind::List(_)) => true,
+                    ("tuple", ValueKind::Tuple(_)) => true,
+                    ("dict", ValueKind::Dict(_)) => true,
+                    ("set", ValueKind::Set(_)) => true,
+                    _ => false,
+                };
+                if !kind_ok {
+                    let actual = pyrust_core::builtin_type_name(&self_val);
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "descriptor '{method}' for '{type_name}' objects doesn't apply to a '{actual}' object",
+                        ),
+                    ));
+                }
                 match type_name {
                     "str" => pyrust_builtins::string::call(method, &self_val, pos),
                     "list" => pyrust_builtins::list::call(method, &self_val, pos, &kw),
                     "tuple" => match self_val.kind() {
                         ValueKind::Tuple(items) => pyrust_builtins::tuple::call(method, items, pos),
-                        _ => Err(PyError::named(
-                            "TypeError",
-                            format!("descriptor '{method}' requires a 'tuple' object"),
-                        )),
+                        _ => unreachable!("kind_ok guard above"),
                     },
                     "dict" => self.call_dict_method(method, self_val, pos),
                     "set" => self.call_set_method(method, self_val, pos),
@@ -1159,23 +1178,15 @@ impl Interpreter {
             return Ok(instantiate_exception(class, values));
         }
 
-        // Issue #462: the 11 migrated primitive types (`int`, `str`, …)
-        // dispatch through `call_class_expanded` because they live in
-        // globals as `PyClass` values now.  Their `__init__` is the
-        // existing builtin constructor (which returns a primitive
-        // `Value::Int(_)` / `Value::Str(_)` / etc.) — not a PyInstance —
-        // so we short-circuit the standard "alloc PyInstance, run
-        // __init__" path and return the constructor's value directly.
-        if is_primitive_class(&class) {
-            let init = lookup_class_attr(&class, "__init__").ok_or_else(|| {
-                PyError::Runtime(format!(
-                    "primitive class '{}' missing __init__ — registry corrupt",
-                    class.borrow().name,
-                ))
-            })?;
-            return self.call_function_expanded(init, args);
-        }
-
+        // Primitive classes never reach this fn — the `PyClass` arm in
+        // `call_function_expanded` short-circuits them via
+        // `PRIMITIVE_CLASS_DISPATCH` (issue #462).  Subclasses of
+        // primitives (`class S(int): pass`) DO reach here but without an
+        // inherited `__init__` (helpers.rs deliberately leaves primitive
+        // class attrs empty so the BuiltinFunction constructor isn't
+        // exposed to PyInstance-based subclass dispatch — see #463
+        // Copilot review).  They land in the `None` arm of the
+        // init match below.
         let instance = Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(&class),
             attrs: IndexMap::new(),

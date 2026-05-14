@@ -286,13 +286,15 @@ fn build_primitive_classes() -> PrimitiveClasses {
     #[cold]
     #[inline(never)]
     fn make(name: &'static str, base: Option<Rc<RefCell<PyClass>>>) -> Rc<RefCell<PyClass>> {
-        let mut attrs: IndexMap<String, Value> = IndexMap::new();
-        // The class's `__init__` is the same builtin function the legacy
-        // sentinel pointed at — `int("42")`, `str(obj)`, etc.  The flat
-        // `builtins` registry (`pyrust_builtin_modules!`'s `@flat builtins`)
-        // registers each constructor under its short name, so the class
-        // name doubles as the init-fn name.
-        attrs.insert("__init__".to_string(), Value::builtin_function(name));
+let attrs: IndexMap<String, Value> = IndexMap::new();
+        // Note: no `__init__` is installed.  Direct `int(5)` / `str(x)` calls
+        // dispatch via `PRIMITIVE_CLASS_DISPATCH` (HashMap → registry fn),
+        // bypassing `__init__` entirely.  Installing the BuiltinFunction
+        // constructor as `__init__` would leak it to subclasses via
+        // `lookup_class_attr`, where `invoke_class_method` prepends the
+        // fresh `PyInstance` receiver and breaks the constructor signature
+        // (`class S(int): pass; S(5)` → `int(PyInstance, 5)` argument
+        // mismatch).  See Copilot review on #463.
         Rc::new(RefCell::new(PyClass {
             name: name.to_string(),
             base,
@@ -354,9 +356,11 @@ const LIST_METHODS: &[&str] = &[
 
 const TUPLE_METHODS: &[&str] = &["index", "count"];
 
+// `fromkeys` is a classmethod in CPython and isn't implemented by
+// `dict::call`/`call_dict_method`; leaving it out until it lands.
 const DICT_METHODS: &[&str] = &[
     "get", "keys", "values", "items", "update", "pop", "popitem", "clear",
-    "setdefault", "copy", "fromkeys",
+    "setdefault", "copy",
 ];
 
 const SET_METHODS: &[&str] = &[
@@ -644,6 +648,14 @@ fn normalize_index(index: &Value, len: usize, label: &str) -> Result<usize> {
 
 pub(crate) fn class_is_subclass_of(class: &Rc<RefCell<PyClass>>, expected: &Rc<RefCell<PyClass>>) -> bool {
     if Rc::ptr_eq(class, expected) {
+        return true;
+    }
+    // The synthetic `object` class is a universal parent: every PyClass
+    // (primitive or user-defined) reports it as the terminal of
+    // `__mro__`.  `class_is_subclass_of(_, object)` must agree so
+    // `issubclass(int, int.__bases__[0])` and `isinstance(x, object)`
+    // hold — see Copilot review on #463.
+    if Rc::ptr_eq(expected, &object_class_singleton()) {
         return true;
     }
     let base = class.borrow().base.clone();
