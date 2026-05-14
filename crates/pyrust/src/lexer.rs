@@ -810,10 +810,14 @@ fn lex_fstring_expr(
 /// of being baked into an opaque string.  On return `*pos` points to the
 /// closing `}` of the outer replacement field.
 ///
-/// CPython only allows a single level of nesting inside a format spec, so the
-/// expression inside a nested `{...}` may NOT itself contain a `{` — this
-/// matches CPython's parser and keeps the implementation simple.  A nested
-/// `{...}` here also does not accept its own format spec or `!conv`.
+/// CPython's rule: a nested replacement field inside a format spec cannot
+/// **itself contain another nested replacement field** (`f"{x:>{w:>{n}}}"`
+/// is rejected at parse time).  Conversion flags (`!r`/`!s`/`!a`) on the
+/// nested expression are accepted — this matches CPython and is implemented
+/// in the loop below.  The nested expression also accepts a paren/bracket-
+/// balanced Python expression (e.g. `f"{x:>{f(1)}}"`).  What is not
+/// supported here is a further format spec on the nested field itself
+/// (i.e. no `{w:>{n}:5}`) — that was kept out to bound recursion.
 fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<Vec<FStringPart>> {
     let mut parts: Vec<FStringPart> = Vec::new();
     let mut literal = String::new();
@@ -838,8 +842,10 @@ fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<Vec<FStringPart>> 
                 }
                 *pos += 1;
                 // Collect expression source until matching `}` (no further
-                // nesting permitted — CPython behaviour).  We still respect
-                // paren / bracket depth so e.g. `{f(1)}` works.
+                // *replacement-field* nesting permitted — matching CPython).
+                // We still respect paren / bracket depth so e.g. `{f(1)}`
+                // works, and we accept a trailing `!r`/`!s`/`!a` conversion
+                // flag on this nested expression below.
                 let mut src = String::new();
                 let mut paren_depth = 0usize;
                 let mut conversion: Option<char> = None;

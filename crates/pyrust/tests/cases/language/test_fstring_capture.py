@@ -68,7 +68,9 @@ assert fmt_with_width(10)("hi") == "        hi", repr(fmt_with_width(10)("hi"))
 
 
 # ---------------------------------------------------------------------------
-# Conversion + captured spec — `!r` plus a captured precision.
+# Captured precision in the format spec — the spec itself contains a
+# nested `{prec}` replacement that must resolve through the enclosing
+# scope.
 # ---------------------------------------------------------------------------
 def fmt_with_precision(prec):
     def fmt(x):
@@ -77,6 +79,19 @@ def fmt_with_precision(prec):
 
 assert fmt_with_precision(2)(3.14159) == "3.14", fmt_with_precision(2)(3.14159)
 assert fmt_with_precision(4)(3.14159) == "3.1416", fmt_with_precision(4)(3.14159)
+
+
+# ---------------------------------------------------------------------------
+# Conversion flag (`!r`) on a captured value — exercises the conversion
+# path alongside the captured-name path.
+# ---------------------------------------------------------------------------
+def fmt_repr(label):
+    def fmt(x):
+        return f"{label}={x!r}"
+    return fmt
+
+assert fmt_repr("k")(3) == "k=3", fmt_repr("k")(3)
+assert fmt_repr("k")("hi") == "k='hi'", fmt_repr("k")("hi")
 
 
 # ---------------------------------------------------------------------------
