@@ -201,9 +201,9 @@ except TypeError:
 
 # cached_property.__set_name__ records the attr_name and __get__ stashes
 # under that name (not the access-site name or the wrapped function's
-# own name).  We can't reach `h.__dict__` directly in pyrust yet, so we
-# inspect via `vars(h)` — that returns the instance dict in both
-# runtimes.
+# own name).  We inspect via `vars(h)`; `h.__dict__` (#392) also works
+# and returns the same dict — `test_instance_dict_attr.py` covers the
+# attribute form directly.
 class HasOffName:
     def _compute(self):
         return 42

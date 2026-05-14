@@ -62,8 +62,8 @@ del e.q
 print(list(vars(e).keys()))                 # ['p', 'r', 's']
 
 # ── `**vars(obj)` splat into another dict preserves order ─────────────
-# pyrust does not expose `obj.__dict__` as an attribute yet — `vars()` is
-# the documented public accessor for the same dict, so we exercise that.
+# `obj.__dict__` is also available (#392) and produces the same dict;
+# a dedicated fixture in `test_instance_dict_attr.py` exercises it.
 class F:
     pass
 

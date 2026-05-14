@@ -71,3 +71,31 @@ i.one = 1
 i.two = 2
 merged = {**i.__dict__, "three": 3}
 print(list(merged.keys()))               # ['one', 'two', 'three']
+
+# ── Inheritance: subclass instance __dict__ holds only own attrs ───────
+# CPython exposes only the instance's *own* attrs in __dict__ —
+# attributes set on the parent class or on unrelated instances are not
+# inherited into a subclass instance's __dict__.
+class Base:
+    pass
+
+class Sub(Base):
+    pass
+
+sub = Sub()
+sub.own = 7
+print(sub.__dict__)                      # {'own': 7}
+
+# Even if the base instance has its own attrs, those don't leak into a
+# sibling subclass instance's __dict__ — they live on different objects.
+b = Base()
+b.base_only = 1
+print(sub.__dict__)                      # still {'own': 7}
+
+# ── `__dict__` itself is not a key in __dict__ ─────────────────────────
+class J:
+    pass
+
+j = J()
+j.x = 1
+print("__dict__" in j.__dict__)          # False

@@ -680,6 +680,19 @@ pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 
+/// Snapshot of an instance's own attrs as a fresh `Value::dict`.  Backs both
+/// `obj.__dict__` (env.rs) and `vars(obj)` (builtins.rs) so the two stay in
+/// lock-step.  CPython's `__dict__` is a live mapping; we return a clone —
+/// mutations to the returned dict do not propagate back to the instance.
+/// Tracked as a follow-up to #392 (live-dict semantics).
+pub(crate) fn instance_attrs_snapshot(instance: &Rc<RefCell<PyInstance>>) -> Value {
+    let mut dict: IndexMap<PyKey, Value> = IndexMap::new();
+    for (k, v) in instance.borrow().attrs.iter() {
+        dict.insert(PyKey::Str(k.clone()), v.clone());
+    }
+    Value::dict(dict)
+}
+
 fn install_exception_builtins(env: &EnvRef) {
     let exception = Rc::new(RefCell::new(PyClass {
         name: "Exception".to_string(),
