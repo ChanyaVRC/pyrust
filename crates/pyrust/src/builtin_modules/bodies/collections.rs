@@ -249,8 +249,7 @@ pyrust_module! {
             // scratch) — `c.copy()` is one of the hot paths.
             let inst = expect_self(args, FN_NAME)?;
             let class = Rc::clone(&inst.borrow().class);
-            let mut attrs: std::collections::HashMap<String, Value> =
-                std::collections::HashMap::new();
+            let mut attrs: IndexMap<String, Value> = IndexMap::new();
             attrs.insert("_counts".to_string(), Value::dict(counts));
             Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
                 class,
@@ -558,8 +557,7 @@ pyrust_module! {
                 .cloned()
                 .unwrap_or_else(Value::none);
             let class = Rc::clone(&inst.borrow().class);
-            let mut attrs: std::collections::HashMap<String, Value> =
-                std::collections::HashMap::new();
+            let mut attrs: IndexMap<String, Value> = IndexMap::new();
             attrs.insert("default_factory".to_string(), factory);
             attrs.insert("_items".to_string(), Value::dict(items));
             Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
@@ -889,8 +887,7 @@ fn counter_binop(args: &[ExpandedCallArg], op: CounterOp) -> Result<Value> {
     };
     let merged = merge_counts(&lhs, &rhs, op);
     let class = Rc::clone(&inst.borrow().class);
-    let mut attrs: std::collections::HashMap<String, Value> =
-        std::collections::HashMap::new();
+    let mut attrs: IndexMap<String, Value> = IndexMap::new();
     attrs.insert("_counts".to_string(), Value::dict(merged));
     Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
         class,

@@ -444,6 +444,91 @@ fn lambda_captures_in_expr(
     }
 }
 
+/// Walk a class body and record names bound at the top level in their
+/// *textual* order — the order CPython preserves for `vars(C)` /
+/// `C.__dict__`.  Only the assigns / defs / class-defs that contribute
+/// to the class namespace are tracked.  Names not in `body_local` are
+/// skipped (they're declared `global` / `nonlocal` and don't become
+/// class-dict entries).
+fn collect_class_body_names_textual(
+    body: &[Stmt],
+    ordered: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+    body_local: &HashSet<String>,
+) {
+    for stmt in body {
+        match stmt {
+            Stmt::Assign(target, _) => {
+                collect_assign_target_textual(target, ordered, seen, body_local);
+            }
+            Stmt::Def { name, .. } | Stmt::Class { name, .. } => {
+                if body_local.contains(name) && seen.insert(name.clone()) {
+                    ordered.push(name.clone());
+                }
+            }
+            Stmt::If {
+                branches,
+                else_branch,
+            } => {
+                for (_, b) in branches {
+                    collect_class_body_names_textual(b, ordered, seen, body_local);
+                }
+                if let Some(b) = else_branch {
+                    collect_class_body_names_textual(b, ordered, seen, body_local);
+                }
+            }
+            Stmt::While { body, .. } | Stmt::For { body, .. } => {
+                collect_class_body_names_textual(body, ordered, seen, body_local);
+            }
+            Stmt::Try {
+                body,
+                handlers,
+                else_branch,
+                finally_branch,
+            } => {
+                collect_class_body_names_textual(body, ordered, seen, body_local);
+                for h in handlers {
+                    collect_class_body_names_textual(&h.body, ordered, seen, body_local);
+                }
+                if let Some(b) = else_branch {
+                    collect_class_body_names_textual(b, ordered, seen, body_local);
+                }
+                if let Some(b) = finally_branch {
+                    collect_class_body_names_textual(b, ordered, seen, body_local);
+                }
+            }
+            Stmt::With { body, .. } => {
+                collect_class_body_names_textual(body, ordered, seen, body_local);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_assign_target_textual(
+    target: &AssignTarget,
+    ordered: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+    body_local: &HashSet<String>,
+) {
+    match target {
+        AssignTarget::Name(name) => {
+            if body_local.contains(name) && seen.insert(name.clone()) {
+                ordered.push(name.clone());
+            }
+        }
+        AssignTarget::Tuple(targets) => {
+            for t in targets {
+                collect_assign_target_textual(t, ordered, seen, body_local);
+            }
+        }
+        AssignTarget::Starred(inner) => {
+            collect_assign_target_textual(inner, ordered, seen, body_local);
+        }
+        AssignTarget::Attr(..) | AssignTarget::Index(..) => {}
+    }
+}
+
 /// For a class body, collect names that the class's methods read as free
 /// variables from the enclosing scope.  Python class scope is not a closure
 /// scope for methods: `def method(self): return x` reads the outer `x`, not
@@ -4341,8 +4426,23 @@ impl Compiler {
         let empty_nonlocal: Rc<HashSet<String>> = Rc::new(HashSet::new());
         let body_local =
             crate::interpreter::collect_local_names(&[], body, &empty_global, &empty_nonlocal);
+        // Assign slot numbers in *textual* order so the MakeClass instruction
+        // can iterate `local_index` by slot and materialise `attrs` in
+        // definition order — CPython guarantees `vars(C)` preserves the order
+        // names were first bound in the class body. `body_local` is a HashSet
+        // and its iteration order is random, so we walk the body separately
+        // and only fall back to `body_local` for any names HashSet has that
+        // we didn't pick up textually.
+        let mut ordered: Vec<String> = Vec::with_capacity(body_local.len());
+        let mut seen: HashSet<String> = HashSet::new();
+        collect_class_body_names_textual(body, &mut ordered, &mut seen, &body_local);
+        for name in body_local.iter() {
+            if seen.insert(name.clone()) {
+                ordered.push(name.clone());
+            }
+        }
         let mut body_index: HashMap<String, Reg> = HashMap::new();
-        for (i, loc) in (0u32..).zip(body_local.iter()) {
+        for (i, loc) in (0u32..).zip(ordered.iter()) {
             body_index.insert(loc.clone(), i);
         }
         let body_index_rc: Rc<HashMap<String, Reg>> = Rc::new(body_index);

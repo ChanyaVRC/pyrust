@@ -780,7 +780,10 @@ pyrust_module! {
         match args[0].value.kind() {
             ValueKind::PyInstance(instance) => {
                 let instance = Rc::clone(instance);
-                if instance.borrow_mut().attrs.remove(&name).is_none() {
+                // `shift_remove` preserves the insertion order of the
+                // surviving entries — matches CPython's `del obj.x`
+                // semantics on a dict that's known to be insertion-ordered.
+                if instance.borrow_mut().attrs.shift_remove(&name).is_none() {
                     let class_name = instance.borrow().class.borrow().name.clone();
                     return Err(PyError::named(
                         "AttributeError",
@@ -791,7 +794,7 @@ pyrust_module! {
             }
             ValueKind::PyClass(class) => {
                 let class = Rc::clone(class);
-                if class.borrow_mut().attrs.remove(&name).is_none() {
+                if class.borrow_mut().attrs.shift_remove(&name).is_none() {
                     let class_name = class.borrow().name.clone();
                     return Err(PyError::named(
                         "AttributeError",
@@ -850,8 +853,7 @@ pyrust_module! {
                     format!("{FN_NAME}() argument 2 must be a tuple"),
                 )),
             };
-            let mut attrs: std::collections::HashMap<String, Value> =
-                std::collections::HashMap::new();
+            let mut attrs: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
             match args[2].value.kind() {
                 ValueKind::Dict(map) => {
                     for (k, v) in map.iter() {

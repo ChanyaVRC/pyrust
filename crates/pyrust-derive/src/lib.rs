@@ -1465,9 +1465,9 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
         class_items.push(quote! {
             attrs.insert(#class_name_lit.to_string(), {
                 use std::cell::RefCell;
-                use std::collections::HashMap;
                 use std::rc::Rc;
-                let mut attrs: HashMap<String, crate::value::Value> = HashMap::new();
+                use indexmap::IndexMap;
+                let mut attrs: IndexMap<String, crate::value::Value> = IndexMap::new();
                 #(#method_attr_inserts)*
                 crate::value::Value::py_class(Rc::new(RefCell::new(crate::value::PyClass {
                     name: #class_name_lit.to_string(),

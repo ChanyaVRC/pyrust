@@ -1651,8 +1651,17 @@ impl Interpreter {
                     let num_class_regs = class_code.num_regs as usize;
                     let mut class_regs: RegsBuf = smallvec![Value::unset(); num_class_regs];
                     vm_try!(self.run_bytecode(&class_code, &mut class_regs));
-                    let mut attrs = HashMap::new();
-                    for (attr_name, &slot) in local_index.iter() {
+                    // Iterate in slot order so class attrs preserve definition
+                    // order (CPython guarantees `vars(C)` matches the order the
+                    // names were first bound in the class body).  `local_index`
+                    // is a HashMap so its own iteration order is random — sort
+                    // its entries by slot to recover the textual order in which
+                    // the compiler allocated registers.
+                    let mut indexed: Vec<(&String, u32)> =
+                        local_index.iter().map(|(k, &s)| (k, s)).collect();
+                    indexed.sort_by_key(|(_, s)| *s);
+                    let mut attrs = IndexMap::new();
+                    for (attr_name, slot) in indexed {
                         if let Some(v) = class_regs.get(slot as usize)
                             && !v.is_unset() {
                                 attrs.insert(attr_name.clone(), v.clone());

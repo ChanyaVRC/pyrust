@@ -329,13 +329,13 @@ pub struct UserFunction {
 pub struct PyClass {
     pub name: String,
     pub base: Option<Rc<RefCell<PyClass>>>,
-    pub attrs: HashMap<String, Value>,
+    pub attrs: IndexMap<String, Value>,
 }
 
 #[derive(Debug, Clone)]
 pub struct PyInstance {
     pub class: Rc<RefCell<PyClass>>,
-    pub attrs: HashMap<String, Value>,
+    pub attrs: IndexMap<String, Value>,
 }
 
 #[derive(Debug, Clone)]

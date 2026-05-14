@@ -58,7 +58,6 @@
 // Reference: <https://docs.python.org/3/library/os.html>
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{LazyLock, Mutex};
 
@@ -762,7 +761,7 @@ fn walk_collect(dir: &str, out: &mut Vec<Value>) -> Result<()> {
 // `"os._Environ.__getitem__"` etc.
 thread_local! {
     static ENVIRON_CLASS: Rc<RefCell<PyClass>> = {
-        let mut attrs: HashMap<String, Value> = HashMap::new();
+        let mut attrs: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
         for (short, py_full) in ENVIRON_METHODS {
             attrs.insert((*short).to_string(), Value::builtin_function(py_full));
         }
@@ -804,7 +803,7 @@ fn make_environ_instance() -> Value {
     ENVIRON_CLASS.with(|class| {
         Value::py_instance(Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(class),
-            attrs: HashMap::new(),
+            attrs: indexmap::IndexMap::new(),
         })))
     })
 }
