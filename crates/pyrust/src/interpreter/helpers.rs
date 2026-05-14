@@ -34,14 +34,18 @@ fn eval_binary_int(op: BinaryOp, a: i64, b: i64) -> Option<Result<Value>> {
         })),
         BinaryOp::Div => {
             if b == 0 {
-                Some(Err(PyError::Runtime("division by zero".to_string())))
+                Some(Err(PyError::named(
+                    "ZeroDivisionError",
+                    "division by zero".to_string(),
+                )))
             } else {
                 Some(Ok(Value::float(a as f64 / b as f64)))
             }
         }
         BinaryOp::FloorDiv => {
             if b == 0 {
-                Some(Err(PyError::Runtime(
+                Some(Err(PyError::named(
+                    "ZeroDivisionError",
                     "integer division or modulo by zero".to_string(),
                 )))
             } else {
@@ -51,8 +55,9 @@ fn eval_binary_int(op: BinaryOp, a: i64, b: i64) -> Option<Result<Value>> {
         }
         BinaryOp::Mod => {
             if b == 0 {
-                Some(Err(PyError::Runtime(
-                    "integer division or modulo by zero".to_string(),
+                Some(Err(PyError::named(
+                    "ZeroDivisionError",
+                    "integer modulo by zero".to_string(),
                 )))
             } else {
                 Some(Ok(Value::int(py_mod_i64(a, b))))
@@ -86,7 +91,8 @@ fn eval_binary_float(op: BinaryOp, a: f64, b: f64) -> Option<Result<Value>> {
         BinaryOp::Mul => Some(Ok(Value::float(a * b))),
         BinaryOp::Div => {
             if b == 0.0 {
-                Some(Err(PyError::Runtime(
+                Some(Err(PyError::named(
+                    "ZeroDivisionError",
                     "float division by zero".to_string(),
                 )))
             } else {

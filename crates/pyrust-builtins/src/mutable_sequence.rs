@@ -95,14 +95,18 @@ pub fn pop(items: &mut Vec<Value>, args: Vec<Value>) -> Result<Value> {
         Some(ValueKind::Int(i)) => i,
         Some(ValueKind::Bool(b)) => b as i64,
         Some(_) => {
-            return Err(PyError::Runtime(
-                "list.pop() index must be an integer".to_string(),
+            return Err(PyError::named(
+                "TypeError",
+                "'list.pop' index must be an integer".to_string(),
             ));
         }
         None => -1,
     };
     if items.is_empty() {
-        return Err(PyError::Runtime("pop from empty list".to_string()));
+        return Err(PyError::named(
+            "IndexError",
+            "pop from empty list".to_string(),
+        ));
     }
     let pos = normalise_index(idx, items.len());
     if pos >= items.len() {

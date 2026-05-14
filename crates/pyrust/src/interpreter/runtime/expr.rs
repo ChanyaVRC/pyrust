@@ -16,9 +16,12 @@ impl Interpreter {
                 if let Some(v) = self.lookup_name(name)? {
                     return Ok(v.clone());
                 }
-                resolve_builtin(name)
-                    .map(Ok)
-                    .unwrap_or_else(|| Err(PyError::Runtime(format!("name '{name}' is not defined"))))
+                resolve_builtin(name).map(Ok).unwrap_or_else(|| {
+                    Err(PyError::named(
+                        "NameError",
+                        format!("name '{name}' is not defined"),
+                    ))
+                })
             }
             Expr::List(items) => {
                 let mut out = Vec::with_capacity(items.len());
@@ -188,7 +191,7 @@ impl Interpreter {
                                 let key = self.value_to_pykey(&index_value)?;
                                 return match self.dict_lookup(&dict_val, &key)? {
                                     Some((_, v)) => Ok(v),
-                                    None => Err(PyError::Runtime("key error".to_string())),
+                                    None => Err(PyError::named("KeyError", index_value.repr())),
                                 };
                             }
                             Fast::Fallthrough => {}
@@ -333,7 +336,7 @@ impl Interpreter {
             let key = self.value_to_pykey(&index)?;
             return match self.dict_lookup(&target, &key)? {
                 Some((_, v)) => Ok(v),
-                None => Err(PyError::Runtime("key error".to_string())),
+                None => Err(PyError::named("KeyError", index.repr())),
             };
         }
         match target.kind() {
@@ -382,7 +385,13 @@ impl Interpreter {
                     format!("'{}' object is not subscriptable", class.borrow().name),
                 ))
             }
-            _ => Err(PyError::Runtime("object is not subscriptable".to_string())),
+            _ => Err(PyError::named(
+                "TypeError",
+                format!(
+                    "'{}' object is not subscriptable",
+                    pyrust_core::builtin_type_name(&target)
+                ),
+            )),
         }
     }
 
@@ -1233,9 +1242,27 @@ impl Interpreter {
                 (a.1 * b.0 - a.0 * b.1) / denom,
             ));
         }
+        // CPython distinguishes wording by operand types: `int / int` says
+        // "division by zero"; anything involving a float says "float
+        // division by zero".  Decide *before* `to_pair_number` coerces
+        // both operands to f64.
+        let both_int = matches!(
+            (left.kind(), right.kind()),
+            (
+                ValueKind::Int(_) | ValueKind::Bool(_),
+                ValueKind::Int(_) | ValueKind::Bool(_),
+            ),
+        );
         let (a, b) = self.to_pair_number(left, right)?;
         if b == 0.0 {
-            return Err(PyError::Runtime("division by zero".to_string()));
+            return Err(PyError::named(
+                "ZeroDivisionError",
+                if both_int {
+                    "division by zero".to_string()
+                } else {
+                    "float division by zero".to_string()
+                },
+            ));
         }
         Ok(Value::float(a / b))
     }
@@ -1244,7 +1271,8 @@ impl Interpreter {
         match (left.kind(), right.kind()) {
             (ValueKind::Int(a), ValueKind::Int(b)) => {
                 if b == 0 {
-                    return Err(PyError::Runtime(
+                    return Err(PyError::named(
+                        "ZeroDivisionError",
                         "integer division or modulo by zero".to_string(),
                     ));
                 }
@@ -1254,7 +1282,10 @@ impl Interpreter {
             _ => {
                 let (a, b) = self.to_pair_number(left, right)?;
                 if b == 0.0 {
-                    return Err(PyError::Runtime("float floor division by zero".to_string()));
+                    return Err(PyError::named(
+                        "ZeroDivisionError",
+                        "float floor division by zero".to_string(),
+                    ));
                 }
                 Ok(Value::float((a / b).floor()))
             }
@@ -1265,8 +1296,9 @@ impl Interpreter {
         match (left.kind(), right.kind()) {
             (ValueKind::Int(a), ValueKind::Int(b)) => {
                 if b == 0 {
-                    return Err(PyError::Runtime(
-                        "integer division or modulo by zero".to_string(),
+                    return Err(PyError::named(
+                        "ZeroDivisionError",
+                        "integer modulo by zero".to_string(),
                     ));
                 }
                 Ok(Value::int(py_mod_i64(a, b)))
@@ -1274,7 +1306,10 @@ impl Interpreter {
             _ => {
                 let (a, b) = self.to_pair_number(left, right)?;
                 if b == 0.0 {
-                    return Err(PyError::Runtime("float modulo".to_string()));
+                    return Err(PyError::named(
+                        "ZeroDivisionError",
+                        "float modulo".to_string(),
+                    ));
                 }
                 Ok(Value::float(a - b * (a / b).floor()))
             }

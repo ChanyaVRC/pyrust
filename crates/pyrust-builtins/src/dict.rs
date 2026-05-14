@@ -102,16 +102,22 @@ fn pop(dict: &mut IndexMap<PyKey, Value>, args: Vec<Value>) -> Result<Value> {
     let key = iter
         .next()
         .ok_or_else(|| PyError::Runtime("dict.pop() requires at least 1 argument".to_string()))?;
-    let pk = key
-        .to_key()
-        .ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
+    let pk = key.to_key().ok_or_else(|| {
+        PyError::named(
+            "TypeError",
+            format!(
+                "unhashable type: '{}'",
+                pyrust_core::builtin_type_name(&key)
+            ),
+        )
+    })?;
     match dict.shift_remove(&pk) {
         Some(v) => Ok(v),
         None => {
             if let Some(default) = iter.next() {
                 Ok(default)
             } else {
-                Err(PyError::Runtime(format!("KeyError: {}", key.repr())))
+                Err(PyError::named("KeyError", key.repr()))
             }
         }
     }
@@ -120,7 +126,10 @@ fn pop(dict: &mut IndexMap<PyKey, Value>, args: Vec<Value>) -> Result<Value> {
 fn popitem(dict: &mut IndexMap<PyKey, Value>) -> Result<Value> {
     match dict.pop() {
         Some((k, v)) => Ok(Value::tuple(vec![key_to_value(k), v])),
-        None => Err(PyError::Runtime("dictionary is empty".to_string())),
+        None => Err(PyError::named(
+            "KeyError",
+            "'popitem(): dictionary is empty'".to_string(),
+        )),
     }
 }
 

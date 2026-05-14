@@ -542,7 +542,10 @@ impl Interpreter {
                         v
                     } else {
                         vm_try!(resolve_builtin(name).ok_or_else(|| {
-                            PyError::Runtime(format!("name '{}' is not defined", name))
+                            PyError::named(
+                                "NameError",
+                                format!("name '{}' is not defined", name),
+                            )
                         }))
                     };
                     regs[*dst as usize] = val;
@@ -731,9 +734,11 @@ impl Interpreter {
                             FastResult::DictLookup(dict_val) => {
                                 let key = vm_try!(self.value_to_pykey(&idx_val));
                                 let lookup = vm_try!(self.dict_lookup(&dict_val, &key));
-                                let r = vm_try!(lookup
-                                    .map(|(_, v)| v)
-                                    .ok_or_else(|| PyError::Runtime("key error".to_string())));
+                                let r = vm_try!(
+                                    lookup
+                                        .map(|(_, v)| v)
+                                        .ok_or_else(|| PyError::named("KeyError", idx_val.repr()))
+                                );
                                 regs[*dst as usize] = r;
                             }
                             FastResult::Miss => {
