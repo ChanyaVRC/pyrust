@@ -96,3 +96,73 @@ except ValueError as e:
 
 # Nested in comprehensions.
 print([x * 2 for x in Seq()])  # ['aa', 'bb', 'cc']
+
+
+# ─── Lazy semantics (#416 Copilot review) ───────────────────────────────
+# next(iter(obj)) consumes only index 0 — later __getitem__ calls that
+# would raise are never made.
+class LazyOne:
+    def __init__(self):
+        self.called = []
+    def __getitem__(self, i):
+        self.called.append(i)
+        if i == 0:
+            return "first"
+        raise RuntimeError("should not be called for i > 0")
+
+lz = LazyOne()
+it = iter(lz)
+print(next(it))             # first
+print(lz.called)            # [0]
+
+
+# `break` in a for-loop stops further __getitem__ calls.
+lz2 = LazyOne()
+for x in lz2:
+    print(x)                # first
+    break
+print(lz2.called)           # [0]
+
+
+# `in` short-circuits on first match without invoking a later
+# __getitem__ index that would raise.
+class SeqWithBomb:
+    def __getitem__(self, i):
+        if i == 0:
+            return "found"
+        if i == 1:
+            raise RuntimeError("bomb")
+        raise IndexError
+
+print("found" in SeqWithBomb())   # True
+
+
+# Subclasses of IndexError / StopIteration terminate iteration.
+class MyIE(IndexError):
+    pass
+
+class SubclassTerm:
+    def __getitem__(self, i):
+        if i < 3:
+            return i
+        raise MyIE
+
+print(list(SubclassTerm()))   # [0, 1, 2]
+
+
+# A user-defined class merely named "IndexError" (not a real subclass)
+# does NOT terminate iteration — its raise propagates.  This guards
+# against the previous name-match terminator.
+class FakeIndexError(Exception):
+    pass
+
+class FakeNameSeq:
+    def __getitem__(self, i):
+        if i == 1:
+            raise FakeIndexError("not a real IndexError")
+        return i
+
+try:
+    list(FakeNameSeq())
+except FakeIndexError as e:
+    print("FakeIndexError propagates:", e)   # propagates

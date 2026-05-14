@@ -692,7 +692,11 @@ pyrust_module! {
         match val.kind() {
             // Generators are their own iterators.
             ValueKind::Generator(_) => Ok(val),
-            // User-defined objects: call __iter__().
+            // User-defined objects: call __iter__(), then fall back to
+            // the legacy sequence-iter protocol via __getitem__.
+            // Having only `__next__` does NOT make a class iterable —
+            // that property belongs to iterators, not iterables (#416
+            // Copilot review).
             ValueKind::PyInstance(inst) => {
                 let inst_rc = Rc::clone(inst);
                 let class = Rc::clone(&inst_rc.borrow().class);
@@ -703,17 +707,12 @@ pyrust_module! {
                         Value::py_instance(inst_rc),
                         &[],
                     )
-                } else if lookup_class_attr(&class, "__next__").is_some() {
-                    // Already an iterator (has __next__ but no separate __iter__).
-                    Ok(val)
                 } else if lookup_class_attr(&class, "__getitem__").is_some() {
-                    // Legacy sequence-iter protocol (#394): wrap the
-                    // __getitem__-driven materialisation in a
-                    // NativeIterFrame so the result behaves like a real
-                    // iterator (supports `next()`, exhausts on
-                    // StopIteration, etc.).
-                    let items = _interp.materialize_via_getitem(inst_rc)?;
-                    Ok(Value::generator(Box::new(NativeIterFrame { items, pos: 0 })))
+                    // Legacy sequence-iter protocol (#394) — lazy
+                    // GetItemIter so `next()` drives one __getitem__
+                    // call at a time; `for x in obj: break` only
+                    // touches index 0 (#416 Copilot review).
+                    _interp.make_getitem_iter(inst_rc)
                 } else {
                     Err(PyError::named(
                         "TypeError",
