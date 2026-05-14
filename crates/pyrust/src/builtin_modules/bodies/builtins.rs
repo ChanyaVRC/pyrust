@@ -26,7 +26,7 @@ use crate::interpreter::{
     py_round_half_even, py_round_half_even_f64, reject_keyword_args_expanded,
     snapshot_current_locals, snapshot_module_namespace, value_to_float, value_type_name_str,
 };
-use crate::value::{PyClass, PyKey, Value, ValueKind, range_len};
+use crate::value::{PyBigInt, PyClass, PyKey, PyZero, Value, ValueKind, range_len};
 use pyrust_derive::pyrust_module;
 
 pyrust_module! {
@@ -480,6 +480,31 @@ pyrust_module! {
                 Ok(Value::tuple(vec![Value::int(quotient), Value::int(modulo)]))
             }
             _ => {
+                // BigInt cross-type arms (#485): match the new
+                // `floor_div`/`modulo` arms in `expr.rs`.  Whenever
+                // either operand is BigInt we delegate to the BigInt
+                // path; everything else falls through to the float
+                // path.  Bool coerces to int so `divmod(big, True)`
+                // works.  The `matches!` guard avoids the BigInt
+                // conversion for the float-mixed arms (`divmod(1, 2.0)`)
+                // that fell through the int-int match above.
+                if matches!(args[0].value.kind(), ValueKind::BigInt(_))
+                    || matches!(args[1].value.kind(), ValueKind::BigInt(_))
+                {
+                    if let (Some(a), Some(b)) = (
+                        bigint_for_divmod(&args[0].value),
+                        bigint_for_divmod(&args[1].value),
+                    ) {
+                        if b.is_zero() {
+                            return Err(PyError::named(
+                                "ZeroDivisionError",
+                                "integer division or modulo by zero".to_string(),
+                            ));
+                        }
+                        let (q, r) = py_bigint_divmod_floor(&a, &b);
+                        return Ok(Value::tuple(vec![Value::bigint(q), Value::bigint(r)]));
+                    }
+                }
                 let a = value_to_float(&args[0].value, FN_NAME)?;
                 let b = value_to_float(&args[1].value, FN_NAME)?;
                 if b == 0.0 {
@@ -1958,6 +1983,31 @@ pub(super) fn materialize_user_iter(
     } else {
         Ok(v)
     }
+}
+
+/// Coerce `Int`/`BigInt`/`Bool` to `PyBigInt` for the BigInt arms of
+/// `divmod`.  Returns `None` for anything else so the float fallback
+/// surfaces a TypeError via `value_to_float`.  Mirrors
+/// `value_to_bigint` in `expr.rs` (issue #485).
+fn bigint_for_divmod(v: &Value) -> Option<PyBigInt> {
+    match v.kind() {
+        ValueKind::Int(n) => Some(PyBigInt::from(n)),
+        ValueKind::BigInt(b) => Some(b.clone()),
+        ValueKind::Bool(b) => Some(PyBigInt::from(b as i64)),
+        _ => None,
+    }
+}
+
+/// Floor-style `(quotient, remainder)` for BigInts — same semantics as
+/// `bigint_divmod_floor` in `expr.rs`.  Caller must guarantee `b != 0`.
+fn py_bigint_divmod_floor(a: &PyBigInt, b: &PyBigInt) -> (PyBigInt, PyBigInt) {
+    let mut q = a / b;
+    let mut r = a % b;
+    if !r.is_zero() && (r.sign() != b.sign()) {
+        q -= 1;
+        r += b;
+    }
+    (q, r)
 }
 
 /// Compute the hash of a `Value` for the `hash()` builtin.  Mirrors
