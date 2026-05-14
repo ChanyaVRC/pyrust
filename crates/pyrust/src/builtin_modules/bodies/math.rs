@@ -23,6 +23,7 @@ pyrust_module! {
     }
 
     /// CPython: math.floor(x) → int.  <https://docs.python.org/3/library/math.html#math.floor>
+    #[pure]
     fn floor(args) -> Result<Value> {
         let x = single_float(FN_NAME, args)?;
         let f = x.floor();
@@ -34,6 +35,7 @@ pyrust_module! {
     }
 
     /// CPython: math.ceil(x) → int.  <https://docs.python.org/3/library/math.html#math.ceil>
+    #[pure]
     fn ceil(args) -> Result<Value> {
         let x = single_float(FN_NAME, args)?;
         let f = x.ceil();
@@ -45,71 +47,85 @@ pyrust_module! {
     }
 
     /// CPython: math.sqrt(x) → float.  <https://docs.python.org/3/library/math.html#math.sqrt>
+    #[pure]
     fn sqrt(args) -> Result<Value> {
         Ok(Value::float(single_float(FN_NAME, args)?.sqrt()))
     }
 
     /// CPython: math.fabs(x) → float.  <https://docs.python.org/3/library/math.html#math.fabs>
+    #[pure]
     fn fabs(args) -> Result<Value> {
         Ok(Value::float(single_float(FN_NAME, args)?.abs()))
     }
 
     /// CPython: math.sin(x) → float.  <https://docs.python.org/3/library/math.html#math.sin>
+    #[pure]
     fn sin(args) -> Result<Value> {
         Ok(Value::float(single_float(FN_NAME, args)?.sin()))
     }
 
     /// CPython: math.cos(x) → float.  <https://docs.python.org/3/library/math.html#math.cos>
+    #[pure]
     fn cos(args) -> Result<Value> {
         Ok(Value::float(single_float(FN_NAME, args)?.cos()))
     }
 
     /// CPython: math.tan(x) → float.  <https://docs.python.org/3/library/math.html#math.tan>
+    #[pure]
     fn tan(args) -> Result<Value> {
         Ok(Value::float(single_float(FN_NAME, args)?.tan()))
     }
 
     /// CPython: math.asin(x) → float.  <https://docs.python.org/3/library/math.html#math.asin>
+    #[pure]
     fn asin(args) -> Result<Value> {
         Ok(Value::float(single_float(FN_NAME, args)?.asin()))
     }
 
     /// CPython: math.acos(x) → float.  <https://docs.python.org/3/library/math.html#math.acos>
+    #[pure]
     fn acos(args) -> Result<Value> {
         Ok(Value::float(single_float(FN_NAME, args)?.acos()))
     }
 
     /// CPython: math.atan(x) → float.  <https://docs.python.org/3/library/math.html#math.atan>
+    #[pure]
     fn atan(args) -> Result<Value> {
         Ok(Value::float(single_float(FN_NAME, args)?.atan()))
     }
 
     /// CPython: math.exp(x) → float.  <https://docs.python.org/3/library/math.html#math.exp>
+    #[pure]
     fn exp(args) -> Result<Value> {
         Ok(Value::float(single_float(FN_NAME, args)?.exp()))
     }
 
     /// CPython: math.log2(x) → float.  <https://docs.python.org/3/library/math.html#math.log2>
+    #[pure]
     fn log2(args) -> Result<Value> {
         Ok(Value::float(single_float(FN_NAME, args)?.log2()))
     }
 
     /// CPython: math.log10(x) → float.  <https://docs.python.org/3/library/math.html#math.log10>
+    #[pure]
     fn log10(args) -> Result<Value> {
         Ok(Value::float(single_float(FN_NAME, args)?.log10()))
     }
 
     /// CPython: math.isnan(x) → bool.  <https://docs.python.org/3/library/math.html#math.isnan>
+    #[pure]
     fn isnan(args) -> Result<Value> {
         Ok(Value::bool_(single_float(FN_NAME, args)?.is_nan()))
     }
 
     /// CPython: math.isinf(x) → bool.  <https://docs.python.org/3/library/math.html#math.isinf>
+    #[pure]
     fn isinf(args) -> Result<Value> {
         Ok(Value::bool_(single_float(FN_NAME, args)?.is_infinite()))
     }
 
     /// CPython: math.pow(x, y) → float.  <https://docs.python.org/3/library/math.html#math.pow>
+    #[pure]
     fn pow(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 2 {
@@ -123,6 +139,7 @@ pyrust_module! {
     }
 
     /// CPython: math.atan2(y, x) → float.  <https://docs.python.org/3/library/math.html#math.atan2>
+    #[pure]
     fn atan2(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 2 {
@@ -136,6 +153,7 @@ pyrust_module! {
     }
 
     /// CPython: math.log(x[, base]) → float.  <https://docs.python.org/3/library/math.html#math.log>
+    #[pure]
     fn log(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.is_empty() || args.len() > 2 {

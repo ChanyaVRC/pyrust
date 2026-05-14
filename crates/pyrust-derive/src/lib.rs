@@ -69,15 +69,25 @@ pub fn pyfunction(attr: TokenStream, item: TokenStream) -> TokenStream {
     let metas = parse_macro_input!(attr with Punctuated::<Meta, Token![,]>::parse_terminated);
 
     let mut name: Option<LitStr> = None;
+    let mut is_pure = false;
     for meta in metas {
-        if let Meta::NameValue(nv) = &meta
-            && nv.path.is_ident("name")
-            && let syn::Expr::Lit(syn::ExprLit {
-                lit: syn::Lit::Str(s),
-                ..
-            }) = &nv.value
-        {
-            name = Some(s.clone());
+        match &meta {
+            Meta::NameValue(nv)
+                if nv.path.is_ident("name")
+                    && let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(s),
+                        ..
+                    }) = &nv.value =>
+            {
+                name = Some(s.clone());
+            }
+            // Marker form: `#[pyfunction(name = "…", pure)]` opts the
+            // one-off arm into optimizer purity, mirroring `#[pure]` on
+            // `pyrust_module!` fns.  See `BuiltinReg::is_pure` and #433.
+            Meta::Path(p) if p.is_ident("pure") => {
+                is_pure = true;
+            }
+            _ => {}
         }
     }
 
@@ -109,6 +119,7 @@ pub fn pyfunction(attr: TokenStream, item: TokenStream) -> TokenStream {
             crate::builtin_registry::BuiltinReg {
                 name: #py_name,
                 dispatch: #fn_ident,
+                is_pure: #is_pure,
             };
     };
 
@@ -139,6 +150,13 @@ struct ModuleFn {
     /// `#[py_name = "..."]`.  Used when the desired Python name is a Rust
     /// strict keyword that can't be a raw identifier (`super`, etc.).
     py_name_override: Option<LitStr>,
+    /// `true` when the declaration carries a `#[pure]` outer attribute.
+    /// The optimizer reads this off the registry to decide whether a
+    /// call may be DCE'd / constant-folded.  Defaults to `false`
+    /// (conservative — unknown purity means "treat as side-effectful").
+    /// See `crates/pyrust/src/builtin_registry.rs::is_pure` and
+    /// issue #433.
+    is_pure: bool,
     /// The argument-list dialect this fn uses.  See [`ModuleFnArgs`].
     args: ModuleFnArgs,
     body: Block,
@@ -279,9 +297,13 @@ impl ModuleInput {
     /// is the outer-attr list already harvested by the caller (so `#[py_name]`
     /// dispatch happens once at the boundary between fn and class blocks).
     fn parse_fn(input: ParseStream, raw_attrs: Vec<syn::Attribute>) -> syn::Result<ModuleFn> {
-        // Pull `#[py_name = "..."]` out of the attr list so it's not
-        // emitted on the generated Rust fn (which wouldn't recognise it).
+        // Pull `#[py_name = "..."]` and `#[pure]` out of the attr list so
+        // they're not emitted on the generated Rust fn (which wouldn't
+        // recognise either).  `#[pure]` is a marker attribute consumed by
+        // the macro to set `BuiltinReg::is_pure = true`; absence means
+        // `false` (conservative default — see issue #433).
         let mut py_name_override: Option<LitStr> = None;
+        let mut is_pure = false;
         let mut attrs: Vec<syn::Attribute> = Vec::with_capacity(raw_attrs.len());
         for attr in raw_attrs {
             if attr.path().is_ident("py_name") {
@@ -309,6 +331,23 @@ impl ModuleInput {
                         "`#[py_name = \"...\"]` value must be a string literal",
                     ));
                 }
+            } else if attr.path().is_ident("pure") {
+                // Marker attribute — must be path-form (`#[pure]`), no
+                // arguments.  Reject `#[pure = …]` / `#[pure(…)]` so a
+                // typo doesn't silently fall through as "not pure".
+                if !matches!(attr.meta, Meta::Path(_)) {
+                    return Err(syn::Error::new_spanned(
+                        &attr,
+                        "`#[pure]` is a marker attribute and takes no arguments",
+                    ));
+                }
+                if is_pure {
+                    return Err(syn::Error::new_spanned(
+                        &attr,
+                        "`#[pure]` may appear at most once per fn",
+                    ));
+                }
+                is_pure = true;
             } else {
                 attrs.push(attr);
             }
@@ -350,6 +389,7 @@ impl ModuleInput {
             attrs,
             short_name,
             py_name_override,
+            is_pure,
             args,
             body,
         })
@@ -654,10 +694,12 @@ fn emit_fn_artefacts(
         }
     };
 
+    let is_pure_lit = f.is_pure;
     let reg_entry = quote! {
         crate::builtin_registry::BuiltinReg {
             name: *#name_static_ident,
             dispatch: #rust_fn_ident,
+            is_pure: #is_pure_lit,
         }
     };
 
@@ -1107,10 +1149,30 @@ fn emit_overload_set_artefacts(
     items.extend(body_fns);
     items.push(dispatcher);
 
+    // Overload sets share one registry entry, so all overloads of a
+    // single Python-level name must agree on purity — otherwise a
+    // single Python call site `foo(x)` would be optimizer-pure when `x:
+    // int` and impure when `x: str`, which is impossible to express
+    // before runtime dispatch.  Reject mismatches at macro-expand time
+    // with the offending overload's span (per issue #433's design).
+    let head_is_pure = group[0].is_pure;
+    for (idx, f) in group.iter().enumerate().skip(1) {
+        if f.is_pure != head_is_pure {
+            return Err(syn::Error::new(
+                f.short_name.span(),
+                format!(
+                    "overload #{idx} disagrees on `#[pure]` with the first \
+                     overload — all overloads of one Python-level name share \
+                     a single registry entry and must agree on purity",
+                ),
+            ));
+        }
+    }
     let reg_entry = quote! {
         crate::builtin_registry::BuiltinReg {
             name: *#name_static_ident,
             dispatch: #dispatcher_ident,
+            is_pure: #head_is_pure,
         }
     };
 

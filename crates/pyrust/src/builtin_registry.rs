@@ -38,10 +38,20 @@ pub type BuiltinDispatchFn = fn(&mut Interpreter, &[ExpandedCallArg]) -> Result<
 
 /// One entry in the registry — emitted by `pyrust_module!` (one per fn
 /// inside the macro body) or by `#[pyfunction(name = …)]`.
+///
+/// `is_pure` carries the optimizer-visible "no observable side effects,
+/// deterministic" property declared at the call site of `pyrust_module!`
+/// via a `#[pure]` attribute on the `fn`.  Default is `false`
+/// (conservative — the optimizer's dead-code elimination pass will not
+/// drop a call whose purity is unknown).  See issue #433 for the
+/// derivation rationale: the registry already knows what exists, so
+/// purity belongs next to the declaration rather than a hand-maintained
+/// list in `helpers.rs`.
 #[derive(Copy, Clone)]
 pub struct BuiltinReg {
     pub name: &'static str,
     pub dispatch: BuiltinDispatchFn,
+    pub is_pure: bool,
 }
 
 /// Look up the dispatcher for a Python-level built-in name.  Returns
@@ -53,6 +63,25 @@ pub fn lookup(name: &str) -> Option<BuiltinDispatchFn> {
         .binary_search_by_key(&name, |r| r.name)
         .ok()
         .map(|i| REGISTRY[i].dispatch)
+}
+
+/// Returns `true` if the built-in by this name is registered and is
+/// declared pure (no observable side effects, deterministic given the
+/// same inputs).  Returns `false` for unknown names or for known
+/// impure names — the optimizer's DCE / constant-folding passes use
+/// this single signal as the conservative gate for "may I drop or
+/// reorder this call?".
+///
+/// Replaces the hand-maintained `PURE_BUILTINS` list that used to live
+/// in `crates/pyrust/src/interpreter/helpers.rs` (see #433).  Adding a
+/// `#[pure] fn …` inside `pyrust_module! { … }` is now the only edit
+/// needed to make a new built-in optimizer-pure.
+#[inline]
+pub fn is_pure(name: &str) -> bool {
+    REGISTRY
+        .binary_search_by_key(&name, |r| r.name)
+        .ok()
+        .is_some_and(|i| REGISTRY[i].is_pure)
 }
 
 /// The full registry.  Constructed via [`std::sync::LazyLock`] from
@@ -92,6 +121,43 @@ mod tests {
     #[test]
     fn lookup_misses_an_unknown_name() {
         assert!(lookup("absolutely-not-a-builtin").is_none());
+    }
+
+    #[test]
+    fn is_pure_reflects_pure_attribute() {
+        // Spot-checks across the three buckets that the optimizer's DCE
+        // pass depends on (issue #433):
+        //
+        // 1. Definitionally pure flat builtins — `abs`, `len`, …  These
+        //    have `#[pure]` in `bodies/builtins.rs` and must come back
+        //    pure here, otherwise the optimizer's call-DCE pass would
+        //    drift backwards relative to the legacy `PURE_BUILTINS`
+        //    list.
+        for name in ["abs", "len", "chr", "ord", "type", "list", "tuple"] {
+            assert!(is_pure(name), "{name:?} must be registered as pure");
+        }
+
+        // 2. Module-namespaced pure builtins — the headline win of
+        //    #433: the legacy hardcoded list couldn't reach these.
+        for name in ["math.sqrt", "math.sin", "math.floor"] {
+            assert!(
+                is_pure(name),
+                "{name:?} must be registered as pure (module-namespaced)"
+            );
+        }
+
+        // 3. Known-impure / unknown — must come back `false` so the
+        //    optimizer's conservative gate still rejects them.
+        for name in ["print", "open", "input"] {
+            assert!(
+                !is_pure(name),
+                "{name:?} must NOT be marked pure (has observable side effects)"
+            );
+        }
+        assert!(
+            !is_pure("absolutely-not-a-builtin"),
+            "unknown names must not be pure",
+        );
     }
 
     #[test]
