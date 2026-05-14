@@ -4,7 +4,7 @@
 #
 # Before the fix, pyrust-builtins shipped its own narrower compare_values
 # that handled only Int/Float/Bool/Str/Tuple — sorting BigInt or list
-# elements raised TypeError even though `<` accepted them.
+# elements failed at runtime even though `<` accepted them.
 
 I48_MAX = 140_737_488_355_327
 
