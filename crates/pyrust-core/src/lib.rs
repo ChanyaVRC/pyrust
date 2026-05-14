@@ -38,6 +38,105 @@ fn next_obj_id() -> u64 {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Cycle-detection guards for `repr` and `==`
+//
+// CPython uses `Py_ReprEnter` / `Py_ReprLeave` (a thread-local set of currently
+// being-formatted ids) to recognise self-referential collections.  Without the
+// guard a structure like `a = []; a.append(a); repr(a)` recurses until the
+// thread blows its stack.
+//
+// We mirror the same trick for `Value::repr` (issue #364) and for `PartialEq`
+// on collection variants (so `a == b` for two distinct cycles terminates and
+// returns `True`, matching CPython's "we've already proven the prefix equal"
+// semantics).
+//
+// The sets stay empty on the non-cyclic hot path until we actually recurse
+// *into* a collection variant, so a flat `repr([1] * 1000)` pays only a
+// single thread-local lookup per recursive level and never inserts.
+// ─────────────────────────────────────────────────────────────────────────────
+
+thread_local! {
+    /// Stack of `Value::value_id()`s currently in the middle of being formatted
+    /// by `Value::repr`.  A second `repr` call for an id already on this stack
+    /// short-circuits to the CPython placeholder (`[...]` / `{...}` / `(...)`)
+    /// instead of recursing.
+    ///
+    /// Stored as a `Vec` rather than a `HashSet`: in practice the depth is
+    /// shallow (a handful of nested collections) so the linear scan is
+    /// faster than a HashSet's hashing on the hot path.  Wrapped in
+    /// `RefCell` rather than `Cell` so we can borrow the inner `Vec`
+    /// without moving it in and out for every push/pop.
+    static REPR_IN_PROGRESS: RefCell<Vec<i64>> = const { RefCell::new(Vec::new()) };
+
+    /// Stack of ordered pairs `(value_id(a), value_id(b))` currently being
+    /// compared by `Value::eq`.  Encountering the same pair again means we've
+    /// hit a cycle; we treat the cycle as equal (the recursion bottoms out as
+    /// "we've already proven the prefix equal") so the comparison terminates
+    /// instead of blowing the stack.
+    static EQ_IN_PROGRESS: RefCell<Vec<(i64, i64)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// RAII guard for the `repr` cycle-detection stack.  Pushes `id` on
+/// construction (caller must have checked it wasn't already present) and pops
+/// on drop so an early-return or panic in the recursive body can't poison the
+/// stack.
+struct ReprGuard;
+
+impl ReprGuard {
+    /// Attempts to enter the recursion for `id`.  Returns `Some(guard)` when
+    /// the caller may proceed to format the children, or `None` if `id` is
+    /// already on the stack (the caller should emit the placeholder).
+    fn enter(id: i64) -> Option<Self> {
+        REPR_IN_PROGRESS.with(|cell| {
+            let mut stack = cell.borrow_mut();
+            if stack.contains(&id) {
+                return None;
+            }
+            stack.push(id);
+            Some(ReprGuard)
+        })
+    }
+}
+
+impl Drop for ReprGuard {
+    fn drop(&mut self) {
+        REPR_IN_PROGRESS.with(|cell| {
+            cell.borrow_mut().pop();
+        });
+    }
+}
+
+/// RAII guard for the `eq` cycle-detection stack.  Identical shape to
+/// [`ReprGuard`] but keyed on the ordered pair of value ids being compared.
+struct EqGuard;
+
+impl EqGuard {
+    /// Attempts to enter the recursion for `(a_id, b_id)`.  Returns
+    /// `Some(guard)` when the caller may proceed with element-wise comparison,
+    /// or `None` if the pair is already on the stack (the caller treats the
+    /// cycle as equal).
+    fn enter(a_id: i64, b_id: i64) -> Option<Self> {
+        EQ_IN_PROGRESS.with(|cell| {
+            let mut stack = cell.borrow_mut();
+            let pair = (a_id, b_id);
+            if stack.contains(&pair) {
+                return None;
+            }
+            stack.push(pair);
+            Some(EqGuard)
+        })
+    }
+}
+
+impl Drop for EqGuard {
+    fn drop(&mut self) {
+        EQ_IN_PROGRESS.with(|cell| {
+            cell.borrow_mut().pop();
+        });
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // PyKey — hashable subset of Value used as dict/set keys (unchanged)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1689,6 +1788,17 @@ impl Value {
             }
             ValueKind::None => "None".to_string(),
             ValueKind::List(items) => {
+                // Cycle detection (#364): if the same list is already being
+                // formatted further up the call stack, emit CPython's
+                // placeholder `[...]` instead of recursing into ourselves.
+                let id = self.value_id();
+                let _guard = match id {
+                    Some(id) => match ReprGuard::enter(id) {
+                        Some(g) => Some(g),
+                        None => return "[...]".to_string(),
+                    },
+                    None => None,
+                };
                 let inner = items
                     .iter()
                     .map(|v| v.repr())
@@ -1697,6 +1807,16 @@ impl Value {
                 format!("[{inner}]")
             }
             ValueKind::Dict(items) => {
+                // Cycle detection (#364): self-referential dicts (via a value)
+                // are reported as `{...}` by CPython.
+                let id = self.value_id();
+                let _guard = match id {
+                    Some(id) => match ReprGuard::enter(id) {
+                        Some(g) => Some(g),
+                        None => return "{...}".to_string(),
+                    },
+                    None => None,
+                };
                 let mut out = String::new();
                 out.push('{');
                 for (i, (k, v)) in items.iter().enumerate() {
@@ -1714,6 +1834,19 @@ impl Value {
                 if items.is_empty() {
                     return "set()".to_string();
                 }
+                // Cycle detection (#364): a set can only hold hashable values,
+                // and the cycle-producing collections (list/dict/set) aren't
+                // hashable, so a true set self-cycle is impossible.  Keep the
+                // guard anyway for defence-in-depth — the cost is one
+                // thread-local lookup per set repr.
+                let id = self.value_id();
+                let _guard = match id {
+                    Some(id) => match ReprGuard::enter(id) {
+                        Some(g) => Some(g),
+                        None => return "{...}".to_string(),
+                    },
+                    None => None,
+                };
                 let inner = items.iter().map(key_repr).collect::<Vec<_>>().join(", ");
                 format!("{{{inner}}}")
             }
@@ -1751,6 +1884,19 @@ impl Value {
             }
             ValueKind::PyModule(m) => format!("<module '{}'>", m.borrow().name),
             ValueKind::Tuple(items) => {
+                // Cycle detection (#364): tuples are immutable so a *direct*
+                // self-cycle isn't constructible from Python, but a tuple can
+                // hold a list that holds the tuple — and the recursion still
+                // passes through here.  CPython emits `(...)` for a tuple
+                // self-cycle; we match that.
+                let id = self.value_id();
+                let _guard = match id {
+                    Some(id) => match ReprGuard::enter(id) {
+                        Some(g) => Some(g),
+                        None => return "(...)".to_string(),
+                    },
+                    None => None,
+                };
                 let inner = items
                     .iter()
                     .map(|v| v.repr())
@@ -1904,6 +2050,29 @@ impl Drop for Value {
 
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
+        // Cycle detection (#364): for collection kinds, check whether we're
+        // already comparing this exact pair further up the call stack.  If we
+        // are we've hit a cycle; we treat cyclic equality as true (the
+        // recursion bottoms out as "we've already proven the prefix equal").
+        //
+        // We only consult the guard when *both* sides are cycle-capable
+        // collection kinds — primitives can't form cycles and shouldn't pay
+        // the thread-local lookup.
+        let _eq_guard = match (self.kind(), other.kind()) {
+            (ValueKind::List(_), ValueKind::List(_))
+            | (ValueKind::Dict(_), ValueKind::Dict(_))
+            | (ValueKind::Set(_), ValueKind::Set(_))
+            | (ValueKind::Tuple(_), ValueKind::Tuple(_)) => {
+                match (self.value_id(), other.value_id()) {
+                    (Some(a_id), Some(b_id)) => match EqGuard::enter(a_id, b_id) {
+                        Some(g) => Some(g),
+                        None => return true,
+                    },
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
         match (self.kind(), other.kind()) {
             (ValueKind::Int(a), ValueKind::Int(b)) => a == b,
             // Python: 1 == 1.0 is True
