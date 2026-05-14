@@ -24,11 +24,11 @@ else:
     y = 42
 print(y)            # 42
 
-# Constant folding creates an intermediate constant that may become orphaned
-# after subsequent algebraic simplification.  e.g. x + 0 folds to Move(x, x)
-# → trivial NOP removes it, leaving the constant 0 unreferenced.
+# `x + 0` is intentionally NOT simplified away (see issue #438): the runtime
+# BinOp must execute so that a user class's `__add__` override is invoked.
+# For primitive int args the observable output is identical to CPython.
 def no_op_add(n):
-    return n + 0    # algebraic simplify: Move; the 0 constant may become orphaned
+    return n + 0    # kept as BinOp at runtime (preserves __add__ dispatch)
 print(no_op_add(7))     # 7
 print(no_op_add(-3))    # -3
 
@@ -54,8 +54,8 @@ else:
     result = "outer-dead"       # dead; "outer-dead" orphaned
 print(result)       # ok
 
-# pow(x, 1) algebraic identity: x**1 → Move(x); the constant 1 used as exponent
-# may become orphaned after simplification.
+# `x ** 1` is intentionally NOT simplified away (see issue #438): a user class
+# may define `__pow__`.  For primitive int args output matches CPython.
 def identity_pow(n):
     return n ** 1
 print(identity_pow(5))      # 5
@@ -63,5 +63,5 @@ print(identity_pow(-2))     # -2
 
 # Constant folding a chain — intermediate constants become unreferenced.
 a = 2 + 3       # folded to 5; the constants 2 and 3 may be orphaned
-b = a * 1       # algebraic → Move; the constant 1 orphaned
+b = a * 1       # `a` is a known constant: pass_const_fold folds it to LoadConst(5).
 print(b)        # 5
