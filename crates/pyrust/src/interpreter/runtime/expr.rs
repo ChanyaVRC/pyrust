@@ -111,12 +111,22 @@ fn value_to_bigint(v: &Value) -> Option<PyBigInt> {
     }
 }
 
-/// Extract a non-negative shift amount as `usize` from a Python value.
-/// Returns `Err(ValueError)` for negative shifts, `Err(OverflowError)`
-/// when the amount exceeds `usize::MAX` (the shift would otherwise
-/// allocate beyond addressable memory anyway), or `Err(TypeError)` if
-/// the operand isn't an int.  Matches CPython's error messages.
-fn shift_count_to_usize(v: &Value) -> Result<usize> {
+/// Result of validating a shift count: either a concrete `usize`
+/// (small enough to apply directly), or a marker that the count is
+/// non-negative but exceeds `usize::MAX`.  Each shift arm decides how
+/// to handle the saturating case — `<<` raises `OverflowError` only
+/// when the LHS is non-zero (CPython would actually allocate the
+/// bits), while `>>` collapses to `0` / `-1` (CPython parity).
+enum ShiftCount {
+    Fits(usize),
+    Saturated,
+}
+
+/// Validate a shift count and convert it to `ShiftCount`.  Returns
+/// `Err(ValueError)` for negative shifts and `Err(TypeError)` if the
+/// operand isn't an int / bool.  Matches CPython's error messages
+/// where possible.
+fn shift_count(v: &Value) -> Result<ShiftCount> {
     let big = value_to_bigint(v).ok_or_else(|| {
         PyError::named("TypeError", "bitwise op requires integer".to_string())
     })?;
@@ -125,12 +135,10 @@ fn shift_count_to_usize(v: &Value) -> Result<usize> {
             "ValueError",
             "negative shift count".to_string(),
         )),
-        PyBigIntSign::NoSign => Ok(0),
-        PyBigIntSign::Plus => big.to_usize().ok_or_else(|| {
-            PyError::named(
-                "OverflowError",
-                "shift count too large".to_string(),
-            )
+        PyBigIntSign::NoSign => Ok(ShiftCount::Fits(0)),
+        PyBigIntSign::Plus => Ok(match big.to_usize() {
+            Some(n) => ShiftCount::Fits(n),
+            None => ShiftCount::Saturated,
         }),
     }
 }
@@ -1139,14 +1147,27 @@ impl Interpreter {
                 }
                 // BigInt LHS: shift exactly, no `& 63` truncation.
                 // Int LHS with a BigInt RHS: the shift count is
-                // astronomically large — fall through to `usize::MAX`
-                // overflow error from `shift_count_to_usize`.  See #485.
+                // astronomically large.  See #485.
                 if matches!(left.kind(), ValueKind::BigInt(_)) || matches!(right.kind(), ValueKind::BigInt(_)) {
                     let a = value_to_bigint(&left).ok_or_else(|| {
                         PyError::named("TypeError", "bitwise op requires integer".to_string())
                     })?;
-                    let n = shift_count_to_usize(&right)?;
-                    return Ok(Value::bigint(a << n));
+                    return match shift_count(&right)? {
+                        ShiftCount::Fits(n) => Ok(Value::bigint(a << n)),
+                        // CPython: `0 << huge == 0` (no allocation
+                        // needed), otherwise OverflowError because the
+                        // result would not fit in memory.
+                        ShiftCount::Saturated => {
+                            if a.is_zero() {
+                                Ok(Value::bigint(a))
+                            } else {
+                                Err(PyError::named(
+                                    "OverflowError",
+                                    "too many digits in integer".to_string(),
+                                ))
+                            }
+                        }
+                    };
                 }
                 self.bitwise_op(&left, &right, |a, b| {
                     if b < 0 { return Err(PyError::named("ValueError", "negative shift count".to_string())); }
@@ -1161,8 +1182,17 @@ impl Interpreter {
                     let a = value_to_bigint(&left).ok_or_else(|| {
                         PyError::named("TypeError", "bitwise op requires integer".to_string())
                     })?;
-                    let n = shift_count_to_usize(&right)?;
-                    return Ok(Value::bigint(a >> n));
+                    return match shift_count(&right)? {
+                        ShiftCount::Fits(n) => Ok(Value::bigint(a >> n)),
+                        // CPython: `>>` by a count larger than the
+                        // value's bit length collapses to the sign
+                        // (`0` for non-negative, `-1` for negative) —
+                        // never raises.
+                        ShiftCount::Saturated => Ok(Value::bigint(match a.sign() {
+                            PyBigIntSign::Minus => PyBigInt::from(-1i64),
+                            _ => PyBigInt::from(0i64),
+                        })),
+                    };
                 }
                 self.bitwise_op(&left, &right, |a, b| {
                     if b < 0 { return Err(PyError::named("ValueError", "negative shift count".to_string())); }

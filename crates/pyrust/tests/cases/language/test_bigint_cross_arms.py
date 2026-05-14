@@ -95,6 +95,26 @@ try:
 except ValueError:
     print("big >> -1 ValueError")
 
+# ---- Saturating shift counts (BigInt RHS exceeds usize::MAX) ----
+# CPython: `>>` by an astronomically large count collapses to the
+# sign (0 for non-negative, -1 for negative).  `<<` raises
+# OverflowError only when the LHS is non-zero — `0 << huge` is 0.
+huge = 2 ** 70
+print(big >> huge)         # 0
+print((-big) >> huge)      # -1
+print(1 >> huge)           # 0
+print(-1 >> huge)          # -1
+print(0 >> huge)           # 0
+print(0 << huge)           # 0
+try:
+    big << huge
+except OverflowError:
+    print("big << huge OverflowError")
+try:
+    1 << huge
+except OverflowError:
+    print("1 << huge OverflowError")
+
 # ---- Pow already works post-#484 review; pin it here too ----
 print(big ** 2)
 print(big ** 0)
