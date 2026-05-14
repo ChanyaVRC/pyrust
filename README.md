@@ -65,6 +65,12 @@ cargo test --test parity_compare
 
 This runs all `tests/cases/**/test_*.py` with CPython and PyRust and compares outputs.
 
+**CPython 3.12 is the reference.** Some slot semantics (e.g. `sorted(reverse=…)`'s coercion) differ between 3.11 and 3.12, and pyrust's fixtures lock in 3.12 behaviour. The test harness:
+- honours `PYRUST_PYTHON` if set,
+- otherwise uses a `.venv` (the repo's `.python-version` pins 3.12 so `uv venv` picks the right interpreter),
+- falls back to a `python3.12` on `PATH` before plain `python3` / `python`,
+- emits a warning to stderr if the resolved interpreter is older than 3.12.
+
 On Windows — override the Python executable if needed:
 
 ```powershell

@@ -50,11 +50,65 @@ fn find_python_executable(root: &Path) -> PathBuf {
         }
     }
 
-    // Fallback when .venv is not present.
-    if cfg!(windows) {
-        PathBuf::from("python")
+    // Fallback when .venv is not present.  Prefer a versioned `python3.12`
+    // executable so that platforms with both 3.11 and 3.12 installed pick
+    // the one pyrust's parity tests are written against — some CPython
+    // APIs changed slot semantics between versions (`sorted(reverse=…)`,
+    // for example, switched from `__index__` in 3.11 to `bool()` in 3.12),
+    // and the test fixtures lock in 3.12 behaviour.
+    // Windows: prefer `python` over `py` — GitHub Actions and most local
+    // setups alias `python` to the `setup-python`-installed interpreter
+    // (or the user's PATH-default), while `py` is the Python launcher
+    // which picks the highest installed version per `py.ini`, often
+    // newer (and behaviour-divergent) than the project's pinned 3.12.
+    let candidates: &[&str] = if cfg!(windows) {
+        &["python3.12", "python", "py"]
     } else {
-        PathBuf::from("python3")
+        &["python3.12", "python3"]
+    };
+    for candidate in candidates {
+        if Command::new(candidate)
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+        {
+            return PathBuf::from(candidate);
+        }
+    }
+    PathBuf::from(candidates.last().copied().unwrap_or("python3"))
+}
+
+/// Confirm `python` is CPython 3.12+ (the slot semantics target).  Emits a
+/// warning if not — doesn't fail the test, because the developer may have
+/// deliberately pointed `PYRUST_PYTHON` at a different version.
+fn warn_if_python_version_off_target(python: &Path) {
+    let out = match Command::new(python)
+        .args([
+            "-c",
+            "import sys; print(sys.version_info[0], sys.version_info[1])",
+        ])
+        .output()
+    {
+        Ok(o) if o.status.success() => o.stdout,
+        _ => return,
+    };
+    let raw = String::from_utf8_lossy(&out);
+    let mut parts = raw.trim().split_whitespace();
+    let major: u32 = match parts.next().and_then(|s| s.parse().ok()) {
+        Some(n) => n,
+        None => return,
+    };
+    let minor: u32 = match parts.next().and_then(|s| s.parse().ok()) {
+        Some(n) => n,
+        None => return,
+    };
+    if (major, minor) < (3, 12) {
+        eprintln!(
+            "WARNING: parity test is running CPython {major}.{minor}, but pyrust \
+             pins behaviour to 3.12+ (see `.python-version`).  Some test \
+             fixtures may report spurious mismatches.  Override with \
+             PYRUST_PYTHON=/path/to/python3.12 or add 3.12 to a local .venv."
+        );
     }
 }
 
@@ -103,6 +157,7 @@ fn compare_against_python_reference_for_all_py_tests() {
             .expect("CARGO_BIN_EXE_pyrust is not set; run with cargo test"),
     );
     let python = find_python_executable(&root);
+    warn_if_python_version_off_target(&python);
 
     let mut scripts: Vec<PathBuf> = Vec::new();
     collect_test_scripts(&cases_dir, &mut scripts);
