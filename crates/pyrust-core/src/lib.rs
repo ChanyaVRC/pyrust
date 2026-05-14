@@ -2591,17 +2591,30 @@ pub fn key_repr(key: &PyKey) -> String {
     }
 }
 
-fn is_exception_instance(instance: &Rc<RefCell<PyInstance>>) -> bool {
+pub fn is_exception_instance(instance: &Rc<RefCell<PyInstance>>) -> bool {
     let class = Rc::clone(&instance.borrow().class);
     class_chain_contains_exception(&class)
 }
 
-fn class_chain_contains_exception(class: &Rc<RefCell<PyClass>>) -> bool {
+/// Canonical "is this class an exception?" predicate, shared by the runtime
+/// (`raise`/`except` machinery) and `Value::repr`/`Value::str` for
+/// `PyInstance`.  Both paths must agree, or `raise X(...)` succeeds while
+/// `repr(X(...))` falls back to the default `<X object>` formatting (issue
+/// #429).
+///
+/// `Exception` and `GeneratorExit` are both treated as roots because
+/// pyrust does not (yet) model `BaseException` as a real class: `Exception`
+/// is registered with `base: None`, and `GeneratorExit` — which in CPython
+/// derives from `BaseException`, *not* `Exception` — is a sibling root
+/// modelled the same way.  See
+/// [`crate::interpreter::helpers::install_exception_builtins`] in the
+/// `pyrust` crate for where the classes are constructed.
+pub fn class_chain_contains_exception(class: &Rc<RefCell<PyClass>>) -> bool {
     let (name, base) = {
         let borrowed = class.borrow();
         (borrowed.name.clone(), borrowed.base.clone())
     };
-    if name == "Exception" {
+    if name == "Exception" || name == "GeneratorExit" {
         return true;
     }
     base.is_some_and(|base| class_chain_contains_exception(&base))

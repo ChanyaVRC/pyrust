@@ -662,18 +662,14 @@ pub(crate) fn class_is_subclass_of(class: &Rc<RefCell<PyClass>>, expected: &Rc<R
     base.is_some_and(|base| class_is_subclass_of(&base, expected))
 }
 
+/// Runtime-side "is this class an exception?" predicate used by the
+/// `raise`/`except` machinery.  Forwards to the canonical implementation
+/// in `pyrust_core` so the runtime and `Value::repr`/`Value::str` paths
+/// cannot drift apart (issue #429: divergence here let `raise
+/// GeneratorExit(...)` succeed while `repr(GeneratorExit(...))` fell back
+/// to the default `<X object>` formatting).
 pub(crate) fn is_exception_class(class: &Rc<RefCell<PyClass>>) -> bool {
-    let (name, base) = {
-        let borrowed = class.borrow();
-        (borrowed.name.clone(), borrowed.base.clone())
-    };
-    // `Exception` is the canonical root for catchable exceptions.
-    // `GeneratorExit` is a sibling root in CPython (derives from `BaseException`,
-    // not `Exception`); we treat its name as a root for the same reason.
-    if name == "Exception" || name == "GeneratorExit" {
-        return true;
-    }
-    base.is_some_and(|base| is_exception_class(&base))
+    pyrust_core::class_chain_contains_exception(class)
 }
 
 pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value>) -> Value {
