@@ -207,6 +207,15 @@ impl Interpreter {
                 self.call_user_function_expanded(function, args, &[])
             }
             ValueKind::PyClass(class) => {
+                // #462 perf: primitive classes (`int`, `str`, …) bypass
+                // `call_class_expanded` entirely and dispatch straight
+                // to the same registry fn that `BuiltinFunction("int")`
+                // would.  One `HashMap` lookup + fn pointer call vs.
+                // the three-layer Pyinstance-alloc / lookup / re-call
+                // chain.
+                if let Some(dispatch) = primitive_class_dispatch(class) {
+                    return dispatch(self, args);
+                }
                 let class = Rc::clone(class);
                 self.call_class_expanded(class, args)
             }

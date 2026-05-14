@@ -1877,6 +1877,14 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
     // singleton, so a class-vs-class walk handles every primitive check
     // (including `bool` → `int` via base inheritance).
     if let ValueKind::PyClass(expected) = cls.kind() {
+        // Fast path: if `expected` is one of the 11 primitive class
+        // singletons, do a direct `ValueKind` tag check.  Skips the
+        // `primitive_class_for_value` thread_local + Rc::clone + the
+        // base-chain walk, recovering most of the master-vs-PR
+        // `isinstance` regression (#462).
+        if let Some(hit) = crate::interpreter::primitive_class_isinstance_fast(obj, expected) {
+            return hit;
+        }
         let actual_class = match obj.kind() {
             ValueKind::PyInstance(inst) => Some(Rc::clone(&inst.borrow().class)),
             _ => crate::interpreter::primitive_class_for_value(obj),

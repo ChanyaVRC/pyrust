@@ -209,6 +209,48 @@ thread_local! {
     /// subclassing primitives in pyrust today; the migration is purely
     /// metadata + dispatch routing.
     static PRIMITIVE_CLASSES: PrimitiveClasses = build_primitive_classes();
+
+    /// O(1) dispatch table for primitive classes (#462 perf): maps the
+    /// `Rc<RefCell<PyClass>>` identity (by raw pointer) to the registry's
+    /// `BuiltinDispatchFn` for the corresponding constructor.  Populated
+    /// once per thread alongside `PRIMITIVE_CLASSES`.
+    ///
+    /// Hot path: `call_function_expanded`'s `ValueKind::PyClass(class)`
+    /// arm looks up `Rc::as_ptr(class)` here; on hit it dispatches
+    /// directly to the registry fn, skipping `call_class_expanded`'s
+    /// PyInstance allocation + `lookup_class_attr("__init__")` walk +
+    /// recursive `call_function_expanded` step.  The lookup is one
+    /// `HashMap::get` (cap = 11) + a fn pointer call.
+    static PRIMITIVE_CLASS_DISPATCH:
+        std::cell::RefCell<
+            std::collections::HashMap<
+                *const std::cell::RefCell<PyClass>,
+                crate::builtin_registry::BuiltinDispatchFn,
+            >,
+        > = {
+        let cell = std::cell::RefCell::new(std::collections::HashMap::with_capacity(11));
+        PRIMITIVE_CLASSES.with(|c| {
+            let mut m = cell.borrow_mut();
+            for (class, name) in [
+                (&c.bool_class, "bool"),
+                (&c.bytes_class, "bytes"),
+                (&c.complex_class, "complex"),
+                (&c.dict_class, "dict"),
+                (&c.float_class, "float"),
+                (&c.frozenset_class, "frozenset"),
+                (&c.int_class, "int"),
+                (&c.list_class, "list"),
+                (&c.set_class, "set"),
+                (&c.str_class, "str"),
+                (&c.tuple_class, "tuple"),
+            ] {
+                if let Some(dispatch) = crate::builtin_registry::lookup(name) {
+                    m.insert(Rc::as_ptr(class), dispatch);
+                }
+            }
+        });
+        cell
+    };
 }
 
 /// Holder for the per-primitive `PyClass` Rc's.  Constructed once per
@@ -337,26 +379,83 @@ pub(crate) fn primitive_class_for_value(v: &Value) -> Option<Rc<RefCell<PyClass>
 }
 
 /// True iff `class` is one of the 11 migrated-primitive class singletons.
-/// Used by `call_class_expanded` to route primitive-class calls through
-/// the existing constructor (`Value::Int(_)` etc.) instead of allocating
-/// a `PyInstance`.
+/// O(1) via the [`PRIMITIVE_CLASS_DISPATCH`] table.
 pub(crate) fn is_primitive_class(class: &Rc<RefCell<PyClass>>) -> bool {
+    primitive_class_dispatch(class).is_some()
+}
+
+/// Fast-path dispatch lookup for primitive classes (#462 perf).
+/// Returns the registry's `BuiltinDispatchFn` for the constructor of
+/// the named primitive (`int`, `str`, …), or `None` for any other
+/// class.  Called from `call_function_expanded`'s `PyClass` arm to
+/// skip the `call_class_expanded` PyInstance-alloc + `__init__`-walk
+/// + recursive `call_function_expanded` chain — three layers of
+/// dispatch collapsed into one `HashMap` lookup and one fn-pointer
+/// call.
+#[inline]
+pub(crate) fn primitive_class_dispatch(
+    class: &Rc<RefCell<PyClass>>,
+) -> Option<crate::builtin_registry::BuiltinDispatchFn> {
+    let ptr = Rc::as_ptr(class);
+    PRIMITIVE_CLASS_DISPATCH.with(|m| m.borrow().get(&ptr).copied())
+}
+
+/// Fast `isinstance(obj, primitive_class)` — when `cls` is one of the
+/// 11 primitive class singletons, skip the `class_is_subclass_of`
+/// walk (which would require materialising `obj`'s class via
+/// `primitive_class_for_value`'s thread_local + Rc::clone) and do a
+/// direct `ValueKind` tag check.  `Some(true/false)` on a hit,
+/// `None` if `cls` isn't a primitive class — fall through to the
+/// general walk.  Issue #462 perf.
+#[inline]
+pub(crate) fn primitive_class_isinstance_fast(
+    obj: &Value,
+    cls: &Rc<RefCell<PyClass>>,
+) -> Option<bool> {
+    let cls_ptr = Rc::as_ptr(cls);
     PRIMITIVE_CLASSES.with(|c| {
-        [
-            &c.bool_class,
-            &c.bytes_class,
-            &c.complex_class,
-            &c.dict_class,
-            &c.float_class,
-            &c.frozenset_class,
-            &c.int_class,
-            &c.list_class,
-            &c.set_class,
-            &c.str_class,
-            &c.tuple_class,
-        ]
-        .into_iter()
-        .any(|p| Rc::ptr_eq(p, class))
+        // bool ⊂ int: an int-class test matches both Int and Bool.
+        // Every other primitive is a tag identity.
+        if cls_ptr == Rc::as_ptr(&c.int_class) {
+            return Some(matches!(
+                obj.kind(),
+                ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+            ));
+        }
+        if cls_ptr == Rc::as_ptr(&c.bool_class) {
+            return Some(matches!(obj.kind(), ValueKind::Bool(_)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.str_class) {
+            return Some(matches!(obj.kind(), ValueKind::Str(_)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.float_class) {
+            return Some(matches!(obj.kind(), ValueKind::Float(_)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.list_class) {
+            return Some(matches!(obj.kind(), ValueKind::List(_)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.tuple_class) {
+            return Some(matches!(obj.kind(), ValueKind::Tuple(_)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.dict_class) {
+            return Some(matches!(obj.kind(), ValueKind::Dict(_)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.set_class) {
+            return Some(matches!(obj.kind(), ValueKind::Set(_)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.bytes_class) {
+            return Some(matches!(obj.kind(), ValueKind::Bytes(_)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.complex_class) {
+            return Some(matches!(obj.kind(), ValueKind::Complex(_, _)));
+        }
+        if cls_ptr == Rc::as_ptr(&c.frozenset_class) {
+            return Some(matches!(
+                obj.kind(),
+                ValueKind::BuiltinObject { ops, .. } if ops.type_name() == "frozenset"
+            ));
+        }
+        None
     })
 }
 
