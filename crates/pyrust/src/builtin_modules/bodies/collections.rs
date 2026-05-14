@@ -685,7 +685,7 @@ fn require_no_args(args: &[ExpandedCallArg], method: &str) -> Result<()> {
 /// +1/-1 per element) or a mapping (uses the mapping's integer values).
 ///
 /// Takes `interp` so user `__iter__` classes are honoured via
-/// `collect_iterable` (issue #418).
+/// `collect_iterable` (issue #446).
 fn apply_delta(
     interp: &mut crate::Interpreter,
     args: &[ExpandedCallArg],

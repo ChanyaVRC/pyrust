@@ -587,12 +587,13 @@ pyrust_module! {
                 )),
             },
         };
-        // Pre-materialise PyInstance sources so user `__iter__` dispatch
-        // (which requires the Interpreter) happens here — the lazy helper
-        // in `iter_helpers` reaches the registry callback, which can't
-        // dispatch dunders.  For non-PyInstance sources we still pass the
-        // raw value so side effects (e.g. `open()`) defer to iteration
-        // start (#418).
+        // Pre-materialise PyInstance / Generator sources so user
+        // `__iter__` dispatch (which requires the Interpreter) happens
+        // here — the lazy helper in `iter_helpers` reaches the
+        // registry callback, which can't dispatch dunders or resume
+        // generators.  For other sources we still pass the raw value
+        // so side effects (e.g. `open()`) defer to iteration start
+        // (#446).
         let iterable = materialize_user_iter(_interp, iterable)?;
         Ok(pyrust_builtins::iter_helpers::enumerate(
             iterable,
@@ -1745,24 +1746,18 @@ pyrust_module! {
     }
 }
 
-/// Compute the hash of a `Value` for the `hash()` builtin.  Mirrors
-/// CPython's semantics:
-/// - numeric types use their integer value (so `hash(True) == hash(1)`
-///   and `hash(1.0) == hash(1)`);
-/// - strings use an FNV-1a-style byte hash;
-/// - tuples fold each element's hash with a CPython-style xor/mul mix,
-///   recursing through nested tuples (issue #382);
-/// - mutable containers (list / dict / set) raise `TypeError`.
 /// If `v` is a user `PyInstance` (which needs `__iter__` / `__getitem__`
 /// dispatch via the interpreter) or a `Generator` (which needs the
 /// interpreter to drive the `GeneratorFrame`), drain it eagerly into a
-/// `Value::list` so downstream lazy iter helpers (enumerate / zip /
-/// reversed / chain) can reach its items through `iter_values_via_registry`
-/// — that callback can't dispatch dunders or resume generators by itself.
-/// Non-user sources are passed through unchanged, preserving lazy
-/// evaluation for builtin iterables (e.g. `enumerate(open(path))` still
-/// defers file-reading until iter).
-fn materialize_user_iter(
+/// `Value::list` so downstream lazy iter helpers (`enumerate` / `zip` /
+/// `reversed` / `chain`) can reach its items through
+/// `iter_values_via_registry` — that callback can't dispatch dunders or
+/// resume generators by itself.  Non-user sources are passed through
+/// unchanged, preserving lazy evaluation for builtin iterables (e.g.
+/// `enumerate(open(path))` still defers file-reading until iter).
+///
+/// Issue #446.
+pub(super) fn materialize_user_iter(
     interp: &mut crate::Interpreter,
     v: Value,
 ) -> Result<Value> {
@@ -1774,6 +1769,14 @@ fn materialize_user_iter(
     }
 }
 
+/// Compute the hash of a `Value` for the `hash()` builtin.  Mirrors
+/// CPython's semantics:
+/// - numeric types use their integer value (so `hash(True) == hash(1)`
+///   and `hash(1.0) == hash(1)`);
+/// - strings use an FNV-1a-style byte hash;
+/// - tuples fold each element's hash with a CPython-style xor/mul mix,
+///   recursing through nested tuples (issue #382);
+/// - mutable containers (list / dict / set) raise `TypeError`.
 fn hash_value(value: &Value) -> Result<i64> {
     match value.kind() {
         ValueKind::Int(v) => Ok(v),

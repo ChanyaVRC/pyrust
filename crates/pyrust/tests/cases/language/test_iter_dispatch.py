@@ -1,4 +1,4 @@
-# Issue #418 regression matrix — builtins/operations that consume an
+# Issue #446 regression matrix — builtins/operations that consume an
 # iterable must dispatch user-defined `__iter__` and the legacy
 # `__getitem__` sequence-iter protocol through the interpreter's
 # `collect_iterable`, not the bare `iter_values` helper that can't
@@ -43,6 +43,18 @@ assert reduce(lambda a, b: a + b, Seq(), 100) == 106
 from itertools import chain
 assert list(chain(Seq(), [4, 5])) == [1, 2, 3, 4, 5]
 assert list(chain([0], Seq())) == [0, 1, 2, 3]
+
+# `chain` must drain GENERATOR sources too, not just PyInstance.  The
+# initial #446 fix only pre-materialised PyInstance, leaving real
+# generators on a code path that couldn't resume `GeneratorFrame`.
+# Reuses `materialize_user_iter` to match `enumerate`/`zip`/`reversed`.
+def _gen():
+    yield 100
+    yield 200
+
+
+assert list(chain(_gen(), [300])) == [100, 200, 300]
+assert list(chain([0], _gen(), [400])) == [0, 100, 200, 400]
 
 
 # ── Class implementing __iter__/__next__ (returns self) ────────────────────
