@@ -132,10 +132,11 @@ impl BuiltinTypeOps for FrozenSetOps {
         let rc = borrow_items(state)
             .ok_or_else(|| PyError::Runtime("internal: bad frozenset state".to_string()))?;
         // Treat the frozenset as an immutable set for non-mutating methods.
-        // Clone into a regular IndexSet, call the method, and (for the
-        // result-returning ones) re-wrap if necessary.
-        let mut items: IndexSet<PyKey> = (*rc).clone();
-        let result = crate::set::call(method, &mut items, args)?;
+        // Clone into a regular set Value, dispatch via the new
+        // `set::call(&Value, ...)` API, and re-wrap result-returning
+        // methods back into a frozenset.
+        let temp_set = Value::set((*rc).clone());
+        let result = crate::set::call(method, &temp_set, args)?;
         if matches!(
             method,
             "copy" | "union" | "intersection" | "difference" | "symmetric_difference"

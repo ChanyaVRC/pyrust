@@ -78,25 +78,19 @@ impl Interpreter {
                         None => pos.push(a.value.clone()),
                     }
                 }
-                // Bound-method dispatch: receiver is `&mut`-borrowed below
-                // for list/set/dict.  Args may alias the receiver (e.g.
-                // `lst.extend(lst)`) — the Rc-shared backing on these types
-                // means an aliased arg points at the same storage the
-                // `&mut` will borrow.  Resolve aliasing up front so the
-                // builtin can read the iterable without producing a
-                // simultaneous `&` + `&mut` to the same Vec/Set/Map.  See
-                // SAFETY contracts on `Value::as_list_mut` / `as_set_mut` /
-                // `as_dict_mut`.
-                pyrust_core::unalias_args_for_mutation(&receiver, &mut pos);
+                // Bound-method dispatch: each builtin takes `&Value`
+                // and scopes its own `RefCell::borrow_mut()` for the
+                // duration of the operation (#448).  No `&mut Vec /
+                // Map / Set` crosses the crate boundary, so the
+                // previous `unalias_args_for_mutation` dance is
+                // unnecessary — aliasing-safety is structural now,
+                // not a discipline the caller has to remember.
                 match receiver.kind() {
                     ValueKind::Str(_) => {
                         pyrust_builtins::string::call(method, &receiver, pos)
                     }
                     ValueKind::List(_) => {
-                        let items = receiver
-                            .as_list_mut()
-                            .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
-                        pyrust_builtins::list::call(method, items, pos, &kw)
+                        pyrust_builtins::list::call(method, &receiver, pos, &kw)
                     }
                     ValueKind::Tuple(items) => {
                         pyrust_builtins::tuple::call(method, items, pos)

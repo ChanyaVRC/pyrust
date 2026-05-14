@@ -790,7 +790,7 @@ impl Interpreter {
     pub(crate) fn call_dict_method(
         &mut self,
         method: &str,
-        mut receiver: Value,
+        receiver: Value,
         args: Vec<Value>,
     ) -> Result<Value> {
         match method {
@@ -815,10 +815,7 @@ impl Interpreter {
                         Some((idx, v)) => {
                             // `dict_lookup` already dropped its borrow before
                             // running user code, so the index is still valid.
-                            let dict = receiver.as_dict_mut().ok_or_else(|| {
-                                PyError::Runtime("internal: expected dict".to_string())
-                            })?;
-                            dict.shift_remove_index(idx);
+                            receiver.dict_with_mut(|dict| dict.shift_remove_index(idx));
                             Ok(v)
                         }
                         None => {
@@ -834,21 +831,17 @@ impl Interpreter {
                         if let Some((_, v)) = self.dict_lookup(&receiver, &pk)? {
                             return Ok(v);
                         }
-                        let dict = receiver.as_dict_mut().ok_or_else(|| {
-                            PyError::Runtime("internal: expected dict".to_string())
-                        })?;
-                        dict.insert(pk, default.clone());
+                        receiver
+                            .dict_with_mut(|dict| dict.insert(pk, default.clone()))
+                            .ok_or_else(|| {
+                                PyError::Runtime("internal: expected dict".to_string())
+                            })?;
                         Ok(default)
                     }
                     _ => unreachable!(),
                 }
             }
-            _ => {
-                let dict = receiver
-                    .as_dict_mut()
-                    .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
-                pyrust_builtins::dict::call(method, dict, args)
-            }
+            _ => pyrust_builtins::dict::call(method, &receiver, args),
         }
     }
 
@@ -860,7 +853,7 @@ impl Interpreter {
     pub(crate) fn call_set_method(
         &mut self,
         method: &str,
-        mut receiver: Value,
+        receiver: Value,
         args: Vec<Value>,
     ) -> Result<Value> {
         match method {
@@ -875,10 +868,7 @@ impl Interpreter {
                         if self.set_lookup(&receiver, &pk)?.is_some() {
                             return Ok(Value::none());
                         }
-                        let set = receiver.as_set_mut().ok_or_else(|| {
-                            PyError::Runtime("internal: expected set".to_string())
-                        })?;
-                        set.insert(pk);
+                        receiver.set_add(pk)?;
                         Ok(Value::none())
                     }
                     "__contains__" => {
@@ -886,19 +876,25 @@ impl Interpreter {
                     }
                     "discard" => {
                         if let Some(idx) = self.set_lookup(&receiver, &pk)? {
-                            let set = receiver.as_set_mut().ok_or_else(|| {
-                                PyError::Runtime("internal: expected set".to_string())
-                            })?;
-                            set.shift_remove_index(idx);
+                            receiver
+                                .set_with_mut(|set| {
+                                    set.shift_remove_index(idx);
+                                })
+                                .ok_or_else(|| {
+                                    PyError::Runtime("internal: expected set".to_string())
+                                })?;
                         }
                         Ok(Value::none())
                     }
                     "remove" => match self.set_lookup(&receiver, &pk)? {
                         Some(idx) => {
-                            let set = receiver.as_set_mut().ok_or_else(|| {
-                                PyError::Runtime("internal: expected set".to_string())
-                            })?;
-                            set.shift_remove_index(idx);
+                            receiver
+                                .set_with_mut(|set| {
+                                    set.shift_remove_index(idx);
+                                })
+                                .ok_or_else(|| {
+                                    PyError::Runtime("internal: expected set".to_string())
+                                })?;
                             Ok(Value::none())
                         }
                         None => Err(PyError::named("KeyError", key_val.repr())),
@@ -906,12 +902,7 @@ impl Interpreter {
                     _ => unreachable!(),
                 }
             }
-            _ => {
-                let set = receiver
-                    .as_set_mut()
-                    .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
-                pyrust_builtins::set::call(method, set, args)
-            }
+            _ => pyrust_builtins::set::call(method, &receiver, args),
         }
     }
 

@@ -292,16 +292,18 @@ pyrust_module! {
                     .ok_or_else(|| internal(FN_NAME))?;
                 match _interp.call_next(iter, None) {
                     Ok(v) => {
-                        // Append in place via as_list_mut so first-pass cost is
-                        // amortised O(1) per element instead of O(n) per yield
-                        // (the old code re-built the cache Vec from a slice clone).
-                        let mut attrs = inst.borrow_mut();
-                        let cache = attrs
+                        // Append in place via the scoped `list_push`
+                        // operation method (#448) so first-pass cost is
+                        // amortised O(1) per element instead of O(n) per
+                        // yield (the old code re-built the cache Vec from
+                        // a slice clone).
+                        let cache = inst
+                            .borrow()
                             .attrs
-                            .get_mut("_cache")
-                            .and_then(Value::as_list_mut)
+                            .get("_cache")
+                            .cloned()
                             .ok_or_else(|| internal(FN_NAME))?;
-                        cache.push(v.clone());
+                        cache.list_push(v.clone())?;
                         return Ok(v);
                     }
                     Err(e) if is_stop_iteration(&e) => {
