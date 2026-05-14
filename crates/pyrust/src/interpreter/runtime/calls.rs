@@ -967,6 +967,7 @@ impl Interpreter {
                         // and yields inside one.
                         handled_exc_slice: Vec::new(),
                         active_exception: None,
+                        local_index: Rc::clone(&function.local_index),
                     };
                     return Ok(Value::generator(Box::new(frame)));
                 }

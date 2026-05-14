@@ -52,3 +52,28 @@ try:
     print("locals-arg-error: FAIL")
 except TypeError:
     print("locals-arg-error: TypeError")
+
+
+# Issue #483 review: locals() inside a generator body must see the
+# generator's own fastlocals, not the caller's frame.  Regression for
+# the pre-fix bug where every resume reused the caller's view because
+# resume_generator_with_exc bypassed the call-site frame-view push.
+def gen_locals():
+    g1 = 1
+    g2 = "two"
+    yield locals()
+    g3 = 3
+    yield locals()
+
+
+_gen = gen_locals()
+print("gen locals first (sorted):", sorted(next(_gen).keys()))
+print("gen locals second (sorted):", sorted(next(_gen).keys()))
+
+
+# globals() inside a generator still resolves the module namespace.
+def gen_globals():
+    yield globals()["x"]
+
+
+print("gen globals x:", next(gen_globals()))
