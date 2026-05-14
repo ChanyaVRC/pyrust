@@ -183,10 +183,17 @@ pub enum FStringPart {
     /// the spec (e.g. `f"{x:>{width}}"`) are exposed as real sub-expressions
     /// — this is what allows the scope-pass / closure-capture analyser to see
     /// names referenced inside the spec.
+    ///
+    /// `debug_text`, when `Some`, marks the Python 3.8 debug form `f"{x=}"`
+    /// and carries the verbatim source text of the expression with the
+    /// trailing `=` (whitespace preserved).  The compiler emits this as a
+    /// literal prefix and defaults the value conversion to `repr` (unless an
+    /// explicit conversion flag or format spec is present).
     Expr {
         expr: Box<Expr>,
         conversion: Option<char>,
         format_spec: Option<Vec<FStringPart>>,
+        debug_text: Option<String>,
     },
 }
 

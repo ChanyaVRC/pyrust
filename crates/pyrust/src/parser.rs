@@ -2038,6 +2038,7 @@ impl Parser {
                     src,
                     conversion,
                     format_spec,
+                    debug_text,
                 } => {
                     let expr = parse_expr_str(&src)?;
                     // Recursively parse any nested expressions inside the
@@ -2051,6 +2052,7 @@ impl Parser {
                         expr: Box::new(expr),
                         conversion,
                         format_spec,
+                        debug_text,
                     });
                 }
             }

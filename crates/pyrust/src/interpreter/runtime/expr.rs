@@ -320,9 +320,22 @@ impl Interpreter {
                     expr,
                     conversion,
                     format_spec,
+                    debug_text,
                 } => {
+                    // Python 3.8 debug form `f"{x=}"`: emit the verbatim
+                    // source text (including the trailing `=`) as a literal
+                    // prefix.  When no explicit conversion and no format
+                    // spec are given, the implicit conversion is `repr`.
+                    if let Some(label) = debug_text {
+                        result.push_str(label);
+                    }
                     let val = self.eval_expr(expr)?;
-                    let converted = match conversion {
+                    let effective_conversion: Option<char> = match conversion {
+                        Some(c) => Some(*c),
+                        None if debug_text.is_some() && format_spec.is_none() => Some('r'),
+                        None => None,
+                    };
+                    let converted = match effective_conversion {
                         Some('r') => Value::string(val.repr()),
                         Some('a') => Value::string(val.repr()),
                         _ => val,

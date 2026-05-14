@@ -7,10 +7,18 @@ pub enum FStringPart {
     /// `format_spec`, when present, is itself a list of f-string parts so that
     /// nested `{expr}` interpolations inside the spec (e.g. `f"{x:>{w}}"`) can
     /// be evaluated and their string values substituted into the spec.
+    ///
+    /// `debug_text`, when `Some`, holds the verbatim source text of the
+    /// expression (including any surrounding whitespace and a trailing `=`)
+    /// for the Python 3.8 debug form `f"{x=}"`.  At compile time, this text
+    /// is emitted as a literal prefix before the formatted value, and the
+    /// default conversion becomes `repr` (unless an explicit conversion
+    /// flag or format spec overrides it).
     Expr {
         src: String,
         conversion: Option<char>,
         format_spec: Option<Vec<FStringPart>>,
+        debug_text: Option<String>,
     },
 }
 
