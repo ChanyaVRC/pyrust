@@ -1430,24 +1430,21 @@ pub(crate) fn value_to_float(v: &Value, ctx: &str) -> Result<f64> {
 // `crates/pyrust/src/builtin_modules/{math,sys}.rs`.  See
 // `docs/builtin-migration.md` for the recipe.
 
-// Names of built-in callables with observable side effects.
-const IMPURE_BUILTINS: &[&str] = &["print", "input", "open", "exit", "quit", "exec", "eval"];
-
-// Built-in callables that are definitionally pure (no side effects, deterministic).
-const PURE_BUILTINS: &[&str] = &[
-    "abs", "all", "any", "bin", "bool", "chr", "dict", "divmod", "enumerate", "float",
-    "hash", "hex", "id", "int", "isinstance", "issubclass", "iter", "len", "list", "max",
-    "min", "oct", "ord", "pow", "range", "repr", "reversed", "round", "set", "sorted",
-    "str", "sum", "tuple", "type", "zip",
-];
-
 /// Returns true if `expr` produces no observable side effects given the set of
 /// locally-defined functions already confirmed pure (`pure_fns`).
 ///
-/// A `Call` is pure only when the callee is a known-pure builtin or a
-/// locally-defined function in `pure_fns`.  Indirect calls (methods, closures
-/// through computed expressions) and calls to names not in either set are
+/// A `Call` is pure only when the callee is a built-in declared `#[pure]` in
+/// `pyrust_module! { … }` (reflected through `BuiltinReg::is_pure` — see
+/// `crate::builtin_registry::is_pure`) or a locally-defined function in
+/// `pure_fns`.  Indirect calls (methods, closures through computed
+/// expressions) and calls to names registered as non-pure (or unknown) are
 /// conservatively treated as impure.
+///
+/// Previously this used a hand-maintained `PURE_BUILTINS` list living
+/// alongside this function.  The list drifted from the registry (issue #433),
+/// so purity is now derived from the `#[pure]` attribute at each builtin's
+/// declaration site.  Adding a `#[pure] fn foo(...)` to `pyrust_module!`
+/// makes the optimizer DCE / fold `foo(…)` calls without any further edit.
 fn is_pure_expr(expr: &Expr, pure_fns: &std::collections::HashSet<String>) -> bool {
     match expr {
         Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bytes(_) | Expr::Bool(_) | Expr::None => true,
@@ -1480,13 +1477,17 @@ fn is_pure_expr(expr: &Expr, pure_fns: &std::collections::HashSet<String>) -> bo
         Expr::Call { func, args } => {
             // Only direct calls to named callees can be pure.
             if let Expr::Var(name) = func.as_ref() {
-                // Known-impure builtins (I/O, process control) → always impure.
-                if IMPURE_BUILTINS.contains(&name.as_str()) {
-                    return false;
-                }
-                // Accept known-pure builtins or locally-defined pure functions.
-                let callee_is_pure = PURE_BUILTINS.contains(&name.as_str())
-                    || pure_fns.contains(name.as_str());
+                // Source of truth for builtin purity: the registry (see
+                // `BuiltinReg::is_pure` / issue #433).  `is_pure` returns
+                // `false` both for "registered but impure" (`print`, `open`,
+                // …) and "not registered", so the conservative default
+                // collapses both paths into a single check.  Local fns
+                // already confirmed pure (`pure_fns`) take precedence so
+                // user-defined names don't accidentally hit the registry —
+                // a stray builtin name shadowed by a local can't be
+                // mis-classified.
+                let callee_is_pure = pure_fns.contains(name.as_str())
+                    || crate::builtin_registry::is_pure(name);
                 if !callee_is_pure {
                     return false;
                 }
@@ -1534,9 +1535,10 @@ fn is_pure_expr(expr: &Expr, pure_fns: &std::collections::HashSet<String>) -> bo
 /// Returns true if every statement in `body` is free of observable side effects.
 ///
 /// `pure_fns` is the set of locally-defined functions already confirmed pure;
-/// calls to names outside this set and outside `PURE_BUILTINS` are treated as
-/// impure.  Attribute/index mutation, global/nonlocal declarations, imports,
-/// and `with` blocks are always impure.
+/// calls to names outside this set and outside the registry's `#[pure]`-marked
+/// builtins (see `crate::builtin_registry::is_pure`) are treated as impure.
+/// Attribute/index mutation, global/nonlocal declarations, imports, and
+/// `with` blocks are always impure.
 pub(crate) fn is_pure_body(
     body: &[Stmt],
     pure_fns: &std::collections::HashSet<String>,

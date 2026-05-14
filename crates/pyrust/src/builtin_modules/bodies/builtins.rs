@@ -48,16 +48,19 @@ pyrust_module! {
     /// range(0x110000)")` via the range check.  Modern CPython
     /// raises `OverflowError` here too (compare `hex(bignum)`
     /// behaviour above).
+    #[pure]
     fn chr(#[positional_only] i: PyInt) -> Result<Value> {
         let code_point = i.expect_i64(FN_NAME, "i")?;
         chr_from_code_point(code_point)
     }
 
+    #[pure]
     fn chr(#[positional_only] i: PyBool) -> Result<Value> {
         // CPython: `chr(True) == '\x01'`, `chr(False) == '\x00'`.
         chr_from_code_point(if i.0 { 1 } else { 0 })
     }
 
+    #[pure]
     fn chr(#[positional_only] i: PyValue) -> Result<Value> {
         Err(PyError::named(
             "TypeError",
@@ -83,6 +86,7 @@ pyrust_module! {
     /// new CPython-parity feature — the legacy body rejected `bytes`
     /// outright, but CPython has always accepted a 1-byte `bytes`
     /// (`ord(b"A") == 65`).
+    #[pure]
     fn ord(#[positional_only] c: PyStr) -> Result<Value> {
         let s: &str = &c;
         let mut chars = s.chars();
@@ -104,6 +108,7 @@ pyrust_module! {
         }
     }
 
+    #[pure]
     fn ord(#[positional_only] c: PyBytes) -> Result<Value> {
         // CPython: `ord(b"A") == 65`; reject empty/multi-byte with the
         // same wording shape used by the `PyStr` overload above.
@@ -119,6 +124,7 @@ pyrust_module! {
         }
     }
 
+    #[pure]
     fn ord(#[positional_only] c: PyValue) -> Result<Value> {
         let _ = c;
         Err(PyError::named(
@@ -138,16 +144,19 @@ pyrust_module! {
     /// Bignums not yet supported; raises `OverflowError` if `x` doesn't
     /// fit in i64 (deliberate divergence from CPython, tracked as
     /// follow-up under #400).
+    #[pure]
     fn bin(#[positional_only] x: PyInt) -> Result<Value> {
         let v = x.expect_i64(FN_NAME, "x")?;
         Ok(Value::string(format_bin_i64(v)))
     }
 
+    #[pure]
     fn bin(#[positional_only] x: PyBool) -> Result<Value> {
         // CPython: `bin(True) == '0b1'`, `bin(False) == '0b0'`.
         Ok(Value::string(format_bin_i64(if x.0 { 1 } else { 0 })))
     }
 
+    #[pure]
     fn bin(#[positional_only] x: PyValue) -> Result<Value> {
         Err(PyError::named(
             "TypeError",
@@ -169,16 +178,19 @@ pyrust_module! {
     /// Bignums not yet supported; raises `OverflowError` if `x` doesn't
     /// fit in i64 (deliberate divergence from CPython, tracked as
     /// follow-up under #400).
+    #[pure]
     fn oct(#[positional_only] x: PyInt) -> Result<Value> {
         let v = x.expect_i64(FN_NAME, "x")?;
         Ok(Value::string(format_oct_i64(v)))
     }
 
+    #[pure]
     fn oct(#[positional_only] x: PyBool) -> Result<Value> {
         // CPython: `oct(True) == '0o1'`, `oct(False) == '0o0'`.
         Ok(Value::string(format_oct_i64(if x.0 { 1 } else { 0 })))
     }
 
+    #[pure]
     fn oct(#[positional_only] x: PyValue) -> Result<Value> {
         Err(PyError::named(
             "TypeError",
@@ -203,16 +215,19 @@ pyrust_module! {
     /// canonical message — preserved verbatim from the legacy body).
     /// Genuine bignums raise `OverflowError` via `expect_i64`; that's
     /// a deliberate divergence from CPython, tracked as follow-up.
+    #[pure]
     fn hex(#[positional_only] x: PyInt) -> Result<Value> {
         let v = x.expect_i64(FN_NAME, "x")?;
         Ok(Value::string(format_hex_i64(v)))
     }
 
+    #[pure]
     fn hex(#[positional_only] x: PyBool) -> Result<Value> {
         // CPython: `hex(True) == '0x1'`, `hex(False) == '0x0'`.
         Ok(Value::string(format_hex_i64(if x.0 { 1 } else { 0 })))
     }
 
+    #[pure]
     fn hex(#[positional_only] x: PyValue) -> Result<Value> {
         Err(PyError::named(
             "TypeError",
@@ -229,6 +244,7 @@ pyrust_module! {
     /// Migrated to the typed-signature dialect (#400): like `repr`,
     /// `ascii` accepts every Python object, so `PyValue` is the natural
     /// wrapper.  The body just delegates to the existing helper.
+    #[pure]
     fn ascii(#[positional_only] obj: PyValue) -> Result<Value> {
         Ok(Value::string(ascii_repr(&obj.0)))
     }
@@ -239,6 +255,7 @@ pyrust_module! {
     /// Migrated to the typed-signature dialect (#400).  `PyValue` is the
     /// catch-all wrapper since `id` accepts every Python object; the
     /// existing per-kind dispatch becomes the body's only concern.
+    #[pure]
     fn id(#[positional_only] obj: PyValue) -> Result<Value> {
         let value = &obj.0;
         let id_val: i64 = match value.kind() {
@@ -263,6 +280,7 @@ pyrust_module! {
     /// with `__abs__`, and the not-a-number error path.  The macro
     /// generates a dispatcher that tries each overload in declaration
     /// order.
+    #[pure]
     fn abs(#[positional_only] x: PyInt) -> Result<Value> {
         // i64 fast path; fall back to BigInt for both genuine bignums
         // *and* the `i64::MIN` boundary case — `i64::MIN.checked_abs()`
@@ -284,15 +302,18 @@ pyrust_module! {
         Ok(Value::bigint(abs))
     }
 
+    #[pure]
     fn abs(#[positional_only] x: PyFloat) -> Result<Value> {
         Ok(Value::float(x.0.abs()))
     }
 
+    #[pure]
     fn abs(#[positional_only] x: PyBool) -> Result<Value> {
         // CPython: abs(True) == 1, abs(False) == 0 — promoted to int.
         Ok(Value::int(if x.0 { 1 } else { 0 }))
     }
 
+    #[pure]
     fn abs(#[positional_only] x: PyValue) -> Result<Value> {
         // Catch-all: complex magnitude, user-defined `__abs__`, and the
         // "not a number" error otherwise.  Reached when none of the
@@ -325,6 +346,7 @@ pyrust_module! {
 
     /// CPython: sum(iterable, /, start=0) — sum elements of an iterable.
     /// <https://docs.python.org/3/library/functions.html#sum>
+    #[pure]
     fn sum(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.is_empty() || args.len() > 2 {
@@ -341,6 +363,7 @@ pyrust_module! {
 
     /// CPython: any(iterable) — true if any element is truthy.
     /// <https://docs.python.org/3/library/functions.html#any>
+    #[pure]
     fn any(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 1 {
@@ -357,6 +380,7 @@ pyrust_module! {
 
     /// CPython: all(iterable) — true if every element is truthy (or empty).
     /// <https://docs.python.org/3/library/functions.html#all>
+    #[pure]
     fn all(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 1 {
@@ -379,6 +403,7 @@ pyrust_module! {
     /// binds `obj` as a typed local.  `PyValue` is the catch-all wrapper
     /// — `repr` accepts every Python object, so type-checking the input
     /// is exactly the prelude's "validate arity / reject kwargs" job.
+    #[pure]
     fn repr(#[positional_only] obj: PyValue) -> Result<Value> {
         let obj = obj.0;
         if let ValueKind::PyInstance(instance) = obj.kind() {
@@ -413,6 +438,7 @@ pyrust_module! {
     /// existing CPython-compatible numeric hashing (int / bool / float
     /// with `1.0 == 1` parity), FNV-1a-style string hashing, and the
     /// per-kind "unhashable type: 'X'" errors for list / dict / set.
+    #[pure]
     fn hash(#[positional_only] obj: PyValue) -> Result<Value> {
         let value = obj.0;
         let hash_val = hash_value(&value)?;
@@ -421,6 +447,7 @@ pyrust_module! {
 
     /// CPython: divmod(a, b) — `(a // b, a % b)`.
     /// <https://docs.python.org/3/library/functions.html#divmod>
+    #[pure]
     fn divmod(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 2 {
@@ -469,6 +496,7 @@ pyrust_module! {
 
     /// CPython: pow(base, exp[, mod]) — exponentiation, optionally modular.
     /// <https://docs.python.org/3/library/functions.html#pow>
+    #[pure]
     fn pow(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() < 2 || args.len() > 3 {
@@ -532,6 +560,7 @@ pyrust_module! {
 
     /// CPython: enumerate(iterable, start=0) — enumerate iterator.
     /// <https://docs.python.org/3/library/functions.html#enumerate>
+    #[pure]
     fn enumerate(args) -> Result<Value> {
         // Parse `iterable` and `start` (positional or keyword). CPython's
         // signature is `enumerate(iterable, start=0)`.
@@ -606,6 +635,7 @@ pyrust_module! {
     /// CPython: zip(*iterables, strict=False) — parallel iterator.
     /// `strict=True` raises `ValueError` if lengths differ.
     /// <https://docs.python.org/3/library/functions.html#zip>
+    #[pure]
     fn zip(args) -> Result<Value> {
         // `strict` is the only accepted keyword arg; everything else is a
         // CPython-style `TypeError`.
@@ -637,6 +667,7 @@ pyrust_module! {
 
     /// CPython: reversed(seq) — reverse iterator.
     /// <https://docs.python.org/3/library/functions.html#reversed>
+    #[pure]
     fn reversed(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 1 {
@@ -697,6 +728,7 @@ pyrust_module! {
 
     /// CPython: iter(obj) — return an iterator over obj.
     /// <https://docs.python.org/3/library/functions.html#iter>
+    #[pure]
     fn iter(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 1 {
@@ -765,6 +797,7 @@ pyrust_module! {
 
     /// CPython: issubclass(cls, classinfo) — true if `cls` is a subclass.
     /// <https://docs.python.org/3/library/functions.html#issubclass>
+    #[pure]
     fn issubclass(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 2 {
@@ -832,6 +865,7 @@ pyrust_module! {
 
     /// CPython: isinstance(obj, classinfo) — type check.
     /// <https://docs.python.org/3/library/functions.html#isinstance>
+    #[pure]
     fn isinstance(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 2 {
@@ -843,6 +877,7 @@ pyrust_module! {
 
     /// CPython: type(object) → type / type(name, bases, namespace) → new class.
     /// <https://docs.python.org/3/library/functions.html#type>
+    #[pure]
     fn r#type(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() == 3 {
@@ -1079,6 +1114,7 @@ pyrust_module! {
 
     /// CPython: len(s) — number of items in a container.
     /// <https://docs.python.org/3/library/functions.html#len>
+    #[pure]
     fn len(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 1 {
@@ -1149,6 +1185,7 @@ pyrust_module! {
 
     /// CPython: sorted(iterable, /, *, key=None, reverse=False) — new sorted list.
     /// <https://docs.python.org/3/library/functions.html#sorted>
+    #[pure]
     fn sorted(args) -> Result<Value> {
         if args.is_empty() {
             return Err(PyError::Runtime(format!("{FN_NAME}() requires at least one argument")));
@@ -1207,18 +1244,21 @@ pyrust_module! {
 
     /// CPython: min(iterable, /, *, key=None) or min(*args, key=None).
     /// <https://docs.python.org/3/library/functions.html#min>
+    #[pure]
     fn min(args) -> Result<Value> {
         min_max_impl(_interp, args, false, FN_NAME)
     }
 
     /// CPython: max(iterable, /, *, key=None) or max(*args, key=None).
     /// <https://docs.python.org/3/library/functions.html#max>
+    #[pure]
     fn max(args) -> Result<Value> {
         min_max_impl(_interp, args, true, FN_NAME)
     }
 
     /// CPython: round(number[, ndigits]) — banker's rounding.
     /// <https://docs.python.org/3/library/functions.html#round>
+    #[pure]
     fn round(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.is_empty() || args.len() > 2 {
@@ -1262,6 +1302,7 @@ pyrust_module! {
 
     /// CPython: list([iterable]) — list constructor.
     /// <https://docs.python.org/3/library/functions.html#list>
+    #[pure]
     fn list(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         match args.len() {
@@ -1273,6 +1314,7 @@ pyrust_module! {
 
     /// CPython: tuple([iterable]) — tuple constructor.
     /// <https://docs.python.org/3/library/functions.html#tuple>
+    #[pure]
     fn tuple(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         match args.len() {
@@ -1284,6 +1326,7 @@ pyrust_module! {
 
     /// CPython: bytes() — bytes constructor.
     /// <https://docs.python.org/3/library/functions.html#func-bytes>
+    #[pure]
     fn bytes(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         match args.len() {
@@ -1351,6 +1394,7 @@ pyrust_module! {
 
     /// CPython: complex(real=0, imag=0) — complex number.
     /// <https://docs.python.org/3/library/functions.html#complex>
+    #[pure]
     fn complex(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         let to_f64 = |v: &Value, what: &str| -> Result<f64> {
@@ -1381,6 +1425,7 @@ pyrust_module! {
 
     /// CPython: set([iterable]) — set constructor.
     /// <https://docs.python.org/3/library/functions.html#func-set>
+    #[pure]
     fn set(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         match args.len() {
@@ -1400,6 +1445,7 @@ pyrust_module! {
 
     /// CPython: frozenset([iterable]) — frozenset constructor.
     /// <https://docs.python.org/3/library/functions.html#func-frozenset>
+    #[pure]
     fn frozenset(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         match args.len() {
@@ -1423,6 +1469,7 @@ pyrust_module! {
 
     /// CPython: str(object='') — string constructor.
     /// <https://docs.python.org/3/library/functions.html#func-str>
+    #[pure]
     fn str(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         match args.len() {
@@ -1434,6 +1481,7 @@ pyrust_module! {
 
     /// CPython: int(x=0, base=10) — integer constructor.
     /// <https://docs.python.org/3/library/functions.html#int>
+    #[pure]
     fn int(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         match args.len() {
@@ -1490,6 +1538,7 @@ pyrust_module! {
 
     /// CPython: float(x=0.0) — float constructor.
     /// <https://docs.python.org/3/library/functions.html#float>
+    #[pure]
     fn float(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         match args.len() {
@@ -1518,6 +1567,7 @@ pyrust_module! {
     /// "compute truthiness of v".  Conflating `bool()` with `bool(None)`
     /// is safe because CPython's truthiness of `None` is also False, so
     /// both paths land on the same answer.
+    #[pure]
     fn bool(
         #[positional_only]
         #[default(None)]
@@ -1538,6 +1588,7 @@ pyrust_module! {
 
     /// CPython: dict() — empty dict (rich constructor forms unsupported).
     /// <https://docs.python.org/3/library/functions.html#func-dict>
+    #[pure]
     fn dict(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.is_empty() {
@@ -1564,6 +1615,7 @@ pyrust_module! {
 
     /// CPython: range(stop) / range(start, stop[, step]).
     /// <https://docs.python.org/3/library/functions.html#func-range>
+    #[pure]
     fn range(args) -> Result<Value> {
         _interp.call_range_expanded(args)
     }
@@ -1771,6 +1823,7 @@ pyrust_module! {
     /// Migrated to the typed-signature dialect (#400).  Mirrors `ascii`
     /// / `id`: a single-body `PyValue` catch-all, since `callable`
     /// accepts every Python object and never raises `TypeError`.
+    #[pure]
     fn callable(#[positional_only] obj: PyValue) -> Result<Value> {
         let value = &obj.0;
         let is_callable = match value.kind() {
