@@ -1620,19 +1620,32 @@ impl Value {
     // The methods below are the safe replacements for `as_list_mut` /
     // `as_dict_mut` / `as_set_mut`.  They take `&self`, scope their
     // `RefCell::borrow_mut()` to the operation's lifetime, and never
-    // hand a `&mut <storage>` out across the function boundary.  This
-    // is the architectural fix proposed in #448 — by construction, no
-    // simultaneous `&` + `&mut` to aliased storage can exist outside
-    // one of these calls, so the manual `unalias_args_for_mutation`
-    // dance becomes unnecessary.
+    // hand a `&mut <storage>` out across the function boundary.
+    //
+    // What this DOES guarantee:
+    // - No mutable reference to the underlying `Vec` / `IndexMap` /
+    //   `IndexSet` crosses an API boundary.  Every mutating operation
+    //   is bounded by a single `borrow_mut()` window.
+    // - The dispatcher's previous `unalias_args_for_mutation` dance
+    //   is no longer needed for self-aliased iterating calls
+    //   (`a.extend(a)` etc.) because the iterable is snapshotted
+    //   before the receiver's `borrow_mut()` opens.
+    //
+    // What this DOES NOT (yet) guarantee:
+    // - Full exclusivity against the still-unguarded read accessors
+    //   `as_list` / `as_dict` / `as_set` / `kind()`.  Those return
+    //   shared references via `RefCell::as_ptr()` *without* bumping
+    //   the cell's borrow counter, so a `borrow_mut()` taken here
+    //   will succeed even if a `&[Value]` / `&IndexMap<...>` from
+    //   one of those accessors is still live.  Rewriting the read
+    //   accessors to use `borrow()` is a follow-up to this PR — see
+    //   the trailing notes on #448.
     //
     // Each method panics with the standard `RefCell::borrow_mut`
     // already-borrowed message if a re-entrant call (e.g. user
-    // `__hash__` that mutates the same container) violates the
-    // borrow rules.  That panic surfaces UB-adjacent behaviour at the
-    // earliest possible point — strictly safer than the previous
-    // `unsafe { &mut *cell.as_ptr() }` bypass which produced silent
-    // memory unsafety.
+    // `__hash__` that mutates the same container while another
+    // borrow is live) violates the `RefCell` rules.  That panic
+    // surfaces UB-adjacent behaviour at the earliest possible point.
 
     /// Borrow the list's `Rc<ListInner>`.  Returns `None` when `self`
     /// is not a list.  Internal helper for the operation methods

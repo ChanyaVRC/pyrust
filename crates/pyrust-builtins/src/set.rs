@@ -55,39 +55,41 @@ pub fn call(method: &str, receiver: &Value, args: Vec<Value>) -> Result<Value> {
         // iterables BEFORE borrow_mut so a self-aliased call
         // (`s.update(s)`) doesn't take a `&` to the same storage
         // we're about to `&mut`.
+        // For the `*_update` family we collect ONE iterable, apply it,
+        // then move to the next.  CPython does the same — an error
+        // collecting the 2nd arg leaves the 1st arg's effect on the
+        // receiver visible (`s.update([1], object())` leaves `1` in
+        // `s` before raising TypeError).  Collecting all args upfront
+        // would make these all-or-nothing, diverging from CPython.
         "update" => {
-            let snapshots = collect_iterables(receiver, args)?;
-            receiver
-                .set_with_mut(|items| {
-                    for snap in snapshots {
-                        items.extend(snap);
-                    }
-                })
-                .ok_or_else(not_set)?;
+            for arg in args {
+                let snap = snapshot_iterable(receiver, arg)?;
+                receiver
+                    .set_with_mut(|items| items.extend(snap))
+                    .ok_or_else(not_set)?;
+            }
             Ok(Value::none())
         }
         "intersection_update" => {
-            let snapshots = collect_iterables(receiver, args)?;
-            receiver
-                .set_with_mut(|items| {
-                    for snap in &snapshots {
-                        items.retain(|k| snap.contains(k));
-                    }
-                })
-                .ok_or_else(not_set)?;
+            for arg in args {
+                let snap = snapshot_iterable(receiver, arg)?;
+                receiver
+                    .set_with_mut(|items| items.retain(|k| snap.contains(k)))
+                    .ok_or_else(not_set)?;
+            }
             Ok(Value::none())
         }
         "difference_update" => {
-            let snapshots = collect_iterables(receiver, args)?;
-            receiver
-                .set_with_mut(|items| {
-                    for snap in &snapshots {
-                        for k in snap {
+            for arg in args {
+                let snap = snapshot_iterable(receiver, arg)?;
+                receiver
+                    .set_with_mut(|items| {
+                        for k in &snap {
                             items.shift_remove(k);
                         }
-                    }
-                })
-                .ok_or_else(not_set)?;
+                    })
+                    .ok_or_else(not_set)?;
+            }
             Ok(Value::none())
         }
         "symmetric_difference_update" => {

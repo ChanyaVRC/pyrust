@@ -53,6 +53,14 @@ pub fn call(method: &str, receiver: &Value, args: Vec<Value>) -> Result<Value> {
             })
             .ok_or_else(not_dict),
         "update" => {
+            // CPython: `dict.update([mapping_or_iterable], **kwargs)` —
+            // at most one positional arg.  >1 positional → TypeError.
+            if args.len() > 1 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("update expected at most 1 argument, got {}", args.len()),
+                ));
+            }
             // Materialise the mapping snapshot BEFORE borrow_mut so
             // a self-aliased call (`d.update(d)`) reads its pre-
             // update state and doesn't `&` the storage we'd `&mut`.
