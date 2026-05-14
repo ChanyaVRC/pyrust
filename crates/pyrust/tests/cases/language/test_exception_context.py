@@ -166,3 +166,79 @@ try:
 except D as e:
     assert isinstance(e.__context__, A)
     print("ctx-finally-only", type(e.__context__).__name__)
+
+
+# 11. VM-implicit raises inside an `except` body (e.g. an
+# `AttributeError` materialised by an attribute-load opcode) get
+# `__context__` attached at the dispatch site, not just at explicit
+# `Raise*` opcodes.
+class CtxC:
+    pass
+
+
+try:
+    try:
+        raise ValueError("outer-implicit")
+    except ValueError:
+        CtxC().nonexistent  # noqa - intentional AttributeError from opcode
+except AttributeError as e:
+    assert isinstance(e.__context__, ValueError)
+    assert e.__context__.args[0] == "outer-implicit"
+    print("ctx-implicit-attr", type(e.__context__).__name__)
+
+
+# 12. VM-implicit raise inside a `finally:` body also chains context.
+try:
+    try:
+        raise ValueError("outer-fin-implicit")
+    finally:
+        CtxC().nonexistent  # noqa - intentional AttributeError
+except AttributeError as e:
+    assert isinstance(e.__context__, ValueError)
+    assert e.__context__.args[0] == "outer-fin-implicit"
+    print("ctx-implicit-finally", type(e.__context__).__name__)
+
+
+# 13. Generator yields inside an `except` handler don't leak their
+# exception state onto the interpreter between resumes (PEP 3134 +
+# CPython's per-frame `exc_info` invariant).
+def ctx_gen():
+    try:
+        raise ValueError("inside gen")
+    except ValueError:
+        yield 1
+        yield 2
+
+
+_g = ctx_gen()
+assert next(_g) == 1
+# We are now paused inside the except handler.  A *fresh* raise here
+# must not inherit ValueError as its __context__.
+try:
+    CtxC().nonexistent  # noqa
+except AttributeError as e:
+    assert e.__context__ is None, f"expected None, got {e.__context__!r}"
+    print("ctx-gen-no-leak", e.__context__ is None)
+
+# Resuming the generator continues to see its own exception state — the
+# next yield should still be inside the except body, and any raise in
+# that body should still chain ValueError as context.
+def ctx_gen_chains():
+    try:
+        raise ValueError("gen-chains")
+    except ValueError:
+        yield 1
+        raise RuntimeError("from-gen")
+
+
+_g2 = ctx_gen_chains()
+assert next(_g2) == 1
+try:
+    next(_g2)
+except RuntimeError as e:
+    assert isinstance(e.__context__, ValueError)
+    assert e.__context__.args[0] == "gen-chains"
+    print("ctx-gen-resume-chains", type(e.__context__).__name__)
+
+# Finish the original generator without observing anything.
+list(_g)

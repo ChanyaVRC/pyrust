@@ -773,6 +773,11 @@ impl Interpreter {
                         pc: 0,
                         done: false,
                         saved_env: gen_env,
+                        // PEP 3134 per-generator exception state; both
+                        // empty until the body actually pushes handlers
+                        // and yields inside one.
+                        handled_exc_slice: Vec::new(),
+                        active_exception: None,
                     };
                     return Ok(Value::generator(Box::new(frame)));
                 }
