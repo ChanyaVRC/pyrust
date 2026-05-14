@@ -1443,7 +1443,40 @@ pyrust_module! {
                     "cannot convert to bytes".to_string(),
                 )),
             },
-            _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most 1 positional argument"))),
+            // bytes(source, encoding[, errors]) — encode `source` using
+            // `encoding`.  CPython accepts a wide spectrum of codecs; we
+            // support the common ASCII-compatible ones (utf-8, ascii,
+            // latin-1) and reject the rest with `LookupError` for parity
+            // with `LookupError: unknown encoding: <name>`. (#391)
+            2 | 3 => {
+                let source: String = match args[0].value.kind() {
+                    ValueKind::Str(s) => s.to_string(),
+                    _ => return Err(PyError::named(
+                        "TypeError",
+                        "encoding without a string argument".to_string(),
+                    )),
+                };
+                let encoding: String = match args[1].value.kind() {
+                    ValueKind::Str(s) => s.to_string(),
+                    _ => return Err(PyError::named(
+                        "TypeError",
+                        "bytes() argument 2 must be str, not non-string".to_string(),
+                    )),
+                };
+                let errors: String = if args.len() == 3 {
+                    match args[2].value.kind() {
+                        ValueKind::Str(s) => s.to_string(),
+                        _ => return Err(PyError::named(
+                            "TypeError",
+                            "bytes() argument 3 must be str, not non-string".to_string(),
+                        )),
+                    }
+                } else {
+                    "strict".to_string()
+                };
+                encode_str_to_bytes(&source, &encoding, &errors)
+            }
+            _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most 3 arguments"))),
         }
     }
 
@@ -2136,6 +2169,104 @@ fn chr_from_code_point(code_point: i64) -> Result<Value> {
         )
     })?;
     Ok(Value::string(ch.to_string()))
+}
+
+/// Format a single Unicode codepoint the way CPython does in
+/// `UnicodeEncodeError` messages: `\xXX` for `< 0x100`, `\uXXXX` for
+/// `< 0x10000`, otherwise `\UXXXXXXXX`.  Keeps the error wording
+/// byte-for-byte aligned with CPython so the parity tests can compare
+/// stderr verbatim.
+fn format_codepoint_repr(cp: u32) -> String {
+    if cp < 0x100 {
+        format!("\\x{:02x}", cp)
+    } else if cp < 0x10000 {
+        format!("\\u{:04x}", cp)
+    } else {
+        format!("\\U{:08x}", cp)
+    }
+}
+
+/// Encode a Python `str` to `bytes` for `bytes(source, encoding[, errors])`
+/// (#391).  Supports `utf-8`, `ascii`, `latin-1` (and CPython aliases) —
+/// the realistic minimum the issue requested.  Other encoding names
+/// raise `LookupError: unknown encoding: <name>` for CPython parity.
+///
+/// `errors="strict"` (default) raises `UnicodeEncodeError` on bytes the
+/// target codec can't represent; `"ignore"` silently drops them.
+/// Other handlers (`replace`, `backslashreplace`, etc.) are out of
+/// scope for now and reported via `LookupError: unknown error handler`.
+fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result<Value> {
+    // CPython normalises encoding names by lowercasing and treating
+    // `_` and `-` interchangeably; do the same so `UTF-8`, `utf_8`,
+    // `UTF8` all resolve to the same codec.
+    fn normalize(name: &str) -> String {
+        name.to_ascii_lowercase().replace('_', "-")
+    }
+    let canonical = normalize(encoding);
+    match errors {
+        "strict" | "ignore" => {}
+        other => {
+            return Err(PyError::named(
+                "LookupError",
+                format!("unknown error handler name '{other}'"),
+            ));
+        }
+    }
+    let ignore = errors == "ignore";
+
+    match canonical.as_str() {
+        // pyrust strings are UTF-8 internally — encoding to utf-8 is a
+        // direct copy.
+        "utf-8" | "utf8" | "u8" | "utf" => Ok(Value::bytes(source.as_bytes().to_vec())),
+        // ASCII: every char must be < 0x80.  Strict raises
+        // UnicodeEncodeError on the first non-ASCII char; ignore drops.
+        "ascii" | "us-ascii" | "646" => {
+            let mut out = Vec::with_capacity(source.len());
+            for (idx, ch) in source.chars().enumerate() {
+                let cp = ch as u32;
+                if cp < 0x80 {
+                    out.push(cp as u8);
+                } else if ignore {
+                    continue;
+                } else {
+                    return Err(PyError::named(
+                        "UnicodeEncodeError",
+                        format!(
+                            "'ascii' codec can't encode character '{}' in position {idx}: ordinal not in range(128)",
+                            format_codepoint_repr(cp),
+                        ),
+                    ));
+                }
+            }
+            Ok(Value::bytes(out))
+        }
+        // Latin-1: every char must be < 0x100.  iso-8859-1 / 8859 are
+        // CPython aliases.
+        "latin-1" | "iso-8859-1" | "8859" | "cp819" | "latin1" | "l1" => {
+            let mut out = Vec::with_capacity(source.len());
+            for (idx, ch) in source.chars().enumerate() {
+                let cp = ch as u32;
+                if cp < 0x100 {
+                    out.push(cp as u8);
+                } else if ignore {
+                    continue;
+                } else {
+                    return Err(PyError::named(
+                        "UnicodeEncodeError",
+                        format!(
+                            "'latin-1' codec can't encode character '{}' in position {idx}: ordinal not in range(256)",
+                            format_codepoint_repr(cp),
+                        ),
+                    ));
+                }
+            }
+            Ok(Value::bytes(out))
+        }
+        _ => Err(PyError::named(
+            "LookupError",
+            format!("unknown encoding: {encoding}"),
+        )),
+    }
 }
 
 /// Format an i64 as Python's `bin()` output — `"0bN"` / `"-0bN"`.  Used
