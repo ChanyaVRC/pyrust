@@ -5766,10 +5766,29 @@ impl Compiler {
                     expr,
                     conversion,
                     format_spec,
+                    debug_text,
                 } => {
+                    // Python 3.8 debug form `f"{x=}"`: emit the verbatim
+                    // source text (with trailing `=`) as a literal prefix
+                    // BEFORE the formatted value.  When no explicit
+                    // conversion flag and no format spec are given, the
+                    // default conversion becomes `repr` instead of the
+                    // implicit `str`/`format(val, "")` path.
+                    if let Some(label) = debug_text {
+                        let lit_r = self.compile_literal(Value::string(label.clone()));
+                        part_regs.push(lit_r);
+                    }
                     let val_r = self.compile_expr(expr);
+                    // Determine the effective conversion: explicit !r/!s/!a
+                    // wins; otherwise, in debug form with no format spec, the
+                    // implicit conversion is `repr`.
+                    let effective_conversion: Option<char> = match conversion {
+                        Some(c) => Some(*c),
+                        None if debug_text.is_some() && format_spec.is_none() => Some('r'),
+                        None => None,
+                    };
                     // Apply conversion flag first.
-                    let val_r = match conversion {
+                    let val_r = match effective_conversion {
                         Some('r') => {
                             // repr(val)
                             let frame = self.next_temp;

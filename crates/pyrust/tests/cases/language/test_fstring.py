@@ -55,4 +55,50 @@ assert f"{'abc'.upper()}" == "ABC"
 s = f"a={n}" + "!"
 assert s == "a=42!"
 
+# ── Python 3.8 self-documenting debug form `f"{x=}"` ────────────────────────
+
+# Basic: emits "name=" then repr() of the value
+x = 42
+assert f"{x=}" == "x=42"
+
+# String value uses repr (so quotes are preserved)
+s = "hi"
+assert f"{s=}" == "s='hi'"
+
+# Explicit !s overrides the implicit repr
+assert f"{x=!s}" == "x=42"
+# Explicit !r matches the default
+assert f"{x=!r}" == "x=42"
+
+# Format spec disables the implicit repr (uses str-like formatting)
+y = 1.5
+assert f"{y=:.2f}" == "y=1.50"
+
+# Expression source is preserved verbatim, including operators
+assert f"{x + 1=}" == "x + 1=43"
+
+# Whitespace inside the braces is preserved in the source label
+assert f"{ x =}" == " x =42"
+assert f"{x = }" == "x = 42"
+
+# `==` is NOT treated as the debug marker
+a, b = 1, 1
+assert f"{a == b}" == "True"
+
+# Other comparison operators are not confused with debug
+assert f"{a <= b}" == "True"
+assert f"{a >= b}" == "True"
+assert f"{a != b}" == "False"
+
+# Debug form mixed with regular substitution
+assert f"{x=} and {a}" == "x=42 and 1"
+
+# Quoted strings inside the expression
+assert f"{'a=b'=}" == "'a=b'='a=b'"
+
+# Function call source preserved
+def _f():
+    return 7
+assert f"{_f()=}" == "_f()=7"
+
 print("f-string OK")

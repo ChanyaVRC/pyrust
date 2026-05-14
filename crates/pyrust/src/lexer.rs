@@ -660,11 +660,12 @@ fn lex_fstring(chars: &[char], start: usize, quote: char) -> Result<(Token, usiz
                 parts.push(FStringPart::Literal(std::mem::take(&mut literal)));
             }
             pos += 1; // skip '{'
-            let (src, conversion, format_spec, next) = lex_fstring_expr(chars, pos)?;
+            let (src, conversion, format_spec, debug_text, next) = lex_fstring_expr(chars, pos)?;
             parts.push(FStringPart::Expr {
                 src,
                 conversion,
                 format_spec,
+                debug_text,
             });
             pos = next;
             continue;
@@ -696,18 +697,28 @@ fn lex_fstring(chars: &[char], start: usize, quote: char) -> Result<(Token, usiz
 
 /// Parse the expression inside `{...}` of an f-string.
 /// `pos` points to the first character after the opening `{`.
-/// Returns `(expr_src, conversion, format_spec, next_pos)` where
-/// `next_pos` is just after the closing `}`.
+/// Returns `(expr_src, conversion, format_spec, debug_text, next_pos)` where
+/// `next_pos` is just after the closing `}`.  `debug_text` is `Some(...)` for
+/// the Python 3.8 debug form `f"{x=}"` and contains the verbatim source text
+/// of the expression with the trailing `=` (whitespace preserved).
 fn lex_fstring_expr(
     chars: &[char],
     start: usize,
-) -> Result<(String, Option<char>, Option<Vec<FStringPart>>, usize)> {
+) -> Result<(
+    String,
+    Option<char>,
+    Option<Vec<FStringPart>>,
+    Option<String>,
+    usize,
+)> {
     let mut pos = start;
     let mut depth = 0usize; // brace depth (for nested dicts/sets in expr)
     let mut src = String::new();
 
-    // Collect the expression source, stopping at `}` (depth==0), `!`, or `:` that
-    // are NOT inside nested brackets.
+    // Collect the expression source, stopping at `}` (depth==0), `!`, `:`,
+    // or a top-level `=` (the Python 3.8 debug form) that are NOT inside
+    // nested brackets.  `=` is only recognised as the debug marker when it
+    // is NOT followed by another `=` (which would make it the `==` operator).
     let mut paren_depth = 0usize; // () [] depth
 
     loop {
@@ -716,7 +727,7 @@ fn lex_fstring_expr(
             Some('}') if depth == 0 && paren_depth == 0 => {
                 // End of expression with no conversion or format spec.
                 let expr_src = src.trim().to_string();
-                return Ok((expr_src, None, None, pos + 1));
+                return Ok((expr_src, None, None, None, pos + 1));
             }
             Some('{') => {
                 depth += 1;
@@ -738,8 +749,68 @@ fn lex_fstring_expr(
                 src.push(chars[pos]);
                 pos += 1;
             }
+            // Python 3.8 debug form: `=` at top level (not `==`, `!=`, `<=`, `>=`).
+            // The `=` is preceded by an expression and may be followed by an
+            // optional conversion flag and/or format spec, then the closing `}`.
+            // We also reject `=` when the previous non-space character of `src`
+            // is itself `=` — that case is the second `=` of `==`, where the
+            // first was already appended to `src` as part of the expression.
+            Some('=')
+                if depth == 0
+                    && paren_depth == 0
+                    && chars.get(pos + 1) != Some(&'=')
+                    && !src.is_empty()
+                    && !src
+                        .trim_end_matches(|c: char| c == ' ' || c == '\t')
+                        .ends_with(['!', '<', '>', '=']) =>
+            {
+                // Build the verbatim debug-text label: the raw source (with
+                // leading/trailing whitespace preserved) plus the `=` itself,
+                // plus any whitespace that follows `=` (CPython preserves it
+                // in the label, not as a format spec).
+                let mut debug_text = src.clone();
+                debug_text.push('=');
+                let expr_src = src.trim().to_string();
+                pos += 1; // skip '='
+                while let Some(&c) = chars.get(pos) {
+                    if c == ' ' || c == '\t' {
+                        debug_text.push(c);
+                        pos += 1;
+                    } else {
+                        break;
+                    }
+                }
+                // Optional conversion flag (!r, !s, !a) after `=` (and any
+                // surrounding whitespace).
+                let conversion = if chars.get(pos) == Some(&'!') {
+                    pos += 1;
+                    let conv = chars.get(pos).copied().ok_or_else(|| {
+                        PyError::Lex("expected conversion flag after '!'".to_string())
+                    })?;
+                    if !matches!(conv, 'r' | 's' | 'a') {
+                        return Err(PyError::Lex(format!("unknown conversion flag '{conv}'")));
+                    }
+                    pos += 1;
+                    Some(conv)
+                } else {
+                    None
+                };
+                // Optional format spec.
+                let format_spec = if chars.get(pos) == Some(&':') {
+                    pos += 1;
+                    Some(lex_format_spec(chars, &mut pos)?)
+                } else {
+                    None
+                };
+                if chars.get(pos) != Some(&'}') {
+                    return Err(PyError::Lex(
+                        "expected '}' to close f-string expression".to_string(),
+                    ));
+                }
+                return Ok((expr_src, conversion, format_spec, Some(debug_text), pos + 1));
+            }
             // Conversion flag: !r, !s, !a — only at top level
-            Some('!') if depth == 0 && paren_depth == 0 => {
+            Some('!') if depth == 0 && paren_depth == 0 && chars.get(pos + 1) != Some(&'=') => {
                 let expr_src = src.trim().to_string();
                 pos += 1; // skip '!'
                 let conv = chars.get(pos).copied().ok_or_else(|| {
@@ -761,7 +832,7 @@ fn lex_fstring_expr(
                         "expected '}' to close f-string expression".to_string(),
                     ));
                 }
-                return Ok((expr_src, Some(conv), format_spec, pos + 1));
+                return Ok((expr_src, Some(conv), format_spec, None, pos + 1));
             }
             // Format spec: : — only at top level
             Some(':') if depth == 0 && paren_depth == 0 => {
@@ -773,7 +844,7 @@ fn lex_fstring_expr(
                         "expected '}' to close f-string expression".to_string(),
                     ));
                 }
-                return Ok((expr_src, None, Some(spec), pos + 1));
+                return Ok((expr_src, None, Some(spec), None, pos + 1));
             }
             // Quoted strings inside the expression (so we don't mis-interpret their contents)
             Some(q @ ('"' | '\'')) => {
@@ -901,6 +972,7 @@ fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<Vec<FStringPart>> 
                     src: src.trim().to_string(),
                     conversion,
                     format_spec: None,
+                    debug_text: None,
                 });
             }
             Some(c) => {
