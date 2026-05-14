@@ -6,6 +6,12 @@ impl Interpreter {
                 if name == "__class__" {
                     return Ok(Value::py_class(Rc::clone(&instance.borrow().class)));
                 }
+                if name == "__dict__" {
+                    // Shared with `vars(obj)` via `instance_attrs_snapshot`
+                    // — see that helper for the live-vs-snapshot caveat
+                    // (issue #392 follow-up).
+                    return Ok(instance_attrs_snapshot(&instance));
+                }
 
                 // Check the class first for data descriptors (Property).  A data
                 // descriptor takes priority over instance __dict__ — matching CPython.
