@@ -88,9 +88,10 @@ pub fn call(method: &str, receiver: &Value, args: Vec<Value>) -> Result<Value> {
         "copy" => receiver
             .dict_with(|dict| Value::dict(dict.clone()))
             .ok_or_else(not_dict),
-        _ => Err(PyError::Runtime(format!(
-            "'dict' object has no attribute '{method}'"
-        ))),
+        _ => Err(PyError::named(
+            "AttributeError",
+            format!("'dict' object has no attribute '{method}'"),
+        )),
     }
 }
 
@@ -129,13 +130,20 @@ fn snapshot_update_arg(receiver: &Value, args: &[Value]) -> Result<Vec<(PyKey, V
                 ValueKind::List(items) if items.len() == 2 => items.clone(),
                 ValueKind::Tuple(items) if items.len() == 2 => items.to_vec(),
                 _ => {
-                    return Err(PyError::Runtime(
+                    return Err(PyError::named(
+                        "TypeError",
                         "dict.update() element must be a (key, value) pair".to_string(),
                     ));
                 }
             };
             let k = kv[0].to_key().ok_or_else(|| {
-                PyError::Runtime("dict.update(): key is not hashable".to_string())
+                PyError::named(
+                    "TypeError",
+                    format!(
+                        "unhashable type: '{}'",
+                        pyrust_core::builtin_type_name(&kv[0])
+                    ),
+                )
             })?;
             out.push((k, kv[1].clone()));
             Ok(())
@@ -157,7 +165,8 @@ fn snapshot_update_arg(receiver: &Value, args: &[Value]) -> Result<Vec<(PyKey, V
                 }
             }
             _ => {
-                return Err(PyError::Runtime(
+                return Err(PyError::named(
+                    "TypeError",
                     "dict.update() argument must be a dict or iterable of pairs".to_string(),
                 ));
             }
@@ -168,21 +177,33 @@ fn snapshot_update_arg(receiver: &Value, args: &[Value]) -> Result<Vec<(PyKey, V
 
 fn get(dict: &IndexMap<PyKey, Value>, args: Vec<Value>) -> Result<Value> {
     let mut iter = args.into_iter();
-    let key = iter
-        .next()
-        .ok_or_else(|| PyError::Runtime("dict.get() requires at least 1 argument".to_string()))?;
+    let key = iter.next().ok_or_else(|| {
+        PyError::named(
+            "TypeError",
+            "get expected at least 1 argument, got 0".to_string(),
+        )
+    })?;
     let default = iter.next().unwrap_or_else(Value::none);
-    let pk = key
-        .to_key()
-        .ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
+    let pk = key.to_key().ok_or_else(|| {
+        PyError::named(
+            "TypeError",
+            format!(
+                "unhashable type: '{}'",
+                pyrust_core::builtin_type_name(&key)
+            ),
+        )
+    })?;
     Ok(dict.get(&pk).cloned().unwrap_or(default))
 }
 
 fn pop(dict: &mut IndexMap<PyKey, Value>, args: Vec<Value>) -> Result<Value> {
     let mut iter = args.into_iter();
-    let key = iter
-        .next()
-        .ok_or_else(|| PyError::Runtime("dict.pop() requires at least 1 argument".to_string()))?;
+    let key = iter.next().ok_or_else(|| {
+        PyError::named(
+            "TypeError",
+            "pop expected at least 1 argument, got 0".to_string(),
+        )
+    })?;
     let pk = key.to_key().ok_or_else(|| {
         PyError::named(
             "TypeError",
@@ -217,12 +238,21 @@ fn popitem(dict: &mut IndexMap<PyKey, Value>) -> Result<Value> {
 fn setdefault(dict: &mut IndexMap<PyKey, Value>, args: Vec<Value>) -> Result<Value> {
     let mut iter = args.into_iter();
     let key = iter.next().ok_or_else(|| {
-        PyError::Runtime("dict.setdefault() requires at least 1 argument".to_string())
+        PyError::named(
+            "TypeError",
+            "setdefault expected at least 1 argument, got 0".to_string(),
+        )
     })?;
     let default = iter.next().unwrap_or_else(Value::none);
-    let pk = key
-        .to_key()
-        .ok_or_else(|| PyError::Runtime("unhashable type".to_string()))?;
+    let pk = key.to_key().ok_or_else(|| {
+        PyError::named(
+            "TypeError",
+            format!(
+                "unhashable type: '{}'",
+                pyrust_core::builtin_type_name(&key)
+            ),
+        )
+    })?;
     Ok(dict.entry(pk).or_insert(default).clone())
 }
 

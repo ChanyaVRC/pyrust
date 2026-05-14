@@ -652,9 +652,9 @@ impl Interpreter {
                 }
                 Insn::GetItem(dst, obj, idx) => {
                     // Fast path: List/Tuple indexed by Int — borrow idx, avoid clone.
-                    let fast_int_idx = if let Some(iv) = regs[*idx as usize].as_some() {
-                        if let ValueKind::Int(raw_i) = iv.kind() { Some(raw_i) } else { None }
-                    } else { None };
+                    // `as_int()` bypasses `kind()`'s Ref machinery on the
+                    // hot index-extraction path (#450 perf).
+                    let fast_int_idx = regs[*idx as usize].as_int();
 
                     if let Some(raw_i) = fast_int_idx {
                         // Extract the indexed element in a scoped block so
@@ -783,7 +783,10 @@ impl Interpreter {
                             new_items
                         } else {
                             vm_try!(self.collect_iterable(val_val.clone()).map_err(|_| {
-                                PyError::Runtime("slice assignment requires iterable".to_string())
+                                PyError::named(
+                                    "TypeError",
+                                    "can only assign an iterable".to_string(),
+                                )
                             }))
                         };
                         let updated = regs[*obj as usize].list_with_mut(|items| {
