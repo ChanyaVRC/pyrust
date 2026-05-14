@@ -1237,21 +1237,6 @@ fn collect_declared_names_from_block(
     }
 }
 
-fn cmp_op_to_binary_op(op: CmpOp) -> BinaryOp {
-    match op {
-        CmpOp::Eq => BinaryOp::Eq,
-        CmpOp::Ne => BinaryOp::Ne,
-        CmpOp::Lt => BinaryOp::Lt,
-        CmpOp::Le => BinaryOp::Le,
-        CmpOp::Gt => BinaryOp::Gt,
-        CmpOp::Ge => BinaryOp::Ge,
-        CmpOp::In => BinaryOp::In,
-        CmpOp::NotIn => BinaryOp::NotIn,
-        CmpOp::Is => BinaryOp::Is,
-        CmpOp::IsNot => BinaryOp::IsNot,
-    }
-}
-
 fn values_are_identical(a: &Value, b: &Value) -> bool {
     match (a.kind(), b.kind()) {
         (ValueKind::None, ValueKind::None) => true,

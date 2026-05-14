@@ -244,7 +244,7 @@ impl Interpreter {
                 let mut prev = self.eval_expr(left)?;
                 for (op, right_expr) in ops {
                     let right = self.eval_expr(right_expr)?;
-                    let result = self.eval_binary(prev.clone(), cmp_op_to_binary_op(*op), right.clone())?;
+                    let result = self.eval_binary(prev.clone(), (*op).into(), right.clone())?;
                     if !result.truthy() { return Ok(Value::bool_(false)); }
                     prev = right;
                 }

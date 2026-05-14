@@ -340,3 +340,20 @@ pub enum CmpOp {
     Is,
     IsNot,
 }
+
+impl From<CmpOp> for BinaryOp {
+    fn from(op: CmpOp) -> Self {
+        match op {
+            CmpOp::Eq => BinaryOp::Eq,
+            CmpOp::Ne => BinaryOp::Ne,
+            CmpOp::Lt => BinaryOp::Lt,
+            CmpOp::Le => BinaryOp::Le,
+            CmpOp::Gt => BinaryOp::Gt,
+            CmpOp::Ge => BinaryOp::Ge,
+            CmpOp::In => BinaryOp::In,
+            CmpOp::NotIn => BinaryOp::NotIn,
+            CmpOp::Is => BinaryOp::Is,
+            CmpOp::IsNot => BinaryOp::IsNot,
+        }
+    }
+}
