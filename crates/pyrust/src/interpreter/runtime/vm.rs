@@ -143,6 +143,41 @@ fn int_cmp(a: i64, b: i64, op: BinaryOp) -> Option<bool> {
     }
 }
 
+/// One iteration step for `ForCount*` opcodes — dedupes the three
+/// near-identical opcode arms (`ForCountReg`, `ForCountConst`,
+/// `ForCountConstInline`) which differ only in where their `stop` /
+/// `step` operands come from.  Expanded via `macro_rules!` so each
+/// call site produces identical codegen to the original hand-written
+/// per-opcode bodies (a `#[inline(always)] fn` was indistinguishable
+/// in measurement — both forms produce the same code — but the macro
+/// form is structurally clearer: no out-parameter or `Option<i64>`
+/// dance, the writeback / loop-exit happens textually at the call
+/// site).
+///
+/// `checked_add` covers the near-i64::MAX / i64::MIN boundary (#439):
+/// on overflow the loop exits cleanly instead of wrapping past `stop`.
+macro_rules! for_count_step {
+    ($regs:ident, $var:expr, $cur:expr, $stop:expr, $step:expr, $cmp_op:expr, $pc:ident, $offset:expr) => {{
+        let cont = match ($cur as i64).checked_add($step as i64) {
+            Some(next) => {
+                let c = match $cmp_op {
+                    BinaryOp::Lt => next < ($stop as i64),
+                    BinaryOp::Gt => next > ($stop as i64),
+                    _ => unreachable!("ForCount* uses Lt or Gt only"),
+                };
+                if c {
+                    $regs[$var as usize] = Value::int(next);
+                }
+                c
+            }
+            None => false,
+        };
+        if !cont {
+            $pc = jump_pc!($offset);
+        }
+    }};
+}
+
 impl Interpreter {
     /// Execute compiled bytecode for a user function.
     ///
@@ -1791,8 +1826,6 @@ impl Interpreter {
                     }
                 }
                 Insn::ForCountReg(var, cmp_op, stop_reg, step_idx, offset) => {
-                    // `as_int()` skips kind()'s Ref machinery on the hot
-                    // loop counter path (#450 perf optimization).
                     let step = pool_get!(code.consts, *step_idx, "const")
                         .as_int()
                         .expect("ForCountReg step must be Int");
@@ -1800,26 +1833,7 @@ impl Interpreter {
                         .as_int()
                         .zip(regs[*stop_reg as usize].as_int());
                     if let Some((cur, stop)) = pair {
-                        // `checked_add` so a near-i64::MAX (or MIN) counter
-                        // exits the loop instead of wrapping past `stop`
-                        // and continuing forever (#439).
-                        let cont = match cur.checked_add(step) {
-                            Some(next) => {
-                                let c = match cmp_op {
-                                    BinaryOp::Lt => next < stop,
-                                    BinaryOp::Gt => next > stop,
-                                    _ => unreachable!("ForCountReg uses Lt or Gt only"),
-                                };
-                                if c {
-                                    regs[*var as usize] = Value::int(next);
-                                }
-                                c
-                            }
-                            None => false,
-                        };
-                        if !cont {
-                            pc = jump_pc!(*offset);
-                        }
+                        for_count_step!(regs, *var, cur, stop, step, cmp_op, pc, *offset);
                     } else {
                         vm_try!(Err(crate::error::PyError::Runtime(
                             "for-range: non-integer counter or stop".into(),
@@ -1827,36 +1841,14 @@ impl Interpreter {
                     }
                 }
                 Insn::ForCountConst(var, cmp_op, stop_idx, step_idx, offset) => {
-                    // `as_int()` skips kind()'s Ref machinery (#450
-                    // perf).
                     let step = pool_get!(code.consts, *step_idx, "const")
                         .as_int()
                         .expect("ForCountConst step must be Int");
                     let stop = pool_get!(code.consts, *stop_idx, "const")
                         .as_int()
                         .expect("ForCountConst stop must be Int");
-                    let cur_opt: Option<i64> = regs[*var as usize].as_int();
-                    if let Some(cur) = cur_opt {
-                        // `checked_add` so overflow terminates the loop
-                        // (matches CPython's arbitrary-precision behaviour
-                        // at the i64 boundary) rather than wrapping (#439).
-                        let cont = match cur.checked_add(step) {
-                            Some(next) => {
-                                let c = match cmp_op {
-                                    BinaryOp::Lt => next < stop,
-                                    BinaryOp::Gt => next > stop,
-                                    _ => unreachable!("ForCountConst uses Lt or Gt only"),
-                                };
-                                if c {
-                                    regs[*var as usize] = Value::int(next);
-                                }
-                                c
-                            }
-                            None => false,
-                        };
-                        if !cont {
-                            pc = jump_pc!(*offset);
-                        }
+                    if let Some(cur) = regs[*var as usize].as_int() {
+                        for_count_step!(regs, *var, cur, stop, step, cmp_op, pc, *offset);
                     } else {
                         vm_try!(Err(crate::error::PyError::Runtime(
                             "for-range: non-integer counter".into(),
@@ -1864,38 +1856,12 @@ impl Interpreter {
                     }
                 }
                 Insn::ForCountConstInline(var, cmp_op, stop, step, offset) => {
-                    // Same semantics as ForCountConst but with stop/step inlined; no
-                    // per-iteration consts-pool lookup, no .kind() decode for them.
-                    let step = *step as i64;
-                    let stop = *stop as i64;
-                    // `as_int()` skips kind()'s Ref machinery (#450 perf).
-                    let cur_opt: Option<i64> = regs[*var as usize].as_int();
-                    let fast = if let Some(cur) = cur_opt {
-                        // `checked_add` so overflow terminates the loop
-                        // (matches CPython's arbitrary-precision behaviour
-                        // at the i64 boundary) rather than wrapping (#439).
-                        let cont = match cur.checked_add(step) {
-                            Some(next) => {
-                                let c = match cmp_op {
-                                    BinaryOp::Lt => next < stop,
-                                    BinaryOp::Gt => next > stop,
-                                    _ => unreachable!("ForCountConstInline uses Lt or Gt only"),
-                                };
-                                if c {
-                                    regs[*var as usize] = Value::int(next);
-                                }
-                                c
-                            }
-                            None => false,
-                        };
-                        if !cont {
-                            pc = jump_pc!(*offset);
-                        }
-                        true
+                    // Same as ForCountConst but with stop/step inlined in
+                    // the opcode payload — no per-iteration consts-pool
+                    // lookup / `.kind()` decode for them.
+                    if let Some(cur) = regs[*var as usize].as_int() {
+                        for_count_step!(regs, *var, cur, *stop, *step, cmp_op, pc, *offset);
                     } else {
-                        false
-                    };
-                    if !fast {
                         vm_try!(Err(crate::error::PyError::Runtime(
                             "for-range: non-integer counter".into(),
                         )));
