@@ -3,7 +3,6 @@
 // method call. The thread_local is safe because the interpreter is single-threaded.
 use std::cell::Cell;
 
-use smallvec::SmallVec;
 
 thread_local! {
     static CALL_DEPTH: Cell<usize> = const { Cell::new(0) };
@@ -31,11 +30,6 @@ impl Drop for CallDepthGuard {
 }
 
 impl Interpreter {
-    fn call_function(&mut self, function: Value, args: &[CallArg]) -> Result<Value> {
-        let expanded = self.expand_call_args(args)?;
-        self.call_function_expanded(function, &expanded)
-    }
-
     pub(crate) fn call_function_expanded(
         &mut self,
         function: Value,
@@ -68,7 +62,7 @@ impl Interpreter {
                 // than cloning into a fresh `String` — the dispatch helpers
                 // below all accept `&str`. See issue #276 item #1.
                 let method: &str = name_rc.as_str();
-                let mut receiver = receiver_owned;
+                let receiver = receiver_owned;
                 // Separate positional and keyword args.
                 let mut pos: Vec<Value> = Vec::with_capacity(args.len());
                 let mut kw: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
@@ -629,54 +623,6 @@ impl Interpreter {
         }
     }
 
-    fn expand_call_args(
-        &mut self,
-        args: &[CallArg],
-    ) -> Result<SmallVec<[ExpandedCallArg; 4]>> {
-        let mut out: SmallVec<[ExpandedCallArg; 4]> = SmallVec::new();
-        for arg in args {
-            if arg.splat {
-                let value = self.eval_expr(&arg.value)?;
-                let items = self.collect_iterable(value)?;
-                for item in items {
-                    out.push(ExpandedCallArg {
-                        name: None,
-                        value: item,
-                    });
-                }
-                continue;
-            }
-            if arg.double_splat {
-                let value = self.eval_expr(&arg.value)?;
-                let items = match value.kind() {
-                    ValueKind::Dict(d) => d.clone(),
-                    _ => return Err(PyError::Runtime(
-                        "** argument after ** must be a mapping".to_string(),
-                    )),
-                };
-                for (k, v) in items {
-                    let name = match k {
-                        PyKey::Str(s) => s,
-                        _ => return Err(PyError::Runtime(
-                            "keywords must be strings".to_string(),
-                        )),
-                    };
-                    out.push(ExpandedCallArg {
-                        name: Some(name),
-                        value: v,
-                    });
-                }
-                continue;
-            }
-
-            out.push(ExpandedCallArg {
-                name: arg.name.clone(),
-                value: self.eval_expr(&arg.value)?,
-            });
-        }
-        Ok(out)
-    }
-
     pub(crate) fn parse_print_options_expanded(&mut self, args: &[ExpandedCallArg]) -> Result<PrintOptions> {
         let mut values = Vec::new();
         let mut sep = String::from(" ");
@@ -718,16 +664,6 @@ impl Interpreter {
         }
 
         Ok(PrintOptions { values, sep, end })
-    }
-
-    fn call_user_function(
-        &mut self,
-        function: Rc<UserFunction>,
-        args: &[CallArg],
-        bound_prefix: &[Value],
-    ) -> Result<Value> {
-        let expanded = self.expand_call_args(args)?;
-        self.call_user_function_expanded(function, &expanded, bound_prefix)
     }
 
     pub(crate) fn call_user_function_expanded(

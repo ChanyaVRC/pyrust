@@ -638,21 +638,6 @@ impl Interpreter {
         lookup_name_in_env(&self.env, name)
     }
 
-    fn resolve_name_env(&self, name: &str) -> Option<EnvRef> {
-        let (is_global, is_nonlocal) = {
-            let env = self.env.borrow();
-            (env.global_names.contains(name), env.nonlocal_names.contains(name))
-        };
-        if is_global {
-            let me = module_env(&self.env);
-            return if me.borrow().values.contains_key(name) { Some(me) } else { None };
-        }
-        if is_nonlocal {
-            return find_enclosing_local_env_for_name(&self.env, name);
-        }
-        find_env_for_name(&self.env, name)
-    }
-
     fn alloc_env(&mut self, parent: Option<EnvRef>) -> EnvRef {
         if let Some(env) = self.env_pool.pop() {
             {

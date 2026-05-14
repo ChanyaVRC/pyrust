@@ -6,7 +6,7 @@ use std::rc::Rc;
 use indexmap::IndexMap;
 use smallvec::smallvec;
 
-use crate::ast::{AssignTarget, BinaryOp, CallArg, CmpOp, Expr, Stmt, UnaryOp};
+use crate::ast::{AssignTarget, BinaryOp, Expr, Stmt, UnaryOp};
 use crate::bytecode::FnCode;
 use crate::error::{PyError, Result};
 use crate::lexer::Lexer;
@@ -21,7 +21,6 @@ type FnCache = HashMap<(u64, Vec<PyKey>), Value>;
 
 const MAX_CALL_DEPTH: usize = 1000;
 const ENV_POOL_MAX: usize = 64;
-const SPEC_THRESHOLD: u8 = 8;
 
 pub struct Interpreter {
     pub(crate) env: EnvRef,
@@ -44,7 +43,6 @@ pub struct Interpreter {
     module_cache: ModuleCache,
     env_pool: Vec<EnvRef>,
     fn_cache: FnCache,
-    spec_cache: HashMap<usize, SpecState>,
     /// Reusable argument buffer for VM Call instructions — avoids a per-call
     /// heap allocation in the common (non-recursive) case.
     call_arg_buf: Vec<ExpandedCallArg>,
@@ -145,7 +143,6 @@ impl Default for Interpreter {
             module_cache: Rc::new(RefCell::new(HashMap::new())),
             env_pool: Vec::new(),
             fn_cache: HashMap::new(),
-            spec_cache: HashMap::new(),
             call_arg_buf: Vec::new(),
             key_scratch: Vec::new(),
             class_store_order: Vec::new(),

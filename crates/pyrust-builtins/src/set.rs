@@ -274,56 +274,6 @@ fn pop(items: &mut IndexSet<PyKey>) -> Result<Value> {
     }
 }
 
-fn update(items: &mut IndexSet<PyKey>, args: &[Value]) -> Result<Value> {
-    for arg in args {
-        let other = collect_iterable(arg)?;
-        for k in other {
-            items.insert(k);
-        }
-    }
-    Ok(Value::none())
-}
-
-fn intersection_update(items: &mut IndexSet<PyKey>, args: &[Value]) -> Result<Value> {
-    for arg in args {
-        let other = collect_iterable(arg)?;
-        items.retain(|k| other.contains(k));
-    }
-    Ok(Value::none())
-}
-
-fn difference_update(items: &mut IndexSet<PyKey>, args: &[Value]) -> Result<Value> {
-    for arg in args {
-        let other = collect_iterable(arg)?;
-        for k in &other {
-            items.shift_remove(k);
-        }
-    }
-    Ok(Value::none())
-}
-
-fn symmetric_difference_update(items: &mut IndexSet<PyKey>, args: &[Value]) -> Result<Value> {
-    let other = args
-        .first()
-        .ok_or_else(|| {
-            PyError::Runtime("set.symmetric_difference_update() requires 1 argument".to_string())
-        })
-        .and_then(collect_iterable)?;
-    // elements in other but not in self
-    let mut to_add: Vec<PyKey> = Vec::new();
-    for k in &other {
-        if !items.contains(k) {
-            to_add.push(k.clone());
-        }
-    }
-    // remove elements that are in both
-    items.retain(|k| !other.contains(k));
-    for k in to_add {
-        items.insert(k);
-    }
-    Ok(Value::none())
-}
-
 // ── non-mutating methods ──────────────────────────────────────────────────────
 //
 // Each helper takes `&Value` and uses a scoped `set_with` borrow.

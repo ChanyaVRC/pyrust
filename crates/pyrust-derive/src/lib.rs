@@ -52,7 +52,6 @@ use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::{ToTokens, format_ident, quote};
 use syn::parse::{Parse, ParseStream};
-use syn::spanned::Spanned;
 use syn::{
     Block, Expr, Ident, ItemFn, LitStr, Meta, Token, parse_macro_input, punctuated::Punctuated,
 };

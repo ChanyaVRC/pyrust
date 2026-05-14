@@ -196,7 +196,10 @@ impl<'a> PyInt<'a> {
 
     /// True if the value is `Big` (heap-stored).  Useful for builtins
     /// that fast-path the small case (e.g. choose between i64 and
-    /// BigInt arithmetic without an extra conversion).
+    /// BigInt arithmetic without an extra conversion).  Exercised only
+    /// by unit tests today; production builtins haven't yet split a
+    /// small/big path through `PyInt` (issue #400 migration WIP).
+    #[allow(dead_code)]
     pub fn is_big(&self) -> bool {
         matches!(self.0, PyIntRepr::Big(_))
     }
@@ -390,11 +393,21 @@ impl<'a> FromValue<'a> for PyBytes {
 //
 // These wrap the Value itself so the body can borrow the underlying slice /
 // map / set with one method call.  No copy at construction time.
+//
+// `#[allow(dead_code)]` on the struct + the `as_slice` / `as_map` / `as_set`
+// methods: none of the migrated `pyrust_module!` builtins consume these
+// shapes yet (the typed-signature dialect — issue #400 — has so far only
+// flipped over `PyInt` / `PyBool` / `PyStr` / `PyFloat` / `PyBytes` /
+// `PyValue` call sites).  The wrappers stay as ready-to-use infrastructure
+// for the remaining #400 migrations; deleting them now would just force
+// the next migration to redefine the exact same shapes.
 
 /// `list` argument.  Use [`PyList::as_slice`] to read elements.
+#[allow(dead_code)] // #400 typed-signature dialect stub
 #[derive(Debug, Clone)]
 pub(crate) struct PyList(pub Value);
 
+#[allow(dead_code)] // #400 stub
 impl PyList {
     pub(crate) fn as_slice(&self) -> &[Value] {
         // SAFETY (no unsafe used): `try_from_value` verified is_list(),
@@ -420,9 +433,11 @@ impl<'a> FromValue<'a> for PyList {
 }
 
 /// `tuple` argument.  Use [`PyTuple::as_slice`].
+#[allow(dead_code)] // #400 typed-signature dialect stub
 #[derive(Debug, Clone)]
 pub(crate) struct PyTuple(pub Value);
 
+#[allow(dead_code)] // #400 stub
 impl PyTuple {
     pub(crate) fn as_slice(&self) -> &[Value] {
         self.0.as_tuple().expect("PyTuple wraps a tuple")
@@ -446,9 +461,11 @@ impl<'a> FromValue<'a> for PyTuple {
 }
 
 /// `dict` argument.  Use [`PyDict::as_map`].
+#[allow(dead_code)] // #400 typed-signature dialect stub
 #[derive(Debug, Clone)]
 pub(crate) struct PyDict(pub Value);
 
+#[allow(dead_code)] // #400 stub
 impl PyDict {
     pub(crate) fn as_map(&self) -> &IndexMap<PyKey, Value> {
         self.0.as_dict().expect("PyDict wraps a dict")
@@ -472,9 +489,11 @@ impl<'a> FromValue<'a> for PyDict {
 }
 
 /// `set` argument.  Use [`PySet::as_set`].
+#[allow(dead_code)] // #400 typed-signature dialect stub
 #[derive(Debug, Clone)]
 pub(crate) struct PySet(pub Value);
 
+#[allow(dead_code)] // #400 stub
 impl PySet {
     /// Returns the underlying `IndexSet`.  Panics if the wrapper somehow
     /// doesn't wrap a `Set` — impossible by construction (`try_from_value`
@@ -571,11 +590,13 @@ impl<'a> FromValue<'a> for PyValue {
 /// first constructing an `Interpreter`, install the callback manually —
 /// the `mod tests` block below does this once via [`std::sync::Once`].
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // #400 typed-signature dialect stub
 pub(crate) struct PyIterable<'a> {
     items: Vec<Value>,
     _phantom: std::marker::PhantomData<&'a Value>,
 }
 
+#[allow(dead_code)] // #400 stub
 impl<'a> PyIterable<'a> {
     /// Read-only view of the materialised items.
     pub fn as_slice(&self) -> &[Value] {

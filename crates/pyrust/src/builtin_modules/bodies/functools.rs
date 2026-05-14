@@ -35,7 +35,7 @@ use std::rc::Rc;
 
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
-use crate::interpreter::{iter_values, reject_keyword_args_expanded};
+use crate::interpreter::reject_keyword_args_expanded;
 use crate::value::{PyInstance, PyKey, Value, ValueKind};
 use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;

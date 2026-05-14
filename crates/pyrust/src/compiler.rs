@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ast::{
-    AssignTarget, BinaryOp, CmpOp, CompClause, DictItem, Expr, FStringPart, FunctionParam,
-    MatchArm, Pattern, Stmt, UnaryOp,
+    AssignTarget, BinaryOp, CompClause, DictItem, Expr, FStringPart, FunctionParam, MatchArm,
+    Pattern, Stmt, UnaryOp,
 };
 use crate::bytecode::{CellVar, FnCode, FnParamSpec, FnProto, Insn, Reg};
 use crate::error::PyError;
@@ -914,7 +914,6 @@ fn collect_free_var_reads_in_expr(expr: &Expr, uses: &mut HashSet<String>) {
         | Expr::Str(_)
         | Expr::Bytes(_)
         | Expr::Complex(_, _)
-        | Expr::Str(_)
         | Expr::Bool(_)
         | Expr::None => {}
         Expr::Yield(Some(e)) => collect_free_var_reads_in_expr(e, uses),
@@ -1753,7 +1752,6 @@ fn expr_is_invariant(expr: &Expr, written: &HashSet<String>) -> bool {
         | Expr::Str(_)
         | Expr::Bytes(_)
         | Expr::Complex(_, _)
-        | Expr::Str(_)
         | Expr::Bool(_)
         | Expr::None => true,
         Expr::Var(name) => !written.contains(name.as_str()),
