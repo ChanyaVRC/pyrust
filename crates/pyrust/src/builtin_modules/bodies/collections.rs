@@ -34,7 +34,7 @@ use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::{
     NativeIterFrame, invoke_class_method, iter_values, lookup_class_attr,
 };
-use crate::value::{PyInstance, PyKey, Value, ValueKind};
+use crate::value::{PyInstance, PyKey, Value, ValueKind, key_repr};
 use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
 
@@ -750,28 +750,6 @@ fn key_to_value(key: PyKey) -> Value {
         }
         PyKey::Tuple(items) => Value::tuple(items.into_iter().map(key_to_value).collect()),
         PyKey::Object { value, .. } => value,
-    }
-}
-
-fn key_repr(key: &PyKey) -> String {
-    match key {
-        PyKey::Int(v) => v.to_string(),
-        PyKey::Float(bits) => f64::from_bits(*bits).to_string(),
-        PyKey::Str(s) => format!("'{s}'"),
-        PyKey::Bool(b) => if *b { "True" } else { "False" }.to_string(),
-        PyKey::None => "None".to_string(),
-        PyKey::FrozenSet(_) => "frozenset(...)".to_string(),
-        PyKey::Tuple(items) => {
-            if items.is_empty() {
-                "()".to_string()
-            } else if items.len() == 1 {
-                format!("({},)", key_repr(&items[0]))
-            } else {
-                let inner = items.iter().map(key_repr).collect::<Vec<_>>().join(", ");
-                format!("({inner})")
-            }
-        }
-        PyKey::Object { value, .. } => value.repr(),
     }
 }
 

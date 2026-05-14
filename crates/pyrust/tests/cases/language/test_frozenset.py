@@ -81,4 +81,10 @@ assert fs2 == fs
 # repr
 assert repr(frozenset()) == "frozenset()"
 
+# repr preserves CPython's whole-number-float trailing `.0` (issue #422).
+# The fixture predates the consolidation onto pyrust_core::key_repr; before
+# the fix, frozenset's local copy used `f64::to_string()` and printed `1`.
+assert repr(frozenset([1.0])) == "frozenset({1.0})"
+assert repr(frozenset([frozenset([1.0])])) == "frozenset({frozenset({1.0})})"
+
 print("frozenset OK")

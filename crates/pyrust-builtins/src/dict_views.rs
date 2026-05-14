@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use indexmap::IndexMap;
-use pyrust_core::{BuiltinState, BuiltinTypeOps, PyKey, Result, Value};
+use pyrust_core::{BuiltinState, BuiltinTypeOps, PyKey, Result, Value, key_repr};
 
 pub type DictRc = Rc<RefCell<IndexMap<PyKey, Value>>>;
 
@@ -188,33 +188,4 @@ fn borrow_view(state: &BuiltinState) -> Option<DictRc> {
     borrow
         .downcast_ref::<DictView>()
         .map(|v| Rc::clone(&v.items))
-}
-
-fn key_repr(key: &PyKey) -> String {
-    match key {
-        PyKey::Int(v) => v.to_string(),
-        PyKey::Float(v) => f64::from_bits(*v).to_string(),
-        PyKey::Str(v) => format!("'{}'", v),
-        PyKey::Bool(v) => if *v { "True" } else { "False" }.to_string(),
-        PyKey::None => "None".to_string(),
-        PyKey::FrozenSet(items) => {
-            if items.is_empty() {
-                "frozenset()".to_string()
-            } else {
-                let inner = items.iter().map(key_repr).collect::<Vec<_>>().join(", ");
-                format!("frozenset({{{inner}}})")
-            }
-        }
-        PyKey::Tuple(items) => {
-            if items.is_empty() {
-                "()".to_string()
-            } else if items.len() == 1 {
-                format!("({},)", key_repr(&items[0]))
-            } else {
-                let inner = items.iter().map(key_repr).collect::<Vec<_>>().join(", ");
-                format!("({inner})")
-            }
-        }
-        PyKey::Object { value, .. } => value.repr(),
-    }
 }
