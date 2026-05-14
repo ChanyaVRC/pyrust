@@ -68,7 +68,7 @@ fn iter_values_for_registry(value: &Value) -> Result<Vec<Value>> {
 }
 
 /// Thin wrapper around `helpers::compare_values` matching pyrust-core's
-/// `CompareValuesFn` signature (`&Value, &Value -> Result<Ordering>`).
+/// `CompareValuesFn` signature (`(&Value, &Value) -> Result<Ordering>`).
 /// Installed at interpreter startup so `pyrust-builtins` sort helpers
 /// (`list.sort`, `sort_with_precomputed_keys`) can route through the
 /// same canonical comparison the `<` / `>` operators use — covering
