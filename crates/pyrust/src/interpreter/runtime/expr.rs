@@ -1086,7 +1086,7 @@ impl Interpreter {
                 (ValueKind::Str(a), ValueKind::Str(b)) => Ok(Value::string(format!("{a}{b}"))),
                 (ValueKind::List(a), ValueKind::List(b)) => {
                     let mut out = a.to_vec();
-                    out.extend_from_slice(b);
+                    out.extend_from_slice(&b[..]);
                     Ok(Value::list(out))
                 }
                 (ValueKind::Tuple(a), ValueKind::Tuple(b)) => {
@@ -1141,14 +1141,14 @@ impl Interpreter {
                 if n <= 0 { return Ok(Value::list(Vec::new())); }
                 let n = n as usize;
                 let mut out = Vec::with_capacity(items.len() * n);
-                for _ in 0..n { out.extend_from_slice(items); }
+                for _ in 0..n { out.extend_from_slice(&items[..]); }
                 Ok(Value::list(out))
             }
             (ValueKind::Int(n), ValueKind::List(items)) => {
                 if n <= 0 { return Ok(Value::list(Vec::new())); }
                 let n = n as usize;
                 let mut out = Vec::with_capacity(items.len() * n);
-                for _ in 0..n { out.extend_from_slice(items); }
+                for _ in 0..n { out.extend_from_slice(&items[..]); }
                 Ok(Value::list(out))
             }
             _ => Err(Self::unsupported_binary_operand("*")),
@@ -1272,52 +1272,56 @@ impl Interpreter {
     }
 
     fn floor_div(&self, left: Value, right: Value) -> Result<Value> {
-        match (left.kind(), right.kind()) {
-            (ValueKind::Int(a), ValueKind::Int(b)) => {
-                if b == 0 {
-                    return Err(PyError::named(
-                        "ZeroDivisionError",
-                        "integer division or modulo by zero".to_string(),
-                    ));
-                }
-                let modulo = py_mod_i64(a, b);
-                Ok(Value::int((a - modulo) / b))
+        // Extract the int/int fast-path values in a scoped block so the
+        // `kind()` Ref guards drop before we may need to move
+        // `left`/`right` into `to_pair_number` (#450).
+        let int_pair: Option<(i64, i64)> = match (left.kind(), right.kind()) {
+            (ValueKind::Int(a), ValueKind::Int(b)) => Some((a, b)),
+            _ => None,
+        };
+        if let Some((a, b)) = int_pair {
+            if b == 0 {
+                return Err(PyError::named(
+                    "ZeroDivisionError",
+                    "integer division or modulo by zero".to_string(),
+                ));
             }
-            _ => {
-                let (a, b) = self.to_pair_number(left, right)?;
-                if b == 0.0 {
-                    return Err(PyError::named(
-                        "ZeroDivisionError",
-                        "float floor division by zero".to_string(),
-                    ));
-                }
-                Ok(Value::float((a / b).floor()))
-            }
+            let modulo = py_mod_i64(a, b);
+            return Ok(Value::int((a - modulo) / b));
         }
+        let (a, b) = self.to_pair_number(left, right)?;
+        if b == 0.0 {
+            return Err(PyError::named(
+                "ZeroDivisionError",
+                "float floor division by zero".to_string(),
+            ));
+        }
+        Ok(Value::float((a / b).floor()))
     }
 
     fn modulo(&self, left: Value, right: Value) -> Result<Value> {
-        match (left.kind(), right.kind()) {
-            (ValueKind::Int(a), ValueKind::Int(b)) => {
-                if b == 0 {
-                    return Err(PyError::named(
-                        "ZeroDivisionError",
-                        "integer modulo by zero".to_string(),
-                    ));
-                }
-                Ok(Value::int(py_mod_i64(a, b)))
+        // Same #450 scoping rationale as `floor_div`.
+        let int_pair: Option<(i64, i64)> = match (left.kind(), right.kind()) {
+            (ValueKind::Int(a), ValueKind::Int(b)) => Some((a, b)),
+            _ => None,
+        };
+        if let Some((a, b)) = int_pair {
+            if b == 0 {
+                return Err(PyError::named(
+                    "ZeroDivisionError",
+                    "integer modulo by zero".to_string(),
+                ));
             }
-            _ => {
-                let (a, b) = self.to_pair_number(left, right)?;
-                if b == 0.0 {
-                    return Err(PyError::named(
-                        "ZeroDivisionError",
-                        "float modulo".to_string(),
-                    ));
-                }
-                Ok(Value::float(a - b * (a / b).floor()))
-            }
+            return Ok(Value::int(py_mod_i64(a, b)));
         }
+        let (a, b) = self.to_pair_number(left, right)?;
+        if b == 0.0 {
+            return Err(PyError::named(
+                "ZeroDivisionError",
+                "float modulo".to_string(),
+            ));
+        }
+        Ok(Value::float(a - b * (a / b).floor()))
     }
 
     fn compare(&self, left: Value, right: Value, cmp: impl Fn(std::cmp::Ordering) -> bool) -> Result<Value> {
@@ -1612,10 +1616,14 @@ fn is_callable_method(v: &Value) -> bool {
 }
 
 fn coerce_numeric(v: Value) -> Value {
-    match v.kind() {
-        ValueKind::Bool(b) => Value::int(b as i64),
-        _ => v,
+    // Extract via kind() in a scope so the borrow is dropped before we
+    // return `v` from the fallthrough — #450 made `kind()`'s borrow
+    // explicit, so we can't move `v` while a `ValueKind::List(_)` (or
+    // any other Ref-bearing variant) might be live.
+    if let ValueKind::Bool(b) = v.kind() {
+        return Value::int(b as i64);
     }
+    v
 }
 
 pub(crate) fn iter_values(value: Value) -> Result<Vec<Value>> {

@@ -175,7 +175,7 @@ fn collect_iterable(v: &Value) -> Result<IndexSet<PyKey>> {
     let mut out = IndexSet::new();
     match v.kind() {
         ValueKind::Set(s) => {
-            for k in s {
+            for k in s.iter() {
                 out.insert(k.clone());
             }
         }
@@ -185,8 +185,13 @@ fn collect_iterable(v: &Value) -> Result<IndexSet<PyKey>> {
                 out.insert(k.clone());
             }
         }
-        ValueKind::List(items) | ValueKind::Tuple(items) => {
-            for item in items {
+        ValueKind::List(items) => {
+            for item in items.iter() {
+                out.insert(to_key(item)?);
+            }
+        }
+        ValueKind::Tuple(items) => {
+            for item in items.iter() {
                 out.insert(to_key(item)?);
             }
         }

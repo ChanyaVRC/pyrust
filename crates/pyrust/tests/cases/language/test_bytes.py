@@ -76,6 +76,47 @@ try:
 except ValueError:
     pass
 
+
+# ─── bytes(iterable) error-class + wording parity ──────────────────────────
+# Per https://docs.python.org/3/library/stdtypes.html#bytes :
+#   "iterable of integers in the range 0 <= x < 256"
+#   non-int element  → TypeError("'X' object cannot be interpreted as an integer")
+#   out-of-range int → ValueError("bytes must be in range(0, 256)")
+
+# List form — non-int elements
+try:
+    bytes([1, "x"])
+except TypeError as e:
+    print("list str:", e)
+
+try:
+    bytes([1, None])
+except TypeError as e:
+    print("list None:", e)
+
+try:
+    bytes([1, 2.5])
+except TypeError as e:
+    print("list float:", e)
+
+# Tuple form — same error path
+try:
+    bytes((1, 2.5))
+except TypeError as e:
+    print("tuple float:", e)
+
+# Out-of-range int — positive and negative
+try:
+    bytes([1, 2, 256])
+except ValueError as e:
+    print("range pos:", e)
+
+try:
+    bytes([-1])
+except ValueError as e:
+    print("range neg:", e)
+
+
 # isinstance
 assert isinstance(b"x", bytes)
 assert not isinstance("x", bytes)

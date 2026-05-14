@@ -85,18 +85,36 @@ impl Interpreter {
                 // previous `unalias_args_for_mutation` dance is
                 // unnecessary — aliasing-safety is structural now,
                 // not a discipline the caller has to remember.
-                match receiver.kind() {
-                    ValueKind::Str(_) => {
-                        pyrust_builtins::string::call(method, &receiver, pos)
-                    }
-                    ValueKind::List(_) => {
-                        pyrust_builtins::list::call(method, &receiver, pos, &kw)
-                    }
+                // Probe the receiver's kind via a scoped block so the
+                // `kind()` Ref guards drop before we may move
+                // `receiver` into call_dict_method / call_set_method
+                // (#450).  Variants that read the kind's payload
+                // (Tuple, Complex, BuiltinObject, PyInstance) keep
+                // working off the live Ref because they don't move
+                // the receiver.
+                enum Kind {
+                    Str,
+                    List,
+                    Dict,
+                    Set,
+                    Other,
+                }
+                let kind_tag = match receiver.kind() {
+                    ValueKind::Str(_) => Kind::Str,
+                    ValueKind::List(_) => Kind::List,
+                    ValueKind::Dict(_) => Kind::Dict,
+                    ValueKind::Set(_) => Kind::Set,
+                    _ => Kind::Other,
+                };
+                match kind_tag {
+                    Kind::Str => pyrust_builtins::string::call(method, &receiver, pos),
+                    Kind::List => pyrust_builtins::list::call(method, &receiver, pos, &kw),
+                    Kind::Dict => self.call_dict_method(method, receiver, pos),
+                    Kind::Set => self.call_set_method(method, receiver, pos),
+                    Kind::Other => match receiver.kind() {
                     ValueKind::Tuple(items) => {
                         pyrust_builtins::tuple::call(method, items, pos)
                     }
-                    ValueKind::Dict(_) => self.call_dict_method(method, receiver, pos),
-                    ValueKind::Set(_) => self.call_set_method(method, receiver, pos),
                     ValueKind::Complex(re, im) if method == "conjugate" => {
                         Ok(Value::complex(re, -im))
                     }
@@ -144,6 +162,7 @@ impl Interpreter {
                         "TypeError",
                         format!("'{}' object has no method '{method}'", pyrust_core::builtin_type_name(&receiver)),
                     )),
+                    },
                 }
             }
             ValueKind::BuiltinFunction("str.format") => {
@@ -2361,26 +2380,28 @@ fn apply_field_accessors(mut value: Value, mut rest: &str) -> Result<Value> {
                 .unwrap_or(rest.len());
             let attr = &rest[1..end];
             rest = &rest[end..];
-            match value.kind() {
-                ValueKind::PyInstance(inst) => {
-                    let v = inst
-                        .borrow()
-                        .attrs
-                        .get(attr)
-                        .cloned()
-                        .ok_or_else(|| PyError::named(
-                            "AttributeError",
-                            format!("attribute '{attr}' not found"),
-                        ))?;
-                    value = v;
-                }
-                _ => {
-                    return Err(PyError::named(
-                        "AttributeError",
-                        format!("attribute access '.{attr}' is only supported on instances"),
-                    ));
-                }
-            }
+            // Snapshot the PyInstance Rc in a scoped block so the
+            // kind() Ref drops before we may reassign `value` (#450).
+            let inst = match value.kind() {
+                ValueKind::PyInstance(inst) => Some(Rc::clone(inst)),
+                _ => None,
+            };
+            let inst = inst.ok_or_else(|| {
+                PyError::named(
+                    "AttributeError",
+                    format!("attribute access '.{attr}' is only supported on instances"),
+                )
+            })?;
+            let v = inst
+                .borrow()
+                .attrs
+                .get(attr)
+                .cloned()
+                .ok_or_else(|| PyError::named(
+                    "AttributeError",
+                    format!("attribute '{attr}' not found"),
+                ))?;
+            value = v;
         } else if bytes[0] == b'[' {
             let end = bytes
                 .iter()
@@ -2393,8 +2414,31 @@ fn apply_field_accessors(mut value: Value, mut rest: &str) -> Result<Value> {
             rest = &rest[end + 1..];
             // Try integer index first; fall back to string key.
             let next = if let Ok(idx) = key_str.parse::<i64>() {
-                match value.kind() {
-                    ValueKind::List(items) | ValueKind::Tuple(items) => {
+                // Extract the indexed item in a scoped block so any
+                // `kind()` Ref drops before we may construct a new
+                // Value (#450).  List/Tuple snapshot to an owned Vec;
+                // Dict pulls the keyed value.
+                enum SeqGet {
+                    Sequence(Vec<Value>),
+                    DictMatch(Value),
+                    NotSubscriptable,
+                }
+                let snap = match value.kind() {
+                    ValueKind::List(items) => SeqGet::Sequence(items.clone()),
+                    ValueKind::Tuple(items) => SeqGet::Sequence(items.to_vec()),
+                    ValueKind::Dict(map) => match map.get(&PyKey::Int(idx)).cloned() {
+                        Some(v) => SeqGet::DictMatch(v),
+                        None => {
+                            return Err(PyError::named(
+                                "KeyError",
+                                format!("{idx}"),
+                            ));
+                        }
+                    },
+                    _ => SeqGet::NotSubscriptable,
+                };
+                match snap {
+                    SeqGet::Sequence(items) => {
                         let len = items.len() as i64;
                         let i = if idx < 0 { idx + len } else { idx };
                         if i < 0 || i >= len {
@@ -2405,14 +2449,8 @@ fn apply_field_accessors(mut value: Value, mut rest: &str) -> Result<Value> {
                         }
                         items[i as usize].clone()
                     }
-                    ValueKind::Dict(map) => map
-                        .get(&PyKey::Int(idx))
-                        .cloned()
-                        .ok_or_else(|| PyError::named(
-                            "KeyError",
-                            format!("{idx}"),
-                        ))?,
-                    _ => {
+                    SeqGet::DictMatch(v) => v,
+                    SeqGet::NotSubscriptable => {
                         return Err(PyError::named(
                             "TypeError",
                             "object is not subscriptable".to_string(),
