@@ -2192,9 +2192,11 @@ fn format_codepoint_repr(cp: u32) -> String {
 /// raise `LookupError: unknown encoding: <name>` for CPython parity.
 ///
 /// `errors="strict"` (default) raises `UnicodeEncodeError` on bytes the
-/// target codec can't represent; `"ignore"` silently drops them.
-/// Other handlers (`replace`, `backslashreplace`, etc.) are out of
-/// scope for now and reported via `LookupError: unknown error handler`.
+/// target codec can't represent; `"ignore"` silently drops them; and
+/// `"replace"` substitutes `b'?'` (matching CPython's ASCII-codec
+/// replacement byte for both `ascii` and `latin-1`).  Richer handlers
+/// (`backslashreplace`, `xmlcharrefreplace`, …) are still out of scope
+/// and reported via `LookupError: unknown error handler`.
 fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result<Value> {
     // CPython normalises encoding names by lowercasing and treating
     // `_` and `-` interchangeably; do the same so `UTF-8`, `utf_8`,
@@ -2203,64 +2205,73 @@ fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result<Val
         name.to_ascii_lowercase().replace('_', "-")
     }
     let canonical = normalize(encoding);
-    match errors {
-        "strict" | "ignore" => {}
+    // Resolve the error handler up-front so an unknown name fails fast
+    // regardless of whether the input has any non-encodable characters
+    // — `bytes("hi", "ascii", "bogus")` must still LookupError in
+    // CPython.
+    enum Handler {
+        Strict,
+        Ignore,
+        Replace,
+    }
+    let handler = match errors {
+        "strict" => Handler::Strict,
+        "ignore" => Handler::Ignore,
+        "replace" => Handler::Replace,
         other => {
             return Err(PyError::named(
                 "LookupError",
                 format!("unknown error handler name '{other}'"),
             ));
         }
+    };
+
+    // Single-codec encoder kernel.  `fits(cp)` returns true if the
+    // codepoint can be emitted as a single byte; `range_label` is
+    // the `ordinal not in range(N)` suffix CPython uses.  Hoisting
+    // the loop out of the ascii/latin-1 arms keeps the handler logic
+    // (and any future codec aliases) in one place.
+    fn encode_single_byte_codec(
+        source: &str,
+        codec_name: &str,
+        fits: impl Fn(u32) -> bool,
+        range_label: &str,
+        handler: &Handler,
+    ) -> Result<Value> {
+        let mut out = Vec::with_capacity(source.len());
+        for (idx, ch) in source.chars().enumerate() {
+            let cp = ch as u32;
+            if fits(cp) {
+                out.push(cp as u8);
+            } else {
+                match handler {
+                    Handler::Ignore => continue,
+                    Handler::Replace => out.push(b'?'),
+                    Handler::Strict => {
+                        return Err(PyError::named(
+                            "UnicodeEncodeError",
+                            format!(
+                                "'{codec_name}' codec can't encode character '{}' in position {idx}: ordinal not in range({range_label})",
+                                format_codepoint_repr(cp),
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(Value::bytes(out))
     }
-    let ignore = errors == "ignore";
 
     match canonical.as_str() {
         // pyrust strings are UTF-8 internally — encoding to utf-8 is a
-        // direct copy.
+        // direct copy and can never fail, so the error handler doesn't
+        // matter.
         "utf-8" | "utf8" | "u8" | "utf" => Ok(Value::bytes(source.as_bytes().to_vec())),
-        // ASCII: every char must be < 0x80.  Strict raises
-        // UnicodeEncodeError on the first non-ASCII char; ignore drops.
         "ascii" | "us-ascii" | "646" => {
-            let mut out = Vec::with_capacity(source.len());
-            for (idx, ch) in source.chars().enumerate() {
-                let cp = ch as u32;
-                if cp < 0x80 {
-                    out.push(cp as u8);
-                } else if ignore {
-                    continue;
-                } else {
-                    return Err(PyError::named(
-                        "UnicodeEncodeError",
-                        format!(
-                            "'ascii' codec can't encode character '{}' in position {idx}: ordinal not in range(128)",
-                            format_codepoint_repr(cp),
-                        ),
-                    ));
-                }
-            }
-            Ok(Value::bytes(out))
+            encode_single_byte_codec(source, "ascii", |cp| cp < 0x80, "128", &handler)
         }
-        // Latin-1: every char must be < 0x100.  iso-8859-1 / 8859 are
-        // CPython aliases.
         "latin-1" | "iso-8859-1" | "8859" | "cp819" | "latin1" | "l1" => {
-            let mut out = Vec::with_capacity(source.len());
-            for (idx, ch) in source.chars().enumerate() {
-                let cp = ch as u32;
-                if cp < 0x100 {
-                    out.push(cp as u8);
-                } else if ignore {
-                    continue;
-                } else {
-                    return Err(PyError::named(
-                        "UnicodeEncodeError",
-                        format!(
-                            "'latin-1' codec can't encode character '{}' in position {idx}: ordinal not in range(256)",
-                            format_codepoint_repr(cp),
-                        ),
-                    ));
-                }
-            }
-            Ok(Value::bytes(out))
+            encode_single_byte_codec(source, "latin-1", |cp| cp < 0x100, "256", &handler)
         }
         _ => Err(PyError::named(
             "LookupError",
