@@ -173,9 +173,11 @@ mod tests {
     }
 
     #[test]
-    fn runtime_errors_inside_try_are_catchable_as_runtimeerror() {
+    fn zero_division_inside_try_is_catchable_as_zerodivisionerror() {
+        // `1/0` raises `ZeroDivisionError` (CPython parity, #336).
+        // Previously this raised the generic `RuntimeError`.
         let interpreter = run_program(
-            "result = ''\ntry:\n    x = 1 / 0\nexcept RuntimeError as err:\n    result = err.args[0]\n",
+            "result = ''\ntry:\n    x = 1 / 0\nexcept ZeroDivisionError as err:\n    result = err.args[0]\n",
         );
 
         assert_eq!(

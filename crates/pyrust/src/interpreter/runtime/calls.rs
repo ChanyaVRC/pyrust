@@ -267,7 +267,13 @@ impl Interpreter {
                     format!("'{}' object is not callable", class.borrow().name),
                 ))
             }
-            _ => Err(PyError::Runtime("object is not callable".to_string())),
+            _ => Err(PyError::named(
+                "TypeError",
+                format!(
+                    "'{}' object is not callable",
+                    pyrust_core::builtin_type_name(&function)
+                ),
+            )),
         }
     }
 
@@ -672,13 +678,16 @@ impl Interpreter {
                 .filter(|param| param.default.is_none())
                 .count();
             if positional_count + bound_prefix.len() > function.params.len() {
-                return Err(PyError::Runtime(format!(
-                    "{}() takes from {} to {} arguments but {} were given",
-                    function.name,
-                    required_params,
-                    function.params.len(),
-                    positional_count + bound_prefix.len()
-                )));
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "{}() takes from {} to {} arguments but {} were given",
+                        function.name,
+                        required_params,
+                        function.params.len(),
+                        positional_count + bound_prefix.len()
+                    ),
+                ));
             }
             let mut bound_args: Vec<Option<Value>> = vec![None; function.params.len()];
             for (index, value) in bound_prefix.iter().enumerate() {
@@ -691,10 +700,13 @@ impl Interpreter {
                     let Some(param_index) =
                         function.params.iter().position(|param| param.name == *name)
                     else {
-                        return Err(PyError::Runtime(format!(
-                            "{}() got an unexpected keyword argument '{}'",
-                            function.name, name
-                        )));
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "{}() got an unexpected keyword argument '{}'",
+                                function.name, name
+                            ),
+                        ));
                     };
                     if function.params[param_index].is_positional_only {
                         // The fast path only runs when the function has neither
@@ -712,10 +724,13 @@ impl Interpreter {
                         ));
                     }
                     if bound_args[param_index].is_some() {
-                        return Err(PyError::Runtime(format!(
-                            "{}() got multiple values for argument '{}'",
-                            function.name, name
-                        )));
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "{}() got multiple values for argument '{}'",
+                                function.name, name
+                            ),
+                        ));
                     }
                     bound_args[param_index] = Some(value);
                 } else {
@@ -723,11 +738,16 @@ impl Interpreter {
                         positional_index += 1;
                     }
                     if positional_index >= bound_args.len() {
-                        return Err(PyError::Runtime(format!(
-                            "{}() takes from {} to {} arguments but {} were given",
-                            function.name, required_params, function.params.len(),
-                            positional_count + bound_prefix.len()
-                        )));
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "{}() takes from {} to {} arguments but {} were given",
+                                function.name,
+                                required_params,
+                                function.params.len(),
+                                positional_count + bound_prefix.len()
+                            ),
+                        ));
                     }
                     bound_args[positional_index] = Some(value);
                     positional_index += 1;
