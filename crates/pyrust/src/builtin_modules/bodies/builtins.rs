@@ -21,10 +21,10 @@ use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
     NativeIterFrame, apply_format_spec, ascii_repr, class_is_subclass_of, compare_values,
-    dir_names, instance_attrs_snapshot, invoke_class_method, is_exception_class, iter_values,
-    lookup_class_attr, modpow_i64, py_mod_i64, py_round_half_even, py_round_half_even_f64,
-    reject_keyword_args_expanded, snapshot_current_locals, snapshot_module_namespace,
-    value_to_float, value_type_name_str,
+    dir_names, instance_attrs_snapshot, int_pow_promoting, invoke_class_method,
+    is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_mod_i64,
+    py_round_half_even, py_round_half_even_f64, reject_keyword_args_expanded,
+    snapshot_current_locals, snapshot_module_namespace, value_to_float, value_type_name_str,
 };
 use crate::value::{PyClass, PyKey, Value, ValueKind, range_len};
 use pyrust_derive::pyrust_module;
@@ -545,10 +545,10 @@ pyrust_module! {
         } else {
             match (args[0].value.kind(), args[1].value.kind()) {
                 (ValueKind::Int(a), ValueKind::Int(b)) if b >= 0 => {
-                    Ok(Value::int(a.wrapping_pow(b as u32)))
+                    Ok(int_pow_promoting(a, b))
                 }
                 (ValueKind::Bool(a), ValueKind::Int(b)) if b >= 0 => {
-                    Ok(Value::int((a as i64).wrapping_pow(b as u32)))
+                    Ok(int_pow_promoting(a as i64, b))
                 }
                 _ => {
                     let a = value_to_float(&args[0].value, FN_NAME)?;

@@ -7,7 +7,7 @@ use crate::ast::{
 };
 use crate::bytecode::{CellVar, FnCode, FnParamSpec, FnProto, Insn, Reg};
 use crate::error::PyError;
-use crate::value::{Value, ValueKind};
+use crate::value::{PyBigInt, PyPow, Value, ValueKind};
 
 /// Compile a top-level script body.  All script-level names are locals.
 ///
@@ -1293,8 +1293,14 @@ fn fold_constant(expr: &Expr) -> Option<Value> {
             let val = fold_constant(expr)?;
             match op {
                 UnaryOp::Neg => match val.kind() {
-                    ValueKind::Int(n) => Some(Value::int(n.wrapping_neg())),
+                    // `-i64::MIN` overflows; promote to BigInt to match
+                    // CPython's arbitrary-precision int semantics (#421).
+                    ValueKind::Int(n) => Some(match n.checked_neg() {
+                        Some(r) => Value::int(r),
+                        None => Value::bigint(-PyBigInt::from(n)),
+                    }),
                     ValueKind::Float(f) => Some(Value::float(-f)),
+                    ValueKind::BigInt(b) => Some(Value::bigint(-b)),
                     _ => None,
                 },
                 UnaryOp::Not => Some(Value::bool_(!val.truthy())),
@@ -1330,15 +1336,18 @@ fn fold_constant(expr: &Expr) -> Option<Value> {
 
 pub(crate) fn fold_binop(l: &Value, op: BinaryOp, r: &Value) -> Option<Value> {
     match (l.kind(), op, r.kind()) {
-        (ValueKind::Int(a), BinaryOp::Add, ValueKind::Int(b)) => {
-            Some(Value::int(a.wrapping_add(b)))
-        }
-        (ValueKind::Int(a), BinaryOp::Sub, ValueKind::Int(b)) => {
-            Some(Value::int(a.wrapping_sub(b)))
-        }
-        (ValueKind::Int(a), BinaryOp::Mul, ValueKind::Int(b)) => {
-            Some(Value::int(a.wrapping_mul(b)))
-        }
+        (ValueKind::Int(a), BinaryOp::Add, ValueKind::Int(b)) => Some(match a.checked_add(b) {
+            Some(r) => Value::int(r),
+            None => Value::bigint(PyBigInt::from(a) + PyBigInt::from(b)),
+        }),
+        (ValueKind::Int(a), BinaryOp::Sub, ValueKind::Int(b)) => Some(match a.checked_sub(b) {
+            Some(r) => Value::int(r),
+            None => Value::bigint(PyBigInt::from(a) - PyBigInt::from(b)),
+        }),
+        (ValueKind::Int(a), BinaryOp::Mul, ValueKind::Int(b)) => Some(match a.checked_mul(b) {
+            Some(r) => Value::int(r),
+            None => Value::bigint(PyBigInt::from(a) * PyBigInt::from(b)),
+        }),
         (ValueKind::Int(a), BinaryOp::Div, ValueKind::Int(b)) if b != 0 => {
             Some(Value::float(a as f64 / b as f64))
         }
@@ -1360,7 +1369,13 @@ pub(crate) fn fold_binop(l: &Value, op: BinaryOp, r: &Value) -> Option<Value> {
             }))
         }
         (ValueKind::Int(a), BinaryOp::Pow, ValueKind::Int(b)) if b >= 0 => {
-            Some(Value::int(a.wrapping_pow(b as u32)))
+            // Limit folded exponents to u32::MAX; larger ones (extremely rare
+            // at compile time) fall through and are computed at runtime.
+            let exp = u32::try_from(b).ok()?;
+            Some(match a.checked_pow(exp) {
+                Some(r) => Value::int(r),
+                None => Value::bigint(PyPow::pow(PyBigInt::from(a), exp)),
+            })
         }
         (ValueKind::Int(a), BinaryOp::BitAnd, ValueKind::Int(b)) => Some(Value::int(a & b)),
         (ValueKind::Int(a), BinaryOp::BitOr, ValueKind::Int(b)) => Some(Value::int(a | b)),

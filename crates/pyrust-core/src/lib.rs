@@ -14,6 +14,7 @@ use num_bigint::BigInt;
 use num_traits::{ToPrimitive, Zero};
 
 pub use num_bigint::BigInt as PyBigInt;
+pub use num_traits::Pow as PyPow;
 pub use num_traits::ToPrimitive as PyToPrimitive;
 
 static FN_ID_COUNTER: AtomicU64 = AtomicU64::new(1);

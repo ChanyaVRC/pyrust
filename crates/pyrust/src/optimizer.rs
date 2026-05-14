@@ -809,8 +809,12 @@ fn pass_unary_fold(insns: Vec<Insn>, num_locals: u32, consts: &mut Vec<Value>) -
                 let c = &consts[*c_idx as usize];
                 let result = match op {
                     UnaryOp::Neg => match c.kind() {
-                        ValueKind::Int(n) => Some(Value::int(n.wrapping_neg())),
+                        ValueKind::Int(n) => Some(match n.checked_neg() {
+                            Some(r) => Value::int(r),
+                            None => Value::bigint(-crate::value::PyBigInt::from(n)),
+                        }),
                         ValueKind::Float(f) => Some(Value::float(-f)),
+                        ValueKind::BigInt(b) => Some(Value::bigint(-b)),
                         _ => None,
                     },
                     UnaryOp::Not => Some(Value::bool_(!c.truthy())),
