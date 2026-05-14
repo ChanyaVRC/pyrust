@@ -1800,15 +1800,24 @@ impl Interpreter {
                         .as_int()
                         .zip(regs[*stop_reg as usize].as_int());
                     if let Some((cur, stop)) = pair {
-                        let next = cur.wrapping_add(step);
-                        let cont = match cmp_op {
-                            BinaryOp::Lt => next < stop,
-                            BinaryOp::Gt => next > stop,
-                            _ => unreachable!("ForCountReg uses Lt or Gt only"),
+                        // `checked_add` so a near-i64::MAX (or MIN) counter
+                        // exits the loop instead of wrapping past `stop`
+                        // and continuing forever (#439).
+                        let cont = match cur.checked_add(step) {
+                            Some(next) => {
+                                let c = match cmp_op {
+                                    BinaryOp::Lt => next < stop,
+                                    BinaryOp::Gt => next > stop,
+                                    _ => unreachable!("ForCountReg uses Lt or Gt only"),
+                                };
+                                if c {
+                                    regs[*var as usize] = Value::int(next);
+                                }
+                                c
+                            }
+                            None => false,
                         };
-                        if cont {
-                            regs[*var as usize] = Value::int(next);
-                        } else {
+                        if !cont {
                             pc = jump_pc!(*offset);
                         }
                     } else {
@@ -1828,15 +1837,24 @@ impl Interpreter {
                         .expect("ForCountConst stop must be Int");
                     let cur_opt: Option<i64> = regs[*var as usize].as_int();
                     if let Some(cur) = cur_opt {
-                        let next = cur.wrapping_add(step);
-                        let cont = match cmp_op {
-                            BinaryOp::Lt => next < stop,
-                            BinaryOp::Gt => next > stop,
-                            _ => unreachable!("ForCountConst uses Lt or Gt only"),
+                        // `checked_add` so overflow terminates the loop
+                        // (matches CPython's arbitrary-precision behaviour
+                        // at the i64 boundary) rather than wrapping (#439).
+                        let cont = match cur.checked_add(step) {
+                            Some(next) => {
+                                let c = match cmp_op {
+                                    BinaryOp::Lt => next < stop,
+                                    BinaryOp::Gt => next > stop,
+                                    _ => unreachable!("ForCountConst uses Lt or Gt only"),
+                                };
+                                if c {
+                                    regs[*var as usize] = Value::int(next);
+                                }
+                                c
+                            }
+                            None => false,
                         };
-                        if cont {
-                            regs[*var as usize] = Value::int(next);
-                        } else {
+                        if !cont {
                             pc = jump_pc!(*offset);
                         }
                     } else {
@@ -1853,15 +1871,24 @@ impl Interpreter {
                     // `as_int()` skips kind()'s Ref machinery (#450 perf).
                     let cur_opt: Option<i64> = regs[*var as usize].as_int();
                     let fast = if let Some(cur) = cur_opt {
-                        let next = cur.wrapping_add(step);
-                        let cont = match cmp_op {
-                            BinaryOp::Lt => next < stop,
-                            BinaryOp::Gt => next > stop,
-                            _ => unreachable!("ForCountConstInline uses Lt or Gt only"),
+                        // `checked_add` so overflow terminates the loop
+                        // (matches CPython's arbitrary-precision behaviour
+                        // at the i64 boundary) rather than wrapping (#439).
+                        let cont = match cur.checked_add(step) {
+                            Some(next) => {
+                                let c = match cmp_op {
+                                    BinaryOp::Lt => next < stop,
+                                    BinaryOp::Gt => next > stop,
+                                    _ => unreachable!("ForCountConstInline uses Lt or Gt only"),
+                                };
+                                if c {
+                                    regs[*var as usize] = Value::int(next);
+                                }
+                                c
+                            }
+                            None => false,
                         };
-                        if cont {
-                            regs[*var as usize] = Value::int(next);
-                        } else {
+                        if !cont {
                             pc = jump_pc!(*offset);
                         }
                         true
