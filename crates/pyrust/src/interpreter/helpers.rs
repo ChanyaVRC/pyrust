@@ -300,19 +300,93 @@ fn build_primitive_classes() -> PrimitiveClasses {
         }))
     }
     let int_class = make("int", None);
+    let str_class = make("str", None);
+    let list_class = make("list", None);
+    let tuple_class = make("tuple", None);
+    let dict_class = make("dict", None);
+    let set_class = make("set", None);
+    populate_primitive_methods(&str_class, "str", STR_METHODS);
+    populate_primitive_methods(&list_class, "list", LIST_METHODS);
+    populate_primitive_methods(&tuple_class, "tuple", TUPLE_METHODS);
+    populate_primitive_methods(&dict_class, "dict", DICT_METHODS);
+    populate_primitive_methods(&set_class, "set", SET_METHODS);
     PrimitiveClasses {
         bytes_class: make("bytes", None),
         complex_class: make("complex", None),
-        dict_class: make("dict", None),
+        dict_class,
         float_class: make("float", None),
         frozenset_class: make("frozenset", None),
-        list_class: make("list", None),
-        set_class: make("set", None),
-        str_class: make("str", None),
-        tuple_class: make("tuple", None),
+        list_class,
+        set_class,
+        str_class,
+        tuple_class,
         // `bool` inherits from `int` (CPython: `bool.__bases__ == (int,)`).
         bool_class: make("bool", Some(Rc::clone(&int_class))),
         int_class,
+    }
+}
+
+/// Authoritative per-primitive method registries.  Keep each in sync with
+/// the corresponding `match method` in `pyrust_builtins::<type>::call`
+/// (or `Interpreter::call_<type>_method` for dict/set, which also have
+/// their own `pyrust_builtins::<type>::call` fallback).  Class-attr access
+/// (`list.append`) returns a `BuiltinFunction("list.append")` sentinel
+/// dispatched by the unified `<type>.<method>` arm in
+/// `call_function_expanded`.
+const STR_METHODS: &[&str] = &[
+    "index", "count",
+    "split", "rsplit", "join", "splitlines", "partition", "rpartition",
+    "strip", "lstrip", "rstrip", "removeprefix", "removesuffix",
+    "center", "ljust", "rjust", "zfill", "expandtabs",
+    "upper", "lower", "casefold", "capitalize", "swapcase", "title",
+    "find", "rfind", "rindex",
+    "replace", "format",
+    "startswith", "endswith",
+    "isdigit", "isalpha", "isalnum", "isspace", "isdecimal", "isnumeric",
+    "islower", "isupper", "istitle", "isascii", "isidentifier", "isprintable",
+];
+
+const LIST_METHODS: &[&str] = &[
+    "index", "count",
+    "append", "clear", "copy", "extend", "insert", "pop", "remove", "reverse",
+    "sort",
+];
+
+const TUPLE_METHODS: &[&str] = &["index", "count"];
+
+const DICT_METHODS: &[&str] = &[
+    "get", "keys", "values", "items", "update", "pop", "popitem", "clear",
+    "setdefault", "copy", "fromkeys",
+];
+
+const SET_METHODS: &[&str] = &[
+    "add", "remove", "discard", "pop", "clear",
+    "update", "intersection_update", "difference_update", "symmetric_difference_update",
+    "copy", "union", "intersection", "difference", "symmetric_difference",
+    "issubset", "issuperset", "isdisjoint",
+];
+
+/// Install `BuiltinFunction("<type>.<name>")` sentinels into the class's
+/// `attrs` for every name in `methods`.  Each qualified name is leaked
+/// once per thread — the storage is fixed-size and permanent (one entry
+/// per method per type), and `Value::builtin_function` requires
+/// `&'static str`.  See [`populate_str_methods`]'s removed predecessor
+/// for the prior shape; this generalised form drives str/list/tuple/dict/
+/// set together.
+#[cold]
+#[inline(never)]
+fn populate_primitive_methods(
+    class: &Rc<RefCell<PyClass>>,
+    type_name: &'static str,
+    methods: &[&'static str],
+) {
+    let mut cls = class.borrow_mut();
+    cls.attrs.reserve(methods.len());
+    for &name in methods {
+        let qualified: &'static str =
+            Box::leak(format!("{type_name}.{name}").into_boxed_str());
+        cls.attrs
+            .insert(name.to_string(), Value::builtin_function(qualified));
     }
 }
 

@@ -190,17 +190,48 @@ impl Interpreter {
                 }
                 format_str_template(&template, &positional, &keyword)
             }
-            ValueKind::BuiltinFunction(name) if name.starts_with("str.") => {
-                let method = &name[4..];
+            // #462: class-method-of-primitive dispatch.  When a primitive
+            // class's attr is `BuiltinFunction("<type>.<method>")` — populated
+            // by `populate_*_methods` in `helpers.rs` — calling it dispatches
+            // like a bound method with `args[0]` as the receiver.  Mirrors the
+            // bound-method arm above so `str.upper(s)` and `s.upper()` go
+            // through the same per-type `call` fn.  `str.format` is handled
+            // by the preceding arm because it threads kwargs into the template.
+            ValueKind::BuiltinFunction(name)
+                if name
+                    .split_once('.')
+                    .is_some_and(|(t, _)| matches!(t, "str" | "list" | "tuple" | "dict" | "set")) =>
+            {
+                let (type_name, method) = name.split_once('.').unwrap();
                 let self_val = args
                     .first()
-                    .map(|a| &a.value)
+                    .map(|a| a.value.clone())
                     .ok_or_else(|| PyError::named(
                         "TypeError",
-                        format!("descriptor '{method}' of 'str' object needs an argument"),
+                        format!("descriptor '{method}' of '{type_name}' object needs an argument"),
                     ))?;
-                let rest: Vec<Value> = args[1..].iter().map(|a| a.value.clone()).collect();
-                pyrust_builtins::string::call(method, self_val, rest)
+                let mut pos: Vec<Value> = Vec::with_capacity(args.len().saturating_sub(1));
+                let mut kw: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
+                for a in &args[1..] {
+                    match &a.name {
+                        Some(n) => { kw.insert(PyKey::Str(n.clone()), a.value.clone()); }
+                        None => pos.push(a.value.clone()),
+                    }
+                }
+                match type_name {
+                    "str" => pyrust_builtins::string::call(method, &self_val, pos),
+                    "list" => pyrust_builtins::list::call(method, &self_val, pos, &kw),
+                    "tuple" => match self_val.kind() {
+                        ValueKind::Tuple(items) => pyrust_builtins::tuple::call(method, items, pos),
+                        _ => Err(PyError::named(
+                            "TypeError",
+                            format!("descriptor '{method}' requires a 'tuple' object"),
+                        )),
+                    },
+                    "dict" => self.call_dict_method(method, self_val, pos),
+                    "set" => self.call_set_method(method, self_val, pos),
+                    _ => unreachable!("guard matched type_name above"),
+                }
             }
             ValueKind::UserFunction(function) => {
                 let function = Rc::clone(function);

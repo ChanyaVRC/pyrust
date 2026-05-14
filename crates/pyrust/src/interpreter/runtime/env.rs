@@ -187,44 +187,6 @@ impl Interpreter {
                         None => value,
                     });
                 }
-                // Migrated-primitive class (issue #462): expose the
-                // per-type method registry as class attrs so that
-                // `str.lower`, etc. work — mirroring the legacy
-                // `BuiltinFunction("str")` attr-access path.  Single
-                // `Rc::ptr_eq` against the `str` singleton; skips
-                // the prior `is_primitive_class` 11-way scan + the
-                // `class.borrow().name.clone()` String allocation
-                // (#462 perf — `attr_class_method` micro-bench).
-                let is_str_class = crate::interpreter::primitive_class_by_name("str")
-                    .as_ref()
-                    .is_some_and(|sc| Rc::ptr_eq(sc, &class));
-                if is_str_class {
-                    match name {
-                        "lower"      => return Ok(Value::builtin_function("str.lower")),
-                        "upper"      => return Ok(Value::builtin_function("str.upper")),
-                        "strip"      => return Ok(Value::builtin_function("str.strip")),
-                        "lstrip"     => return Ok(Value::builtin_function("str.lstrip")),
-                        "rstrip"     => return Ok(Value::builtin_function("str.rstrip")),
-                        "capitalize" => return Ok(Value::builtin_function("str.capitalize")),
-                        "split"      => return Ok(Value::builtin_function("str.split")),
-                        "join"       => return Ok(Value::builtin_function("str.join")),
-                        "replace"    => return Ok(Value::builtin_function("str.replace")),
-                        "find"       => return Ok(Value::builtin_function("str.find")),
-                        "rfind"      => return Ok(Value::builtin_function("str.rfind")),
-                        "index"      => return Ok(Value::builtin_function("str.index")),
-                        "rindex"     => return Ok(Value::builtin_function("str.rindex")),
-                        "count"      => return Ok(Value::builtin_function("str.count")),
-                        "startswith" => return Ok(Value::builtin_function("str.startswith")),
-                        "endswith"   => return Ok(Value::builtin_function("str.endswith")),
-                        "format"     => return Ok(Value::builtin_function("str.format")),
-                        "isdigit"    => return Ok(Value::builtin_function("str.isdigit")),
-                        "isalpha"    => return Ok(Value::builtin_function("str.isalpha")),
-                        "isalnum"    => return Ok(Value::builtin_function("str.isalnum")),
-                        "isspace"    => return Ok(Value::builtin_function("str.isspace")),
-                        _ => {}
-                    }
-                }
-
                 let class_name = class.borrow().name.clone();
                 Err(PyError::named(
                     "AttributeError",
