@@ -205,6 +205,16 @@ fn key_repr(key: &PyKey) -> String {
                 format!("frozenset({{{inner}}})")
             }
         }
+        PyKey::Tuple(items) => {
+            if items.is_empty() {
+                "()".to_string()
+            } else if items.len() == 1 {
+                format!("({},)", key_repr(&items[0]))
+            } else {
+                let inner = items.iter().map(key_repr).collect::<Vec<_>>().join(", ");
+                format!("({inner})")
+            }
+        }
         PyKey::Object { value, .. } => value.repr(),
     }
 }

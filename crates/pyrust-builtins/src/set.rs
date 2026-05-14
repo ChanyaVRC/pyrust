@@ -308,6 +308,7 @@ fn key_to_value(k: PyKey) -> Value {
             }
             crate::frozenset::frozenset(set)
         }
+        PyKey::Tuple(items) => Value::tuple(items.into_iter().map(key_to_value).collect()),
         PyKey::Object { value, .. } => value,
     }
 }
