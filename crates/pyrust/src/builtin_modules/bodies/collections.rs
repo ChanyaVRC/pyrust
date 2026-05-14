@@ -65,7 +65,7 @@ pyrust_module! {
                         counts.insert(k.clone(), Value::int(count));
                     }
                 } else {
-                    for v in iter_values(arg.value.clone())? {
+                    for v in _interp.collect_iterable(arg.value.clone())? {
                         let key = v.to_key().ok_or_else(|| {
                             PyError::named(
                                 "TypeError",
@@ -224,13 +224,13 @@ pyrust_module! {
         /// `c.update(iterable_or_mapping)` — add to counts (mapping form
         /// uses values as deltas; iterable form adds 1 per element).
         fn update(args) -> Result<Value> {
-            apply_delta(args, FN_NAME, /* sign = */ 1)
+            apply_delta(_interp, args, FN_NAME, /* sign = */ 1)
         }
 
         /// `c.subtract(iterable_or_mapping)` — subtract counts; the
         /// result can go below zero (`elements()` then skips them).
         fn subtract(args) -> Result<Value> {
-            apply_delta(args, FN_NAME, /* sign = */ -1)
+            apply_delta(_interp, args, FN_NAME, /* sign = */ -1)
         }
 
         /// `c.copy()` — return a new Counter with the same counts.
@@ -683,7 +683,15 @@ fn require_no_args(args: &[ExpandedCallArg], method: &str) -> Result<()> {
 /// Apply `update`/`subtract` semantics: for each element of `other`,
 /// adjust the count by `sign`.  `other` can be an iterable (counts as
 /// +1/-1 per element) or a mapping (uses the mapping's integer values).
-fn apply_delta(args: &[ExpandedCallArg], fn_name: &str, sign: i64) -> Result<Value> {
+///
+/// Takes `interp` so user `__iter__` classes are honoured via
+/// `collect_iterable` (issue #418).
+fn apply_delta(
+    interp: &mut crate::Interpreter,
+    args: &[ExpandedCallArg],
+    fn_name: &str,
+    sign: i64,
+) -> Result<Value> {
     let user = &args[1..];
     if user.len() != 1 {
         return Err(PyError::named(
@@ -710,7 +718,7 @@ fn apply_delta(args: &[ExpandedCallArg], fn_name: &str, sign: i64) -> Result<Val
         }
     } else {
         // Iterable form — each element contributes ±1.
-        for v in iter_values(other.clone())? {
+        for v in interp.collect_iterable(other.clone())? {
             let key = v.to_key().ok_or_else(|| {
                 PyError::named("TypeError", "unhashable type".to_string())
             })?;

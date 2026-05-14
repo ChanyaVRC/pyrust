@@ -37,7 +37,21 @@ pyrust_module! {
     /// <https://docs.python.org/3/library/itertools.html#itertools.chain>
     fn chain(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
-        let sources: Vec<Value> = args.iter().map(|a| a.value.clone()).collect();
+        // Pre-materialise PyInstance sources so user `__iter__` dispatch
+        // (which needs the interpreter) happens here instead of inside the
+        // registry callback, which can't dispatch dunders (#418).  Non-
+        // PyInstance sources keep their lazy semantics.
+        let sources: Vec<Value> = args
+            .iter()
+            .map(|a| {
+                let v = a.value.clone();
+                if matches!(v.kind(), ValueKind::PyInstance(_)) {
+                    Ok(Value::list(_interp.collect_iterable(v)?))
+                } else {
+                    Ok(v)
+                }
+            })
+            .collect::<Result<_>>()?;
         Ok(pyrust_builtins::iter_helpers::chain(sources))
     }
 
