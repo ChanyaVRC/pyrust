@@ -143,26 +143,6 @@ fn int_cmp(a: i64, b: i64, op: BinaryOp) -> Option<bool> {
     }
 }
 
-fn expect_list_mut<'a>(
-    regs: &'a mut [Value],
-    reg: u32,
-    op: &str,
-) -> Result<&'a mut Vec<Value>> {
-    regs[reg as usize]
-        .as_list_mut()
-        .ok_or_else(|| PyError::Runtime(format!("{op} on non-list")))
-}
-
-fn expect_dict_mut<'a>(
-    regs: &'a mut [Value],
-    reg: u32,
-    op: &str,
-) -> Result<&'a mut indexmap::IndexMap<PyKey, Value>> {
-    regs[reg as usize]
-        .as_dict_mut()
-        .ok_or_else(|| PyError::Runtime(format!("{op} on non-dict")))
-}
-
 impl Interpreter {
     /// Execute compiled bytecode for a user function.
     ///
@@ -760,21 +740,20 @@ impl Interpreter {
                                 PyError::Runtime("slice assignment requires iterable".to_string())
                             })),
                         };
-                        let list_mut = if let Some(ov) = regs[*obj as usize].as_some_mut() {
-                            ov.as_list_mut()
-                        } else { None };
-                        if let Some(items) = list_mut {
-                            vm_try!(Self::slice_setitem(
+                        let updated = regs[*obj as usize].list_with_mut(|items| {
+                            Self::slice_setitem(
                                 items,
                                 lo.as_ref(),
                                 hi.as_ref(),
                                 st.as_ref(),
                                 new_items,
-                            ));
-                        } else {
-                            vm_try!(Err(PyError::Runtime(
+                            )
+                        });
+                        match updated {
+                            Some(r) => vm_try!(r),
+                            None => vm_try!(Err(PyError::Runtime(
                                 "object does not support slice assignment".to_string(),
-                            )));
+                            ))),
                         }
                     } else {
                         // Non-slice set: determine target type first, then mutate
@@ -787,9 +766,11 @@ impl Interpreter {
                         }).unwrap_or(0);
                         match target_kind {
                             1 => {
-                                let items = vm_try!(expect_list_mut(regs, *obj, "SetItem"));
-                                let i = vm_try!(normalize_index(&idx_val, items.len(), "list"));
-                                items[i] = val_val;
+                                let len = regs[*obj as usize].list_len().unwrap_or(0);
+                                let i = vm_try!(normalize_index(&idx_val, len, "list"));
+                                regs[*obj as usize].list_with_mut(|items| {
+                                    items[i] = val_val;
+                                });
                             }
                             2 => {
                                 // For PyInstance keys we need `__hash__` (and possibly
@@ -808,25 +789,23 @@ impl Interpreter {
                                         .cloned()
                                         .unwrap_or(Value::none());
                                     let existing = vm_try!(self.dict_lookup(&dict_val, &key));
-                                    let dict =
-                                        vm_try!(expect_dict_mut(regs, *obj, "SetItem"));
-                                    if let Some((idx, _)) = existing {
-                                        // Preserve existing entry's PyKey to
-                                        // keep insertion order; replace value
-                                        // in place.
-                                        let existing_key =
-                                            dict.get_index(idx).map(|(k, _)| k.clone());
-                                        if let Some(k) = existing_key {
-                                            dict.insert(k, val_val);
+                                    regs[*obj as usize].dict_with_mut(|dict| {
+                                        if let Some((idx, _)) = existing {
+                                            let existing_key =
+                                                dict.get_index(idx).map(|(k, _)| k.clone());
+                                            if let Some(k) = existing_key {
+                                                dict.insert(k, val_val);
+                                            } else {
+                                                dict.insert(key, val_val);
+                                            }
                                         } else {
                                             dict.insert(key, val_val);
                                         }
-                                    } else {
-                                        dict.insert(key, val_val);
-                                    }
+                                    });
                                 } else {
-                                    let dict = vm_try!(expect_dict_mut(regs, *obj, "SetItem"));
-                                    dict.insert(key, val_val);
+                                    regs[*obj as usize].dict_with_mut(|dict| {
+                                        dict.insert(key, val_val);
+                                    });
                                 }
                             }
                             3 => {
@@ -880,20 +859,19 @@ impl Interpreter {
                 Insn::DeleteItem(obj, idx) => {
                     let idx_val = vm_try!(vm_read(regs, *idx, num_locals));
                     if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
-                        let list_mut = if let Some(ov) = regs[*obj as usize].as_some_mut() {
-                            ov.as_list_mut()
-                        } else { None };
-                        if let Some(items) = list_mut {
-                            vm_try!(Self::slice_delitem(
+                        let updated = regs[*obj as usize].list_with_mut(|items| {
+                            Self::slice_delitem(
                                 items,
                                 lo.as_ref(),
                                 hi.as_ref(),
                                 st.as_ref(),
-                            ));
-                        } else {
-                            vm_try!(Err(PyError::Runtime(
+                            )
+                        });
+                        match updated {
+                            Some(r) => vm_try!(r),
+                            None => vm_try!(Err(PyError::Runtime(
                                 "object does not support slice deletion".to_string(),
-                            )));
+                            ))),
                         }
                     } else {
                         let mut handled = false;
@@ -905,17 +883,16 @@ impl Interpreter {
                             _ => 0u8,
                         }).unwrap_or(0);
                         if target_kind == 1 {
-                            if let Some(ov) = regs[*obj as usize].as_some_mut()
-                                && let Some(items) = ov.as_list_mut()
-                            {
-                                let i = vm_try!(normalize_index(&idx_val, items.len(), "list"));
-                                if i == items.len() - 1 {
+                            let len = regs[*obj as usize].list_len().unwrap_or(0);
+                            let i = vm_try!(normalize_index(&idx_val, len, "list"));
+                            regs[*obj as usize].list_with_mut(|items| {
+                                if i + 1 == items.len() {
                                     items.pop();
                                 } else {
                                     items.remove(i);
                                 }
-                                handled = true;
-                            }
+                            });
+                            handled = true;
                         } else if target_kind == 2 {
                             let key = vm_try!(self.value_to_pykey(&idx_val));
                             // For object keys, resolve via user-eq match first
@@ -928,16 +905,15 @@ impl Interpreter {
                                     .cloned()
                                     .unwrap_or(Value::none());
                                 let found = vm_try!(self.dict_lookup(&dict_val, &key));
-                                if let Some((idx, _)) = found
-                                    && let Some(ov) = regs[*obj as usize].as_some_mut()
-                                    && let Some(dict) = ov.as_dict_mut()
-                                {
-                                    dict.shift_remove_index(idx);
+                                if let Some((idx, _)) = found {
+                                    regs[*obj as usize].dict_with_mut(|dict| {
+                                        dict.shift_remove_index(idx);
+                                    });
                                 }
-                            } else if let Some(ov) = regs[*obj as usize].as_some_mut()
-                                && let Some(dict) = ov.as_dict_mut()
-                            {
-                                dict.shift_remove(&key);
+                            } else {
+                                regs[*obj as usize].dict_with_mut(|dict| {
+                                    dict.shift_remove(&key);
+                                });
                             }
                             handled = true;
                         }
@@ -1365,30 +1341,20 @@ impl Interpreter {
                             .unwrap_or(Value::none());
                         let found = vm_try!(self.set_lookup(&set_val, &key));
                         if found.is_none() {
-                            let set = vm_try!(regs[*set_reg as usize]
-                                .as_set_mut()
-                                .ok_or_else(|| PyError::Runtime(
-                                    "SetAdd: not a set".to_string()
-                                )));
-                            set.insert(key);
+                            vm_try!(regs[*set_reg as usize].set_add(key));
                         }
                     } else {
-                        let set = vm_try!(regs[*set_reg as usize]
-                            .as_set_mut()
-                            .ok_or_else(|| PyError::Runtime("SetAdd: not a set".to_string())));
-                        set.insert(key);
+                        vm_try!(regs[*set_reg as usize].set_add(key));
                     }
                 }
                 Insn::ListAppend(list_reg, val_reg) => {
                     let val = vm_try!(vm_read(regs, *val_reg, num_locals));
-                    let items = vm_try!(expect_list_mut(regs, *list_reg, "ListAppend"));
-                    items.push(val);
+                    vm_try!(regs[*list_reg as usize].list_push(val));
                 }
                 Insn::ListExtend(list_reg, src_reg) => {
                     let src_val = vm_try!(vm_read(regs, *src_reg, num_locals));
                     let items_to_add = vm_try!(iter_values(src_val));
-                    let items = vm_try!(expect_list_mut(regs, *list_reg, "ListExtend"));
-                    items.extend(items_to_add);
+                    vm_try!(regs[*list_reg as usize].list_extend(items_to_add));
                 }
                 Insn::DictUpdate(dict_reg, src_reg) => {
                     let src_val = vm_try!(vm_read(regs, *src_reg, num_locals));
@@ -1402,10 +1368,9 @@ impl Interpreter {
                             ),
                         ))),
                     };
-                    let dict = vm_try!(expect_dict_mut(regs, *dict_reg, "DictUpdate"));
-                    for (k, v) in src_dict {
-                        dict.insert(k, v);
-                    }
+                    let pairs: Vec<(PyKey, Value)> =
+                        src_dict.into_iter().collect();
+                    vm_try!(regs[*dict_reg as usize].dict_extend(pairs));
                 }
 
                 // ── Generator yield ──────────────────────────────────────
@@ -2032,24 +1997,16 @@ impl Interpreter {
             _ => 0u8,
         }).unwrap_or(0);
 
-        // For Rc-shared mutable types (list/set/dict), args may alias the
-        // receiver (e.g. `lst.extend(lst)`).  Resolve up front so the builtin
-        // can read iterables without producing a simultaneous `&` + `&mut` to
-        // the same Vec/Set/Map.  See `Value::as_list_mut` safety contract.
-        if matches!(obj_kind_tag, 1 | 2 | 5) {
-            pyrust_core::unalias_args_for_mutation(&regs[obj as usize], &mut args);
-        }
+        // No upfront unalias needed (#448): each builtin scopes its
+        // own `RefCell::borrow_mut()` and snapshots iterable args
+        // before opening the borrow.  Aliased self-references like
+        // `lst.extend(lst)` are now safe by construction.
 
         match obj_kind_tag {
             1 => {
-                // as_list_mut is safe: we confirmed tag==List above and
-                // pre-unaliased args; the mutable borrow of the Vec ends
-                // before exec_call_method returns, so no alias with the later store.
-                let items = regs[obj as usize]
-                    .as_list_mut()
-                    .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
+                let receiver = regs[obj as usize].clone();
                 let empty_kw = indexmap::IndexMap::new();
-                pyrust_builtins::list::call(&method, items, args, &empty_kw)
+                pyrust_builtins::list::call(&method, &receiver, args, &empty_kw)
             }
             2 => {
                 if matches!(method.as_str(), "keys" | "values" | "items") {
@@ -2153,15 +2110,13 @@ impl Interpreter {
             _ => 0u8,
         }).unwrap_or(0);
 
-        // See `exec_call_method`: unalias args sharing the receiver's
-        // Rc-backing before the `&mut` is taken.
-        let mut pos_items = pos_items;
-        if matches!(obj_kind_tag, 1 | 2 | 5) {
-            pyrust_core::unalias_args_for_mutation(&regs[obj as usize], &mut pos_items);
-        }
+        // No upfront unalias needed (#448): each builtin scopes its
+        // own `borrow_mut()` and snapshots iterables before opening
+        // the borrow.
 
         match obj_kind_tag {
             1 => {
+                let receiver = regs[obj as usize].clone();
                 // Intercept list.sort here to support key= (needs interpreter access).
                 if method == "sort" {
                     // Cache the kwarg PyKeys once so each list.sort() call avoids
@@ -2173,12 +2128,13 @@ impl Interpreter {
                         std::sync::LazyLock::new(|| PyKey::Str("reverse".to_string()));
                     for k in kw_map.keys() {
                         if let PyKey::Str(s) = k
-                            && s != "key" && s != "reverse" {
-                                return Err(PyError::named(
-                                    "TypeError",
-                                    format!("sort() got an unexpected keyword argument '{s}'"),
-                                ));
-                            }
+                            && s != "key" && s != "reverse"
+                        {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!("sort() got an unexpected keyword argument '{s}'"),
+                            ));
+                        }
                     }
                     let key_fn = kw_map.get(&*KEY_KW).cloned();
                     let reverse = kw_map
@@ -2187,37 +2143,34 @@ impl Interpreter {
                         .unwrap_or(false);
                     if let Some(key_fn_val) = key_fn {
                         // Compute keys via the interpreter, then delegate sorting to builtins.
-                        let items_snapshot = regs[obj as usize]
-                            .as_list()
-                            .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?
-                            .to_vec();
+                        let items_snapshot = receiver
+                            .list_with(|items| items.clone())
+                            .ok_or_else(|| {
+                                PyError::Runtime("internal: expected list".to_string())
+                            })?;
                         let mut keys: Vec<Value> = Vec::with_capacity(items_snapshot.len());
                         for item in &items_snapshot {
                             let key_val = {
                                 let mut buf = std::mem::take(&mut self.call_arg_buf);
                                 buf.clear();
-                                buf.push(ExpandedCallArg { name: None, value: item.clone() });
+                                buf.push(ExpandedCallArg {
+                                    name: None,
+                                    value: item.clone(),
+                                });
                                 let r = self.call_function_expanded(key_fn_val.clone(), &buf);
                                 self.call_arg_buf = buf;
                                 r?
                             };
                             keys.push(key_val);
                         }
-                        let items_out = regs[obj as usize]
-                            .as_list_mut()
-                            .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
-                        return pyrust_builtins::list::sort_with_precomputed_keys(items_out, keys, reverse);
+                        return pyrust_builtins::list::sort_with_precomputed_keys(
+                            &receiver, keys, reverse,
+                        );
                     }
                     // No key: delegate to builtins (handles reverse kwarg)
-                    let items = regs[obj as usize]
-                        .as_list_mut()
-                        .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
-                    return pyrust_builtins::list::call(&method, items, pos_items, &kw_map);
+                    return pyrust_builtins::list::call(&method, &receiver, pos_items, &kw_map);
                 }
-                let items = regs[obj as usize]
-                    .as_list_mut()
-                    .ok_or_else(|| PyError::Runtime("internal: expected list".to_string()))?;
-                pyrust_builtins::list::call(&method, items, pos_items, &kw_map)
+                pyrust_builtins::list::call(&method, &receiver, pos_items, &kw_map)
             }
             2 => {
                 if matches!(method.as_str(), "keys" | "values" | "items") {

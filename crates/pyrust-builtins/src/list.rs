@@ -17,34 +17,43 @@ pub fn has_method(method: &str) -> bool {
 
 pub fn call(
     method: &str,
-    items: &mut Vec<Value>,
+    receiver: &Value,
     args: Vec<Value>,
     kwargs: &IndexMap<PyKey, Value>,
 ) -> Result<Value> {
     match method {
-        // Common Sequence Operations
-        "index" => sequence::seq_index(items, &args, "list"),
-        "count" => sequence::seq_count(items, &args, "list"),
-        // Mutable Sequence Operations
-        "append" => ms::append(items, args),
-        "clear" => ms::clear(items, args),
-        "copy" => ms::copy(items, args),
-        "extend" => ms::extend(items, args),
-        "insert" => ms::insert(items, args),
-        "pop" => ms::pop(items, args),
-        "remove" => ms::remove(items, args),
-        "reverse" => ms::reverse(items, args),
+        // Read-only sequence operations — borrow scoped to the call.
+        "index" => receiver
+            .list_with(|items| sequence::seq_index(items, &args, "list"))
+            .ok_or_else(|| {
+                PyError::named("TypeError", "list.index receiver is not a list".to_string())
+            })?,
+        "count" => receiver
+            .list_with(|items| sequence::seq_count(items, &args, "list"))
+            .ok_or_else(|| {
+                PyError::named("TypeError", "list.count receiver is not a list".to_string())
+            })?,
+        // Mutable Sequence Operations — each ms::* takes &Value and
+        // scopes its own borrow_mut().
+        "append" => ms::append(receiver, args),
+        "clear" => ms::clear(receiver, args),
+        "copy" => ms::copy(receiver, args),
+        "extend" => ms::extend(receiver, args),
+        "insert" => ms::insert(receiver, args),
+        "pop" => ms::pop(receiver, args),
+        "remove" => ms::remove(receiver, args),
+        "reverse" => ms::reverse(receiver, args),
         // List-specific
-        "sort" => sort(items, &args, kwargs),
+        "sort" => sort(receiver, &args, kwargs),
         _ => Err(PyError::Runtime(format!(
             "'list' object has no attribute '{method}'"
         ))),
     }
 }
 
-fn sort(items: &mut Vec<Value>, args: &[Value], kwargs: &IndexMap<PyKey, Value>) -> Result<Value> {
+fn sort(receiver: &Value, args: &[Value], kwargs: &IndexMap<PyKey, Value>) -> Result<Value> {
     let reverse_flag = extract_reverse(args, kwargs)?;
-    sort_by_cmp(items, reverse_flag)
+    sort_by_cmp(receiver, reverse_flag)
 }
 
 fn extract_reverse(args: &[Value], kwargs: &IndexMap<PyKey, Value>) -> Result<bool> {
@@ -70,10 +79,18 @@ fn extract_reverse(args: &[Value], kwargs: &IndexMap<PyKey, Value>) -> Result<bo
     )
 }
 
-fn sort_by_cmp(items: &mut Vec<Value>, reverse: bool) -> Result<Value> {
-    let snapshot = items.clone();
+fn sort_by_cmp(receiver: &Value, reverse: bool) -> Result<Value> {
+    // Snapshot the items into an owned Vec.  The comparator may call
+    // user `__lt__` which can re-enter the same list — by working on
+    // a snapshot we keep the receiver's borrow unscoped during the
+    // sort, then write the result back inside a `list_with_mut`
+    // borrow_mut window.  Matches the previous `items.clone() →
+    // sort_by → restore on err` shape.
+    let mut snapshot = receiver.list_with(|items| items.clone()).ok_or_else(|| {
+        PyError::named("TypeError", "list.sort receiver is not a list".to_string())
+    })?;
     let mut err: Option<PyError> = None;
-    items.sort_by(|a, b| {
+    snapshot.sort_by(|a, b| {
         if err.is_some() {
             return std::cmp::Ordering::Equal;
         }
@@ -87,22 +104,24 @@ fn sort_by_cmp(items: &mut Vec<Value>, reverse: bool) -> Result<Value> {
         }
     });
     if let Some(e) = err {
-        *items = snapshot;
         return Err(e);
     }
+    receiver.list_with_mut(|items| *items = snapshot);
     Ok(Value::none())
 }
 
 /// Sort items using precomputed keys (one key per item in the same order).
 /// Called by the VM after evaluating each key function call.
 pub fn sort_with_precomputed_keys(
-    items: &mut Vec<Value>,
+    receiver: &Value,
     keys: Vec<Value>,
     reverse: bool,
 ) -> Result<Value> {
-    debug_assert_eq!(items.len(), keys.len());
-    let snapshot = items.clone();
-    let mut keyed: Vec<(Value, Value)> = keys.into_iter().zip(items.iter().cloned()).collect();
+    let snapshot = receiver.list_with(|items| items.clone()).ok_or_else(|| {
+        PyError::named("TypeError", "list.sort receiver is not a list".to_string())
+    })?;
+    debug_assert_eq!(snapshot.len(), keys.len());
+    let mut keyed: Vec<(Value, Value)> = keys.into_iter().zip(snapshot.into_iter()).collect();
     let mut sort_err: Option<PyError> = None;
     keyed.sort_by(|(ka, _), (kb, _)| {
         if sort_err.is_some() {
@@ -118,10 +137,10 @@ pub fn sort_with_precomputed_keys(
         }
     });
     if let Some(e) = sort_err {
-        *items = snapshot;
         return Err(e);
     }
-    *items = keyed.into_iter().map(|(_, v)| v).collect();
+    let new_items: Vec<Value> = keyed.into_iter().map(|(_, v)| v).collect();
+    receiver.list_with_mut(|items| *items = new_items);
     Ok(Value::none())
 }
 

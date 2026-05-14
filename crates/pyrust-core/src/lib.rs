@@ -1527,27 +1527,12 @@ impl Value {
         }
     }
 
-    /// Borrow the list's elements as a mutable Vec.
-    ///
-    /// SAFETY CONTRACT: see [`Value::as_list`].  Same constraints apply, with
-    /// the additional rule that the returned `&mut Vec<Value>` is
-    /// exclusive — no other borrow (shared or mutable) on the same backing
-    /// Rc<ListInner> may exist while it is live.  The `&mut self` receiver
-    /// only blocks aliasing **through this Value**; a separately-rooted
-    /// `Value` sharing the same `Rc` can still call `as_list()` or
-    /// `kind()` and produce an aliased read borrow.  Builtin call sites that
-    /// pass `args: Vec<Value>` alongside the receiver `&mut` MUST first
-    /// unalias args that share identity with the receiver
-    /// (`Value::value_id`); the helper `unalias_args_for_mutation` in the VM
-    /// dispatch path does this.
-    pub fn as_list_mut(&mut self) -> Option<&mut Vec<Value>> {
-        if self.is_list() {
-            let inner = unsafe { self.list_inner() };
-            Some(unsafe { &mut *inner.items.as_ptr() })
-        } else {
-            None
-        }
-    }
+    // `as_list_mut` was removed in #448 — use the scoped operation
+    // methods (`Value::list_with_mut`, `list_push`, `list_extend`, …)
+    // instead.  The previous `unsafe { &mut *cell.as_ptr() }` pattern
+    // exposed an unguarded `&mut Vec<Value>` across crate boundaries
+    // and forced callers to manually re-derive the aliasing-safety
+    // property that `RefCell` already enforces internally.
 
     /// Borrow the tuple's elements as a slice.  Backs both the pool-allocated
     /// path (`TAG_TUPLE`) and the inline small-tuple path
@@ -1574,21 +1559,20 @@ impl Value {
         }
     }
 
-    pub fn as_opaque_mut(&mut self) -> Option<&mut Opaque> {
-        if top16(self.0) == TAG_OPAQUE {
-            Some(unsafe { &mut *self.opaque_ptr() })
-        } else {
-            None
-        }
-    }
+    // `as_opaque_mut` removed in #448 — the only callers were the
+    // `as_dict_mut` / `as_set_mut` accessors that have themselves
+    // been retired.
 
-    /// Borrow the dict's IndexMap.
+    /// Borrow the dict's IndexMap (read-only).
     ///
     /// SAFETY CONTRACT: see [`Value::as_list`].  Dict storage is
     /// `Rc<RefCell<IndexMap<...>>>` (Rc-shared since dict was the original
     /// reference type); the read borrow is unguarded via `RefCell::as_ptr`,
     /// so callers MUST NOT hold any other borrow (shared or mutable) on any
     /// Value that shares this `Rc` while the returned reference is live.
+    /// **For new code prefer [`Self::dict_with`] / [`Self::dict_with_mut`]
+    /// (#448)** — these scope the borrow to the operation and prevent the
+    /// aliasing class of bugs by construction.
     pub fn as_dict(&self) -> Option<&IndexMap<PyKey, Value>> {
         self.as_opaque().and_then(|o| {
             if let Opaque::Dict(rc) = o {
@@ -1599,27 +1583,15 @@ impl Value {
         })
     }
 
-    /// Borrow the dict's IndexMap as mutable.
-    ///
-    /// SAFETY CONTRACT: see [`Value::as_list_mut`].  Same constraints — the
-    /// `&mut self` receiver only blocks aliasing through this Value; an
-    /// Rc-cloned `Value` can still produce an aliased read borrow.  Call
-    /// sites passing `args: Vec<Value>` alongside the `&mut` MUST unalias
-    /// args that share identity with the receiver first.
-    pub fn as_dict_mut(&mut self) -> Option<&mut IndexMap<PyKey, Value>> {
-        self.as_opaque_mut().and_then(|o| {
-            if let Opaque::Dict(rc) = o {
-                Some(unsafe { &mut *rc.as_ref().as_ptr() })
-            } else {
-                None
-            }
-        })
-    }
+    // `as_dict_mut` removed in #448 — use `Value::dict_with_mut`,
+    // `dict_insert`, `dict_shift_remove`, `dict_clear`, `dict_extend`
+    // instead.
 
-    /// Borrow the set's IndexSet.
+    /// Borrow the set's IndexSet (read-only).
     ///
     /// SAFETY CONTRACT: see [`Value::as_list`].  Set storage is `Rc<SetInner>`
-    /// after #305; same Rc-aliasing concerns apply.
+    /// after #305; same Rc-aliasing concerns apply.  Prefer
+    /// [`Self::set_with`] / [`Self::set_with_mut`] (#448) for new code.
     pub fn as_set(&self) -> Option<&IndexSet<PyKey>> {
         self.as_opaque().and_then(|o| {
             if let Opaque::Set(rc) = o {
@@ -1630,18 +1602,8 @@ impl Value {
         })
     }
 
-    /// Borrow the set's IndexSet as mutable.
-    ///
-    /// SAFETY CONTRACT: see [`Value::as_list_mut`].  Same Rc-aliasing rules.
-    pub fn as_set_mut(&mut self) -> Option<&mut IndexSet<PyKey>> {
-        self.as_opaque_mut().and_then(|o| {
-            if let Opaque::Set(rc) = o {
-                Some(unsafe { &mut *rc.items.as_ptr() })
-            } else {
-                None
-            }
-        })
-    }
+    // `as_set_mut` removed in #448 — use `Value::set_with_mut`,
+    // `set_add`, `set_discard`, `set_clear`, `set_extend` instead.
 
     pub fn get_dict_rc(&self) -> Option<&Rc<RefCell<IndexMap<PyKey, Value>>>> {
         self.as_opaque().and_then(|o| {
@@ -1651,6 +1613,273 @@ impl Value {
                 None
             }
         })
+    }
+
+    // ── Scoped-borrow operation API (#448) ────────────────────────────
+    //
+    // The methods below are the safe replacements for `as_list_mut` /
+    // `as_dict_mut` / `as_set_mut`.  They take `&self`, scope their
+    // `RefCell::borrow_mut()` to the operation's lifetime, and never
+    // hand a `&mut <storage>` out across the function boundary.
+    //
+    // What this DOES guarantee:
+    // - No mutable reference to the underlying `Vec` / `IndexMap` /
+    //   `IndexSet` crosses an API boundary.  Every mutating operation
+    //   is bounded by a single `borrow_mut()` window.
+    // - The dispatcher's previous `unalias_args_for_mutation` dance
+    //   is no longer needed for self-aliased iterating calls
+    //   (`a.extend(a)` etc.) because the iterable is snapshotted
+    //   before the receiver's `borrow_mut()` opens.
+    //
+    // What this DOES NOT (yet) guarantee:
+    // - Full exclusivity against the still-unguarded read accessors
+    //   `as_list` / `as_dict` / `as_set` / `kind()`.  Those return
+    //   shared references via `RefCell::as_ptr()` *without* bumping
+    //   the cell's borrow counter, so a `borrow_mut()` taken here
+    //   will succeed even if a `&[Value]` / `&IndexMap<...>` from
+    //   one of those accessors is still live.  Rewriting the read
+    //   accessors to use `borrow()` is a follow-up to this PR — see
+    //   the trailing notes on #448.
+    //
+    // Each method panics with the standard `RefCell::borrow_mut`
+    // already-borrowed message if a re-entrant call (e.g. user
+    // `__hash__` that mutates the same container while another
+    // borrow is live) violates the `RefCell` rules.  That panic
+    // surfaces UB-adjacent behaviour at the earliest possible point.
+
+    /// Borrow the list's `Rc<ListInner>`.  Returns `None` when `self`
+    /// is not a list.  Internal helper for the operation methods
+    /// below.
+    fn list_inner_rc(&self) -> Option<&ListInner> {
+        if self.is_list() {
+            Some(unsafe { self.list_inner() })
+        } else {
+            None
+        }
+    }
+
+    /// Borrow the dict's `Rc<RefCell<IndexMap<...>>>`.
+    fn dict_rc(&self) -> Option<&Rc<RefCell<IndexMap<PyKey, Value>>>> {
+        self.get_dict_rc()
+    }
+
+    /// Borrow the set's `Rc<SetInner>`.
+    fn set_inner_rc(&self) -> Option<&SetInner> {
+        self.as_opaque().and_then(|o| match o {
+            Opaque::Set(rc) => Some(rc.as_ref()),
+            _ => None,
+        })
+    }
+
+    /// Scoped read access to the list's elements.  The closure runs
+    /// while the immutable `RefCell` borrow is live; the borrow is
+    /// dropped before this method returns.  Returns `None` when
+    /// `self` is not a list.
+    pub fn list_with<R>(&self, f: impl FnOnce(&Vec<Value>) -> R) -> Option<R> {
+        let inner = self.list_inner_rc()?;
+        Some(f(&inner.items.borrow()))
+    }
+
+    /// Scoped mutable access.  See [`Self::list_with`].  Inner
+    /// closures MUST NOT call back into the same list (e.g. by
+    /// recursing through user `__eq__`) — a re-entrant access will
+    /// panic with `RefCell` already-borrowed.
+    pub fn list_with_mut<R>(&self, f: impl FnOnce(&mut Vec<Value>) -> R) -> Option<R> {
+        let inner = self.list_inner_rc()?;
+        Some(f(&mut inner.items.borrow_mut()))
+    }
+
+    /// `list.append(item)`.  Returns `Err` (TypeError) when `self`
+    /// is not a list.
+    pub fn list_push(&self, item: Value) -> Result<()> {
+        let inner = self.list_inner_rc().ok_or_else(|| {
+            PyError::named("TypeError", "list_push receiver is not a list".to_string())
+        })?;
+        inner.items.borrow_mut().push(item);
+        Ok(())
+    }
+
+    /// `list.extend(snapshot)` — caller passes an owned Vec already
+    /// materialised from the iterable, so no aliasing window exists
+    /// between the read and the write.
+    pub fn list_extend(&self, snapshot: Vec<Value>) -> Result<()> {
+        let inner = self.list_inner_rc().ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "list_extend receiver is not a list".to_string(),
+            )
+        })?;
+        inner.items.borrow_mut().extend(snapshot);
+        Ok(())
+    }
+
+    /// `list.clear()`.
+    pub fn list_clear(&self) -> Result<()> {
+        let inner = self.list_inner_rc().ok_or_else(|| {
+            PyError::named("TypeError", "list_clear receiver is not a list".to_string())
+        })?;
+        inner.items.borrow_mut().clear();
+        Ok(())
+    }
+
+    /// `list.reverse()`.
+    pub fn list_reverse(&self) -> Result<()> {
+        let inner = self.list_inner_rc().ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "list_reverse receiver is not a list".to_string(),
+            )
+        })?;
+        inner.items.borrow_mut().reverse();
+        Ok(())
+    }
+
+    /// `list.insert(idx, item)` — `idx` is the already-normalised
+    /// position (caller does CPython-style negative-index folding).
+    pub fn list_insert(&self, idx: usize, item: Value) -> Result<()> {
+        let inner = self.list_inner_rc().ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "list_insert receiver is not a list".to_string(),
+            )
+        })?;
+        let mut items = inner.items.borrow_mut();
+        let pos = idx.min(items.len());
+        items.insert(pos, item);
+        Ok(())
+    }
+
+    /// `list.pop(idx)` — removes and returns the element at `idx`
+    /// (already normalised; caller raises IndexError on out-of-range).
+    pub fn list_pop_at(&self, idx: usize) -> Result<Value> {
+        let inner = self.list_inner_rc().ok_or_else(|| {
+            PyError::named("TypeError", "list_pop receiver is not a list".to_string())
+        })?;
+        let mut items = inner.items.borrow_mut();
+        if idx >= items.len() {
+            return Err(PyError::named(
+                "IndexError",
+                "pop index out of range".to_string(),
+            ));
+        }
+        Ok(items.remove(idx))
+    }
+
+    /// Length of the list.
+    pub fn list_len(&self) -> Option<usize> {
+        self.list_inner_rc().map(|i| i.items.borrow().len())
+    }
+
+    /// Length of the set.
+    pub fn set_len(&self) -> Option<usize> {
+        self.set_inner_rc().map(|i| i.items.borrow().len())
+    }
+
+    /// Length of the dict.
+    pub fn dict_len(&self) -> Option<usize> {
+        self.dict_rc().map(|rc| rc.borrow().len())
+    }
+
+    /// Scoped read access to the set.
+    pub fn set_with<R>(&self, f: impl FnOnce(&IndexSet<PyKey>) -> R) -> Option<R> {
+        let inner = self.set_inner_rc()?;
+        Some(f(&inner.items.borrow()))
+    }
+
+    /// Scoped mutable access to the set.
+    pub fn set_with_mut<R>(&self, f: impl FnOnce(&mut IndexSet<PyKey>) -> R) -> Option<R> {
+        let inner = self.set_inner_rc()?;
+        Some(f(&mut inner.items.borrow_mut()))
+    }
+
+    /// `set.add(key)` — returns true if the key was newly inserted,
+    /// false if it was already present.
+    pub fn set_add(&self, key: PyKey) -> Result<bool> {
+        let inner = self.set_inner_rc().ok_or_else(|| {
+            PyError::named("TypeError", "set_add receiver is not a set".to_string())
+        })?;
+        Ok(inner.items.borrow_mut().insert(key))
+    }
+
+    /// `set.discard(key)` — removes if present, no error if missing.
+    pub fn set_discard(&self, key: &PyKey) -> Result<bool> {
+        let inner = self.set_inner_rc().ok_or_else(|| {
+            PyError::named("TypeError", "set_discard receiver is not a set".to_string())
+        })?;
+        Ok(inner.items.borrow_mut().shift_remove(key))
+    }
+
+    /// `set.update(snapshot)`.
+    pub fn set_extend(&self, snapshot: Vec<PyKey>) -> Result<()> {
+        let inner = self.set_inner_rc().ok_or_else(|| {
+            PyError::named("TypeError", "set_extend receiver is not a set".to_string())
+        })?;
+        inner.items.borrow_mut().extend(snapshot);
+        Ok(())
+    }
+
+    /// `set.clear()`.
+    pub fn set_clear(&self) -> Result<()> {
+        let inner = self.set_inner_rc().ok_or_else(|| {
+            PyError::named("TypeError", "set_clear receiver is not a set".to_string())
+        })?;
+        inner.items.borrow_mut().clear();
+        Ok(())
+    }
+
+    /// Scoped read access to the dict.
+    pub fn dict_with<R>(&self, f: impl FnOnce(&IndexMap<PyKey, Value>) -> R) -> Option<R> {
+        let rc = self.dict_rc()?;
+        Some(f(&rc.borrow()))
+    }
+
+    /// Scoped mutable access to the dict.
+    pub fn dict_with_mut<R>(&self, f: impl FnOnce(&mut IndexMap<PyKey, Value>) -> R) -> Option<R> {
+        let rc = self.dict_rc()?;
+        Some(f(&mut rc.borrow_mut()))
+    }
+
+    /// `dict[key] = value`.
+    pub fn dict_insert(&self, key: PyKey, value: Value) -> Result<Option<Value>> {
+        let rc = self.dict_rc().ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "dict_insert receiver is not a dict".to_string(),
+            )
+        })?;
+        Ok(rc.borrow_mut().insert(key, value))
+    }
+
+    /// `dict.shift_remove(key)`.
+    pub fn dict_shift_remove(&self, key: &PyKey) -> Result<Option<Value>> {
+        let rc = self.dict_rc().ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "dict_shift_remove receiver is not a dict".to_string(),
+            )
+        })?;
+        Ok(rc.borrow_mut().shift_remove(key))
+    }
+
+    /// `dict.clear()`.
+    pub fn dict_clear(&self) -> Result<()> {
+        let rc = self.dict_rc().ok_or_else(|| {
+            PyError::named("TypeError", "dict_clear receiver is not a dict".to_string())
+        })?;
+        rc.borrow_mut().clear();
+        Ok(())
+    }
+
+    /// `dict.update(snapshot)`.
+    pub fn dict_extend(&self, snapshot: Vec<(PyKey, Value)>) -> Result<()> {
+        let rc = self.dict_rc().ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "dict_extend receiver is not a dict".to_string(),
+            )
+        })?;
+        rc.borrow_mut().extend(snapshot);
+        Ok(())
     }
 
     /// Unified int accessor (handles inline i48 and PyBigInt that fits in i64)
@@ -2183,46 +2412,13 @@ impl fmt::Debug for Value {
 // Helper free functions
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Replace any `Value` in `args` that shares the receiver's backing storage
-/// (Rc-aliased list/set/dict) with an independent deep copy.  Used at builtin
-/// dispatch sites before taking a `&mut` borrow on the receiver: the safety
-/// contracts on [`Value::as_list_mut`], [`Value::as_set_mut`], and
-/// [`Value::as_dict_mut`] forbid simultaneous borrows on aliased Values, so
-/// e.g. `lst.extend(lst)` would otherwise create overlapping `&[Value]` and
-/// `&mut Vec<Value>` references to the same storage even though no user-level
-/// race occurs.
-///
-/// This is identity-based via [`Value::value_id`].  Primitives and types that
-/// are not Rc-shared (tuple, str, etc.) flow through unchanged because their
-/// `&[Value]` slices are stable for the borrow's lifetime regardless of
-/// aliasing.
-pub fn unalias_args_for_mutation(receiver: &Value, args: &mut [Value]) {
-    let rid = match receiver.value_id() {
-        Some(id) => id,
-        None => return,
-    };
-    // Only the receiver kinds that are Rc-shared and mutated through `&mut`
-    // need this treatment; bail early for other kinds.
-    let is_aliasable = matches!(
-        receiver.kind(),
-        ValueKind::List(_) | ValueKind::Set(_) | ValueKind::Dict(_)
-    );
-    if !is_aliasable {
-        return;
-    }
-    for arg in args.iter_mut() {
-        if arg.value_id() == Some(rid) {
-            *arg = match arg.kind() {
-                ValueKind::List(items) => Value::list(items.to_vec()),
-                ValueKind::Set(s) => Value::set(s.clone()),
-                ValueKind::Dict(d) => Value::dict(d.clone()),
-                // Same id but different kind shouldn't happen (id is derived
-                // from the storage variant), but be defensive: leave as-is.
-                _ => arg.clone(),
-            };
-        }
-    }
-}
+// `unalias_args_for_mutation` was removed in #448.  Its job was to
+// satisfy the manual aliasing-safety contract that `as_list_mut` /
+// `as_dict_mut` / `as_set_mut` documented.  With those accessors gone
+// and the new scoped-borrow API in place (`list_with_mut`,
+// `dict_with_mut`, `set_with_mut`, …), the dispatcher no longer holds
+// a `&mut <storage>` across calls into the builtin, so no aliasing
+// window exists to pre-empt.
 
 /// Returns the Python built-in type name (e.g. `"list"`, `"str"`) for a
 /// `Value`.  Used by error messages (`'X' object is not iterable`, attribute
@@ -2608,10 +2804,9 @@ mod tests {
         // (`m = lst.append; m(4)`) and simple aliasing (`b = a; b.append(x)`)
         // mutate the original list — matching CPython's reference semantics.
         let a = Value::list(vec![Value::int(1)]);
-        let mut b = a.clone();
-        b.as_list_mut()
-            .expect("clone must still be a list")
-            .push(Value::int(2));
+        let b = a.clone();
+        b.list_push(Value::int(2))
+            .expect("clone must still be a list");
         let items = a.as_list().expect("original must still be a list");
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].as_int(), Some(1));
@@ -2639,10 +2834,8 @@ mod tests {
             s.insert(PyKey::Int(1));
             s
         });
-        let mut b = a.clone();
-        b.as_set_mut()
-            .expect("clone must still be a set")
-            .insert(PyKey::Int(2));
+        let b = a.clone();
+        b.set_add(PyKey::Int(2)).expect("clone must still be a set");
         let items = a.as_set().expect("original must still be a set");
         assert!(items.contains(&PyKey::Int(1)));
         assert!(items.contains(&PyKey::Int(2)));
@@ -2654,15 +2847,14 @@ mod tests {
         // Symmetric counterpart to `set_clone_shares_storage`: mutate via
         // the original Value, the clone (alias) sees it.  This pins both
         // directions of the Rc-shared backing post-#305.
-        let mut a = Value::set({
+        let a = Value::set({
             let mut s = IndexSet::new();
             s.insert(PyKey::Int(1));
             s
         });
         let b = a.clone();
-        a.as_set_mut()
-            .expect("original must still be a set")
-            .insert(PyKey::Int(2));
+        a.set_add(PyKey::Int(2))
+            .expect("original must still be a set");
         let items = b.as_set().expect("clone must still be a set");
         assert!(items.contains(&PyKey::Int(1)));
         assert!(items.contains(&PyKey::Int(2)));

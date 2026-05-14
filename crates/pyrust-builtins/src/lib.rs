@@ -73,8 +73,8 @@ mod method_table_drift_guard {
     #[test]
     fn list_methods_dispatched() {
         for &name in super::list::METHODS {
-            let mut items: Vec<Value> = Vec::new();
-            let r = super::list::call(name, &mut items, vec![], &IndexMap::new());
+            let receiver = Value::list(Vec::new());
+            let r = super::list::call(name, &receiver, vec![], &IndexMap::new());
             if let Err(ref e) = r {
                 assert!(!is_fallback(e), "list::call({name}) hit fallback: {e:?}");
             }
@@ -84,8 +84,8 @@ mod method_table_drift_guard {
     #[test]
     fn dict_methods_dispatched() {
         for &name in super::dict::METHODS {
-            let mut dict: IndexMap<PyKey, Value> = IndexMap::new();
-            let r = super::dict::call(name, &mut dict, vec![]);
+            let receiver = Value::dict(IndexMap::<PyKey, Value>::new());
+            let r = super::dict::call(name, &receiver, vec![]);
             if let Err(ref e) = r {
                 assert!(!is_fallback(e), "dict::call({name}) hit fallback: {e:?}");
             }
@@ -106,8 +106,8 @@ mod method_table_drift_guard {
     #[test]
     fn set_methods_dispatched() {
         for &name in super::set::METHODS {
-            let mut set: IndexSet<PyKey> = IndexSet::new();
-            let r = super::set::call(name, &mut set, vec![]);
+            let receiver = Value::set(IndexSet::<PyKey>::new());
+            let r = super::set::call(name, &receiver, vec![]);
             if let Err(ref e) = r {
                 assert!(!is_fallback(e), "set::call({name}) hit fallback: {e:?}");
             }

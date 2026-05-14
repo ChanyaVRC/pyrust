@@ -670,15 +670,17 @@ fn encode_value(v: &Value, typed: bool) -> String {
 /// the order list (shouldn't happen — but we tolerate it rather than
 /// panicking on the hot path).
 fn promote_key(inst: &Rc<RefCell<PyInstance>>, key: &str) {
-    let mut borrow = inst.borrow_mut();
-    if let Some(order) = borrow.attrs.get_mut("_order").and_then(Value::as_list_mut) {
-        if let Some(pos) = order
-            .iter()
-            .position(|v| matches!(v.kind(), ValueKind::Str(s) if s == key))
-        {
-            let item = order.remove(pos);
-            order.push(item);
-        }
+    let order = inst.borrow().attrs.get("_order").cloned();
+    if let Some(order) = order {
+        order.list_with_mut(|items| {
+            if let Some(pos) = items
+                .iter()
+                .position(|v| matches!(v.kind(), ValueKind::Str(s) if s == key))
+            {
+                let item = items.remove(pos);
+                items.push(item);
+            }
+        });
     }
 }
 
@@ -691,44 +693,50 @@ fn insert_cache(
     value: Value,
     maxsize: Option<i64>,
 ) {
-    let mut borrow = inst.borrow_mut();
-    let order_full = if let Some(order) =
-        borrow.attrs.get_mut("_order").and_then(Value::as_list_mut)
-    {
-        order.push(Value::string(&key));
-        match maxsize {
-            Some(0) => true,
-            Some(n) => order.len() > n as usize,
-            None => false,
-        }
+    let order_val = inst.borrow().attrs.get("_order").cloned();
+    let cache_val = inst.borrow().attrs.get("_cache").cloned();
+    let order_full = if let Some(ref order) = order_val {
+        order
+            .list_with_mut(|items| {
+                items.push(Value::string(&key));
+                match maxsize {
+                    Some(0) => true,
+                    Some(n) => items.len() > n as usize,
+                    None => false,
+                }
+            })
+            .unwrap_or(false)
     } else {
         false
     };
-    if let Some(cache) = borrow.attrs.get_mut("_cache").and_then(Value::as_dict_mut) {
-        cache.insert(key_pykey, value);
+    if let Some(ref cache) = cache_val {
+        let _ = cache.dict_with_mut(|dict| {
+            dict.insert(key_pykey, value);
+        });
     }
     // Evict head if over capacity.  `maxsize=0` is a degenerate case
     // — no entries are kept; we immediately evict what we just
     // inserted.
     if order_full {
-        let evict_key: Option<String> = {
-            let order = borrow.attrs.get_mut("_order").and_then(Value::as_list_mut);
-            if let Some(order) = order
-                && !order.is_empty()
-            {
-                let head = order.remove(0);
-                match head.kind() {
-                    ValueKind::Str(s) => Some(s.to_string()),
-                    _ => None,
+        let evict_key: Option<String> = order_val.as_ref().and_then(|order| {
+            order.list_with_mut(|items| {
+                if items.is_empty() {
+                    None
+                } else {
+                    let head = items.remove(0);
+                    match head.kind() {
+                        ValueKind::Str(s) => Some(s.to_string()),
+                        _ => None,
+                    }
                 }
-            } else {
-                None
-            }
-        };
+            })?
+        });
         if let Some(k) = evict_key
-            && let Some(cache) = borrow.attrs.get_mut("_cache").and_then(Value::as_dict_mut)
+            && let Some(ref cache) = cache_val
         {
-            cache.shift_remove(&PyKey::Str(k));
+            let _ = cache.dict_with_mut(|dict| {
+                dict.shift_remove(&PyKey::Str(k));
+            });
         }
     }
 }
