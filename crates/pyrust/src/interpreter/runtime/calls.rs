@@ -971,7 +971,18 @@ impl Interpreter {
                     return Ok(Value::generator(Box::new(frame)));
                 }
 
+                // Issue #389: publish a view of this function frame so
+                // `locals()` can surface its fastlocal registers
+                // mid-call.  Popped immediately after `run_bytecode`
+                // returns so the raw pointer never outlives `regs`.
+                self.vm_frame_views.push(VmFrameView {
+                    kind: FrameKind::Function,
+                    regs_ptr: regs.as_ptr(),
+                    regs_len: regs.len(),
+                    local_index: Rc::clone(&function.local_index),
+                });
                 let vm_result = self.run_bytecode_for_fn(&code, &mut regs, function.id);
+                self.vm_frame_views.pop();
 
                 let used_env = std::mem::replace(&mut self.env, previous_env);
                 if needs_local_env {
@@ -1151,7 +1162,16 @@ impl Interpreter {
                 std::mem::replace(&mut self.env, Rc::clone(&function.env))
             };
 
+            // Issue #389: publish a function frame view (see the
+            // matching push in the simple-path branch above).
+            self.vm_frame_views.push(VmFrameView {
+                kind: FrameKind::Function,
+                regs_ptr: regs.as_ptr(),
+                regs_len: regs.len(),
+                local_index: Rc::clone(&function.local_index),
+            });
             let vm_result = self.run_bytecode_for_fn(&code, &mut regs, function.id);
+            self.vm_frame_views.pop();
 
             let used_env = std::mem::replace(&mut self.env, previous_env);
             if needs_local_env {
