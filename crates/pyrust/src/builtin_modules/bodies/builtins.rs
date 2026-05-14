@@ -413,67 +413,7 @@ pyrust_module! {
     /// per-kind "unhashable type: 'X'" errors for list / dict / set.
     fn hash(#[positional_only] obj: PyValue) -> Result<Value> {
         let value = obj.0;
-        let hash_val = match value.kind() {
-            ValueKind::Int(v) => v,
-            ValueKind::Bool(b) => b as i64,
-            ValueKind::Float(v) => {
-                if v.fract() == 0.0 && v.is_finite() { v as i64 }
-                else { v.to_bits() as i64 }
-            }
-            ValueKind::Str(s) => {
-                let mut h: u64 = 14695981039346656037u64;
-                for b in s.bytes() {
-                    h ^= b as u64;
-                    h = h.wrapping_mul(1099511628211u64);
-                }
-                h as i64
-            }
-            ValueKind::None => 0,
-            ValueKind::Tuple(items) => {
-                let mut h: i64 = 3527539;
-                for item in items {
-                    let item_hash = match item.kind() {
-                        ValueKind::Int(v) => v,
-                        ValueKind::Bool(b) => b as i64,
-                        ValueKind::Float(fv) => {
-                            if fv.fract() == 0.0 && fv.is_finite() { fv as i64 }
-                            else { fv.to_bits() as i64 }
-                        }
-                        ValueKind::Str(s) => {
-                            let mut sh: u64 = 14695981039346656037u64;
-                            for byte in s.bytes() {
-                                sh ^= byte as u64;
-                                sh = sh.wrapping_mul(1099511628211u64);
-                            }
-                            sh as i64
-                        }
-                        ValueKind::None => 0,
-                        _ => return Err(PyError::named(
-                            "TypeError",
-                            "unhashable type in tuple".to_string(),
-                        )),
-                    };
-                    h = h.wrapping_mul(1000003).wrapping_add(item_hash);
-                }
-                h
-            }
-            ValueKind::List(_) => return Err(PyError::named(
-                "TypeError",
-                "unhashable type: 'list'".to_string(),
-            )),
-            ValueKind::Dict(_) => return Err(PyError::named(
-                "TypeError",
-                "unhashable type: 'dict'".to_string(),
-            )),
-            ValueKind::Set(_) => return Err(PyError::named(
-                "TypeError",
-                "unhashable type: 'set'".to_string(),
-            )),
-            _ => return Err(PyError::named(
-                "TypeError",
-                "unhashable type".to_string(),
-            )),
-        };
+        let hash_val = hash_value(&value)?;
         Ok(Value::int(hash_val))
     }
 
@@ -1782,6 +1722,64 @@ pyrust_module! {
             _ => false,
         };
         Ok(Value::bool_(is_callable))
+    }
+}
+
+/// Compute the hash of a `Value` for the `hash()` builtin.  Mirrors
+/// CPython's semantics:
+/// - numeric types use their integer value (so `hash(True) == hash(1)`
+///   and `hash(1.0) == hash(1)`);
+/// - strings use an FNV-1a-style byte hash;
+/// - tuples fold each element's hash with a CPython-style xor/mul mix,
+///   recursing through nested tuples (issue #382);
+/// - mutable containers (list / dict / set) raise `TypeError`.
+fn hash_value(value: &Value) -> Result<i64> {
+    match value.kind() {
+        ValueKind::Int(v) => Ok(v),
+        ValueKind::Bool(b) => Ok(b as i64),
+        ValueKind::Float(v) => {
+            if v.fract() == 0.0 && v.is_finite() {
+                Ok(v as i64)
+            } else {
+                Ok(v.to_bits() as i64)
+            }
+        }
+        ValueKind::Str(s) => {
+            let mut h: u64 = 14695981039346656037u64;
+            for b in s.bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(1099511628211u64);
+            }
+            Ok(h as i64)
+        }
+        ValueKind::None => Ok(0),
+        ValueKind::Tuple(items) => {
+            let mut h: i64 = 3527539;
+            for item in items {
+                let item_hash = hash_value(item)?;
+                h = h.wrapping_mul(1000003).wrapping_add(item_hash);
+            }
+            Ok(h)
+        }
+        ValueKind::List(_) => Err(PyError::named(
+            "TypeError",
+            "unhashable type: 'list'".to_string(),
+        )),
+        ValueKind::Dict(_) => Err(PyError::named(
+            "TypeError",
+            "unhashable type: 'dict'".to_string(),
+        )),
+        ValueKind::Set(_) => Err(PyError::named(
+            "TypeError",
+            "unhashable type: 'set'".to_string(),
+        )),
+        _ => Err(PyError::named(
+            "TypeError",
+            format!(
+                "unhashable type: '{}'",
+                pyrust_core::builtin_type_name(value)
+            ),
+        )),
     }
 }
 

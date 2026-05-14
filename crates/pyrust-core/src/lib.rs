@@ -150,6 +150,11 @@ pub enum PyKey {
     /// Hashable frozenset key.  Stores a sorted-canonical Vec of inner keys
     /// so equality and hashing are content-based (matching CPython).
     FrozenSet(Vec<PyKey>),
+    /// Hashable tuple key.  Stores each element as its own `PyKey` so
+    /// hashing and equality propagate element-wise (matching CPython's
+    /// `hash((1, 2))`).  Unlike `FrozenSet`, ordering is significant —
+    /// `(1, 2) != (2, 1)` — so we preserve insertion order.
+    Tuple(Vec<PyKey>),
     /// Key constructed for a user-defined `PyInstance` (or any non-builtin
     /// Value that defines `__hash__`).  The `hash` is precomputed by the
     /// caller — pyrust-core has no interpreter reference, so dispatching
@@ -187,6 +192,7 @@ impl PartialEq for PyKey {
             (PyKey::Str(a), PyKey::Str(b)) => a == b,
             (PyKey::None, PyKey::None) => true,
             (PyKey::FrozenSet(a), PyKey::FrozenSet(b)) => a == b,
+            (PyKey::Tuple(a), PyKey::Tuple(b)) => a == b,
             (PyKey::Object { value: a, .. }, PyKey::Object { value: b, .. }) => a == b,
             _ => false,
         }
@@ -223,6 +229,13 @@ impl Hash for PyKey {
             }
             PyKey::FrozenSet(items) => {
                 4u8.hash(state);
+                for k in items {
+                    k.hash(state);
+                }
+            }
+            PyKey::Tuple(items) => {
+                5u8.hash(state);
+                items.len().hash(state);
                 for k in items {
                     k.hash(state);
                 }
@@ -1937,6 +1950,17 @@ impl Value {
             ValueKind::Bool(v) => Some(PyKey::Bool(v)),
             ValueKind::None => Some(PyKey::None),
             ValueKind::BuiltinObject { ops, state } => ops.to_key(state),
+            ValueKind::Tuple(items) => {
+                // Recursively hash each element.  If any element is itself
+                // unhashable (e.g. a list inside the tuple), the whole tuple
+                // is unhashable — matches CPython's `hash((1, [2]))` raising
+                // TypeError.
+                let mut keys = Vec::with_capacity(items.len());
+                for item in items {
+                    keys.push(item.to_key()?);
+                }
+                Some(PyKey::Tuple(keys))
+            }
             _ => None,
         }
     }
@@ -2330,6 +2354,16 @@ fn key_repr(key: &PyKey) -> String {
             } else {
                 let inner = items.iter().map(key_repr).collect::<Vec<_>>().join(", ");
                 format!("frozenset({{{inner}}})")
+            }
+        }
+        PyKey::Tuple(items) => {
+            if items.is_empty() {
+                "()".to_string()
+            } else if items.len() == 1 {
+                format!("({},)", key_repr(&items[0]))
+            } else {
+                let inner = items.iter().map(key_repr).collect::<Vec<_>>().join(", ");
+                format!("({inner})")
             }
         }
         PyKey::Object { value, .. } => value.repr(),

@@ -464,6 +464,20 @@ impl Interpreter {
     /// `u64` (mod 2^64 reduction matches CPython's `hash()` builtin) into
     /// a `PyKey::Object` along with the instance value.
     pub(crate) fn value_to_pykey(&mut self, value: &Value) -> Result<PyKey> {
+        // Tuples need special handling: the core `Value::to_key` cannot
+        // recurse through `PyInstance` elements (it has no interpreter
+        // reference), and on an unhashable inner element it collapses the
+        // error to a generic "unhashable type: 'tuple'".  CPython instead
+        // surfaces the offending inner type (e.g. `unhashable type: 'list'`
+        // for `{([1], 2): 0}`).  Recurse element-wise here so user
+        // `__hash__` dispatch and precise error messages both work.
+        if let ValueKind::Tuple(items) = value.kind() {
+            let mut keys = Vec::with_capacity(items.len());
+            for item in items {
+                keys.push(self.value_to_pykey(item)?);
+            }
+            return Ok(PyKey::Tuple(keys));
+        }
         if let Some(k) = value.to_key() {
             return Ok(k);
         }
