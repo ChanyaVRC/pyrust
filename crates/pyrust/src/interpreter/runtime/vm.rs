@@ -22,6 +22,33 @@ pub(crate) struct NativeIterFrame {
     pub(crate) pos: usize,
 }
 
+/// Lazy iterator over `obj.__getitem__(0)`, `obj.__getitem__(1)`, …
+/// implementing the legacy sequence-iter protocol (#394).  Stored
+/// type-erased inside `Value::generator()` like [`NativeIterFrame`].
+///
+/// Each call to `next()` invokes `__getitem__(index)` with the current
+/// `index`, bumps the counter on success, and terminates on a
+/// subclass of `IndexError` or `StopIteration` raised from
+/// `__getitem__`.  This is the *lazy* path: a `for x in obj: break`
+/// only calls `obj.__getitem__(0)` once and never advances.
+pub(crate) struct GetItemIter {
+    /// The object whose `__getitem__` is being driven (kept alive by
+    /// `Rc` cloning — the iterator can outlive any other reference).
+    pub(crate) obj: Value,
+    /// Cached `__getitem__` method value resolved at construction time,
+    /// so the per-tick `lookup_class_attr` call is paid once rather
+    /// than every `next()`.
+    pub(crate) method: Value,
+    /// Next integer index to pass to `__getitem__`.  Wraps at i64::MAX
+    /// (impossible in practice — would take ~290 years at 1 ns/step).
+    pub(crate) index: i64,
+    /// Set once `__getitem__` has raised `IndexError`/`StopIteration`.
+    /// Subsequent `next()` calls return StopIteration without invoking
+    /// `__getitem__` again (matches CPython's iterator-exhaustion
+    /// rule: once exhausted, always exhausted).
+    pub(crate) exhausted: bool,
+}
+
 /// Heap-allocated execution state for a suspended generator.
 /// Stored type-erased inside `Value::generator()` via `Box<dyn Any>`.
 pub(crate) struct GeneratorFrame {
@@ -1325,6 +1352,16 @@ impl Interpreter {
                                         &[],
                                     ));
                                     IterState::UserDefined(iter_obj)
+                                } else if lookup_class_attr(&class, "__getitem__").is_some() {
+                                    // Legacy sequence-iter protocol (#394):
+                                    // no __iter__ but __getitem__ exists.
+                                    // Lazy: wrap as a UserDefined iterator
+                                    // backed by GetItemIter so break/early
+                                    // return correctly stops without
+                                    // calling further __getitem__ indices
+                                    // (#416 Copilot review).
+                                    let iter_obj = vm_try!(self.make_getitem_iter(inst_rc));
+                                    IterState::UserDefined(iter_obj)
                                 } else {
                                     // No __iter__: try to materialise via iter_values (will fail)
                                     IterState::Materialized(vm_try!(iter_values(src_val)), 0)
@@ -1394,33 +1431,53 @@ impl Interpreter {
                             let next_result: Option<Result<Value>> =
                                 if let ValueKind::Generator(state_rc) = iter_val.kind() {
                                     let state_rc = Rc::clone(state_rc);
-                                    let mut borrow = state_rc.borrow_mut();
-                                    if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
-                                        // Built-in iterator created by iter().
-                                        if native.pos >= native.items.len() {
-                                            Some(Err(PyError::named(
+                                    // Probe for the lazy GetItemIter shape
+                                    // first — its step needs &mut self for
+                                    // the `__getitem__` invocation, so we
+                                    // must release any cell borrow before
+                                    // calling.
+                                    let is_getitem_iter = state_rc
+                                        .borrow()
+                                        .downcast_ref::<GetItemIter>()
+                                        .is_some();
+                                    if is_getitem_iter {
+                                        Some(match self.step_getitem_iter(&state_rc) {
+                                            Ok(Some(v)) => Ok(v),
+                                            Ok(None) => Err(PyError::named(
                                                 "StopIteration",
                                                 String::new(),
-                                            )))
-                                        } else {
-                                            let item = native.items[native.pos].clone();
-                                            native.pos += 1;
-                                            Some(Ok(item))
-                                        }
-                                    } else if let Some(frame) = borrow.downcast_mut::<GeneratorFrame>() {
-                                        // Resume the generator.
-                                        if frame.done {
-                                            Some(Err(PyError::named(
-                                                "StopIteration",
-                                                String::new(),
-                                            )))
-                                        } else {
-                                            Some(self.resume_generator(frame))
-                                        }
+                                            )),
+                                            Err(e) => Err(e),
+                                        })
                                     } else {
-                                        Some(Err(PyError::Runtime(
-                                            "invalid generator state".to_string(),
-                                        )))
+                                        let mut borrow = state_rc.borrow_mut();
+                                        if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
+                                            // Built-in iterator created by iter().
+                                            if native.pos >= native.items.len() {
+                                                Some(Err(PyError::named(
+                                                    "StopIteration",
+                                                    String::new(),
+                                                )))
+                                            } else {
+                                                let item = native.items[native.pos].clone();
+                                                native.pos += 1;
+                                                Some(Ok(item))
+                                            }
+                                        } else if let Some(frame) = borrow.downcast_mut::<GeneratorFrame>() {
+                                            // Resume the generator.
+                                            if frame.done {
+                                                Some(Err(PyError::named(
+                                                    "StopIteration",
+                                                    String::new(),
+                                                )))
+                                            } else {
+                                                Some(self.resume_generator(frame))
+                                            }
+                                        } else {
+                                            Some(Err(PyError::Runtime(
+                                                "invalid generator state".to_string(),
+                                            )))
+                                        }
                                     }
                                 } else if let ValueKind::PyInstance(inst) = iter_val.kind() {
                                     let inst_rc = Rc::clone(inst);
@@ -2087,6 +2144,13 @@ impl Interpreter {
             if borrow.downcast_mut::<NativeIterFrame>().is_some() {
                 return Ok(Value::none());
             }
+            // GetItemIter (legacy `__getitem__` protocol, #394): same
+            // story — there is no user frame to clean up; mark
+            // exhausted so subsequent next() raises StopIteration.
+            if let Some(it) = borrow.downcast_mut::<GetItemIter>() {
+                it.exhausted = true;
+                return Ok(Value::none());
+            }
         }
 
         let mut borrow = match state_rc.try_borrow_mut() {
@@ -2182,6 +2246,11 @@ impl Interpreter {
             // the exception (matching CPython, where the iterator has no
             // Python frame to inject into).
             if borrow.downcast_mut::<NativeIterFrame>().is_some() {
+                return Err(PyError::Raised(exc_val));
+            }
+            // GetItemIter (#394): same — no Python frame to inject
+            // into.  Propagate the thrown exception.
+            if borrow.downcast_mut::<GetItemIter>().is_some() {
                 return Err(PyError::Raised(exc_val));
             }
         }

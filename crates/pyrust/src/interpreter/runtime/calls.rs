@@ -310,25 +310,30 @@ impl Interpreter {
             }
             Ok(items)
         } else if let ValueKind::PyInstance(inst) = val.kind() {
-            // Get iterator via __iter__ (or use self if it only has __next__).
-            let iterator = {
-                let inst_rc = Rc::clone(inst);
-                let class = Rc::clone(&inst_rc.borrow().class);
-                if let Some(method_val) = lookup_class_attr(&class, "__iter__") {
-                    invoke_class_method(
-                        self,
-                        method_val,
-                        Value::py_instance(inst_rc),
-                        &[],
-                    )?
-                } else if lookup_class_attr(&class, "__next__").is_some() {
-                    val.clone()
-                } else {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!("'{}' object is not iterable", class.borrow().name),
-                    ));
-                }
+            // CPython fallback order is `__iter__` first, then the legacy
+            // sequence-iter protocol via `__getitem__`.  Having only
+            // `__next__` does *not* make a class iterable — that property
+            // belongs to iterator objects, not iterables (#416 Copilot
+            // review).
+            let inst_rc = Rc::clone(inst);
+            let class = Rc::clone(&inst_rc.borrow().class);
+            let iterator = if let Some(method_val) = lookup_class_attr(&class, "__iter__") {
+                invoke_class_method(
+                    self,
+                    method_val,
+                    Value::py_instance(Rc::clone(&inst_rc)),
+                    &[],
+                )?
+            } else if lookup_class_attr(&class, "__getitem__").is_some() {
+                // Legacy sequence-iter protocol — lazy iterator that
+                // drives `__getitem__(0)`, `__getitem__(1)`, … on
+                // demand and terminates on IndexError/StopIteration.
+                self.make_getitem_iter(Rc::clone(&inst_rc))?
+            } else {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("'{}' object is not iterable", class.borrow().name),
+                ));
             };
             let mut items = Vec::new();
             loop {
@@ -351,6 +356,76 @@ impl Interpreter {
         }
     }
 
+    /// Build a lazy iterator wrapping the legacy `__getitem__`
+    /// sequence-iter protocol for `inst_rc`.  Returns a
+    /// `Value::generator(...)` that downcasts to [`GetItemIter`].
+    /// Each `next()` call invokes `inst.__getitem__(i)` once; the
+    /// caller's `break`/early-return correctly stops at the first
+    /// unused index (CPython semantics, #394).  Issue #416 Copilot
+    /// review: switched from eager materialise to lazy after the
+    /// reviewer flagged the observable break/short-circuit gap.
+    pub(crate) fn make_getitem_iter(&self, inst_rc: Rc<RefCell<PyInstance>>) -> Result<Value> {
+        let class = Rc::clone(&inst_rc.borrow().class);
+        let method_val = lookup_class_attr(&class, "__getitem__").ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                format!("'{}' object is not iterable", class.borrow().name),
+            )
+        })?;
+        let obj = Value::py_instance(inst_rc);
+        Ok(Value::generator(Box::new(GetItemIter {
+            obj,
+            method: method_val,
+            index: 0,
+            exhausted: false,
+        })))
+    }
+
+    /// One step of the lazy `__getitem__` iterator.
+    /// `Ok(Some(v))` → next element; `Ok(None)` → exhausted (caller
+    /// should yield `StopIteration` or return default); `Err(e)` →
+    /// any non-terminator exception from `__getitem__` propagates.
+    ///
+    /// Called from `call_next`'s GetItemIter branch and from
+    /// `ForIter`'s `UserDefined` arm via the same downcast.
+    pub(crate) fn step_getitem_iter(
+        &mut self,
+        state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
+    ) -> Result<Option<Value>> {
+        let snapshot: Option<(Value, Value, i64)> = {
+            let borrow = state_rc.borrow();
+            if let Some(it) = borrow.downcast_ref::<GetItemIter>() {
+                if it.exhausted {
+                    return Ok(None);
+                }
+                Some((it.obj.clone(), it.method.clone(), it.index))
+            } else {
+                return Err(PyError::Runtime("step_getitem_iter on non-GetItemIter state".to_string()));
+            }
+        };
+        let (obj, method, index) = snapshot.unwrap();
+        let arg = ExpandedCallArg {
+            name: None,
+            value: Value::int(index),
+        };
+        let result = invoke_class_method(self, method, obj, &[arg]);
+        match result {
+            Ok(v) => {
+                if let Some(it) = state_rc.borrow_mut().downcast_mut::<GetItemIter>() {
+                    it.index = it.index.saturating_add(1);
+                }
+                Ok(Some(v))
+            }
+            Err(e) if is_sequence_iter_terminator(self, &e) => {
+                if let Some(it) = state_rc.borrow_mut().downcast_mut::<GetItemIter>() {
+                    it.exhausted = true;
+                }
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Call next() on a generator or any object with __next__.
     pub(crate) fn call_next(&mut self, val: Value, default: Option<Value>) -> Result<Value> {
         if let ValueKind::Generator(state_rc) = val.kind() {
@@ -370,6 +445,28 @@ impl Interpreter {
                     let item = native.items[native.pos].clone();
                     native.pos += 1;
                     return Ok(item);
+                }
+            }
+
+            // GetItemIter path: drive one `__getitem__(i)` call lazily.
+            // Borrow released by step_getitem_iter before invoking the
+            // method (it would otherwise re-entrantly re-borrow).
+            {
+                let is_getitem = state_rc
+                    .borrow()
+                    .downcast_ref::<GetItemIter>()
+                    .is_some();
+                if is_getitem {
+                    return match self.step_getitem_iter(&state_rc)? {
+                        Some(v) => Ok(v),
+                        None => {
+                            if let Some(d) = default {
+                                Ok(d)
+                            } else {
+                                Err(PyError::named("StopIteration", String::new()))
+                            }
+                        }
+                    };
                 }
             }
 
@@ -1788,6 +1885,68 @@ fn apply_field_accessors(mut value: Value, mut rest: &str) -> Result<Value> {
         }
     }
     Ok(value)
+}
+
+/// Does `err` signal end-of-sequence for the legacy `__getitem__`
+/// iter protocol?  CPython terminates iteration on `IndexError`,
+/// `StopIteration`, **and any subclass of those** raised from
+/// `__getitem__`; anything else propagates to the caller.  Issue #394.
+///
+/// Subclass-aware: we look up the canonical `IndexError` /
+/// `StopIteration` classes via [`lookup_name_in_module`] and walk the
+/// raised instance's `class.base` chain with [`class_is_subclass_of`].
+/// A user-defined class *named* `IndexError` that doesn't actually
+/// derive from the built-in `IndexError` no longer falsely terminates
+/// iteration.
+pub(crate) fn is_sequence_iter_terminator(interp: &Interpreter, err: &PyError) -> bool {
+    // `class_is_subclass_of` and `lookup_name_in_module` are pulled into
+    // the `interpreter` module directly via `include!` in interpreter.rs
+    // — no use-import needed.
+
+    // Look up the canonical built-in exception classes in the module env.
+    // If they aren't present (shouldn't happen — installed by
+    // install_exception_builtins at startup), fall back to a name match
+    // so the iterator still terminates rather than spinning.
+    let (built_in_index, built_in_stop) = {
+        let env = &interp.env;
+        let idx = lookup_name_in_module(env, "IndexError");
+        let stp = lookup_name_in_module(env, "StopIteration");
+        let to_class = |v: Option<Value>| match v.as_ref().map(|v| v.kind()) {
+            Some(ValueKind::PyClass(c)) => Some(Rc::clone(c)),
+            _ => None,
+        };
+        (to_class(idx), to_class(stp))
+    };
+
+    let cls_is_terminator = |cls: &Rc<RefCell<PyClass>>| -> bool {
+        if let Some(ref base) = built_in_index
+            && class_is_subclass_of(cls, base)
+        {
+            return true;
+        }
+        if let Some(ref base) = built_in_stop
+            && class_is_subclass_of(cls, base)
+        {
+            return true;
+        }
+        false
+    };
+
+    match err {
+        // PyError::Named is the VM-internal raise shape that pre-dates
+        // the PyInstance-backed exception path.  Match the canonical
+        // built-in names directly — VM-internal raises never come from
+        // user subclasses of IndexError/StopIteration.
+        PyError::Named(cls, _) => cls == "IndexError" || cls == "StopIteration",
+        PyError::Raised(exc) => match exc.kind() {
+            ValueKind::PyInstance(inst) => {
+                let class = Rc::clone(&inst.borrow().class);
+                cls_is_terminator(&class)
+            }
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// Returns the ASCII-escaped repr of a value (like the built-in `ascii()`).

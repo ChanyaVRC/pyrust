@@ -1511,6 +1511,38 @@ impl Interpreter {
                         }
                     }
                 }
+                // Legacy sequence-iter protocol (#394): if the class
+                // defines `__getitem__` but no `__iter__`/`__contains__`,
+                // walk indices 0, 1, … until IndexError/StopIteration.
+                // **Short-circuits** on first match (#416 Copilot
+                // review): the lazy iterator stops calling
+                // `__getitem__` past the matching index, so a later
+                // index raising `RuntimeError` doesn't surface.
+                if lookup_class_attr(&class, "__getitem__").is_some() {
+                    let iter_val = self.make_getitem_iter(Rc::clone(&inst_rc))?;
+                    loop {
+                        match self.call_next(iter_val.clone(), None) {
+                            Ok(elem) => {
+                                if elem == item {
+                                    return Ok(Value::bool_(true));
+                                }
+                            }
+                            Err(PyError::Named(ref cls, _)) if cls == "StopIteration" => {
+                                return Ok(Value::bool_(false));
+                            }
+                            Err(PyError::Raised(ref exc)) => {
+                                let is_stop = matches!(exc.kind(),
+                                    ValueKind::PyInstance(i) if i.borrow().class.borrow().name == "StopIteration"
+                                );
+                                if is_stop {
+                                    return Ok(Value::bool_(false));
+                                }
+                                return Err(PyError::Raised(exc.clone()));
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                }
                 Err(PyError::named(
                     "TypeError",
                     format!("argument of type '{}' is not iterable", class.borrow().name),
