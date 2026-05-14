@@ -348,7 +348,7 @@ pyrust_module! {
         }
         let items = _interp.collect_iterable(args[0].value.clone())?;
         for item in items {
-            if item.truthy() {
+            if _interp.truthy_value(&item)? {
                 return Ok(Value::bool_(true));
             }
         }
@@ -364,7 +364,7 @@ pyrust_module! {
         }
         let items = _interp.collect_iterable(args[0].value.clone())?;
         for item in items {
-            if !item.truthy() {
+            if !_interp.truthy_value(&item)? {
                 return Ok(Value::bool_(false));
             }
         }
@@ -613,7 +613,7 @@ pyrust_module! {
         for a in args.iter() {
             if let Some(name) = a.name.as_deref() {
                 if name == "strict" {
-                    strict = a.value.truthy();
+                    strict = _interp.truthy_value(&a.value)?;
                 } else {
                     return Err(PyError::named(
                         "TypeError",
@@ -680,13 +680,13 @@ pyrust_module! {
         let mut result = Vec::new();
         for item in items {
             let keep = if use_identity {
-                item.truthy()
+                _interp.truthy_value(&item)?
             } else {
                 let test = _interp.call_function_expanded(
                     func.clone(),
                     &[ExpandedCallArg { name: None, value: item.clone() }],
                 )?;
-                test.truthy()
+                _interp.truthy_value(&test)?
             };
             if keep {
                 result.push(item);
@@ -1153,9 +1153,10 @@ pyrust_module! {
         if args.is_empty() {
             return Err(PyError::Runtime(format!("{FN_NAME}() requires at least one argument")));
         }
-        let reverse = args.iter().find(|a| a.name.as_deref() == Some("reverse"))
-            .map(|a| a.value.truthy())
-            .unwrap_or(false);
+        let reverse = match args.iter().find(|a| a.name.as_deref() == Some("reverse")) {
+            Some(a) => _interp.truthy_value(&a.value)?,
+            None => false,
+        };
         let key_fn = args.iter().find(|a| a.name.as_deref() == Some("key"))
             .map(|a| a.value.clone());
         let positional: Vec<&ExpandedCallArg> = args.iter()
