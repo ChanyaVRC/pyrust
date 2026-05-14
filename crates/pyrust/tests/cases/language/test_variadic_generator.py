@@ -66,3 +66,31 @@ loc = next(g6(100, 200))
 print(sorted(loc.keys()))  # ['args', 'x']
 print(loc["args"])         # (100, 200)
 print(loc["x"])            # 42
+
+# --- nonlocal cell-var capture: a variadic generator that closes
+#     over an outer cell. Verifies the env-swap dance in the variadic
+#     branch keeps the enclosing closure scope reachable through the
+#     GeneratorFrame's `saved_env`. ---
+def outer():
+    x = 0
+    def gen(*args):
+        nonlocal x
+        for a in args:
+            x += a
+            yield x
+    return gen
+
+g = outer()
+print(list(g(1, 2, 3)))  # [1, 3, 6]
+
+# --- throw() into a variadic generator: exception propagates through
+#     the generator body's try/except, exercising the resume path. ---
+def g7(*args):
+    try:
+        yield args
+    except ValueError as e:
+        yield ("caught", str(e))
+
+it = g7(11, 22)
+print(next(it))                       # (11, 22)
+print(it.throw(ValueError("boom")))   # ('caught', 'boom')
