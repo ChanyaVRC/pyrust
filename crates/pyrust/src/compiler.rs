@@ -1265,21 +1265,6 @@ fn collect_transitive_free_vars_in_expr(expr: &Expr, uses: &mut HashSet<String>)
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
-fn cmp_to_binary(op: CmpOp) -> BinaryOp {
-    match op {
-        CmpOp::Eq => BinaryOp::Eq,
-        CmpOp::Ne => BinaryOp::Ne,
-        CmpOp::Lt => BinaryOp::Lt,
-        CmpOp::Le => BinaryOp::Le,
-        CmpOp::Gt => BinaryOp::Gt,
-        CmpOp::Ge => BinaryOp::Ge,
-        CmpOp::In => BinaryOp::In,
-        CmpOp::NotIn => BinaryOp::NotIn,
-        CmpOp::Is => BinaryOp::Is,
-        CmpOp::IsNot => BinaryOp::IsNot,
-    }
-}
-
 fn const_eq(a: &Value, b: &Value) -> bool {
     use ValueKind::*;
     match (a.kind(), b.kind()) {
@@ -1329,7 +1314,7 @@ fn fold_constant(expr: &Expr) -> Option<Value> {
             let mut cur = fold_constant(left)?;
             for (cmp_op, rhs_expr) in ops {
                 let rhs = fold_constant(rhs_expr)?;
-                let op = cmp_to_binary(*cmp_op);
+                let op = BinaryOp::from(*cmp_op);
                 let result = fold_binop(&cur, op, &rhs)?;
                 if !result.truthy() {
                     return Some(Value::bool_(false));
@@ -5564,7 +5549,7 @@ impl Compiler {
                 if ops.len() == 1 {
                     let (cmp_op, right) = &ops[0];
                     let lhs = self.compile_expr(left);
-                    let bin_op = cmp_to_binary(*cmp_op);
+                    let bin_op = BinaryOp::from(*cmp_op);
                     let dst = self.ensure_dst(lhs);
                     let rhs = self.compile_expr(right);
                     self.emit(Insn::BinOp(dst, lhs, bin_op, rhs));
@@ -5578,7 +5563,7 @@ impl Compiler {
                     let mut and_patches: Vec<usize> = Vec::new();
                     let mut prev_rhs = first_lhs;
                     for (i, (cmp_op, rhs_expr)) in ops.iter().enumerate() {
-                        let bin_op = cmp_to_binary(*cmp_op);
+                        let bin_op = BinaryOp::from(*cmp_op);
                         let rhs = self.compile_expr(rhs_expr);
                         let last = i == ops.len() - 1;
                         // For the last comparison write directly into result_dst to

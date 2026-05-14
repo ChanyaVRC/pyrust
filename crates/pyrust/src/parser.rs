@@ -1334,7 +1334,7 @@ impl Parser {
             let (op, right) = ops.remove(0);
             return Ok(Expr::Binary {
                 left: Box::new(left),
-                op: cmp_op_to_binary(op),
+                op: op.into(),
                 right: Box::new(right),
             });
         }
@@ -2196,19 +2196,4 @@ fn exprs_to_assign_targets(exprs: &[Expr], starred: &[bool]) -> Result<Vec<Assig
         }
     }
     Ok(targets)
-}
-
-fn cmp_op_to_binary(op: CmpOp) -> BinaryOp {
-    match op {
-        CmpOp::Eq => BinaryOp::Eq,
-        CmpOp::Ne => BinaryOp::Ne,
-        CmpOp::Lt => BinaryOp::Lt,
-        CmpOp::Le => BinaryOp::Le,
-        CmpOp::Gt => BinaryOp::Gt,
-        CmpOp::Ge => BinaryOp::Ge,
-        CmpOp::In => BinaryOp::In,
-        CmpOp::NotIn => BinaryOp::NotIn,
-        CmpOp::Is => BinaryOp::Is,
-        CmpOp::IsNot => BinaryOp::IsNot,
-    }
 }
