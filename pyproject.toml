@@ -7,7 +7,7 @@ name = "pyrust"
 version = "0.1.0"
 description = "A tiny Python-like interpreter implemented in Rust"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.12"
 authors = [{ name = "ChanyaVRC" }]
 classifiers = [
     "Programming Language :: Rust",
