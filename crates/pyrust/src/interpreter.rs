@@ -73,9 +73,17 @@ pub struct Interpreter {
     ///     or the script frame at module scope.
     ///
     /// Safety: each raw pointer is only dereferenced while the frame
-    /// is still on the VM stack, i.e. inside the same `run_bytecode`
-    /// call that pushed it.  The push/pop invariant in `program.rs`
-    /// and `calls.rs` guarantees this.
+    /// is still on the VM stack, i.e. inside the same VM entry that
+    /// pushed it.  The push/pop invariant is maintained by:
+    ///   * `program.rs::try_exec_vm_script_with_index` (`Script`)
+    ///   * `calls.rs::call_user_function_expanded` — both the simple
+    ///     and variadic user-function paths (`Function`)
+    ///   * `vm.rs::resume_generator_with_exc` — each generator resume
+    ///     (`Function`; the regs pointer comes from the heap-allocated
+    ///     `GeneratorFrame::regs`, stable across yields)
+    /// Class bodies (`Insn::MakeClass`) do NOT publish a view; calling
+    /// `locals()` inside a class body falls through to the module-
+    /// globals path.  Tracked as a known limitation (issue #487).
     pub(crate) vm_frame_views: Vec<VmFrameView>,
 }
 
