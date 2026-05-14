@@ -1,33 +1,6 @@
-use pyrust_core::{PyError, Result, Value, ValueKind};
+use pyrust_core::{PyError, Result, Value, ValueKind, iter_values_via_registry};
 
 use crate::sequence::normalise_index;
-
-fn iter_value(v: &Value) -> Result<Vec<Value>> {
-    match v.kind() {
-        ValueKind::List(items) => Ok(items.to_vec()),
-        ValueKind::Tuple(items) => Ok(items.to_vec()),
-        ValueKind::Str(s) => Ok(s.chars().map(|c| Value::string(c.to_string())).collect()),
-        ValueKind::Range { start, stop, step } => {
-            let mut out = Vec::new();
-            let mut cur = start;
-            loop {
-                if step > 0 && cur >= stop {
-                    break;
-                }
-                if step < 0 && cur <= stop {
-                    break;
-                }
-                out.push(Value::int(cur));
-                cur = cur.wrapping_add(step);
-            }
-            Ok(out)
-        }
-        _ => Err(PyError::Runtime(format!(
-            "'{}' object is not iterable",
-            pyrust_core::builtin_type_name(v)
-        ))),
-    }
-}
 
 // Mutable Sequence Operations (https://docs.python.org/3/library/stdtypes.html#mutable-sequence-types)
 //
@@ -67,7 +40,11 @@ pub fn extend(receiver: &Value, args: Vec<Value>) -> Result<Value> {
     // receiver while we iterate the arg, aliasing (`a.extend(a)`) can't
     // produce a simultaneous borrow regardless of whether the arg is the
     // same Rc as the receiver.
-    let snapshot = iter_value(&iterable)?;
+    //
+    // Goes through `iter_values_via_registry` (#427) so any iterable the
+    // interpreter recognises — set, dict, dict-views, bytes, generators,
+    // user `__iter__` — works here too, not just list/tuple/str/range.
+    let snapshot = iter_values_via_registry(&iterable)?;
     receiver.list_extend(snapshot)?;
     Ok(Value::none())
 }
