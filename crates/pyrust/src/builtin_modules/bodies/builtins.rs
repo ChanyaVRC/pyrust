@@ -1288,7 +1288,10 @@ pyrust_module! {
                             )),
                             _ => return Err(PyError::named(
                                 "TypeError",
-                                "bytes element must be an integer".to_string(),
+                                format!(
+                                    "'{}' object cannot be interpreted as an integer",
+                                    pyrust_core::builtin_type_name(v),
+                                ),
                             )),
                         }
                     }
@@ -1305,7 +1308,10 @@ pyrust_module! {
                             )),
                             _ => return Err(PyError::named(
                                 "TypeError",
-                                "bytes element must be an integer".to_string(),
+                                format!(
+                                    "'{}' object cannot be interpreted as an integer",
+                                    pyrust_core::builtin_type_name(v),
+                                ),
                             )),
                         }
                     }
