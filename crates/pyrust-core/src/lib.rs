@@ -2791,10 +2791,9 @@ mod tests {
         // (`m = lst.append; m(4)`) and simple aliasing (`b = a; b.append(x)`)
         // mutate the original list — matching CPython's reference semantics.
         let a = Value::list(vec![Value::int(1)]);
-        let mut b = a.clone();
-        b.as_list_mut()
-            .expect("clone must still be a list")
-            .push(Value::int(2));
+        let b = a.clone();
+        b.list_push(Value::int(2))
+            .expect("clone must still be a list");
         let items = a.as_list().expect("original must still be a list");
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].as_int(), Some(1));
@@ -2822,10 +2821,8 @@ mod tests {
             s.insert(PyKey::Int(1));
             s
         });
-        let mut b = a.clone();
-        b.as_set_mut()
-            .expect("clone must still be a set")
-            .insert(PyKey::Int(2));
+        let b = a.clone();
+        b.set_add(PyKey::Int(2)).expect("clone must still be a set");
         let items = a.as_set().expect("original must still be a set");
         assert!(items.contains(&PyKey::Int(1)));
         assert!(items.contains(&PyKey::Int(2)));
@@ -2837,15 +2834,14 @@ mod tests {
         // Symmetric counterpart to `set_clone_shares_storage`: mutate via
         // the original Value, the clone (alias) sees it.  This pins both
         // directions of the Rc-shared backing post-#305.
-        let mut a = Value::set({
+        let a = Value::set({
             let mut s = IndexSet::new();
             s.insert(PyKey::Int(1));
             s
         });
         let b = a.clone();
-        a.as_set_mut()
-            .expect("original must still be a set")
-            .insert(PyKey::Int(2));
+        a.set_add(PyKey::Int(2))
+            .expect("original must still be a set");
         let items = b.as_set().expect("clone must still be a set");
         assert!(items.contains(&PyKey::Int(1)));
         assert!(items.contains(&PyKey::Int(2)));
