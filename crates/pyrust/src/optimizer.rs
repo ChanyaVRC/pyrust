@@ -34,6 +34,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_binop_const_fusion(insns, num_locals);
     let insns = pass_fold_const_tuple(insns, num_locals, &mut consts);
     let insns = pass_const_fold(insns, &mut consts);
+
     let insns = pass_algebraic_simplify(insns, &mut consts);
     let insns = pass_unary_fold(insns, num_locals, &mut consts);
     let insns = pass_ivsr(insns, &mut consts, &mut num_regs);
@@ -561,12 +562,12 @@ fn pass_dead_code(insns: Vec<Insn>) -> Vec<Insn> {
     compact(insns, &reachable)
 }
 
-// ─── Algebraic simplification ──────────────────────────────────────────────────
+// ─── Algebraic simplification (type-gated) ────────────────────────────────────
 
-/// Simplify algebraic identities on integer operands (integers only — float and
-/// string arithmetic may have different identity semantics):
+/// Simplify algebraic identities — gated on the LHS being statically known
+/// to be a built-in `int` (or `BigInt`).
 ///
-/// | Pattern                         | Result                     |
+/// | Pattern                         | Rewrite                    |
 /// |---------------------------------|----------------------------|
 /// | `BinOpConst(dst, lhs, Add, 0)`  | `Move(dst, lhs)`           |
 /// | `BinOpConst(dst, lhs, Sub, 0)`  | `Move(dst, lhs)`           |
@@ -575,36 +576,209 @@ fn pass_dead_code(insns: Vec<Insn>) -> Vec<Insn> {
 /// | `BinOpConst(dst, lhs, Pow, 1)`  | `Move(dst, lhs)`           |
 /// | `BinOpConst(dst, lhs, Pow, 0)`  | `LoadConst(dst, idx_1)`    |
 ///
-/// Commutative identities (0+x, 1*x, 0*x) are produced by `pass_binop_const_fusion`
-/// only when the constant is on the right, so we don't need separate cases for them.
+/// The earlier (#438) version of this pass fired unconditionally and broke
+/// user-defined `__add__` / `__mul__` / `__pow__` (matching CPython
+/// requires dunder dispatch, not algebraic identity).  This version keeps
+/// the unsafe arms gated behind `int_regs` — a per-basic-block set of
+/// registers proven to hold an `Int` / `BigInt` value:
+///
+/// - `LoadConst(r, c)` where `consts[c]` is Int / BigInt → mark `r`.
+/// - `ForCountReg/Const/ConstInline(var, …)` → mark `var` (loop counter).
+/// - `Move(dst, src)` / `CopyReg(dst, src)` from a marked `src` → mark `dst`.
+/// - `BinOpConst(dst, lhs, op, c)` with `lhs` marked, `c` Int, and `op` ∈
+///   {Add, Sub, Mul, FloorDiv, Mod, BitAnd, BitOr, BitXor, LShift, RShift}
+///   → mark `dst` (these ops preserve Int for Int LHS).  `Pow` / `Div`
+///   skipped — `Div` returns Float, `Pow` returns Float for negative RHS.
+///
+/// `int_regs` is cleared at every basic-block boundary, conservatively
+/// dropping flow-sensitive type info that would otherwise need a full
+/// dataflow walk.  Any unrecognised write (`writable_dst`) drops the
+/// destination from the set.  This is strictly a subset of safe rewrites;
+/// false negatives are fine, false positives would be #438 all over again.
 fn pass_algebraic_simplify(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn> {
     use crate::ast::BinaryOp::*;
 
-    insns
-        .into_iter()
-        .map(|insn| {
-            if let Insn::BinOpConst(dst, lhs, op, c_idx) = insn {
-                let c_val = match consts[c_idx as usize].kind() {
-                    ValueKind::Int(n) => n,
-                    _ => return Insn::BinOpConst(dst, lhs, op, c_idx),
-                };
-                match (op, c_val) {
-                    (Add, 0) | (Sub, 0) | (Mul, 1) | (Pow, 1) => Insn::Move(dst, lhs),
-                    (Mul, 0) => {
-                        let idx = intern_const_in_pool(consts, Value::int(0)).unwrap_or(c_idx);
-                        Insn::LoadConst(dst, idx)
-                    }
-                    (Pow, 0) => {
-                        let idx = intern_const_in_pool(consts, Value::int(1)).unwrap_or(c_idx);
-                        Insn::LoadConst(dst, idx)
-                    }
-                    _ => Insn::BinOpConst(dst, lhs, op, c_idx),
-                }
-            } else {
-                insn
+    // Basic-block boundary set (mirrors `pass_const_fold`'s logic).
+    let mut bb_starts: HashSet<usize> = HashSet::new();
+    for (i, insn) in insns.iter().enumerate() {
+        let k: Option<i32> = match insn {
+            Insn::Jump(k) => Some(*k),
+            Insn::JumpIfFalse(_, k)
+            | Insn::JumpIfTrue(_, k)
+            | Insn::CmpJumpIfFalse(_, _, _, k)
+            | Insn::CmpJumpIfTrue(_, _, _, k)
+            | Insn::CmpJumpIfFalseConst(_, _, _, k)
+            | Insn::CmpJumpIfTrueConst(_, _, _, k)
+            | Insn::ForIter(_, _, k)
+            | Insn::ForCountReg(_, _, _, _, k)
+            | Insn::ForCountConst(_, _, _, _, k)
+            | Insn::ForCountConstInline(_, _, _, _, k)
+            | Insn::SetupExcept(k) => Some(*k),
+            _ => None,
+        };
+        if let Some(k) = k {
+            let target = (i as i64 + 1 + k as i64) as usize;
+            if target < insns.len() {
+                bb_starts.insert(target);
             }
-        })
-        .collect()
+        }
+    }
+
+    // Pre-scan: find registers that are WRITE-ONCE — assigned by exactly one
+    // `LoadConst` and never written again.  These hold a stable Int value
+    // across the whole function (including loop bodies), so the bb-clear of
+    // `int_regs` doesn't need to lose them.  This catches the hot pattern
+    // `for i in range(N): x = i + 0` where the `0` constant is hoisted out
+    // of the loop by `pass_licm` as a register, leaving a `BinOp(_, i, Add,
+    // c_reg)` in the loop body that the per-bb tracking would otherwise
+    // miss (the LoadConst is outside the loop's basic block).
+    let mut write_count: HashMap<u32, u32> = HashMap::new();
+    let mut load_const_value: HashMap<u32, i64> = HashMap::new();
+    for insn in &insns {
+        if let Insn::LoadConst(dst, c) = insn {
+            *write_count.entry(*dst).or_insert(0) += 1;
+            if let Some(v) = consts[*c as usize].as_int() {
+                load_const_value.insert(*dst, v);
+            }
+        } else if let Some(dst) = writable_dst(insn) {
+            *write_count.entry(dst).or_insert(0) += 1;
+        }
+    }
+    // Final map: register → its sole Int constant value, iff written exactly once
+    // and that single write was a `LoadConst(_, c)` with `consts[c]` an Int.
+    let immutable_int_const: HashMap<u32, i64> = load_const_value
+        .into_iter()
+        .filter(|(r, _)| write_count.get(r).copied() == Some(1))
+        .collect();
+
+    let is_int_const = |idx: u16, consts: &[Value]| -> bool {
+        matches!(
+            consts[idx as usize].kind(),
+            ValueKind::Int(_) | ValueKind::BigInt(_)
+        )
+    };
+    // Ops that preserve Int when both operands are Int.  `Div` returns
+    // Float; `Pow` may return Float for negative RHS; skipped.
+    let int_preserving = |op: crate::ast::BinaryOp| -> bool {
+        matches!(
+            op,
+            Add | Sub | Mul | FloorDiv | Mod | BitAnd | BitOr | BitXor | LShift | RShift
+        )
+    };
+    // Match an identity pattern.  Returns `Some(rewrite)` when `(op, c_val)` is
+    // one of the six recognised algebraic identities; otherwise `None`.
+    let identity_rewrite = |dst: u32,
+                            lhs: u32,
+                            op: crate::ast::BinaryOp,
+                            c_val: i64,
+                            consts: &mut Vec<Value>|
+     -> Option<Insn> {
+        match (op, c_val) {
+            (Add, 0) | (Sub, 0) | (Mul, 1) | (Pow, 1) => Some(Insn::Move(dst, lhs)),
+            (Mul, 0) => {
+                intern_const_in_pool(consts, Value::int(0)).map(|idx| Insn::LoadConst(dst, idx))
+            }
+            (Pow, 0) => {
+                intern_const_in_pool(consts, Value::int(1)).map(|idx| Insn::LoadConst(dst, idx))
+            }
+            _ => None,
+        }
+    };
+
+    let mut int_regs: HashSet<u32> = HashSet::new();
+    // Seed `int_regs` with the immutable-int-const registers — they're Int
+    // everywhere, so always in the set regardless of bb position.
+    for &r in immutable_int_const.keys() {
+        int_regs.insert(r);
+    }
+    let mut out: Vec<Insn> = Vec::with_capacity(insns.len());
+
+    for (i, insn) in insns.into_iter().enumerate() {
+        if bb_starts.contains(&i) {
+            int_regs.clear();
+            // Re-seed with immutable consts (they survive bb boundaries).
+            for &r in immutable_int_const.keys() {
+                int_regs.insert(r);
+            }
+        }
+        match insn {
+            Insn::LoadConst(dst, c) => {
+                if is_int_const(c, consts) {
+                    int_regs.insert(dst);
+                } else {
+                    int_regs.remove(&dst);
+                }
+                out.push(Insn::LoadConst(dst, c));
+            }
+            Insn::Move(dst, src) | Insn::CopyReg(dst, src) => {
+                if int_regs.contains(&src) {
+                    int_regs.insert(dst);
+                } else {
+                    int_regs.remove(&dst);
+                }
+                out.push(insn);
+            }
+            Insn::ForCountReg(var, _, _, _, _)
+            | Insn::ForCountConst(var, _, _, _, _)
+            | Insn::ForCountConstInline(var, _, _, _, _) => {
+                // Loop counter is always Int (range() emits int bounds).
+                int_regs.insert(var);
+                out.push(insn);
+            }
+            Insn::BinOpConst(dst, lhs, op, c) => {
+                let lhs_int = int_regs.contains(&lhs);
+                let c_int = is_int_const(c, consts);
+                if lhs_int && c_int {
+                    if let Some(cv) = consts[c as usize].as_int() {
+                        if let Some(new) = identity_rewrite(dst, lhs, op, cv, consts) {
+                            int_regs.insert(dst);
+                            out.push(new);
+                            continue;
+                        }
+                    }
+                }
+                if lhs_int && c_int && int_preserving(op) {
+                    int_regs.insert(dst);
+                } else {
+                    int_regs.remove(&dst);
+                }
+                out.push(Insn::BinOpConst(dst, lhs, op, c));
+            }
+            Insn::BinOp(dst, lhs, op, rhs) => {
+                // First: try the identity rewrite when `rhs` is an immutable
+                // int constant register (covers the loop case where
+                // `pass_binop_const_fusion` couldn't fuse across a back-edge).
+                if int_regs.contains(&lhs) {
+                    if let Some(&cv) = immutable_int_const.get(&rhs) {
+                        if let Some(new) = identity_rewrite(dst, lhs, op, cv, consts) {
+                            int_regs.insert(dst);
+                            out.push(new);
+                            continue;
+                        }
+                    }
+                }
+                // Propagate Int-ness through type-preserving ops.
+                if int_regs.contains(&lhs) && int_regs.contains(&rhs) && int_preserving(op) {
+                    int_regs.insert(dst);
+                } else {
+                    int_regs.remove(&dst);
+                }
+                out.push(Insn::BinOp(dst, lhs, op, rhs));
+            }
+            insn => {
+                // Any other write conservatively drops the dst's int-ness.
+                if let Some(dst) = writable_dst(&insn) {
+                    // ...unless it's an immutable-int-const register: those
+                    // are mark-once and write-once by definition (pre-scan
+                    // verified write_count == 1), so we never reach here
+                    // for one.  The `remove` is still safe (it'd be a no-op).
+                    int_regs.remove(&dst);
+                }
+                out.push(insn);
+            }
+        }
+    }
+    out
 }
 
 // ─── Unary constant folding ────────────────────────────────────────────────────
@@ -2561,80 +2735,183 @@ mod tests {
         assert!(has_neg5, "constant -5 should appear after unary fold");
     }
 
-    // ── pass_algebraic_simplify ───────────────────────────────────────────────
+    // ── algebraic-simplify removal (issue #438) ───────────────────────────────
+    //
+    // These tests pin the regression: the optimizer must NOT rewrite
+    // `x + 0` / `x * 1` / `x * 0` / `x ** 0` / `x ** 1` when `x` is a function
+    // parameter of unknown type, because a user class may override `__add__`
+    // etc. and the rewrite would skip dunder dispatch.
 
     #[test]
-    fn algebraic_add_zero_becomes_move() {
-        use crate::ast::BinaryOp;
-        use crate::value::Value;
-        let mut consts = vec![Value::int(0)];
-        let insns = vec![Insn::BinOpConst(2, 1, BinaryOp::Add, 0)];
-        let out = pass_algebraic_simplify(insns, &mut consts);
-        assert!(matches!(out[0], Insn::Move(2, 1)), "x+0 should become Move");
-    }
-
-    #[test]
-    fn algebraic_mul_zero_becomes_loadconst() {
-        use crate::ast::BinaryOp;
-        use crate::value::Value;
-        let mut consts = vec![Value::int(0)];
-        let insns = vec![Insn::BinOpConst(2, 1, BinaryOp::Mul, 0)];
-        let out = pass_algebraic_simplify(insns, &mut consts);
-        assert!(
-            matches!(out[0], Insn::LoadConst(2, _)),
-            "x*0 should become LoadConst(0)"
-        );
-    }
-
-    #[test]
-    fn algebraic_pow_zero_becomes_loadconst_one() {
-        use crate::ast::BinaryOp;
-        use crate::value::Value;
-        let mut consts = vec![Value::int(0)];
-        let insns = vec![Insn::BinOpConst(2, 1, BinaryOp::Pow, 0)];
-        let out = pass_algebraic_simplify(insns, &mut consts);
-        assert!(
-            matches!(out[0], Insn::LoadConst(2, _)),
-            "x**0 should become LoadConst(1)"
-        );
-        let idx = match out[0] {
-            Insn::LoadConst(_, i) => i,
-            _ => panic!(),
-        };
-        assert!(matches!(
-            consts[idx as usize].kind(),
-            crate::value::ValueKind::Int(1)
-        ));
-    }
-
-    #[test]
-    fn algebraic_skips_float_identity() {
-        use crate::ast::BinaryOp;
-        use crate::value::Value;
-        // 0.0 is int-0-like but we only simplify integer constants.
-        let mut consts = vec![Value::float(0.0)];
-        let insns = vec![Insn::BinOpConst(2, 1, BinaryOp::Add, 0)];
-        let out = pass_algebraic_simplify(insns, &mut consts);
-        // Should NOT simplify float: x + 0.0 has different NaN/inf semantics.
-        assert!(
-            matches!(out[0], Insn::BinOpConst(2, 1, BinaryOp::Add, 0)),
-            "float identity should not be simplified"
-        );
-    }
-
-    #[test]
-    fn algebraic_on_compiled_code() {
-        // x + 0 inside a function — algebraic pass should fold to Move.
+    fn algebraic_x_plus_zero_keeps_binopconst() {
+        // x + 0 inside a function must NOT be rewritten to Move(dst, x),
+        // because `x` may be a user instance with a `__add__` override.
         let code = compile_fn("def f(x):\n    return x + 0\n");
         let optimized = optimize(code);
-        // After simplification x+0 becomes Move(dst,x), then trivial_nop removes Move(r,r).
-        // Either way, there should be no BinOpConst in the output.
         let has_binopconst = optimized.fn_protos[0]
             .code
             .insns
             .iter()
             .any(|i| matches!(i, Insn::BinOpConst(..)));
-        assert!(!has_binopconst, "x+0 should not leave a BinOpConst");
+        assert!(
+            has_binopconst,
+            "x+0 must keep BinOpConst so __add__ dispatch runs at runtime"
+        );
+    }
+
+    #[test]
+    fn algebraic_x_times_zero_keeps_binopconst() {
+        // x * 0 must NOT collapse to LoadConst(0) — user `__mul__` may run.
+        let code = compile_fn("def f(x):\n    return x * 0\n");
+        let optimized = optimize(code);
+        let has_binopconst = optimized.fn_protos[0]
+            .code
+            .insns
+            .iter()
+            .any(|i| matches!(i, Insn::BinOpConst(..)));
+        assert!(
+            has_binopconst,
+            "x*0 must keep BinOpConst so __mul__ dispatch runs at runtime"
+        );
+    }
+
+    #[test]
+    fn algebraic_x_pow_zero_keeps_binopconst() {
+        // x ** 0 must NOT collapse to LoadConst(1) — user `__pow__` may run.
+        let code = compile_fn("def f(x):\n    return x ** 0\n");
+        let optimized = optimize(code);
+        let has_binopconst = optimized.fn_protos[0]
+            .code
+            .insns
+            .iter()
+            .any(|i| matches!(i, Insn::BinOpConst(..)));
+        assert!(
+            has_binopconst,
+            "x**0 must keep BinOpConst so __pow__ dispatch runs at runtime"
+        );
+    }
+
+    #[test]
+    fn algebraic_constant_lhs_still_folds_via_const_fold() {
+        // `5 + 0` should still fold to `5` — handled by `pass_const_fold`,
+        // not the removed algebraic-simplify pass.
+        let code = compile_fn("def f():\n    return 5 + 0\n");
+        let optimized = optimize(code);
+        // No BinOpConst should remain: const_fold turned it into LoadConst(_, 5).
+        let has_binopconst = optimized.fn_protos[0]
+            .code
+            .insns
+            .iter()
+            .any(|i| matches!(i, Insn::BinOpConst(..)));
+        assert!(
+            !has_binopconst,
+            "5+0 must still be constant-folded by pass_const_fold"
+        );
+    }
+
+    // ── pass_algebraic_simplify (type-gated, fires for known Int LHS) ────────
+
+    #[test]
+    fn algebraic_fires_when_lhs_known_int_from_loadconst() {
+        // `x = 5; y = x + 0` — LoadConst marks `x` as Int, so `x + 0`
+        // simplifies to Move (and the chain typically collapses further).
+        let code = compile_fn("def f():\n    x = 5\n    return x + 0\n");
+        let optimized = optimize(code);
+        let has_binopconst = optimized.fn_protos[0]
+            .code
+            .insns
+            .iter()
+            .any(|i| matches!(i, Insn::BinOpConst(..)));
+        assert!(
+            !has_binopconst,
+            "x+0 with x known Int (LoadConst 5) should be simplified"
+        );
+    }
+
+    #[test]
+    fn algebraic_fires_for_loop_counter() {
+        // `for i in range(N): t = i + 0` — ForCount* marks `i` as Int,
+        // so `i + 0` inside the loop body simplifies.
+        let code = compile_fn(
+            "def f():\n    t = 0\n    for i in range(100):\n        t = i + 0\n    return t\n",
+        );
+        let optimized = optimize(code);
+        // The loop body should NOT contain `BinOpConst(..., Add, 0)` —
+        // it must have collapsed via algebraic + downstream passes.
+        let loop_binopconst_add0 = optimized.fn_protos[0].code.insns.iter().any(|i| {
+            matches!(i, Insn::BinOpConst(_, _, crate::ast::BinaryOp::Add, c_idx)
+                if matches!(optimized.fn_protos[0].code.consts[*c_idx as usize].kind(),
+                            crate::value::ValueKind::Int(0)))
+        });
+        assert!(
+            !loop_binopconst_add0,
+            "i+0 in loop body should be simplified (loop counter is Int)"
+        );
+    }
+
+    #[test]
+    fn algebraic_int_mul_one_simplifies() {
+        let code = compile_fn("def f():\n    x = 7\n    return x * 1\n");
+        let optimized = optimize(code);
+        let has_binopconst = optimized.fn_protos[0]
+            .code
+            .insns
+            .iter()
+            .any(|i| matches!(i, Insn::BinOpConst(..)));
+        assert!(!has_binopconst, "x*1 with x known Int should be simplified");
+    }
+
+    #[test]
+    fn algebraic_int_mul_zero_loadconst() {
+        // `x = 7; return x * 0` — `x` is Int, so `x * 0` becomes LoadConst(0)
+        // (no BinOpConst left after the pass).
+        let code = compile_fn("def f():\n    x = 7\n    return x * 0\n");
+        let optimized = optimize(code);
+        let has_binopconst = optimized.fn_protos[0]
+            .code
+            .insns
+            .iter()
+            .any(|i| matches!(i, Insn::BinOpConst(..)));
+        assert!(
+            !has_binopconst,
+            "x*0 with x known Int should fold to LoadConst(0)"
+        );
+    }
+
+    #[test]
+    fn algebraic_unknown_lhs_still_keeps_binopconst() {
+        // Param `x` of unknown type — pass MUST NOT fire (regression pin).
+        // This is the original #438 test, restated to make sure the gating
+        // works for the bug case.
+        let code = compile_fn("def f(x):\n    return x + 0\n");
+        let optimized = optimize(code);
+        let has_binopconst = optimized.fn_protos[0]
+            .code
+            .insns
+            .iter()
+            .any(|i| matches!(i, Insn::BinOpConst(..)));
+        assert!(
+            has_binopconst,
+            "x+0 with unknown-type x MUST keep BinOpConst (#438)"
+        );
+    }
+
+    #[test]
+    fn algebraic_float_lhs_keeps_binopconst() {
+        // `x = 1.5; return x + 0` — x is Float, pass MUST NOT fire because
+        // `float * 0` returns `0.0` (not int 0) and `float + 0` preserves
+        // NaN/inf semantics.
+        let code = compile_fn("def f():\n    x = 1.5\n    return x + 0\n");
+        let optimized = optimize(code);
+        let has_binopconst = optimized.fn_protos[0]
+            .code
+            .insns
+            .iter()
+            .any(|i| matches!(i, Insn::BinOpConst(..)));
+        assert!(
+            has_binopconst,
+            "x+0 with Float x MUST keep BinOpConst (gating works for non-Int)"
+        );
     }
 
     // ── pass_const_fold ───────────────────────────────────────────────────────
