@@ -391,12 +391,14 @@ pyrust_module! {
                     Value::py_instance(instance_rc),
                     &[],
                 )?;
-                return match result.kind() {
-                    ValueKind::Str(_) => Ok(result),
-                    _ => Err(PyError::named(
+                let is_str = matches!(result.kind(), ValueKind::Str(_));
+                return if is_str {
+                    Ok(result)
+                } else {
+                    Err(PyError::named(
                         "TypeError",
                         "__repr__ returned non-string".to_string(),
-                    )),
+                    ))
                 };
             }
         }
@@ -701,16 +703,21 @@ pyrust_module! {
             return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
         }
         let val = args[0].value.clone();
-        match val.kind() {
-            // Generators are their own iterators.
-            ValueKind::Generator(_) => Ok(val),
-            // User-defined objects: call __iter__(), then fall back to
-            // the legacy sequence-iter protocol via __getitem__.
-            // Having only `__next__` does NOT make a class iterable —
-            // that property belongs to iterators, not iterables (#416
-            // Copilot review).
-            ValueKind::PyInstance(inst) => {
-                let inst_rc = Rc::clone(inst);
+        // Detect kind tag in a scoped block so the kind() borrow drops
+        // before we may need to move `val` (#450).
+        enum IterKind {
+            Generator,
+            PyInstance(Rc<RefCell<crate::value::PyInstance>>),
+            Other,
+        }
+        let kind = match val.kind() {
+            ValueKind::Generator(_) => IterKind::Generator,
+            ValueKind::PyInstance(inst) => IterKind::PyInstance(Rc::clone(inst)),
+            _ => IterKind::Other,
+        };
+        match kind {
+            IterKind::Generator => Ok(val),
+            IterKind::PyInstance(inst_rc) => {
                 let class = Rc::clone(&inst_rc.borrow().class);
                 if let Some(method_val) = lookup_class_attr(&class, "__iter__") {
                     invoke_class_method(
@@ -720,10 +727,6 @@ pyrust_module! {
                         &[],
                     )
                 } else if lookup_class_attr(&class, "__getitem__").is_some() {
-                    // Legacy sequence-iter protocol (#394) — lazy
-                    // GetItemIter so `next()` drives one __getitem__
-                    // call at a time; `for x in obj: break` only
-                    // touches index 0 (#416 Copilot review).
                     _interp.make_getitem_iter(inst_rc)
                 } else {
                     Err(PyError::named(
@@ -732,9 +735,7 @@ pyrust_module! {
                     ))
                 }
             }
-            // Built-in iterables: materialise into a NativeIterFrame so that
-            // next() works on the returned value.
-            _ => {
+            IterKind::Other => {
                 let items = iter_values(val.clone()).map_err(|_| {
                     PyError::named(
                         "TypeError",
@@ -852,25 +853,26 @@ pyrust_module! {
                     format!("{FN_NAME}() argument 1 must be a str"),
                 )),
             };
-            let base = match args[1].value.kind() {
-                ValueKind::Tuple(items) | ValueKind::List(items) => {
-                    if items.is_empty() {
-                        None
-                    } else {
-                        // Multiple inheritance: PyRust supports only single base; take the first.
-                        match items[0].kind() {
-                            ValueKind::PyClass(c) => Some(Rc::clone(c)),
-                            _ => return Err(PyError::named(
-                                "TypeError",
-                                format!("{FN_NAME}() argument 2 entries must be classes"),
-                            )),
-                        }
-                    }
-                }
+            // Extract the first element (if any) of the base-class
+            // sequence in a scoped block so the kind() Ref guard drops
+            // before we work with it (#450).
+            let first_base: Option<Value> = match args[1].value.kind() {
+                ValueKind::Tuple(items) => items.first().cloned(),
+                ValueKind::List(items) => items.first().cloned(),
                 _ => return Err(PyError::named(
                     "TypeError",
                     format!("{FN_NAME}() argument 2 must be a tuple"),
                 )),
+            };
+            let base = match first_base {
+                None => None,
+                Some(first) => match first.kind() {
+                    ValueKind::PyClass(c) => Some(Rc::clone(c)),
+                    _ => return Err(PyError::named(
+                        "TypeError",
+                        format!("{FN_NAME}() argument 2 entries must be classes"),
+                    )),
+                },
             };
             let mut attrs: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
             match args[2].value.kind() {
@@ -1275,9 +1277,26 @@ pyrust_module! {
                     "TypeError",
                     "string argument without an encoding".to_string(),
                 )),
-                ValueKind::List(items) | ValueKind::Tuple(items) => {
+                ValueKind::List(items) => {
                     let mut out = Vec::with_capacity(items.len());
-                    for v in items {
+                    for v in items.iter() {
+                        match v.kind() {
+                            ValueKind::Int(n) if (0..=255).contains(&n) => out.push(n as u8),
+                            ValueKind::Int(_) => return Err(PyError::named(
+                                "ValueError",
+                                "bytes must be in range(0, 256)".to_string(),
+                            )),
+                            _ => return Err(PyError::named(
+                                "TypeError",
+                                "bytes element must be an integer".to_string(),
+                            )),
+                        }
+                    }
+                    Ok(Value::bytes(out))
+                }
+                ValueKind::Tuple(items) => {
+                    let mut out = Vec::with_capacity(items.len());
+                    for v in items.iter() {
                         match v.kind() {
                             ValueKind::Int(n) if (0..=255).contains(&n) => out.push(n as u8),
                             ValueKind::Int(_) => return Err(PyError::named(
@@ -1548,7 +1567,7 @@ pyrust_module! {
             .map(|v| ExpandedCallArg { name: None, value: v })
             .collect();
         if let ValueKind::Dict(kw_map) = args[2].value.kind() {
-            for (k, v) in kw_map {
+            for (k, v) in kw_map.iter() {
                 if let PyKey::Str(name) = k {
                     expanded.push(ExpandedCallArg { name: Some(name.clone()), value: v.clone() });
                 }
@@ -1588,15 +1607,17 @@ pyrust_module! {
                         value: Value::string(spec),
                     }],
                 )?;
-                return match result.kind() {
-                    ValueKind::Str(_) => Ok(result),
-                    _ => Err(PyError::named(
+                let is_str = matches!(result.kind(), ValueKind::Str(_));
+                return if is_str {
+                    Ok(result)
+                } else {
+                    Err(PyError::named(
                         "TypeError",
                         format!(
                             "__format__ must return a str, not {}",
                             value_type_name_str(&result),
                         ),
-                    )),
+                    ))
                 };
             }
         }

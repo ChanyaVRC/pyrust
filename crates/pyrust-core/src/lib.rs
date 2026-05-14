@@ -768,14 +768,25 @@ pub enum ValueKind<'a> {
     BigInt(&'a BigInt),
     Float(f64),
     Str(&'a str),
-    List(&'a [Value]),
+    /// Borrowed view of a list's elements.  Holds a `Ref<'_, Vec<Value>>`
+    /// guard so the `RefCell`'s borrow counter is bumped for the duration
+    /// of the match (#450).  A concurrent `borrow_mut()` (e.g. from a
+    /// `list_push` triggered by user code during a match-arm body) now
+    /// panics with the standard `RefCell` already-borrowed message
+    /// instead of producing silent UB through `RefCell::as_ptr()`.
+    List(std::cell::Ref<'a, Vec<Value>>),
     /// Borrowed view of a tuple's elements.  Backed either by the pool path
     /// (`TAG_TUPLE`) which stores `Vec<Value>`, or by the inline
-    /// `Opaque::SmallTuple2/3` path which stores a fixed-size array.  Using
-    /// a slice unifies both backing representations behind one variant.
+    /// `Opaque::SmallTuple2/3` path which stores a fixed-size array.  Tuples
+    /// are immutable so no `RefCell` wraps them — a raw slice is sound.
     Tuple(&'a [Value]),
-    Dict(&'a IndexMap<PyKey, Value>),
-    Set(&'a IndexSet<PyKey>),
+    /// Borrowed view of a dict.  Like [`Self::List`], holds a
+    /// `Ref<'_, IndexMap<...>>` guard so the `RefCell` borrow check
+    /// catches concurrent mutation (#450).
+    Dict(std::cell::Ref<'a, IndexMap<PyKey, Value>>),
+    /// Borrowed view of a set.  Same `Ref` guard rationale as
+    /// [`Self::List`] / [`Self::Dict`] (#450).
+    Set(std::cell::Ref<'a, IndexSet<PyKey>>),
     Range {
         start: i64,
         stop: i64,
@@ -1912,11 +1923,16 @@ impl Value {
             TAG_INT => ValueKind::Int(self.as_int_raw()),
             TAG_STR => ValueKind::Str(unsafe { self.str_as_str() }),
             TAG_TUPLE => ValueKind::Tuple(unsafe { &*self.tuple_ptr() }),
-            // SAFETY: same single-threaded no-concurrent-borrow_mut invariant
-            // as the dict/list cases below; see `as_list`.
+            // List/Dict/Set views: take a scoped `RefCell::borrow()` so
+            // the cell's runtime borrow check is *honoured*.  A
+            // concurrent `borrow_mut()` while the resulting ValueKind
+            // is alive will panic with the standard already-borrowed
+            // message — strictly safer than the previous
+            // `unsafe { &*cell.as_ptr() }` bypass which produced silent
+            // UB (#450).
             TAG_LIST => {
                 let inner = unsafe { self.list_inner() };
-                ValueKind::List(unsafe { &*inner.items.as_ptr() })
+                ValueKind::List(inner.items.borrow())
             }
             TAG_OPAQUE => match unsafe { &*self.opaque_ptr() } {
                 Opaque::PyBigInt(rc) => {
@@ -1926,13 +1942,8 @@ impl Value {
                         ValueKind::BigInt(rc.as_ref())
                     }
                 }
-                // SAFETY: rc.as_ref().as_ptr() yields *mut IndexMap whose lifetime is
-                // bounded by the Rc, which lives at least as long as this &self borrow.
-                // No mutable borrow (borrow_mut) is held concurrently in our single-
-                // threaded interpreter, so the raw-pointer alias is sound.
-                Opaque::Dict(rc) => ValueKind::Dict(unsafe { &*rc.as_ref().as_ptr() }),
-                // Sets share the same Rc<RefCell<...>> invariant after #305.
-                Opaque::Set(rc) => ValueKind::Set(unsafe { &*rc.items.as_ptr() }),
+                Opaque::Dict(rc) => ValueKind::Dict(rc.as_ref().borrow()),
+                Opaque::Set(rc) => ValueKind::Set(rc.items.borrow()),
                 Opaque::Range { start, stop, step } => ValueKind::Range {
                     start: *start,
                     stop: *stop,
@@ -2346,10 +2357,13 @@ impl PartialEq for Value {
             (ValueKind::Bool(a), ValueKind::Float(b)) => (a as u8 as f64) == b,
             (ValueKind::Float(a), ValueKind::Bool(b)) => a == (b as u8 as f64),
             (ValueKind::None, ValueKind::None) => true,
-            (ValueKind::List(a), ValueKind::List(b)) => a == b,
+            // `Ref<T>` doesn't impl `==` directly — deref to compare the
+            // underlying containers.  `*a == *b` calls Vec/IndexMap/IndexSet's
+            // `PartialEq`, which is what we want.
+            (ValueKind::List(a), ValueKind::List(b)) => *a == *b,
             (ValueKind::Tuple(a), ValueKind::Tuple(b)) => a == b,
-            (ValueKind::Dict(a), ValueKind::Dict(b)) => a == b,
-            (ValueKind::Set(a), ValueKind::Set(b)) => a == b,
+            (ValueKind::Dict(a), ValueKind::Dict(b)) => *a == *b,
+            (ValueKind::Set(a), ValueKind::Set(b)) => *a == *b,
             (ValueKind::Bytes(a), ValueKind::Bytes(b)) => a.as_ref() == b.as_ref(),
             (ValueKind::Complex(ar, ai), ValueKind::Complex(br, bi)) => ar == br && ai == bi,
             (ValueKind::Int(n), ValueKind::Complex(br, bi)) => (n as f64) == br && bi == 0.0,

@@ -791,14 +791,14 @@ pyrust_module! {
                         ProductStep::Exhausted
                     } else {
                         ProductStep::Yield {
-                            tuple: tuple_from_pools(pools_outer, &indices),
+                            tuple: tuple_from_pools(&pools_outer[..], &indices),
                             indices,
                             already_started: true,
                         }
                     }
                 } else {
                     ProductStep::Yield {
-                        tuple: tuple_from_pools(pools_outer, &indices),
+                        tuple: tuple_from_pools(&pools_outer[..], &indices),
                         indices,
                         already_started: false,
                     }
@@ -990,7 +990,7 @@ pyrust_module! {
                         Step::Exhausted
                     } else {
                         Step::Yield {
-                            tuple: tuple_from_pool(pool_items, &indices, r),
+                            tuple: tuple_from_pool(&pool_items[..], &indices, r),
                             indices,
                             cycles,
                             already_started: true,
@@ -998,7 +998,7 @@ pyrust_module! {
                     }
                 } else {
                     Step::Yield {
-                        tuple: tuple_from_pool(pool_items, &indices, r),
+                        tuple: tuple_from_pool(&pool_items[..], &indices, r),
                         indices,
                         cycles,
                         already_started: false,
@@ -1473,14 +1473,14 @@ fn advance_combinations(
                     Outcome::Exhausted
                 } else {
                     Outcome::Yield {
-                        tuple: tuple_from_pool(pool_items, &indices, r),
+                        tuple: tuple_from_pool(&pool_items[..], &indices, r),
                         indices,
                         set_started: false,
                     }
                 }
             } else {
                 Outcome::Yield {
-                    tuple: tuple_from_pool(pool_items, &indices, r),
+                    tuple: tuple_from_pool(&pool_items[..], &indices, r),
                     indices,
                     set_started: true,
                 }

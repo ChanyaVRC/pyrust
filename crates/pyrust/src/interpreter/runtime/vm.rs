@@ -539,36 +539,45 @@ impl Interpreter {
                     regs[*dst as usize] = Value::none();
                 }
                 Insn::Move(dst, src) | Insn::CopyReg(dst, src) => {
+                    // Hot path: `as_int()` bypasses `kind()`'s RefCell
+                    // borrow entirely for the int case — important after
+                    // #450 changed kind() to take a scoped borrow on
+                    // List/Dict/Set.  `Insn::Move` runs per-instruction;
+                    // a 1ns Ref bump here would compound.
                     if let Some(v) = regs[*src as usize].as_some()
-                        && let ValueKind::Int(n) = v.kind() {
-                            regs[*dst as usize] = Value::int(n);
-                            continue;
-                        }
+                        && let Some(n) = v.as_int()
+                    {
+                        regs[*dst as usize] = Value::int(n);
+                        continue;
+                    }
                     let v = vm_try!(vm_read(regs, *src, num_locals));
                     regs[*dst as usize] = v;
                 }
 
                 // ── Arithmetic / Logic ───────────────────────────────────
                 Insn::BinOp(dst, lhs, op, rhs) => {
-                    let lv = &regs[*lhs as usize];
-                    let rv = &regs[*rhs as usize];
-                    if let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), rv.kind())
-                        && let Some(result) = int_int_fast(a, b, *op) {
-                            regs[*dst as usize] = result;
-                            continue;
-                        }
+                    // Hot path bypasses kind() — see Insn::Move (#450).
+                    if let (Some(a), Some(b)) = (
+                        regs[*lhs as usize].as_int(),
+                        regs[*rhs as usize].as_int(),
+                    ) && let Some(result) = int_int_fast(a, b, *op)
+                    {
+                        regs[*dst as usize] = result;
+                        continue;
+                    }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = vm_try!(vm_read(regs, *rhs, num_locals));
                     regs[*dst as usize] = vm_try!(self.eval_binary(l, *op, r));
                 }
                 Insn::BinOpInPlace(dst, lhs, op, rhs) => {
-                    let lv = &regs[*lhs as usize];
-                    let rv = &regs[*rhs as usize];
-                    if let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), rv.kind())
-                        && let Some(result) = int_int_fast(a, b, *op) {
-                            regs[*dst as usize] = result;
-                            continue;
-                        }
+                    if let (Some(a), Some(b)) = (
+                        regs[*lhs as usize].as_int(),
+                        regs[*rhs as usize].as_int(),
+                    ) && let Some(result) = int_int_fast(a, b, *op)
+                    {
+                        regs[*dst as usize] = result;
+                        continue;
+                    }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = vm_try!(vm_read(regs, *rhs, num_locals));
                     let result = if let Some(v) = vm_try!(self.try_inplace_op(l.clone(), *op, r.clone())) {
@@ -580,12 +589,14 @@ impl Interpreter {
                 }
                 Insn::BinOpConst(dst, lhs, op, const_idx) => {
                     let cv = pool_get!(code.consts, *const_idx, "const");
-                    if let Some(lv) = regs[*lhs as usize].as_some()
-                        && let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), cv.kind())
-                            && let Some(result) = int_int_fast(a, b, *op) {
-                                regs[*dst as usize] = result;
-                                continue;
-                            }
+                    if let (Some(a), Some(b)) = (
+                        regs[*lhs as usize].as_int(),
+                        cv.as_int(),
+                    ) && let Some(result) = int_int_fast(a, b, *op)
+                    {
+                        regs[*dst as usize] = result;
+                        continue;
+                    }
                     let l = vm_try!(vm_read(regs, *lhs, num_locals));
                     let r = cv.clone();
                     let result = if let Some(v) = vm_try!(self.try_inplace_op(l.clone(), *op, r.clone())) {
@@ -646,31 +657,55 @@ impl Interpreter {
                     } else { None };
 
                     if let Some(raw_i) = fast_int_idx {
-                        let mut handled = false;
-                        if let Some(ov) = regs[*obj as usize].as_some() {
-                            match ov.kind() {
-                                ValueKind::List(items) => {
-                                    let len = items.len() as i64;
-                                    let j = if raw_i < 0 { raw_i + len } else { raw_i };
-                                    if j >= 0 && (j as usize) < items.len() {
-                                        regs[*dst as usize] = items[j as usize].clone();
-                                    } else {
-                                        vm_try!(Err(PyError::named("IndexError", "list index out of range")));
-                                    }
-                                    handled = true;
+                        // Extract the indexed element in a scoped block so
+                        // the `kind()` Ref drops before we assign to
+                        // `regs[dst]` (#450).
+                        enum Got {
+                            Item(Value),
+                            ListOOR,
+                            TupleOOR,
+                            None,
+                        }
+                        let got = match regs[*obj as usize].as_some().map(|v| v.kind()) {
+                            Some(ValueKind::List(items)) => {
+                                let len = items.len() as i64;
+                                let j = if raw_i < 0 { raw_i + len } else { raw_i };
+                                if j >= 0 && (j as usize) < items.len() {
+                                    Got::Item(items[j as usize].clone())
+                                } else {
+                                    Got::ListOOR
                                 }
-                                ValueKind::Tuple(items) => {
-                                    let len = items.len() as i64;
-                                    let j = if raw_i < 0 { raw_i + len } else { raw_i };
-                                    if j >= 0 && (j as usize) < items.len() {
-                                        regs[*dst as usize] = items[j as usize].clone();
-                                    } else {
-                                        vm_try!(Err(PyError::named("IndexError", "tuple index out of range")));
-                                    }
-                                    handled = true;
-                                }
-                                _ => {}
                             }
+                            Some(ValueKind::Tuple(items)) => {
+                                let len = items.len() as i64;
+                                let j = if raw_i < 0 { raw_i + len } else { raw_i };
+                                if j >= 0 && (j as usize) < items.len() {
+                                    Got::Item(items[j as usize].clone())
+                                } else {
+                                    Got::TupleOOR
+                                }
+                            }
+                            _ => Got::None,
+                        };
+                        let mut handled = false;
+                        match got {
+                            Got::Item(v) => {
+                                regs[*dst as usize] = v;
+                                handled = true;
+                            }
+                            Got::ListOOR => {
+                                vm_try!(Err(PyError::named(
+                                    "IndexError",
+                                    "list index out of range",
+                                )));
+                            }
+                            Got::TupleOOR => {
+                                vm_try!(Err(PyError::named(
+                                    "IndexError",
+                                    "tuple index out of range",
+                                )));
+                            }
+                            Got::None => {}
                         }
                         if handled { continue; }
                     }
@@ -734,11 +769,22 @@ impl Interpreter {
                     let val_val = vm_try!(vm_read(regs, *val, num_locals));
                     // Slice assignment: tuple key on a list.
                     if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
+                        // Drop the kind() Ref before the fallback path
+                        // may move `val_val` into `collect_iterable`
+                        // (#450).
                         let new_items: Vec<Value> = match val_val.kind() {
-                            ValueKind::List(v) => v.to_vec(),
-                            _ => vm_try!(self.collect_iterable(val_val).map_err(|_| {
+                            ValueKind::List(v) => Some(v.to_vec()),
+                            _ => None,
+                        }
+                        .unwrap_or_else(|| Vec::new());
+                        let new_items = if !new_items.is_empty()
+                            || matches!(val_val.kind(), ValueKind::List(_))
+                        {
+                            new_items
+                        } else {
+                            vm_try!(self.collect_iterable(val_val.clone()).map_err(|_| {
                                 PyError::Runtime("slice assignment requires iterable".to_string())
-                            })),
+                            }))
                         };
                         let updated = regs[*obj as usize].list_with_mut(|items| {
                             Self::slice_setitem(
@@ -1165,37 +1211,45 @@ impl Interpreter {
                         } else { false }
                     } else { false };
 
-                    if is_pure_fn
-                        && let Some(fv) = regs[*func_reg as usize].as_some()
-                            && let ValueKind::UserFunction(func) = fv.kind() {
-                                let fn_id = func.id;
-                                let mut key = std::mem::take(&mut self.key_scratch);
-                                key.clear();
-                                let mut all_hashable = true;
-                                for i in 0..*argc as usize {
-                                    match regs[*func_reg as usize + 1 + i]
-                                        .to_key()
-                                    {
-                                        Some(k) => key.push(k),
-                                        None => {
-                                            all_hashable = false;
-                                            break;
-                                        }
-                                    }
-                                }
-                                if all_hashable {
-                                    let lookup = (fn_id, key);
-                                    let hit = self.fn_cache.get(&lookup).cloned();
-                                    let (_, key) = lookup;
-                                    self.key_scratch = key;
-                                    if let Some(cached) = hit {
-                                        regs[*func_reg as usize] = cached;
-                                        continue;
-                                    }
-                                } else {
-                                    self.key_scratch = key;
+                    // Extract `fn_id` in a scoped block so the `kind()`
+                    // Ref drops before we assign into `regs[func_reg]`
+                    // on a cache hit (#450).
+                    let fn_id_opt: Option<u64> = if is_pure_fn {
+                        regs[*func_reg as usize].as_some().and_then(|fv| {
+                            match fv.kind() {
+                                ValueKind::UserFunction(func) => Some(func.id),
+                                _ => None,
+                            }
+                        })
+                    } else {
+                        None
+                    };
+                    if let Some(fn_id) = fn_id_opt {
+                        let mut key = std::mem::take(&mut self.key_scratch);
+                        key.clear();
+                        let mut all_hashable = true;
+                        for i in 0..*argc as usize {
+                            match regs[*func_reg as usize + 1 + i].to_key() {
+                                Some(k) => key.push(k),
+                                None => {
+                                    all_hashable = false;
+                                    break;
                                 }
                             }
+                        }
+                        if all_hashable {
+                            let lookup = (fn_id, key);
+                            let hit = self.fn_cache.get(&lookup).cloned();
+                            let (_, key) = lookup;
+                            self.key_scratch = key;
+                            if let Some(cached) = hit {
+                                regs[*func_reg as usize] = cached;
+                                continue;
+                            }
+                        } else {
+                            self.key_scratch = key;
+                        }
+                    }
                     // Cache miss or unhashable args: normal call (call_function_expanded
                     // will store the result in fn_cache on the way back).
                     let func_val = vm_try!(vm_read(regs, *func_reg, num_locals));
@@ -1505,8 +1559,28 @@ impl Interpreter {
                         IterState::Indexed { reg: *src, pos: 0 }
                     } else {
                         let src_val = vm_try!(vm_read(regs, *src, num_locals));
-                        match src_val.kind() {
-                            ValueKind::Range { start, stop, step } => {
+                        // Detect the kind tag in a scoped block so the
+                        // kind() Ref drops before we may move src_val
+                        // into IterState / iter_values / make_getitem_iter
+                        // (#450).
+                        enum IterTag {
+                            Range(i64, i64, i64),
+                            Generator,
+                            PyInstance(Rc<RefCell<crate::value::PyInstance>>),
+                            BuiltinIterable,
+                            Other,
+                        }
+                        let tag = match src_val.kind() {
+                            ValueKind::Range { start, stop, step } => IterTag::Range(start, stop, step),
+                            ValueKind::Generator(_) => IterTag::Generator,
+                            ValueKind::PyInstance(inst) => IterTag::PyInstance(Rc::clone(inst)),
+                            ValueKind::BuiltinObject { ops, .. } if ops.is_iterable() => {
+                                IterTag::BuiltinIterable
+                            }
+                            _ => IterTag::Other,
+                        };
+                        match tag {
+                            IterTag::Range(start, stop, step) => {
                                 if step == 0 {
                                     vm_try!(Err(PyError::named(
                                         "ValueError",
@@ -1515,12 +1589,8 @@ impl Interpreter {
                                 }
                                 IterState::Range { cur: start, stop, step }
                             }
-                            ValueKind::Generator(_) => {
-                                // A generator is its own iterator.
-                                IterState::UserDefined(src_val)
-                            }
-                            ValueKind::PyInstance(inst) => {
-                                let inst_rc = Rc::clone(inst);
+                            IterTag::Generator => IterState::UserDefined(src_val),
+                            IterTag::PyInstance(inst_rc) => {
                                 let class = Rc::clone(&inst_rc.borrow().class);
                                 if let Some(method_val) = lookup_class_attr(&class, "__iter__") {
                                     let iter_obj = vm_try!(invoke_class_method(
@@ -1531,25 +1601,14 @@ impl Interpreter {
                                     ));
                                     IterState::UserDefined(iter_obj)
                                 } else if lookup_class_attr(&class, "__getitem__").is_some() {
-                                    // Legacy sequence-iter protocol (#394):
-                                    // no __iter__ but __getitem__ exists.
-                                    // Lazy: wrap as a UserDefined iterator
-                                    // backed by GetItemIter so break/early
-                                    // return correctly stops without
-                                    // calling further __getitem__ indices
-                                    // (#416 Copilot review).
                                     let iter_obj = vm_try!(self.make_getitem_iter(inst_rc));
                                     IterState::UserDefined(iter_obj)
                                 } else {
-                                    // No __iter__: try to materialise via iter_values (will fail)
                                     IterState::Materialized(vm_try!(iter_values(src_val)), 0)
                                 }
                             }
-                            ValueKind::BuiltinObject { ops, .. } if ops.is_iterable() => {
-                                // Iterable built-in objects dispatch through ops.iter_next.
-                                IterState::UserDefined(src_val)
-                            }
-                            _ => {
+                            IterTag::BuiltinIterable => IterState::UserDefined(src_val),
+                            IterTag::Other => {
                                 IterState::Materialized(vm_try!(iter_values(src_val)), 0)
                             }
                         }
@@ -1729,54 +1788,55 @@ impl Interpreter {
                     }
                 }
                 Insn::ForCountReg(var, cmp_op, stop_reg, step_idx, offset) => {
-                    let step = match pool_get!(code.consts, *step_idx, "const").kind() {
-                        ValueKind::Int(s) => s,
-                        _ => unreachable!("ForCountReg step must be Int"),
-                    };
-                    let fast = {
-                        let vv = &regs[*var as usize];
-                        let sv = &regs[*stop_reg as usize];
-                        if let (ValueKind::Int(cur), ValueKind::Int(stop)) = (vv.kind(), sv.kind()) {
-                            let next = cur.wrapping_add(step);
-                            let cont = match cmp_op {
-                                BinaryOp::Lt => next < stop,
-                                BinaryOp::Gt => next > stop,
-                                _ => unreachable!("ForCountReg uses Lt or Gt only"),
-                            };
-                            if cont { regs[*var as usize] = Value::int(next); }
-                            else { pc = jump_pc!(*offset); }
-                            true
-                        } else { false }
-                    };
-                    if !fast {
+                    // `as_int()` skips kind()'s Ref machinery on the hot
+                    // loop counter path (#450 perf optimization).
+                    let step = pool_get!(code.consts, *step_idx, "const")
+                        .as_int()
+                        .expect("ForCountReg step must be Int");
+                    let pair: Option<(i64, i64)> = regs[*var as usize]
+                        .as_int()
+                        .zip(regs[*stop_reg as usize].as_int());
+                    if let Some((cur, stop)) = pair {
+                        let next = cur.wrapping_add(step);
+                        let cont = match cmp_op {
+                            BinaryOp::Lt => next < stop,
+                            BinaryOp::Gt => next > stop,
+                            _ => unreachable!("ForCountReg uses Lt or Gt only"),
+                        };
+                        if cont {
+                            regs[*var as usize] = Value::int(next);
+                        } else {
+                            pc = jump_pc!(*offset);
+                        }
+                    } else {
                         vm_try!(Err(crate::error::PyError::Runtime(
                             "for-range: non-integer counter or stop".into(),
                         )));
                     }
                 }
                 Insn::ForCountConst(var, cmp_op, stop_idx, step_idx, offset) => {
-                    let step = match pool_get!(code.consts, *step_idx, "const").kind() {
-                        ValueKind::Int(s) => s,
-                        _ => unreachable!("ForCountConst step must be Int"),
-                    };
-                    let stop = match pool_get!(code.consts, *stop_idx, "const").kind() {
-                        ValueKind::Int(s) => s,
-                        _ => unreachable!("ForCountConst stop must be Int"),
-                    };
-                    let fast = if let Some(vv) = regs[*var as usize].as_some() {
-                        if let ValueKind::Int(cur) = vv.kind() {
-                            let next = cur.wrapping_add(step);
-                            let cont = match cmp_op {
-                                BinaryOp::Lt => next < stop,
-                                BinaryOp::Gt => next > stop,
-                                _ => unreachable!("ForCountConst uses Lt or Gt only"),
-                            };
-                            if cont { regs[*var as usize] = Value::int(next); }
-                            else { pc = jump_pc!(*offset); }
-                            true
-                        } else { false }
-                    } else { false };
-                    if !fast {
+                    // `as_int()` skips kind()'s Ref machinery (#450
+                    // perf).
+                    let step = pool_get!(code.consts, *step_idx, "const")
+                        .as_int()
+                        .expect("ForCountConst step must be Int");
+                    let stop = pool_get!(code.consts, *stop_idx, "const")
+                        .as_int()
+                        .expect("ForCountConst stop must be Int");
+                    let cur_opt: Option<i64> = regs[*var as usize].as_int();
+                    if let Some(cur) = cur_opt {
+                        let next = cur.wrapping_add(step);
+                        let cont = match cmp_op {
+                            BinaryOp::Lt => next < stop,
+                            BinaryOp::Gt => next > stop,
+                            _ => unreachable!("ForCountConst uses Lt or Gt only"),
+                        };
+                        if cont {
+                            regs[*var as usize] = Value::int(next);
+                        } else {
+                            pc = jump_pc!(*offset);
+                        }
+                    } else {
                         vm_try!(Err(crate::error::PyError::Runtime(
                             "for-range: non-integer counter".into(),
                         )));
@@ -1787,19 +1847,24 @@ impl Interpreter {
                     // per-iteration consts-pool lookup, no .kind() decode for them.
                     let step = *step as i64;
                     let stop = *stop as i64;
-                    let fast = if let Some(vv) = regs[*var as usize].as_some() {
-                        if let ValueKind::Int(cur) = vv.kind() {
-                            let next = cur.wrapping_add(step);
-                            let cont = match cmp_op {
-                                BinaryOp::Lt => next < stop,
-                                BinaryOp::Gt => next > stop,
-                                _ => unreachable!("ForCountConstInline uses Lt or Gt only"),
-                            };
-                            if cont { regs[*var as usize] = Value::int(next); }
-                            else { pc = jump_pc!(*offset); }
-                            true
-                        } else { false }
-                    } else { false };
+                    // `as_int()` skips kind()'s Ref machinery (#450 perf).
+                    let cur_opt: Option<i64> = regs[*var as usize].as_int();
+                    let fast = if let Some(cur) = cur_opt {
+                        let next = cur.wrapping_add(step);
+                        let cont = match cmp_op {
+                            BinaryOp::Lt => next < stop,
+                            BinaryOp::Gt => next > stop,
+                            _ => unreachable!("ForCountConstInline uses Lt or Gt only"),
+                        };
+                        if cont {
+                            regs[*var as usize] = Value::int(next);
+                        } else {
+                            pc = jump_pc!(*offset);
+                        }
+                        true
+                    } else {
+                        false
+                    };
                     if !fast {
                         vm_try!(Err(crate::error::PyError::Runtime(
                             "for-range: non-integer counter".into(),

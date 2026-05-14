@@ -76,37 +76,39 @@ impl Interpreter {
                             .insert(attr_name, result.clone());
                         return Ok(result);
                     }
-                    return Ok(match value.kind() {
-                        ValueKind::UserFunction(f) => match f.kind {
+                    // Probe kind tag in a scoped block so the `kind()` Ref
+                    // drops before the `_ => value` arm may move `value`
+                    // (#450).
+                    enum AttrKind {
+                        UserFunction(Rc<UserFunction>),
+                        BuiltinFunction,
+                        Other,
+                    }
+                    let tag = match value.kind() {
+                        ValueKind::UserFunction(f) => AttrKind::UserFunction(Rc::clone(f)),
+                        ValueKind::BuiltinFunction(_) => AttrKind::BuiltinFunction,
+                        _ => AttrKind::Other,
+                    };
+                    return Ok(match tag {
+                        AttrKind::UserFunction(f) => match f.kind {
                             UserFunctionKind::Regular => {
-                                Value::bound_method(Rc::clone(f), instance)
+                                Value::bound_method(Rc::clone(&f), instance)
                             }
                             UserFunctionKind::ClassMethod => {
-                                // bind the class (not the instance) as first argument
-                                Value::class_bound_method(Rc::clone(f), Rc::clone(&class))
+                                Value::class_bound_method(Rc::clone(&f), Rc::clone(&class))
                             }
                             UserFunctionKind::StaticMethod => {
-                                // staticmethod: return the raw function, no binding
-                                Value::user_function(Rc::clone(f))
+                                Value::user_function(Rc::clone(&f))
                             }
-                            // kind() synthesizes BuiltinFunction for kind=Builtin
-                            // so this arm is unreachable; satisfy exhaustiveness.
-                            UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(f)),
+                            UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(&f)),
                         },
-                        ValueKind::BuiltinFunction(_) => {
-                            // Class method backed by a BuiltinFunction —
-                            // emitted by `pyrust_module!`'s `class { … }` block
-                            // (e.g. `Counter.most_common`).  Wrap so the call
-                            // dispatch prepends `self` before invoking the
-                            // registered Rust dispatcher; see the
-                            // `as_bound_method` arm in
-                            // `calls.rs::call_function_expanded`.
+                        AttrKind::BuiltinFunction => {
                             pyrust_builtins::bound_method::bound_method(
                                 name.to_string(),
                                 Value::py_instance(Rc::clone(&instance)),
                             )
                         }
-                        _ => value,
+                        AttrKind::Other => value,
                     });
                 }
 
@@ -155,17 +157,24 @@ impl Interpreter {
                     return Ok(Value::tuple(items));
                 }
                 if let Some(value) = lookup_class_attr(&class, name) {
-                    return Ok(match value.kind() {
-                        ValueKind::UserFunction(f) => match f.kind {
+                    // Drop the kind() Ref before the `_ => value` arm
+                    // may move `value` (#450).
+                    let user_fn = match value.kind() {
+                        ValueKind::UserFunction(f) => Some(Rc::clone(f)),
+                        _ => None,
+                    };
+                    return Ok(match user_fn {
+                        Some(f) => match f.kind {
                             UserFunctionKind::ClassMethod => {
-                                // bind the class as first argument
-                                Value::class_bound_method(Rc::clone(f), Rc::clone(&class))
+                                Value::class_bound_method(Rc::clone(&f), Rc::clone(&class))
                             }
-                            UserFunctionKind::StaticMethod => Value::user_function(Rc::clone(f)),
+                            UserFunctionKind::StaticMethod => {
+                                Value::user_function(Rc::clone(&f))
+                            }
                             UserFunctionKind::Regular => value,
                             UserFunctionKind::Builtin(_) => value,
                         },
-                        _ => value,
+                        None => value,
                     });
                 }
 
@@ -187,21 +196,24 @@ impl Interpreter {
                     ));
                 };
                 if let Some(value) = lookup_class_attr(&parent_class, name) {
-                    return Ok(match value.kind() {
-                        ValueKind::UserFunction(f) => match f.kind {
+                    let user_fn = match value.kind() {
+                        ValueKind::UserFunction(f) => Some(Rc::clone(f)),
+                        _ => None,
+                    };
+                    return Ok(match user_fn {
+                        Some(f) => match f.kind {
                             UserFunctionKind::Regular => {
-                                Value::bound_method(Rc::clone(f), instance)
+                                Value::bound_method(Rc::clone(&f), instance)
                             }
                             UserFunctionKind::ClassMethod => {
-                                Value::class_bound_method(Rc::clone(f), parent_class)
+                                Value::class_bound_method(Rc::clone(&f), parent_class)
                             }
-                            UserFunctionKind::StaticMethod => Value::user_function(Rc::clone(f)),
-                            // `kind()` synthesizes `ValueKind::BuiltinFunction`
-                            // for kind=Builtin, so this arm is unreachable in
-                            // practice — but rustc requires exhaustiveness.
-                            UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(f)),
+                            UserFunctionKind::StaticMethod => {
+                                Value::user_function(Rc::clone(&f))
+                            }
+                            UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(&f)),
                         },
-                        _ => value,
+                        None => value,
                     });
                 }
                 Err(PyError::named(
@@ -221,24 +233,24 @@ impl Interpreter {
                     ));
                 };
                 if let Some(value) = lookup_class_attr(&parent_class, name) {
-                    return Ok(match value.kind() {
-                        ValueKind::UserFunction(f) => match f.kind {
+                    let user_fn = match value.kind() {
+                        ValueKind::UserFunction(f) => Some(Rc::clone(f)),
+                        _ => None,
+                    };
+                    return Ok(match user_fn {
+                        Some(f) => match f.kind {
                             UserFunctionKind::Regular => {
-                                // Regular method accessed via super in classmethod context —
-                                // return the raw function (rare, but valid).
-                                Value::user_function(Rc::clone(f))
+                                Value::user_function(Rc::clone(&f))
                             }
                             UserFunctionKind::ClassMethod => {
-                                // bind to the concrete subclass
-                                Value::class_bound_method(Rc::clone(f), obj_class)
+                                Value::class_bound_method(Rc::clone(&f), obj_class)
                             }
-                            UserFunctionKind::StaticMethod => Value::user_function(Rc::clone(f)),
-                            // `kind()` synthesizes `ValueKind::BuiltinFunction`
-                            // for kind=Builtin, so this arm is unreachable in
-                            // practice — but rustc requires exhaustiveness.
-                            UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(f)),
+                            UserFunctionKind::StaticMethod => {
+                                Value::user_function(Rc::clone(&f))
+                            }
+                            UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(&f)),
                         },
-                        _ => value,
+                        None => value,
                     });
                 }
                 Err(PyError::named(

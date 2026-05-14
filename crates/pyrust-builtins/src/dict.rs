@@ -118,27 +118,42 @@ fn snapshot_update_arg(receiver: &Value, args: &[Value]) -> Result<Vec<(PyKey, V
             out.extend(snap);
             continue;
         }
+        // Helper: handle a single key/value pair from the iterable form
+        // (`[(k1, v1), (k2, v2), ...]`).  Each `pair` must itself be a
+        // length-2 sequence.  Factored out so the `List` and `Tuple`
+        // arms below can share it without combining their patterns
+        // (List now carries `Ref<'_, Vec<Value>>`, Tuple still carries
+        // `&[Value]` — they can't bind to the same variable post-#450).
+        fn push_pair(pair: &Value, out: &mut Vec<(PyKey, Value)>) -> Result<()> {
+            let kv: Vec<Value> = match pair.kind() {
+                ValueKind::List(items) if items.len() == 2 => items.clone(),
+                ValueKind::Tuple(items) if items.len() == 2 => items.to_vec(),
+                _ => {
+                    return Err(PyError::Runtime(
+                        "dict.update() element must be a (key, value) pair".to_string(),
+                    ));
+                }
+            };
+            let k = kv[0].to_key().ok_or_else(|| {
+                PyError::Runtime("dict.update(): key is not hashable".to_string())
+            })?;
+            out.push((k, kv[1].clone()));
+            Ok(())
+        }
         match arg.kind() {
             ValueKind::Dict(other_map) => {
-                for (k, v) in other_map {
+                for (k, v) in other_map.iter() {
                     out.push((k.clone(), v.clone()));
                 }
             }
-            ValueKind::List(items) | ValueKind::Tuple(items) => {
+            ValueKind::List(items) => {
+                for pair in items.iter() {
+                    push_pair(pair, &mut out)?;
+                }
+            }
+            ValueKind::Tuple(items) => {
                 for pair in items {
-                    match pair.kind() {
-                        ValueKind::Tuple(kv) | ValueKind::List(kv) if kv.len() == 2 => {
-                            let k = kv[0].to_key().ok_or_else(|| {
-                                PyError::Runtime("dict.update(): key is not hashable".to_string())
-                            })?;
-                            out.push((k, kv[1].clone()));
-                        }
-                        _ => {
-                            return Err(PyError::Runtime(
-                                "dict.update() element must be a (key, value) pair".to_string(),
-                            ));
-                        }
-                    }
+                    push_pair(pair, &mut out)?;
                 }
             }
             _ => {

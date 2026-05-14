@@ -227,7 +227,8 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
         }
         "writelines" => {
             let lines = match args.first().map(|v| v.kind()) {
-                Some(ValueKind::List(items)) | Some(ValueKind::Tuple(items)) => items.to_vec(),
+                Some(ValueKind::List(items)) => items.clone(),
+                Some(ValueKind::Tuple(items)) => items.to_vec(),
                 _ => {
                     return Err(PyError::named(
                         "TypeError",

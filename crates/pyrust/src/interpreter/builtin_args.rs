@@ -480,12 +480,14 @@ impl PySet {
     /// doesn't wrap a `Set` — impossible by construction (`try_from_value`
     /// checks `is_set` and `Value::clone` preserves the kind), but the
     /// `expect` style matches the sibling wrappers' panic-message wording.
-    pub(crate) fn as_set(&self) -> &IndexSet<PyKey> {
-        // `Value::as_set` doesn't exist on `pyrust-core` (only `as_set_mut`
-        // does); match locally and surface the same `.expect()` style the
-        // other wrappers use against their `Option`-returning accessors.
+    /// Run `f` against the underlying `IndexSet` view.  Returns the
+    /// closure's result.  Post-#450 the `IndexSet` is reached via a
+    /// scoped `Ref` borrow from `ValueKind::Set`, so the API now
+    /// passes a `&IndexSet<PyKey>` into the closure rather than
+    /// handing one back (which the borrow lifetimes can't express).
+    pub(crate) fn as_set<R>(&self, f: impl FnOnce(&IndexSet<PyKey>) -> R) -> R {
         match self.0.kind() {
-            ValueKind::Set(s) => s,
+            ValueKind::Set(s) => f(&s),
             _ => panic!("PySet wraps a set"),
         }
     }
