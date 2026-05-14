@@ -1,5 +1,5 @@
 use crate::ast::{
-    AssignTarget, BinaryOp, CallArg, CmpOp, CompClause, ExceptHandler, Expr, FStringPart,
+    AssignTarget, BinaryOp, CallArg, CmpOp, CompClause, DictItem, ExceptHandler, Expr, FStringPart,
     FunctionParam, MatchArm, Pattern, Stmt, UnaryOp,
 };
 use crate::error::{PyError, Result};
@@ -1731,6 +1731,32 @@ impl Parser {
                     self.bump();
                     return Ok(Expr::Tuple(vec![]));
                 }
+                // PEP 448 tuple splat: `(*a, ...)`.  A leading `*` unambiguously
+                // commits to a tuple literal (it cannot be a parenthesised
+                // expression because `*expr` is not a valid expression on its
+                // own outside of a collection / call / assign-target context).
+                // We require at least one comma — `(*a)` without a trailing
+                // comma is a SyntaxError in CPython, matching the rule that
+                // parenthesised expressions do not become tuples without a
+                // comma.
+                if self.is(&Token::Star) {
+                    let first = self.parse_seq_item()?;
+                    if !self.is(&Token::Comma) {
+                        return Err(PyError::Parse(
+                            "cannot use starred expression here".to_string(),
+                        ));
+                    }
+                    let mut items = vec![first];
+                    while self.is(&Token::Comma) {
+                        self.bump();
+                        if self.is(&Token::RParen) {
+                            break;
+                        }
+                        items.push(self.parse_seq_item()?);
+                    }
+                    self.expect(&Token::RParen)?;
+                    return Ok(Expr::Tuple(items));
+                }
                 let first = self.parse_expr()?;
                 if self.is(&Token::Comma) {
                     // Tuple
@@ -1740,7 +1766,7 @@ impl Parser {
                         if self.is(&Token::RParen) {
                             break;
                         }
-                        items.push(self.parse_expr()?);
+                        items.push(self.parse_seq_item()?);
                     }
                     self.expect(&Token::RParen)?;
                     Ok(Expr::Tuple(items))
@@ -1763,9 +1789,15 @@ impl Parser {
             self.bump();
             return Ok(Expr::List(vec![]));
         }
-        let first = self.parse_expr()?;
+        let first = self.parse_seq_item()?;
         // Detect list comprehension: [expr for ...]
+        // Comprehensions cannot start with `*expr` (PEP 448 syntax restriction).
         if self.is(&Token::For) {
+            if let Expr::Starred(_) = &first {
+                return Err(PyError::Parse(
+                    "iterable unpacking cannot be used in comprehension".to_string(),
+                ));
+            }
             let clauses = self.parse_comp_clauses()?;
             self.expect(&Token::RBracket)?;
             return Ok(Expr::ListComp {
@@ -1779,10 +1811,25 @@ impl Parser {
             if self.is(&Token::RBracket) {
                 break;
             }
-            items.push(self.parse_expr()?);
+            items.push(self.parse_seq_item()?);
         }
         self.expect(&Token::RBracket)?;
         Ok(Expr::List(items))
+    }
+
+    /// Parse one element of a list / set / tuple literal: either an ordinary
+    /// expression or a PEP 448 `*expr` splat.  The splatted expression is
+    /// parsed at `or` precedence (same as call-site `*expr`) so that
+    /// `[*a + b]` parses as `[*(a + b)]` would be ambiguous — Python uses the
+    /// tighter binding here as well.
+    fn parse_seq_item(&mut self) -> Result<Expr> {
+        if self.is(&Token::Star) {
+            self.bump();
+            let inner = self.parse_or()?;
+            Ok(Expr::Starred(Box::new(inner)))
+        } else {
+            self.parse_expr()
+        }
     }
 
     /// Parse one or more comprehension clauses: `for target in iter (if cond)? ...`
@@ -1826,6 +1873,37 @@ impl Parser {
             self.bump();
             return Ok(Expr::Dict(vec![]));
         }
+        // `**expr` at the very start unambiguously commits to a dict literal
+        // (PEP 448 dict splat).
+        if self.is(&Token::StarStar) {
+            self.bump();
+            let first_splat = self.parse_or()?;
+            let mut items = vec![DictItem::DoubleSplat(first_splat)];
+            while self.is(&Token::Comma) {
+                self.bump();
+                if self.is(&Token::RBrace) {
+                    break;
+                }
+                items.push(self.parse_dict_item()?);
+            }
+            self.expect(&Token::RBrace)?;
+            return Ok(Expr::Dict(items));
+        }
+        // `*expr` at the start commits to a set literal (PEP 448 set splat).
+        if self.is(&Token::Star) {
+            self.bump();
+            let first_splat = self.parse_or()?;
+            let mut items = vec![Expr::Starred(Box::new(first_splat))];
+            while self.is(&Token::Comma) {
+                self.bump();
+                if self.is(&Token::RBrace) {
+                    break;
+                }
+                items.push(self.parse_seq_item()?);
+            }
+            self.expect(&Token::RBrace)?;
+            return Ok(Expr::Set(items));
+        }
         let first = self.parse_expr()?;
         if self.is(&Token::Colon) {
             // Dict or dict comprehension
@@ -1841,16 +1919,13 @@ impl Parser {
                     clauses,
                 });
             }
-            let mut items = vec![(first, val)];
+            let mut items = vec![DictItem::Pair(first, val)];
             while self.is(&Token::Comma) {
                 self.bump();
                 if self.is(&Token::RBrace) {
                     break;
                 }
-                let k = self.parse_expr()?;
-                self.expect(&Token::Colon)?;
-                let v = self.parse_expr()?;
-                items.push((k, v));
+                items.push(self.parse_dict_item()?);
             }
             self.expect(&Token::RBrace)?;
             Ok(Expr::Dict(items))
@@ -1871,10 +1946,25 @@ impl Parser {
                 if self.is(&Token::RBrace) {
                     break;
                 }
-                items.push(self.parse_expr()?);
+                items.push(self.parse_seq_item()?);
             }
             self.expect(&Token::RBrace)?;
             Ok(Expr::Set(items))
+        }
+    }
+
+    /// Parse one entry inside a dict literal: either `key: value` or `**expr`
+    /// (PEP 448 dict splat).
+    fn parse_dict_item(&mut self) -> Result<DictItem> {
+        if self.is(&Token::StarStar) {
+            self.bump();
+            let val = self.parse_or()?;
+            Ok(DictItem::DoubleSplat(val))
+        } else {
+            let k = self.parse_expr()?;
+            self.expect(&Token::Colon)?;
+            let v = self.parse_expr()?;
+            Ok(DictItem::Pair(k, v))
         }
     }
 

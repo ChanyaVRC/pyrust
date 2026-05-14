@@ -163,6 +163,15 @@ pub enum Pattern {
     },
 }
 
+/// An entry in a dict literal: either a `key: value` pair or a `**expr` splat
+/// per PEP 448.
+#[derive(Debug, Clone)]
+pub enum DictItem {
+    Pair(Expr, Expr),
+    /// `**expr` — merge `expr` (a mapping) into the dict.
+    DoubleSplat(Expr),
+}
+
 /// One part of a parsed f-string.
 #[derive(Debug, Clone)]
 pub enum FStringPart {
@@ -192,8 +201,14 @@ pub enum Expr {
     Var(String),
     List(Vec<Expr>),
     Tuple(Vec<Expr>),
-    Dict(Vec<(Expr, Expr)>),
+    Dict(Vec<DictItem>),
     Set(Vec<Expr>),
+    /// PEP 448 splat inside a list / tuple / set literal: `*expr`.
+    /// Only valid as a direct child of `Expr::List` / `Expr::Tuple` / `Expr::Set`
+    /// (collection-literal contexts).  Splat in function-call argument lists is
+    /// represented via `CallArg::splat`, and splat assign-targets via
+    /// `AssignTarget::Starred`.
+    Starred(Box<Expr>),
     /// `[elt for target in iter (if cond)?  (for target2 in iter2 ...)*]`
     ListComp {
         elt: Box<Expr>,
