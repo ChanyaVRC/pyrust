@@ -21,7 +21,10 @@ pub(crate) enum SpecState {
 /// semantics — `2 ** 64` returns the BigInt `18446744073709551616`, not the
 /// wrapped value `0`.  The fast path is a single `checked_pow` (≈free), so
 /// non-overflowing call sites pay no measurable cost over `wrapping_pow`.
-fn int_pow_promoting(a: i64, b: i64) -> Value {
+///
+/// Centralised here (issue #421 / PR #484 Copilot review) so the `**`
+/// operator and the `pow(a, b)` builtin share one source of truth.
+pub(crate) fn int_pow_promoting(a: i64, b: i64) -> Value {
     debug_assert!(b >= 0, "int_pow_promoting: caller must guard b < 0");
     let exp = match u32::try_from(b) {
         Ok(e) => e,

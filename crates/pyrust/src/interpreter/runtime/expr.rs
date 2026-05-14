@@ -1,3 +1,20 @@
+/// Fallible `BigInt -> f64`.  Raises `OverflowError` (CPython parity:
+/// `int too large to convert to float`) when the BigInt's magnitude is
+/// outside f64's representable range, instead of silently returning
+/// `f64::INFINITY` (which loses sign and produces nonsense `inf`
+/// arithmetic).  Centralised here for the mixed BigInt±Float arms in
+/// add/sub/mul (PR #484 Copilot review).
+fn bigint_to_float_or_overflow(b: &PyBigInt) -> Result<f64> {
+    b.to_f64()
+        .filter(|f| f.is_finite())
+        .ok_or_else(|| {
+            PyError::named(
+                "OverflowError",
+                "int too large to convert to float".to_string(),
+            )
+        })
+}
+
 impl Interpreter {
     fn unsupported_binary_operand(op: &str) -> PyError {
         PyError::named("TypeError", format!("unsupported operand type(s) for {op}"))
@@ -1023,9 +1040,45 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__pow__", "__rpow__") {
                     return r;
                 }
+                // Integer ** non-negative integer stays in the int domain
+                // (BigInt promotion when the result overflows i64).  Once
+                // overflow promotes (#421), `(2**64) ** 2` arrives here as
+                // `BigInt ** Int`; the dedicated arms below handle those
+                // cross-type cases.  Negative exponent on an int LHS
+                // returns Float (CPython parity).  See PR #484 Copilot
+                // review.
                 match (left.kind(), right.kind()) {
                     (ValueKind::Int(a), ValueKind::Int(b)) if b >= 0 => {
                         Ok(int_pow_promoting(a, b))
+                    }
+                    (ValueKind::BigInt(a), ValueKind::Int(b)) if b >= 0 => {
+                        Ok(Value::bigint(PyPow::pow(a.clone(), b as u64)))
+                    }
+                    (ValueKind::Int(a), ValueKind::BigInt(b)) if *b >= PyBigInt::from(0) => {
+                        // BigInt exponent: astronomically large for |a| > 1.
+                        // Promote a to BigInt and delegate to BigInt::pow
+                        // if the exponent fits in u64; otherwise raise
+                        // OverflowError (CPython parity at the
+                        // "exponentiation cannot produce a result that
+                        // fits in memory" boundary).
+                        match b.to_u64_digits().1.as_slice() {
+                            [exp] => Ok(Value::bigint(PyPow::pow(PyBigInt::from(a), *exp))),
+                            [] => Ok(Value::int(1)), // a ** 0
+                            _ => Err(PyError::named(
+                                "OverflowError",
+                                "exponent too large for ** to compute".to_string(),
+                            )),
+                        }
+                    }
+                    (ValueKind::BigInt(a), ValueKind::BigInt(b)) if *b >= PyBigInt::from(0) => {
+                        match b.to_u64_digits().1.as_slice() {
+                            [exp] => Ok(Value::bigint(PyPow::pow(a.clone(), *exp))),
+                            [] => Ok(Value::int(1)),
+                            _ => Err(PyError::named(
+                                "OverflowError",
+                                "exponent too large for ** to compute".to_string(),
+                            )),
+                        }
                     }
                     _ => {
                         let a = value_to_float(&left, "**")?;
@@ -1104,10 +1157,10 @@ impl Interpreter {
                 (ValueKind::BigInt(a), ValueKind::Int(b)) => Ok(Value::bigint(a + PyBigInt::from(b))),
                 (ValueKind::Int(a), ValueKind::BigInt(b)) => Ok(Value::bigint(PyBigInt::from(a) + b)),
                 (ValueKind::BigInt(a), ValueKind::Float(b)) => {
-                    Ok(Value::float(a.to_f64().unwrap_or(f64::INFINITY) + b))
+                    Ok(Value::float(bigint_to_float_or_overflow(&a)? + b))
                 }
                 (ValueKind::Float(a), ValueKind::BigInt(b)) => {
-                    Ok(Value::float(a + b.to_f64().unwrap_or(f64::INFINITY)))
+                    Ok(Value::float(a + bigint_to_float_or_overflow(&b)?))
                 }
                 (ValueKind::Str(a), ValueKind::Str(b)) => Ok(Value::string(format!("{a}{b}"))),
                 (ValueKind::List(a), ValueKind::List(b)) => {
@@ -1141,10 +1194,10 @@ impl Interpreter {
             (ValueKind::BigInt(a), ValueKind::Int(b)) => Ok(Value::bigint(a - PyBigInt::from(b))),
             (ValueKind::Int(a), ValueKind::BigInt(b)) => Ok(Value::bigint(PyBigInt::from(a) - b)),
             (ValueKind::BigInt(a), ValueKind::Float(b)) => {
-                Ok(Value::float(a.to_f64().unwrap_or(f64::INFINITY) - b))
+                Ok(Value::float(bigint_to_float_or_overflow(&a)? - b))
             }
             (ValueKind::Float(a), ValueKind::BigInt(b)) => {
-                Ok(Value::float(a - b.to_f64().unwrap_or(f64::INFINITY)))
+                Ok(Value::float(a - bigint_to_float_or_overflow(&b)?))
             }
             _ => Err(Self::unsupported_binary_operand("-")),
         }
@@ -1168,10 +1221,10 @@ impl Interpreter {
             (ValueKind::BigInt(a), ValueKind::Int(b)) => Ok(Value::bigint(a * PyBigInt::from(b))),
             (ValueKind::Int(a), ValueKind::BigInt(b)) => Ok(Value::bigint(PyBigInt::from(a) * b)),
             (ValueKind::BigInt(a), ValueKind::Float(b)) => {
-                Ok(Value::float(a.to_f64().unwrap_or(f64::INFINITY) * b))
+                Ok(Value::float(bigint_to_float_or_overflow(&a)? * b))
             }
             (ValueKind::Float(a), ValueKind::BigInt(b)) => {
-                Ok(Value::float(a * b.to_f64().unwrap_or(f64::INFINITY)))
+                Ok(Value::float(a * bigint_to_float_or_overflow(&b)?))
             }
             (ValueKind::Str(text), ValueKind::Int(n)) => {
                 if n <= 0 { Ok(Value::string(String::new())) }
