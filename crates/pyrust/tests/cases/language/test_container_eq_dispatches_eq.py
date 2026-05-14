@@ -83,3 +83,14 @@ print([a, 1] != [b, 2])                  # True
 # Dict-value comparison must also dispatch __eq__ on user-class values.
 print({1: a} == {1: b})                  # True
 print({1: n1} == {1: n2})                # False
+
+# Cycles where the prefix already differs — must return False before
+# reaching the back-edge.  CPython raises RecursionError when the prefix
+# is equal (so we don't add an "all-equal cycle" case to a parity test);
+# pyrust's `EqGuard`/`eq_in_progress` policy treats those as equal, but
+# the more important guarantee is that we *don't* blow the stack here.
+d1 = [99]
+d1.append(d1)
+d2 = [100]
+d2.append(d2)
+print(d1 == d2)                          # False

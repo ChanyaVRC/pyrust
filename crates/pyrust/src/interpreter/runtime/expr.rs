@@ -15,6 +15,69 @@ fn bigint_to_float_or_overflow(b: &PyBigInt) -> Result<f64> {
         })
 }
 
+/// Outcome of the borrow-only sequence equality fast path used by
+/// `values_user_eq` for `List`/`Tuple` pairs.
+///
+/// `Resolved(v)` means every element comparison was settled by
+/// `Value::eq` without needing user `__eq__` dispatch, so `v` is the
+/// final answer.  `NeedsDispatch` means at least one element pair could
+/// only be resolved by recursing into `values_user_eq` (e.g. it
+/// contains a `PyInstance` or a nested container that itself may hold
+/// one); the caller must drop the borrow, snapshot the elements, and
+/// take the slow recursion path.
+enum SeqFast {
+    Resolved(bool),
+    NeedsDispatch,
+}
+
+/// Returns `true` iff comparing `a` against `b` via `Value::eq` could
+/// give a different answer than user `__eq__` dispatch would.  Used to
+/// keep `[1,2,3] == [1,2,4]` (flat primitive sequences) on a
+/// zero-allocation walk.
+///
+/// Conservative: any `PyInstance` or container (`List`/`Tuple`/`Dict`/
+/// `Set`) returns `true`, because each may itself contain a
+/// `PyInstance` for which `Value::eq` would fall back to
+/// `Rc::ptr_eq`.  Leaf primitives (`Int`/`Float`/`Bool`/`Str`/`Bytes`/
+/// `None`/`Complex`/`BigInt`/`Range`) return `false`.
+fn pair_may_need_dispatch(a: &Value, b: &Value) -> bool {
+    matches!(
+        a.kind(),
+        ValueKind::PyInstance(_)
+            | ValueKind::List(_)
+            | ValueKind::Tuple(_)
+            | ValueKind::Dict(_)
+            | ValueKind::Set(_)
+    ) || matches!(
+        b.kind(),
+        ValueKind::PyInstance(_)
+            | ValueKind::List(_)
+            | ValueKind::Tuple(_)
+            | ValueKind::Dict(_)
+            | ValueKind::Set(_)
+    )
+}
+
+/// Element-wise equality over two equal-length slices, returning
+/// [`SeqFast::Resolved`] as soon as every pair can be decided by
+/// `Value::eq` alone.  As soon as a pair that could need user dispatch
+/// is encountered (and didn't already compare equal), bail to
+/// [`SeqFast::NeedsDispatch`] so the caller can take the snapshot+
+/// recurse path.
+fn try_seq_fast_eq(av: &[Value], bv: &[Value]) -> SeqFast {
+    debug_assert_eq!(av.len(), bv.len());
+    for (x, y) in av.iter().zip(bv.iter()) {
+        if x == y {
+            continue;
+        }
+        if pair_may_need_dispatch(x, y) {
+            return SeqFast::NeedsDispatch;
+        }
+        return SeqFast::Resolved(false);
+    }
+    SeqFast::Resolved(true)
+}
+
 impl Interpreter {
     fn unsupported_binary_operand(op: &str) -> PyError {
         PyError::named("TypeError", format!("unsupported operand type(s) for {op}"))
@@ -462,55 +525,73 @@ impl Interpreter {
     /// resolving `PyKey::Object` collisions and by `BinaryOp::Eq`/`Ne`'s
     /// container fall-through path (issue #436).
     ///
-    /// The fast `Value::eq` path covers primitives and identity-equal
-    /// containers (e.g. `[1,2,3] == [1,2,3]`).  When it returns false we
-    /// look for cases that need dunder dispatch:
+    /// Dispatch order, structured to keep the flat-primitive hot path
+    /// allocation-free:
     ///
-    /// - `PyInstance` on either side: try `__eq__` (issue #368).
-    /// - Same-kind container (`List`/`Tuple`/`Dict`): recurse element-wise
-    ///   so a `PyInstance` element with `__eq__` participates correctly
-    ///   instead of the inner `Rc::ptr_eq` returning false (issue #436).
-    /// - `Set`: same-size + each lhs element in rhs via `set_lookup`
-    ///   (which already routes `PyKey::Object` through `values_user_eq`).
+    /// 1. Same-kind sequence pair (`List`/`List` or `Tuple`/`Tuple`):
+    ///    `try_seq_fast_eq` walks the borrow pairwise and resolves any
+    ///    pair that doesn't transitively need user dispatch via
+    ///    `Value::eq`.  This avoids the double-walk an upfront
+    ///    `a == b` would cause and matches pre-#436 perf for primitive
+    ///    sequences.  When a pair could need dispatch (`PyInstance` or
+    ///    nested container), snapshot both sides and recurse.
+    /// 2. Primitive / identity fast path: `a == b` for the non-sequence
+    ///    cases (`Int`/`Float`/`Bool`/`Str`/`Bytes`/`Complex`/`None`
+    ///    and identity-equal `Dict`/`Set`).
+    /// 3. Same-kind `Dict`/`Set`: snapshot keys and dispatch via
+    ///    `dict_lookup`/`set_lookup`, which already route
+    ///    `PyKey::Object` through user `__hash__`/`__eq__` (issue #368).
+    /// 4. `PyInstance` on either side: `try_dunder_binary` for
+    ///    `__eq__`/reflected `__eq__`.
     ///
     /// Cycle detection mirrors `Value::eq`'s `EqGuard`: a recursive call
     /// for the same `(value_id(a), value_id(b))` pair returns true (the
     /// recursion bottoms out as "we've already proven the prefix equal"),
     /// so `a.append(a); b.append(b); a == b` doesn't blow the stack.
     pub(crate) fn values_user_eq(&mut self, a: &Value, b: &Value) -> Result<bool> {
-        // Primitive / identity fast path: `Value::eq` handles
-        // Int/Float/Bool/Str/Bytes/Complex/None and identity-equal
-        // collections without any dunder dispatch.  When it returns true
-        // we're done — this also preserves the branch-free
-        // `[1,2,3] == [1,2,3]` shortcut.
-        if a == b {
-            return Ok(true);
-        }
-
-        // Same-kind container recursion.  Each kind has element-wise
-        // semantics where `Value::eq` doesn't dispatch user `__eq__`:
-        //   - `Vec::eq` element-by-element via `Value::eq`
-        //   - `IndexMap`/`IndexSet`: keyed by `PyKey` (which for
-        //     `PyKey::Object` uses ptr-identity, not user `__eq__`)
-        // Snapshot element slices when both operands are list-shaped or
-        // tuple-shaped.  Tuple `ValueKind` yields `&[Value]` and List
-        // yields `Ref<'_, Vec<Value>>`, so we extract the snapshot in a
-        // mini-scope and recurse below.  Element clones are cheap
-        // (Rc/NaN-box copy); the snapshot also prevents user code from
-        // invalidating the borrow during recursion.
-        let pair_slices: Option<(Vec<Value>, Vec<Value>)> = match (a.kind(), b.kind()) {
+        // Same-kind sequence containers come first.  For `List`/`Tuple`
+        // pairs an upfront `Value::eq` would double-walk: `Vec::eq`
+        // already iterates element-wise, and the recursion below would
+        // repeat the walk.  Going straight to `try_seq_fast_eq`
+        // resolves flat primitive sequences (`[1,2,3] == [1,2,4]`) in
+        // a single borrow-only pass with no allocation — matching
+        // pre-#436 perf.  Mixed-kind pairs (e.g. list vs tuple) fall
+        // through to the primitive/identity fast path below.
+        let needs_seq_dispatch = match (a.kind(), b.kind()) {
             (ValueKind::List(la), ValueKind::List(lb)) => {
-                Some((la.iter().cloned().collect(), lb.iter().cloned().collect()))
+                if la.len() != lb.len() {
+                    return Ok(false);
+                }
+                match try_seq_fast_eq(&la, &lb) {
+                    SeqFast::Resolved(v) => return Ok(v),
+                    SeqFast::NeedsDispatch => true,
+                }
             }
             (ValueKind::Tuple(la), ValueKind::Tuple(lb)) => {
-                Some((la.iter().cloned().collect(), lb.iter().cloned().collect()))
+                if la.len() != lb.len() {
+                    return Ok(false);
+                }
+                match try_seq_fast_eq(la, lb) {
+                    SeqFast::Resolved(v) => return Ok(v),
+                    SeqFast::NeedsDispatch => true,
+                }
             }
-            _ => None,
+            _ => false,
         };
-        if let Some((av, bv)) = pair_slices {
-            if av.len() != bv.len() {
-                return Ok(false);
-            }
+        if needs_seq_dispatch {
+            // Slow path: snapshot both sides to drop the borrow before
+            // recursing into user code, then walk element-wise through
+            // `values_user_eq` so `PyInstance` elements dispatch
+            // `__eq__`.  Element clones are cheap (Rc/NaN-box copy).
+            let (av, bv): (Vec<Value>, Vec<Value>) = match (a.kind(), b.kind()) {
+                (ValueKind::List(la), ValueKind::List(lb)) => {
+                    (la.iter().cloned().collect(), lb.iter().cloned().collect())
+                }
+                (ValueKind::Tuple(la), ValueKind::Tuple(lb)) => {
+                    (la.iter().cloned().collect(), lb.iter().cloned().collect())
+                }
+                _ => unreachable!("needs_seq_dispatch implies a sequence pair"),
+            };
             if self.eq_cycle_enter(a, b) {
                 // Already comparing this pair further up the stack —
                 // treat as equal to terminate the recursion (matching
@@ -527,6 +608,14 @@ impl Interpreter {
             })();
             self.eq_cycle_exit(a, b);
             return result;
+        }
+
+        // Primitive / identity fast path: `Value::eq` handles
+        // Int/Float/Bool/Str/Bytes/Complex/None and identity-equal
+        // Dict/Set without dunder dispatch.  (List/Tuple were already
+        // handled above to avoid the double-walk.)
+        if a == b {
+            return Ok(true);
         }
 
         match (a.kind(), b.kind()) {
