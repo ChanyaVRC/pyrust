@@ -624,6 +624,33 @@ fn pass_algebraic_simplify(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Ins
         }
     }
 
+    // Pre-scan: find registers that are WRITE-ONCE — assigned by exactly one
+    // `LoadConst` and never written again.  These hold a stable Int value
+    // across the whole function (including loop bodies), so the bb-clear of
+    // `int_regs` doesn't need to lose them.  This catches the hot pattern
+    // `for i in range(N): x = i + 0` where the `0` constant is hoisted out
+    // of the loop by `pass_licm` as a register, leaving a `BinOp(_, i, Add,
+    // c_reg)` in the loop body that the per-bb tracking would otherwise
+    // miss (the LoadConst is outside the loop's basic block).
+    let mut write_count: HashMap<u32, u32> = HashMap::new();
+    let mut load_const_value: HashMap<u32, i64> = HashMap::new();
+    for insn in &insns {
+        if let Insn::LoadConst(dst, c) = insn {
+            *write_count.entry(*dst).or_insert(0) += 1;
+            if let Some(v) = consts[*c as usize].as_int() {
+                load_const_value.insert(*dst, v);
+            }
+        } else if let Some(dst) = writable_dst(insn) {
+            *write_count.entry(dst).or_insert(0) += 1;
+        }
+    }
+    // Final map: register → its sole Int constant value, iff written exactly once
+    // and that single write was a `LoadConst(_, c)` with `consts[c]` an Int.
+    let immutable_int_const: HashMap<u32, i64> = load_const_value
+        .into_iter()
+        .filter(|(r, _)| write_count.get(r).copied() == Some(1))
+        .collect();
+
     let is_int_const = |idx: u16, consts: &[Value]| -> bool {
         matches!(
             consts[idx as usize].kind(),
@@ -638,13 +665,41 @@ fn pass_algebraic_simplify(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Ins
             Add | Sub | Mul | FloorDiv | Mod | BitAnd | BitOr | BitXor | LShift | RShift
         )
     };
+    // Match an identity pattern.  Returns `Some(rewrite)` when `(op, c_val)` is
+    // one of the six recognised algebraic identities; otherwise `None`.
+    let identity_rewrite = |dst: u32,
+                            lhs: u32,
+                            op: crate::ast::BinaryOp,
+                            c_val: i64,
+                            consts: &mut Vec<Value>|
+     -> Option<Insn> {
+        match (op, c_val) {
+            (Add, 0) | (Sub, 0) | (Mul, 1) | (Pow, 1) => Some(Insn::Move(dst, lhs)),
+            (Mul, 0) => {
+                intern_const_in_pool(consts, Value::int(0)).map(|idx| Insn::LoadConst(dst, idx))
+            }
+            (Pow, 0) => {
+                intern_const_in_pool(consts, Value::int(1)).map(|idx| Insn::LoadConst(dst, idx))
+            }
+            _ => None,
+        }
+    };
 
     let mut int_regs: HashSet<u32> = HashSet::new();
+    // Seed `int_regs` with the immutable-int-const registers — they're Int
+    // everywhere, so always in the set regardless of bb position.
+    for &r in immutable_int_const.keys() {
+        int_regs.insert(r);
+    }
     let mut out: Vec<Insn> = Vec::with_capacity(insns.len());
 
     for (i, insn) in insns.into_iter().enumerate() {
         if bb_starts.contains(&i) {
             int_regs.clear();
+            // Re-seed with immutable consts (they survive bb boundaries).
+            for &r in immutable_int_const.keys() {
+                int_regs.insert(r);
+            }
         }
         match insn {
             Insn::LoadConst(dst, c) => {
@@ -675,24 +730,13 @@ fn pass_algebraic_simplify(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Ins
                 let c_int = is_int_const(c, consts);
                 if lhs_int && c_int {
                     if let Some(cv) = consts[c as usize].as_int() {
-                        let rewrite: Option<Insn> = match (op, cv) {
-                            (Add, 0) | (Sub, 0) | (Mul, 1) | (Pow, 1) => Some(Insn::Move(dst, lhs)),
-                            (Mul, 0) => intern_const_in_pool(consts, Value::int(0))
-                                .map(|idx| Insn::LoadConst(dst, idx)),
-                            (Pow, 0) => intern_const_in_pool(consts, Value::int(1))
-                                .map(|idx| Insn::LoadConst(dst, idx)),
-                            _ => None,
-                        };
-                        if let Some(new) = rewrite {
-                            // dst inherits Int from lhs (or is the int constant
-                            // we just synthesised).
+                        if let Some(new) = identity_rewrite(dst, lhs, op, cv, consts) {
                             int_regs.insert(dst);
                             out.push(new);
                             continue;
                         }
                     }
                 }
-                // No rewrite — propagate int-ness through type-preserving ops.
                 if lhs_int && c_int && int_preserving(op) {
                     int_regs.insert(dst);
                 } else {
@@ -701,6 +745,19 @@ fn pass_algebraic_simplify(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Ins
                 out.push(Insn::BinOpConst(dst, lhs, op, c));
             }
             Insn::BinOp(dst, lhs, op, rhs) => {
+                // First: try the identity rewrite when `rhs` is an immutable
+                // int constant register (covers the loop case where
+                // `pass_binop_const_fusion` couldn't fuse across a back-edge).
+                if int_regs.contains(&lhs) {
+                    if let Some(&cv) = immutable_int_const.get(&rhs) {
+                        if let Some(new) = identity_rewrite(dst, lhs, op, cv, consts) {
+                            int_regs.insert(dst);
+                            out.push(new);
+                            continue;
+                        }
+                    }
+                }
+                // Propagate Int-ness through type-preserving ops.
                 if int_regs.contains(&lhs) && int_regs.contains(&rhs) && int_preserving(op) {
                     int_regs.insert(dst);
                 } else {
@@ -711,6 +768,10 @@ fn pass_algebraic_simplify(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Ins
             insn => {
                 // Any other write conservatively drops the dst's int-ness.
                 if let Some(dst) = writable_dst(&insn) {
+                    // ...unless it's an immutable-int-const register: those
+                    // are mark-once and write-once by definition (pre-scan
+                    // verified write_count == 1), so we never reach here
+                    // for one.  The `remove` is still safe (it'd be a no-op).
                     int_regs.remove(&dst);
                 }
                 out.push(insn);
