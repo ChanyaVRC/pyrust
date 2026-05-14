@@ -87,7 +87,15 @@ impl Interpreter {
                 // simultaneous `&` + `&mut` to the same Vec/Set/Map.  See
                 // SAFETY contracts on `Value::as_list_mut` / `as_set_mut` /
                 // `as_dict_mut`.
-                pyrust_core::unalias_args_for_mutation(&receiver, &mut pos);
+                //
+                // Only methods that iterate their arg through the
+                // receiver's storage need the deep copy (issue #414):
+                // `extend` / `update` / `intersection_update` etc.  For
+                // `append` / `insert` / `add` the deep copy would break
+                // valid self-aliased calls like `a.append(a)`.
+                if pyrust_core::method_iterates_args(method) {
+                    pyrust_core::unalias_args_for_mutation(&receiver, &mut pos);
+                }
                 match receiver.kind() {
                     ValueKind::Str(_) => {
                         pyrust_builtins::string::call(method, &receiver, pos)

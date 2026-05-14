@@ -2183,6 +2183,35 @@ impl fmt::Debug for Value {
 // Helper free functions
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Does the named built-in method *iterate* its positional argument(s)
+/// while the receiver is being `&mut`-borrowed?  Only those sites need
+/// the [`unalias_args_for_mutation`] deep-copy dance — every other
+/// mutating method (`list.append`, `list.insert`, `set.add`,
+/// `dict.pop`, …) treats its args as opaque elements / keys and can
+/// alias the receiver freely.  Issue #414: deep-copying every arg
+/// broke self-cycle construction like `a.append(a)` by replacing the
+/// receiver-aliased value with an unrelated fresh copy.
+///
+/// The set is small and stable:
+/// - **list.extend** — iterates the iterable into the back of `self`.
+/// - **set.update / .intersection_update / .difference_update /
+///   .symmetric_difference_update** — iterate the other set/iterable.
+/// - **dict.update** — iterates the mapping arg's key/value pairs.
+///
+/// Non-mutating set methods (`union`, `intersection`, `issubset`, …)
+/// also iterate their args but they don't take a `&mut` on `self`, so
+/// no aliasing-safety problem arises and the unalias is unnecessary.
+pub fn method_iterates_args(method: &str) -> bool {
+    matches!(
+        method,
+        "extend"
+            | "update"
+            | "intersection_update"
+            | "difference_update"
+            | "symmetric_difference_update"
+    )
+}
+
 /// Replace any `Value` in `args` that shares the receiver's backing storage
 /// (Rc-aliased list/set/dict) with an independent deep copy.  Used at builtin
 /// dispatch sites before taking a `&mut` borrow on the receiver: the safety
@@ -2191,6 +2220,12 @@ impl fmt::Debug for Value {
 /// e.g. `lst.extend(lst)` would otherwise create overlapping `&[Value]` and
 /// `&mut Vec<Value>` references to the same storage even though no user-level
 /// race occurs.
+///
+/// **Call only when the method iterates its args** — see
+/// [`method_iterates_args`].  Methods like `append` / `insert` / `add` /
+/// `pop` don't touch the receiver's storage through `args`, so the deep
+/// copy would silently break valid self-aliased calls like
+/// `a.append(a)` (issue #414).
 ///
 /// This is identity-based via [`Value::value_id`].  Primitives and types that
 /// are not Rc-shared (tuple, str, etc.) flow through unchanged because their

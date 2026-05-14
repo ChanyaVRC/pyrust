@@ -2036,7 +2036,14 @@ impl Interpreter {
         // receiver (e.g. `lst.extend(lst)`).  Resolve up front so the builtin
         // can read iterables without producing a simultaneous `&` + `&mut` to
         // the same Vec/Set/Map.  See `Value::as_list_mut` safety contract.
-        if matches!(obj_kind_tag, 1 | 2 | 5) {
+        //
+        // Only methods that iterate their arg through the receiver's storage
+        // need the deep copy (issue #414).  `append`/`insert`/`add` etc. take
+        // their arg as an opaque element and must NOT be unaliased — that
+        // would break valid self-aliased calls like `a.append(a)`.
+        if matches!(obj_kind_tag, 1 | 2 | 5)
+            && pyrust_core::method_iterates_args(&method)
+        {
             pyrust_core::unalias_args_for_mutation(&regs[obj as usize], &mut args);
         }
 
@@ -2154,9 +2161,12 @@ impl Interpreter {
         }).unwrap_or(0);
 
         // See `exec_call_method`: unalias args sharing the receiver's
-        // Rc-backing before the `&mut` is taken.
+        // Rc-backing before the `&mut` is taken.  Only iterating methods
+        // (issue #414).
         let mut pos_items = pos_items;
-        if matches!(obj_kind_tag, 1 | 2 | 5) {
+        if matches!(obj_kind_tag, 1 | 2 | 5)
+            && pyrust_core::method_iterates_args(&method)
+        {
             pyrust_core::unalias_args_for_mutation(&regs[obj as usize], &mut pos_items);
         }
 
