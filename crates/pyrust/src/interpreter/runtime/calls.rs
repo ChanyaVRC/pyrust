@@ -1099,6 +1099,28 @@ impl Interpreter {
                 std::mem::replace(&mut self.env, Rc::clone(&function.env))
             };
 
+            // Issue #488: variadic generator functions (`def g(*args):
+            // yield ...` and friends) must also be wrapped in a
+            // GeneratorFrame instead of executed synchronously — the
+            // simple-path branch already does this above; mirror it here
+            // so the body's `yield` isn't observed as a runtime error.
+            if code.is_generator {
+                let gen_env = std::mem::replace(&mut self.env, previous_env);
+                let frame = GeneratorFrame {
+                    code: Rc::clone(&code),
+                    regs,
+                    iters: vec![None; code.num_iters as usize],
+                    exc_handlers: Vec::new(),
+                    pc: 0,
+                    done: false,
+                    saved_env: gen_env,
+                    handled_exc_slice: Vec::new(),
+                    active_exception: None,
+                    local_index: Rc::clone(&function.local_index),
+                };
+                return Ok(Value::generator(Box::new(frame)));
+            }
+
             // Issue #389: publish a function frame view (see the
             // matching push in the simple-path branch above).
             self.vm_frame_views.push(VmFrameView {
