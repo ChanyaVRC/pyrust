@@ -6,6 +6,19 @@ impl Interpreter {
                 if name == "__class__" {
                     return Ok(Value::py_class(Rc::clone(&instance.borrow().class)));
                 }
+                if name == "__dict__" {
+                    // Snapshot of the instance's own attrs — CPython exposes a
+                    // live mapping; we currently return a fresh dict (a clone)
+                    // which is sufficient for read access, `**obj.__dict__`
+                    // splatting, serialisation, etc.  Mutations to the
+                    // returned dict do *not* propagate back to the instance
+                    // (see issue #392 — follow-up for live-dict semantics).
+                    let mut dict: IndexMap<PyKey, Value> = IndexMap::new();
+                    for (k, v) in instance.borrow().attrs.iter() {
+                        dict.insert(PyKey::Str(k.clone()), v.clone());
+                    }
+                    return Ok(Value::dict(dict));
+                }
 
                 // Check the class first for data descriptors (Property).  A data
                 // descriptor takes priority over instance __dict__ — matching CPython.
