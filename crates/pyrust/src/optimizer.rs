@@ -814,6 +814,7 @@ fn pass_unary_fold(insns: Vec<Insn>, num_locals: u32, consts: &mut Vec<Value>) -
                             None => Value::bigint(-crate::value::PyBigInt::from(n)),
                         }),
                         ValueKind::Float(f) => Some(Value::float(-f)),
+                        ValueKind::BigInt(b) => Some(Value::bigint(-b)),
                         _ => None,
                     },
                     UnaryOp::Not => Some(Value::bool_(!c.truthy())),

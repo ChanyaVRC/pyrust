@@ -1293,8 +1293,14 @@ fn fold_constant(expr: &Expr) -> Option<Value> {
             let val = fold_constant(expr)?;
             match op {
                 UnaryOp::Neg => match val.kind() {
-                    ValueKind::Int(n) => Some(Value::int(n.wrapping_neg())),
+                    // `-i64::MIN` overflows; promote to BigInt to match
+                    // CPython's arbitrary-precision int semantics (#421).
+                    ValueKind::Int(n) => Some(match n.checked_neg() {
+                        Some(r) => Value::int(r),
+                        None => Value::bigint(-PyBigInt::from(n)),
+                    }),
                     ValueKind::Float(f) => Some(Value::float(-f)),
+                    ValueKind::BigInt(b) => Some(Value::bigint(-b)),
                     _ => None,
                 },
                 UnaryOp::Not => Some(Value::bool_(!val.truthy())),

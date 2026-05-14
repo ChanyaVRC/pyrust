@@ -90,3 +90,12 @@ print(big * big)
 # Unary minus on a BigInt
 print(-big)
 print(-(2 ** 64))
+
+# ---- compile-time unary fold via aug-assign RHS ----
+# The augmented-assignment RHS goes through `try_literal_const_idx`, which
+# constant-folds the entire expression at compile time.  When the inner
+# subtraction folds to `i64::MIN`, the outer unary `-` must promote to
+# BigInt rather than wrap back to `i64::MIN`.
+acc = 0
+acc += -(-1 - 9223372036854775807)
+print(acc)
