@@ -191,6 +191,95 @@ thread_local! {
         base: None,
         attrs: IndexMap::new(),
     }));
+
+    /// Per-primitive `PyClass` singletons.  Issue #462 — `int`, `str`,
+    /// `list`, … are now real `PyClass` values, not `BuiltinFunction(name)`
+    /// sentinels.  `type(x)` returns the matching entry here; the names
+    /// resolve to these classes via `resolve_builtin`; and `isinstance`
+    /// works through the standard `class_is_subclass_of` walk.
+    ///
+    /// Each class's `__init__` is the existing `BuiltinFunction("<name>")`
+    /// constructor (so `int("42")` etc. keep their established behaviour);
+    /// the call-site dispatch in `call_class_expanded` recognises primitive
+    /// classes and returns the constructor's `Value` directly instead of
+    /// wrapping it in a `PyInstance`.
+    ///
+    /// `bool` chains its `base` to `int`, matching CPython's
+    /// `bool.__bases__ == (int,)`.  Storage-variant constraints prevent
+    /// subclassing primitives in pyrust today; the migration is purely
+    /// metadata + dispatch routing.
+    static PRIMITIVE_CLASSES: PrimitiveClasses = build_primitive_classes();
+}
+
+/// Holder for the per-primitive `PyClass` Rc's.  Constructed once per
+/// thread at startup, then cloned cheaply (Rc::clone) on every `type(x)` /
+/// `resolve_builtin("int")` etc. call.
+pub(crate) struct PrimitiveClasses {
+    pub(crate) bool_class: Rc<RefCell<PyClass>>,
+    pub(crate) bytes_class: Rc<RefCell<PyClass>>,
+    pub(crate) complex_class: Rc<RefCell<PyClass>>,
+    pub(crate) dict_class: Rc<RefCell<PyClass>>,
+    pub(crate) float_class: Rc<RefCell<PyClass>>,
+    pub(crate) frozenset_class: Rc<RefCell<PyClass>>,
+    pub(crate) int_class: Rc<RefCell<PyClass>>,
+    pub(crate) list_class: Rc<RefCell<PyClass>>,
+    pub(crate) set_class: Rc<RefCell<PyClass>>,
+    pub(crate) str_class: Rc<RefCell<PyClass>>,
+    pub(crate) tuple_class: Rc<RefCell<PyClass>>,
+}
+
+/// Build the per-primitive `PyClass` singletons.  Called once per thread
+/// (via `thread_local!` init).  Each class's `__init__` slot is the
+/// existing builtin constructor (`BuiltinFunction("int")` etc.) so that
+/// `T(args)` keeps its existing behaviour through `call_class_expanded`'s
+/// primitive short-circuit.
+fn build_primitive_classes() -> PrimitiveClasses {
+    fn make(name: &str, base: Option<Rc<RefCell<PyClass>>>) -> Rc<RefCell<PyClass>> {
+        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        // The class's `__init__` is the same builtin function the legacy
+        // sentinel pointed at — `int("42")`, `str(obj)`, etc.  Lookup by
+        // bare name works because the flat-namespace `builtins` registry
+        // (see `pyrust_builtin_modules!`'s `@flat builtins`) registers
+        // each constructor under its short name.
+        let init_name: &'static str = match name {
+            "int" => "int",
+            "str" => "str",
+            "float" => "float",
+            "bool" => "bool",
+            "list" => "list",
+            "tuple" => "tuple",
+            "dict" => "dict",
+            "set" => "set",
+            "frozenset" => "frozenset",
+            "bytes" => "bytes",
+            "complex" => "complex",
+            _ => unreachable!("unknown primitive type {name}"),
+        };
+        attrs.insert(
+            "__init__".to_string(),
+            Value::builtin_function(init_name),
+        );
+        Rc::new(RefCell::new(PyClass {
+            name: name.to_string(),
+            base,
+            attrs,
+        }))
+    }
+    let int_class = make("int", None);
+    PrimitiveClasses {
+        bytes_class: make("bytes", None),
+        complex_class: make("complex", None),
+        dict_class: make("dict", None),
+        float_class: make("float", None),
+        frozenset_class: make("frozenset", None),
+        list_class: make("list", None),
+        set_class: make("set", None),
+        str_class: make("str", None),
+        tuple_class: make("tuple", None),
+        // `bool` inherits from `int` (CPython: `bool.__bases__ == (int,)`).
+        bool_class: make("bool", Some(Rc::clone(&int_class))),
+        int_class,
+    }
 }
 
 /// Returns the singleton synthetic `object` class used as the terminal
@@ -200,6 +289,75 @@ thread_local! {
 /// `A.__mro__[-1] is B.__mro__[-1]` holds, matching CPython.
 pub(crate) fn object_class_singleton() -> Rc<RefCell<PyClass>> {
     OBJECT_CLASS.with(|c| Rc::clone(c))
+}
+
+/// Look up the per-primitive `PyClass` singleton for one of the 11 migrated
+/// primitive type names (`int`, `str`, `list`, …).  Returns `None` for any
+/// other name — callers fall through to the legacy `BuiltinFunction(name)`
+/// path.  See [`PRIMITIVE_CLASSES`].
+pub(crate) fn primitive_class_by_name(name: &str) -> Option<Rc<RefCell<PyClass>>> {
+    PRIMITIVE_CLASSES.with(|c| {
+        Some(Rc::clone(match name {
+            "bool" => &c.bool_class,
+            "bytes" => &c.bytes_class,
+            "complex" => &c.complex_class,
+            "dict" => &c.dict_class,
+            "float" => &c.float_class,
+            "frozenset" => &c.frozenset_class,
+            "int" => &c.int_class,
+            "list" => &c.list_class,
+            "set" => &c.set_class,
+            "str" => &c.str_class,
+            "tuple" => &c.tuple_class,
+            _ => return None,
+        }))
+    })
+}
+
+/// Return the `PyClass` that `type(v)` should yield for any of the 11
+/// migrated primitive types.  Returns `None` for variants that aren't
+/// part of this migration (functions, modules, instances, …) — the
+/// caller falls back to its existing per-variant logic.
+pub(crate) fn primitive_class_for_value(v: &Value) -> Option<Rc<RefCell<PyClass>>> {
+    let name: &'static str = match v.kind() {
+        ValueKind::Bool(_) => "bool",
+        ValueKind::Int(_) | ValueKind::BigInt(_) => "int",
+        ValueKind::Float(_) => "float",
+        ValueKind::Str(_) => "str",
+        ValueKind::List(_) => "list",
+        ValueKind::Tuple(_) => "tuple",
+        ValueKind::Dict(_) => "dict",
+        ValueKind::Set(_) => "set",
+        ValueKind::Bytes(_) => "bytes",
+        ValueKind::Complex(_, _) => "complex",
+        ValueKind::BuiltinObject { ops, .. } if ops.type_name() == "frozenset" => "frozenset",
+        _ => return None,
+    };
+    primitive_class_by_name(name)
+}
+
+/// True iff `class` is one of the 11 migrated-primitive class singletons.
+/// Used by `call_class_expanded` to route primitive-class calls through
+/// the existing constructor (`Value::Int(_)` etc.) instead of allocating
+/// a `PyInstance`.
+pub(crate) fn is_primitive_class(class: &Rc<RefCell<PyClass>>) -> bool {
+    PRIMITIVE_CLASSES.with(|c| {
+        [
+            &c.bool_class,
+            &c.bytes_class,
+            &c.complex_class,
+            &c.dict_class,
+            &c.float_class,
+            &c.frozenset_class,
+            &c.int_class,
+            &c.list_class,
+            &c.set_class,
+            &c.str_class,
+            &c.tuple_class,
+        ]
+        .into_iter()
+        .any(|p| Rc::ptr_eq(p, class))
+    })
 }
 
 pub(crate) struct PrintOptions {

@@ -901,36 +901,47 @@ pyrust_module! {
         }
         let obj = &args[0].value;
         // For user-defined class instances return the actual Rc so that
-        // `type(x) is type(x)` works via Rc::ptr_eq.  For builtin types
-        // return a BuiltinFunction value (singleton-like) so
-        // `type(5) is type(5)` works and isinstance(x, type(x)) succeeds.
+        // `type(x) is type(x)` works via Rc::ptr_eq.
+        //
+        // Issue #462: the 11 migrated primitives (`int`, `str`, …) return
+        // their per-thread `PyClass` singletons from `primitive_class_for_value`,
+        // so `type(5).__name__ == "int"`, `bool.__bases__ == (int,)`, and
+        // `isinstance(x, T)` work through the standard class machinery.
+        //
+        // Remaining variants (functions, modules, ranges, generators, …)
+        // still emit a `BuiltinFunction(name)` sentinel — they're not part
+        // of the primitive-class migration.
+        if let ValueKind::PyInstance(inst) = obj.kind() {
+            return Ok(Value::py_class(Rc::clone(&inst.borrow().class)));
+        }
+        if let Some(class) = crate::interpreter::primitive_class_for_value(obj) {
+            return Ok(Value::py_class(class));
+        }
         match obj.kind() {
-            ValueKind::PyInstance(inst) => Ok(Value::py_class(Rc::clone(&inst.borrow().class))),
             ValueKind::PyClass(_) => Ok(Value::builtin_function("type")),
-            ValueKind::Bool(_) => Ok(Value::builtin_function("bool")),
-            ValueKind::Int(_) => Ok(Value::builtin_function("int")),
-            ValueKind::Float(_) => Ok(Value::builtin_function("float")),
-            ValueKind::Str(_) => Ok(Value::builtin_function("str")),
             ValueKind::None => Ok(Value::builtin_function("NoneType")),
-            ValueKind::List(_) => Ok(Value::builtin_function("list")),
-            ValueKind::Tuple(_) => Ok(Value::builtin_function("tuple")),
-            ValueKind::Dict(_) => Ok(Value::builtin_function("dict")),
-            ValueKind::Set(_) => Ok(Value::builtin_function("set")),
             ValueKind::Range { .. } => Ok(Value::builtin_function("range")),
             ValueKind::UserFunction(_)
             | ValueKind::BoundMethod { .. }
             | ValueKind::ClassBoundMethod { .. } => Ok(Value::builtin_function("function")),
             ValueKind::BuiltinFunction(_) => Ok(Value::builtin_function("builtin_function_or_method")),
             ValueKind::PyModule(_) => Ok(Value::builtin_function("module")),
-            ValueKind::BigInt(_) => Ok(Value::builtin_function("int")),
             ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => Ok(Value::builtin_function("super")),
             ValueKind::Generator(_) => Ok(Value::builtin_function("generator")),
             ValueKind::NotImplemented => Ok(Value::builtin_function("NotImplementedType")),
-            ValueKind::Bytes(_) => Ok(Value::builtin_function("bytes")),
-            ValueKind::Complex(_, _) => Ok(Value::builtin_function("complex")),
             ValueKind::BuiltinObject { ops, .. } => {
                 Ok(Value::builtin_function(ops.type_name()))
             }
+            // Migrated primitives are handled above via
+            // `primitive_class_for_value`; the explicit `unreachable!`
+            // documents that and lets rustc verify exhaustiveness.
+            ValueKind::Bool(_) | ValueKind::Int(_) | ValueKind::BigInt(_)
+            | ValueKind::Float(_) | ValueKind::Str(_) | ValueKind::List(_)
+            | ValueKind::Tuple(_) | ValueKind::Dict(_) | ValueKind::Set(_)
+            | ValueKind::Bytes(_) | ValueKind::Complex(_, _)
+            | ValueKind::PyInstance(_) => unreachable!(
+                "primitive_class_for_value should have handled this variant"
+            ),
         }
     }
 
@@ -1855,28 +1866,36 @@ fn hash_value(value: &Value) -> Result<i64> {
 }
 
 /// Single-class `isinstance` check — `obj` against one concrete class
-/// value (i.e. *not* a tuple).  Mirrors the original match arms from
-/// `isinstance` and is reused by the tuple-recursive entry point.
+/// value (i.e. *not* a tuple).  Issue #462: the 11 migrated primitive
+/// types (`int`, `str`, `list`, …) are real `PyClass` values now, so
+/// their `isinstance` resolves through the standard `class_is_subclass_of`
+/// walk — no per-type hard-coded arms.  Only `NoneType` and `BuiltinObject`
+/// (frozenset, range, enumerate, …) still take the legacy
+/// `BuiltinFunction(name)` path until they're migrated too.
 fn isinstance_single(obj: &Value, cls: &Value) -> bool {
-    match (obj.kind(), cls.kind()) {
-        (ValueKind::PyInstance(inst), ValueKind::PyClass(expected)) => {
-            class_is_subclass_of(&inst.borrow().class, expected)
+    // Migrated primitives: `type(obj)` returns the per-thread PyClass
+    // singleton, so a class-vs-class walk handles every primitive check
+    // (including `bool` → `int` via base inheritance).
+    if let ValueKind::PyClass(expected) = cls.kind() {
+        let actual_class = match obj.kind() {
+            ValueKind::PyInstance(inst) => Some(Rc::clone(&inst.borrow().class)),
+            _ => crate::interpreter::primitive_class_for_value(obj),
+        };
+        if let Some(actual) = actual_class {
+            return class_is_subclass_of(&actual, expected);
         }
-        (ValueKind::Int(_) | ValueKind::Bool(_), ValueKind::BuiltinFunction("int")) => true,
-        (ValueKind::Float(_), ValueKind::BuiltinFunction("float")) => true,
-        (ValueKind::Str(_), ValueKind::BuiltinFunction("str")) => true,
-        (ValueKind::Bool(_), ValueKind::BuiltinFunction("bool")) => true,
+        return false;
+    }
+    // Non-class `cls` operands are an error at the API boundary
+    // (`isinstance_check` rejects them); the only remaining match here is
+    // the legacy `BuiltinFunction(name)` path for types that haven't been
+    // migrated to PyClass yet (`NoneType` and any future builtin-only
+    // type tokens).
+    match (obj.kind(), cls.kind()) {
         (ValueKind::None, ValueKind::BuiltinFunction("NoneType")) => true,
-        (ValueKind::List(_), ValueKind::BuiltinFunction("list")) => true,
-        (ValueKind::Tuple(_), ValueKind::BuiltinFunction("tuple")) => true,
-        (ValueKind::Set(_), ValueKind::BuiltinFunction("set")) => true,
         (ValueKind::BuiltinObject { ops, .. }, ValueKind::BuiltinFunction(name)) => {
             ops.type_name() == name
         }
-        (ValueKind::Bytes(_), ValueKind::BuiltinFunction("bytes")) => true,
-        (ValueKind::Complex(_, _), ValueKind::BuiltinFunction("complex")) => true,
-        (ValueKind::Dict(_), ValueKind::BuiltinFunction("dict")) => true,
-        (ValueKind::BigInt(_), ValueKind::BuiltinFunction("int")) => true,
         _ => false,
     }
 }

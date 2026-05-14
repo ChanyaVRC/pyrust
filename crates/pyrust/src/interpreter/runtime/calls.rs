@@ -1119,6 +1119,23 @@ impl Interpreter {
             return Ok(instantiate_exception(class, values));
         }
 
+        // Issue #462: the 11 migrated primitive types (`int`, `str`, …)
+        // dispatch through `call_class_expanded` because they live in
+        // globals as `PyClass` values now.  Their `__init__` is the
+        // existing builtin constructor (which returns a primitive
+        // `Value::Int(_)` / `Value::Str(_)` / etc.) — not a PyInstance —
+        // so we short-circuit the standard "alloc PyInstance, run
+        // __init__" path and return the constructor's value directly.
+        if is_primitive_class(&class) {
+            let init = lookup_class_attr(&class, "__init__").ok_or_else(|| {
+                PyError::Runtime(format!(
+                    "primitive class '{}' missing __init__ — registry corrupt",
+                    class.borrow().name,
+                ))
+            })?;
+            return self.call_function_expanded(init, args);
+        }
+
         let instance = Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(&class),
             attrs: IndexMap::new(),

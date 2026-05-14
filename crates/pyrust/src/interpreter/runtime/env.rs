@@ -140,6 +140,16 @@ impl Interpreter {
                 if name == "__name__" {
                     return Ok(Value::string(class.borrow().name.clone()));
                 }
+                if name == "__bases__" {
+                    // `__bases__` reports the immediate parents — a 1-tuple
+                    // containing `base` if set, else a 1-tuple containing
+                    // the synthetic `object` (CPython: every class without
+                    // an explicit base is `(object,)`).  Multi-inheritance
+                    // isn't modelled — `PyClass.base` is single-valued.
+                    let base = class.borrow().base.clone();
+                    let parent = base.unwrap_or_else(object_class_singleton);
+                    return Ok(Value::tuple(vec![Value::py_class(parent)]));
+                }
                 if name == "__mro__" {
                     // Walk the single-inheritance `base` chain to build the
                     // MRO tuple, terminating in the synthetic `object` class.
@@ -176,6 +186,43 @@ impl Interpreter {
                         },
                         None => value,
                     });
+                }
+                // Migrated-primitive class (issue #462): expose the
+                // per-type method registry as class attrs so that
+                // `str.lower`, `list.append`, etc. work — mirroring the
+                // legacy `BuiltinFunction("str")` attr-access path that
+                // used to live in this file.  Limited to `str` for now
+                // because that's the only type with regression-tested
+                // class-method-by-name access; the other primitive types
+                // are reached via bound-method lookup on instances.
+                if is_primitive_class(&class) {
+                    let class_name = class.borrow().name.clone();
+                    if class_name == "str" {
+                        match name {
+                            "lower"      => return Ok(Value::builtin_function("str.lower")),
+                            "upper"      => return Ok(Value::builtin_function("str.upper")),
+                            "strip"      => return Ok(Value::builtin_function("str.strip")),
+                            "lstrip"     => return Ok(Value::builtin_function("str.lstrip")),
+                            "rstrip"     => return Ok(Value::builtin_function("str.rstrip")),
+                            "capitalize" => return Ok(Value::builtin_function("str.capitalize")),
+                            "split"      => return Ok(Value::builtin_function("str.split")),
+                            "join"       => return Ok(Value::builtin_function("str.join")),
+                            "replace"    => return Ok(Value::builtin_function("str.replace")),
+                            "find"       => return Ok(Value::builtin_function("str.find")),
+                            "rfind"      => return Ok(Value::builtin_function("str.rfind")),
+                            "index"      => return Ok(Value::builtin_function("str.index")),
+                            "rindex"     => return Ok(Value::builtin_function("str.rindex")),
+                            "count"      => return Ok(Value::builtin_function("str.count")),
+                            "startswith" => return Ok(Value::builtin_function("str.startswith")),
+                            "endswith"   => return Ok(Value::builtin_function("str.endswith")),
+                            "format"     => return Ok(Value::builtin_function("str.format")),
+                            "isdigit"    => return Ok(Value::builtin_function("str.isdigit")),
+                            "isalpha"    => return Ok(Value::builtin_function("str.isalpha")),
+                            "isalnum"    => return Ok(Value::builtin_function("str.isalnum")),
+                            "isspace"    => return Ok(Value::builtin_function("str.isspace")),
+                            _ => {}
+                        }
+                    }
                 }
 
                 let class_name = class.borrow().name.clone();

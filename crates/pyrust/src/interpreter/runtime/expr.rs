@@ -1721,7 +1721,17 @@ pub(crate) fn iter_values(value: Value) -> Result<Vec<Value>> {
 /// Resolve a built-in name to its `Value::builtin_function` variant.
 /// Single source of truth for both the tree-walker (`eval_expr`) and the register VM
 /// (`LoadGlobal` fallback).  Any new built-in must be added here only.
+///
+/// The 11 primitive type names (`int`, `str`, `list`, …) resolve to the
+/// per-thread `PyClass` singletons from `primitive_class_by_name` — see
+/// issue #462.  `bool` resolves to a class whose `base` chains to `int`,
+/// so `bool.__bases__ == (int,)` matches CPython.
 pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
+    // Primitive types (issue #462) — `int`, `str`, `list`, … are real
+    // `PyClass` values, not `BuiltinFunction(name)` sentinels.
+    if let Some(class) = primitive_class_by_name(name) {
+        return Some(Value::py_class(class));
+    }
     match name {
         "print" => Some(Value::builtin_function("print")),
         "len" => Some(Value::builtin_function("len")),
@@ -1734,16 +1744,6 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
         "min" => Some(Value::builtin_function("min")),
         "max" => Some(Value::builtin_function("max")),
         "sum" => Some(Value::builtin_function("sum")),
-        "list" => Some(Value::builtin_function("list")),
-        "tuple" => Some(Value::builtin_function("tuple")),
-        "set" => Some(Value::builtin_function("set")),
-        "frozenset" => Some(Value::builtin_function("frozenset")),
-        "bytes" => Some(Value::builtin_function("bytes")),
-        "dict" => Some(Value::builtin_function("dict")),
-        "str" => Some(Value::builtin_function("str")),
-        "int" => Some(Value::builtin_function("int")),
-        "float" => Some(Value::builtin_function("float")),
-        "bool" => Some(Value::builtin_function("bool")),
         "isinstance" => Some(Value::builtin_function("isinstance")),
         "type" => Some(Value::builtin_function("type")),
         "id" => Some(Value::builtin_function("id")),
@@ -1780,7 +1780,6 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
         "dir" => Some(Value::builtin_function("dir")),
         "open" => Some(Value::builtin_function("open")),
         "NotImplemented" => Some(Value::not_implemented()),
-        "complex" => Some(Value::builtin_function("complex")),
         _ => None,
     }
 }
