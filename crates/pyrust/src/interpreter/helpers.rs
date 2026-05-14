@@ -1413,16 +1413,27 @@ pub(crate) fn float_to_bigint(f: f64) -> Value {
     Value::bigint(n)
 }
 
-pub(crate) fn value_to_float(v: &Value, ctx: &str) -> Result<f64> {
+/// Coerce a `Value` to `f64` for numeric ops.  Returns the raw `f64` on
+/// success or `None` for non-numeric types — the caller chooses the error
+/// wording so CPython-parity messages stay precise at each call site.
+pub(crate) fn try_value_to_float(v: &Value) -> Option<f64> {
     match v.kind() {
-        ValueKind::Float(f) => Ok(f),
-        ValueKind::Int(i) => Ok(i as f64),
-        ValueKind::Bool(b) => Ok(if b { 1.0 } else { 0.0 }),
-        _ => Err(PyError::named("TypeError", format!(
-            "{ctx}: a float is required, not {}",
-            v.repr()
-        ))),
+        ValueKind::Float(f) => Some(f),
+        ValueKind::Int(i) => Some(i as f64),
+        ValueKind::Bool(b) => Some(if b { 1.0 } else { 0.0 }),
+        _ => None,
     }
+}
+
+/// Coerce a `Value` to `f64` with the `math`/builtins-style error message,
+/// matching CPython's `math.sqrt`-family error wording.
+pub(crate) fn value_to_float(v: &Value, ctx: &str) -> Result<f64> {
+    try_value_to_float(v).ok_or_else(|| {
+        PyError::named(
+            "TypeError",
+            format!("{ctx}: a float is required, not {}", v.repr()),
+        )
+    })
 }
 
 // `make_math_module()` / `make_sys_module()` removed — both are now

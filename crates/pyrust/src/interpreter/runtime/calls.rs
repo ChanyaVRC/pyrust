@@ -2102,16 +2102,16 @@ fn normalise_exp_digits(s: String) -> String {
     format!("{mantissa}{e_char}{exp_sign}{exp_num_padded}")
 }
 
+/// Coerce a `Value` to `f64` for format-spec (`format(x, ".2f")` / f-string)
+/// numeric formatting.  Thin wrapper around [`try_value_to_float`] that
+/// reports the format-path CPython-parity error message.
 fn fmt_value_to_float(value: &Value) -> Result<f64> {
-    match value.kind() {
-        ValueKind::Float(f) => Ok(f),
-        ValueKind::Int(n) => Ok(n as f64),
-        ValueKind::Bool(b) => Ok(if b { 1.0 } else { 0.0 }),
-        _ => Err(PyError::named(
+    try_value_to_float(value).ok_or_else(|| {
+        PyError::named(
             "TypeError",
             format!("must be real number, not {}", value_type_name_str(value)),
-        )),
-    }
+        )
+    })
 }
 
 fn apply_sign_str(s: String, f: f64, sign: Option<char>) -> String {
