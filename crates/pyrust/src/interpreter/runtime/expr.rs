@@ -1511,6 +1511,13 @@ impl Interpreter {
                         }
                     }
                 }
+                // Legacy sequence-iter protocol (#394): if the class
+                // defines `__getitem__` but no `__iter__`/`__contains__`,
+                // walk indices 0, 1, … until IndexError/StopIteration.
+                if lookup_class_attr(&class, "__getitem__").is_some() {
+                    let items = self.materialize_via_getitem(Rc::clone(&inst_rc))?;
+                    return Ok(Value::bool_(items.into_iter().any(|elem| elem == item)));
+                }
                 Err(PyError::named(
                     "TypeError",
                     format!("argument of type '{}' is not iterable", class.borrow().name),

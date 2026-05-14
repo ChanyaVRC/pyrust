@@ -1325,6 +1325,17 @@ impl Interpreter {
                                         &[],
                                     ));
                                     IterState::UserDefined(iter_obj)
+                                } else if lookup_class_attr(&class, "__getitem__").is_some() {
+                                    // Legacy sequence-iter protocol (#394):
+                                    // no __iter__ but __getitem__ exists —
+                                    // walk integer indices 0, 1, … until
+                                    // IndexError/StopIteration.  Eager:
+                                    // materialise upfront, then iterate
+                                    // the Vec.
+                                    let items = vm_try!(
+                                        self.materialize_via_getitem(inst_rc)
+                                    );
+                                    IterState::Materialized(items, 0)
                                 } else {
                                     // No __iter__: try to materialise via iter_values (will fail)
                                     IterState::Materialized(vm_try!(iter_values(src_val)), 0)

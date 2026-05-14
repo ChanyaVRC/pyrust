@@ -311,24 +311,26 @@ impl Interpreter {
             Ok(items)
         } else if let ValueKind::PyInstance(inst) = val.kind() {
             // Get iterator via __iter__ (or use self if it only has __next__).
-            let iterator = {
-                let inst_rc = Rc::clone(inst);
-                let class = Rc::clone(&inst_rc.borrow().class);
-                if let Some(method_val) = lookup_class_attr(&class, "__iter__") {
-                    invoke_class_method(
-                        self,
-                        method_val,
-                        Value::py_instance(inst_rc),
-                        &[],
-                    )?
-                } else if lookup_class_attr(&class, "__next__").is_some() {
-                    val.clone()
-                } else {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!("'{}' object is not iterable", class.borrow().name),
-                    ));
-                }
+            let inst_rc = Rc::clone(inst);
+            let class = Rc::clone(&inst_rc.borrow().class);
+            let iterator = if let Some(method_val) = lookup_class_attr(&class, "__iter__") {
+                invoke_class_method(
+                    self,
+                    method_val,
+                    Value::py_instance(Rc::clone(&inst_rc)),
+                    &[],
+                )?
+            } else if lookup_class_attr(&class, "__next__").is_some() {
+                val.clone()
+            } else if lookup_class_attr(&class, "__getitem__").is_some() {
+                // Legacy sequence-iter protocol: iterate via __getitem__(0),
+                // __getitem__(1), … until IndexError/StopIteration.  See #394.
+                return self.materialize_via_getitem(Rc::clone(&inst_rc));
+            } else {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("'{}' object is not iterable", class.borrow().name),
+                ));
             };
             let mut items = Vec::new();
             loop {
@@ -348,6 +350,55 @@ impl Interpreter {
             Ok(items)
         } else {
             iter_values(val)
+        }
+    }
+
+    /// Materialise an instance's items by calling `__getitem__(0)`,
+    /// `__getitem__(1)`, … until `IndexError` (or `StopIteration`) is
+    /// raised.  Implements CPython's legacy sequence-iter protocol
+    /// for classes that define `__getitem__` but not `__iter__`.
+    ///
+    /// **Eager**: the entire sequence is materialised into a `Vec`
+    /// before returning.  This is fine for typical "wraps a list"
+    /// shapes that the protocol exists for, but means infinite or
+    /// very-large `__getitem__` implementations will spin until OOM
+    /// rather than streaming.  A follow-up could swap to a lazy
+    /// `IterState` that bumps an index on each `ForIter`.
+    ///
+    /// Any exception other than `IndexError`/`StopIteration`
+    /// propagates — matching CPython.  In particular, `TypeError`
+    /// from a non-integer-aware `__getitem__` surfaces to the caller
+    /// rather than terminating iteration silently.
+    pub(crate) fn materialize_via_getitem(
+        &mut self,
+        inst_rc: Rc<RefCell<PyInstance>>,
+    ) -> Result<Vec<Value>> {
+        let class = Rc::clone(&inst_rc.borrow().class);
+        let method_val = lookup_class_attr(&class, "__getitem__").ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                format!("'{}' object is not iterable", class.borrow().name),
+            )
+        })?;
+        let mut items: Vec<Value> = Vec::new();
+        let mut index: i64 = 0;
+        loop {
+            let arg = ExpandedCallArg {
+                name: None,
+                value: Value::int(index),
+            };
+            let result = invoke_class_method(
+                self,
+                method_val.clone(),
+                Value::py_instance(Rc::clone(&inst_rc)),
+                &[arg],
+            );
+            match result {
+                Ok(v) => items.push(v),
+                Err(e) if is_sequence_iter_terminator(&e) => return Ok(items),
+                Err(e) => return Err(e),
+            }
+            index += 1;
         }
     }
 
@@ -1788,6 +1839,25 @@ fn apply_field_accessors(mut value: Value, mut rest: &str) -> Result<Value> {
         }
     }
     Ok(value)
+}
+
+/// Does `err` signal end-of-sequence for the legacy `__getitem__`
+/// iter protocol?  CPython terminates iteration on both `IndexError`
+/// and `StopIteration` raised from `__getitem__`; anything else
+/// (including subclasses of those names raised as `PyInstance`
+/// objects) propagates to the caller.  Issue #394.
+pub(crate) fn is_sequence_iter_terminator(err: &PyError) -> bool {
+    match err {
+        PyError::Named(cls, _) => cls == "IndexError" || cls == "StopIteration",
+        PyError::Raised(exc) => match exc.kind() {
+            ValueKind::PyInstance(inst) => {
+                let name = inst.borrow().class.borrow().name.clone();
+                name == "IndexError" || name == "StopIteration"
+            }
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// Returns the ASCII-escaped repr of a value (like the built-in `ascii()`).

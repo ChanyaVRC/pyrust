@@ -706,6 +706,14 @@ pyrust_module! {
                 } else if lookup_class_attr(&class, "__next__").is_some() {
                     // Already an iterator (has __next__ but no separate __iter__).
                     Ok(val)
+                } else if lookup_class_attr(&class, "__getitem__").is_some() {
+                    // Legacy sequence-iter protocol (#394): wrap the
+                    // __getitem__-driven materialisation in a
+                    // NativeIterFrame so the result behaves like a real
+                    // iterator (supports `next()`, exhausts on
+                    // StopIteration, etc.).
+                    let items = _interp.materialize_via_getitem(inst_rc)?;
+                    Ok(Value::generator(Box::new(NativeIterFrame { items, pos: 0 })))
                 } else {
                     Err(PyError::named(
                         "TypeError",
