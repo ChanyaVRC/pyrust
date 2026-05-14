@@ -1727,12 +1727,13 @@ pub(crate) fn iter_values(value: Value) -> Result<Vec<Value>> {
 /// issue #462.  `bool` resolves to a class whose `base` chains to `int`,
 /// so `bool.__bases__ == (int,)` matches CPython.
 pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
-    // Primitive types (issue #462) — `int`, `str`, `list`, … are real
-    // `PyClass` values, not `BuiltinFunction(name)` sentinels.
-    if let Some(class) = primitive_class_by_name(name) {
-        return Some(Value::py_class(class));
-    }
+    // One combined match so non-primitive names (`range`, `print`, …) skip
+    // the `PRIMITIVE_CLASSES` thread_local entirely.  Primitive names
+    // (#462) trigger the TLS access lazily and wrap the singleton `Rc` in
+    // a `Value::py_class`.
     match name {
+        "bool" | "bytes" | "complex" | "dict" | "float" | "frozenset" | "int" | "list" | "set"
+        | "str" | "tuple" => primitive_class_by_name(name).map(Value::py_class),
         "print" => Some(Value::builtin_function("print")),
         "len" => Some(Value::builtin_function("len")),
         "range" => Some(Value::builtin_function("range")),

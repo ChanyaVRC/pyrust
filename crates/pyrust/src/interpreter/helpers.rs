@@ -275,32 +275,24 @@ pub(crate) struct PrimitiveClasses {
 /// existing builtin constructor (`BuiltinFunction("int")` etc.) so that
 /// `T(args)` keeps its existing behaviour through `call_class_expanded`'s
 /// primitive short-circuit.
+///
+/// `#[cold]` + `#[inline(never)]` keeps this one-time init code out of the
+/// hot-path icache footprint of `call_function_expanded`, `get_attr`, etc.
+/// — observable as a small but uniform speedup on benches that never touch
+/// primitive classes (`literal_int`, `literal_dict`).
+#[cold]
+#[inline(never)]
 fn build_primitive_classes() -> PrimitiveClasses {
-    fn make(name: &str, base: Option<Rc<RefCell<PyClass>>>) -> Rc<RefCell<PyClass>> {
+    #[cold]
+    #[inline(never)]
+    fn make(name: &'static str, base: Option<Rc<RefCell<PyClass>>>) -> Rc<RefCell<PyClass>> {
         let mut attrs: IndexMap<String, Value> = IndexMap::new();
         // The class's `__init__` is the same builtin function the legacy
-        // sentinel pointed at — `int("42")`, `str(obj)`, etc.  Lookup by
-        // bare name works because the flat-namespace `builtins` registry
-        // (see `pyrust_builtin_modules!`'s `@flat builtins`) registers
-        // each constructor under its short name.
-        let init_name: &'static str = match name {
-            "int" => "int",
-            "str" => "str",
-            "float" => "float",
-            "bool" => "bool",
-            "list" => "list",
-            "tuple" => "tuple",
-            "dict" => "dict",
-            "set" => "set",
-            "frozenset" => "frozenset",
-            "bytes" => "bytes",
-            "complex" => "complex",
-            _ => unreachable!("unknown primitive type {name}"),
-        };
-        attrs.insert(
-            "__init__".to_string(),
-            Value::builtin_function(init_name),
-        );
+        // sentinel pointed at — `int("42")`, `str(obj)`, etc.  The flat
+        // `builtins` registry (`pyrust_builtin_modules!`'s `@flat builtins`)
+        // registers each constructor under its short name, so the class
+        // name doubles as the init-fn name.
+        attrs.insert("__init__".to_string(), Value::builtin_function(name));
         Rc::new(RefCell::new(PyClass {
             name: name.to_string(),
             base,
