@@ -574,24 +574,19 @@ impl Interpreter {
                     regs[*dst as usize] = Value::none();
                 }
                 Insn::Move(dst, src) | Insn::CopyReg(dst, src) => {
-                    // Hot path: `as_int()` bypasses `kind()`'s RefCell
-                    // borrow entirely for the int case — important after
-                    // #450 changed kind() to take a scoped borrow on
-                    // List/Dict/Set.  `Insn::Move` runs per-instruction;
-                    // a 1ns Ref bump here would compound.
-                    if let Some(v) = regs[*src as usize].as_some()
-                        && let Some(n) = v.as_int()
-                    {
-                        regs[*dst as usize] = Value::int(n);
-                        continue;
-                    }
                     let v = vm_try!(vm_read(regs, *src, num_locals));
                     regs[*dst as usize] = v;
                 }
 
                 // ── Arithmetic / Logic ───────────────────────────────────
                 Insn::BinOp(dst, lhs, op, rhs) => {
-                    // Hot path bypasses kind() — see Insn::Move (#450).
+                    // Hot path: `as_int()` is a tagged-u64 check that
+                    // bypasses `kind()`'s scoped RefCell borrow for the
+                    // List/Dict/Set kinds (#450).  Unlike `Insn::Move`
+                    // (where #441 showed the int specialization is a
+                    // wash), the BinOp fast path also short-circuits the
+                    // entire `eval_binary` dispatch for int–int ops, so
+                    // the savings are real.
                     if let (Some(a), Some(b)) = (
                         regs[*lhs as usize].as_int(),
                         regs[*rhs as usize].as_int(),
