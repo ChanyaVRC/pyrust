@@ -2040,6 +2040,13 @@ impl Parser {
                     format_spec,
                 } => {
                     let expr = parse_expr_str(&src)?;
+                    // Recursively parse any nested expressions inside the
+                    // format spec — they need to be visible to every AST
+                    // recursor (scope-pass, closure-capture analyser, etc.).
+                    let format_spec = match format_spec {
+                        None => None,
+                        Some(parts) => Some(self.parse_fstring_parts(parts)?),
+                    };
                     ast_parts.push(FStringPart::Expr {
                         expr: Box::new(expr),
                         conversion,

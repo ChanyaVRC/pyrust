@@ -331,6 +331,72 @@ fn lambda_captures_in_stmt(
     }
 }
 
+/// Walk every sub-expression embedded in an f-string — both the main expression
+/// of each replacement field and any nested expressions inside that field's
+/// format spec.  This centralises the recursion so every AST analysis pass
+/// (closure-capture, free-var collection, walrus collection, …) sees both.
+fn for_each_fstring_expr<F: FnMut(&Expr)>(parts: &[FStringPart], f: &mut F) {
+    for part in parts {
+        if let FStringPart::Expr {
+            expr, format_spec, ..
+        } = part
+        {
+            f(expr);
+            if let Some(spec_parts) = format_spec {
+                for_each_fstring_expr(spec_parts, f);
+            }
+        }
+    }
+}
+
+/// `&mut` variant of `for_each_fstring_expr` for passes that rewrite the AST
+/// in place (e.g. the c-at-i indexing rewrite).
+fn for_each_fstring_expr_mut<F: FnMut(&mut Expr)>(parts: &mut [FStringPart], f: &mut F) {
+    for part in parts.iter_mut() {
+        if let FStringPart::Expr {
+            expr, format_spec, ..
+        } = part
+        {
+            f(expr);
+            if let Some(spec_parts) = format_spec.as_mut() {
+                for_each_fstring_expr_mut(spec_parts, f);
+            }
+        }
+    }
+}
+
+/// Predicate variant: returns true as soon as `pred` returns true for any
+/// sub-expression in the f-string (main expr or nested spec expr).
+fn any_fstring_expr<F: FnMut(&Expr) -> bool>(parts: &[FStringPart], pred: &mut F) -> bool {
+    parts.iter().any(|part| match part {
+        FStringPart::Literal(_) => false,
+        FStringPart::Expr {
+            expr, format_spec, ..
+        } => {
+            pred(expr)
+                || format_spec
+                    .as_ref()
+                    .is_some_and(|spec_parts| any_fstring_expr(spec_parts, pred))
+        }
+    })
+}
+
+/// Like `any_fstring_expr`, but requires `pred` to hold for every embedded
+/// sub-expression.  Literal parts trivially satisfy the predicate.
+fn all_fstring_exprs<F: FnMut(&Expr) -> bool>(parts: &[FStringPart], pred: &mut F) -> bool {
+    parts.iter().all(|part| match part {
+        FStringPart::Literal(_) => true,
+        FStringPart::Expr {
+            expr, format_spec, ..
+        } => {
+            pred(expr)
+                && format_spec
+                    .as_ref()
+                    .is_none_or(|spec_parts| all_fstring_exprs(spec_parts, pred))
+        }
+    })
+}
+
 fn lambda_captures_in_expr(
     expr: &Expr,
     local_index: &HashMap<String, Reg>,
@@ -429,11 +495,9 @@ fn lambda_captures_in_expr(
         }
         Expr::Named { value, .. } => lambda_captures_in_expr(value, local_index, cells),
         Expr::FString(parts) => {
-            for part in parts {
-                if let FStringPart::Expr { expr, .. } = part {
-                    lambda_captures_in_expr(expr, local_index, cells);
-                }
-            }
+            for_each_fstring_expr(parts, &mut |e| {
+                lambda_captures_in_expr(e, local_index, cells);
+            });
         }
         Expr::Var(_)
         | Expr::Int(_)
@@ -843,11 +907,7 @@ fn collect_free_var_reads_in_expr(expr: &Expr, uses: &mut HashSet<String>) {
         Expr::Lambda { body, .. } => collect_free_var_reads_in_expr(body, uses),
         Expr::Named { value, .. } => collect_free_var_reads_in_expr(value, uses),
         Expr::FString(parts) => {
-            for part in parts {
-                if let FStringPart::Expr { expr, .. } = part {
-                    collect_free_var_reads_in_expr(expr, uses);
-                }
-            }
+            for_each_fstring_expr(parts, &mut |e| collect_free_var_reads_in_expr(e, uses));
         }
         Expr::Int(_)
         | Expr::Float(_)
@@ -1185,11 +1245,9 @@ fn collect_transitive_free_vars_in_expr(expr: &Expr, uses: &mut HashSet<String>)
         }
         Expr::Named { value, .. } => collect_transitive_free_vars_in_expr(value, uses),
         Expr::FString(parts) => {
-            for part in parts {
-                if let FStringPart::Expr { expr, .. } = part {
-                    collect_transitive_free_vars_in_expr(expr, uses);
-                }
-            }
+            for_each_fstring_expr(parts, &mut |e| {
+                collect_transitive_free_vars_in_expr(e, uses)
+            });
         }
         Expr::Var(_)
         | Expr::Int(_)
@@ -2097,10 +2155,7 @@ fn expr_safe(expr: &Expr, i_name: &str, c_name: &str) -> bool {
             DictItem::Pair(k, v) => expr_safe(k, i_name, c_name) && expr_safe(v, i_name, c_name),
             DictItem::DoubleSplat(e) => expr_safe(e, i_name, c_name),
         }),
-        Expr::FString(parts) => parts.iter().all(|p| match p {
-            FStringPart::Literal(_) => true,
-            FStringPart::Expr { expr, .. } => expr_safe(expr, i_name, c_name),
-        }),
+        Expr::FString(parts) => all_fstring_exprs(parts, &mut |e| expr_safe(e, i_name, c_name)),
         // Conservatively bail on anything that captures or re-evaluates
         // expressions in a non-trivial way: comprehensions (they have their
         // own scope and could shadow), lambdas, walrus, yield.
@@ -2275,10 +2330,7 @@ fn expr_reads_var(expr: &Expr, name: &str) -> bool {
         | Expr::Bytes(_)
         | Expr::Bool(_)
         | Expr::None => false,
-        Expr::FString(parts) => parts.iter().any(|p| match p {
-            FStringPart::Literal(_) => false,
-            FStringPart::Expr { expr, .. } => expr_reads_var(expr, name),
-        }),
+        Expr::FString(parts) => any_fstring_expr(parts, &mut |e| expr_reads_var(e, name)),
         Expr::Unary { expr, .. } => expr_reads_var(expr, name),
         Expr::Binary { left, right, .. } => {
             expr_reads_var(left, name) || expr_reads_var(right, name)
@@ -2470,11 +2522,7 @@ fn rewrite_c_at_i_in_expr(expr: &mut Expr, c_name: &str, i_name: &str) {
         | Expr::None
         | Expr::Var(_) => {}
         Expr::FString(parts) => {
-            for p in parts.iter_mut() {
-                if let FStringPart::Expr { expr, .. } = p {
-                    rewrite_c_at_i_in_expr(expr, c_name, i_name);
-                }
-            }
+            for_each_fstring_expr_mut(parts, &mut |e| rewrite_c_at_i_in_expr(e, c_name, i_name));
         }
         Expr::Unary { expr, .. } => rewrite_c_at_i_in_expr(expr, c_name, i_name),
         Expr::Binary { left, right, .. } => {
@@ -5773,9 +5821,12 @@ impl Compiler {
                         }
                         _ => val_r,
                     };
-                    // Apply format spec if present.
-                    if let Some(spec) = format_spec {
-                        // format(val, spec)
+                    // Apply format spec if present.  The spec is itself a
+                    // mini f-string (literals plus nested `{expr}` parts), so
+                    // we compile it via the same fstring helper to obtain a
+                    // single string register, then call `format(val, spec)`.
+                    if let Some(spec_parts) = format_spec {
+                        let spec_r = self.compile_fstring(spec_parts);
                         let frame = self.next_temp;
                         if frame + 2 > self.max_reg {
                             self.max_reg = frame + 2;
@@ -5787,7 +5838,6 @@ impl Compiler {
                             self.emit(Insn::Move(frame + 1, val_r));
                         }
                         self.free_temp(val_r);
-                        let spec_r = self.compile_literal(Value::string(spec.clone()));
                         if spec_r != frame + 2 {
                             self.emit(Insn::Move(frame + 2, spec_r));
                         }

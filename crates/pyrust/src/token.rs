@@ -4,10 +4,13 @@ pub enum FStringPart {
     /// Plain text fragment (already escape-processed).
     Literal(String),
     /// Raw source text for the expression, plus optional conversion flag and format spec.
+    /// `format_spec`, when present, is itself a list of f-string parts so that
+    /// nested `{expr}` interpolations inside the spec (e.g. `f"{x:>{w}}"`) can
+    /// be evaluated and their string values substituted into the spec.
     Expr {
         src: String,
         conversion: Option<char>,
-        format_spec: Option<String>,
+        format_spec: Option<Vec<FStringPart>>,
     },
 }
 

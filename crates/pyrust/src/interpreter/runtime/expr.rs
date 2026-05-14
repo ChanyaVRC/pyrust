@@ -293,27 +293,7 @@ impl Interpreter {
                 Ok(val)
             }
             Expr::FString(parts) => {
-                use crate::ast::FStringPart;
-                let mut result = String::new();
-                for part in parts {
-                    match part {
-                        FStringPart::Literal(s) => result.push_str(s),
-                        FStringPart::Expr { expr, conversion, format_spec } => {
-                            let val = self.eval_expr(expr)?;
-                            let converted = match conversion {
-                                Some('r') => Value::string(val.repr()),
-                                Some('a') => Value::string(val.repr()),
-                                _ => val,
-                            };
-                            let formatted = if let Some(spec) = format_spec {
-                                apply_format_spec(&converted, spec)?
-                            } else {
-                                Value::string(converted.to_py_str())
-                            };
-                            result.push_str(formatted.as_str().unwrap_or(""));
-                        }
-                    }
-                }
+                let result = self.eval_fstring_parts(parts)?;
                 Ok(Value::string(result))
             }
             // yield / yield from are only valid inside generator functions; the
@@ -325,6 +305,39 @@ impl Interpreter {
                 ))
             }
         }
+    }
+
+    /// Evaluate a sequence of `FStringPart`s into a Rust `String`.  Shared
+    /// between the top-level f-string expression and nested f-string parts
+    /// that appear inside a format spec (which is itself a mini f-string).
+    fn eval_fstring_parts(&mut self, parts: &[crate::ast::FStringPart]) -> Result<String> {
+        use crate::ast::FStringPart;
+        let mut result = String::new();
+        for part in parts {
+            match part {
+                FStringPart::Literal(s) => result.push_str(s),
+                FStringPart::Expr {
+                    expr,
+                    conversion,
+                    format_spec,
+                } => {
+                    let val = self.eval_expr(expr)?;
+                    let converted = match conversion {
+                        Some('r') => Value::string(val.repr()),
+                        Some('a') => Value::string(val.repr()),
+                        _ => val,
+                    };
+                    let formatted = if let Some(spec_parts) = format_spec {
+                        let spec_str = self.eval_fstring_parts(spec_parts)?;
+                        apply_format_spec(&converted, &spec_str)?
+                    } else {
+                        Value::string(converted.to_py_str())
+                    };
+                    result.push_str(formatted.as_str().unwrap_or(""));
+                }
+            }
+        }
+        Ok(result)
     }
 
     fn eval_index(&mut self, target: Value, index: Value) -> Result<Value> {
