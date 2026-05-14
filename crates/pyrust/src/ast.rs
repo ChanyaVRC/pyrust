@@ -178,11 +178,15 @@ pub enum FStringPart {
     /// A literal text fragment.
     Literal(String),
     /// An embedded expression with optional conversion flag (`!r`/`!s`/`!a`)
-    /// and optional format spec (e.g. `.2f`).
+    /// and optional format spec.  When present, the format spec is itself a
+    /// list of f-string parts so that nested `{expr}` interpolations inside
+    /// the spec (e.g. `f"{x:>{width}}"`) are exposed as real sub-expressions
+    /// — this is what allows the scope-pass / closure-capture analyser to see
+    /// names referenced inside the spec.
     Expr {
         expr: Box<Expr>,
         conversion: Option<char>,
-        format_spec: Option<String>,
+        format_spec: Option<Vec<FStringPart>>,
     },
 }
 

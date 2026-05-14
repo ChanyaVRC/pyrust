@@ -701,7 +701,7 @@ fn lex_fstring(chars: &[char], start: usize, quote: char) -> Result<(Token, usiz
 fn lex_fstring_expr(
     chars: &[char],
     start: usize,
-) -> Result<(String, Option<char>, Option<String>, usize)> {
+) -> Result<(String, Option<char>, Option<Vec<FStringPart>>, usize)> {
     let mut pos = start;
     let mut depth = 0usize; // brace depth (for nested dicts/sets in expr)
     let mut src = String::new();
@@ -804,11 +804,23 @@ fn lex_fstring_expr(
     }
 }
 
-/// Collect format spec characters until we hit `}` (at depth 0).
-/// On return `pos` points to the `}`.
-fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<String> {
-    let mut spec = String::new();
-    let mut depth = 0usize;
+/// Collect a format spec until we hit `}` (at depth 0), splitting it into a
+/// list of f-string parts so that nested `{expr}` interpolations inside the
+/// spec (e.g. `f"{x:>{width}}"`) are exposed as real sub-expressions instead
+/// of being baked into an opaque string.  On return `*pos` points to the
+/// closing `}` of the outer replacement field.
+///
+/// CPython's rule: a nested replacement field inside a format spec cannot
+/// **itself contain another nested replacement field** (`f"{x:>{w:>{n}}}"`
+/// is rejected at parse time).  Conversion flags (`!r`/`!s`/`!a`) on the
+/// nested expression are accepted — this matches CPython and is implemented
+/// in the loop below.  The nested expression also accepts a paren/bracket-
+/// balanced Python expression (e.g. `f"{x:>{f(1)}}"`).  What is not
+/// supported here is a further format spec on the nested field itself
+/// (i.e. no `{w:>{n}:5}`) — that was kept out to bound recursion.
+fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<Vec<FStringPart>> {
+    let mut parts: Vec<FStringPart> = Vec::new();
+    let mut literal = String::new();
     loop {
         match chars.get(*pos).copied() {
             None => {
@@ -816,27 +828,88 @@ fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<String> {
                     "unterminated f-string format spec".to_string(),
                 ));
             }
-            Some('{') => {
-                depth += 1;
-                spec.push('{');
-                *pos += 1;
-            }
-            Some('}') if depth > 0 => {
-                depth -= 1;
-                spec.push('}');
-                *pos += 1;
-            }
             Some('}') => {
-                // closing } of the expression — leave pos pointing at it
+                // closing } of the outer expression — leave pos pointing at it
+                if !literal.is_empty() {
+                    parts.push(FStringPart::Literal(std::mem::take(&mut literal)));
+                }
                 break;
             }
+            Some('{') => {
+                // Start of a nested interpolation inside the spec.
+                if !literal.is_empty() {
+                    parts.push(FStringPart::Literal(std::mem::take(&mut literal)));
+                }
+                *pos += 1;
+                // Collect expression source until matching `}` (no further
+                // *replacement-field* nesting permitted — matching CPython).
+                // We still respect paren / bracket depth so e.g. `{f(1)}`
+                // works, and we accept a trailing `!r`/`!s`/`!a` conversion
+                // flag on this nested expression below.
+                let mut src = String::new();
+                let mut paren_depth = 0usize;
+                let mut conversion: Option<char> = None;
+                loop {
+                    match chars.get(*pos).copied() {
+                        None => {
+                            return Err(PyError::Lex(
+                                "unterminated nested expression in f-string format spec"
+                                    .to_string(),
+                            ));
+                        }
+                        Some('}') if paren_depth == 0 => {
+                            *pos += 1;
+                            break;
+                        }
+                        Some('(') | Some('[') => {
+                            paren_depth += 1;
+                            src.push(chars[*pos]);
+                            *pos += 1;
+                        }
+                        Some(')') | Some(']') => {
+                            paren_depth = paren_depth.saturating_sub(1);
+                            src.push(chars[*pos]);
+                            *pos += 1;
+                        }
+                        Some('!') if paren_depth == 0 => {
+                            *pos += 1;
+                            let conv = chars.get(*pos).copied().ok_or_else(|| {
+                                PyError::Lex("expected conversion flag after '!'".to_string())
+                            })?;
+                            if !matches!(conv, 'r' | 's' | 'a') {
+                                return Err(PyError::Lex(format!(
+                                    "unknown conversion flag '{conv}'"
+                                )));
+                            }
+                            conversion = Some(conv);
+                            *pos += 1;
+                            if chars.get(*pos) != Some(&'}') {
+                                return Err(PyError::Lex(
+                                    "expected '}' to close nested f-string expression".to_string(),
+                                ));
+                            }
+                            *pos += 1;
+                            break;
+                        }
+                        Some(c) => {
+                            src.push(c);
+                            *pos += 1;
+                        }
+                    }
+                }
+                parts.push(FStringPart::Expr {
+                    src: src.trim().to_string(),
+                    conversion,
+                    format_spec: None,
+                });
+            }
             Some(c) => {
-                spec.push(c);
+                literal.push(c);
                 *pos += 1;
             }
         }
     }
-    Ok(spec)
+    Ok(parts)
 }
 
 fn map_escape(c: char) -> Result<char> {

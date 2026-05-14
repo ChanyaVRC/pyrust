@@ -1017,6 +1017,28 @@ fn collect_walrus_targets_in_expr(
                 collect_walrus_targets_in_expr(e, names, global_names, nonlocal_names);
             }
         }
+        Expr::FString(parts) => {
+            // Walrus inside an f-string interpolation (or inside a nested
+            // `{expr}` in the format spec) still binds in the enclosing
+            // scope; recurse so the target name is recorded.
+            use crate::ast::FStringPart;
+            fn walk(
+                parts: &[FStringPart],
+                names: &mut std::collections::HashSet<String>,
+                global_names: &std::collections::HashSet<String>,
+                nonlocal_names: &std::collections::HashSet<String>,
+            ) {
+                for part in parts {
+                    if let FStringPart::Expr { expr, format_spec, .. } = part {
+                        collect_walrus_targets_in_expr(expr, names, global_names, nonlocal_names);
+                        if let Some(spec_parts) = format_spec {
+                            walk(spec_parts, names, global_names, nonlocal_names);
+                        }
+                    }
+                }
+            }
+            walk(parts, names, global_names, nonlocal_names);
+        }
         _ => {}
     }
 }
@@ -1173,10 +1195,18 @@ fn is_pure_expr(expr: &Expr, pure_fns: &std::collections::HashSet<String>) -> bo
         Expr::Named { .. } => false,
         Expr::FString(parts) => {
             use crate::ast::FStringPart;
-            parts.iter().all(|p| match p {
-                FStringPart::Literal(_) => true,
-                FStringPart::Expr { expr, .. } => is_pure_expr(expr, pure_fns),
-            })
+            fn check_parts(parts: &[FStringPart], pure_fns: &std::collections::HashSet<String>) -> bool {
+                parts.iter().all(|p| match p {
+                    FStringPart::Literal(_) => true,
+                    FStringPart::Expr { expr, format_spec, .. } => {
+                        is_pure_expr(expr, pure_fns)
+                            && format_spec
+                                .as_ref()
+                                .is_none_or(|sp| check_parts(sp, pure_fns))
+                    }
+                })
+            }
+            check_parts(parts, pure_fns)
         }
         // yield/yield from always have side effects (generator suspension).
         Expr::Yield(_) | Expr::YieldFrom(_) => false,
