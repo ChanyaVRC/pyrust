@@ -29,7 +29,7 @@ impl Interpreter {
                     match item {
                         Expr::Starred(inner) => {
                             let v = self.eval_expr(inner)?;
-                            out.extend(iter_values(v)?);
+                            out.extend(self.collect_iterable(v)?);
                         }
                         _ => out.push(self.eval_expr(item)?),
                     }
@@ -213,7 +213,7 @@ impl Interpreter {
                     match item {
                         Expr::Starred(inner) => {
                             let v = self.eval_expr(inner)?;
-                            out.extend(iter_values(v)?);
+                            out.extend(self.collect_iterable(v)?);
                         }
                         _ => out.push(self.eval_expr(item)?),
                     }
@@ -226,7 +226,7 @@ impl Interpreter {
                     match item {
                         Expr::Starred(inner) => {
                             let v = self.eval_expr(inner)?;
-                            for item in iter_values(v)? {
+                            for item in self.collect_iterable(v)? {
                                 let key = self.value_to_pykey(&item)?;
                                 self.set_insert(&mut out, key)?;
                             }

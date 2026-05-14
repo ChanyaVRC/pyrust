@@ -37,7 +37,17 @@ pyrust_module! {
     /// <https://docs.python.org/3/library/itertools.html#itertools.chain>
     fn chain(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
-        let sources: Vec<Value> = args.iter().map(|a| a.value.clone()).collect();
+        // Pre-materialise user `PyInstance` AND `Generator` sources so
+        // user `__iter__` dispatch / generator resumption (both of
+        // which need the interpreter) happen here instead of inside
+        // the registry callback, which can only walk
+        // `NativeIterFrame` generators (#446).  Re-uses the same
+        // helper `enumerate`/`zip`/`reversed` call so behaviour stays
+        // consistent across the lazy iter family.
+        let sources: Vec<Value> = args
+            .iter()
+            .map(|a| super::builtins::materialize_user_iter(_interp, a.value.clone()))
+            .collect::<Result<_>>()?;
         Ok(pyrust_builtins::iter_helpers::chain(sources))
     }
 

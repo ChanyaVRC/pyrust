@@ -559,7 +559,7 @@ impl Interpreter {
         for arg in args {
             if arg.splat {
                 let value = self.eval_expr(&arg.value)?;
-                let items = iter_values(value)?;
+                let items = self.collect_iterable(value)?;
                 for item in items {
                     out.push(ExpandedCallArg {
                         name: None,

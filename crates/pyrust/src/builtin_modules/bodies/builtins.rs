@@ -330,7 +330,7 @@ pyrust_module! {
         if args.is_empty() || args.len() > 2 {
             return Err(PyError::Runtime(format!("{FN_NAME}() takes 1 or 2 arguments")));
         }
-        let items = iter_values(args[0].value.clone())?;
+        let items = _interp.collect_iterable(args[0].value.clone())?;
         let start = if args.len() == 2 { args[1].value.clone() } else { Value::int(0) };
         let mut acc = start;
         for item in items {
@@ -346,7 +346,7 @@ pyrust_module! {
         if args.len() != 1 {
             return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
         }
-        let items = iter_values(args[0].value.clone())?;
+        let items = _interp.collect_iterable(args[0].value.clone())?;
         for item in items {
             if item.truthy() {
                 return Ok(Value::bool_(true));
@@ -362,7 +362,7 @@ pyrust_module! {
         if args.len() != 1 {
             return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
         }
-        let items = iter_values(args[0].value.clone())?;
+        let items = _interp.collect_iterable(args[0].value.clone())?;
         for item in items {
             if !item.truthy() {
                 return Ok(Value::bool_(false));
@@ -587,9 +587,14 @@ pyrust_module! {
                 )),
             },
         };
-        // Pass the source Value directly — `iter_helpers` materialises
-        // lazily on first iter_next so side effects of e.g. `open()`
-        // happen at iteration start, not at construction.
+        // Pre-materialise PyInstance / Generator sources so user
+        // `__iter__` dispatch (which requires the Interpreter) happens
+        // here — the lazy helper in `iter_helpers` reaches the
+        // registry callback, which can't dispatch dunders or resume
+        // generators.  For other sources we still pass the raw value
+        // so side effects (e.g. `open()`) defer to iteration start
+        // (#446).
+        let iterable = materialize_user_iter(_interp, iterable)?;
         Ok(pyrust_builtins::iter_helpers::enumerate(
             iterable,
             start,
@@ -620,6 +625,11 @@ pyrust_module! {
             .filter(|a| a.name.is_none())
             .map(|a| a.value.clone())
             .collect();
+        // Pre-materialise PyInstance sources (see `enumerate` for rationale).
+        let sources = sources
+            .into_iter()
+            .map(|v| materialize_user_iter(_interp, v))
+            .collect::<Result<Vec<_>>>()?;
         Ok(pyrust_builtins::iter_helpers::zip(sources, strict))
     }
 
@@ -630,7 +640,9 @@ pyrust_module! {
         if args.len() != 1 {
             return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
         }
-        Ok(pyrust_builtins::iter_helpers::reversed(args[0].value.clone()))
+        // Pre-materialise PyInstance sources (see `enumerate` for rationale).
+        let source = materialize_user_iter(_interp, args[0].value.clone())?;
+        Ok(pyrust_builtins::iter_helpers::reversed(source))
     }
 
     /// CPython: map(func, iterable) — apply func to each element.
@@ -641,7 +653,7 @@ pyrust_module! {
             return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly 2 arguments")));
         }
         let func = args[0].value.clone();
-        let items = iter_values(args[1].value.clone())?;
+        let items = _interp.collect_iterable(args[1].value.clone())?;
         let mut result = Vec::with_capacity(items.len());
         for item in items {
             let mapped = _interp.call_function_expanded(
@@ -661,7 +673,7 @@ pyrust_module! {
             return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly 2 arguments")));
         }
         let func = args[0].value.clone();
-        let items = iter_values(args[1].value.clone())?;
+        let items = _interp.collect_iterable(args[1].value.clone())?;
         let use_identity = func.is_none();
         let mut result = Vec::new();
         for item in items {
@@ -1129,7 +1141,7 @@ pyrust_module! {
                 "{FN_NAME}() takes exactly one positional argument",
             )));
         }
-        let mut items = iter_values(positional[0].value.clone())?;
+        let mut items = _interp.collect_iterable(positional[0].value.clone())?;
         if let Some(kfn) = key_fn {
             let mut keyed: Vec<(Value, Value)> = items
                 .into_iter()
@@ -1530,7 +1542,7 @@ pyrust_module! {
             return Err(PyError::Runtime(format!("{FN_NAME} requires 3 arguments")));
         }
         let func = args[0].value.clone();
-        let pos_items = iter_values(args[1].value.clone())?;
+        let pos_items = _interp.collect_iterable(args[1].value.clone())?;
         let mut expanded: Vec<ExpandedCallArg> = pos_items
             .into_iter()
             .map(|v| ExpandedCallArg { name: None, value: v })
@@ -1731,6 +1743,29 @@ pyrust_module! {
             _ => false,
         };
         Ok(Value::bool_(is_callable))
+    }
+}
+
+/// If `v` is a user `PyInstance` (which needs `__iter__` / `__getitem__`
+/// dispatch via the interpreter) or a `Generator` (which needs the
+/// interpreter to drive the `GeneratorFrame`), drain it eagerly into a
+/// `Value::list` so downstream lazy iter helpers (`enumerate` / `zip` /
+/// `reversed` / `chain`) can reach its items through
+/// `iter_values_via_registry` — that callback can't dispatch dunders or
+/// resume generators by itself.  Non-user sources are passed through
+/// unchanged, preserving lazy evaluation for builtin iterables (e.g.
+/// `enumerate(open(path))` still defers file-reading until iter).
+///
+/// Issue #446.
+pub(super) fn materialize_user_iter(
+    interp: &mut crate::Interpreter,
+    v: Value,
+) -> Result<Value> {
+    if matches!(v.kind(), ValueKind::PyInstance(_) | ValueKind::Generator(_)) {
+        let items = interp.collect_iterable(v)?;
+        Ok(Value::list(items))
+    } else {
+        Ok(v)
     }
 }
 
@@ -1975,7 +2010,7 @@ fn min_max_impl(
     let positional: Vec<&ExpandedCallArg> =
         args.iter().filter(|a| a.name.is_none()).collect();
     let items: Vec<Value> = if positional.len() == 1 {
-        iter_values(positional[0].value.clone())?
+        interp.collect_iterable(positional[0].value.clone())?
     } else if positional.len() >= 2 {
         positional.iter().map(|a| a.value.clone()).collect()
     } else {

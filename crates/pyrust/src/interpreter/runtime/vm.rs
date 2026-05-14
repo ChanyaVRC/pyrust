@@ -736,7 +736,7 @@ impl Interpreter {
                     if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
                         let new_items: Vec<Value> = match val_val.kind() {
                             ValueKind::List(v) => v.to_vec(),
-                            _ => vm_try!(iter_values(val_val).map_err(|_| {
+                            _ => vm_try!(self.collect_iterable(val_val).map_err(|_| {
                                 PyError::Runtime("slice assignment requires iterable".to_string())
                             })),
                         };
@@ -1353,7 +1353,12 @@ impl Interpreter {
                 }
                 Insn::ListExtend(list_reg, src_reg) => {
                     let src_val = vm_try!(vm_read(regs, *src_reg, num_locals));
-                    let items_to_add = vm_try!(iter_values(src_val));
+                    // #446: route through `collect_iterable` so user
+                    // `__iter__` / `__getitem__` classes are honoured.
+                    // #448: write back via the scoped `list_extend`
+                    // operation method (no `&mut Vec` crosses the API
+                    // boundary).
+                    let items_to_add = vm_try!(self.collect_iterable(src_val));
                     vm_try!(regs[*list_reg as usize].list_extend(items_to_add));
                 }
                 Insn::DictUpdate(dict_reg, src_reg) => {
@@ -1410,7 +1415,7 @@ impl Interpreter {
                 // ── Unpack ───────────────────────────────────────────────
                 Insn::Unpack(base, src, n) => {
                     let src_val = vm_try!(vm_read(regs, *src, num_locals));
-                    let items = vm_try!(iter_values(src_val));
+                    let items = vm_try!(self.collect_iterable(src_val));
                     if items.len() < *n as usize {
                         vm_try!(Err::<(), _>(PyError::Runtime(format!(
                             "not enough values to unpack (expected {}, got {})",
@@ -1436,7 +1441,7 @@ impl Interpreter {
 
                 Insn::UnpackEx { src, before, after, dst_base } => {
                     let src_val = vm_try!(vm_read(regs, *src, num_locals));
-                    let items = vm_try!(iter_values(src_val));
+                    let items = vm_try!(self.collect_iterable(src_val));
                     let before = *before as usize;
                     let after = *after as usize;
                     let min_len = before + after;
