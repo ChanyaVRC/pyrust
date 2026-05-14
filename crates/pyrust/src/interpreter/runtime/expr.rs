@@ -23,17 +23,50 @@ impl Interpreter {
             Expr::List(items) => {
                 let mut out = Vec::with_capacity(items.len());
                 for item in items {
-                    out.push(self.eval_expr(item)?);
+                    match item {
+                        Expr::Starred(inner) => {
+                            let v = self.eval_expr(inner)?;
+                            out.extend(iter_values(v)?);
+                        }
+                        _ => out.push(self.eval_expr(item)?),
+                    }
                 }
                 Ok(Value::list(out))
             }
+            Expr::Starred(_) => Err(PyError::named(
+                "SyntaxError",
+                "can't use starred expression here".to_string(),
+            )),
             Expr::Dict(items) => {
                 let mut out = indexmap::IndexMap::new();
-                for (kexpr, vexpr) in items {
-                    let key_val = self.eval_expr(kexpr)?;
-                    let key = self.value_to_pykey(&key_val)?;
-                    let value = self.eval_expr(vexpr)?;
-                    self.dict_insert(&mut out, key, value)?;
+                for item in items {
+                    match item {
+                        crate::ast::DictItem::Pair(kexpr, vexpr) => {
+                            let key_val = self.eval_expr(kexpr)?;
+                            let key = self.value_to_pykey(&key_val)?;
+                            let value = self.eval_expr(vexpr)?;
+                            self.dict_insert(&mut out, key, value)?;
+                        }
+                        crate::ast::DictItem::DoubleSplat(expr) => {
+                            let mapping = self.eval_expr(expr)?;
+                            match mapping.kind() {
+                                ValueKind::Dict(d) => {
+                                    for (k, v) in d.iter() {
+                                        out.insert(k.clone(), v.clone());
+                                    }
+                                }
+                                _ => {
+                                    return Err(PyError::named(
+                                        "TypeError",
+                                        format!(
+                                            "'{}' object is not a mapping",
+                                            value_type_name_str(&mapping)
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                    }
                 }
                 Ok(Value::dict(out))
             }
@@ -173,15 +206,34 @@ impl Interpreter {
             }
             Expr::Tuple(items) => {
                 let mut out = Vec::with_capacity(items.len());
-                for item in items { out.push(self.eval_expr(item)?); }
+                for item in items {
+                    match item {
+                        Expr::Starred(inner) => {
+                            let v = self.eval_expr(inner)?;
+                            out.extend(iter_values(v)?);
+                        }
+                        _ => out.push(self.eval_expr(item)?),
+                    }
+                }
                 Ok(Value::tuple(out))
             }
             Expr::Set(items) => {
                 let mut out = indexmap::IndexSet::new();
                 for item in items {
-                    let v = self.eval_expr(item)?;
-                    let key = self.value_to_pykey(&v)?;
-                    self.set_insert(&mut out, key)?;
+                    match item {
+                        Expr::Starred(inner) => {
+                            let v = self.eval_expr(inner)?;
+                            for item in iter_values(v)? {
+                                let key = self.value_to_pykey(&item)?;
+                                self.set_insert(&mut out, key)?;
+                            }
+                        }
+                        _ => {
+                            let v = self.eval_expr(item)?;
+                            let key = self.value_to_pykey(&v)?;
+                            self.set_insert(&mut out, key)?;
+                        }
+                    }
                 }
                 Ok(Value::set(out))
             }

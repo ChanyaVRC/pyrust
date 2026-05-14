@@ -18,7 +18,7 @@ use std::rc::Rc;
 use crate::ast::BinaryOp;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
-use crate::interpreter::builtin_args::{PyBool, PyFloat, PyInt, PyStr, PyValue};
+use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
     NativeIterFrame, apply_format_spec, ascii_repr, class_is_subclass_of, compare_values,
     dir_names, invoke_class_method, is_exception_class, iter_values, lookup_class_attr,
@@ -31,122 +31,162 @@ use pyrust_derive::pyrust_module;
 pyrust_module! {
     /// CPython: chr(i) — return the string of one Unicode codepoint i.
     /// <https://docs.python.org/3/library/functions.html#chr>
-    fn chr(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
-        }
-        let code_point = match args[0].value.kind() {
-            ValueKind::Int(v) => v,
-            ValueKind::Bool(b) => b as i64,
-            _ => return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "an integer is required (got type {})",
-                    value_type_name_str(&args[0].value),
-                ),
-            )),
-        };
-        if !(0..=1114111).contains(&code_point) {
-            return Err(PyError::named(
-                "ValueError",
-                format!("{FN_NAME}() arg not in range(0x110000): {code_point}"),
-            ));
-        }
-        let ch = char::from_u32(code_point as u32).ok_or_else(|| {
-            PyError::named(
-                "ValueError",
-                format!("{FN_NAME}() arg not in range(0x110000): {code_point}"),
-            )
-        })?;
-        Ok(Value::string(ch.to_string()))
+    ///
+    /// Migrated to the typed-signature dialect (#400) as a three-element
+    /// overload set: `PyInt` is the primary path; `PyBool` mirrors
+    /// CPython's `bool ⊆ int` subtyping (`chr(True) == '\x01'`), since
+    /// strict `PyInt` doesn't auto-coerce `bool` in the typed dialect.
+    /// A trailing `PyValue` catch-all preserves the legacy
+    /// `"an integer is required (got type X)"` TypeError verbatim — the
+    /// macro's default "unsupported argument type(s)" fallback would
+    /// drift from that canonical wording.  All parameters are
+    /// `#[positional_only]` so the macro's positional-only fast-path
+    /// applies (no kwarg-validation work).  Bignum inputs raise
+    /// `OverflowError` via `PyInt::expect_i64` *before* the range
+    /// check — a deliberate CPython-parity improvement over the
+    /// legacy body, which raised `ValueError("chr() arg not in
+    /// range(0x110000)")` via the range check.  Modern CPython
+    /// raises `OverflowError` here too (compare `hex(bignum)`
+    /// behaviour above).
+    fn chr(#[positional_only] i: PyInt) -> Result<Value> {
+        let code_point = i.expect_i64(FN_NAME, "i")?;
+        chr_from_code_point(code_point)
+    }
+
+    fn chr(#[positional_only] i: PyBool) -> Result<Value> {
+        // CPython: `chr(True) == '\x01'`, `chr(False) == '\x00'`.
+        chr_from_code_point(if i.0 { 1 } else { 0 })
+    }
+
+    fn chr(#[positional_only] i: PyValue) -> Result<Value> {
+        Err(PyError::named(
+            "TypeError",
+            format!(
+                "an integer is required (got type {})",
+                value_type_name_str(&i.0),
+            ),
+        ))
     }
 
     /// CPython: ord(c) — return the Unicode codepoint of a one-character string.
     /// <https://docs.python.org/3/library/functions.html#ord>
-    fn ord(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
-        }
-        match args[0].value.kind() {
-            ValueKind::Str(s) => {
-                let mut chars = s.chars();
-                let first = chars.next();
-                let second = chars.next();
-                match (first, second) {
-                    (Some(c), None) => Ok(Value::int(c as i64)),
-                    (None, _) => Err(PyError::named(
-                        "TypeError",
-                        format!("{FN_NAME}() expected a character, but string of length 0 found"),
-                    )),
-                    (Some(_), Some(_)) => Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "{FN_NAME}() expected a character, but string of length {} found",
-                            s.chars().count()
-                        ),
-                    )),
-                }
-            }
-            _ => Err(PyError::named(
+    ///
+    /// Migrated to the typed-signature dialect (#400) as a three-element
+    /// overload set: `PyStr` is the primary path; `PyBytes` mirrors
+    /// CPython's acceptance of one-byte bytes (`ord(b"A") == 65`); a
+    /// trailing `PyValue` catch-all preserves the legacy
+    /// `"expected string of length 1, but got non-string"` TypeError
+    /// verbatim.  Length-mismatch wording on the `PyStr` overload is also
+    /// preserved verbatim from the legacy body so parity output is
+    /// stable.  All parameters are `#[positional_only]` so the macro's
+    /// positional-only fast-path applies.  The `PyBytes` overload is a
+    /// new CPython-parity feature — the legacy body rejected `bytes`
+    /// outright, but CPython has always accepted a 1-byte `bytes`
+    /// (`ord(b"A") == 65`).
+    fn ord(#[positional_only] c: PyStr) -> Result<Value> {
+        let s: &str = &c;
+        let mut chars = s.chars();
+        let first = chars.next();
+        let second = chars.next();
+        match (first, second) {
+            (Some(ch), None) => Ok(Value::int(ch as i64)),
+            (None, _) => Err(PyError::named(
                 "TypeError",
-                format!("{FN_NAME}() expected string of length 1, but got non-string"),
+                format!("{FN_NAME}() expected a character, but string of length 0 found"),
+            )),
+            (Some(_), Some(_)) => Err(PyError::named(
+                "TypeError",
+                format!(
+                    "{FN_NAME}() expected a character, but string of length {} found",
+                    s.chars().count()
+                ),
             )),
         }
+    }
+
+    fn ord(#[positional_only] c: PyBytes) -> Result<Value> {
+        // CPython: `ord(b"A") == 65`; reject empty/multi-byte with the
+        // same wording shape used by the `PyStr` overload above.
+        match c.0.as_slice() {
+            [b] => Ok(Value::int(*b as i64)),
+            other => Err(PyError::named(
+                "TypeError",
+                format!(
+                    "{FN_NAME}() expected a character, but string of length {} found",
+                    other.len()
+                ),
+            )),
+        }
+    }
+
+    fn ord(#[positional_only] c: PyValue) -> Result<Value> {
+        let _ = c;
+        Err(PyError::named(
+            "TypeError",
+            format!("{FN_NAME}() expected string of length 1, but got non-string"),
+        ))
     }
 
     /// CPython: bin(x) — integer to '0b…' / '-0b…' string.
     /// <https://docs.python.org/3/library/functions.html#bin>
-    fn bin(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
-        }
-        match args[0].value.kind() {
-            ValueKind::Int(v) => {
-                if v < 0 {
-                    // Widen to i128 first so `i64::MIN.abs()` doesn't overflow.
-                    Ok(Value::string(format!("-0b{:b}", -(v as i128))))
-                } else {
-                    Ok(Value::string(format!("0b{:b}", v)))
-                }
-            }
-            ValueKind::Bool(b) => Ok(Value::string(if b { "0b1".to_string() } else { "0b0".to_string() })),
-            _ => Err(PyError::named(
-                "TypeError",
-                format!(
-                    "'{}' object cannot be interpreted as an integer",
-                    value_type_name_str(&args[0].value),
-                ),
-            )),
-        }
+    ///
+    /// Migrated to the typed-signature dialect (#400) mirroring `hex`'s
+    /// 3-overload pattern: `PyInt` is the primary path, `PyBool` mirrors
+    /// CPython's `bool ⊆ int` subtyping, and a trailing `PyValue`
+    /// catch-all reproduces CPython's exact "'X' object cannot be
+    /// interpreted as an integer" TypeError wording verbatim.
+    /// Bignums not yet supported; raises `OverflowError` if `x` doesn't
+    /// fit in i64 (deliberate divergence from CPython, tracked as
+    /// follow-up under #400).
+    fn bin(#[positional_only] x: PyInt) -> Result<Value> {
+        let v = x.expect_i64(FN_NAME, "x")?;
+        Ok(Value::string(format_bin_i64(v)))
+    }
+
+    fn bin(#[positional_only] x: PyBool) -> Result<Value> {
+        // CPython: `bin(True) == '0b1'`, `bin(False) == '0b0'`.
+        Ok(Value::string(format_bin_i64(if x.0 { 1 } else { 0 })))
+    }
+
+    fn bin(#[positional_only] x: PyValue) -> Result<Value> {
+        Err(PyError::named(
+            "TypeError",
+            format!(
+                "'{}' object cannot be interpreted as an integer",
+                value_type_name_str(&x.0),
+            ),
+        ))
     }
 
     /// CPython: oct(x) — integer to '0o…' / '-0o…' string.
     /// <https://docs.python.org/3/library/functions.html#oct>
-    fn oct(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
-        }
-        match args[0].value.kind() {
-            ValueKind::Int(v) => {
-                if v < 0 {
-                    Ok(Value::string(format!("-0o{:o}", -(v as i128))))
-                } else {
-                    Ok(Value::string(format!("0o{:o}", v)))
-                }
-            }
-            ValueKind::Bool(b) => Ok(Value::string(if b { "0o1".to_string() } else { "0o0".to_string() })),
-            _ => Err(PyError::named(
-                "TypeError",
-                format!(
-                    "'{}' object cannot be interpreted as an integer",
-                    value_type_name_str(&args[0].value),
-                ),
-            )),
-        }
+    ///
+    /// Migrated to the typed-signature dialect (#400) mirroring `hex`'s
+    /// 3-overload pattern: `PyInt` is the primary path, `PyBool` mirrors
+    /// CPython's `bool ⊆ int` subtyping, and a trailing `PyValue`
+    /// catch-all reproduces CPython's exact "'X' object cannot be
+    /// interpreted as an integer" TypeError wording verbatim.
+    /// Bignums not yet supported; raises `OverflowError` if `x` doesn't
+    /// fit in i64 (deliberate divergence from CPython, tracked as
+    /// follow-up under #400).
+    fn oct(#[positional_only] x: PyInt) -> Result<Value> {
+        let v = x.expect_i64(FN_NAME, "x")?;
+        Ok(Value::string(format_oct_i64(v)))
+    }
+
+    fn oct(#[positional_only] x: PyBool) -> Result<Value> {
+        // CPython: `oct(True) == '0o1'`, `oct(False) == '0o0'`.
+        Ok(Value::string(format_oct_i64(if x.0 { 1 } else { 0 })))
+    }
+
+    fn oct(#[positional_only] x: PyValue) -> Result<Value> {
+        Err(PyError::named(
+            "TypeError",
+            format!(
+                "'{}' object cannot be interpreted as an integer",
+                value_type_name_str(&x.0),
+            ),
+        ))
     }
 
     /// CPython: hex(x) — integer to '0x…' / '-0x…' string.
@@ -710,32 +750,16 @@ pyrust_module! {
         if args.len() != 2 {
             return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly 2 arguments")));
         }
-        let cls = match args[0].value.kind() {
-            ValueKind::PyClass(c) => Rc::clone(c),
-            _ => return Err(PyError::named(
+        // `cls` may be either a user-defined class (`PyClass`) or a
+        // built-in type token (`BuiltinFunction("int")` etc.); anything
+        // else is a `TypeError`, matching CPython.
+        if !is_class_like(&args[0].value) {
+            return Err(PyError::named(
                 "TypeError",
                 format!("{FN_NAME}() arg 1 must be a class"),
-            )),
-        };
-        let result = match args[1].value.kind() {
-            ValueKind::PyClass(expected) => class_is_subclass_of(&cls, expected),
-            ValueKind::Tuple(items) => {
-                let mut found = false;
-                for item in items {
-                    if let ValueKind::PyClass(expected) = item.kind()
-                        && class_is_subclass_of(&cls, expected)
-                    {
-                        found = true;
-                        break;
-                    }
-                }
-                found
-            }
-            _ => return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}() arg 2 must be a class or tuple of classes"),
-            )),
-        };
+            ));
+        }
+        let result = issubclass_check(FN_NAME, &args[0].value, &args[1].value)?;
         Ok(Value::bool_(result))
     }
 
@@ -790,28 +814,7 @@ pyrust_module! {
         if args.len() != 2 {
             return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly 2 arguments")));
         }
-        let obj = &args[0].value;
-        let cls = &args[1].value;
-        let result = match (obj.kind(), cls.kind()) {
-            (ValueKind::PyInstance(inst), ValueKind::PyClass(expected)) => {
-                class_is_subclass_of(&inst.borrow().class, expected)
-            }
-            (ValueKind::Int(_) | ValueKind::Bool(_), ValueKind::BuiltinFunction("int")) => true,
-            (ValueKind::Float(_), ValueKind::BuiltinFunction("float")) => true,
-            (ValueKind::Str(_), ValueKind::BuiltinFunction("str")) => true,
-            (ValueKind::Bool(_), ValueKind::BuiltinFunction("bool")) => true,
-            (ValueKind::None, ValueKind::BuiltinFunction("NoneType")) => true,
-            (ValueKind::List(_), ValueKind::BuiltinFunction("list")) => true,
-            (ValueKind::Tuple(_), ValueKind::BuiltinFunction("tuple")) => true,
-            (ValueKind::Set(_), ValueKind::BuiltinFunction("set")) => true,
-            (ValueKind::BuiltinObject { ops, .. }, ValueKind::BuiltinFunction(name)) => {
-                ops.type_name() == name
-            }
-            (ValueKind::Bytes(_), ValueKind::BuiltinFunction("bytes")) => true,
-            (ValueKind::Complex(_, _), ValueKind::BuiltinFunction("complex")) => true,
-            (ValueKind::Dict(_), ValueKind::BuiltinFunction("dict")) => true,
-            _ => false,
-        };
+        let result = isinstance_check(FN_NAME, &args[0].value, &args[1].value)?;
         Ok(Value::bool_(result))
     }
 
@@ -1439,16 +1442,28 @@ pyrust_module! {
 
     /// CPython: bool(x=False) — bool constructor.
     /// <https://docs.python.org/3/library/functions.html#bool>
-    fn bool(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        match args.len() {
-            0 => Ok(Value::bool_(false)),
-            1 => {
-                let val = args[0].value.clone();
-                let result = _interp.truthy_value(&val)?;
+    ///
+    /// Migrated to the typed-signature dialect (#400).  `Option<PyValue>`
+    /// + `#[default(None)]` is the natural shape for a single optional
+    /// positional: `None` means "no arg" → False, `Some(v)` means
+    /// "compute truthiness of v".  Conflating `bool()` with `bool(None)`
+    /// is safe because CPython's truthiness of `None` is also False, so
+    /// both paths land on the same answer.
+    fn bool(
+        #[positional_only]
+        #[default(None)]
+        x: Option<PyValue>,
+    ) -> Result<Value> {
+        match x {
+            // No-arg path returns `Value::bool_(false)` directly, skipping
+            // `_interp.truthy_value`.  This is equivalent (not incidental):
+            // `truthy_value(&Value::none())` would also resolve to False and
+            // has no observable side effects, so the shortcut is intentional.
+            None => Ok(Value::bool_(false)),
+            Some(v) => {
+                let result = _interp.truthy_value(&v.0)?;
                 Ok(Value::bool_(result))
             }
-            _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most one argument"))),
         }
     }
 
@@ -1523,20 +1538,21 @@ pyrust_module! {
 
     /// CPython: format(value[, format_spec]).
     /// <https://docs.python.org/3/library/functions.html#format>
-    fn format(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        let (value, spec) = match args.len() {
-            1 => (args[0].value.clone(), String::new()),
-            2 => {
-                let value = args[0].value.clone();
-                let spec = match args[1].value.kind() {
-                    ValueKind::Str(s) => s.to_string(),
-                    _ => return Err(PyError::Runtime("format spec must be a string".to_string())),
-                };
-                (value, spec)
-            }
-            _ => return Err(PyError::Runtime(format!("{FN_NAME}() takes 1 or 2 arguments"))),
-        };
+    ///
+    /// Migrated to the typed-signature dialect (#400).  Both params are
+    /// `#[positional_only]` so the macro emits the fast-path prelude that
+    /// skips kwarg validation entirely.  The optional `format_spec` is
+    /// encoded as `Option<PyStr>` — absent → `None` (treated as `""`),
+    /// present-and-str → `Some(PyStr)`, present-and-non-str → the typed
+    /// dialect's standard "must be str or None" TypeError.
+    fn format(
+        #[positional_only] value: PyValue,
+        #[positional_only]
+        #[default(None)]
+        format_spec: Option<PyStr>,
+    ) -> Result<Value> {
+        let value = &value.0;
+        let spec: &str = format_spec.as_ref().map(|s| s.as_ref()).unwrap_or("");
         // Dispatch __format__(spec) for user instances.
         if let ValueKind::PyInstance(instance) = value.kind() {
             let instance_rc = Rc::clone(instance);
@@ -1548,7 +1564,7 @@ pyrust_module! {
                     Value::py_instance(instance_rc),
                     &[ExpandedCallArg {
                         name: None,
-                        value: Value::string(spec.clone()),
+                        value: Value::string(spec),
                     }],
                 )?;
                 return match result.kind() {
@@ -1563,7 +1579,7 @@ pyrust_module! {
                 };
             }
         }
-        apply_format_spec(&value, &spec)
+        apply_format_spec(value, spec)
     }
 
     /// CPython: classmethod(function) — class-method descriptor.
@@ -1680,12 +1696,13 @@ pyrust_module! {
 
     /// CPython: callable(object) — true if the object is callable.
     /// <https://docs.python.org/3/library/functions.html#callable>
-    fn callable(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
-        }
-        let is_callable = match args[0].value.kind() {
+    ///
+    /// Migrated to the typed-signature dialect (#400).  Mirrors `ascii`
+    /// / `id`: a single-body `PyValue` catch-all, since `callable`
+    /// accepts every Python object and never raises `TypeError`.
+    fn callable(#[positional_only] obj: PyValue) -> Result<Value> {
+        let value = &obj.0;
+        let is_callable = match value.kind() {
             ValueKind::UserFunction(_)
             | ValueKind::BuiltinFunction(_)
             | ValueKind::BoundMethod { .. }
@@ -1695,7 +1712,7 @@ pyrust_module! {
             // prop.setter / prop.getter / prop.deleter) are callable —
             // a plain property descriptor isn't.
             ValueKind::BuiltinObject { .. } => {
-                pyrust_builtins::property::property_partial_slot(&args[0].value)
+                pyrust_builtins::property::property_partial_slot(value)
                     .is_some_and(|slot| slot.is_some())
             }
             ValueKind::PyInstance(inst) => {
@@ -1766,6 +1783,111 @@ fn hash_value(value: &Value) -> Result<i64> {
     }
 }
 
+/// Single-class `isinstance` check — `obj` against one concrete class
+/// value (i.e. *not* a tuple).  Mirrors the original match arms from
+/// `isinstance` and is reused by the tuple-recursive entry point.
+fn isinstance_single(obj: &Value, cls: &Value) -> bool {
+    match (obj.kind(), cls.kind()) {
+        (ValueKind::PyInstance(inst), ValueKind::PyClass(expected)) => {
+            class_is_subclass_of(&inst.borrow().class, expected)
+        }
+        (ValueKind::Int(_) | ValueKind::Bool(_), ValueKind::BuiltinFunction("int")) => true,
+        (ValueKind::Float(_), ValueKind::BuiltinFunction("float")) => true,
+        (ValueKind::Str(_), ValueKind::BuiltinFunction("str")) => true,
+        (ValueKind::Bool(_), ValueKind::BuiltinFunction("bool")) => true,
+        (ValueKind::None, ValueKind::BuiltinFunction("NoneType")) => true,
+        (ValueKind::List(_), ValueKind::BuiltinFunction("list")) => true,
+        (ValueKind::Tuple(_), ValueKind::BuiltinFunction("tuple")) => true,
+        (ValueKind::Set(_), ValueKind::BuiltinFunction("set")) => true,
+        (ValueKind::BuiltinObject { ops, .. }, ValueKind::BuiltinFunction(name)) => {
+            ops.type_name() == name
+        }
+        (ValueKind::Bytes(_), ValueKind::BuiltinFunction("bytes")) => true,
+        (ValueKind::Complex(_, _), ValueKind::BuiltinFunction("complex")) => true,
+        (ValueKind::Dict(_), ValueKind::BuiltinFunction("dict")) => true,
+        (ValueKind::BigInt(_), ValueKind::BuiltinFunction("int")) => true,
+        _ => false,
+    }
+}
+
+/// `isinstance(obj, classinfo)` — accept a class *or* an
+/// arbitrarily-nested tuple of classes, matching CPython's recursive
+/// contract.  Raises `TypeError` if a leaf is neither a class nor a
+/// tuple.  See <https://docs.python.org/3/library/functions.html#isinstance>.
+fn isinstance_check(fn_name: &str, obj: &Value, cls: &Value) -> Result<bool> {
+    if let ValueKind::Tuple(items) = cls.kind() {
+        for item in items {
+            if isinstance_check(fn_name, obj, item)? {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+    if !is_class_like(cls) {
+        return Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() arg 2 must be a type, a tuple of types, or a union"),
+        ));
+    }
+    Ok(isinstance_single(obj, cls))
+}
+
+/// `issubclass(cls, classinfo)` — same tuple-recursive contract as
+/// `isinstance_check`, but compares classes rather than instances.
+fn issubclass_check(fn_name: &str, cls: &Value, classinfo: &Value) -> Result<bool> {
+    if let ValueKind::Tuple(items) = classinfo.kind() {
+        for item in items {
+            if issubclass_check(fn_name, cls, item)? {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+    match (cls.kind(), classinfo.kind()) {
+        // User-defined → user-defined: walk the `base` chain.
+        (ValueKind::PyClass(c), ValueKind::PyClass(expected)) => {
+            Ok(class_is_subclass_of(&c, &expected))
+        }
+        // User-defined → builtin type token: never a match in PyRust
+        // (user classes don't inherit from built-in types here).
+        (ValueKind::PyClass(_), ValueKind::BuiltinFunction(_)) => Ok(false),
+        // Builtin type token → builtin type token: handle the small
+        // hard-coded relations (`bool` ⊂ `int`, anything ⊂ itself,
+        // anything ⊂ `object`).
+        (ValueKind::BuiltinFunction(a), ValueKind::BuiltinFunction(b)) => {
+            Ok(builtin_is_subclass_of(a, b))
+        }
+        // Builtin → user-defined: never matches.
+        (ValueKind::BuiltinFunction(_), ValueKind::PyClass(_)) => Ok(false),
+        (_, ValueKind::PyClass(_) | ValueKind::BuiltinFunction(_)) => Ok(false),
+        _ => Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() arg 2 must be a class, a tuple of classes, or a union"),
+        )),
+    }
+}
+
+/// True if built-in type token `a` is a subclass of token `b`.  Only
+/// the CPython-documented built-in relations matter here: every type
+/// is a subclass of itself and of `object`; `bool` is a subclass of
+/// `int`.
+fn builtin_is_subclass_of(a: &str, b: &str) -> bool {
+    if a == b || b == "object" {
+        return true;
+    }
+    matches!((a, b), ("bool", "int"))
+}
+
+/// True if `v` looks like a class-info leaf accepted by
+/// `isinstance`/`issubclass` — either a user-defined `PyClass` or a
+/// built-in type token (`BuiltinFunction("int")` etc.).
+fn is_class_like(v: &Value) -> bool {
+    matches!(
+        v.kind(),
+        ValueKind::PyClass(_) | ValueKind::BuiltinFunction(_),
+    )
+}
+
 /// Format an i64 as Python's `hex()` output — `"0xN"` / `"-0xN"`.  Used
 /// by both the `PyInt` and `PyBool` overloads of the typed `hex`
 /// builtin (#400).  Widens through i128 first so `i64::MIN.abs()`
@@ -1775,6 +1897,50 @@ fn format_hex_i64(v: i64) -> String {
         format!("-0x{:x}", -(v as i128))
     } else {
         format!("0x{:x}", v)
+    }
+}
+
+/// Validate a codepoint and return the corresponding single-char `str`
+/// `Value`.  Shared by the `PyInt` and `PyBool` overloads of the typed
+/// `chr` builtin (#400).  Out-of-range codepoints raise `ValueError`
+/// with CPython-style wording preserved verbatim from the legacy body.
+fn chr_from_code_point(code_point: i64) -> Result<Value> {
+    if !(0..=1114111).contains(&code_point) {
+        return Err(PyError::named(
+            "ValueError",
+            format!("chr() arg not in range(0x110000): {code_point}"),
+        ));
+    }
+    let ch = char::from_u32(code_point as u32).ok_or_else(|| {
+        PyError::named(
+            "ValueError",
+            format!("chr() arg not in range(0x110000): {code_point}"),
+        )
+    })?;
+    Ok(Value::string(ch.to_string()))
+}
+
+/// Format an i64 as Python's `bin()` output — `"0bN"` / `"-0bN"`.  Used
+/// by both the `PyInt` and `PyBool` overloads of the typed `bin`
+/// builtin (#400).  Widens through i128 first so `i64::MIN.abs()`
+/// doesn't overflow.
+fn format_bin_i64(v: i64) -> String {
+    if v < 0 {
+        format!("-0b{:b}", -(v as i128))
+    } else {
+        format!("0b{:b}", v)
+    }
+}
+
+/// Format an i64 as Python's `oct()` output — `"0oN"` / `"-0oN"`.  Used
+/// by both the `PyInt` and `PyBool` overloads of the typed `oct`
+/// builtin (#400).  Widens through i128 first so `i64::MIN.abs()`
+/// doesn't overflow.
+fn format_oct_i64(v: i64) -> String {
+    if v < 0 {
+        format!("-0o{:o}", -(v as i128))
+    } else {
+        format!("0o{:o}", v)
     }
 }
 

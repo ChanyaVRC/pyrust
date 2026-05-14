@@ -982,10 +982,20 @@ fn collect_walrus_targets_in_expr(
                 collect_walrus_targets_in_expr(e, names, global_names, nonlocal_names);
             }
         }
-        Expr::Dict(pairs) => {
-            for (k, v) in pairs {
-                collect_walrus_targets_in_expr(k, names, global_names, nonlocal_names);
-                collect_walrus_targets_in_expr(v, names, global_names, nonlocal_names);
+        Expr::Starred(inner) => {
+            collect_walrus_targets_in_expr(inner, names, global_names, nonlocal_names);
+        }
+        Expr::Dict(items) => {
+            for item in items {
+                match item {
+                    crate::ast::DictItem::Pair(k, v) => {
+                        collect_walrus_targets_in_expr(k, names, global_names, nonlocal_names);
+                        collect_walrus_targets_in_expr(v, names, global_names, nonlocal_names);
+                    }
+                    crate::ast::DictItem::DoubleSplat(e) => {
+                        collect_walrus_targets_in_expr(e, names, global_names, nonlocal_names);
+                    }
+                }
             }
         }
         Expr::Index { target, index } => {
@@ -1100,9 +1110,13 @@ fn is_pure_expr(expr: &Expr, pure_fns: &std::collections::HashSet<String>) -> bo
         Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
             items.iter().all(|e| is_pure_expr(e, pure_fns))
         }
-        Expr::Dict(pairs) => pairs
-            .iter()
-            .all(|(k, v)| is_pure_expr(k, pure_fns) && is_pure_expr(v, pure_fns)),
+        Expr::Starred(inner) => is_pure_expr(inner, pure_fns),
+        Expr::Dict(items) => items.iter().all(|item| match item {
+            crate::ast::DictItem::Pair(k, v) => {
+                is_pure_expr(k, pure_fns) && is_pure_expr(v, pure_fns)
+            }
+            crate::ast::DictItem::DoubleSplat(e) => is_pure_expr(e, pure_fns),
+        }),
         Expr::Unary { expr, .. } => is_pure_expr(expr, pure_fns),
         Expr::Binary { left, right, .. } => {
             is_pure_expr(left, pure_fns) && is_pure_expr(right, pure_fns)
