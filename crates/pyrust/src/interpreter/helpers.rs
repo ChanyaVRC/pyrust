@@ -1475,24 +1475,56 @@ fn is_pure_expr(expr: &Expr, pure_fns: &std::collections::HashSet<String>) -> bo
         }
         Expr::Lambda { .. } => true,
         Expr::Call { func, args } => {
-            // Only direct calls to named callees can be pure.
-            if let Expr::Var(name) = func.as_ref() {
-                // Source of truth for builtin purity: the registry (see
-                // `BuiltinReg::is_pure` / issue #433).  `is_pure` returns
-                // `false` both for "registered but impure" (`print`, `open`,
-                // …) and "not registered", so the conservative default
-                // collapses both paths into a single check.  Local fns
-                // already confirmed pure (`pure_fns`) take precedence so
-                // user-defined names don't accidentally hit the registry —
-                // a stray builtin name shadowed by a local can't be
-                // mis-classified.
-                let callee_is_pure = pure_fns.contains(name.as_str())
-                    || crate::builtin_registry::is_pure(name);
-                if !callee_is_pure {
-                    return false;
+            // Only direct calls to named callees can be pure.  Two shapes
+            // qualify:
+            //   1. `name(…)`         — `Expr::Var(name)` callee.
+            //   2. `module.name(…)`  — `Expr::Attr { Var(module), name }`
+            //      callee, e.g. `math.sqrt(x)`.  The registry keys
+            //      module-namespaced builtins by `module.name` (see
+            //      `builtin_modules/mod.rs::all_regs`), so we look them up
+            //      under that joined form.  Anything more indirect
+            //      (`a.b.c(…)`, computed callees, method calls on values)
+            //      stays conservatively impure.
+            let callee_is_pure = match func.as_ref() {
+                Expr::Var(name) => {
+                    // Local fns already confirmed pure (`pure_fns`) take
+                    // precedence so user-defined names shadowing a builtin
+                    // don't accidentally hit the registry — a stray builtin
+                    // name shadowed by a local can't be mis-classified.
+                    // `is_pure` returns `false` both for "registered but
+                    // impure" (`print`, `open`, …) and "not registered", so
+                    // the conservative default collapses both paths into a
+                    // single check.
+                    pure_fns.contains(name.as_str())
+                        || crate::builtin_registry::is_pure(name)
                 }
-            } else {
-                // Indirect call (method, computed callee) — conservatively impure.
+                Expr::Attr { target, name } => {
+                    // Module-attribute call.  Only treat as pure when the
+                    // target is a bare module-name `Var` (so `math.sqrt`
+                    // qualifies but `obj.method` / `a.b.c` do not) AND the
+                    // joined `module.name` is registered `#[pure]`.  Method
+                    // calls on user instances are always impure because we
+                    // can't see through the receiver here.
+                    if let Expr::Var(module) = target.as_ref() {
+                        // Local shadowing of the module name disables the
+                        // registry lookup, mirroring the bare-`Var` arm.
+                        if pure_fns.contains(module.as_str()) {
+                            false
+                        } else {
+                            let joined = format!("{module}.{name}");
+                            crate::builtin_registry::is_pure(&joined)
+                        }
+                    } else {
+                        false
+                    }
+                }
+                _ => {
+                    // Indirect call (computed callee, deeper attr chain) —
+                    // conservatively impure.
+                    false
+                }
+            };
+            if !callee_is_pure {
                 return false;
             }
             args.iter().all(|a| is_pure_expr(&a.value, pure_fns))
@@ -1673,6 +1705,70 @@ pub(crate) fn modpow_i64(base: i64, exp: u64, modulus: i64) -> i64 {
         base = (base * base) % modulus;
     }
     result
+}
+
+#[cfg(test)]
+mod purity_tests {
+    use super::is_pure_body;
+    use crate::lexer::Lexer;
+    use crate::parser::Parser;
+    use std::collections::HashSet;
+
+    fn parse_body(src: &str) -> Vec<crate::ast::Stmt> {
+        let tokens = Lexer::new(src).expect("lex failed").into_tokens();
+        Parser::new(tokens).parse_program().expect("parse failed")
+    }
+
+    /// Module-namespaced builtins (`math.sqrt`, `math.sin`, …) must be
+    /// recognised as pure by the optimizer's call gate.  This is the
+    /// headline acceptance criterion from #433 — the legacy hardcoded
+    /// `PURE_BUILTINS` list couldn't express prefixed names, and the
+    /// initial registry-derived rewrite only looked at bare `Expr::Var`
+    /// callees so `math.sqrt(x)` slipped through to the "indirect call"
+    /// branch and stayed conservatively impure.
+    #[test]
+    fn module_namespaced_math_calls_are_pure() {
+        let body = parse_body("y = math.sqrt(x)\nz = math.sin(y)\nreturn z\n");
+        assert!(
+            is_pure_body(&body, &HashSet::new()),
+            "math.sqrt / math.sin must register as pure (registry-keyed lookup)"
+        );
+    }
+
+    /// Method calls on values must remain impure — the receiver can be
+    /// any user instance whose method has side effects, and we don't
+    /// know the receiver's type at AST-purity time.
+    #[test]
+    fn value_method_calls_stay_impure() {
+        let body = parse_body("y = obj.frobnicate(x)\nreturn y\n");
+        assert!(
+            !is_pure_body(&body, &HashSet::new()),
+            "obj.method(...) calls must be conservatively impure"
+        );
+    }
+
+    /// Deeper attribute chains (`a.b.c(…)`) don't qualify — only
+    /// `module.name(…)` is registry-checkable.
+    #[test]
+    fn nested_attribute_calls_stay_impure() {
+        let body = parse_body("y = a.b.c(x)\nreturn y\n");
+        assert!(
+            !is_pure_body(&body, &HashSet::new()),
+            "a.b.c(...) calls must be conservatively impure"
+        );
+    }
+
+    /// Builtin print(...) is registered impure; the registry lookup
+    /// must propagate that to the body gate.  This is the mirror of
+    /// `module_namespaced_math_calls_are_pure` for the impure side.
+    #[test]
+    fn impure_builtins_are_rejected() {
+        let body = parse_body("print(x)\nreturn x\n");
+        assert!(
+            !is_pure_body(&body, &HashSet::new()),
+            "print(...) is registered impure and must NOT pass the gate"
+        );
+    }
 }
 
 
