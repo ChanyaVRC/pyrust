@@ -90,6 +90,11 @@ fn collect_cell_vars_in(
                 );
                 let mut inner_uses: HashSet<String> = HashSet::new();
                 collect_free_var_reads_in_stmts(nested_body, &mut inner_uses);
+                // Also include names referenced freely by ANY function/class/lambda
+                // nested deeper inside this body.  Even if `nested_body` itself never
+                // names `x`, an inner-inner function might read `x`; the current scope
+                // must still promote `x` to a cell var so the env chain carries it.
+                collect_transitive_free_vars_in_stmts(nested_body, &mut inner_uses);
                 for name in inner_uses {
                     if !inner_locals.contains(&name)
                         && !inner_globals.contains(&name)
@@ -483,6 +488,9 @@ fn collect_class_method_outer_refs(
                 );
                 let mut uses: HashSet<String> = HashSet::new();
                 collect_free_var_reads_in_stmts(method_body, &mut uses);
+                // Functions/classes nested deeper inside this method may also
+                // reference outer names that the method itself never mentions.
+                collect_transitive_free_vars_in_stmts(method_body, &mut uses);
                 for name in uses {
                     if !inner_locals.contains(&name)
                         && !inner_globals.contains(&name)
@@ -764,6 +772,348 @@ fn collect_free_var_reads_in_expr(expr: &Expr, uses: &mut HashSet<String>) {
         Expr::Yield(Some(e)) => collect_free_var_reads_in_expr(e, uses),
         Expr::Yield(None) => {}
         Expr::YieldFrom(e) => collect_free_var_reads_in_expr(e, uses),
+    }
+}
+
+// ─── Transitive free-variable collection ─────────────────────────────────────
+//
+// `collect_free_var_reads_in_*` deliberately stops at nested `Def`/`Class`
+// boundaries because those scopes have their own locals.  For closure capture
+// to work through more than two levels of nesting, the *current* scope must
+// also know about names that descendants (functions inside the directly-nested
+// function) read from outer scopes — otherwise the intermediate scope never
+// promotes those names to cell vars, and the env chain has no entry for them.
+//
+// `collect_transitive_free_vars_in_stmts` walks INTO every nested `Def`,
+// `Class`, and `Lambda` it finds and unions their free-name sets into `uses`,
+// subtracting only the locals bound by each nested scope.  Combined with the
+// usual `collect_free_var_reads_in_stmts` (which handles names mentioned at
+// the current level), this yields the full set of outer-scope names that
+// the enclosing function must keep accessible via cell vars.
+
+fn collect_transitive_free_vars_in_stmts(stmts: &[Stmt], uses: &mut HashSet<String>) {
+    for stmt in stmts {
+        collect_transitive_free_vars_in_stmt(stmt, uses);
+    }
+}
+
+fn collect_transitive_free_vars_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>) {
+    match stmt {
+        Stmt::Def {
+            params,
+            body: nested_body,
+            decorators,
+            ..
+        } => {
+            // Decorator expressions evaluate in the enclosing scope.
+            for d in decorators {
+                collect_transitive_free_vars_in_expr(d, uses);
+                collect_free_var_reads_in_expr(d, uses);
+            }
+            // Default values are also evaluated in the enclosing scope.
+            for p in params {
+                if let Some(d) = &p.default {
+                    collect_transitive_free_vars_in_expr(d, uses);
+                    collect_free_var_reads_in_expr(d, uses);
+                }
+            }
+            // Names locally bound inside the nested function — exclude them
+            // when contributing to the enclosing scope's free-var set.
+            let nested_globals = crate::interpreter::collect_global_names(nested_body);
+            let nested_nonlocals = crate::interpreter::collect_nonlocal_names(nested_body);
+            let nested_locals = crate::interpreter::collect_local_names(
+                params,
+                nested_body,
+                &nested_globals,
+                &nested_nonlocals,
+            );
+            let mut nested_uses: HashSet<String> = HashSet::new();
+            collect_free_var_reads_in_stmts(nested_body, &mut nested_uses);
+            collect_transitive_free_vars_in_stmts(nested_body, &mut nested_uses);
+            // Explicit `nonlocal x` makes `x` an enclosing-scope reference even if
+            // the body doesn't read it textually.
+            for n in &nested_nonlocals {
+                nested_uses.insert(n.clone());
+            }
+            for name in nested_uses {
+                if !nested_locals.contains(&name) && !nested_globals.contains(&name) {
+                    uses.insert(name);
+                }
+            }
+        }
+        Stmt::Class {
+            body: nested_body,
+            bases,
+            metaclass,
+            decorators,
+            ..
+        } => {
+            // Decorator + base expressions evaluate in the enclosing scope.
+            for d in decorators {
+                collect_transitive_free_vars_in_expr(d, uses);
+                collect_free_var_reads_in_expr(d, uses);
+            }
+            for b in bases {
+                collect_transitive_free_vars_in_expr(b, uses);
+                collect_free_var_reads_in_expr(b, uses);
+            }
+            if let Some(m) = metaclass {
+                collect_transitive_free_vars_in_expr(m, uses);
+                collect_free_var_reads_in_expr(m, uses);
+            }
+            // Class body itself: methods read enclosing scope (skipping class scope).
+            // We approximate the class scope conservatively by collecting class-level
+            // assignments as the local set.
+            let empty_set: HashSet<String> = HashSet::new();
+            let class_locals =
+                crate::interpreter::collect_local_names(&[], nested_body, &empty_set, &empty_set);
+            let mut class_uses: HashSet<String> = HashSet::new();
+            collect_free_var_reads_in_stmts(nested_body, &mut class_uses);
+            collect_transitive_free_vars_in_stmts(nested_body, &mut class_uses);
+            for name in class_uses {
+                if !class_locals.contains(&name) {
+                    uses.insert(name);
+                }
+            }
+        }
+        Stmt::Assign(_, value) => collect_transitive_free_vars_in_expr(value, uses),
+        Stmt::AttrAssign { target, expr, .. } => {
+            collect_transitive_free_vars_in_expr(target, uses);
+            collect_transitive_free_vars_in_expr(expr, uses);
+        }
+        Stmt::IndexAssign {
+            target,
+            index,
+            expr,
+        } => {
+            collect_transitive_free_vars_in_expr(target, uses);
+            collect_transitive_free_vars_in_expr(index, uses);
+            collect_transitive_free_vars_in_expr(expr, uses);
+        }
+        Stmt::SliceAssign {
+            target,
+            lower,
+            upper,
+            step,
+            expr,
+        } => {
+            collect_transitive_free_vars_in_expr(target, uses);
+            for e in [lower, upper, step].iter().flat_map(|o| o.as_deref()) {
+                collect_transitive_free_vars_in_expr(e, uses);
+            }
+            collect_transitive_free_vars_in_expr(expr, uses);
+        }
+        Stmt::AugAssign { expr, .. } => collect_transitive_free_vars_in_expr(expr, uses),
+        Stmt::Return(Some(e)) => collect_transitive_free_vars_in_expr(e, uses),
+        Stmt::Expr(e) => collect_transitive_free_vars_in_expr(e, uses),
+        Stmt::If {
+            branches,
+            else_branch,
+        } => {
+            for (cond, body) in branches {
+                collect_transitive_free_vars_in_expr(cond, uses);
+                collect_transitive_free_vars_in_stmts(body, uses);
+            }
+            if let Some(b) = else_branch {
+                collect_transitive_free_vars_in_stmts(b, uses);
+            }
+        }
+        Stmt::While {
+            cond,
+            body,
+            else_branch,
+        } => {
+            collect_transitive_free_vars_in_expr(cond, uses);
+            collect_transitive_free_vars_in_stmts(body, uses);
+            if let Some(b) = else_branch {
+                collect_transitive_free_vars_in_stmts(b, uses);
+            }
+        }
+        Stmt::For {
+            iter,
+            body,
+            else_branch,
+            ..
+        } => {
+            collect_transitive_free_vars_in_expr(iter, uses);
+            collect_transitive_free_vars_in_stmts(body, uses);
+            if let Some(b) = else_branch {
+                collect_transitive_free_vars_in_stmts(b, uses);
+            }
+        }
+        Stmt::Try {
+            body,
+            handlers,
+            else_branch,
+            finally_branch,
+        } => {
+            collect_transitive_free_vars_in_stmts(body, uses);
+            for h in handlers {
+                if let Some(e) = &h.kind {
+                    collect_transitive_free_vars_in_expr(e, uses);
+                }
+                collect_transitive_free_vars_in_stmts(&h.body, uses);
+            }
+            if let Some(b) = else_branch {
+                collect_transitive_free_vars_in_stmts(b, uses);
+            }
+            if let Some(b) = finally_branch {
+                collect_transitive_free_vars_in_stmts(b, uses);
+            }
+        }
+        Stmt::With { items, body } => {
+            for (e, _) in items {
+                collect_transitive_free_vars_in_expr(e, uses);
+            }
+            collect_transitive_free_vars_in_stmts(body, uses);
+        }
+        Stmt::Raise {
+            expr: Some(e),
+            cause,
+        } => {
+            collect_transitive_free_vars_in_expr(e, uses);
+            if let Some(c) = cause {
+                collect_transitive_free_vars_in_expr(c, uses);
+            }
+        }
+        Stmt::Assert { test, msg } => {
+            collect_transitive_free_vars_in_expr(test, uses);
+            if let Some(m) = msg {
+                collect_transitive_free_vars_in_expr(m, uses);
+            }
+        }
+        Stmt::Delete(exprs) => {
+            for e in exprs {
+                collect_transitive_free_vars_in_expr(e, uses);
+            }
+        }
+        Stmt::Match { subject, arms } => {
+            collect_transitive_free_vars_in_expr(subject, uses);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_transitive_free_vars_in_expr(guard, uses);
+                }
+                collect_transitive_free_vars_in_stmts(&arm.body, uses);
+            }
+        }
+        Stmt::Return(None)
+        | Stmt::Import { .. }
+        | Stmt::ImportFrom { .. }
+        | Stmt::Global(_)
+        | Stmt::Nonlocal(_)
+        | Stmt::Pass
+        | Stmt::Break
+        | Stmt::Continue
+        | Stmt::Raise { expr: None, .. } => {}
+    }
+}
+
+fn collect_transitive_free_vars_in_expr(expr: &Expr, uses: &mut HashSet<String>) {
+    match expr {
+        Expr::Lambda { params, body } => {
+            let mut inner_uses: HashSet<String> = HashSet::new();
+            collect_free_var_reads_in_expr(body, &mut inner_uses);
+            collect_transitive_free_vars_in_expr(body, &mut inner_uses);
+            for p in params {
+                inner_uses.remove(p);
+            }
+            for n in inner_uses {
+                uses.insert(n);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_transitive_free_vars_in_expr(left, uses);
+            collect_transitive_free_vars_in_expr(right, uses);
+        }
+        Expr::Unary { expr: e, .. } => collect_transitive_free_vars_in_expr(e, uses),
+        Expr::Compare { left, ops } => {
+            collect_transitive_free_vars_in_expr(left, uses);
+            for (_, e) in ops {
+                collect_transitive_free_vars_in_expr(e, uses);
+            }
+        }
+        Expr::Call { func, args } => {
+            collect_transitive_free_vars_in_expr(func, uses);
+            for a in args {
+                collect_transitive_free_vars_in_expr(&a.value, uses);
+            }
+        }
+        Expr::Attr { target, .. } => collect_transitive_free_vars_in_expr(target, uses),
+        Expr::Index { target, index } => {
+            collect_transitive_free_vars_in_expr(target, uses);
+            collect_transitive_free_vars_in_expr(index, uses);
+        }
+        Expr::Slice {
+            target,
+            lower,
+            upper,
+            step,
+        } => {
+            collect_transitive_free_vars_in_expr(target, uses);
+            for e in [lower, upper, step].iter().flat_map(|o| o.as_deref()) {
+                collect_transitive_free_vars_in_expr(e, uses);
+            }
+        }
+        Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
+            for e in items {
+                collect_transitive_free_vars_in_expr(e, uses);
+            }
+        }
+        Expr::Starred(inner) => collect_transitive_free_vars_in_expr(inner, uses),
+        Expr::Dict(items) => {
+            for item in items {
+                match item {
+                    DictItem::Pair(k, v) => {
+                        collect_transitive_free_vars_in_expr(k, uses);
+                        collect_transitive_free_vars_in_expr(v, uses);
+                    }
+                    DictItem::DoubleSplat(e) => collect_transitive_free_vars_in_expr(e, uses),
+                }
+            }
+        }
+        Expr::ListComp { elt, clauses } | Expr::SetComp { elt, clauses } => {
+            for clause in clauses {
+                collect_transitive_free_vars_in_expr(&clause.iter, uses);
+                if let Some(c) = &clause.cond {
+                    collect_transitive_free_vars_in_expr(c, uses);
+                }
+            }
+            collect_transitive_free_vars_in_expr(elt, uses);
+        }
+        Expr::DictComp { key, val, clauses } => {
+            for clause in clauses {
+                collect_transitive_free_vars_in_expr(&clause.iter, uses);
+                if let Some(c) = &clause.cond {
+                    collect_transitive_free_vars_in_expr(c, uses);
+                }
+            }
+            collect_transitive_free_vars_in_expr(key, uses);
+            collect_transitive_free_vars_in_expr(val, uses);
+        }
+        Expr::Ternary { cond, then, else_ } => {
+            collect_transitive_free_vars_in_expr(cond, uses);
+            collect_transitive_free_vars_in_expr(then, uses);
+            collect_transitive_free_vars_in_expr(else_, uses);
+        }
+        Expr::Named { value, .. } => collect_transitive_free_vars_in_expr(value, uses),
+        Expr::FString(parts) => {
+            for part in parts {
+                if let FStringPart::Expr { expr, .. } = part {
+                    collect_transitive_free_vars_in_expr(expr, uses);
+                }
+            }
+        }
+        Expr::Var(_)
+        | Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Complex(_, _)
+        | Expr::Str(_)
+        | Expr::Bytes(_)
+        | Expr::Bool(_)
+        | Expr::None => {}
+        Expr::Yield(Some(e)) => collect_transitive_free_vars_in_expr(e, uses),
+        Expr::Yield(None) => {}
+        Expr::YieldFrom(e) => collect_transitive_free_vars_in_expr(e, uses),
     }
 }
 
