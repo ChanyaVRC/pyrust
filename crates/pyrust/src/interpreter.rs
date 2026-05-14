@@ -67,10 +67,21 @@ fn iter_values_for_registry(value: &Value) -> Result<Vec<Value>> {
     iter_values(value.clone())
 }
 
+/// Thin wrapper around `helpers::compare_values` matching pyrust-core's
+/// `CompareValuesFn` signature (`(&Value, &Value) -> Result<Ordering>`).
+/// Installed at interpreter startup so `pyrust-builtins` sort helpers
+/// (`list.sort`, `sort_with_precomputed_keys`) can route through the
+/// same canonical comparison the `<` / `>` operators use — covering
+/// BigInt, nested List, etc.  See issue #428.
+fn compare_values_for_registry(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
+    compare_values(a, b)
+}
+
 impl Default for Interpreter {
     fn default() -> Self {
         pyrust_builtins::install();
         pyrust_core::install_iter_values(iter_values_for_registry);
+        pyrust_core::install_compare_values(compare_values_for_registry);
         let env = Environment::new(None);
         install_exception_builtins(&env);
         install_singleton_builtins(&env);
