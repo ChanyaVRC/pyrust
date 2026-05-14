@@ -1171,8 +1171,12 @@ impl Interpreter {
                     let src_val = vm_try!(vm_read(regs, *src_reg, num_locals));
                     let src_dict = match src_val.kind() {
                         ValueKind::Dict(d) => d.clone(),
-                        _ => vm_try!(Err(PyError::Runtime(
-                            "DictUpdate requires a dict argument".to_string(),
+                        _ => vm_try!(Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "'{}' object is not a mapping",
+                                value_type_name_str(&src_val)
+                            ),
                         ))),
                     };
                     let dict = vm_try!(expect_dict_mut(regs, *dict_reg, "DictUpdate"));

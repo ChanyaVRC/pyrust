@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ast::{
-    AssignTarget, BinaryOp, CmpOp, CompClause, Expr, FStringPart, FunctionParam, MatchArm, Pattern,
-    Stmt, UnaryOp,
+    AssignTarget, BinaryOp, CmpOp, CompClause, DictItem, Expr, FStringPart, FunctionParam,
+    MatchArm, Pattern, Stmt, UnaryOp,
 };
 use crate::bytecode::{CellVar, FnCode, FnParamSpec, FnProto, Insn, Reg};
 use crate::error::PyError;
@@ -382,10 +382,20 @@ fn lambda_captures_in_expr(
                 lambda_captures_in_expr(e, local_index, cells);
             }
         }
-        Expr::Dict(pairs) => {
-            for (k, v) in pairs {
-                lambda_captures_in_expr(k, local_index, cells);
-                lambda_captures_in_expr(v, local_index, cells);
+        Expr::Starred(inner) => {
+            lambda_captures_in_expr(inner, local_index, cells);
+        }
+        Expr::Dict(items) => {
+            for item in items {
+                match item {
+                    DictItem::Pair(k, v) => {
+                        lambda_captures_in_expr(k, local_index, cells);
+                        lambda_captures_in_expr(v, local_index, cells);
+                    }
+                    DictItem::DoubleSplat(e) => {
+                        lambda_captures_in_expr(e, local_index, cells);
+                    }
+                }
             }
         }
         Expr::ListComp { elt, clauses } | Expr::SetComp { elt, clauses } => {
@@ -698,10 +708,16 @@ fn collect_free_var_reads_in_expr(expr: &Expr, uses: &mut HashSet<String>) {
                 collect_free_var_reads_in_expr(e, uses);
             }
         }
-        Expr::Dict(pairs) => {
-            for (k, v) in pairs {
-                collect_free_var_reads_in_expr(k, uses);
-                collect_free_var_reads_in_expr(v, uses);
+        Expr::Starred(inner) => collect_free_var_reads_in_expr(inner, uses),
+        Expr::Dict(items) => {
+            for item in items {
+                match item {
+                    DictItem::Pair(k, v) => {
+                        collect_free_var_reads_in_expr(k, uses);
+                        collect_free_var_reads_in_expr(v, uses);
+                    }
+                    DictItem::DoubleSplat(e) => collect_free_var_reads_in_expr(e, uses),
+                }
             }
         }
         Expr::ListComp { elt, clauses } | Expr::SetComp { elt, clauses } => {
@@ -1638,9 +1654,11 @@ fn expr_safe(expr: &Expr, i_name: &str, c_name: &str) -> bool {
         Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
             items.iter().all(|e| expr_safe(e, i_name, c_name))
         }
-        Expr::Dict(pairs) => pairs
-            .iter()
-            .all(|(k, v)| expr_safe(k, i_name, c_name) && expr_safe(v, i_name, c_name)),
+        Expr::Starred(inner) => expr_safe(inner, i_name, c_name),
+        Expr::Dict(items) => items.iter().all(|item| match item {
+            DictItem::Pair(k, v) => expr_safe(k, i_name, c_name) && expr_safe(v, i_name, c_name),
+            DictItem::DoubleSplat(e) => expr_safe(e, i_name, c_name),
+        }),
         Expr::FString(parts) => parts.iter().all(|p| match p {
             FStringPart::Literal(_) => true,
             FStringPart::Expr { expr, .. } => expr_safe(expr, i_name, c_name),
@@ -1854,9 +1872,11 @@ fn expr_reads_var(expr: &Expr, name: &str) -> bool {
         Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
             items.iter().any(|e| expr_reads_var(e, name))
         }
-        Expr::Dict(pairs) => pairs
-            .iter()
-            .any(|(k, v)| expr_reads_var(k, name) || expr_reads_var(v, name)),
+        Expr::Starred(inner) => expr_reads_var(inner, name),
+        Expr::Dict(items) => items.iter().any(|item| match item {
+            DictItem::Pair(k, v) => expr_reads_var(k, name) || expr_reads_var(v, name),
+            DictItem::DoubleSplat(e) => expr_reads_var(e, name),
+        }),
         Expr::ListComp { elt, clauses } | Expr::SetComp { elt, clauses } => {
             expr_reads_var(elt, name)
                 || clauses.iter().any(|c| {
@@ -2067,10 +2087,16 @@ fn rewrite_c_at_i_in_expr(expr: &mut Expr, c_name: &str, i_name: &str) {
                 rewrite_c_at_i_in_expr(e, c_name, i_name);
             }
         }
-        Expr::Dict(pairs) => {
-            for (k, v) in pairs.iter_mut() {
-                rewrite_c_at_i_in_expr(k, c_name, i_name);
-                rewrite_c_at_i_in_expr(v, c_name, i_name);
+        Expr::Starred(inner) => rewrite_c_at_i_in_expr(inner, c_name, i_name),
+        Expr::Dict(items) => {
+            for item in items.iter_mut() {
+                match item {
+                    DictItem::Pair(k, v) => {
+                        rewrite_c_at_i_in_expr(k, c_name, i_name);
+                        rewrite_c_at_i_in_expr(v, c_name, i_name);
+                    }
+                    DictItem::DoubleSplat(e) => rewrite_c_at_i_in_expr(e, c_name, i_name),
+                }
             }
         }
         // Comprehensions/lambdas/walrus/yield are bailed on in expr_safe so
@@ -5051,114 +5077,32 @@ impl Compiler {
                 self.free_temp(slice_r);
                 dst
             }
-            Expr::List(items) => self.compile_collection(items, false),
-            Expr::Tuple(items) => self.compile_collection(items, true),
-            Expr::Set(items) => {
-                // Build as list then convert — reuse BuildList + special handling.
-                // For simplicity, compile as a list and let the VM convert.
-                // Actually we don't have a BuildSet instruction.
-                // Use BuildList then the VM can interpret it as a set.
-                // Best approach: use a "set literal" call: set([items...])
-                let n = items.len() as u8;
-                let frame = self.next_temp;
-                if frame.checked_add(1 + Reg::from(n)).is_none() {
-                    self.failed = true;
-                    if self.error_msg.is_none() {
-                        self.error_msg = Some("too many elements in set literal".to_string());
-                    }
-                    return 0;
+            Expr::List(items) => {
+                if items.iter().any(|e| matches!(e, Expr::Starred(_))) {
+                    self.compile_unpack_list_or_tuple(items, false)
+                } else {
+                    self.compile_collection(items, false)
                 }
-                self.next_temp = frame + 1 + Reg::from(n);
-                if frame + Reg::from(n) > self.max_reg {
-                    self.max_reg = frame + Reg::from(n);
-                }
-                let set_name_idx = self.intern_name("set");
-                self.emit(Insn::LoadGlobal(frame, set_name_idx));
-                // Build the list of items in frame+1..frame+1+n
-                let list_r = frame + 1;
-                let saved = self.next_temp;
-                let list_base = self.next_temp;
-                if list_base.checked_add(Reg::from(n)).is_none() {
-                    self.failed = true;
-                    if self.error_msg.is_none() {
-                        self.error_msg = Some("too many elements in set literal".to_string());
-                    }
-                    return 0;
-                }
-                self.next_temp = list_base + Reg::from(n);
-                if list_base + Reg::from(n) - 1 > self.max_reg {
-                    self.max_reg = list_base + Reg::from(n) - 1;
-                }
-                for (i, item) in (0u32..).zip(items.iter()) {
-                    let slot = list_base + i;
-                    let ns = self.next_temp;
-                    let r = self.compile_expr(item);
-                    if r != slot {
-                        self.emit(Insn::Move(slot, r));
-                    }
-                    self.next_temp = ns;
-                }
-                self.emit(Insn::BuildList(list_r, list_base, n));
-                self.next_temp = saved;
-                self.next_temp = frame + 2;
-                if frame + 1 > self.max_reg {
-                    self.max_reg = frame + 1;
-                }
-                self.emit(Insn::Call(frame, 1));
-                self.next_temp = frame + 1;
-                frame
             }
-            Expr::Dict(pairs) => {
-                let n = pairs.len() as u8;
-                let base = self.next_temp;
-                let slots_needed = Reg::from(n).saturating_mul(2);
-                if base.checked_add(slots_needed).is_none() {
-                    self.failed = true;
-                    if self.error_msg.is_none() {
-                        self.error_msg = Some("too many entries in dict literal".to_string());
-                    }
-                    return 0;
+            Expr::Tuple(items) => {
+                if items.iter().any(|e| matches!(e, Expr::Starred(_))) {
+                    self.compile_unpack_list_or_tuple(items, true)
+                } else {
+                    self.compile_collection(items, true)
                 }
-                // Always ensure base (the destination register) is tracked in max_reg,
-                // even for an empty dict where slots_needed == 0.
-                if base > self.max_reg {
-                    self.max_reg = base;
-                }
-                self.next_temp = base + Reg::from(n).saturating_mul(2);
-                if self.next_temp > 0 && self.next_temp - 1 > self.max_reg {
-                    self.max_reg = self.next_temp - 1;
-                }
-                for (i, (key_expr, val_expr)) in (0u32..).zip(pairs.iter()) {
-                    let k_slot = base + i * 2;
-                    let v_slot = base + i * 2 + 1;
-                    let saved = self.next_temp;
-                    let insn_before = self.insns.len();
-                    let kr = self.compile_expr(key_expr);
-                    if kr != k_slot {
-                        let single = self.insns.len() == insn_before + 1;
-                        if single && kr >= self.base_temp && self.retarget_last(kr, k_slot) {
-                            // retargeted in place — no Move needed
-                        } else {
-                            self.emit(Insn::Move(k_slot, kr));
-                        }
-                    }
-                    self.next_temp = saved;
-                    let insn_before = self.insns.len();
-                    let vr = self.compile_expr(val_expr);
-                    if vr != v_slot {
-                        let single = self.insns.len() == insn_before + 1;
-                        if single && vr >= self.base_temp && self.retarget_last(vr, v_slot) {
-                            // retargeted in place — no Move needed
-                        } else {
-                            self.emit(Insn::Move(v_slot, vr));
-                        }
-                    }
-                    self.next_temp = saved;
-                }
-                self.emit(Insn::BuildDict(base, base, n));
-                self.next_temp = base + 1;
-                base
             }
+            Expr::Starred(_) => {
+                // `*expr` is only valid as a child of a list/tuple/set literal,
+                // a call-site argument, or an assign target.  Encountering it
+                // here means the parser produced one in an unexpected position.
+                self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some("can't use starred expression here".to_string());
+                }
+                0
+            }
+            Expr::Set(items) => self.compile_set_literal(items),
+            Expr::Dict(items) => self.compile_dict_literal(items),
             Expr::Ternary { cond, then, else_ } => {
                 let cond_reg = self.compile_expr(cond);
                 let jmp_false = self.emit(Insn::JumpIfFalse(cond_reg, 0));
@@ -5979,5 +5923,247 @@ impl Compiler {
         }
         self.next_temp = base + 1;
         base
+    }
+
+    /// Compile `[a, *b, c]` / `(a, *b, c)` — PEP 448 sequence splat.
+    /// Strategy: build an empty list, then for each item emit either
+    /// `ListAppend` (literal) or `ListExtend` (splat).  Tuples reuse the same
+    /// path then convert via the `tuple` builtin at the end.
+    fn compile_unpack_list_or_tuple(&mut self, items: &[Expr], is_tuple: bool) -> Reg {
+        let dst = self.alloc_temp();
+        let empty_base = self.next_temp;
+        self.next_temp = empty_base + 1;
+        if empty_base > self.max_reg {
+            self.max_reg = empty_base;
+        }
+        self.emit(Insn::BuildList(dst, empty_base, 0));
+        for item in items {
+            match item {
+                Expr::Starred(inner) => {
+                    let saved = self.next_temp;
+                    let r = self.compile_expr(inner);
+                    self.emit(Insn::ListExtend(dst, r));
+                    self.next_temp = saved;
+                }
+                _ => {
+                    let saved = self.next_temp;
+                    let r = self.compile_expr(item);
+                    self.emit(Insn::ListAppend(dst, r));
+                    self.next_temp = saved;
+                }
+            }
+        }
+        if !is_tuple {
+            self.next_temp = dst + 1;
+            return dst;
+        }
+        // Convert the freshly-built list into a tuple via the `tuple` builtin.
+        let frame = self.next_temp;
+        if frame.checked_add(2).is_none() {
+            self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg = Some("register overflow in tuple splat".to_string());
+            }
+            return 0;
+        }
+        self.next_temp = frame + 2;
+        if frame + 1 > self.max_reg {
+            self.max_reg = frame + 1;
+        }
+        let tuple_name_idx = self.intern_name("tuple");
+        self.emit(Insn::LoadGlobal(frame, tuple_name_idx));
+        self.emit(Insn::Move(frame + 1, dst));
+        self.emit(Insn::Call(frame, 1));
+        self.next_temp = frame + 1;
+        frame
+    }
+
+    /// Compile `{a, *b, c}` — PEP 448 set splat.  Strategy: build an empty
+    /// list (uniform path with non-splat sets), then convert via the `set`
+    /// builtin.  Splat elements are appended via `ListExtend`, ordinary
+    /// elements via `ListAppend`.
+    fn compile_set_literal(&mut self, items: &[Expr]) -> Reg {
+        let has_splat = items.iter().any(|e| matches!(e, Expr::Starred(_)));
+        if !has_splat {
+            // Fast path: no splat — same code shape as the original.
+            let n = items.len() as u8;
+            let frame = self.next_temp;
+            if frame.checked_add(1 + Reg::from(n)).is_none() {
+                self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some("too many elements in set literal".to_string());
+                }
+                return 0;
+            }
+            self.next_temp = frame + 1 + Reg::from(n);
+            if frame + Reg::from(n) > self.max_reg {
+                self.max_reg = frame + Reg::from(n);
+            }
+            let set_name_idx = self.intern_name("set");
+            self.emit(Insn::LoadGlobal(frame, set_name_idx));
+            let list_r = frame + 1;
+            let saved = self.next_temp;
+            let list_base = self.next_temp;
+            if list_base.checked_add(Reg::from(n)).is_none() {
+                self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some("too many elements in set literal".to_string());
+                }
+                return 0;
+            }
+            self.next_temp = list_base + Reg::from(n);
+            if list_base + Reg::from(n) - 1 > self.max_reg {
+                self.max_reg = list_base + Reg::from(n) - 1;
+            }
+            for (i, item) in (0u32..).zip(items.iter()) {
+                let slot = list_base + i;
+                let ns = self.next_temp;
+                let r = self.compile_expr(item);
+                if r != slot {
+                    self.emit(Insn::Move(slot, r));
+                }
+                self.next_temp = ns;
+            }
+            self.emit(Insn::BuildList(list_r, list_base, n));
+            self.next_temp = saved;
+            self.next_temp = frame + 2;
+            if frame + 1 > self.max_reg {
+                self.max_reg = frame + 1;
+            }
+            self.emit(Insn::Call(frame, 1));
+            self.next_temp = frame + 1;
+            return frame;
+        }
+
+        // Slow path with splats: build list incrementally, then call set(list).
+        let frame = self.next_temp;
+        if frame.checked_add(2).is_none() {
+            self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg = Some("register overflow in set splat".to_string());
+            }
+            return 0;
+        }
+        self.next_temp = frame + 2;
+        if frame + 1 > self.max_reg {
+            self.max_reg = frame + 1;
+        }
+        let set_name_idx = self.intern_name("set");
+        self.emit(Insn::LoadGlobal(frame, set_name_idx));
+        let list_r = frame + 1;
+        let empty_base = self.next_temp;
+        self.next_temp = empty_base + 1;
+        if empty_base > self.max_reg {
+            self.max_reg = empty_base;
+        }
+        self.emit(Insn::BuildList(list_r, empty_base, 0));
+        for item in items {
+            match item {
+                Expr::Starred(inner) => {
+                    let saved = self.next_temp;
+                    let r = self.compile_expr(inner);
+                    self.emit(Insn::ListExtend(list_r, r));
+                    self.next_temp = saved;
+                }
+                _ => {
+                    let saved = self.next_temp;
+                    let r = self.compile_expr(item);
+                    self.emit(Insn::ListAppend(list_r, r));
+                    self.next_temp = saved;
+                }
+            }
+        }
+        self.emit(Insn::Call(frame, 1));
+        self.next_temp = frame + 1;
+        frame
+    }
+
+    /// Compile `{k1: v1, **m, k2: v2}` — supports PEP 448 dict splat.
+    /// Fast path (no `**` splats) uses `BuildDict` with pre-staged key/value
+    /// slots, identical to the pre-PEP-448 shape.  Slow path builds an empty
+    /// dict and emits `SetItem` for pairs / `DictUpdate` for splats.
+    fn compile_dict_literal(&mut self, items: &[DictItem]) -> Reg {
+        let has_splat = items.iter().any(|i| matches!(i, DictItem::DoubleSplat(_)));
+        if !has_splat {
+            let n = items.len() as u8;
+            let base = self.next_temp;
+            let slots_needed = Reg::from(n).saturating_mul(2);
+            if base.checked_add(slots_needed).is_none() {
+                self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some("too many entries in dict literal".to_string());
+                }
+                return 0;
+            }
+            if base > self.max_reg {
+                self.max_reg = base;
+            }
+            self.next_temp = base + Reg::from(n).saturating_mul(2);
+            if self.next_temp > 0 && self.next_temp - 1 > self.max_reg {
+                self.max_reg = self.next_temp - 1;
+            }
+            for (i, item) in (0u32..).zip(items.iter()) {
+                let (key_expr, val_expr) = match item {
+                    DictItem::Pair(k, v) => (k, v),
+                    DictItem::DoubleSplat(_) => unreachable!("has_splat is false"),
+                };
+                let k_slot = base + i * 2;
+                let v_slot = base + i * 2 + 1;
+                let saved = self.next_temp;
+                let insn_before = self.insns.len();
+                let kr = self.compile_expr(key_expr);
+                if kr != k_slot {
+                    let single = self.insns.len() == insn_before + 1;
+                    if single && kr >= self.base_temp && self.retarget_last(kr, k_slot) {
+                        // retargeted in place — no Move needed
+                    } else {
+                        self.emit(Insn::Move(k_slot, kr));
+                    }
+                }
+                self.next_temp = saved;
+                let insn_before = self.insns.len();
+                let vr = self.compile_expr(val_expr);
+                if vr != v_slot {
+                    let single = self.insns.len() == insn_before + 1;
+                    if single && vr >= self.base_temp && self.retarget_last(vr, v_slot) {
+                        // retargeted in place — no Move needed
+                    } else {
+                        self.emit(Insn::Move(v_slot, vr));
+                    }
+                }
+                self.next_temp = saved;
+            }
+            self.emit(Insn::BuildDict(base, base, n));
+            self.next_temp = base + 1;
+            return base;
+        }
+
+        // Slow path: build empty dict, populate via SetItem / DictUpdate.
+        let dst = self.alloc_temp();
+        let empty_base = self.next_temp;
+        self.next_temp = empty_base + 1;
+        if empty_base > self.max_reg {
+            self.max_reg = empty_base;
+        }
+        self.emit(Insn::BuildDict(dst, empty_base, 0));
+        for item in items {
+            match item {
+                DictItem::Pair(k, v) => {
+                    let saved = self.next_temp;
+                    let kr = self.compile_expr(k);
+                    let vr = self.compile_expr(v);
+                    self.emit(Insn::SetItem(dst, kr, vr));
+                    self.next_temp = saved;
+                }
+                DictItem::DoubleSplat(e) => {
+                    let saved = self.next_temp;
+                    let r = self.compile_expr(e);
+                    self.emit(Insn::DictUpdate(dst, r));
+                    self.next_temp = saved;
+                }
+            }
+        }
+        self.next_temp = dst + 1;
+        dst
     }
 }
