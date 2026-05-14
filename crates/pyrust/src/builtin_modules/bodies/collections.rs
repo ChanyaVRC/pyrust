@@ -32,7 +32,7 @@ use std::rc::Rc;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::{
-    NativeIterFrame, invoke_class_method, iter_values, lookup_class_attr,
+    NativeIterFrame, invoke_class_method, lookup_class_attr,
 };
 use crate::value::{PyInstance, PyKey, Value, ValueKind, key_repr};
 use indexmap::IndexMap;

@@ -417,7 +417,7 @@ impl Interpreter {
         gen_active_exception: Option<Value>,
     ) -> Result<Value> {
         use crate::bytecode::Insn;
-        use std::collections::HashMap;
+        
         let num_locals = code.num_locals;
 
         let mut iters: Vec<Option<IterState>> = iters_init;

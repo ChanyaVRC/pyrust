@@ -1,21 +1,3 @@
-#[derive(Clone, Copy, PartialEq)]
-pub(crate) enum BinopTypeTag {
-    Int,
-    Float,
-    Str,
-    Other,
-}
-
-#[derive(Clone)]
-pub(crate) enum SpecState {
-    /// Seen `count` examples of the same type tag.
-    Counting { tag: BinopTypeTag, count: u8 },
-    /// Promoted to a specialized path after SPEC_THRESHOLD observations.
-    Specialized(BinopTypeTag),
-    /// Seen mixed types — no further specialization.
-    Megamorphic,
-}
-
 /// `a ** b` for non-negative integer exponent, promoting to `BigInt` if the
 /// result would overflow `i64`.  Matches CPython's arbitrary-precision int
 /// semantics — `2 ** 64` returns the BigInt `18446744073709551616`, not the
@@ -41,100 +23,6 @@ pub(crate) fn int_pow_promoting(a: i64, b: i64) -> Value {
         None => Value::bigint(PyPow::pow(PyBigInt::from(a), exp)),
     }
 }
-
-/// Attempt a pure-integer binary operation. Returns Some(Result<Value>) on success,
-/// None if the operation is not applicable to integers (e.g. Str concat).
-fn eval_binary_int(op: BinaryOp, a: i64, b: i64) -> Option<Result<Value>> {
-    match op {
-        BinaryOp::Add => Some(Ok(match a.checked_add(b) {
-            Some(r) => Value::int(r),
-            None => Value::bigint(PyBigInt::from(a) + PyBigInt::from(b)),
-        })),
-        BinaryOp::Sub => Some(Ok(match a.checked_sub(b) {
-            Some(r) => Value::int(r),
-            None => Value::bigint(PyBigInt::from(a) - PyBigInt::from(b)),
-        })),
-        BinaryOp::Mul => Some(Ok(match a.checked_mul(b) {
-            Some(r) => Value::int(r),
-            None => Value::bigint(PyBigInt::from(a) * PyBigInt::from(b)),
-        })),
-        BinaryOp::Div => {
-            if b == 0 {
-                Some(Err(PyError::named(
-                    "ZeroDivisionError",
-                    "division by zero".to_string(),
-                )))
-            } else {
-                Some(Ok(Value::float(a as f64 / b as f64)))
-            }
-        }
-        BinaryOp::FloorDiv => {
-            if b == 0 {
-                Some(Err(PyError::named(
-                    "ZeroDivisionError",
-                    "integer division or modulo by zero".to_string(),
-                )))
-            } else {
-                let modulo = py_mod_i64(a, b);
-                Some(Ok(Value::int((a - modulo) / b)))
-            }
-        }
-        BinaryOp::Mod => {
-            if b == 0 {
-                Some(Err(PyError::named(
-                    "ZeroDivisionError",
-                    "integer modulo by zero".to_string(),
-                )))
-            } else {
-                Some(Ok(Value::int(py_mod_i64(a, b))))
-            }
-        }
-        BinaryOp::Pow => Some(Ok(if b >= 0 {
-            int_pow_promoting(a, b)
-        } else {
-            Value::float((a as f64).powi(b as i32))
-        })),
-        BinaryOp::Eq => Some(Ok(Value::bool_(a == b))),
-        BinaryOp::Ne => Some(Ok(Value::bool_(a != b))),
-        BinaryOp::Lt => Some(Ok(Value::bool_(a < b))),
-        BinaryOp::Le => Some(Ok(Value::bool_(a <= b))),
-        BinaryOp::Gt => Some(Ok(Value::bool_(a > b))),
-        BinaryOp::Ge => Some(Ok(Value::bool_(a >= b))),
-        BinaryOp::BitAnd => Some(Ok(Value::int(a & b))),
-        BinaryOp::BitOr => Some(Ok(Value::int(a | b))),
-        BinaryOp::BitXor => Some(Ok(Value::int(a ^ b))),
-        BinaryOp::LShift => Some(Ok(Value::int(a << (b & 63)))),
-        BinaryOp::RShift => Some(Ok(Value::int(a >> (b & 63)))),
-        _ => None, // And/Or handled separately; In/NotIn/Is/IsNot/MatMul not applicable
-    }
-}
-
-/// Attempt a pure-float binary operation.
-fn eval_binary_float(op: BinaryOp, a: f64, b: f64) -> Option<Result<Value>> {
-    match op {
-        BinaryOp::Add => Some(Ok(Value::float(a + b))),
-        BinaryOp::Sub => Some(Ok(Value::float(a - b))),
-        BinaryOp::Mul => Some(Ok(Value::float(a * b))),
-        BinaryOp::Div => {
-            if b == 0.0 {
-                Some(Err(PyError::named(
-                    "ZeroDivisionError",
-                    "float division by zero".to_string(),
-                )))
-            } else {
-                Some(Ok(Value::float(a / b)))
-            }
-        }
-        BinaryOp::Eq => Some(Ok(Value::bool_(a == b))),
-        BinaryOp::Ne => Some(Ok(Value::bool_(a != b))),
-        BinaryOp::Lt => Some(Ok(Value::bool_(a < b))),
-        BinaryOp::Le => Some(Ok(Value::bool_(a <= b))),
-        BinaryOp::Gt => Some(Ok(Value::bool_(a > b))),
-        BinaryOp::Ge => Some(Ok(Value::bool_(a >= b))),
-        _ => None,
-    }
-}
-
 /// Returns the Python type name string for a `Value`, used in error messages.
 ///
 /// Thin alias for [`pyrust_core::builtin_type_name`] — kept locally so the
@@ -1048,38 +936,6 @@ fn env_assign_local(env: &EnvRef, name: &str, value: Value) {
         }
     borrowed.values.insert(name.to_string(), value);
 }
-
-// Walk the env chain and return the `EnvRef` that owns `name`, without cloning
-// the value. Returns `None` if the name is unresolvable (not found or unbound local).
-fn find_env_for_name(env: &EnvRef, name: &str) -> Option<EnvRef> {
-    let mut current = Rc::clone(env);
-    loop {
-        let (found, is_local_name, parent) = {
-            let borrowed = current.borrow();
-            let found = if let Some(fl) = &borrowed.fastlocals {
-                if let Some(&idx) = fl.index.get(name) {
-                    fl.slots[idx].is_some()
-                } else {
-                    borrowed.values.contains_key(name)
-                }
-            } else {
-                borrowed.values.contains_key(name)
-            };
-            (found, borrowed.local_names.contains(name), borrowed.parent.clone())
-        };
-        if found {
-            return Some(current);
-        }
-        if is_local_name {
-            return None;
-        }
-        match parent {
-            Some(p) => current = p,
-            None => return None,
-        }
-    }
-}
-
 fn lookup_name_in_env(env: &EnvRef, name: &str) -> Result<Option<Value>> {
     let borrowed = env.borrow();
     if let Some(fl) = &borrowed.fastlocals
@@ -1621,8 +1477,13 @@ pub(crate) fn value_to_float(v: &Value, ctx: &str) -> Result<f64> {
 /// makes the optimizer DCE / fold `foo(…)` calls without any further edit.
 fn is_pure_expr(expr: &Expr, pure_fns: &std::collections::HashSet<String>) -> bool {
     match expr {
-        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bytes(_) | Expr::Bool(_) | Expr::None => true,
-        Expr::Int(_) | Expr::Float(_) | Expr::Complex(_, _) | Expr::Str(_) | Expr::Bool(_) | Expr::None => true,
+        Expr::Int(_)
+        | Expr::Float(_)
+        | Expr::Complex(_, _)
+        | Expr::Str(_)
+        | Expr::Bytes(_)
+        | Expr::Bool(_)
+        | Expr::None => true,
         Expr::Var(_) => true,
         Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
             items.iter().all(|e| is_pure_expr(e, pure_fns))
