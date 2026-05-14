@@ -2545,7 +2545,18 @@ fn complex_repr(re: f64, im: f64) -> String {
     format!("({re_str}{sep}{im_str}j)")
 }
 
-fn key_repr(key: &PyKey) -> String {
+/// Canonical CPython-parity `repr()` for a `PyKey`.
+///
+/// This is the single source of truth for hashable-key reprs across the
+/// workspace.  Consumers in `pyrust-builtins` (frozenset, dict views) and
+/// `pyrust` (collections.deque) all route through this function rather than
+/// keeping local copies — see issue #422 for the divergence that motivated
+/// consolidation (whole-number floats were losing their trailing `.0` in the
+/// frozenset path because the copy there used `f64::to_string` instead of
+/// `format_float`).
+///
+/// Umbrella tracking: #420.
+pub fn key_repr(key: &PyKey) -> String {
     match key {
         PyKey::Int(v) => v.to_string(),
         PyKey::Float(v) => format_float(f64::from_bits(*v)),

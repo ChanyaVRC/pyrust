@@ -8,7 +8,9 @@ use std::any::Any;
 use std::rc::Rc;
 
 use indexmap::{IndexMap, IndexSet};
-use pyrust_core::{BuiltinState, BuiltinTypeOps, PyError, PyKey, Result, Value, ValueKind};
+use pyrust_core::{
+    BuiltinState, BuiltinTypeOps, PyError, PyKey, Result, Value, ValueKind, key_repr,
+};
 
 /// Internal frozenset state.  `Rc` so that clones are cheap and so that
 /// the same backing storage can be shared via `Value::builtin_object_shared`.
@@ -179,33 +181,4 @@ fn borrow_items(state: &BuiltinState) -> Option<Rc<IndexSet<PyKey>>> {
     borrow
         .downcast_ref::<FrozenSetState>()
         .map(|s| Rc::clone(&s.items))
-}
-
-fn key_repr(key: &PyKey) -> String {
-    match key {
-        PyKey::Int(v) => v.to_string(),
-        PyKey::Float(v) => f64::from_bits(*v).to_string(),
-        PyKey::Str(v) => format!("'{}'", v),
-        PyKey::Bool(v) => if *v { "True" } else { "False" }.to_string(),
-        PyKey::None => "None".to_string(),
-        PyKey::FrozenSet(items) => {
-            if items.is_empty() {
-                "frozenset()".to_string()
-            } else {
-                let inner = items.iter().map(key_repr).collect::<Vec<_>>().join(", ");
-                format!("frozenset({{{inner}}})")
-            }
-        }
-        PyKey::Tuple(items) => {
-            if items.is_empty() {
-                "()".to_string()
-            } else if items.len() == 1 {
-                format!("({},)", key_repr(&items[0]))
-            } else {
-                let inner = items.iter().map(key_repr).collect::<Vec<_>>().join(", ");
-                format!("({inner})")
-            }
-        }
-        PyKey::Object { value, .. } => value.repr(),
-    }
 }
