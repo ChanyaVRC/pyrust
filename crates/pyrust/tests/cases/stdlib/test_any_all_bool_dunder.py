@@ -2,11 +2,10 @@
 # Previously they bypassed the dunder and treated every instance as truthy.
 #
 # Notes on coverage:
-#   * `sorted(reverse=<instance>)` is also fixed at the source level, but
-#     CPython coerces `reverse=` via `__index__`, not `__bool__`, and rejects
-#     an instance that defines only `__bool__`.  Verifying that path with a
-#     parity fixture would require an unrelated `__index__`/coercion fix,
-#     so we exercise it via bool-typed reverse only.
+#   * `sorted(reverse=<instance>)` coerces via `__index__` (not `__bool__`)
+#     per CPython.  Class with only `__bool__` raises TypeError; class with
+#     `__index__` returning 0 / non-zero controls reversal.  See
+#     `sorted-rev-*` cases below.
 #   * `__repr__` is not yet dispatched inside `list.__repr__` (separate bug),
 #     so we count filter results with `len()` rather than printing them.
 
@@ -40,9 +39,49 @@ print("filter-none-mixed-count", len(list(filter(None, [0, T(True), "", T(False)
 print("filter-pred-identity-count", len(list(filter(lambda x: x, [T(False), T(True), T(False)]))))
 print("filter-pred-returns-instance", list(filter(lambda x: T(x > 0), [-1, 0, 1, 2])))
 
-# --- sorted(reverse=...) with regular bool — confirms no regression ---
+# --- sorted(reverse=...) ---
+# Plain bool / int — implicit __index__.
 print("sorted-rev-true", sorted([1, 3, 2], reverse=True))
 print("sorted-rev-false", sorted([1, 3, 2], reverse=False))
+print("sorted-rev-int-1", sorted([1, 3, 2], reverse=1))
+print("sorted-rev-int-0", sorted([1, 3, 2], reverse=0))
+
+
+# User class with __index__ — non-zero / zero controls reversal.
+class IdxOne:
+    def __index__(self): return 1
+
+
+class IdxZero:
+    def __index__(self): return 0
+
+
+print("sorted-rev-idx-one", sorted([1, 3, 2], reverse=IdxOne()))
+print("sorted-rev-idx-zero", sorted([1, 3, 2], reverse=IdxZero()))
+
+
+# User class with only __bool__ — TypeError per CPython.
+class JustBool:
+    def __bool__(self): return True
+
+
+try:
+    sorted([1, 3, 2], reverse=JustBool())
+    print("sorted-rev-justbool: FAIL (no exception)")
+except TypeError as e:
+    print("sorted-rev-justbool: TypeError")
+
+
+# User class with neither — TypeError.
+class Nothing:
+    pass
+
+
+try:
+    sorted([1, 3, 2], reverse=Nothing())
+    print("sorted-rev-nothing: FAIL (no exception)")
+except TypeError as e:
+    print("sorted-rev-nothing: TypeError")
 
 
 # --- class that uses __len__ as the truthiness fallback ---

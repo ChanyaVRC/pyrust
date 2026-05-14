@@ -462,7 +462,7 @@ impl Interpreter {
     /// Try to call a unary dunder method on a PyInstance.  Routes both
     /// `UserFunction` and `BuiltinFunction` class methods through
     /// `invoke_class_method` — same parity with `try_dunder_binary`.
-    fn try_dunder_unary(&mut self, val: &Value, method: &str) -> Option<Result<Value>> {
+    pub(crate) fn try_dunder_unary(&mut self, val: &Value, method: &str) -> Option<Result<Value>> {
         if let ValueKind::PyInstance(inst) = val.kind() {
             let class = Rc::clone(&inst.borrow().class);
             if let Some(m) = lookup_class_attr(&class, method)

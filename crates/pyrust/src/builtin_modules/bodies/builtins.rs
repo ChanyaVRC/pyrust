@@ -1153,8 +1153,42 @@ pyrust_module! {
         if args.is_empty() {
             return Err(PyError::Runtime(format!("{FN_NAME}() requires at least one argument")));
         }
+        // `reverse=` is dispatched through `__index__`, not `__bool__` —
+        // CPython treats it as an integer-coercion slot (`bool` is a
+        // subclass of `int` so plain `True`/`False` flow through, but
+        // a user class with only `__bool__` raises TypeError, mirroring
+        // `sorted(reverse=cls())` in CPython).  See #432 review.
         let reverse = match args.iter().find(|a| a.name.as_deref() == Some("reverse")) {
-            Some(a) => _interp.truthy_value(&a.value)?,
+            Some(a) => {
+                let v = &a.value;
+                match v.kind() {
+                    ValueKind::Bool(b) => b,
+                    ValueKind::Int(n) => n != 0,
+                    ValueKind::BigInt(_) => !v.as_int().is_some_and(|n| n == 0),
+                    _ => {
+                        let idx_val = _interp.try_dunder_unary(v, "__index__")
+                            .ok_or_else(|| PyError::named(
+                                "TypeError",
+                                format!(
+                                    "'{}' object cannot be interpreted as an integer",
+                                    value_type_name_str(v),
+                                ),
+                            ))??;
+                        match idx_val.kind() {
+                            ValueKind::Bool(b) => b,
+                            ValueKind::Int(n) => n != 0,
+                            ValueKind::BigInt(_) => !idx_val.as_int().is_some_and(|n| n == 0),
+                            _ => return Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "__index__ returned non-int (type {})",
+                                    value_type_name_str(&idx_val),
+                                ),
+                            )),
+                        }
+                    }
+                }
+            }
             None => false,
         };
         let key_fn = args.iter().find(|a| a.name.as_deref() == Some("key"))
