@@ -243,6 +243,44 @@ impl Interpreter {
         // or a user-supplied exception (for `throw()`) at the current yield.
         inject_exc: Option<PyError>,
     ) -> Result<Value> {
+        // Record per-frame exception state at entry.  On any exit path
+        // that is NOT a generator yield, restore so the caller's frame
+        // sees the same `active_exception` / `handled_exc_stack` it left
+        // behind, regardless of whether this callee raised, returned, or
+        // ran past the end.
+        //
+        // Generator yields are deliberately exempt: a yield is logically
+        // mid-execution and the same frame will be resumed later, so any
+        // entries it pushed must persist across the yield boundary.
+        let exc_ctx_entry_depth = self.handled_exc_stack.len();
+        let saved_active = self.active_exception.clone();
+        let result = self.run_bytecode_inner_impl(
+            code,
+            regs,
+            iters_init,
+            exc_handlers_init,
+            start_pc,
+            current_fn_id,
+            inject_exc,
+        );
+        if !matches!(&result, Err(PyError::GeneratorYield(_))) {
+            self.handled_exc_stack.truncate(exc_ctx_entry_depth);
+            self.active_exception = saved_active;
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_bytecode_inner_impl(
+        &mut self,
+        code: &crate::bytecode::FnCode,
+        regs: &mut [Value],
+        iters_init: Vec<Option<IterState>>,
+        exc_handlers_init: Vec<usize>,
+        start_pc: usize,
+        current_fn_id: Option<u64>,
+        inject_exc: Option<PyError>,
+    ) -> Result<Value> {
         use crate::bytecode::Insn;
         use std::collections::HashMap;
         let num_locals = code.num_locals;
@@ -254,6 +292,12 @@ impl Interpreter {
         // eventually raises RecursionError instead of looping forever.
         let mut tco_iters: usize = 0;
         let mut pending_inject: Option<PyError> = inject_exc;
+
+        // Depth of `handled_exc_stack` belonging to *caller* frames at the
+        // time this VM frame started executing.  Used by `vm_try!` to bound
+        // its "propagating out of a handler body" pop so it never reaches
+        // into the caller's entries.
+        let exc_ctx_frame_base: usize = self.handled_exc_stack.len();
 
         'vm: loop {
         // Dispatch errors through the active exception handler stack.
@@ -280,6 +324,27 @@ impl Interpreter {
                                 }
                                 other => return Err(other),
                             };
+                            // If the exception we're now dispatching was
+                            // raised *inside* an existing handler body in
+                            // THIS frame, we are leaving that body — pop
+                            // its context-stack entry so a future raise
+                            // here doesn't pick it up.  Detection: the
+                            // existing `active_exception` matches the top
+                            // of `handled_exc_stack` exactly when control
+                            // is currently inside a handler/finally body.
+                            // The depth check protects entries belonging
+                            // to caller frames.
+                            if self.handled_exc_stack.len() > exc_ctx_frame_base
+                                && let Some(top) = self.handled_exc_stack.last()
+                                && let Some(active) = self.active_exception.as_ref()
+                                && Self::values_are_same_exception(top, active)
+                            {
+                                self.handled_exc_stack.pop();
+                            }
+                            // Push the new exception so a `raise` inside
+                            // the about-to-run handler/finally body sees
+                            // it as the implicit `__context__`.
+                            self.handled_exc_stack.push(exc_val.clone());
                             self.active_exception = Some(exc_val);
                             pc = h;
                             continue 'vm;
@@ -889,9 +954,20 @@ impl Interpreter {
                     if !vm_try!(self.exception_matches(&exc, &type_val)) {
                         pc = jump_pc!(*offset);
                     }
+                    // No stack push on match: the dispatch already pushed
+                    // the exception onto `handled_exc_stack` when vm_try!
+                    // routed us here, so MatchExcept is purely a filter.
                 }
                 Insn::EndExcept => {
-                    self.active_exception = None;
+                    // Leaving an `except` handler body — pop the entry
+                    // that vm_try! pushed on dispatch.  Restore
+                    // `active_exception` to the outer handler's exception
+                    // (if any), bounded by this frame's base depth so we
+                    // never pop into caller-frame entries.
+                    if self.handled_exc_stack.len() > exc_ctx_frame_base {
+                        self.handled_exc_stack.pop();
+                    }
+                    self.active_exception = self.handled_exc_stack.last().cloned();
                 }
                 Insn::RaiseAssert(msg_reg) => {
                     let msg = vm_try!(vm_read(regs, *msg_reg, num_locals));
@@ -902,17 +978,23 @@ impl Interpreter {
                     };
                     let exc =
                         vm_try!(self.instantiate_named_exception("AssertionError", msg_str));
+                    self.attach_implicit_context(&exc);
                     vm_try!(Err::<(), _>(PyError::Raised(exc)));
                 }
                 Insn::RaiseValue(src) => {
                     let val = vm_try!(vm_read(regs, *src, num_locals));
                     let exc = vm_try!(self.coerce_to_exception(val));
+                    self.attach_implicit_context(&exc);
                     vm_try!(Err::<(), _>(PyError::Raised(exc)));
                 }
                 Insn::RaiseFrom(src, cause_reg) => {
                     let val = vm_try!(vm_read(regs, *src, num_locals));
                     let cause = vm_try!(vm_read(regs, *cause_reg, num_locals));
                     let exc = vm_try!(self.coerce_to_exception(val));
+                    // PEP 3134: `raise X from Y` sets `__cause__` AND
+                    // `__suppress_context__`, but `__context__` is still
+                    // populated so that the chain is observable.
+                    self.attach_implicit_context(&exc);
                     if let ValueKind::PyInstance(inst) = exc.kind() {
                         inst.borrow_mut().attrs.insert("__cause__".to_string(), cause);
                         inst.borrow_mut().attrs.insert("__suppress_context__".to_string(), Value::bool_(true));
@@ -923,6 +1005,18 @@ impl Interpreter {
                     let exc = vm_try!(self.active_exception.clone().ok_or_else(|| {
                         PyError::Runtime("no active exception to re-raise".to_string())
                     }));
+                    // RaiseReRaise is emitted by the compiler at three
+                    // logical "exit-this-handler" points: bare `raise`
+                    // inside an except, the fall-through after a chain of
+                    // unmatched MatchExcepts, and the implicit re-raise
+                    // at the end of a finally exception-path.  In all
+                    // three cases we are leaving the dispatch / handler
+                    // body, so pop the corresponding context-stack entry
+                    // pushed by vm_try!.  Bounded by this frame's base
+                    // depth so we never reach into caller entries.
+                    if self.handled_exc_stack.len() > exc_ctx_frame_base {
+                        self.handled_exc_stack.pop();
+                    }
                     vm_try!(Err::<(), _>(PyError::Raised(exc)));
                 }
 

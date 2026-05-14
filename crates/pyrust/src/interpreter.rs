@@ -25,6 +25,20 @@ const SPEC_THRESHOLD: u8 = 8;
 pub struct Interpreter {
     pub(crate) env: EnvRef,
     active_exception: Option<Value>,
+    /// Stack of currently-handled exceptions (PEP 3134 `__context__`).
+    /// An entry is pushed when an exception handler catches an exception
+    /// (matching CPython's per-frame "exc_info" stack), and popped when
+    /// the handler exits — either normally via `EndExcept`, or because
+    /// a new exception propagates out of the handler body.
+    ///
+    /// The top of this stack is the exception whose handler we are
+    /// currently inside, and it is the value attached as `__context__`
+    /// to any *new* exception raised inside that handler body.
+    ///
+    /// Note: this differs from `active_exception`, which can be cleared
+    /// transiently while the handler body is running (e.g. by an inner
+    /// `EndExcept`).  The stack lets us restore the outer context.
+    handled_exc_stack: Vec<Value>,
     script_dir: Option<PathBuf>,
     module_cache: ModuleCache,
     env_pool: Vec<EnvRef>,
@@ -56,6 +70,7 @@ impl Default for Interpreter {
         Self {
             env,
             active_exception: None,
+            handled_exc_stack: Vec::new(),
             script_dir: None,
             module_cache: Rc::new(RefCell::new(HashMap::new())),
             env_pool: Vec::new(),
