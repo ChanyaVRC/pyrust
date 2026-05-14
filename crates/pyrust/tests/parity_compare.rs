@@ -56,8 +56,13 @@ fn find_python_executable(root: &Path) -> PathBuf {
     // APIs changed slot semantics between versions (`sorted(reverse=…)`,
     // for example, switched from `__index__` in 3.11 to `bool()` in 3.12),
     // and the test fixtures lock in 3.12 behaviour.
+    // Windows: prefer `python` over `py` — GitHub Actions and most local
+    // setups alias `python` to the `setup-python`-installed interpreter
+    // (or the user's PATH-default), while `py` is the Python launcher
+    // which picks the highest installed version per `py.ini`, often
+    // newer (and behaviour-divergent) than the project's pinned 3.12.
     let candidates: &[&str] = if cfg!(windows) {
-        &["python3.12", "py", "python"]
+        &["python3.12", "python", "py"]
     } else {
         &["python3.12", "python3"]
     };
