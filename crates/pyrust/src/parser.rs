@@ -120,16 +120,19 @@ impl Parser {
                     i += 1;
                 }
                 Some(Token::Colon) if depth == 0 => {
-                    // Found the colon; now check for Newline Indent (case|_)
+                    // Found the colon; now check for Newline* Indent Newline* case.
+                    // Comment-only lines between the match header and the first
+                    // `case` arm fold into extra Newline tokens in the stream
+                    // (the lexer skips Indent/Dedent for blank/comment lines).
                     i += 1;
-                    // Skip optional Newline
-                    if matches!(self.tokens.get(i), Some(Token::Newline)) {
+                    // Skip any blank / comment-only Newlines before the Indent.
+                    while matches!(self.tokens.get(i), Some(Token::Newline)) {
                         i += 1;
                     }
                     if matches!(self.tokens.get(i), Some(Token::Indent)) {
                         i += 1;
                     }
-                    // Skip blank lines
+                    // Skip blank lines inside the indented block before the first case.
                     while matches!(self.tokens.get(i), Some(Token::Newline)) {
                         i += 1;
                     }
@@ -153,6 +156,9 @@ impl Parser {
         self.expect(&Token::Colon)?;
         // Parse the indented block of `case` arms.
         self.expect(&Token::Newline)?;
+        // Skip blank / comment-only lines between the `match:` header and the
+        // block Indent token (same pattern as parse_suite).
+        self.skip_newlines();
         self.expect(&Token::Indent)?;
         let mut arms: Vec<MatchArm> = Vec::new();
         self.skip_newlines();
@@ -1130,6 +1136,11 @@ impl Parser {
     fn parse_suite(&mut self) -> Result<Vec<Stmt>> {
         if self.is(&Token::Newline) {
             self.bump();
+            // Skip blank / comment-only lines that the lexer folds into bare
+            // Newline tokens.  CPython accepts a leading comment or blank line
+            // as the first line of any suite-introducing block (try/except/
+            // for/while/def/class/with/if/else/match …).
+            self.skip_newlines();
             self.expect(&Token::Indent)?;
             let mut out = Vec::new();
             self.skip_newlines();
