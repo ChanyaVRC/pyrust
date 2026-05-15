@@ -97,6 +97,42 @@ assert bytes("hi", "ascii", "strict") == b"hi"
 assert bytes("héllo", "ascii", "replace") == b"h?llo"
 assert bytes("Āb", "latin-1", "replace") == b"?b"
 
+# ── contiguous run of unencodable characters ──────────────────────────
+# CPython groups consecutive unencodable codepoints into one error span
+# rather than stopping at the first failing char.  The message uses
+# "characters" (plural, no codepoint repr) and "position S-E" notation.
+try:
+    bytes("éé", "ascii")
+    print("FAIL: éé should raise")
+except UnicodeEncodeError as e:
+    assert str(e) == (
+        "'ascii' codec can't encode characters in position 0-1: "
+        "ordinal not in range(128)"
+    ), f"contiguous-run msg: {e}"
+    print("contiguous-run reject:", e)
+
+try:
+    bytes("aéàb", "ascii")
+    print("FAIL: aéàb should raise")
+except UnicodeEncodeError as e:
+    assert str(e) == (
+        "'ascii' codec can't encode characters in position 1-2: "
+        "ordinal not in range(128)"
+    ), f"interior-run msg: {e}"
+    print("interior-run reject:", e)
+
+# ── error handler is deferred (not looked up unless needed) ──────────
+# An unknown handler name on an all-encodable input must NOT raise;
+# CPython only consults the error handler at the first unencodable char.
+assert bytes("hi", "utf-8", "bogus") == b"hi"
+assert bytes("hi", "ascii", "bogus") == b"hi"
+# When an unencodable char exists, the bogus handler raises LookupError.
+try:
+    bytes("é", "ascii", "bogus")
+    print("FAIL: should raise LookupError for bogus handler")
+except LookupError as e:
+    print("deferred-handler LookupError:", e)
+
 # ── invalid encoding name → LookupError ───────────────────────────────
 try:
     bytes("hello", "definitely-not-a-codec")
