@@ -84,6 +84,18 @@ print([a, 1] != [b, 2])                  # True
 print({1: a} == {1: b})                  # True
 print({1: n1} == {1: n2})                # False
 
+# frozenset equality must dispatch __eq__ on PyInstance elements, just
+# like set.  frozenset({a}) == frozenset({b}) should be True when
+# a.__eq__(b) returns True (issue #492 Copilot thread).
+print(frozenset({a}) == frozenset({b}))  # True
+print(frozenset({n1}) == frozenset({n2}))  # False
+# frozenset inside a list — exercises pair_may_need_dispatch for
+# BuiltinObject so the outer list comparison takes the slow path.
+print([frozenset({a})] == [frozenset({b})])   # True
+print([frozenset({n1})] == [frozenset({n2})])  # False
+# Mixed lengths — fast False without dispatch.
+print(frozenset({a}) == frozenset({a, b}))   # False
+
 # Cycles where the prefix already differs — must return False before
 # reaching the back-edge.  CPython raises RecursionError when the prefix
 # is equal (so we don't add an "all-equal cycle" case to a parity test);

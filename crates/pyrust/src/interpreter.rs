@@ -88,9 +88,17 @@ pub struct Interpreter {
     /// of a container pair currently being compared element-wise.
     /// Encountering the same pair again means the recursion has hit a
     /// cycle (e.g. `a.append(a); b.append(b); a == b`); the recursion
-    /// short-circuits to `true` instead of blowing the stack — matching
-    /// `Value::eq`'s `EqGuard` policy and CPython's effective behaviour
-    /// for self-referential containers under `==`.
+    /// short-circuits to `true` instead of blowing the stack.
+    ///
+    /// **Intentional divergence from CPython:** CPython raises
+    /// `RecursionError` when the prefix is all-equal and the back-edge
+    /// is reached.  pyrust instead returns `true` (the same policy as
+    /// `Value::eq`'s `EqGuard`).  The parity fixture
+    /// `test_container_eq_dispatches_eq.py` documents and tests only
+    /// the prefix-differs case (which is deterministic in both
+    /// implementations); the all-equal-cycle case is explicitly excluded
+    /// from parity testing because CPython's behaviour there is
+    /// `RecursionError`, not `True` or `False`.
     ///
     /// Lives on the interpreter (rather than a `thread_local!`) because
     /// the helper is only reachable through `&mut self`; the field

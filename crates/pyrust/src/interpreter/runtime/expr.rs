@@ -35,11 +35,12 @@ enum SeqFast {
 /// keep `[1,2,3] == [1,2,4]` (flat primitive sequences) on a
 /// zero-allocation walk.
 ///
-/// Conservative: any `PyInstance` or container (`List`/`Tuple`/`Dict`/
-/// `Set`) returns `true`, because each may itself contain a
-/// `PyInstance` for which `Value::eq` would fall back to
-/// `Rc::ptr_eq`.  Leaf primitives (`Int`/`Float`/`Bool`/`Str`/`Bytes`/
-/// `None`/`Complex`/`BigInt`/`Range`) return `false`.
+/// Conservative: any `PyInstance`, container (`List`/`Tuple`/`Dict`/
+/// `Set`), or `BuiltinObject` (e.g. `frozenset`) returns `true`,
+/// because each may itself contain a `PyInstance` for which `Value::eq`
+/// would fall back to `Rc::ptr_eq`.  Leaf primitives
+/// (`Int`/`Float`/`Bool`/`Str`/`Bytes`/`None`/`Complex`/`BigInt`/
+/// `Range`) return `false`.
 fn pair_may_need_dispatch(a: &Value, b: &Value) -> bool {
     matches!(
         a.kind(),
@@ -48,6 +49,7 @@ fn pair_may_need_dispatch(a: &Value, b: &Value) -> bool {
             | ValueKind::Tuple(_)
             | ValueKind::Dict(_)
             | ValueKind::Set(_)
+            | ValueKind::BuiltinObject { .. }
     ) || matches!(
         b.kind(),
         ValueKind::PyInstance(_)
@@ -55,6 +57,7 @@ fn pair_may_need_dispatch(a: &Value, b: &Value) -> bool {
             | ValueKind::Tuple(_)
             | ValueKind::Dict(_)
             | ValueKind::Set(_)
+            | ValueKind::BuiltinObject { .. }
     )
 }
 
@@ -541,7 +544,10 @@ impl Interpreter {
     /// 3. Same-kind `Dict`/`Set`: snapshot keys and dispatch via
     ///    `dict_lookup`/`set_lookup`, which already route
     ///    `PyKey::Object` through user `__hash__`/`__eq__` (issue #368).
-    /// 4. `PyInstance` on either side: `try_dunder_binary` for
+    /// 4. Both sides are `frozenset` (`BuiltinObject`): same membership
+    ///    check as Set but via `set_lookup_in`, so `PyKey::Object`
+    ///    elements (user-class instances) dispatch `__eq__` correctly.
+    /// 5. `PyInstance` on either side: `try_dunder_binary` for
     ///    `__eq__`/reflected `__eq__`.
     ///
     /// Cycle detection mirrors `Value::eq`'s `EqGuard`: a recursive call
@@ -671,6 +677,38 @@ impl Interpreter {
                 return result;
             }
             _ => {}
+        }
+
+        // Frozenset — same membership logic as Set above, but the items
+        // live inside a BuiltinObject.  `set_lookup_in` handles
+        // `PyKey::Object` elements by dispatching user `__eq__`, so
+        // `frozenset({a}) == frozenset({b})` works correctly when
+        // `a.__eq__(b)` returns True.  Non-frozenset BuiltinObject pairs
+        // fall through to `try_dunder_binary` (the PyInstance path); if
+        // that also yields nothing, we return false — identical to
+        // `Value::eq`'s behaviour for unrecognised BuiltinObject pairs.
+        if let (Some(lhs_rc), Some(rhs_rc)) = (
+            pyrust_builtins::frozenset::as_items(a),
+            pyrust_builtins::frozenset::as_items(b),
+        ) {
+            if lhs_rc.len() != rhs_rc.len() {
+                return Ok(false);
+            }
+            if self.eq_cycle_enter(a, b) {
+                return Ok(true);
+            }
+            let lhs_keys: Vec<PyKey> = lhs_rc.iter().cloned().collect();
+            let rhs_snap: indexmap::IndexSet<PyKey> = rhs_rc.iter().cloned().collect();
+            let result = (|| -> Result<bool> {
+                for pk in lhs_keys {
+                    if self.set_lookup_in(&rhs_snap, &pk)?.is_none() {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            })();
+            self.eq_cycle_exit(a, b);
+            return result;
         }
 
         // PyInstance (either side) — dispatch `__eq__`/reflected
