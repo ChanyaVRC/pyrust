@@ -86,7 +86,10 @@ fn try_seq_fast_eq(av: &[Value], bv: &[Value]) -> SeqFast {
 /// zero), CPython uses floor division: the quotient is rounded toward
 /// negative infinity and the remainder has the same sign as the
 /// divisor.  Caller must guarantee `b != 0`.
-fn bigint_divmod_floor(a: &PyBigInt, b: &PyBigInt) -> (PyBigInt, PyBigInt) {
+///
+/// Shared with `builtin_modules/bodies/builtins.rs` (the `divmod()`
+/// builtin) to avoid divergence in sign-adjustment logic (issue #493).
+pub(crate) fn bigint_divmod_floor(a: &PyBigInt, b: &PyBigInt) -> (PyBigInt, PyBigInt) {
     let mut q = a / b;
     let mut r = a % b;
     // Adjust if the truncated remainder's sign disagrees with the
@@ -102,7 +105,10 @@ fn bigint_divmod_floor(a: &PyBigInt, b: &PyBigInt) -> (PyBigInt, PyBigInt) {
 /// Coerce `Int` / `BigInt` / `Bool` to `PyBigInt` for cross-type
 /// arithmetic.  Returns `None` for anything else so callers can fall
 /// through to the float / TypeError path.
-fn value_to_bigint(v: &Value) -> Option<PyBigInt> {
+///
+/// Shared with `builtin_modules/bodies/builtins.rs` (the `divmod()`
+/// builtin) to avoid divergence in coercion logic (issue #493).
+pub(crate) fn value_to_bigint(v: &Value) -> Option<PyBigInt> {
     match v.kind() {
         ValueKind::Int(n) => Some(PyBigInt::from(n)),
         ValueKind::BigInt(b) => Some(b.clone()),
