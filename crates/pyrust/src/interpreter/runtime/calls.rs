@@ -30,6 +30,36 @@ impl Drop for CallDepthGuard {
 }
 
 impl Interpreter {
+    /// Shared constructor for the `GeneratorFrame` wrapped in a
+    /// `Value::generator`. Both call-site branches in
+    /// `call_user_function_expanded` (simple-arity and variadic) bind
+    /// params into `regs`, capture the active env, then need to short-
+    /// circuit before `run_bytecode_for_fn`. The two branches must keep
+    /// the frame initialisation identical — factored here so issue #488
+    /// (variadic) can't drift from the simple-path baseline again.
+    fn build_generator_value(
+        code: &Rc<crate::bytecode::FnCode>,
+        regs: RegsBuf,
+        saved_env: EnvRef,
+        local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
+    ) -> Value {
+        let frame = GeneratorFrame {
+            code: Rc::clone(code),
+            regs,
+            iters: vec![None; code.num_iters as usize],
+            exc_handlers: Vec::new(),
+            pc: 0,
+            done: false,
+            saved_env,
+            // PEP 3134 per-generator exception state; both empty until
+            // the body actually pushes handlers and yields inside one.
+            handled_exc_slice: Vec::new(),
+            active_exception: None,
+            local_index,
+        };
+        Value::generator(Box::new(frame))
+    }
+
     pub(crate) fn call_function_expanded(
         &mut self,
         function: Value,
@@ -885,27 +915,15 @@ impl Interpreter {
                 // Generator function: create a frame rather than executing.
                 if code.is_generator {
                     // Restore env before capturing it into the frame.
+                    // (When `needs_local_env` is false, `gen_env` ==
+                    // `function.env` — the GeneratorFrame keeps it alive.)
                     let gen_env = std::mem::replace(&mut self.env, previous_env);
-                    if !needs_local_env {
-                        // No local env was allocated; use the function's own env.
-                        // (gen_env == function.env here)
-                    }
-                    let frame = GeneratorFrame {
-                        code: Rc::clone(&code),
+                    return Ok(Self::build_generator_value(
+                        &code,
                         regs,
-                        iters: vec![None; code.num_iters as usize],
-                        exc_handlers: Vec::new(),
-                        pc: 0,
-                        done: false,
-                        saved_env: gen_env,
-                        // PEP 3134 per-generator exception state; both
-                        // empty until the body actually pushes handlers
-                        // and yields inside one.
-                        handled_exc_slice: Vec::new(),
-                        active_exception: None,
-                        local_index: Rc::clone(&function.local_index),
-                    };
-                    return Ok(Value::generator(Box::new(frame)));
+                        gen_env,
+                        Rc::clone(&function.local_index),
+                    ));
                 }
 
                 // Issue #389: publish a view of this function frame so
@@ -1098,6 +1116,21 @@ impl Interpreter {
             } else {
                 std::mem::replace(&mut self.env, Rc::clone(&function.env))
             };
+
+            // Issue #488: variadic generator functions (`def g(*args):
+            // yield ...` and friends) must also be wrapped in a
+            // GeneratorFrame instead of executed synchronously — the
+            // simple-path branch already does this above; mirror it here
+            // so the body's `yield` isn't observed as a runtime error.
+            if code.is_generator {
+                let gen_env = std::mem::replace(&mut self.env, previous_env);
+                return Ok(Self::build_generator_value(
+                    &code,
+                    regs,
+                    gen_env,
+                    Rc::clone(&function.local_index),
+                ));
+            }
 
             // Issue #389: publish a function frame view (see the
             // matching push in the simple-path branch above).
