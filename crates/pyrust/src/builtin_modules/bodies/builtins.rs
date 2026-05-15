@@ -1443,7 +1443,40 @@ pyrust_module! {
                     "cannot convert to bytes".to_string(),
                 )),
             },
-            _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most 1 positional argument"))),
+            // bytes(source, encoding[, errors]) — encode `source` using
+            // `encoding`.  CPython accepts a wide spectrum of codecs; we
+            // support the common ASCII-compatible ones (utf-8, ascii,
+            // latin-1) and reject the rest with `LookupError` for parity
+            // with `LookupError: unknown encoding: <name>`. (#391)
+            2 | 3 => {
+                let source: String = match args[0].value.kind() {
+                    ValueKind::Str(s) => s.to_string(),
+                    _ => return Err(PyError::named(
+                        "TypeError",
+                        "encoding without a string argument".to_string(),
+                    )),
+                };
+                let encoding: String = match args[1].value.kind() {
+                    ValueKind::Str(s) => s.to_string(),
+                    _ => return Err(PyError::named(
+                        "TypeError",
+                        "bytes() argument 2 must be str, not non-string".to_string(),
+                    )),
+                };
+                let errors: String = if args.len() == 3 {
+                    match args[2].value.kind() {
+                        ValueKind::Str(s) => s.to_string(),
+                        _ => return Err(PyError::named(
+                            "TypeError",
+                            "bytes() argument 3 must be str, not non-string".to_string(),
+                        )),
+                    }
+                } else {
+                    "strict".to_string()
+                };
+                encode_str_to_bytes(&source, &encoding, &errors)
+            }
+            _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most 3 arguments"))),
         }
     }
 
@@ -2136,6 +2169,154 @@ fn chr_from_code_point(code_point: i64) -> Result<Value> {
         )
     })?;
     Ok(Value::string(ch.to_string()))
+}
+
+/// Format a single Unicode codepoint the way CPython does in
+/// `UnicodeEncodeError` messages: `\xXX` for `< 0x100`, `\uXXXX` for
+/// `< 0x10000`, otherwise `\UXXXXXXXX`.  Keeps the error wording
+/// byte-for-byte aligned with CPython so the parity tests can compare
+/// stderr verbatim.
+fn format_codepoint_repr(cp: u32) -> String {
+    if cp < 0x100 {
+        format!("\\x{:02x}", cp)
+    } else if cp < 0x10000 {
+        format!("\\u{:04x}", cp)
+    } else {
+        format!("\\U{:08x}", cp)
+    }
+}
+
+/// Encode a Python `str` to `bytes` for `bytes(source, encoding[, errors])`
+/// (#391).  Supports `utf-8`, `ascii`, `latin-1` (and CPython aliases) —
+/// the realistic minimum the issue requested.  Other encoding names
+/// raise `LookupError: unknown encoding: <name>` for CPython parity.
+///
+/// `errors="strict"` (default) raises `UnicodeEncodeError` on bytes the
+/// target codec can't represent; `"ignore"` silently drops them; and
+/// `"replace"` substitutes `b'?'` (matching CPython's ASCII-codec
+/// replacement byte for both `ascii` and `latin-1`).  Richer handlers
+/// (`backslashreplace`, `xmlcharrefreplace`, …) are still out of scope
+/// and reported via `LookupError: unknown error handler`.
+fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result<Value> {
+    // CPython normalises encoding names by lowercasing and treating
+    // `_` and `-` interchangeably; do the same so `UTF-8`, `utf_8`,
+    // `UTF8` all resolve to the same codec.
+    fn normalize(name: &str) -> String {
+        name.to_ascii_lowercase().replace('_', "-")
+    }
+    let canonical = normalize(encoding);
+
+    // Error-handler dispatch.  CPython only consults the error handler
+    // when the codec actually encounters an unencodable character, so
+    // `bytes("hi", "ascii", "bogus")` succeeds — the bad handler name
+    // is never reached.  We therefore resolve the handler lazily inside
+    // `encode_single_byte_codec`, at the first unencodable codepoint.
+    // Unknown encoding names still fail unconditionally (before any
+    // encoding work) so the encoding check always runs first.
+    enum Handler {
+        Strict,
+        Ignore,
+        Replace,
+    }
+
+    /// Resolve the error handler name.  Called only when an unencodable
+    /// codepoint is actually encountered, matching CPython's lazy lookup.
+    fn resolve_handler(errors: &str) -> Result<Handler> {
+        match errors {
+            "strict" => Ok(Handler::Strict),
+            "ignore" => Ok(Handler::Ignore),
+            "replace" => Ok(Handler::Replace),
+            other => Err(PyError::named(
+                "LookupError",
+                format!("unknown error handler name '{other}'"),
+            )),
+        }
+    }
+
+    // Single-codec encoder kernel.  `fits(cp)` returns true if the
+    // codepoint can be emitted as a single byte; `range_label` is
+    // the `ordinal not in range(N)` suffix CPython uses.  Hoisting
+    // the loop out of the ascii/latin-1 arms keeps the handler logic
+    // (and any future codec aliases) in one place.
+    //
+    // For the strict path CPython groups a contiguous run of unencodable
+    // characters into one error: e.g. `bytes("éé", "ascii")` reports
+    // "characters in position 0-1" rather than stopping at the first
+    // one.  We scan ahead to find the end of the run before building
+    // the message, matching CPython's UnicodeEncodeError wording exactly.
+    fn encode_single_byte_codec(
+        source: &str,
+        codec_name: &str,
+        fits: impl Fn(u32) -> bool,
+        range_label: &str,
+        errors: &str,
+    ) -> Result<Value> {
+        let chars: Vec<char> = source.chars().collect();
+        let mut out = Vec::with_capacity(source.len());
+        let mut idx = 0usize;
+        while idx < chars.len() {
+            let cp = chars[idx] as u32;
+            if fits(cp) {
+                out.push(cp as u8);
+                idx += 1;
+            } else {
+                // Lazy handler resolution — only reached on unencodable char.
+                match resolve_handler(errors)? {
+                    Handler::Ignore => {
+                        idx += 1;
+                    }
+                    Handler::Replace => {
+                        out.push(b'?');
+                        idx += 1;
+                    }
+                    Handler::Strict => {
+                        // Scan the contiguous run of unencodable characters
+                        // starting at `idx`.  CPython's UnicodeEncodeError
+                        // covers the entire run: "characters in position S-E"
+                        // (inclusive, 0-based) when len > 1, or the single-
+                        // char form "character '\\xNN' in position S" when the
+                        // run is length 1.
+                        let run_start = idx;
+                        let mut run_end = idx + 1; // exclusive
+                        while run_end < chars.len() && !fits(chars[run_end] as u32) {
+                            run_end += 1;
+                        }
+                        let run_len = run_end - run_start;
+                        let msg = if run_len == 1 {
+                            format!(
+                                "'{codec_name}' codec can't encode character '{}' in position {run_start}: ordinal not in range({range_label})",
+                                format_codepoint_repr(cp),
+                            )
+                        } else {
+                            format!(
+                                "'{codec_name}' codec can't encode characters in position {run_start}-{}: ordinal not in range({range_label})",
+                                run_end - 1,
+                            )
+                        };
+                        return Err(PyError::named("UnicodeEncodeError", msg));
+                    }
+                }
+            }
+        }
+        Ok(Value::bytes(out))
+    }
+
+    match canonical.as_str() {
+        // pyrust strings are UTF-8 internally — encoding to utf-8 is a
+        // direct copy and can never fail, so the error handler doesn't
+        // matter.
+        "utf-8" | "utf8" | "u8" | "utf" => Ok(Value::bytes(source.as_bytes().to_vec())),
+        "ascii" | "us-ascii" | "646" => {
+            encode_single_byte_codec(source, "ascii", |cp| cp < 0x80, "128", errors)
+        }
+        "latin-1" | "iso-8859-1" | "8859" | "cp819" | "latin1" | "l1" => {
+            encode_single_byte_codec(source, "latin-1", |cp| cp < 0x100, "256", errors)
+        }
+        _ => Err(PyError::named(
+            "LookupError",
+            format!("unknown encoding: {encoding}"),
+        )),
+    }
 }
 
 /// Format an i64 as Python's `bin()` output — `"0bN"` / `"-0bN"`.  Used

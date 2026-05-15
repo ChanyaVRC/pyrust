@@ -640,6 +640,31 @@ fn install_exception_builtins(env: &EnvRef) {
     // FileNotFoundError inherits from OSError in CPython; we just register it
     // as a sibling for now.
     let file_not_found_error = make_child("FileNotFoundError");
+    // LookupError is a base class for IndexError / KeyError in CPython.  We
+    // register it as a direct child of Exception for now (so
+    // `except LookupError:` is at least catchable from explicit raises),
+    // without rewiring IndexError/KeyError's bases — that would be a wider
+    // hierarchy change.  Tracked as a follow-up.
+    let lookup_error = make_child("LookupError");
+    // UnicodeError derives from ValueError in CPython; mirror that so
+    // `except ValueError:` catches a `UnicodeEncodeError` raised by
+    // `bytes(str, encoding)` (#391).  UnicodeEncodeError derives from
+    // UnicodeError.
+    let unicode_error = Rc::new(RefCell::new(PyClass {
+        name: "UnicodeError".to_string(),
+        base: Some(Rc::clone(&value_error)),
+        attrs: IndexMap::new(),
+    }));
+    let unicode_encode_error = Rc::new(RefCell::new(PyClass {
+        name: "UnicodeEncodeError".to_string(),
+        base: Some(Rc::clone(&unicode_error)),
+        attrs: IndexMap::new(),
+    }));
+    let unicode_decode_error = Rc::new(RefCell::new(PyClass {
+        name: "UnicodeDecodeError".to_string(),
+        base: Some(Rc::clone(&unicode_error)),
+        attrs: IndexMap::new(),
+    }));
     // `GeneratorExit` is a sibling root in CPython (derives from
     // `BaseException`, not `Exception`).  Modelled here as a class with no
     // base so that `except Exception:` does NOT catch it, while
@@ -702,6 +727,20 @@ fn install_exception_builtins(env: &EnvRef) {
     module
         .values
         .insert("FileNotFoundError".to_string(), Value::py_class(file_not_found_error));
+    module
+        .values
+        .insert("LookupError".to_string(), Value::py_class(lookup_error));
+    module
+        .values
+        .insert("UnicodeError".to_string(), Value::py_class(unicode_error));
+    module.values.insert(
+        "UnicodeEncodeError".to_string(),
+        Value::py_class(unicode_encode_error),
+    );
+    module.values.insert(
+        "UnicodeDecodeError".to_string(),
+        Value::py_class(unicode_decode_error),
+    );
     module
         .values
         .insert("GeneratorExit".to_string(), Value::py_class(generator_exit));
