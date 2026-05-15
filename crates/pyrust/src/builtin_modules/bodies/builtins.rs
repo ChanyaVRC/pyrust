@@ -467,9 +467,22 @@ pyrust_module! {
                 )?;
                 // __hash__ must return an integer (bool is a subtype of int).
                 // CPython maps -1 → -2 because -1 is the C-level error sentinel.
+                // Large integers (BigInt) are reduced mod 2^61-1 (Py_HASH_MODULUS),
+                // matching CPython's tp_hash for arbitrary-precision int results.
+                const PY_HASH_MODULUS: i64 = (1i64 << 61) - 1;
                 let raw: i64 = match result.kind() {
                     ValueKind::Int(n) => n,
                     ValueKind::Bool(b) => b as i64,
+                    ValueKind::BigInt(n) => {
+                        // Reduce mod Py_HASH_MODULUS (2^61 - 1), preserving sign.
+                        // n: &BigInt (the borrowed inner value from the Rc).
+                        use crate::value::PyBigInt;
+                        use crate::value::PyToPrimitive;
+                        let modulus = PyBigInt::from(PY_HASH_MODULUS);
+                        let reduced = n.clone() % &modulus;
+                        // `reduced` is in (-modulus, modulus); fits in i64.
+                        reduced.to_i64().unwrap_or(0)
+                    }
                     _ => {
                         return Err(PyError::named(
                             "TypeError",
