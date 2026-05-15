@@ -15,6 +15,72 @@ fn bigint_to_float_or_overflow(b: &PyBigInt) -> Result<f64> {
         })
 }
 
+/// Outcome of the borrow-only sequence equality fast path used by
+/// `values_user_eq` for `List`/`Tuple` pairs.
+///
+/// `Resolved(v)` means every element comparison was settled by
+/// `Value::eq` without needing user `__eq__` dispatch, so `v` is the
+/// final answer.  `NeedsDispatch` means at least one element pair could
+/// only be resolved by recursing into `values_user_eq` (e.g. it
+/// contains a `PyInstance` or a nested container that itself may hold
+/// one); the caller must drop the borrow, snapshot the elements, and
+/// take the slow recursion path.
+enum SeqFast {
+    Resolved(bool),
+    NeedsDispatch,
+}
+
+/// Returns `true` iff comparing `a` against `b` via `Value::eq` could
+/// give a different answer than user `__eq__` dispatch would.  Used to
+/// keep `[1,2,3] == [1,2,4]` (flat primitive sequences) on a
+/// zero-allocation walk.
+///
+/// Conservative: any `PyInstance`, container (`List`/`Tuple`/`Dict`/
+/// `Set`), or `BuiltinObject` (e.g. `frozenset`) returns `true`,
+/// because each may itself contain a `PyInstance` for which `Value::eq`
+/// would fall back to `Rc::ptr_eq`.  Leaf primitives
+/// (`Int`/`Float`/`Bool`/`Str`/`Bytes`/`None`/`Complex`/`BigInt`/
+/// `Range`) return `false`.
+fn pair_may_need_dispatch(a: &Value, b: &Value) -> bool {
+    matches!(
+        a.kind(),
+        ValueKind::PyInstance(_)
+            | ValueKind::List(_)
+            | ValueKind::Tuple(_)
+            | ValueKind::Dict(_)
+            | ValueKind::Set(_)
+            | ValueKind::BuiltinObject { .. }
+    ) || matches!(
+        b.kind(),
+        ValueKind::PyInstance(_)
+            | ValueKind::List(_)
+            | ValueKind::Tuple(_)
+            | ValueKind::Dict(_)
+            | ValueKind::Set(_)
+            | ValueKind::BuiltinObject { .. }
+    )
+}
+
+/// Element-wise equality over two equal-length slices, returning
+/// [`SeqFast::Resolved`] as soon as every pair can be decided by
+/// `Value::eq` alone.  As soon as a pair that could need user dispatch
+/// is encountered (and didn't already compare equal), bail to
+/// [`SeqFast::NeedsDispatch`] so the caller can take the snapshot+
+/// recurse path.
+fn try_seq_fast_eq(av: &[Value], bv: &[Value]) -> SeqFast {
+    debug_assert_eq!(av.len(), bv.len());
+    for (x, y) in av.iter().zip(bv.iter()) {
+        if x == y {
+            continue;
+        }
+        if pair_may_need_dispatch(x, y) {
+            return SeqFast::NeedsDispatch;
+        }
+        return SeqFast::Resolved(false);
+    }
+    SeqFast::Resolved(true)
+}
+
 impl Interpreter {
     fn unsupported_binary_operand(op: &str) -> PyError {
         PyError::named("TypeError", format!("unsupported operand type(s) for {op}"))
@@ -459,16 +525,235 @@ impl Interpreter {
     }
 
     /// Compare two values via `__eq__`, used by the dict/set runtime when
-    /// resolving `PyKey::Object` collisions.  Falls back to `Value::eq`
-    /// (pointer-identity for `PyInstance`) when no `__eq__` is defined.
-    fn values_user_eq(&mut self, a: &Value, b: &Value) -> Result<bool> {
+    /// resolving `PyKey::Object` collisions and by `BinaryOp::Eq`/`Ne`'s
+    /// container fall-through path (issue #436).
+    ///
+    /// Dispatch order, structured to keep the flat-primitive hot path
+    /// allocation-free:
+    ///
+    /// 1. Same-kind sequence pair (`List`/`List` or `Tuple`/`Tuple`):
+    ///    `try_seq_fast_eq` walks the borrow pairwise and resolves any
+    ///    pair that doesn't transitively need user dispatch via
+    ///    `Value::eq`.  This avoids the double-walk an upfront
+    ///    `a == b` would cause and matches pre-#436 perf for primitive
+    ///    sequences.  When a pair could need dispatch (`PyInstance` or
+    ///    nested container), snapshot both sides and recurse.
+    /// 2. Primitive / identity fast path: `a == b` for the non-sequence
+    ///    cases (`Int`/`Float`/`Bool`/`Str`/`Bytes`/`Complex`/`None`
+    ///    and identity-equal `Dict`/`Set`).
+    /// 3. Same-kind `Dict`/`Set`: snapshot keys and dispatch via
+    ///    `dict_lookup`/`set_lookup`, which already route
+    ///    `PyKey::Object` through user `__hash__`/`__eq__` (issue #368).
+    /// 4. Both sides are `frozenset` (`BuiltinObject`): same membership
+    ///    check as Set but via `set_lookup_in`, so `PyKey::Object`
+    ///    elements (user-class instances) dispatch `__eq__` correctly.
+    /// 5. `PyInstance` on either side: `try_dunder_binary` for
+    ///    `__eq__`/reflected `__eq__`.
+    ///
+    /// Cycle detection mirrors `Value::eq`'s `EqGuard`: a recursive call
+    /// for the same `(value_id(a), value_id(b))` pair returns true (the
+    /// recursion bottoms out as "we've already proven the prefix equal"),
+    /// so `a.append(a); b.append(b); a == b` doesn't blow the stack.
+    pub(crate) fn values_user_eq(&mut self, a: &Value, b: &Value) -> Result<bool> {
+        // Same-kind sequence containers come first.  For `List`/`Tuple`
+        // pairs an upfront `Value::eq` would double-walk: `Vec::eq`
+        // already iterates element-wise, and the recursion below would
+        // repeat the walk.  Going straight to `try_seq_fast_eq`
+        // resolves flat primitive sequences (`[1,2,3] == [1,2,4]`) in
+        // a single borrow-only pass with no allocation — matching
+        // pre-#436 perf.  Mixed-kind pairs (e.g. list vs tuple) fall
+        // through to the primitive/identity fast path below.
+        let needs_seq_dispatch = match (a.kind(), b.kind()) {
+            (ValueKind::List(la), ValueKind::List(lb)) => {
+                if la.len() != lb.len() {
+                    return Ok(false);
+                }
+                match try_seq_fast_eq(&la, &lb) {
+                    SeqFast::Resolved(v) => return Ok(v),
+                    SeqFast::NeedsDispatch => true,
+                }
+            }
+            (ValueKind::Tuple(la), ValueKind::Tuple(lb)) => {
+                if la.len() != lb.len() {
+                    return Ok(false);
+                }
+                match try_seq_fast_eq(la, lb) {
+                    SeqFast::Resolved(v) => return Ok(v),
+                    SeqFast::NeedsDispatch => true,
+                }
+            }
+            _ => false,
+        };
+        if needs_seq_dispatch {
+            // Slow path: snapshot both sides to drop the borrow before
+            // recursing into user code, then walk element-wise through
+            // `values_user_eq` so `PyInstance` elements dispatch
+            // `__eq__`.  Element clones are cheap (Rc/NaN-box copy).
+            let (av, bv): (Vec<Value>, Vec<Value>) = match (a.kind(), b.kind()) {
+                (ValueKind::List(la), ValueKind::List(lb)) => {
+                    (la.iter().cloned().collect(), lb.iter().cloned().collect())
+                }
+                (ValueKind::Tuple(la), ValueKind::Tuple(lb)) => {
+                    (la.iter().cloned().collect(), lb.iter().cloned().collect())
+                }
+                _ => unreachable!("needs_seq_dispatch implies a sequence pair"),
+            };
+            if self.eq_cycle_enter(a, b) {
+                // Already comparing this pair further up the stack —
+                // treat as equal to terminate the recursion (matching
+                // `Value::eq`'s `EqGuard` policy).
+                return Ok(true);
+            }
+            let result = (|| -> Result<bool> {
+                for (x, y) in av.iter().zip(bv.iter()) {
+                    if !self.values_user_eq(x, y)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            })();
+            self.eq_cycle_exit(a, b);
+            return result;
+        }
+
+        // Primitive / identity fast path: `Value::eq` handles
+        // Int/Float/Bool/Str/Bytes/Complex/None and identity-equal
+        // Dict/Set without dunder dispatch.  (List/Tuple were already
+        // handled above to avoid the double-walk.)
         if a == b {
             return Ok(true);
         }
+
+        match (a.kind(), b.kind()) {
+            (ValueKind::Dict(da), ValueKind::Dict(db)) => {
+                if da.len() != db.len() {
+                    return Ok(false);
+                }
+                if self.eq_cycle_enter(a, b) {
+                    return Ok(true);
+                }
+                // Snapshot (PyKey, Value) pairs from `a` so user `__eq__`
+                // (run while looking up in `b`) can't invalidate the dict
+                // borrow.  We pass the snapshotted `PyKey` straight to
+                // `dict_lookup` so `__hash__` / `__eq__` dispatch on
+                // `PyKey::Object` keys still works (issue #368).
+                let entries: Vec<(PyKey, Value)> = da
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                let result = (|| -> Result<bool> {
+                    for (pk, v_lhs) in entries {
+                        match self.dict_lookup(b, &pk)? {
+                            Some((_, v_rhs)) => {
+                                if !self.values_user_eq(&v_lhs, &v_rhs)? {
+                                    return Ok(false);
+                                }
+                            }
+                            None => return Ok(false),
+                        }
+                    }
+                    Ok(true)
+                })();
+                self.eq_cycle_exit(a, b);
+                return result;
+            }
+            (ValueKind::Set(sa), ValueKind::Set(sb)) => {
+                if sa.len() != sb.len() {
+                    return Ok(false);
+                }
+                if self.eq_cycle_enter(a, b) {
+                    return Ok(true);
+                }
+                let keys: Vec<PyKey> = sa.iter().cloned().collect();
+                let result = (|| -> Result<bool> {
+                    for pk in keys {
+                        if self.set_lookup(b, &pk)?.is_none() {
+                            return Ok(false);
+                        }
+                    }
+                    Ok(true)
+                })();
+                self.eq_cycle_exit(a, b);
+                return result;
+            }
+            _ => {}
+        }
+
+        // Frozenset — same membership logic as Set above, but the items
+        // live inside a BuiltinObject.  `set_lookup_in` handles
+        // `PyKey::Object` elements by dispatching user `__eq__`, so
+        // `frozenset({a}) == frozenset({b})` works correctly when
+        // `a.__eq__(b)` returns True.  Non-frozenset BuiltinObject pairs
+        // fall through to `try_dunder_binary` (the PyInstance path); if
+        // that also yields nothing, we return false — identical to
+        // `Value::eq`'s behaviour for unrecognised BuiltinObject pairs.
+        if let (Some(lhs_rc), Some(rhs_rc)) = (
+            pyrust_builtins::frozenset::as_items(a),
+            pyrust_builtins::frozenset::as_items(b),
+        ) {
+            if lhs_rc.len() != rhs_rc.len() {
+                return Ok(false);
+            }
+            if self.eq_cycle_enter(a, b) {
+                return Ok(true);
+            }
+            let lhs_keys: Vec<PyKey> = lhs_rc.iter().cloned().collect();
+            let rhs_snap: indexmap::IndexSet<PyKey> = rhs_rc.iter().cloned().collect();
+            let result = (|| -> Result<bool> {
+                for pk in lhs_keys {
+                    if self.set_lookup_in(&rhs_snap, &pk)?.is_none() {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            })();
+            self.eq_cycle_exit(a, b);
+            return result;
+        }
+
+        // PyInstance (either side) — dispatch `__eq__`/reflected
+        // `__eq__`.  This is the original `values_user_eq` body.
         if let Some(r) = self.try_dunder_binary(a, b, "__eq__", "__eq__") {
             return Ok(r?.truthy());
         }
         Ok(false)
+    }
+
+    /// Enter equality recursion for the `(value_id(a), value_id(b))`
+    /// pair.  Returns `true` when a cycle is detected (the caller should
+    /// short-circuit to "equal" without pushing); returns `false`
+    /// otherwise after pushing the pair onto the recursion stack.  Each
+    /// `false` return must be matched by an `eq_cycle_exit` call.
+    ///
+    /// Primitives (no `value_id`) can't form cycles, so we return
+    /// `false` without recording anything — the missing push is paired
+    /// with a no-op `eq_cycle_exit`.
+    fn eq_cycle_enter(&mut self, a: &Value, b: &Value) -> bool {
+        let (Some(a_id), Some(b_id)) = (a.value_id(), b.value_id()) else {
+            return false;
+        };
+        let pair = (a_id, b_id);
+        if self.eq_in_progress.contains(&pair) {
+            return true;
+        }
+        self.eq_in_progress.push(pair);
+        false
+    }
+
+    /// Pop the matching pair from the recursion stack.  No-op when the
+    /// pair wasn't pushed (one operand was a primitive without
+    /// `value_id`).
+    fn eq_cycle_exit(&mut self, a: &Value, b: &Value) {
+        let (Some(a_id), Some(b_id)) = (a.value_id(), b.value_id()) else {
+            return;
+        };
+        if let Some(pos) = self
+            .eq_in_progress
+            .iter()
+            .rposition(|p| *p == (a_id, b_id))
+        {
+            self.eq_in_progress.remove(pos);
+        }
     }
 
     /// Dispatch any dict method.  Methods that read or write keys
@@ -649,13 +934,18 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__eq__", "__eq__") {
                     return r;
                 }
-                Ok(Value::bool_(left == right))
+                // Containers fall through here: `Value::eq` would call
+                // `Rc::ptr_eq` on `PyInstance` elements, missing user
+                // `__eq__`.  Route through `values_user_eq` so list /
+                // tuple / dict / set element comparison dispatches
+                // `__eq__` recursively (issue #436).
+                Ok(Value::bool_(self.values_user_eq(&left, &right)?))
             }
             BinaryOp::Ne => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__ne__", "__ne__") {
                     return r;
                 }
-                Ok(Value::bool_(left != right))
+                Ok(Value::bool_(!self.values_user_eq(&left, &right)?))
             }
             BinaryOp::Lt => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__lt__", "__gt__") {
