@@ -2743,9 +2743,6 @@ pub enum PyError {
     /// still be carried via `Cow::Owned`.
     Named(Cow<'static, str>, String), // (class_name, message)
     Raised(Value),
-    /// Internal: used to unwind the VM call stack when a generator yields.
-    /// Never observed outside the generator machinery.
-    GeneratorYield(Value),
 }
 
 impl PyError {
@@ -2766,9 +2763,6 @@ impl fmt::Display for PyError {
             PyError::Runtime(s) => write!(f, "Runtime error: {s}"),
             PyError::Named(cls, s) => write!(f, "{cls}: {s}"),
             PyError::Raised(value) => write!(f, "Uncaught exception: {}", value.repr()),
-            PyError::GeneratorYield(value) => {
-                write!(f, "internal: generator yielded {}", value.repr())
-            }
         }
     }
 }
