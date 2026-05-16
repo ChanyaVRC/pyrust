@@ -403,7 +403,7 @@ impl Interpreter {
                         drop(borrow);
                         items.push(yielded);
                     }
-                    Err(PyError::Named(ref cls, _)) if cls == "StopIteration" => {
+                    Err(ref e) if e.class_name_is("StopIteration") => {
                         break;
                     }
                     Err(e) => return Err(e),
@@ -440,7 +440,7 @@ impl Interpreter {
             loop {
                 match self.call_next(iterator.clone(), None) {
                     Ok(item) => items.push(item),
-                    Err(PyError::Named(ref cls, _)) if cls == "StopIteration" => break,
+                    Err(ref e) if e.class_name_is("StopIteration") => break,
                     Err(PyError::Raised(ref exc)) => {
                         let is_stop = matches!(exc.kind(),
                             ValueKind::PyInstance(i) if i.borrow().class.borrow().name == "StopIteration"
@@ -586,7 +586,7 @@ impl Interpreter {
             }
             match self.resume_generator(frame) {
                 Ok(yielded) => Ok(yielded),
-                Err(PyError::Named(ref cls, _)) if cls == "StopIteration" => {
+                Err(ref e) if e.class_name_is("StopIteration") => {
                     drop(borrow);
                     if let Some(d) = default {
                         Ok(d)
@@ -836,10 +836,17 @@ impl Interpreter {
 
                 let _depth_guard = CallDepthGuard::enter();
                 if call_depth() > MAX_CALL_DEPTH {
-                    let exc = self.instantiate_named_exception(
-                        "RecursionError",
-                        "maximum recursion depth exceeded".to_string(),
-                    )?;
+                    let exc = if let Some(cls) = self.exc_classes.get("RecursionError") {
+                        instantiate_exception(
+                            cls,
+                            vec![Value::string("maximum recursion depth exceeded")],
+                        )
+                    } else {
+                        self.instantiate_named_exception(
+                            "RecursionError",
+                            "maximum recursion depth exceeded".to_string(),
+                        )?
+                    };
                     return Err(PyError::Raised(exc));
                 }
 
@@ -1084,10 +1091,17 @@ impl Interpreter {
 
             let _depth_guard = CallDepthGuard::enter();
             if call_depth() > MAX_CALL_DEPTH {
-                let exc = self.instantiate_named_exception(
-                    "RecursionError",
-                    "maximum recursion depth exceeded".to_string(),
-                )?;
+                let exc = if let Some(cls) = self.exc_classes.get("RecursionError") {
+                    instantiate_exception(
+                        cls,
+                        vec![Value::string("maximum recursion depth exceeded")],
+                    )
+                } else {
+                    self.instantiate_named_exception(
+                        "RecursionError",
+                        "maximum recursion depth exceeded".to_string(),
+                    )?
+                };
                 return Err(PyError::Raised(exc));
             }
 
@@ -2598,6 +2612,12 @@ pub(crate) fn is_sequence_iter_terminator(interp: &Interpreter, err: &PyError) -
         // built-in names directly — VM-internal raises never come from
         // user subclasses of IndexError/StopIteration.
         PyError::Named(cls, _) => cls == "IndexError" || cls == "StopIteration",
+        // PyError::Class carries class identity directly; check the name the
+        // same way as Named — no env lookup needed.
+        PyError::Class(cls, _) => {
+            let borrow = cls.borrow();
+            borrow.name == "IndexError" || borrow.name == "StopIteration"
+        }
         PyError::Raised(exc) => match exc.kind() {
             ValueKind::PyInstance(inst) => {
                 let class = Rc::clone(&inst.borrow().class);
