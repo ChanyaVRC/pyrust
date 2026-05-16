@@ -964,34 +964,14 @@ fn lookup_name_in_enclosing_local_env(env: &EnvRef, name: &str) -> Result<Option
 }
 
 
-// Write `value` into `env` for `name`, using fastlocals slot when available.
+// Write `value` into `env` for `name`.
 #[inline]
 fn env_assign_local(env: &EnvRef, name: &str, value: Value) {
-    let mut borrowed = env.borrow_mut();
-    if let Some(fl) = &mut borrowed.fastlocals
-        && let Some(&idx) = fl.index.get(name) {
-            fl.slots[idx] = Some(value);
-            return;
-        }
-    borrowed.values.insert(name.to_string(), value);
+    env.borrow_mut().values.insert(name.to_string(), value);
 }
+
 fn lookup_name_in_env(env: &EnvRef, name: &str) -> Result<Option<Value>> {
     let borrowed = env.borrow();
-    if let Some(fl) = &borrowed.fastlocals
-        && let Some(&idx) = fl.index.get(name) {
-            return if idx < 64 && fl.def_bound_mask & (1u64 << idx) != 0 {
-                // Definitely-bound slot — skip the None check (analogous to CPython LOAD_FAST).
-                Ok(Some(fl.slots[idx].as_ref().unwrap().clone()))
-            } else {
-                match &fl.slots[idx] {
-                    Some(v) => Ok(Some(v.clone())),
-                    None => Err(PyError::Runtime(format!(
-                        "cannot access local variable '{}' where it is not associated with a value",
-                        name
-                    ))),
-                }
-            };
-        }
     let value = borrowed.values.get(name).cloned();
     let is_local_name = borrowed.local_names.contains(name);
     let parent = borrowed.parent.clone();

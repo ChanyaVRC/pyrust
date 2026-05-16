@@ -255,16 +255,8 @@ impl Hash for PyKey {
 pub type NameSet = Rc<HashSet<String>>;
 
 #[derive(Debug, Clone)]
-pub struct FunctionLocals {
-    pub slots: Vec<Option<Value>>,
-    pub index: Rc<HashMap<String, usize>>,
-    pub def_bound_mask: u64,
-}
-
-#[derive(Debug, Clone)]
 pub struct Environment {
     pub values: HashMap<String, Value>,
-    pub fastlocals: Option<FunctionLocals>,
     pub local_names: NameSet,
     pub global_names: NameSet,
     pub nonlocal_names: NameSet,
@@ -277,7 +269,6 @@ impl Environment {
     pub fn new(parent: Option<EnvRef>) -> EnvRef {
         Rc::new(RefCell::new(Self {
             values: HashMap::new(),
-            fastlocals: None,
             local_names: Rc::new(HashSet::new()),
             global_names: Rc::new(HashSet::new()),
             nonlocal_names: Rc::new(HashSet::new()),
