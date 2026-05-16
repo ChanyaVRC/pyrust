@@ -381,9 +381,9 @@ impl Interpreter {
         // returned, ran past the end, or yielded.
         //
         // For yields, the `Yield` opcode itself has already split the
-        // generator's slice of `handled_exc_stack` off into thread-local
-        // storage and cleared `active_exception`, so the stack length is
-        // back at the caller's depth.  For non-yield exits, truncate
+        // generator's slice of `handled_exc_stack` off into the returned
+        // `FrameOutcome::Yielded::saved` and cleared `active_exception`,
+        // so the stack length is back at the caller's depth.  For non-yield exits, truncate
         // any leftover handler-stack entries.  In both cases re-install
         // the caller's `active_exception`, since the generator's view of
         // it must never persist outside this frame.
