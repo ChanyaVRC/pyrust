@@ -2615,8 +2615,8 @@ pub(crate) fn is_sequence_iter_terminator(interp: &Interpreter, err: &PyError) -
         // PyError::Class carries class identity directly; check the name the
         // same way as Named — no env lookup needed.
         PyError::Class(cls, _) => {
-            let name = cls.borrow().name.clone();
-            name == "IndexError" || name == "StopIteration"
+            let borrow = cls.borrow();
+            borrow.name == "IndexError" || borrow.name == "StopIteration"
         }
         PyError::Raised(exc) => match exc.kind() {
             ValueKind::PyInstance(inst) => {

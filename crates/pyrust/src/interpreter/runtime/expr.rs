@@ -1679,14 +1679,14 @@ impl Interpreter {
                             // `PyError::Raised(exc)` rather than `Named`.
                             // Catch it here so the `in` operator returns False
                             // instead of propagating the exception.
-                            Err(PyError::Raised(ref exc)) => {
+                            Err(PyError::Raised(exc)) => {
                                 let is_stop = matches!(exc.kind(),
                                     ValueKind::PyInstance(i) if i.borrow().class.borrow().name == "StopIteration"
                                 );
                                 if is_stop {
                                     return Ok(Value::bool_(false));
                                 }
-                                return Err(PyError::Raised(exc.clone()));
+                                return Err(PyError::Raised(exc));
                             }
                             Err(e) => return Err(e),
                         }
@@ -1711,14 +1711,14 @@ impl Interpreter {
                             Err(ref e) if e.class_name_is("StopIteration") => {
                                 return Ok(Value::bool_(false));
                             }
-                            Err(PyError::Raised(ref exc)) => {
+                            Err(PyError::Raised(exc)) => {
                                 let is_stop = matches!(exc.kind(),
                                     ValueKind::PyInstance(i) if i.borrow().class.borrow().name == "StopIteration"
                                 );
                                 if is_stop {
                                     return Ok(Value::bool_(false));
                                 }
-                                return Err(PyError::Raised(exc.clone()));
+                                return Err(PyError::Raised(exc));
                             }
                             Err(e) => return Err(e),
                         }
