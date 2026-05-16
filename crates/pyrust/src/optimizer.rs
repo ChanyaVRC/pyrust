@@ -823,7 +823,12 @@ fn pass_unary_fold(insns: Vec<Insn>, num_locals: u32, consts: &mut Vec<Value>) -
                         ValueKind::BigInt(b) => Some(Value::bigint(!b)),
                         _ => None,
                     },
-                    _ => None,
+                    UnaryOp::Pos => match c.kind() {
+                        ValueKind::Int(n) => Some(Value::int(n)),
+                        ValueKind::Float(f) => Some(Value::float(f)),
+                        ValueKind::BigInt(b) => Some(Value::bigint(b.clone())),
+                        _ => None,
+                    },
                 };
                 result.map(|v| (*dst, v))
             }

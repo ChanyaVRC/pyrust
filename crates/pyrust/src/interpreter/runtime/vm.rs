@@ -2621,6 +2621,7 @@ fn vm_eval_unary(op: UnaryOp, val: Value) -> Result<Value> {
             ValueKind::Float(v) => Ok(Value::float(-v)),
             ValueKind::Complex(re, im) => Ok(Value::complex(-re, -im)),
             ValueKind::BigInt(v) => Ok(Value::bigint(-v)),
+            ValueKind::Bool(b) => Ok(Value::int(if b { -1 } else { 0 })),
             _ => Err(PyError::named("TypeError", "bad operand type for unary -".to_string())),
         },
         UnaryOp::Not => Ok(Value::bool_(!val.truthy())),
@@ -2637,6 +2638,7 @@ fn vm_eval_unary(op: UnaryOp, val: Value) -> Result<Value> {
             ValueKind::Int(v) => Ok(Value::int(v)),
             ValueKind::Float(v) => Ok(Value::float(v)),
             ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
+            ValueKind::BigInt(b) => Ok(Value::bigint(b.clone())),
             _ => Err(PyError::named("TypeError", "bad operand type for unary +".to_string())),
         },
     }
