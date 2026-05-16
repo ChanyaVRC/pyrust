@@ -644,6 +644,9 @@ impl Interpreter {
                 let mut e = env.borrow_mut();
                 e.values.clear();
                 e.parent = parent;
+                e.local_names = Default::default();
+                e.global_names = Default::default();
+                e.nonlocal_names = Default::default();
             }
             env
         } else {
