@@ -623,12 +623,25 @@ fn install_exception_builtins(env: &EnvRef) {
     };
 
     let runtime_error = make_child("RuntimeError");
+
+    // RecursionError and NotImplementedError derive from RuntimeError in
+    // CPython 3.12 (`RecursionError → RuntimeError → Exception`).  Use a
+    // separate helper so that `isinstance(RecursionError(), RuntimeError)`
+    // returns True, matching CPython parity (#513).
+    let make_runtime_child = |name: &str| {
+        Rc::new(RefCell::new(PyClass {
+            name: name.to_string(),
+            base: Some(Rc::clone(&runtime_error)),
+            attrs: IndexMap::new(),
+        }))
+    };
+
     let type_error = make_child("TypeError");
     let value_error = make_child("ValueError");
     let name_error = make_child("NameError");
     let assertion_error = make_child("AssertionError");
-    let recursion_error = make_child("RecursionError");
-    let not_implemented_error = make_child("NotImplementedError");
+    let recursion_error = make_runtime_child("RecursionError");
+    let not_implemented_error = make_runtime_child("NotImplementedError");
     let stop_iteration = make_child("StopIteration");
     let index_error = make_child("IndexError");
     let key_error = make_child("KeyError");
