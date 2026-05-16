@@ -2090,7 +2090,11 @@ fn hash_value(value: &Value) -> Result<i64> {
         ValueKind::BigInt(n) => Ok(bigint_hash(n)),
         ValueKind::Float(v) => {
             if v.fract() == 0.0 && v.is_finite() {
-                Ok(v as i64)
+                // Integral floats share the same hash as the equivalent int
+                // (CPython invariant: hash(1.0) == hash(1)).  Apply int_hash
+                // to get the Mersenne reduction and -1→-2 sentinel remap, so
+                // that e.g. hash(-1.0) == -2 and hash(float(2**62)) == 2.
+                Ok(int_hash(v as i64))
             } else {
                 Ok(v.to_bits() as i64)
             }
