@@ -1670,7 +1670,7 @@ impl Interpreter {
                                     return Ok(Value::bool_(true));
                                 }
                             }
-                            Err(PyError::Named(ref cls, _)) if cls == "StopIteration" => {
+                            Err(ref e) if e.class_name_is("StopIteration") => {
                                 return Ok(Value::bool_(false));
                             }
                             Err(e) => return Err(e),
@@ -1693,7 +1693,7 @@ impl Interpreter {
                                     return Ok(Value::bool_(true));
                                 }
                             }
-                            Err(PyError::Named(ref cls, _)) if cls == "StopIteration" => {
+                            Err(ref e) if e.class_name_is("StopIteration") => {
                                 return Ok(Value::bool_(false));
                             }
                             Err(PyError::Raised(ref exc)) => {
