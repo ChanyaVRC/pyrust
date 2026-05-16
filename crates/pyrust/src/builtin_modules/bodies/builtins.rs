@@ -20,13 +20,14 @@ use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
-    NativeIterFrame, apply_format_spec, ascii_repr, class_is_subclass_of, compare_values,
-    dir_names, instance_attrs_snapshot, int_pow_promoting, invoke_class_method,
+    NativeIterFrame, apply_format_spec, ascii_repr, bigint_divmod_floor, class_is_subclass_of,
+    compare_values, dir_names, instance_attrs_snapshot, int_pow_promoting, invoke_class_method,
     is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_mod_i64,
     py_round_half_even, py_round_half_even_f64, reject_keyword_args_expanded,
-    snapshot_current_locals, snapshot_module_namespace, value_to_float, value_type_name_str,
+    snapshot_current_locals, snapshot_module_namespace, value_to_bigint, value_to_float,
+    value_type_name_str,
 };
-use crate::value::{PyClass, PyKey, Value, ValueKind, range_len};
+use crate::value::{PyClass, PyKey, PyZero, Value, ValueKind, range_len};
 use pyrust_derive::pyrust_module;
 
 pyrust_module! {
@@ -480,6 +481,31 @@ pyrust_module! {
                 Ok(Value::tuple(vec![Value::int(quotient), Value::int(modulo)]))
             }
             _ => {
+                // BigInt cross-type arms (#485): match the new
+                // `floor_div`/`modulo` arms in `expr.rs`.  Whenever
+                // either operand is BigInt we delegate to the BigInt
+                // path; everything else falls through to the float
+                // path.  Bool coerces to int so `divmod(big, True)`
+                // works.  The `matches!` guard avoids the BigInt
+                // conversion for the float-mixed arms (`divmod(1, 2.0)`)
+                // that fell through the int-int match above.
+                if matches!(args[0].value.kind(), ValueKind::BigInt(_))
+                    || matches!(args[1].value.kind(), ValueKind::BigInt(_))
+                {
+                    if let (Some(a), Some(b)) = (
+                        value_to_bigint(&args[0].value),
+                        value_to_bigint(&args[1].value),
+                    ) {
+                        if b.is_zero() {
+                            return Err(PyError::named(
+                                "ZeroDivisionError",
+                                "integer division or modulo by zero".to_string(),
+                            ));
+                        }
+                        let (q, r) = bigint_divmod_floor(&a, &b);
+                        return Ok(Value::tuple(vec![Value::bigint(q), Value::bigint(r)]));
+                    }
+                }
                 let a = value_to_float(&args[0].value, FN_NAME)?;
                 let b = value_to_float(&args[1].value, FN_NAME)?;
                 if b == 0.0 {
@@ -1959,6 +1985,7 @@ pub(super) fn materialize_user_iter(
         Ok(v)
     }
 }
+
 
 /// Compute the hash of a `Value` for the `hash()` builtin.  Mirrors
 /// CPython's semantics:

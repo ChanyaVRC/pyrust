@@ -81,6 +81,74 @@ fn try_seq_fast_eq(av: &[Value], bv: &[Value]) -> SeqFast {
     SeqFast::Resolved(true)
 }
 
+/// Python-style `(quotient, remainder)` for `a // b` and `a % b` where
+/// both operands are BigInts.  Unlike Rust's `/` / `%` (truncate-toward-
+/// zero), CPython uses floor division: the quotient is rounded toward
+/// negative infinity and the remainder has the same sign as the
+/// divisor.  Caller must guarantee `b != 0`.
+///
+/// Shared with `builtin_modules/bodies/builtins.rs` (the `divmod()`
+/// builtin) to avoid divergence in sign-adjustment logic (issue #493).
+pub(crate) fn bigint_divmod_floor(a: &PyBigInt, b: &PyBigInt) -> (PyBigInt, PyBigInt) {
+    let mut q = a / b;
+    let mut r = a % b;
+    // Adjust if the truncated remainder's sign disagrees with the
+    // divisor: subtract one from the quotient and add `b` back into the
+    // remainder so it matches the divisor's sign (CPython semantics).
+    if !r.is_zero() && (r.sign() != b.sign()) {
+        q -= 1;
+        r += b;
+    }
+    (q, r)
+}
+
+/// Coerce `Int` / `BigInt` / `Bool` to `PyBigInt` for cross-type
+/// arithmetic.  Returns `None` for anything else so callers can fall
+/// through to the float / TypeError path.
+///
+/// Shared with `builtin_modules/bodies/builtins.rs` (the `divmod()`
+/// builtin) to avoid divergence in coercion logic (issue #493).
+pub(crate) fn value_to_bigint(v: &Value) -> Option<PyBigInt> {
+    match v.kind() {
+        ValueKind::Int(n) => Some(PyBigInt::from(n)),
+        ValueKind::BigInt(b) => Some(b.clone()),
+        ValueKind::Bool(b) => Some(PyBigInt::from(b as i64)),
+        _ => None,
+    }
+}
+
+/// Result of validating a shift count: either a concrete `usize`
+/// (small enough to apply directly), or a marker that the count is
+/// non-negative but exceeds `usize::MAX`.  Each shift arm decides how
+/// to handle the saturating case — `<<` raises `OverflowError` only
+/// when the LHS is non-zero (CPython would actually allocate the
+/// bits), while `>>` collapses to `0` / `-1` (CPython parity).
+enum ShiftCount {
+    Fits(usize),
+    Saturated,
+}
+
+/// Validate a shift count and convert it to `ShiftCount`.  Returns
+/// `Err(ValueError)` for negative shifts and `Err(TypeError)` if the
+/// operand isn't an int / bool.  Matches CPython's error messages
+/// where possible.
+fn shift_count(v: &Value) -> Result<ShiftCount> {
+    let big = value_to_bigint(v).ok_or_else(|| {
+        PyError::named("TypeError", "bitwise op requires integer".to_string())
+    })?;
+    match big.sign() {
+        PyBigIntSign::Minus => Err(PyError::named(
+            "ValueError",
+            "negative shift count".to_string(),
+        )),
+        PyBigIntSign::NoSign => Ok(ShiftCount::Fits(0)),
+        PyBigIntSign::Plus => Ok(match big.to_usize() {
+            Some(n) => ShiftCount::Fits(n),
+            None => ShiftCount::Saturated,
+        }),
+    }
+}
+
 impl Interpreter {
     fn unsupported_binary_operand(op: &str) -> PyError {
         PyError::named("TypeError", format!("unsupported operand type(s) for {op}"))
@@ -1029,6 +1097,18 @@ impl Interpreter {
                 if let Some(r) = set_binary_op(&left, &right, SetOp::And) {
                     return r;
                 }
+                // BigInt × int / int × BigInt / BigInt × BigInt all flow
+                // through the BigInt path; int × int stays on the fast
+                // path inside `bitwise_op`.  See issue #485.
+                if matches!(left.kind(), ValueKind::BigInt(_)) || matches!(right.kind(), ValueKind::BigInt(_)) {
+                    let a = value_to_bigint(&left).ok_or_else(|| {
+                        PyError::named("TypeError", "bitwise op requires integer".to_string())
+                    })?;
+                    let b = value_to_bigint(&right).ok_or_else(|| {
+                        PyError::named("TypeError", "bitwise op requires integer".to_string())
+                    })?;
+                    return Ok(Value::bigint(a & b));
+                }
                 self.bitwise_op(&left, &right, |a, b| Ok(a & b))
             }
             BinaryOp::BitOr => {
@@ -1037,6 +1117,15 @@ impl Interpreter {
                 }
                 if let Some(r) = set_binary_op(&left, &right, SetOp::Or) {
                     return r;
+                }
+                if matches!(left.kind(), ValueKind::BigInt(_)) || matches!(right.kind(), ValueKind::BigInt(_)) {
+                    let a = value_to_bigint(&left).ok_or_else(|| {
+                        PyError::named("TypeError", "bitwise op requires integer".to_string())
+                    })?;
+                    let b = value_to_bigint(&right).ok_or_else(|| {
+                        PyError::named("TypeError", "bitwise op requires integer".to_string())
+                    })?;
+                    return Ok(Value::bigint(a | b));
                 }
                 self.bitwise_op(&left, &right, |a, b| Ok(a | b))
             }
@@ -1047,11 +1136,44 @@ impl Interpreter {
                 if let Some(r) = set_binary_op(&left, &right, SetOp::Xor) {
                     return r;
                 }
+                if matches!(left.kind(), ValueKind::BigInt(_)) || matches!(right.kind(), ValueKind::BigInt(_)) {
+                    let a = value_to_bigint(&left).ok_or_else(|| {
+                        PyError::named("TypeError", "bitwise op requires integer".to_string())
+                    })?;
+                    let b = value_to_bigint(&right).ok_or_else(|| {
+                        PyError::named("TypeError", "bitwise op requires integer".to_string())
+                    })?;
+                    return Ok(Value::bigint(a ^ b));
+                }
                 self.bitwise_op(&left, &right, |a, b| Ok(a ^ b))
             }
             BinaryOp::LShift => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__lshift__", "__rlshift__") {
                     return r;
+                }
+                // BigInt LHS: shift exactly, no `& 63` truncation.
+                // Int LHS with a BigInt RHS: the shift count is
+                // astronomically large.  See #485.
+                if matches!(left.kind(), ValueKind::BigInt(_)) || matches!(right.kind(), ValueKind::BigInt(_)) {
+                    let a = value_to_bigint(&left).ok_or_else(|| {
+                        PyError::named("TypeError", "bitwise op requires integer".to_string())
+                    })?;
+                    return match shift_count(&right)? {
+                        ShiftCount::Fits(n) => Ok(Value::bigint(a << n)),
+                        // CPython: `0 << huge == 0` (no allocation
+                        // needed), otherwise OverflowError because the
+                        // result would not fit in memory.
+                        ShiftCount::Saturated => {
+                            if a.is_zero() {
+                                Ok(Value::bigint(a))
+                            } else {
+                                Err(PyError::named(
+                                    "OverflowError",
+                                    "too many digits in integer".to_string(),
+                                ))
+                            }
+                        }
+                    };
                 }
                 self.bitwise_op(&left, &right, |a, b| {
                     if b < 0 { return Err(PyError::named("ValueError", "negative shift count".to_string())); }
@@ -1061,6 +1183,22 @@ impl Interpreter {
             BinaryOp::RShift => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__rshift__", "__rrshift__") {
                     return r;
+                }
+                if matches!(left.kind(), ValueKind::BigInt(_)) || matches!(right.kind(), ValueKind::BigInt(_)) {
+                    let a = value_to_bigint(&left).ok_or_else(|| {
+                        PyError::named("TypeError", "bitwise op requires integer".to_string())
+                    })?;
+                    return match shift_count(&right)? {
+                        ShiftCount::Fits(n) => Ok(Value::bigint(a >> n)),
+                        // CPython: `>>` by a count larger than the
+                        // value's bit length collapses to the sign
+                        // (`0` for non-negative, `-1` for negative) —
+                        // never raises.
+                        ShiftCount::Saturated => Ok(Value::bigint(match a.sign() {
+                            PyBigIntSign::Minus => PyBigInt::from(-1i64),
+                            _ => PyBigInt::from(0i64),
+                        })),
+                    };
                 }
                 self.bitwise_op(&left, &right, |a, b| {
                     if b < 0 { return Err(PyError::named("ValueError", "negative shift count".to_string())); }
@@ -1321,6 +1459,24 @@ impl Interpreter {
             let modulo = py_mod_i64(a, b);
             return Ok(Value::int((a - modulo) / b));
         }
+        // BigInt cross-type arms (#485): once #421 promotes overflow to
+        // BigInt, `(2**64) // 2` arrives here with a BigInt operand.
+        // Bool coerces to int so `big // True` works.  Float operands
+        // fall through to the float path below.
+        if matches!(left.kind(), ValueKind::BigInt(_))
+            || matches!(right.kind(), ValueKind::BigInt(_))
+        {
+            if let (Some(a), Some(b)) = (value_to_bigint(&left), value_to_bigint(&right)) {
+                if b.is_zero() {
+                    return Err(PyError::named(
+                        "ZeroDivisionError",
+                        "integer division or modulo by zero".to_string(),
+                    ));
+                }
+                let (q, _) = bigint_divmod_floor(&a, &b);
+                return Ok(Value::bigint(q));
+            }
+        }
         let (a, b) = self.to_pair_number(left, right)?;
         if b == 0.0 {
             return Err(PyError::named(
@@ -1345,6 +1501,21 @@ impl Interpreter {
                 ));
             }
             return Ok(Value::int(py_mod_i64(a, b)));
+        }
+        // BigInt cross-type arms (#485) — see `floor_div` for rationale.
+        if matches!(left.kind(), ValueKind::BigInt(_))
+            || matches!(right.kind(), ValueKind::BigInt(_))
+        {
+            if let (Some(a), Some(b)) = (value_to_bigint(&left), value_to_bigint(&right)) {
+                if b.is_zero() {
+                    return Err(PyError::named(
+                        "ZeroDivisionError",
+                        "integer modulo by zero".to_string(),
+                    ));
+                }
+                let (_, r) = bigint_divmod_floor(&a, &b);
+                return Ok(Value::bigint(r));
+            }
         }
         let (a, b) = self.to_pair_number(left, right)?;
         if b == 0.0 {
