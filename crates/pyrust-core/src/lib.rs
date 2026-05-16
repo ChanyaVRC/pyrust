@@ -2735,15 +2735,28 @@ pub enum PyError {
     Lex(String),
     Parse(String),
     Runtime(String),
-    /// A named Python exception (e.g. "ValueError", "TypeError") raised from
-    /// builtin code that cannot instantiate exception objects directly.
-    /// The VM converts this to a proper PyInstance before propagating.
+    /// A named Python exception identified by **class name string**.
+    ///
+    /// Used by builtin code in `pyrust-core` and `pyrust-builtins` that
+    /// cannot hold a `Rc<RefCell<PyClass>>` because the class objects live
+    /// in the interpreter crate.  The VM materialises this into a
+    /// `PyInstance` via an env-hierarchy name lookup before propagating.
     ///
     /// `class_name` is a `Cow<'static, str>` so the overwhelmingly common
     /// case (a string literal like `"TypeError"`) is zero-allocation; rare
-    /// dynamic class names (e.g. from user-defined exception types) can
-    /// still be carried via `Cow::Owned`.
+    /// dynamic class names can still be carried via `Cow::Owned`.
     Named(Cow<'static, str>, String), // (class_name, message)
+    /// A named Python exception identified by **class identity** (`Rc`).
+    ///
+    /// Used by interpreter-internal raise sites that already hold the class
+    /// object (e.g. the VM dispatch loop).  The VM can materialise this into
+    /// a `PyInstance` directly, with no env-hierarchy name lookup — making
+    /// the hot path (typed exception from a built-in opcode) zero-lookup.
+    ///
+    /// Construct via [`PyError::class`].  Call sites in `pyrust-core` and
+    /// `pyrust-builtins` that cannot reference a `PyClass` Rc should
+    /// continue to use [`PyError::named`] / `PyError::Named`.
+    Class(Rc<RefCell<PyClass>>, String), // (class, message)
     Raised(Value),
 }
 
@@ -2751,9 +2764,37 @@ impl PyError {
     /// Convenience constructor for a named Python exception with a static
     /// class-name literal.  Avoids the per-call `"TypeError".to_string()`
     /// allocation that every error site would otherwise perform.
+    ///
+    /// Prefer [`PyError::class`] when the class `Rc` is already in scope
+    /// (avoids an env-hierarchy name lookup in the VM handler).
     #[inline]
     pub fn named(cls: &'static str, msg: impl Into<String>) -> Self {
         PyError::Named(Cow::Borrowed(cls), msg.into())
+    }
+
+    /// Constructor for a named Python exception with a **known class object**.
+    ///
+    /// The VM can materialise this directly (no env name lookup).  Use this
+    /// from interpreter-internal raise sites that already hold the class `Rc`.
+    #[inline]
+    pub fn class(cls: Rc<RefCell<PyClass>>, msg: impl Into<String>) -> Self {
+        PyError::Class(cls, msg.into())
+    }
+
+    /// Returns `true` when `self` is a `Named` or `Class` error whose
+    /// exception class name equals `name`.
+    ///
+    /// Used by the generator/iterator machinery to cheaply detect
+    /// `StopIteration` and `GeneratorExit` without materialising the error
+    /// into a full `PyInstance`.  Works for both the string-named (`Named`)
+    /// and class-identity (`Class`) variants.
+    #[inline]
+    pub fn class_name_is(&self, name: &str) -> bool {
+        match self {
+            PyError::Named(cls, _) => cls.as_ref() == name,
+            PyError::Class(cls, _) => cls.borrow().name == name,
+            _ => false,
+        }
     }
 }
 
@@ -2764,6 +2805,7 @@ impl fmt::Display for PyError {
             PyError::Parse(s) => write!(f, "Parse error: {s}"),
             PyError::Runtime(s) => write!(f, "Runtime error: {s}"),
             PyError::Named(cls, s) => write!(f, "{cls}: {s}"),
+            PyError::Class(cls, s) => write!(f, "{}: {s}", cls.borrow().name),
             PyError::Raised(value) => write!(f, "Uncaught exception: {}", value.repr()),
         }
     }

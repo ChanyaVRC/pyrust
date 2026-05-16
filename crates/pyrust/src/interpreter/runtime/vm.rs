@@ -470,9 +470,16 @@ impl Interpreter {
                             let exc_val = match e {
                                 PyError::Raised(v) => v,
                                 PyError::Runtime(msg) => {
-                                    match self.instantiate_named_exception("RuntimeError", msg) {
-                                        Ok(v) => v,
-                                        Err(e2) => return Err(e2),
+                                    // Fast path via exc_classes when available;
+                                    // fall back to env lookup (should never fire
+                                    // in a correctly initialised interpreter).
+                                    if let Some(cls) = self.exc_classes.get("RuntimeError") {
+                                        instantiate_exception(cls, vec![Value::string(msg)])
+                                    } else {
+                                        match self.instantiate_named_exception("RuntimeError", msg) {
+                                            Ok(v) => v,
+                                            Err(e2) => return Err(e2),
+                                        }
                                     }
                                 }
                                 PyError::Named(cls, msg) => {
@@ -480,6 +487,12 @@ impl Interpreter {
                                         Ok(v) => v,
                                         Err(e2) => return Err(e2),
                                     }
+                                }
+                                // Fast path: class identity already known —
+                                // skip the env-hierarchy name lookup that
+                                // `instantiate_named_exception` would do.
+                                PyError::Class(cls, msg) => {
+                                    instantiate_exception(cls, vec![Value::string(msg)])
                                 }
                                 other => return Err(other),
                             };
@@ -1194,8 +1207,11 @@ impl Interpreter {
                     } else {
                         msg.to_py_str()
                     };
-                    let exc =
-                        vm_try!(self.instantiate_named_exception("AssertionError", msg_str));
+                    let exc = if let Some(cls) = self.exc_classes.get("AssertionError") {
+                        instantiate_exception(cls, vec![Value::string(msg_str)])
+                    } else {
+                        vm_try!(self.instantiate_named_exception("AssertionError", msg_str))
+                    };
                     self.attach_implicit_context(&exc);
                     vm_try!(Err::<(), _>(PyError::Raised(exc)));
                 }
@@ -1377,10 +1393,17 @@ impl Interpreter {
                         // RecursionError for truly infinite self-tail-calls.
                         tco_iters += 1;
                         if tco_iters > MAX_CALL_DEPTH * 100 {
-                            let exc = vm_try!(self.instantiate_named_exception(
-                                "RecursionError",
-                                "maximum recursion depth exceeded".to_string(),
-                            ));
+                            let exc = if let Some(cls) = self.exc_classes.get("RecursionError") {
+                                instantiate_exception(
+                                    cls,
+                                    vec![Value::string("maximum recursion depth exceeded")],
+                                )
+                            } else {
+                                vm_try!(self.instantiate_named_exception(
+                                    "RecursionError",
+                                    "maximum recursion depth exceeded".to_string(),
+                                ))
+                            };
                             return Err(PyError::Raised(exc));
                         }
                         // Collect new argument values before we overwrite any registers.
@@ -1831,9 +1854,7 @@ impl Interpreter {
                                         vm_try!(Err(PyError::Raised(exc)));
                                     }
                                 }
-                                Some(Err(PyError::Named(ref cls, _)))
-                                    if cls == "StopIteration" =>
-                                {
+                                Some(Err(ref e)) if e.class_name_is("StopIteration") => {
                                     pc = jump_pc!(*offset);
                                 }
                                 Some(Err(e)) => { vm_try!(Err(e)); }
@@ -2477,10 +2498,10 @@ impl Interpreter {
                 ))
             }
             // Generator returned normally (StopIteration synthesised).
-            Err(PyError::Named(ref cls, _)) if cls == "StopIteration" => Ok(Value::none()),
+            Err(ref e) if e.class_name_is("StopIteration") => Ok(Value::none()),
             // Generator re-raised GeneratorExit — that's the expected close
             // behaviour, swallow it.
-            Err(PyError::Named(ref cls, _)) if cls == "GeneratorExit" => Ok(Value::none()),
+            Err(ref e) if e.class_name_is("GeneratorExit") => Ok(Value::none()),
             Err(PyError::Raised(ref exc)) => {
                 let cls_name = match exc.kind() {
                     ValueKind::PyInstance(inst) => inst.borrow().class.borrow().name.clone(),
@@ -2573,7 +2594,7 @@ impl Interpreter {
             // Generator caught the injected exception and yielded.
             Ok(v) => Ok(v),
             // Generator returned normally — convert to StopIteration.
-            Err(PyError::Named(ref cls, _)) if cls == "StopIteration" => {
+            Err(ref e) if e.class_name_is("StopIteration") => {
                 Err(PyError::named("StopIteration", String::new()))
             }
             // Any other propagating error (including a re-raise of the

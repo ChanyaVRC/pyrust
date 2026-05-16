@@ -22,6 +22,60 @@ type FnCache = HashMap<(u64, Vec<PyKey>), Value>;
 const MAX_CALL_DEPTH: usize = 1000;
 const ENV_POOL_MAX: usize = 64;
 
+/// Pre-resolved table of built-in exception classes.
+///
+/// Populated once at interpreter startup from `env` after
+/// `install_exception_builtins` runs.  Lets the VM dispatch loop
+/// construct `PyError::Class` errors without a per-raise env lookup.
+pub(crate) struct ExcClasses(HashMap<&'static str, Rc<RefCell<PyClass>>>);
+
+impl ExcClasses {
+    fn new(env: &EnvRef) -> Self {
+        let names: &[&'static str] = &[
+            "Exception",
+            "RuntimeError",
+            "TypeError",
+            "ValueError",
+            "NameError",
+            "AssertionError",
+            "RecursionError",
+            "NotImplementedError",
+            "StopIteration",
+            "IndexError",
+            "KeyError",
+            "AttributeError",
+            "OverflowError",
+            "ZeroDivisionError",
+            "SystemExit",
+            "OSError",
+            "FileNotFoundError",
+            "LookupError",
+            "UnicodeError",
+            "UnicodeEncodeError",
+            "UnicodeDecodeError",
+            "GeneratorExit",
+        ];
+        let mut map = HashMap::with_capacity(names.len());
+        let module = env.borrow();
+        for name in names {
+            if let Some(v) = module.values.get(*name) {
+                if let ValueKind::PyClass(cls) = v.kind() {
+                    map.insert(*name, Rc::clone(cls));
+                }
+            }
+        }
+        ExcClasses(map)
+    }
+
+    /// Look up a built-in exception class by its `'static` name.
+    /// Returns `None` only when `name` is not a registered built-in
+    /// exception (should not happen in correct interpreter state).
+    #[inline]
+    pub(crate) fn get(&self, name: &'static str) -> Option<Rc<RefCell<PyClass>>> {
+        self.0.get(name).map(Rc::clone)
+    }
+}
+
 pub struct Interpreter {
     pub(crate) env: EnvRef,
     active_exception: Option<Value>,
@@ -104,6 +158,18 @@ pub struct Interpreter {
     /// the helper is only reachable through `&mut self`; the field
     /// avoids the per-recursive-call thread-local borrow.
     pub(crate) eq_in_progress: Vec<(i64, i64)>,
+    /// Pre-resolved table of built-in exception classes, populated once
+    /// at interpreter startup by [`Interpreter::default`] after
+    /// `install_exception_builtins` registers the classes into `env`.
+    ///
+    /// The table maps the class name (`"TypeError"`, `"ValueError"`, …)
+    /// to the `Rc<RefCell<PyClass>>` stored in `env`.  Using this cache
+    /// the VM dispatch loop can construct [`PyError::Class`] errors
+    /// directly — no env-hierarchy name lookup at the raise site.
+    ///
+    /// [`ExcClasses`] is a newtype that exposes a `get(&str)` method so
+    /// callers stay legible and the HashMap detail stays local.
+    pub(crate) exc_classes: ExcClasses,
 }
 
 /// Discriminator for `VmFrameView`: script-level (module-scope) vs.
@@ -156,6 +222,9 @@ impl Default for Interpreter {
         let env = Environment::new(None);
         install_exception_builtins(&env);
         install_singleton_builtins(&env);
+        // Snapshot built-in exception class Rcs so the VM dispatch loop can
+        // construct `PyError::Class` errors without an env lookup per raise.
+        let exc_classes = ExcClasses::new(&env);
         Self {
             env,
             active_exception: None,
@@ -169,6 +238,7 @@ impl Default for Interpreter {
             class_store_order: Vec::new(),
             vm_frame_views: Vec::new(),
             eq_in_progress: Vec::new(),
+            exc_classes,
         }
     }
 }
