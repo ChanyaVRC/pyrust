@@ -496,6 +496,7 @@ pyrust_module! {
             // No __hash__ at all: use object-identity hash, matching
             // CPython's default object.__hash__ behaviour.
             let ptr = Rc::as_ptr(&inst_rc) as i64;
+            let ptr = if ptr == -1 { -2 } else { ptr };
             return Ok(Value::int(ptr));
         }
         let hash_val = hash_value(&value)?;
