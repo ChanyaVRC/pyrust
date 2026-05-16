@@ -1018,11 +1018,13 @@ impl Value {
     /// initialised". The bit pattern is a specific positive NaN that the VM
     /// never produces from real Python values — `0x7FF8_0000_0000_BAD0`.
     ///
-    /// `is_unset()` returns true only for this exact pattern. All other
-    /// accessors (`kind()`, `truthy()`, `is_none()`, …) classify it as if it
-    /// were the corresponding float NaN, which is fine because correct
-    /// programs never read an unset slot (the compiler emits `CheckLocal`
-    /// before any read that could observe one).
+    /// `is_unset()` returns true only for this exact pattern.
+    ///
+    /// Reading an unset slot through `kind()`, `truthy()`, or any accessor
+    /// that routes through `kind()` will panic in debug builds (via
+    /// `debug_assert!`).  In release builds the assert is elided; the runtime
+    /// tripwire is the compiler's `Insn::CheckLocal` emission.  Do not pass an
+    /// unset `Value` to any accessor other than `is_unset()` / `as_some()`.
     pub fn unset() -> Self {
         Value(UNSET_BITS)
     }
@@ -1942,6 +1944,15 @@ impl Value {
     // ── kind() — borrow-based view for pattern matching ──────────────────────
 
     pub fn kind(&self) -> ValueKind<'_> {
+        // Catch reads of uninitialised register slots early.  In debug builds
+        // this panics with a diagnostic message so the bug surfaces immediately
+        // rather than silently propagating a NaN through the program.  Release
+        // builds elide the assert (zero cost on the hot path).
+        debug_assert!(
+            !self.is_unset(),
+            "Value::kind() called on an uninitialised register slot (Value::unset()). \
+             A CheckLocal instruction is missing for this read."
+        );
         // NotImplemented is encoded as a reserved NaN-box bit pattern; check
         // before the float arm so it doesn't get classified as a float NaN.
         if self.0 == NOT_IMPLEMENTED_BITS {
@@ -2811,6 +2822,43 @@ mod tests {
         assert!(!unset.is_not_implemented());
         assert!(nimpl.is_not_implemented());
         assert!(!nimpl.is_unset());
+    }
+
+    #[test]
+    fn unset_is_unset_returns_true() {
+        // Basic sanity: the sentinel round-trips through is_unset().
+        let v = Value::unset();
+        assert!(v.is_unset());
+        assert!(!v.is_none());
+        assert!(!v.is_float());
+        assert!(!v.is_not_implemented());
+    }
+
+    #[test]
+    fn unset_as_some_returns_none() {
+        // as_some() is the safe way to probe an unset slot.
+        let v = Value::unset();
+        assert!(v.as_some().is_none());
+    }
+
+    // In debug builds, calling kind() on an unset Value must panic with a
+    // diagnostic message so missed CheckLocal emissions surface immediately
+    // rather than silently propagating a NaN through the program.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "uninitialised register slot")]
+    fn unset_kind_panics_in_debug() {
+        let v = Value::unset();
+        let _ = v.kind();
+    }
+
+    // In debug builds, truthy() routes through kind() and must also panic.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "uninitialised register slot")]
+    fn unset_truthy_panics_in_debug() {
+        let v = Value::unset();
+        let _ = v.truthy();
     }
 
     /// Helper: build a minimal `UserFunction` for kind-wrapping tests.
