@@ -820,6 +820,7 @@ fn pass_unary_fold(insns: Vec<Insn>, num_locals: u32, consts: &mut Vec<Value>) -
                     UnaryOp::Not => Some(Value::bool_(!c.truthy())),
                     UnaryOp::BitNot => match c.kind() {
                         ValueKind::Int(n) => Some(Value::int(!n)),
+                        ValueKind::BigInt(b) => Some(Value::bigint(!b)),
                         _ => None,
                     },
                     _ => None,

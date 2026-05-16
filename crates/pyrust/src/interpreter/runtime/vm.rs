@@ -2610,7 +2610,9 @@ fn vm_eval_unary(op: UnaryOp, val: Value) -> Result<Value> {
         UnaryOp::BitNot => match val.kind() {
             ValueKind::Int(v) => Ok(Value::int(!v)),
             ValueKind::Bool(b) => Ok(Value::int(if b { -2 } else { -1 })),
-            _ => Err(PyError::named("TypeError",
+            ValueKind::BigInt(v) => Ok(Value::bigint(!v)),
+            _ => Err(PyError::named(
+                "TypeError",
                 "bad operand type for unary ~: use integer".to_string(),
             )),
         },
