@@ -399,7 +399,7 @@ impl Interpreter {
                     break;
                 }
                 match self.resume_generator(frame) {
-                    Err(PyError::GeneratorYield(yielded)) => {
+                    Ok(yielded) => {
                         drop(borrow);
                         items.push(yielded);
                     }
@@ -407,7 +407,6 @@ impl Interpreter {
                         break;
                     }
                     Err(e) => return Err(e),
-                    Ok(_) => unreachable!("resume_generator always returns Err"),
                 }
             }
             Ok(items)
@@ -586,7 +585,7 @@ impl Interpreter {
                 };
             }
             match self.resume_generator(frame) {
-                Err(PyError::GeneratorYield(yielded)) => Ok(yielded),
+                Ok(yielded) => Ok(yielded),
                 Err(PyError::Named(ref cls, _)) if cls == "StopIteration" => {
                     drop(borrow);
                     if let Some(d) = default {
@@ -596,7 +595,6 @@ impl Interpreter {
                     }
                 }
                 Err(e) => Err(e),
-                Ok(_) => unreachable!("resume_generator always returns Err"),
             }
         } else if let ValueKind::PyInstance(inst) = val.kind() {
             let inst_rc = Rc::clone(inst);

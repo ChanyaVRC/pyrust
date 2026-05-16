@@ -85,25 +85,34 @@ pub(crate) struct GeneratorFrame {
     pub(crate) local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
 }
 
-// Thread-local used to pass generator suspension state back from the VM loop
-// to the resume_generator() caller without an extra return value or RefCell on
-// the hot path.  Set immediately before `return Err(GeneratorYield(...))`.
-//
-// Fields, in order: saved `iters`, saved `exc_handlers`, saved `pc`, the
-// generator-owned slice of `handled_exc_stack` (entries above the caller's
-// base depth at the moment of yield), and `active_exception` at the moment
-// of yield.  The two trailing fields are what fixes the PEP 3134
-// "yield-inside-handler leaks context" gap.
-type GenSaveState = (
-    Vec<Option<IterState>>,
-    Vec<usize>,
-    usize,
-    Vec<Value>,
-    Option<Value>,
-);
-thread_local! {
-    static GEN_SAVE: std::cell::RefCell<Option<GenSaveState>>
-        = const { std::cell::RefCell::new(None) };
+/// Explicit suspension state for a generator frame.
+///
+/// Replaces the old `GEN_SAVE` thread-local + `GenSaveState` tuple alias.
+/// All suspension state is now carried as a struct field in `FrameOutcome::Yielded`
+/// rather than smuggled through a side-channel.
+pub(crate) struct GenSaveState {
+    pub(crate) iters: Vec<Option<IterState>>,
+    pub(crate) exc_handlers: Vec<usize>,
+    pub(crate) pc: usize,
+    pub(crate) handled_exc_slice: Vec<Value>,
+    pub(crate) active_exception: Option<Value>,
+}
+
+/// Outcome of executing a generator frame (returned by `run_bytecode_inner` and
+/// `run_bytecode_inner_impl`).
+///
+/// Generator outcomes are explicit values, not errors, except for StopIteration
+/// which is the user-visible error contract.  Using a dedicated enum here avoids
+/// the old pattern of abusing `Result::Err` as a control-flow channel for yield.
+///
+/// - `Returned(v)` — frame returned (fell off the end or hit `return`).
+/// - `Yielded { value, saved }` — frame yielded; resume state is in `saved`.
+///
+/// For callers that don't execute generators (`run_bytecode`, `run_bytecode_for_fn`),
+/// `Yielded` is unreachable and the `Returned` value is extracted directly.
+pub(crate) enum FrameOutcome {
+    Returned(Value),
+    Yielded { value: Value, saved: GenSaveState },
 }
 
 #[derive(Clone)]
@@ -196,7 +205,7 @@ impl Interpreter {
         code: &crate::bytecode::FnCode,
         regs: &mut [Value],
     ) -> Result<Value> {
-        self.run_bytecode_inner(
+        match self.run_bytecode_inner(
             code,
             regs,
             vec![None; code.num_iters as usize],
@@ -206,7 +215,12 @@ impl Interpreter {
             None,
             Vec::new(),
             None,
-        )
+        )? {
+            FrameOutcome::Returned(v) => Ok(v),
+            FrameOutcome::Yielded { .. } => {
+                unreachable!("run_bytecode called on a non-generator function")
+            }
+        }
     }
 
     /// Like `run_bytecode` but also passes the current function's id so that
@@ -217,7 +231,7 @@ impl Interpreter {
         regs: &mut [Value],
         fn_id: u64,
     ) -> Result<Value> {
-        self.run_bytecode_inner(
+        match self.run_bytecode_inner(
             code,
             regs,
             vec![None; code.num_iters as usize],
@@ -227,13 +241,18 @@ impl Interpreter {
             None,
             Vec::new(),
             None,
-        )
+        )? {
+            FrameOutcome::Returned(v) => Ok(v),
+            FrameOutcome::Yielded { .. } => {
+                unreachable!("run_bytecode_for_fn called on a non-generator function")
+            }
+        }
     }
 
     /// Resume (or initialise) a generator by executing from `frame.pc` until
     /// the next yield or completion.  Returns:
-    /// - `Ok(val)`  — generator returned (StopIteration); frame.done = true
-    /// - `Err(GeneratorYield(val))` — generator yielded; frame updated in-place
+    /// - `Ok(val)`  — generator yielded `val`; frame updated in-place
+    /// - `Err(Named("StopIteration", _))` — generator returned normally
     /// - `Err(other)` — propagating exception
     pub(crate) fn resume_generator(&mut self, frame: &mut GeneratorFrame) -> Result<Value> {
         self.resume_generator_with_exc(frame, None)
@@ -245,8 +264,8 @@ impl Interpreter {
     /// exception).
     ///
     /// Returns:
-    /// - `Ok(val)` — generator returned (StopIteration); frame.done = true
-    /// - `Err(GeneratorYield(val))` — generator yielded; frame updated in-place
+    /// - `Ok(val)` — generator yielded `val`; frame updated in-place
+    /// - `Err(Named("StopIteration", _))` — generator returned normally
     /// - `Err(other)` — propagating exception
     pub(crate) fn resume_generator_with_exc(
         &mut self,
@@ -308,28 +327,16 @@ impl Interpreter {
         self.env = previous_env;
 
         match result {
-            Err(PyError::GeneratorYield(val)) => {
-                // Retrieve the saved state from the thread-local.
-                let saved = GEN_SAVE.with(|cell| cell.borrow_mut().take());
-                if let Some((
-                    saved_iters,
-                    saved_handlers,
-                    saved_pc,
-                    saved_handled_slice,
-                    saved_active,
-                )) = saved
-                {
-                    frame.iters = saved_iters;
-                    frame.exc_handlers = saved_handlers;
-                    frame.pc = saved_pc;
-                    frame.handled_exc_slice = saved_handled_slice;
-                    frame.active_exception = saved_active;
-                } else {
-                    unreachable!("GEN_SAVE must be set before every GeneratorYield");
-                }
-                Err(PyError::GeneratorYield(val))
+            Ok(FrameOutcome::Yielded { value, saved }) => {
+                // Generator suspended: restore frame state from the outcome.
+                frame.iters = saved.iters;
+                frame.exc_handlers = saved.exc_handlers;
+                frame.pc = saved.pc;
+                frame.handled_exc_slice = saved.handled_exc_slice;
+                frame.active_exception = saved.active_exception;
+                Ok(value)
             }
-            Ok(_return_val) => {
+            Ok(FrameOutcome::Returned(_)) => {
                 // Generator returned normally (fell off end or hit explicit `return`).
                 // Signal exhaustion as StopIteration so ForIter and call_next handle it uniformly.
                 frame.done = true;
@@ -367,16 +374,16 @@ impl Interpreter {
         // for fresh, non-generator invocations.
         gen_handled_slice: Vec<Value>,
         gen_active_exception: Option<Value>,
-    ) -> Result<Value> {
+    ) -> Result<FrameOutcome> {
         // Record per-frame exception state at entry.  On any exit path
         // restore so the caller's frame sees the same `active_exception`
         // it left behind, regardless of whether this callee raised,
         // returned, ran past the end, or yielded.
         //
         // For yields, the `Yield` opcode itself has already split the
-        // generator's slice of `handled_exc_stack` off into thread-local
-        // storage and cleared `active_exception`, so the stack length is
-        // back at the caller's depth.  For non-yield exits, truncate
+        // generator's slice of `handled_exc_stack` off into the returned
+        // `FrameOutcome::Yielded::saved` and cleared `active_exception`,
+        // so the stack length is back at the caller's depth.  For non-yield exits, truncate
         // any leftover handler-stack entries.  In both cases re-install
         // the caller's `active_exception`, since the generator's view of
         // it must never persist outside this frame.
@@ -395,6 +402,10 @@ impl Interpreter {
             gen_active_exception,
         );
 
+        // For `Yielded`, the `Yield` opcode already stripped the generator's
+        // exc-stack entries and cleared `active_exception` before returning, so
+        // `handled_exc_stack` is already at `exc_ctx_entry_depth` on that path.
+        // `truncate` is idempotent so it's safe to call in every branch.
         self.handled_exc_stack.truncate(exc_ctx_entry_depth);
         self.active_exception = saved_active;
         result
@@ -415,7 +426,7 @@ impl Interpreter {
         // caller's stack entries and are owned by this frame.
         gen_handled_slice: Vec<Value>,
         gen_active_exception: Option<Value>,
-    ) -> Result<Value> {
+    ) -> Result<FrameOutcome> {
         use crate::bytecode::Insn;
         
         let num_locals = code.num_locals;
@@ -540,7 +551,7 @@ impl Interpreter {
             }
             let Some(insn) = code.insns.get(pc) else {
                 if pc == code.insns.len() {
-                    return Ok(Value::none());
+                    return Ok(FrameOutcome::Returned(Value::none()));
                 }
                 return Err(PyError::Runtime(format!(
                     "internal error: PC {} out of bounds (insns len {})",
@@ -1334,10 +1345,10 @@ impl Interpreter {
 
                 // ── Returns ──────────────────────────────────────────────
                 Insn::Return(src) => {
-                    return Ok(vm_try!(vm_read(regs, *src, num_locals)));
+                    return Ok(FrameOutcome::Returned(vm_try!(vm_read(regs, *src, num_locals))));
                 }
                 Insn::ReturnNone => {
-                    return Ok(Value::none());
+                    return Ok(FrameOutcome::Returned(Value::none()));
                 }
 
                 // ── Tail-call ────────────────────────────────────────────
@@ -1409,7 +1420,7 @@ impl Interpreter {
                         }
                         let call_result = self.call_function_expanded(callee_val, &buf);
                         self.call_arg_buf = buf;
-                        return Ok(vm_try!(call_result));
+                        return Ok(FrameOutcome::Returned(vm_try!(call_result)));
                     }
                 }
 
@@ -1507,19 +1518,18 @@ impl Interpreter {
                     let saved_handled_slice: Vec<Value> =
                         self.handled_exc_stack.split_off(exc_ctx_frame_base);
                     let saved_active = self.active_exception.take();
-                    // Save current iters/exc_handlers/pc to the thread-local
-                    // so that resume_generator() can write them back into the
-                    // GeneratorFrame after we unwind.
-                    GEN_SAVE.with(|cell| {
-                        *cell.borrow_mut() = Some((
-                            iters.clone(),
-                            exc_handlers.clone(),
+                    // Return an explicit FrameOutcome::Yielded rather than
+                    // using the old GEN_SAVE thread-local side-channel.
+                    return Ok(FrameOutcome::Yielded {
+                        value: yielded,
+                        saved: GenSaveState {
+                            iters: iters.clone(),
+                            exc_handlers: exc_handlers.clone(),
                             pc, // already past the Yield instruction
-                            saved_handled_slice,
-                            saved_active,
-                        ));
+                            handled_exc_slice: saved_handled_slice,
+                            active_exception: saved_active,
+                        },
                     });
-                    return Err(PyError::GeneratorYield(yielded));
                 }
 
                 // ── Unpack ───────────────────────────────────────────────
@@ -1801,9 +1811,6 @@ impl Interpreter {
                                 } else { None };
                             match next_result {
                                 Some(Ok(val)) => {
-                                    regs[*dst as usize] = val;
-                                }
-                                Some(Err(PyError::GeneratorYield(val))) => {
                                     regs[*dst as usize] = val;
                                 }
                                 Some(Err(PyError::Raised(exc))) => {
@@ -2459,8 +2466,9 @@ impl Interpreter {
 
         let inject = PyError::named("GeneratorExit", String::new());
         match self.resume_generator_with_exc(frame, Some(inject)) {
-            // Generator yielded again — that's an error in CPython.
-            Err(PyError::GeneratorYield(_)) => {
+            // Generator yielded again instead of returning/re-raising — that's
+            // an error in CPython.
+            Ok(_yielded) => {
                 // Mark as done so subsequent calls don't re-execute.
                 frame.done = true;
                 Err(PyError::named(
@@ -2486,7 +2494,6 @@ impl Interpreter {
                 }
             }
             Err(e) => Err(e),
-            Ok(_) => unreachable!("resume_generator_with_exc always returns Err"),
         }
     }
 
@@ -2563,7 +2570,8 @@ impl Interpreter {
 
         let inject = PyError::Raised(exc_val);
         match self.resume_generator_with_exc(frame, Some(inject)) {
-            Err(PyError::GeneratorYield(v)) => Ok(v),
+            // Generator caught the injected exception and yielded.
+            Ok(v) => Ok(v),
             // Generator returned normally — convert to StopIteration.
             Err(PyError::Named(ref cls, _)) if cls == "StopIteration" => {
                 Err(PyError::named("StopIteration", String::new()))
@@ -2571,7 +2579,6 @@ impl Interpreter {
             // Any other propagating error (including a re-raise of the
             // injected exception) flows through unchanged.
             Err(e) => Err(e),
-            Ok(_) => unreachable!("resume_generator_with_exc always returns Err"),
         }
     }
 }
