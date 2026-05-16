@@ -467,23 +467,13 @@ pyrust_module! {
                     &[],
                 )?;
                 // __hash__ must return an integer (bool is a subtype of int).
-                // CPython maps -1 → -2 because -1 is the C-level error sentinel.
-                // Large integers (BigInt) are reduced mod 2^61-1 (Py_HASH_MODULUS),
-                // matching CPython's tp_hash for arbitrary-precision int results.
-                const PY_HASH_MODULUS: i64 = (1i64 << 61) - 1;
-                let raw: i64 = match result.kind() {
-                    ValueKind::Int(n) => n,
+                // CPython maps -1 → -2 (C-level tp_hash error sentinel) and
+                // reduces large integers modulo 2^61-1 (Py_HASH_MODULUS).
+                // Both int_hash and bigint_hash encapsulate these rules.
+                let hash_val: i64 = match result.kind() {
+                    ValueKind::Int(n) => int_hash(n),
                     ValueKind::Bool(b) => b as i64,
-                    ValueKind::BigInt(n) => {
-                        // Reduce mod Py_HASH_MODULUS (2^61 - 1), preserving sign.
-                        // n: &BigInt (the borrowed inner value from the Rc).
-                        use crate::value::PyBigInt;
-                        use crate::value::PyToPrimitive;
-                        let modulus = PyBigInt::from(PY_HASH_MODULUS);
-                        let reduced = n.clone() % &modulus;
-                        // `reduced` is in (-modulus, modulus); fits in i64.
-                        reduced.to_i64().unwrap_or(0)
-                    }
+                    ValueKind::BigInt(n) => bigint_hash(n),
                     _ => {
                         return Err(PyError::named(
                             "TypeError",
@@ -491,7 +481,6 @@ pyrust_module! {
                         ));
                     }
                 };
-                let hash_val = if raw == -1 { -2 } else { raw };
                 return Ok(Value::int(hash_val));
             }
             // No __hash__ at all: use object-identity hash, matching
@@ -2044,6 +2033,41 @@ pub(super) fn materialize_user_iter(
 }
 
 
+/// CPython's Py_HASH_MODULUS = 2^61 - 1 (Mersenne prime).
+const PY_HASH_MODULUS: i64 = (1i64 << 61) - 1;
+
+/// Hash an `i64` integer using CPython's Mersenne-prime scheme.
+///
+/// For values whose absolute value is less than `Py_HASH_MODULUS` the result
+/// is the value itself (identity), subject to the `-1 → -2` sentinel remap.
+/// Values with `|v| >= 2^61-1` are reduced modulo `2^61-1` first.
+///
+/// The `-1 → -2` remap is always applied: `-1` is CPython's C-level tp_hash
+/// error sentinel and must never be returned from a Python `__hash__`.
+fn int_hash(v: i64) -> i64 {
+    // Rust's `%` for i64 is sign-preserving (C99 remainder), matching CPython's
+    // `long_hash` for values that fit in a C long (platform i64 on 64-bit).
+    let raw = v % PY_HASH_MODULUS;
+    if raw == -1 { -2 } else { raw }
+}
+
+/// Reduce a `BigInt` to an `i64` hash using CPython's Mersenne-prime scheme.
+///
+/// Algorithm (mirrors CPython `_Py_HashDouble` / `long_hash`):
+/// 1. `r = n % (2^61 - 1)` — sign-preserving remainder (num-bigint semantics).
+/// 2. If `r == -1`, remap to `-2` (the C-level error-sentinel exclusion).
+///
+/// The result is in `[-(2^61-2), 2^61-1]`, always fitting in `i64`.
+fn bigint_hash(n: &crate::value::PyBigInt) -> i64 {
+    use crate::value::PyBigInt;
+    use crate::value::PyToPrimitive;
+    let modulus = PyBigInt::from(PY_HASH_MODULUS);
+    // num-bigint's `%` preserves the sign of the dividend, matching CPython.
+    let reduced = n.clone() % &modulus;
+    let raw = reduced.to_i64().unwrap_or(0);
+    if raw == -1 { -2 } else { raw }
+}
+
 /// Compute the hash of a `Value` for the `hash()` builtin.  Mirrors
 /// CPython's semantics:
 /// - numeric types use their integer value (so `hash(True) == hash(1)`
@@ -2054,8 +2078,16 @@ pub(super) fn materialize_user_iter(
 /// - mutable containers (list / dict / set) raise `TypeError`.
 fn hash_value(value: &Value) -> Result<i64> {
     match value.kind() {
-        ValueKind::Int(v) => Ok(v),
+        // ValueKind::Int arrives here for values in [-2^47, 2^47-1] (inline i48)
+        // *and* for Opaque::PyBigInt values that happen to fit in i64 (the `kind()`
+        // accessor promotes them).  Both need the full Mersenne reduction so that
+        // e.g. hash(2**62) and hash(-1) match CPython.
+        ValueKind::Int(v) => Ok(int_hash(v)),
+        // bool: True==1, False==0 — both well within (-M, M), so int_hash is a
+        // no-op for the reduction, but the -1→-2 remap can never fire here either.
         ValueKind::Bool(b) => Ok(b as i64),
+        // BigInt arrives only when the value doesn't fit in i64 (|n| > i64::MAX).
+        ValueKind::BigInt(n) => Ok(bigint_hash(n)),
         ValueKind::Float(v) => {
             if v.fract() == 0.0 && v.is_finite() {
                 Ok(v as i64)
