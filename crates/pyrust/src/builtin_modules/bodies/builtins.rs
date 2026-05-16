@@ -440,9 +440,66 @@ pyrust_module! {
     /// existing CPython-compatible numeric hashing (int / bool / float
     /// with `1.0 == 1` parity), FNV-1a-style string hashing, and the
     /// per-kind "unhashable type: 'X'" errors for list / dict / set.
-    #[pure]
+    ///
+    /// Not marked `#[pure]` because it dispatches user `__hash__` for
+    /// `PyInstance` values, which may invoke arbitrary user code.
     fn hash(#[positional_only] obj: PyValue) -> Result<Value> {
         let value = obj.0;
+        // Dispatch user-defined __hash__ for PyInstance before falling
+        // through to the primitive hash_value path.  Mirrors CPython's
+        // tp_hash slot lookup.
+        if let ValueKind::PyInstance(inst) = value.kind() {
+            let inst_rc = Rc::clone(inst);
+            let class = Rc::clone(&inst_rc.borrow().class);
+            let class_name = class.borrow().name.clone();
+            if let Some(hash_method) = lookup_class_attr(&class, "__hash__") {
+                // __hash__ = None means explicitly unhashable (CPython rule).
+                if matches!(hash_method.kind(), ValueKind::None) {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("unhashable type: '{class_name}'"),
+                    ));
+                }
+                let result = invoke_class_method(
+                    _interp,
+                    hash_method,
+                    Value::py_instance(inst_rc),
+                    &[],
+                )?;
+                // __hash__ must return an integer (bool is a subtype of int).
+                // CPython maps -1 → -2 because -1 is the C-level error sentinel.
+                // Large integers (BigInt) are reduced mod 2^61-1 (Py_HASH_MODULUS),
+                // matching CPython's tp_hash for arbitrary-precision int results.
+                const PY_HASH_MODULUS: i64 = (1i64 << 61) - 1;
+                let raw: i64 = match result.kind() {
+                    ValueKind::Int(n) => n,
+                    ValueKind::Bool(b) => b as i64,
+                    ValueKind::BigInt(n) => {
+                        // Reduce mod Py_HASH_MODULUS (2^61 - 1), preserving sign.
+                        // n: &BigInt (the borrowed inner value from the Rc).
+                        use crate::value::PyBigInt;
+                        use crate::value::PyToPrimitive;
+                        let modulus = PyBigInt::from(PY_HASH_MODULUS);
+                        let reduced = n.clone() % &modulus;
+                        // `reduced` is in (-modulus, modulus); fits in i64.
+                        reduced.to_i64().unwrap_or(0)
+                    }
+                    _ => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            "__hash__ method should return an integer".to_string(),
+                        ));
+                    }
+                };
+                let hash_val = if raw == -1 { -2 } else { raw };
+                return Ok(Value::int(hash_val));
+            }
+            // No __hash__ at all: use object-identity hash, matching
+            // CPython's default object.__hash__ behaviour.
+            let ptr = Rc::as_ptr(&inst_rc) as i64;
+            let ptr = if ptr == -1 { -2 } else { ptr };
+            return Ok(Value::int(ptr));
+        }
         let hash_val = hash_value(&value)?;
         Ok(Value::int(hash_val))
     }
@@ -2035,6 +2092,17 @@ fn hash_value(value: &Value) -> Result<i64> {
             "TypeError",
             "unhashable type: 'set'".to_string(),
         )),
+        // PyInstance arriving here means either the caller didn't intercept
+        // it for __hash__ dispatch (e.g. a tuple element), or no __hash__
+        // method exists.  Use the actual class name rather than the generic
+        // "object" returned by builtin_type_name.
+        ValueKind::PyInstance(inst) => {
+            let class_name = inst.borrow().class.borrow().name.clone();
+            Err(PyError::named(
+                "TypeError",
+                format!("unhashable type: '{class_name}'"),
+            ))
+        }
         _ => Err(PyError::named(
             "TypeError",
             format!(
