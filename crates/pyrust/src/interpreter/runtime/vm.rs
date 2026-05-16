@@ -411,6 +411,64 @@ impl Interpreter {
         result
     }
 
+    /// Materialise a `PyError` into a Python exception value and route it
+    /// through the active handler stack.
+    ///
+    /// Returns `Ok(handler_pc)` when the error is caught — the caller sets
+    /// `pc = handler_pc` and continues the VM loop.  Returns `Err(e)` when
+    /// no handler is in scope; the caller propagates upward.
+    ///
+    /// `#[cold]` + `#[inline(never)]` keep the large match and all its
+    /// temporaries in a separate Rust frame, preventing them from inflating
+    /// `run_bytecode_inner_impl`'s debug-mode stack frame at every `vm_try!`
+    /// expansion site.
+    #[cold]
+    #[inline(never)]
+    fn handle_vm_error(
+        &mut self,
+        e: PyError,
+        exc_handlers: &mut Vec<usize>,
+        exc_ctx_frame_base: usize,
+    ) -> std::result::Result<usize, PyError> {
+        let Some(h) = exc_handlers.pop() else {
+            return Err(e);
+        };
+        let exc_val = match e {
+            PyError::Raised(v) => v,
+            PyError::Runtime(msg) => {
+                if let Some(cls) = self.exc_classes.get("RuntimeError") {
+                    instantiate_exception(cls, vec![Value::string(msg)])
+                } else {
+                    match self.instantiate_named_exception("RuntimeError", msg) {
+                        Ok(v) => v,
+                        Err(e2) => return Err(e2),
+                    }
+                }
+            }
+            PyError::Named(cls, msg) => {
+                match self.instantiate_named_exception(&cls, msg) {
+                    Ok(v) => v,
+                    Err(e2) => return Err(e2),
+                }
+            }
+            PyError::Class(cls, msg) => {
+                instantiate_exception(cls, vec![Value::string(msg)])
+            }
+            other => return Err(other),
+        };
+        self.attach_implicit_context(&exc_val);
+        if self.handled_exc_stack.len() > exc_ctx_frame_base
+            && let Some(top) = self.handled_exc_stack.last()
+            && let Some(active) = self.active_exception.as_ref()
+            && Self::values_are_same_exception(top, active)
+        {
+            self.handled_exc_stack.pop();
+        }
+        self.handled_exc_stack.push(exc_val.clone());
+        self.active_exception = Some(exc_val);
+        Ok(h)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn run_bytecode_inner_impl(
         &mut self,
@@ -465,79 +523,10 @@ impl Interpreter {
             ($expr:expr) => {
                 match $expr {
                     Ok(v) => v,
-                    Err(e) => {
-                        if let Some(h) = exc_handlers.pop() {
-                            let exc_val = match e {
-                                PyError::Raised(v) => v,
-                                PyError::Runtime(msg) => {
-                                    // Fast path via exc_classes when available;
-                                    // fall back to env lookup (should never fire
-                                    // in a correctly initialised interpreter).
-                                    if let Some(cls) = self.exc_classes.get("RuntimeError") {
-                                        instantiate_exception(cls, vec![Value::string(msg)])
-                                    } else {
-                                        match self.instantiate_named_exception("RuntimeError", msg) {
-                                            Ok(v) => v,
-                                            Err(e2) => return Err(e2),
-                                        }
-                                    }
-                                }
-                                PyError::Named(cls, msg) => {
-                                    match self.instantiate_named_exception(&cls, msg) {
-                                        Ok(v) => v,
-                                        Err(e2) => return Err(e2),
-                                    }
-                                }
-                                // Fast path: class identity already known —
-                                // skip the env-hierarchy name lookup that
-                                // `instantiate_named_exception` would do.
-                                PyError::Class(cls, msg) => {
-                                    instantiate_exception(cls, vec![Value::string(msg)])
-                                }
-                                other => return Err(other),
-                            };
-                            // PEP 3134 implicit chaining for *VM-implicit*
-                            // raises (e.g. `1/0` producing
-                            // `PyError::Named("ZeroDivisionError", ...)`
-                            // from a `BinOp` opcode).  Explicit `raise`
-                            // opcodes call `attach_implicit_context` at
-                            // the raise site; this call covers everything
-                            // else by attaching context at the point the
-                            // VM materialises the exception value, BEFORE
-                            // the pop-then-push reshuffle below removes
-                            // the very entry we want to chain from.  The
-                            // method is idempotent (it skips when
-                            // `__context__` is already set), so the
-                            // explicit-raise path is unaffected.
-                            self.attach_implicit_context(&exc_val);
-                            // If the exception we're now dispatching was
-                            // raised *inside* an existing handler body in
-                            // THIS frame, we are leaving that body — pop
-                            // its context-stack entry so a future raise
-                            // here doesn't pick it up.  Detection: the
-                            // existing `active_exception` matches the top
-                            // of `handled_exc_stack` exactly when control
-                            // is currently inside a handler/finally body.
-                            // The depth check protects entries belonging
-                            // to caller frames.
-                            if self.handled_exc_stack.len() > exc_ctx_frame_base
-                                && let Some(top) = self.handled_exc_stack.last()
-                                && let Some(active) = self.active_exception.as_ref()
-                                && Self::values_are_same_exception(top, active)
-                            {
-                                self.handled_exc_stack.pop();
-                            }
-                            // Push the new exception so a `raise` inside
-                            // the about-to-run handler/finally body sees
-                            // it as the implicit `__context__`.
-                            self.handled_exc_stack.push(exc_val.clone());
-                            self.active_exception = Some(exc_val);
-                            pc = h;
-                            continue 'vm;
-                        } else {
-                            return Err(e);
-                        }
-                    }
+                    Err(e) => match self.handle_vm_error(e, &mut exc_handlers, exc_ctx_frame_base) {
+                        Ok(h) => { pc = h; continue 'vm; }
+                        Err(e) => return Err(e),
+                    },
                 }
             };
         }

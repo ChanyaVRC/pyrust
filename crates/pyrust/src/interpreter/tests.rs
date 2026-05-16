@@ -245,7 +245,7 @@ except RecursionError:
         // Must run on a large-stack thread; Interpreter (Rc-based) is created
         // inside so Send is not required for the interpreter itself.
         let caught: bool = std::thread::Builder::new()
-            .stack_size(512 * 1024 * 1024)
+            .stack_size(256 * 1024 * 1024)
             .spawn(move || {
                 let tokens = Lexer::new(src).unwrap().into_tokens();
                 let program = Parser::new(tokens).parse_program().unwrap();
@@ -271,7 +271,7 @@ result = count(200)
         // Large-stack thread because 200 Python frames × ~80 KB/frame in debug
         // mode exceeds the test harness's default 8 MB stack.
         let ok: bool = std::thread::Builder::new()
-            .stack_size(512 * 1024 * 1024)
+            .stack_size(256 * 1024 * 1024)
             .spawn(move || {
                 let tokens = Lexer::new(src).unwrap().into_tokens();
                 let program = Parser::new(tokens).parse_program().unwrap();
@@ -297,7 +297,7 @@ def fib(n):
 result = fib(35)
 ";
         let ok: bool = std::thread::Builder::new()
-            .stack_size(512 * 1024 * 1024)
+            .stack_size(256 * 1024 * 1024)
             .spawn(move || {
                 let tokens = Lexer::new(src).unwrap().into_tokens();
                 let program = Parser::new(tokens).parse_program().unwrap();
@@ -505,7 +505,7 @@ for i in range(60):
     total = total + square(i)
 ";
         let ok: bool = std::thread::Builder::new()
-            .stack_size(512 * 1024 * 1024)
+            .stack_size(256 * 1024 * 1024)
             .spawn(move || {
                 let tokens = Lexer::new(src).unwrap().into_tokens();
                 let program = Parser::new(tokens).parse_program().unwrap();
@@ -532,7 +532,7 @@ def fact(n):
 result = fact(10)
 ";
         let ok: bool = std::thread::Builder::new()
-            .stack_size(512 * 1024 * 1024)
+            .stack_size(256 * 1024 * 1024)
             .spawn(move || {
                 let tokens = Lexer::new(src).unwrap().into_tokens();
                 let program = Parser::new(tokens).parse_program().unwrap();
@@ -694,7 +694,7 @@ result = fact(10)
         // run_bytecode debug-mode frame is large (~150 KB); spawn with explicit
         // stack so this test stays stable as new VM arms are added.
         let ok: bool = std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
+            .stack_size(8 * 1024 * 1024)
             .spawn(|| {
                 let interpreter = run_program(
                     "def fact(n):\n    if n <= 1: return 1\n    return n * fact(n - 1)\nresult = fact(10)\n",
@@ -712,7 +712,7 @@ result = fact(10)
         // fib(35) without memoization requires ~29M recursive calls and takes seconds.
         // With CallMemo, each unique n is computed once and cached — must finish fast.
         let ok: bool = std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
+            .stack_size(8 * 1024 * 1024)
             .spawn(|| {
                 let interpreter = run_program(
                     "def fib(n):\n    if n <= 1: return n\n    return fib(n-1) + fib(n-2)\nresult = fib(35)\n",
@@ -737,7 +737,7 @@ result = fact(10)
         // Verify correctness for several known Fibonacci values to confirm
         // memoization is not returning stale/wrong cached results.
         let ok: bool = std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
+            .stack_size(8 * 1024 * 1024)
             .spawn(|| {
                 let interp = run_program(
                     "def fib(n):\n    if n <= 1: return n\n    return fib(n-1) + fib(n-2)\n\
