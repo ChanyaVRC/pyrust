@@ -20,6 +20,14 @@ print(x >> 101)   # 0
 print(-1 >> 64)   # -1
 print(0 >> 64)    # 0
 
+# Non-constant sub-64 shifts that overflow i64 (VM fast-path overflow detection).
+n = 63
+print(1 << n)        # 9223372036854775808
+n = 62
+print(2 << n)        # 9223372036854775808
+n = 1
+print(2**62 << n)    # 9223372036854775808
+
 # Negative shift count raises ValueError.
 try:
     _ = 1 << -1

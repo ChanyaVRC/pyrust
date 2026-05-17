@@ -1467,6 +1467,13 @@ pub(crate) fn fold_binop(l: &Value, op: BinaryOp, r: &Value) -> Option<Value> {
         (ValueKind::Int(a), BinaryOp::LShift, ValueKind::Int(b)) if b >= 0 => {
             // Promote to BigInt when the shift overflows i64 — identical to
             // the runtime path in eval_binary.
+            // Cap at 1_000_000 bits: astronomically large shifts (e.g.
+            // `1 << i64::MAX`) would exhaust memory during compilation.
+            // Values above the cap are left for the runtime to handle
+            // (which will raise OverflowError for non-zero LHS).
+            if b > 1_000_000 {
+                return None;
+            }
             let n = b as usize;
             let big = PyBigInt::from(a) << n;
             Some(match big.to_i64() {
