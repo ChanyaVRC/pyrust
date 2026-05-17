@@ -153,8 +153,10 @@ mod tests {
         //    dunders (`__str__`/`__repr__`, `__bool__`/`__len__`,
         //    `__iter__`/`__next__`, `__lt__` etc.) and must not be folded
         //    away even when their result is unused (#538).
+        //    `min` and `max` also dispatch user dunders (`__lt__`/`__gt__`
+        //    via `richcmp_order`) and had `#[pure]` removed in #544.
         for name in [
-            "print", "open", "input", "str", "bool", "list", "tuple", "sorted",
+            "print", "open", "input", "str", "bool", "list", "tuple", "sorted", "min", "max",
         ] {
             assert!(
                 !is_pure(name),

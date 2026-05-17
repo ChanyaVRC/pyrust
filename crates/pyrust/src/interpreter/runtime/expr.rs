@@ -295,6 +295,134 @@ impl Interpreter {
         None
     }
 
+    /// Three-way ordering comparison that dispatches `__lt__` / `__gt__` on
+    /// user instances before falling back to `compare_values` for primitives.
+    ///
+    /// Used by `sorted()` and `min()` — always tries `__lt__` first,
+    /// matching CPython's `Py_LT`-primary reduction for those builtins.
+    /// For `max()` call `richcmp_order_gt` instead, which mirrors CPython's
+    /// `Py_GT`-primary reduction and emits `'>' not supported` on error.
+    ///
+    /// Algorithm:
+    /// 1. If neither operand is a `PyInstance`, delegate to `compare_values`
+    ///    (fast primitive path — zero overhead for the common int/str case).
+    /// 2. Try `a < b` via `__lt__` on `a` / `__gt__` on `b`.  If truthy →
+    ///    `Less`.
+    /// 3. If step 2 returned falsy, try `b < a` to distinguish `Equal` from
+    ///    `Greater`.
+    /// 4. If no dunder was found, fall through to `compare_values` (which
+    ///    raises `TypeError: '<' not supported …`, matching CPython `min` /
+    ///    `sorted` behaviour).
+    pub(crate) fn richcmp_order(
+        &mut self,
+        a: &Value,
+        b: &Value,
+    ) -> Result<std::cmp::Ordering> {
+        use std::cmp::Ordering;
+
+        // Fast path: neither operand is a user instance.
+        if !matches!(a.kind(), ValueKind::PyInstance(_))
+            && !matches!(b.kind(), ValueKind::PyInstance(_))
+        {
+            return compare_values(a, b);
+        }
+
+        // Try a < b (dispatches __lt__ on a, then __gt__ on b).
+        match self.try_dunder_binary(a, b, "__lt__", "__gt__") {
+            Some(Ok(v)) => {
+                let lt = self.truthy_value(&v)?;
+                if lt {
+                    return Ok(Ordering::Less);
+                }
+                // a is not less than b; try b < a to tell Equal from Greater.
+                match self.try_dunder_binary(b, a, "__lt__", "__gt__") {
+                    Some(Ok(v2)) => {
+                        return Ok(if self.truthy_value(&v2)? {
+                            Ordering::Greater
+                        } else {
+                            Ordering::Equal
+                        });
+                    }
+                    Some(Err(e)) => return Err(e),
+                    // No reverse dunder found: incomparable pair — raise
+                    // TypeError just as CPython does for these builtins.
+                    None => return compare_values(a, b),
+                }
+            }
+            Some(Err(e)) => return Err(e),
+            // No __lt__/__gt__ on either operand; fall through to primitive
+            // comparison, which raises TypeError for incomparable instance
+            // pairs — matches CPython's behaviour when no comparison dunder
+            // is defined.
+            None => compare_values(a, b),
+        }
+    }
+
+    /// Three-way ordering comparison for `max()` — tries `__gt__` first,
+    /// matching CPython's `Py_GT`-primary reduction for `max`.
+    ///
+    /// Emits `TypeError: '>' not supported …` (not `'<'`) when no comparison
+    /// dunder is found, matching CPython 3.12 parity for `max()`.
+    ///
+    /// Algorithm mirrors `richcmp_order` but with primary/reflected dunders
+    /// swapped and the fallback error using `>` instead of `<`.
+    pub(crate) fn richcmp_order_gt(
+        &mut self,
+        a: &Value,
+        b: &Value,
+    ) -> Result<std::cmp::Ordering> {
+        use std::cmp::Ordering;
+
+        // Fast path: neither operand is a user instance.
+        if !matches!(a.kind(), ValueKind::PyInstance(_))
+            && !matches!(b.kind(), ValueKind::PyInstance(_))
+        {
+            return compare_values(a, b);
+        }
+
+        // Try a > b (dispatches __gt__ on a, then __lt__ on b).
+        match self.try_dunder_binary(a, b, "__gt__", "__lt__") {
+            Some(Ok(v)) => {
+                let gt = self.truthy_value(&v)?;
+                if gt {
+                    return Ok(Ordering::Greater);
+                }
+                // a is not greater than b; try b > a to tell Equal from Less.
+                match self.try_dunder_binary(b, a, "__gt__", "__lt__") {
+                    Some(Ok(v2)) => {
+                        return Ok(if self.truthy_value(&v2)? {
+                            Ordering::Less
+                        } else {
+                            Ordering::Equal
+                        });
+                    }
+                    Some(Err(e)) => return Err(e),
+                    // No reverse dunder found: incomparable pair — raise
+                    // TypeError just as CPython does for max().
+                    None => return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "'>' not supported between instances of '{}' and '{}'",
+                            value_type_name_str(a),
+                            value_type_name_str(b),
+                        ),
+                    )),
+                }
+            }
+            Some(Err(e)) => return Err(e),
+            // No __gt__/__lt__ on either operand; emit '>' error matching
+            // CPython's max() TypeError wording.
+            None => Err(PyError::named(
+                "TypeError",
+                format!(
+                    "'>' not supported between instances of '{}' and '{}'",
+                    value_type_name_str(a),
+                    value_type_name_str(b),
+                ),
+            )),
+        }
+    }
+
     /// Convert a `Value` to a `PyKey`, dispatching the user's `__hash__`
     /// when the value is a `PyInstance` so user-defined classes can be used
     /// as dict/set keys (issue #368).
