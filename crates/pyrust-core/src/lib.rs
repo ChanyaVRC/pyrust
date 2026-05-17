@@ -174,6 +174,35 @@ pub enum PyKey {
     },
 }
 
+// ── PyKey cross-type numeric helpers ─────────────────────────────────────────
+//
+// CPython guarantees: `hash(x) == hash(y)` whenever `x == y`, even across
+// numeric types.  In particular `hash(1.0) == hash(1)` and `1.0 == 1` for
+// dict/set purposes.  The helpers below implement the required logic without
+// depending on the `pyrust` interpreter crate (which would create a cycle).
+
+/// If `bits` (an `f64` stored as its IEEE-754 bit pattern) represents a
+/// finite, integer-valued float whose magnitude fits in an `i64`, return
+/// `Some(i as i64)`.  Otherwise return `None`.
+///
+/// Safe conversion range: `[i64::MIN, 2^63)`.  `i64::MIN as f64` is exactly
+/// representable; `i64::MAX as f64` rounds up to `2^63`, so the upper bound
+/// is strictly less than `-(i64::MIN as f64)`.
+#[inline]
+fn float_bits_as_exact_i64(bits: u64) -> Option<i64> {
+    let f = f64::from_bits(bits);
+    if !f.is_finite() || f.fract() != 0.0 {
+        return None;
+    }
+    let min_f = i64::MIN as f64; // exact: -9223372036854775808.0
+    let max_exclusive = -min_f; // 9223372036854775808.0 = 2^63
+    if f >= min_f && f < max_exclusive {
+        Some(f as i64)
+    } else {
+        None
+    }
+}
+
 impl PartialEq for PyKey {
     fn eq(&self, other: &Self) -> bool {
         // In CPython, `True == 1` and `False == 0`, and they hash equal, so
@@ -181,6 +210,10 @@ impl PartialEq for PyKey {
         // (e.g. `{True: 1, 1: 2}` keeps `True` as the visible key) by storing
         // `PyKey::Bool` distinctly, but we make `Bool(b) == Int(b as i64)` so
         // lookups across the two types succeed.
+        //
+        // CPython also guarantees `1.0 == 1` for dict/set purposes, so
+        // `Float` and `Int` (or `Bool`) must compare equal when the float is
+        // integer-valued and representable as an `i64`.
         //
         // Two `Object` keys compare equal only when the underlying value
         // identity matches.  This is intentionally strict: the dict/set
@@ -191,7 +224,16 @@ impl PartialEq for PyKey {
             (PyKey::Int(a), PyKey::Int(b)) => a == b,
             (PyKey::Bool(a), PyKey::Bool(b)) => a == b,
             (PyKey::Bool(a), PyKey::Int(b)) | (PyKey::Int(b), PyKey::Bool(a)) => *b == *a as i64,
-            (PyKey::Float(a), PyKey::Float(b)) => a == b,
+            (PyKey::Float(a), PyKey::Float(b)) => f64::from_bits(*a) == f64::from_bits(*b),
+            // Cross-type: Float vs Int (and Bool, since Bool is a subtype of int).
+            // A float equals an int key iff the float is finite, has no
+            // fractional part, and its value equals the integer exactly.
+            (PyKey::Float(bits), PyKey::Int(i)) | (PyKey::Int(i), PyKey::Float(bits)) => {
+                float_bits_as_exact_i64(*bits).is_some_and(|fi| fi == *i)
+            }
+            (PyKey::Float(bits), PyKey::Bool(b)) | (PyKey::Bool(b), PyKey::Float(bits)) => {
+                float_bits_as_exact_i64(*bits).is_some_and(|fi| fi == *b as i64)
+            }
             (PyKey::Str(a), PyKey::Str(b)) => a == b,
             (PyKey::None, PyKey::None) => true,
             (PyKey::FrozenSet(a), PyKey::FrozenSet(b)) => a == b,
@@ -210,6 +252,12 @@ impl Hash for PyKey {
         // collide in dict/set buckets and PartialEq can deduplicate them.
         // We therefore deliberately omit `std::mem::discriminant` here and
         // hash a per-variant tag instead, treating Bool as Int.
+        //
+        // `Float` must also hash equal to `Int` when they are equal (CPython
+        // invariant: `hash(1.0) == hash(1)`).  Integer-valued floats use tag 0
+        // and the same `i64` value as the equivalent `Int`, satisfying the
+        // `Hash + PartialEq` contract.  Fractional or non-finite floats use
+        // tag 1, keeping them in a separate hash space.
         match self {
             PyKey::Int(v) => {
                 0u8.hash(state);
@@ -220,8 +268,17 @@ impl Hash for PyKey {
                 (*b as i64).hash(state);
             }
             PyKey::Float(bits) => {
-                1u8.hash(state);
-                bits.hash(state);
+                if let Some(i) = float_bits_as_exact_i64(*bits) {
+                    // Integer-valued float: hash identically to PyKey::Int(i)
+                    // so that equal keys land in the same bucket.
+                    0u8.hash(state);
+                    i.hash(state);
+                } else {
+                    // Fractional or non-finite float: use a distinct tag so
+                    // it can never collide with Int/Bool hashes.
+                    1u8.hash(state);
+                    bits.hash(state);
+                }
             }
             PyKey::Str(s) => {
                 2u8.hash(state);
@@ -3050,5 +3107,109 @@ mod tests {
             m
         });
         assert_ne!(a.value_id(), c.value_id());
+    }
+
+    // ── float_bits_as_exact_i64 boundary tests ───────────────────────────────
+
+    #[test]
+    fn float_bits_exact_i64_integer_values() {
+        // Ordinary integer-valued floats within i64 range.
+        assert_eq!(float_bits_as_exact_i64(1.0f64.to_bits()), Some(1));
+        assert_eq!(float_bits_as_exact_i64((-1.0f64).to_bits()), Some(-1));
+        assert_eq!(float_bits_as_exact_i64(0.0f64.to_bits()), Some(0));
+        assert_eq!(float_bits_as_exact_i64(42.0f64.to_bits()), Some(42));
+        assert_eq!(
+            float_bits_as_exact_i64(1_000_000_000_000_000.0f64.to_bits()),
+            Some(1_000_000_000_000_000)
+        );
+    }
+
+    #[test]
+    fn float_bits_exact_i64_fractional_returns_none() {
+        assert_eq!(float_bits_as_exact_i64(0.5f64.to_bits()), None);
+        assert_eq!(float_bits_as_exact_i64(1.5f64.to_bits()), None);
+        assert_eq!(float_bits_as_exact_i64((-0.1f64).to_bits()), None);
+    }
+
+    #[test]
+    fn float_bits_exact_i64_non_finite_returns_none() {
+        assert_eq!(float_bits_as_exact_i64(f64::INFINITY.to_bits()), None);
+        assert_eq!(float_bits_as_exact_i64(f64::NEG_INFINITY.to_bits()), None);
+        assert_eq!(float_bits_as_exact_i64(f64::NAN.to_bits()), None);
+    }
+
+    #[test]
+    fn float_bits_exact_i64_i64_min_is_exact() {
+        // i64::MIN as f64 is exactly representable (-2^63); must return Some.
+        let min_f = i64::MIN as f64;
+        assert_eq!(float_bits_as_exact_i64(min_f.to_bits()), Some(i64::MIN));
+    }
+
+    #[test]
+    fn float_bits_exact_i64_i64_max_rounds_up() {
+        // i64::MAX = 2^63-1 is not exactly representable as f64; the nearest f64
+        // is 2^63, which is out of range.  Must return None.
+        let max_f = i64::MAX as f64; // rounds up to 2^63
+        assert_eq!(float_bits_as_exact_i64(max_f.to_bits()), None);
+    }
+
+    #[test]
+    fn float_bits_exact_i64_out_of_range_large() {
+        // 2^63 is exactly representable but exceeds i64::MAX (= 2^63 - 1).
+        let too_big = 9_223_372_036_854_775_808.0f64; // 2^63
+        assert_eq!(float_bits_as_exact_i64(too_big.to_bits()), None);
+        // 2^64 — clearly out of range.
+        let much_bigger = 1.844_674_407_370_955_2e19_f64; // 2^64
+        assert_eq!(float_bits_as_exact_i64(much_bigger.to_bits()), None);
+        // Negative out-of-range: the f64 immediately below i64::MIN as f64.
+        // i64::MIN as f64 is exactly -2^63 (in range); the next f64 towards
+        // -inf has integer value -2^63 - 2^10, which is out of i64 range.
+        let min_f = i64::MIN as f64;
+        // Construct the next representable f64 below min_f by decrementing bits.
+        let next_below_bits = min_f.to_bits() + 1; // negative floats: +1 bits → more negative
+        let too_small = f64::from_bits(next_below_bits);
+        assert!(
+            too_small < min_f,
+            "sanity: next_below must be more negative than i64::MIN as f64"
+        );
+        assert_eq!(float_bits_as_exact_i64(next_below_bits), None);
+    }
+
+    #[test]
+    fn pykey_float_int_cross_type_eq() {
+        // Core contract: Float(1.0) == Int(1) and they hash equal.
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn key_hash(k: &PyKey) -> u64 {
+            let mut h = DefaultHasher::new();
+            k.hash(&mut h);
+            h.finish()
+        }
+
+        let f1 = PyKey::Float(1.0f64.to_bits());
+        let i1 = PyKey::Int(1);
+        assert_eq!(f1, i1, "Float(1.0) must equal Int(1)");
+        assert_eq!(
+            key_hash(&f1),
+            key_hash(&i1),
+            "hash(Float(1.0)) must equal hash(Int(1))"
+        );
+
+        // 0.5 must NOT equal 0
+        let f05 = PyKey::Float(0.5f64.to_bits());
+        let i0 = PyKey::Int(0);
+        assert_ne!(f05, i0, "Float(0.5) must not equal Int(0)");
+
+        // Float(-1.0) == Int(-1)
+        let fn1 = PyKey::Float((-1.0f64).to_bits());
+        let in1 = PyKey::Int(-1);
+        assert_eq!(fn1, in1, "Float(-1.0) must equal Int(-1)");
+        assert_eq!(key_hash(&fn1), key_hash(&in1), "hash contract for -1.0/-1");
+
+        // Float(1.0) == Bool(true)
+        let bt = PyKey::Bool(true);
+        assert_eq!(f1, bt, "Float(1.0) must equal Bool(true)");
+        assert_eq!(key_hash(&f1), key_hash(&bt), "hash contract for 1.0/true");
     }
 }
