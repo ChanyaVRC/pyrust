@@ -33,31 +33,122 @@ pub(crate) fn value_type_name_str(v: &Value) -> std::borrow::Cow<'static, str> {
     pyrust_core::builtin_type_name(v)
 }
 
+/// Exact ordering between an `i64` integer and an `f64` float.
+///
+/// Mirrors CPython's richcmp for int vs float: instead of converting the int
+/// to f64 (lossy beyond 2^53), we convert the float to its exact integer value
+/// and compare there.  Handles all finite and non-finite floats:
+///
+/// - NaN: returns `None` (caller must treat as unordered; the `compare`
+///   wrapper in `expr.rs` already short-circuits NaN to `false`).
+/// - `±inf`: ordered relative to every finite i64.
+/// - Integer-valued finite float: compare `(f as i64)` to `i`.
+/// - Fractional finite float: `i` equals `f.trunc() as i64` only if the
+///   fractional part pushes `f` strictly away — positive fraction means
+///   `f > i`, negative fraction means `f < i`.
+/// - Out-of-i64-range finite float: sign decides ordering.
+fn int_float_cmp(i: i64, f: f64) -> Option<std::cmp::Ordering> {
+    if f.is_nan() {
+        return None;
+    }
+    // f is ±inf or finite.
+    const I64_MAX_PLUS_ONE: f64 = 9_223_372_036_854_775_808.0_f64; // 2^63
+    if f >= I64_MAX_PLUS_ONE {
+        // float is larger than every i64
+        return Some(std::cmp::Ordering::Less);
+    }
+    if f < (i64::MIN as f64) {
+        // float is smaller than every i64
+        return Some(std::cmp::Ordering::Greater);
+    }
+    // f is finite and in [i64::MIN, 2^63); safe to cast.
+    let trunc = f.trunc();
+    let trunc_i = trunc as i64;
+    // base = how i compares to trunc_i (the integer value of f rounded toward zero).
+    let base = i.cmp(&trunc_i);
+    if base != std::cmp::Ordering::Equal || f == trunc {
+        // i != trunc_i: the ordering is unambiguous.
+        // i == trunc_i and f is integer-valued: exact equality.
+        Some(base)
+    } else {
+        // i == trunc_i but f has a fractional part: f lies strictly between
+        // two integers.  Positive fraction: trunc_i < f < trunc_i+1, so i < f.
+        // Negative fraction: trunc_i-1 < f < trunc_i, so i > f.
+        if f > 0.0 {
+            Some(std::cmp::Ordering::Less)
+        } else {
+            Some(std::cmp::Ordering::Greater)
+        }
+    }
+}
+
+/// Exact ordering between a `BigInt` and an `f64` float.
+///
+/// Uses `BigInt::from_f64` (returns `None` for NaN/infinity; for fractional
+/// finite floats it truncates toward zero rather than returning `None`) for
+/// the integer-valued case — guarded by `f == f.trunc()` so fractional
+/// floats fall through to the heuristic path below.  For out-of-range or
+/// non-integer floats, falls back to a sign + magnitude heuristic that
+/// mirrors CPython's implementation.
+fn bigint_float_cmp(big: &crate::value::PyBigInt, f: f64) -> Option<std::cmp::Ordering> {
+    use crate::value::PyBigInt;
+    use num_traits::FromPrimitive;
+    if f.is_nan() {
+        return None;
+    }
+    // For integer-valued finite floats: convert to BigInt and compare exactly.
+    if f.is_finite() && f == f.trunc() {
+        return PyBigInt::from_f64(f).map(|fi| big.cmp(&fi));
+    }
+    if f.is_infinite() {
+        return if f > 0.0 {
+            Some(std::cmp::Ordering::Less) // big < +inf
+        } else {
+            Some(std::cmp::Ordering::Greater) // big > -inf
+        };
+    }
+    // Fractional finite float: compare big to f.trunc() and adjust.
+    let trunc = f.trunc();
+    let base = PyBigInt::from_f64(trunc)
+        .map(|ti| big.cmp(&ti))
+        .unwrap_or(std::cmp::Ordering::Less);
+    if base != std::cmp::Ordering::Equal {
+        return Some(base);
+    }
+    // big == trunc but f has a fractional part.
+    if f > 0.0 {
+        Some(std::cmp::Ordering::Less) // big < f
+    } else {
+        Some(std::cmp::Ordering::Greater) // big > f
+    }
+}
+
 /// Total order for Python values used by `sorted()` / `min()` / `max()` and
 /// comparison operators.  Mirrors CPython's `<` semantics: numbers by
 /// magnitude, strings lexicographically, bools as 0/1, lists and tuples
 /// lexicographically element-by-element.  Incomparable pairs return a
 /// `TypeError`.
 pub(crate) fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
-    use crate::value::{PyBigInt, PyToPrimitive};
+    use crate::value::PyBigInt;
     match (a.kind(), b.kind()) {
         (ValueKind::Int(x), ValueKind::Int(y)) => Ok(x.cmp(&y)),
         (ValueKind::Float(x), ValueKind::Float(y)) => Ok(x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)),
-        (ValueKind::Int(x), ValueKind::Float(y)) => Ok((x as f64).partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal)),
-        (ValueKind::Float(x), ValueKind::Int(y)) => Ok(x.partial_cmp(&(y as f64)).unwrap_or(std::cmp::Ordering::Equal)),
+        // Use exact integer comparison to avoid precision loss beyond 2^53.
+        // int_float_cmp converts the float to an exact integer value rather
+        // than widening the int to f64.  NaN falls through to Equal (the
+        // `compare` wrapper in expr.rs pre-filters NaN via `is_nan` checks).
+        (ValueKind::Int(x), ValueKind::Float(y)) => Ok(int_float_cmp(x, y).unwrap_or(std::cmp::Ordering::Equal)),
+        (ValueKind::Float(x), ValueKind::Int(y)) => Ok(int_float_cmp(y, x).map(|o| o.reverse()).unwrap_or(std::cmp::Ordering::Equal)),
         (ValueKind::Bool(x), ValueKind::Bool(y)) => Ok(x.cmp(&y)),
         (ValueKind::Bool(x), ValueKind::Int(y)) => Ok((x as i64).cmp(&y)),
         (ValueKind::Int(x), ValueKind::Bool(y)) => Ok(x.cmp(&(y as i64))),
         (ValueKind::BigInt(x), ValueKind::BigInt(y)) => Ok(x.cmp(y)),
         (ValueKind::BigInt(x), ValueKind::Int(y)) => Ok((*x).cmp(&PyBigInt::from(y))),
         (ValueKind::Int(x), ValueKind::BigInt(y)) => Ok(PyBigInt::from(x).cmp(y)),
-        (ValueKind::BigInt(x), ValueKind::Float(y)) => Ok(x
-            .to_f64()
-            .and_then(|xf| xf.partial_cmp(&y))
-            .unwrap_or(std::cmp::Ordering::Equal)),
-        (ValueKind::Float(x), ValueKind::BigInt(y)) => Ok(y
-            .to_f64()
-            .and_then(|yf| x.partial_cmp(&yf))
+        (ValueKind::BigInt(x), ValueKind::Float(y)) => {
+            Ok(bigint_float_cmp(x, y).unwrap_or(std::cmp::Ordering::Equal))
+        }
+        (ValueKind::Float(x), ValueKind::BigInt(y)) => Ok(bigint_float_cmp(y, x)
             .map(|o| o.reverse())
             .unwrap_or(std::cmp::Ordering::Equal)),
         (ValueKind::Str(x), ValueKind::Str(y)) => Ok(x.cmp(y)),
