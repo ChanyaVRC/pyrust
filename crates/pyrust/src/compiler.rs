@@ -4981,8 +4981,23 @@ impl Compiler {
         // We still walk the body textually here so register numbers stay
         // stable across runs (HashSet iteration order is randomised, which
         // would otherwise cause spurious bytecode diffs).
-        let mut ordered: Vec<String> = Vec::with_capacity(body_local.len());
+        //
+        // Issue #546: CPython pre-injects `__qualname__` and `__module__`
+        // into the class namespace before the body runs.  Give them fixed
+        // register slots (0 and 1) so the VM can pre-populate them and so
+        // `locals()` inside the class body always includes them.  If the
+        // user explicitly assigns either name in the body, `collect_local_names`
+        // will have included it in `body_local` already; we skip it here to
+        // avoid a duplicate slot.
+        let mut ordered: Vec<String> = Vec::with_capacity(body_local.len() + 2);
         let mut seen: HashSet<String> = HashSet::new();
+        // CPython injects __module__ first, __qualname__ second.
+        for pre_name in ["__module__", "__qualname__"] {
+            if !body_local.contains(pre_name) {
+                ordered.push(pre_name.to_string());
+                seen.insert(pre_name.to_string());
+            }
+        }
         collect_class_body_names_textual(body, &mut ordered, &mut seen, &body_local);
         for name in body_local.iter() {
             if seen.insert(name.clone()) {
