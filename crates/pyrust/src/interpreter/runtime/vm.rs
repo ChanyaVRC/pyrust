@@ -2047,8 +2047,24 @@ impl Interpreter {
                     // emitted inside the class body record into *this* class
                     // — supports `class A: class B: ...` nesting cleanly.
                     self.class_store_order.push(Vec::new());
+                    // Issue #487: publish a FrameKind::Class view so that
+                    // `locals()` called inside the class body returns the
+                    // partially-built class attrs dict (the fastlocal register
+                    // file) rather than the module globals.  The raw pointer is
+                    // valid for the lifetime of `run_bytecode` — `class_regs`
+                    // is pinned on this stack frame for the entire duration of
+                    // the call.  Popped below unconditionally (even on error).
+                    self.vm_frame_views.push(VmFrameView {
+                        kind: FrameKind::Class,
+                        regs_ptr: class_regs.as_mut_ptr(),
+                        regs_len: class_regs.len(),
+                        local_index: Rc::clone(&local_index),
+                        nonlocal_names: None,
+                        env: None,
+                    });
                     let body_result = self.run_bytecode(&class_code, &mut class_regs);
-                    // Always pop, even on error, to keep the stack balanced.
+                    // Always pop both stacks, even on error, to keep them balanced.
+                    self.vm_frame_views.pop();
                     let mut store_order = self
                         .class_store_order
                         .pop()
