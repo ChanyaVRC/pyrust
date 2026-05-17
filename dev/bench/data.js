@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779057012130,
+  "lastUpdate": 1779060204026,
   "repoUrl": "https://github.com/ChanyaVRC/pyrust",
   "entries": {
     "Benchmark": [
@@ -189476,6 +189476,2592 @@ window.BENCHMARK_DATA = {
             "name": "test_sys_exit_finally [Python]",
             "value": 10.512,
             "range": "±0.35 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "63221603+ChanyaVRC@users.noreply.github.com",
+            "name": "ChanyaVRC",
+            "username": "ChanyaVRC"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b9bf9967a0fcaaf9d598e6e6dc7e00ad57265e8b",
+          "message": "Merge pull request #567 from ChanyaVRC/fix/337-complex-optimizer\n\nfix(#337): extend const_eq and intern_const_in_pool to cover Complex, BigInt, Bytes",
+          "timestamp": "2026-05-18T08:20:30+09:00",
+          "tree_id": "e43d580b98d674a6982799b64fbe92833451adfe",
+          "url": "https://github.com/ChanyaVRC/pyrust/commit/b9bf9967a0fcaaf9d598e6e6dc7e00ad57265e8b"
+        },
+        "date": 1779060202211,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "test_while_cmp [PyRust]",
+            "value": 64.166,
+            "range": "±0.172 ms",
+            "unit": "ms",
+            "extra": "iters=50 trim=10%"
+          },
+          {
+            "name": "test_while_cmp [Python]",
+            "value": 256.62,
+            "range": "±8.926 ms",
+            "unit": "ms",
+            "extra": "iters=50 trim=10%"
+          },
+          {
+            "name": "test_while_true [PyRust]",
+            "value": 34.575,
+            "range": "±0.253 ms",
+            "unit": "ms",
+            "extra": "iters=50 trim=10%"
+          },
+          {
+            "name": "test_while_true [Python]",
+            "value": 118.426,
+            "range": "±4.433 ms",
+            "unit": "ms",
+            "extra": "iters=50 trim=10%"
+          },
+          {
+            "name": "test_range_loop [PyRust]",
+            "value": 22.158,
+            "range": "±0.206 ms",
+            "unit": "ms",
+            "extra": "iters=50 trim=10%"
+          },
+          {
+            "name": "test_range_loop [Python]",
+            "value": 93.916,
+            "range": "±3.058 ms",
+            "unit": "ms",
+            "extra": "iters=50 trim=10%"
+          },
+          {
+            "name": "test_const_fold [PyRust]",
+            "value": 21.973,
+            "range": "±0.166 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_const_fold [Python]",
+            "value": 82.482,
+            "range": "±2.226 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_range_loop_step [PyRust]",
+            "value": 11.824,
+            "range": "±0.155 ms",
+            "unit": "ms",
+            "extra": "iters=50 trim=10%"
+          },
+          {
+            "name": "test_range_loop_step [Python]",
+            "value": 52.345,
+            "range": "±1.647 ms",
+            "unit": "ms",
+            "extra": "iters=50 trim=10%"
+          },
+          {
+            "name": "test_named_exception_identity [PyRust]",
+            "value": 9.15,
+            "range": "±0.187 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_named_exception_identity [Python]",
+            "value": 12.598,
+            "range": "±0.48 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_recursion_error_hierarchy [PyRust]",
+            "value": 8.262,
+            "range": "±0.263 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_recursion_error_hierarchy [Python]",
+            "value": 10.162,
+            "range": "±0.32 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_insertion_sort [PyRust]",
+            "value": 3.845,
+            "range": "±0.032 ms",
+            "unit": "ms",
+            "extra": "iters=15 trim=10%"
+          },
+          {
+            "name": "test_insertion_sort [Python]",
+            "value": 12.729,
+            "range": "±0.299 ms",
+            "unit": "ms",
+            "extra": "iters=15 trim=10%"
+          },
+          {
+            "name": "test_itertools_more [PyRust]",
+            "value": 3.134,
+            "range": "±0.101 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_itertools_more [Python]",
+            "value": 12.421,
+            "range": "±0.274 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_fib_iterative [PyRust]",
+            "value": 3.091,
+            "range": "±0.049 ms",
+            "unit": "ms",
+            "extra": "iters=40 trim=10%"
+          },
+          {
+            "name": "test_fib_iterative [Python]",
+            "value": 13.723,
+            "range": "±0.305 ms",
+            "unit": "ms",
+            "extra": "iters=40 trim=10%"
+          },
+          {
+            "name": "test_dunder_protocol [PyRust]",
+            "value": 2.998,
+            "range": "±0.195 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_dunder_protocol [Python]",
+            "value": 12.031,
+            "range": "±0.612 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_many_locals [PyRust]",
+            "value": 2.549,
+            "range": "±0.128 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_many_locals [Python]",
+            "value": 12.885,
+            "range": "±0.918 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_numeric_builtins [PyRust]",
+            "value": 2.329,
+            "range": "±0.247 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_numeric_builtins [Python]",
+            "value": 13.015,
+            "range": "±0.525 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_iter_dispatch [PyRust]",
+            "value": 2.293,
+            "range": "±0.077 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_iter_dispatch [Python]",
+            "value": 14.513,
+            "range": "±0.78 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_match [PyRust]",
+            "value": 2.284,
+            "range": "±0.093 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_match [Python]",
+            "value": 13.018,
+            "range": "±0.426 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_nested_closure_capture [PyRust]",
+            "value": 2.189,
+            "range": "±0.153 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_nested_closure_capture [Python]",
+            "value": 10.863,
+            "range": "±0.58 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_except_finally_break [PyRust]",
+            "value": 2.095,
+            "range": "±0.191 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_except_finally_break [Python]",
+            "value": 12.765,
+            "range": "±0.486 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_file_io [PyRust]",
+            "value": 2.088,
+            "range": "±0.241 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_file_io [Python]",
+            "value": 11.529,
+            "range": "±0.54 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_functools_more [PyRust]",
+            "value": 2.061,
+            "range": "±0.036 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_functools_more [Python]",
+            "value": 13.398,
+            "range": "±0.144 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_while_index_for [PyRust]",
+            "value": 2.026,
+            "range": "±0.063 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_while_index_for [Python]",
+            "value": 11.194,
+            "range": "±0.215 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_os_fs_ops [PyRust]",
+            "value": 1.995,
+            "range": "±0.043 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_os_fs_ops [Python]",
+            "value": 11.214,
+            "range": "±0.319 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_fstring_format_spec [PyRust]",
+            "value": 1.933,
+            "range": "±0.056 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_fstring_format_spec [Python]",
+            "value": 10.977,
+            "range": "±0.521 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_getitem_iter_protocol [PyRust]",
+            "value": 1.856,
+            "range": "±0.054 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_getitem_iter_protocol [Python]",
+            "value": 11.145,
+            "range": "±0.711 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_exceptions [PyRust]",
+            "value": 1.849,
+            "range": "±0.047 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_exceptions [Python]",
+            "value": 11.335,
+            "range": "±0.464 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_bound_method_mutation [PyRust]",
+            "value": 1.849,
+            "range": "±0.062 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_bound_method_mutation [Python]",
+            "value": 10.782,
+            "range": "±0.261 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_container_protocol [PyRust]",
+            "value": 1.821,
+            "range": "±0.051 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_container_protocol [Python]",
+            "value": 11.579,
+            "range": "±0.265 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_fstring [PyRust]",
+            "value": 1.814,
+            "range": "±0.152 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_fstring [Python]",
+            "value": 11.791,
+            "range": "±0.452 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_super_classmethod_staticmethod [PyRust]",
+            "value": 1.802,
+            "range": "±0.055 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_super_classmethod_staticmethod [Python]",
+            "value": 11.089,
+            "range": "±0.255 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_exception_context [PyRust]",
+            "value": 1.784,
+            "range": "±0.046 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_exception_context [Python]",
+            "value": 12.324,
+            "range": "±0.773 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_builtin_extras [PyRust]",
+            "value": 1.778,
+            "range": "±0.038 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_builtin_extras [Python]",
+            "value": 10.611,
+            "range": "±0.253 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_primitive_class_shape [PyRust]",
+            "value": 1.774,
+            "range": "±0.074 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_primitive_class_shape [Python]",
+            "value": 10.884,
+            "range": "±0.419 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_op_overload [PyRust]",
+            "value": 1.77,
+            "range": "±0.163 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_op_overload [Python]",
+            "value": 12.087,
+            "range": "±0.579 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_fstring_capture [PyRust]",
+            "value": 1.758,
+            "range": "±0.097 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_fstring_capture [Python]",
+            "value": 11.147,
+            "range": "±0.485 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_list_repeat [PyRust]",
+            "value": 1.742,
+            "range": "±0.046 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_list_repeat [Python]",
+            "value": 11.397,
+            "range": "±0.216 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_container_eq_dispatches_eq [PyRust]",
+            "value": 1.707,
+            "range": "±0.04 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_container_eq_dispatches_eq [Python]",
+            "value": 10.308,
+            "range": "±0.073 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_counter_arith [PyRust]",
+            "value": 1.705,
+            "range": "±0.039 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_counter_arith [Python]",
+            "value": 12.522,
+            "range": "±0.395 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_typed_builtins_tier1 [PyRust]",
+            "value": 1.702,
+            "range": "±0.048 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_typed_builtins_tier1 [Python]",
+            "value": 10.903,
+            "range": "±0.304 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_dunder_arithmetic [PyRust]",
+            "value": 1.699,
+            "range": "±0.043 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_dunder_arithmetic [Python]",
+            "value": 10.595,
+            "range": "±0.291 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_frozenset [PyRust]",
+            "value": 1.68,
+            "range": "±0.142 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_frozenset [Python]",
+            "value": 10.695,
+            "range": "±0.299 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_cmp_str [PyRust]",
+            "value": 1.674,
+            "range": "±0.089 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_cmp_str [Python]",
+            "value": 10.388,
+            "range": "±0.301 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_bytes_encoding [PyRust]",
+            "value": 1.673,
+            "range": "±0.039 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_bytes_encoding [Python]",
+            "value": 10.521,
+            "range": "±0.308 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_functions [PyRust]",
+            "value": 1.672,
+            "range": "±0.184 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_functions [Python]",
+            "value": 10.625,
+            "range": "±0.325 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_any_all_bool_dunder [PyRust]",
+            "value": 1.671,
+            "range": "±0.069 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_any_all_bool_dunder [Python]",
+            "value": 10.657,
+            "range": "±0.441 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_collections [PyRust]",
+            "value": 1.664,
+            "range": "±0.128 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_collections [Python]",
+            "value": 11.197,
+            "range": "±0.784 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_collections [PyRust]",
+            "value": 1.645,
+            "range": "±0.031 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_collections [Python]",
+            "value": 12.456,
+            "range": "±0.151 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_itertools [PyRust]",
+            "value": 1.633,
+            "range": "±0.047 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_itertools [Python]",
+            "value": 10.463,
+            "range": "±0.25 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_custom_hash_eq_key [PyRust]",
+            "value": 1.63,
+            "range": "±0.078 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_custom_hash_eq_key [Python]",
+            "value": 10.263,
+            "range": "±0.131 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_vars_insertion_order [PyRust]",
+            "value": 1.628,
+            "range": "±0.039 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_vars_insertion_order [Python]",
+            "value": 11.005,
+            "range": "±0.39 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_generator_protocol [PyRust]",
+            "value": 1.61,
+            "range": "±0.037 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_generator_protocol [Python]",
+            "value": 10.811,
+            "range": "±0.336 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_getattr_builtins [PyRust]",
+            "value": 1.605,
+            "range": "±0.046 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_getattr_builtins [Python]",
+            "value": 10.567,
+            "range": "±0.46 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_name_resolution_paths [PyRust]",
+            "value": 1.6,
+            "range": "±0.062 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_name_resolution_paths [Python]",
+            "value": 11.005,
+            "range": "±0.615 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_bytes [PyRust]",
+            "value": 1.594,
+            "range": "±0.08 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_bytes [Python]",
+            "value": 10.351,
+            "range": "±0.371 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_tuple_as_key [PyRust]",
+            "value": 1.589,
+            "range": "±0.066 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_tuple_as_key [Python]",
+            "value": 10.995,
+            "range": "±0.247 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_set_methods [PyRust]",
+            "value": 1.583,
+            "range": "±0.05 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_set_methods [Python]",
+            "value": 10.176,
+            "range": "±0.187 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_generators_advanced [PyRust]",
+            "value": 1.581,
+            "range": "±0.046 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_generators_advanced [Python]",
+            "value": 10.762,
+            "range": "±0.445 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_generator_frame_outcome [PyRust]",
+            "value": 1.577,
+            "range": "±0.054 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_generator_frame_outcome [Python]",
+            "value": 10.861,
+            "range": "±0.454 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_variadic_generator [PyRust]",
+            "value": 1.575,
+            "range": "±0.051 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_variadic_generator [Python]",
+            "value": 10.794,
+            "range": "±0.343 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_inplace_dunders [PyRust]",
+            "value": 1.574,
+            "range": "±0.078 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_inplace_dunders [Python]",
+            "value": 10.767,
+            "range": "±0.694 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_pep448 [PyRust]",
+            "value": 1.573,
+            "range": "±0.094 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_pep448 [Python]",
+            "value": 10.474,
+            "range": "±0.231 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_str_methods_2 [PyRust]",
+            "value": 1.566,
+            "range": "±0.059 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_str_methods_2 [Python]",
+            "value": 10.819,
+            "range": "±0.298 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_issue_438_algebraic_dunder [PyRust]",
+            "value": 1.562,
+            "range": "±0.105 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_issue_438_algebraic_dunder [Python]",
+            "value": 10.172,
+            "range": "±0.498 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_vars_dir [PyRust]",
+            "value": 1.559,
+            "range": "±0.059 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_vars_dir [Python]",
+            "value": 10.698,
+            "range": "±0.22 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_value_to_float_coercion [PyRust]",
+            "value": 1.557,
+            "range": "±0.056 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_value_to_float_coercion [Python]",
+            "value": 10.508,
+            "range": "±0.25 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_iter_builtin [PyRust]",
+            "value": 1.554,
+            "range": "±0.061 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_iter_builtin [Python]",
+            "value": 10.914,
+            "range": "±0.807 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_builtins_type [PyRust]",
+            "value": 1.547,
+            "range": "±0.055 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_builtins_type [Python]",
+            "value": 10.454,
+            "range": "±0.389 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_sorted_custom [PyRust]",
+            "value": 1.536,
+            "range": "±0.052 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_sorted_custom [Python]",
+            "value": 10.24,
+            "range": "±0.229 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_classes [PyRust]",
+            "value": 1.53,
+            "range": "±0.088 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_classes [Python]",
+            "value": 10.463,
+            "range": "±0.335 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_builtins_iter [PyRust]",
+            "value": 1.525,
+            "range": "±0.048 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_builtins_iter [Python]",
+            "value": 9.955,
+            "range": "±0.112 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_split_and_sort [PyRust]",
+            "value": 1.52,
+            "range": "±0.123 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_split_and_sort [Python]",
+            "value": 11.226,
+            "range": "±0.658 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_complex [PyRust]",
+            "value": 1.52,
+            "range": "±0.143 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_complex [Python]",
+            "value": 10.21,
+            "range": "±0.353 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_str_format [PyRust]",
+            "value": 1.51,
+            "range": "±0.042 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_str_format [Python]",
+            "value": 10.144,
+            "range": "±0.182 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_os_funcs [PyRust]",
+            "value": 1.509,
+            "range": "±0.038 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_os_funcs [Python]",
+            "value": 10.465,
+            "range": "±0.377 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_generators [PyRust]",
+            "value": 1.507,
+            "range": "±0.049 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_generators [Python]",
+            "value": 10.481,
+            "range": "±0.677 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_block_leading_comment [PyRust]",
+            "value": 1.505,
+            "range": "±0.077 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_block_leading_comment [Python]",
+            "value": 10.567,
+            "range": "±0.41 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_builtins_introspect [PyRust]",
+            "value": 1.5,
+            "range": "±0.032 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_builtins_introspect [Python]",
+            "value": 10.329,
+            "range": "±0.313 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_locals_class [PyRust]",
+            "value": 1.493,
+            "range": "±0.137 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_locals_class [Python]",
+            "value": 12.388,
+            "range": "±0.688 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_bigint_cross_arms [PyRust]",
+            "value": 1.482,
+            "range": "±0.047 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_bigint_cross_arms [Python]",
+            "value": 10.073,
+            "range": "±0.124 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_specific_exception_classes [PyRust]",
+            "value": 1.482,
+            "range": "±0.067 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_specific_exception_classes [Python]",
+            "value": 10.506,
+            "range": "±0.304 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_property [PyRust]",
+            "value": 1.481,
+            "range": "±0.067 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_property [Python]",
+            "value": 10.81,
+            "range": "±0.463 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_dict_methods [PyRust]",
+            "value": 1.477,
+            "range": "±0.064 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_dict_methods [Python]",
+            "value": 10.389,
+            "range": "±0.315 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_hash_dispatch [PyRust]",
+            "value": 1.475,
+            "range": "±0.043 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_hash_dispatch [Python]",
+            "value": 10.394,
+            "range": "±0.317 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_continue_top [PyRust]",
+            "value": 1.474,
+            "range": "±0.053 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_continue_top [Python]",
+            "value": 10.529,
+            "range": "±0.463 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_float_edge [PyRust]",
+            "value": 1.473,
+            "range": "±0.051 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_float_edge [Python]",
+            "value": 11.732,
+            "range": "±0.568 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_posonly_params [PyRust]",
+            "value": 1.473,
+            "range": "±0.056 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_posonly_params [Python]",
+            "value": 10.842,
+            "range": "±0.573 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_eq_implies_unhashable [PyRust]",
+            "value": 1.472,
+            "range": "±0.314 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_eq_implies_unhashable [Python]",
+            "value": 10.624,
+            "range": "±0.907 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_instance_dict_attr [PyRust]",
+            "value": 1.469,
+            "range": "±0.061 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_instance_dict_attr [Python]",
+            "value": 10.837,
+            "range": "±0.617 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_globals_locals [PyRust]",
+            "value": 1.468,
+            "range": "±0.097 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_globals_locals [Python]",
+            "value": 10.085,
+            "range": "±0.577 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_tailcall_dse [PyRust]",
+            "value": 1.46,
+            "range": "±0.041 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_tailcall_dse [Python]",
+            "value": 10.097,
+            "range": "±0.246 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_isinstance_tuple [PyRust]",
+            "value": 1.456,
+            "range": "±0.2 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_isinstance_tuple [Python]",
+            "value": 10.827,
+            "range": "±0.364 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_int_overflow [PyRust]",
+            "value": 1.446,
+            "range": "±0.063 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_int_overflow [Python]",
+            "value": 11.263,
+            "range": "±0.944 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_list_spec [PyRust]",
+            "value": 1.445,
+            "range": "±0.054 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_list_spec [Python]",
+            "value": 10.26,
+            "range": "±0.311 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_comprehensions [PyRust]",
+            "value": 1.444,
+            "range": "±0.042 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_comprehensions [Python]",
+            "value": 10.445,
+            "range": "±0.424 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_in_operator_iter_stop [PyRust]",
+            "value": 1.439,
+            "range": "±0.061 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_in_operator_iter_stop [Python]",
+            "value": 10.032,
+            "range": "±0.364 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_type_annotations [PyRust]",
+            "value": 1.435,
+            "range": "±0.047 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_type_annotations [Python]",
+            "value": 10.911,
+            "range": "±0.409 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_int_float_eq [PyRust]",
+            "value": 1.433,
+            "range": "±0.031 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_int_float_eq [Python]",
+            "value": 10.051,
+            "range": "±0.384 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_while_true_break [PyRust]",
+            "value": 1.416,
+            "range": "±0.062 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_while_true_break [Python]",
+            "value": 10.237,
+            "range": "±0.22 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_lambda_closure [PyRust]",
+            "value": 1.41,
+            "range": "±0.143 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_lambda_closure [Python]",
+            "value": 11.346,
+            "range": "±0.817 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_metaclass [PyRust]",
+            "value": 1.399,
+            "range": "±0.062 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_metaclass [Python]",
+            "value": 11.512,
+            "range": "±0.828 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_fstring_format [PyRust]",
+            "value": 1.396,
+            "range": "±0.171 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_fstring_format [Python]",
+            "value": 10.526,
+            "range": "±0.45 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_licm [PyRust]",
+            "value": 1.389,
+            "range": "±0.098 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_licm [Python]",
+            "value": 11.471,
+            "range": "±0.695 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_str_spec [PyRust]",
+            "value": 1.385,
+            "range": "±0.036 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_str_spec [Python]",
+            "value": 10.112,
+            "range": "±0.294 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_typed_builtins_chr_ord [PyRust]",
+            "value": 1.378,
+            "range": "±0.041 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_typed_builtins_chr_ord [Python]",
+            "value": 10.055,
+            "range": "±0.324 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_pykey_hash_sentinel [PyRust]",
+            "value": 1.377,
+            "range": "±0.041 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_pykey_hash_sentinel [Python]",
+            "value": 10.065,
+            "range": "±0.26 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_large_int [PyRust]",
+            "value": 1.365,
+            "range": "±0.041 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_large_int [Python]",
+            "value": 10.525,
+            "range": "±0.59 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_typed_builtins_format [PyRust]",
+            "value": 1.351,
+            "range": "±0.066 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_typed_builtins_format [Python]",
+            "value": 10.122,
+            "range": "±0.27 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_typed_builtins_bool_callable [PyRust]",
+            "value": 1.347,
+            "range": "±0.039 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_typed_builtins_bool_callable [Python]",
+            "value": 10.018,
+            "range": "±0.243 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_sort_bigint_nested [PyRust]",
+            "value": 1.342,
+            "range": "±0.071 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_sort_bigint_nested [Python]",
+            "value": 10.007,
+            "range": "±0.12 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_functools [PyRust]",
+            "value": 1.339,
+            "range": "±0.046 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_functools [Python]",
+            "value": 12.608,
+            "range": "±0.377 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_class_qualname [PyRust]",
+            "value": 1.336,
+            "range": "±0.039 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_class_qualname [Python]",
+            "value": 10.056,
+            "range": "±0.269 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_cond_expr_in_function [PyRust]",
+            "value": 1.336,
+            "range": "±0.042 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_cond_expr_in_function [Python]",
+            "value": 10.368,
+            "range": "±0.387 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_list_extend_iterables [PyRust]",
+            "value": 1.333,
+            "range": "±0.059 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_list_extend_iterables [Python]",
+            "value": 10.054,
+            "range": "±0.296 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_pure_sideeffects [PyRust]",
+            "value": 1.332,
+            "range": "±0.043 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_pure_sideeffects [Python]",
+            "value": 11.171,
+            "range": "±0.517 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_class_mro [PyRust]",
+            "value": 1.326,
+            "range": "±0.088 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_class_mro [Python]",
+            "value": 10.258,
+            "range": "±0.419 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_os_path_imports [PyRust]",
+            "value": 1.325,
+            "range": "±0.033 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_os_path_imports [Python]",
+            "value": 9.959,
+            "range": "±0.318 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_hash_tuple_custom [PyRust]",
+            "value": 1.324,
+            "range": "±0.037 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_hash_tuple_custom [Python]",
+            "value": 11.032,
+            "range": "±0.747 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_typed_builtins_tier2 [PyRust]",
+            "value": 1.32,
+            "range": "±0.045 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_typed_builtins_tier2 [Python]",
+            "value": 10.335,
+            "range": "±0.364 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_property_deleter [PyRust]",
+            "value": 1.318,
+            "range": "±0.035 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_property_deleter [Python]",
+            "value": 10.285,
+            "range": "±0.403 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_hash_float [PyRust]",
+            "value": 1.316,
+            "range": "±0.07 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_hash_float [Python]",
+            "value": 10.655,
+            "range": "±0.723 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_range_spec [PyRust]",
+            "value": 1.308,
+            "range": "±0.046 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_range_spec [Python]",
+            "value": 9.901,
+            "range": "±0.327 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_optimizer_not_invert [PyRust]",
+            "value": 1.306,
+            "range": "±0.085 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_optimizer_not_invert [Python]",
+            "value": 10.601,
+            "range": "±0.418 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_self_aliased_mutation [PyRust]",
+            "value": 1.294,
+            "range": "±0.03 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_self_aliased_mutation [Python]",
+            "value": 10.259,
+            "range": "±0.364 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_while_constant [PyRust]",
+            "value": 1.292,
+            "range": "±0.04 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_while_constant [Python]",
+            "value": 10.158,
+            "range": "±0.259 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_complex_optimizer [PyRust]",
+            "value": 1.289,
+            "range": "±0.054 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_complex_optimizer [Python]",
+            "value": 10.32,
+            "range": "±0.364 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_optimizer_binopinplace [PyRust]",
+            "value": 1.283,
+            "range": "±0.06 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_optimizer_binopinplace [Python]",
+            "value": 10.154,
+            "range": "±0.223 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_zip_strict [PyRust]",
+            "value": 1.277,
+            "range": "±0.059 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_zip_strict [Python]",
+            "value": 9.965,
+            "range": "±0.316 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_enumerate_start [PyRust]",
+            "value": 1.276,
+            "range": "±0.04 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_enumerate_start [Python]",
+            "value": 9.92,
+            "range": "±0.202 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_bigint_shift [PyRust]",
+            "value": 1.27,
+            "range": "±0.045 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_bigint_shift [Python]",
+            "value": 9.711,
+            "range": "±0.306 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_dict_merge [PyRust]",
+            "value": 1.267,
+            "range": "±0.144 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_dict_merge [Python]",
+            "value": 9.872,
+            "range": "±0.298 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_ivsr [PyRust]",
+            "value": 1.267,
+            "range": "±0.097 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_ivsr [Python]",
+            "value": 10.302,
+            "range": "±0.81 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_dict_spec [PyRust]",
+            "value": 1.263,
+            "range": "±0.031 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_dict_spec [Python]",
+            "value": 9.822,
+            "range": "±0.171 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_for_iter [PyRust]",
+            "value": 1.26,
+            "range": "±0.046 ms",
+            "unit": "ms",
+            "extra": "iters=40 trim=10%"
+          },
+          {
+            "name": "test_for_iter [Python]",
+            "value": 10.028,
+            "range": "±0.286 ms",
+            "unit": "ms",
+            "extra": "iters=40 trim=10%"
+          },
+          {
+            "name": "test_control_flow [PyRust]",
+            "value": 1.26,
+            "range": "±0.054 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_control_flow [Python]",
+            "value": 9.898,
+            "range": "±0.204 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_dict_bool_int_key [PyRust]",
+            "value": 1.258,
+            "range": "±0.082 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_dict_bool_int_key [Python]",
+            "value": 9.802,
+            "range": "±0.303 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_optimizer_copy_prop [PyRust]",
+            "value": 1.257,
+            "range": "±0.049 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_optimizer_copy_prop [Python]",
+            "value": 10.173,
+            "range": "±0.283 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_subscript_tuple [PyRust]",
+            "value": 1.253,
+            "range": "±0.07 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_subscript_tuple [Python]",
+            "value": 9.991,
+            "range": "±0.273 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_locals_closure [PyRust]",
+            "value": 1.251,
+            "range": "±0.053 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_locals_closure [Python]",
+            "value": 11.57,
+            "range": "±0.53 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_generator_exit_repr [PyRust]",
+            "value": 1.249,
+            "range": "±0.034 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_generator_exit_repr [Python]",
+            "value": 9.832,
+            "range": "±0.269 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_except_match [PyRust]",
+            "value": 1.249,
+            "range": "±0.053 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_except_match [Python]",
+            "value": 9.962,
+            "range": "±0.285 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_min_max_key [PyRust]",
+            "value": 1.247,
+            "range": "±0.075 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_min_max_key [Python]",
+            "value": 10.542,
+            "range": "±0.884 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_bigint_literal [PyRust]",
+            "value": 1.241,
+            "range": "±0.031 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_bigint_literal [Python]",
+            "value": 9.66,
+            "range": "±0.189 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_str_methods [PyRust]",
+            "value": 1.239,
+            "range": "±0.032 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_str_methods [Python]",
+            "value": 9.953,
+            "range": "±0.264 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_list_methods [PyRust]",
+            "value": 1.239,
+            "range": "±0.04 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_list_methods [Python]",
+            "value": 9.989,
+            "range": "±0.235 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_os_path [PyRust]",
+            "value": 1.23,
+            "range": "±0.045 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_os_path [Python]",
+            "value": 10.008,
+            "range": "±0.372 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_fstring_debug [PyRust]",
+            "value": 1.228,
+            "range": "±0.039 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_fstring_debug [Python]",
+            "value": 10.338,
+            "range": "±0.404 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_pykey_float_int [PyRust]",
+            "value": 1.227,
+            "range": "±0.034 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_pykey_float_int [Python]",
+            "value": 10.193,
+            "range": "±0.388 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_finally_return [PyRust]",
+            "value": 1.227,
+            "range": "±0.037 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_finally_return [Python]",
+            "value": 10.413,
+            "range": "±0.288 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_nan_comparisons [PyRust]",
+            "value": 1.225,
+            "range": "±0.088 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_nan_comparisons [Python]",
+            "value": 11.454,
+            "range": "±0.829 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_builtins_numeric [PyRust]",
+            "value": 1.225,
+            "range": "±0.033 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_builtins_numeric [Python]",
+            "value": 10.024,
+            "range": "±0.4 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_modules [PyRust]",
+            "value": 1.223,
+            "range": "±0.039 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_modules [Python]",
+            "value": 10.46,
+            "range": "±0.364 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_hash_bigint [PyRust]",
+            "value": 1.221,
+            "range": "±0.116 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_hash_bigint [Python]",
+            "value": 9.634,
+            "range": "±0.264 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_bitnot_bigint [PyRust]",
+            "value": 1.22,
+            "range": "±0.044 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_bitnot_bigint [Python]",
+            "value": 10.81,
+            "range": "±0.626 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_optimizer_dse [PyRust]",
+            "value": 1.215,
+            "range": "±0.034 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_optimizer_dse [Python]",
+            "value": 9.97,
+            "range": "±0.216 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_arithmetic [PyRust]",
+            "value": 1.211,
+            "range": "±0.044 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_arithmetic [Python]",
+            "value": 9.776,
+            "range": "±0.325 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_range_overflow [PyRust]",
+            "value": 1.199,
+            "range": "±0.031 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_range_overflow [Python]",
+            "value": 9.985,
+            "range": "±0.289 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_for_lazy_tuple [PyRust]",
+            "value": 1.196,
+            "range": "±0.078 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_for_lazy_tuple [Python]",
+            "value": 9.761,
+            "range": "±0.223 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_cyclic_repr [PyRust]",
+            "value": 1.18,
+            "range": "±0.041 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_cyclic_repr [Python]",
+            "value": 9.844,
+            "range": "±0.304 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_set_hash_sideeffect [PyRust]",
+            "value": 1.18,
+            "range": "±0.038 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_set_hash_sideeffect [Python]",
+            "value": 9.703,
+            "range": "±0.156 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_global_del [PyRust]",
+            "value": 1.179,
+            "range": "±0.051 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_global_del [Python]",
+            "value": 9.959,
+            "range": "±0.342 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_unary_pos_neg_bool_bigint [PyRust]",
+            "value": 1.179,
+            "range": "±0.041 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_unary_pos_neg_bool_bigint [Python]",
+            "value": 9.93,
+            "range": "±0.339 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_dict_operations [PyRust]",
+            "value": 1.178,
+            "range": "±0.038 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_dict_operations [Python]",
+            "value": 9.873,
+            "range": "±0.346 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_operators [PyRust]",
+            "value": 1.175,
+            "range": "±0.089 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_operators [Python]",
+            "value": 10.583,
+            "range": "±0.669 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_optimizer_const_pool [PyRust]",
+            "value": 1.17,
+            "range": "±0.05 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_optimizer_const_pool [Python]",
+            "value": 9.996,
+            "range": "±0.277 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_global_nested_write [PyRust]",
+            "value": 1.167,
+            "range": "±0.053 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_global_nested_write [Python]",
+            "value": 10.274,
+            "range": "±0.511 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_signal_propagation [PyRust]",
+            "value": 1.166,
+            "range": "±0.059 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_signal_propagation [Python]",
+            "value": 10.164,
+            "range": "±0.239 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_walrus [PyRust]",
+            "value": 1.153,
+            "range": "±0.036 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_walrus [Python]",
+            "value": 9.926,
+            "range": "±0.257 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_starred_assign [PyRust]",
+            "value": 1.147,
+            "range": "±0.038 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_starred_assign [Python]",
+            "value": 9.969,
+            "range": "±0.394 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_fib_recursive [PyRust]",
+            "value": 1.141,
+            "range": "±0.04 ms",
+            "unit": "ms",
+            "extra": "iters=10 trim=10%"
+          },
+          {
+            "name": "test_fib_recursive [Python]",
+            "value": 19.666,
+            "range": "±0.726 ms",
+            "unit": "ms",
+            "extra": "iters=10 trim=10%"
+          },
+          {
+            "name": "test_tuple_methods [PyRust]",
+            "value": 1.135,
+            "range": "±0.039 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_tuple_methods [Python]",
+            "value": 10.897,
+            "range": "±0.347 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_del_item [PyRust]",
+            "value": 1.131,
+            "range": "±0.043 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_del_item [Python]",
+            "value": 10.661,
+            "range": "±0.503 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_index_error [PyRust]",
+            "value": 1.13,
+            "range": "±0.069 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_index_error [Python]",
+            "value": 10.505,
+            "range": "±0.5 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_licm [PyRust]",
+            "value": 1.125,
+            "range": "±0.113 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_licm [Python]",
+            "value": 9.751,
+            "range": "±0.229 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_frozenset_custom_hash [PyRust]",
+            "value": 1.122,
+            "range": "±0.036 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_frozenset_custom_hash [Python]",
+            "value": 9.958,
+            "range": "±0.901 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_global_nonlocal_scoping [PyRust]",
+            "value": 1.121,
+            "range": "±0.042 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_global_nonlocal_scoping [Python]",
+            "value": 10.076,
+            "range": "±0.26 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_keyword_only_error [PyRust]",
+            "value": 1.099,
+            "range": "±0.053 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_keyword_only_error [Python]",
+            "value": 10.799,
+            "range": "±0.78 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_foriter_mutation [PyRust]",
+            "value": 1.098,
+            "range": "±0.047 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_foriter_mutation [Python]",
+            "value": 9.871,
+            "range": "±0.367 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_chained_assignment [PyRust]",
+            "value": 1.09,
+            "range": "±0.048 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_chained_assignment [Python]",
+            "value": 9.989,
+            "range": "±0.467 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_while_pattern [PyRust]",
+            "value": 1.081,
+            "range": "±0.055 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_while_pattern [Python]",
+            "value": 9.935,
+            "range": "±0.38 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_hash_float_inf [PyRust]",
+            "value": 1.078,
+            "range": "±0.045 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_hash_float_inf [Python]",
+            "value": 10.2,
+            "range": "±0.877 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_optimizer_const_tuple [PyRust]",
+            "value": 1.062,
+            "range": "±0.037 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_optimizer_const_tuple [Python]",
+            "value": 10.247,
+            "range": "±0.421 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_str_slice_safety [PyRust]",
+            "value": 1.056,
+            "range": "±0.047 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_str_slice_safety [Python]",
+            "value": 10.347,
+            "range": "±0.504 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_aug_assign_loop [PyRust]",
+            "value": 1.049,
+            "range": "±0.03 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_aug_assign_loop [Python]",
+            "value": 9.602,
+            "range": "±0.251 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_bigint_identity [PyRust]",
+            "value": 1.039,
+            "range": "±0.045 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_bigint_identity [Python]",
+            "value": 9.448,
+            "range": "±0.198 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_sys_exit_finally [PyRust]",
+            "value": 1.019,
+            "range": "±0.058 ms",
+            "unit": "ms",
+            "extra": "iters=30 trim=10%"
+          },
+          {
+            "name": "test_sys_exit_finally [Python]",
+            "value": 9.766,
+            "range": "±0.375 ms",
             "unit": "ms",
             "extra": "iters=30 trim=10%"
           }
