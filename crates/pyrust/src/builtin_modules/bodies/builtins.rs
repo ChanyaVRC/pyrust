@@ -21,7 +21,8 @@ use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
     NativeIterFrame, apply_format_spec, ascii_repr, bigint_divmod_floor, class_is_subclass_of,
-    compare_values, dir_names, instance_attrs_snapshot, int_pow_promoting, invoke_class_method,
+    compare_values, compare_values_with_op, dir_names, instance_attrs_snapshot,
+    int_pow_promoting, invoke_class_method,
     is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_hash_bigint, py_hash_float,
     py_hash_int, py_mod_i64, py_round_half_even, py_round_half_even_f64,
     reject_keyword_args_expanded, snapshot_current_locals, snapshot_module_namespace,
@@ -2580,7 +2581,8 @@ fn min_max_impl(
             })
             .collect::<Result<_>>()?;
         // Pre-scan: if no key is a PyInstance, all comparisons are primitive —
-        // use compare_values directly to avoid interpreter-dispatch overhead.
+        // use compare_values_with_op directly to avoid interpreter-dispatch
+        // overhead while still emitting the correct operator token.
         let has_instance =
             keyed.iter().any(|(k, _)| matches!(k.kind(), ValueKind::PyInstance(_)));
         let mut result_err: Option<PyError> = None;
@@ -2596,7 +2598,8 @@ fn min_max_impl(
                     interp.richcmp_order(&item.0, &acc.0)
                 }
             } else {
-                compare_values(&item.0, &acc.0)
+                // CPython max() emits '>' in its TypeError; min() emits '<'.
+                compare_values_with_op(&item.0, &acc.0, if is_max { ">" } else { "<" })
             };
             match cmp {
                 Ok(cmp) => {
@@ -2610,8 +2613,9 @@ fn min_max_impl(
         if let Some(e) = result_err { return Err(e); }
         Ok(result.1)
     } else {
-        // Pre-scan: if no item is a PyInstance, use compare_values directly —
-        // zero interpreter-dispatch overhead for all-primitive sequences.
+        // Pre-scan: if no item is a PyInstance, use compare_values_with_op
+        // directly — zero interpreter-dispatch overhead for all-primitive
+        // sequences, while emitting the correct operator token.
         let has_instance =
             items.iter().any(|v| matches!(v.kind(), ValueKind::PyInstance(_)));
         let mut result_err: Option<PyError> = None;
@@ -2624,7 +2628,8 @@ fn min_max_impl(
                     interp.richcmp_order(&v, &acc)
                 }
             } else {
-                compare_values(&v, &acc)
+                // CPython max() emits '>' in its TypeError; min() emits '<'.
+                compare_values_with_op(&v, &acc, if is_max { ">" } else { "<" })
             };
             match cmp {
                 Ok(cmp) => {

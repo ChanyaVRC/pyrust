@@ -129,6 +129,18 @@ fn bigint_float_cmp(big: &crate::value::PyBigInt, f: f64) -> Option<std::cmp::Or
 /// lexicographically element-by-element.  Incomparable pairs return a
 /// `TypeError`.
 pub(crate) fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
+    compare_values_with_op(a, b, "<")
+}
+
+/// Like `compare_values` but uses `op_name` in the `TypeError` message when
+/// the operand types are incompatible.  CPython's `do_richcompare` emits the
+/// operator token that was actually requested (`<`, `>`, `<=`, `>=`), so
+/// `eval_binary` calls this variant directly for `Gt`, `Le`, and `Ge`.
+pub(crate) fn compare_values_with_op(
+    a: &Value,
+    b: &Value,
+    op_name: &str,
+) -> Result<std::cmp::Ordering> {
     use crate::value::PyBigInt;
     match (a.kind(), b.kind()) {
         (ValueKind::Int(x), ValueKind::Int(y)) => Ok(x.cmp(&y)),
@@ -154,7 +166,7 @@ pub(crate) fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering>
         (ValueKind::Str(x), ValueKind::Str(y)) => Ok(x.cmp(y)),
         (ValueKind::List(x), ValueKind::List(y)) => {
             for (a, b) in x.iter().zip(y.iter()) {
-                let ord = compare_values(a, b)?;
+                let ord = compare_values_with_op(a, b, op_name)?;
                 if ord != std::cmp::Ordering::Equal {
                     return Ok(ord);
                 }
@@ -163,7 +175,7 @@ pub(crate) fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering>
         }
         (ValueKind::Tuple(x), ValueKind::Tuple(y)) => {
             for (a, b) in x.iter().zip(y.iter()) {
-                let ord = compare_values(a, b)?;
+                let ord = compare_values_with_op(a, b, op_name)?;
                 if ord != std::cmp::Ordering::Equal {
                     return Ok(ord);
                 }
@@ -173,7 +185,7 @@ pub(crate) fn compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering>
         _ => Err(PyError::named(
             "TypeError",
             format!(
-                "'<' not supported between instances of '{}' and '{}'",
+                "'{op_name}' not supported between instances of '{}' and '{}'",
                 value_type_name_str(a),
                 value_type_name_str(b),
             ),
