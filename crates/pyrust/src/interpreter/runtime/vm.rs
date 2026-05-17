@@ -304,11 +304,29 @@ impl Interpreter {
         // the regs slice stays valid (it's owned by `frame.regs`) but
         // the view is no longer the innermost frame from the caller's
         // perspective.
+        // Issue #486: also capture nonlocal_names + env from the
+        // generator's saved_env so `locals()` can surface nonlocal
+        // bindings captured at generator-creation time.
+        let gen_nonlocal_names = {
+            let env = frame.saved_env.borrow();
+            if env.nonlocal_names.is_empty() {
+                None
+            } else {
+                Some(Rc::clone(&env.nonlocal_names))
+            }
+        };
+        let gen_env_opt = if gen_nonlocal_names.is_some() {
+            Some(Rc::clone(&frame.saved_env))
+        } else {
+            None
+        };
         self.vm_frame_views.push(VmFrameView {
             kind: FrameKind::Function,
             regs_ptr: frame.regs.as_mut_ptr(),
             regs_len: frame.regs.len(),
             local_index: Rc::clone(&frame.local_index),
+            nonlocal_names: gen_nonlocal_names,
+            env: gen_env_opt,
         });
         let result = self.run_bytecode_inner(
             &frame.code.clone(),

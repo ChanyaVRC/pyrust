@@ -197,6 +197,19 @@ pub(crate) struct VmFrameView {
     pub(crate) regs_ptr: *mut Value,
     pub(crate) regs_len: usize,
     pub(crate) local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
+    /// Names declared `nonlocal` in this function frame (absent for
+    /// `Script` frames which have no enclosing function scope).  Used
+    /// by `snapshot_current_locals` (issue #486) to include nonlocal
+    /// bindings in `locals()` — these live in an enclosing env, not
+    /// in the fastlocal register file.
+    pub(crate) nonlocal_names: Option<Rc<std::collections::HashSet<String>>>,
+    /// The active env reference for this frame.  For function frames,
+    /// this is the function's own local env (the one pushed by
+    /// `call_user_function_expanded` before `run_bytecode`).
+    /// `snapshot_current_locals` uses it as the starting point for
+    /// `find_enclosing_local_env_for_name` to resolve nonlocal names.
+    /// `None` for `Script` frames (which use the module env directly).
+    pub(crate) env: Option<EnvRef>,
 }
 
 /// Thin wrapper around `iter_values` matching pyrust-core's `IterValuesFn`
