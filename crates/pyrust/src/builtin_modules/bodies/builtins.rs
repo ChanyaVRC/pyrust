@@ -1259,7 +1259,9 @@ pyrust_module! {
 
     /// CPython: sorted(iterable, /, *, key=None, reverse=False) — new sorted list.
     /// <https://docs.python.org/3/library/functions.html#sorted>
-    #[pure]
+    /// Not marked `#[pure]` because it dispatches user `__lt__` (and related
+    /// comparison dunders) when sorting, and may invoke the user-supplied key
+    /// function which can execute arbitrary user code.
     fn sorted(args) -> Result<Value> {
         if args.is_empty() {
             return Err(PyError::Runtime(format!("{FN_NAME}() requires at least one argument")));
@@ -1385,7 +1387,8 @@ pyrust_module! {
 
     /// CPython: list([iterable]) — list constructor.
     /// <https://docs.python.org/3/library/functions.html#list>
-    #[pure]
+    /// Not marked `#[pure]` because it dispatches user `__iter__` and
+    /// `__next__` when consuming a user-defined iterable.
     fn list(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         match args.len() {
@@ -1397,7 +1400,8 @@ pyrust_module! {
 
     /// CPython: tuple([iterable]) — tuple constructor.
     /// <https://docs.python.org/3/library/functions.html#tuple>
-    #[pure]
+    /// Not marked `#[pure]` because it dispatches user `__iter__` and
+    /// `__next__` when consuming a user-defined iterable.
     fn tuple(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         match args.len() {
@@ -1587,7 +1591,8 @@ pyrust_module! {
 
     /// CPython: str(object='') — string constructor.
     /// <https://docs.python.org/3/library/functions.html#func-str>
-    #[pure]
+    /// Not marked `#[pure]` because it dispatches user `__str__` and
+    /// (as fallback) `__repr__` on user-defined objects.
     fn str(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         match args.len() {
@@ -1685,7 +1690,9 @@ pyrust_module! {
     /// "compute truthiness of v".  Conflating `bool()` with `bool(None)`
     /// is safe because CPython's truthiness of `None` is also False, so
     /// both paths land on the same answer.
-    #[pure]
+    ///
+    /// Not marked `#[pure]` because it dispatches user `__bool__` and
+    /// (as fallback) `__len__` on user-defined objects via `truthy_value`.
     fn bool(
         #[positional_only]
         #[default(None)]
