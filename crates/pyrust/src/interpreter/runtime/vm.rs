@@ -2012,6 +2012,15 @@ impl Interpreter {
                             attrs.insert(name.clone(), v.clone());
                         }
                     }
+                    // CPython rule (Objects/typeobject.c `type_new_set_slots`):
+                    // if a class defines `__eq__` in its own body without also
+                    // defining `__hash__`, implicitly set `__hash__ = None` so
+                    // instances become unhashable.  Only the local class dict is
+                    // checked here — base-class propagation is handled by the
+                    // existing `lookup_class_attr` walk in the `hash()` builtin.
+                    if attrs.contains_key("__eq__") && !attrs.contains_key("__hash__") {
+                        attrs.insert("__hash__".to_string(), Value::none());
+                    }
                     let base = if *bases_n > 0 {
                         let base_val = vm_try!(vm_read(regs, *bases_base, num_locals));
                         match base_val.kind() {
