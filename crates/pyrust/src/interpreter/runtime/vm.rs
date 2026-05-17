@@ -1064,7 +1064,50 @@ impl Interpreter {
                 }
                 Insn::DeleteName(name_idx) => {
                     let name = pool_get!(code.names, *name_idx, "name").clone();
-                    self.env.borrow_mut().values.remove(&name);
+                    let is_global = self.env.borrow().global_names.contains(&name);
+                    if is_global {
+                        // For `global x; del x` inside a function: target the module
+                        // env, not the function's local env.  Raise NameError if the
+                        // name is absent (matches CPython 3.12 behaviour).
+                        let me = module_env(&self.env);
+                        if me.borrow_mut().values.remove(&name).is_none() {
+                            vm_try!(Err(PyError::named(
+                                "NameError",
+                                format!("name '{}' is not defined", name),
+                            )));
+                        }
+                        // Also clear the module-level fastlocal register so the
+                        // write-back loop in `program.rs` does not re-insert the
+                        // stale value.  Mirrors the write-through that `assign_name`
+                        // does for `StoreGlobal` (#520).
+                        // SAFETY: the Script frame view is pushed before
+                        // `run_bytecode` and popped immediately after; while
+                        // this nested function executes, the script frame is
+                        // suspended, so the pointer is valid and uncontested.
+                        if let Some(script_view) = self
+                            .vm_frame_views
+                            .iter()
+                            .find(|v| v.kind == FrameKind::Script)
+                        {
+                            if let Some(&slot) = script_view.local_index.get(&name) {
+                                let slot = slot as usize;
+                                if slot < script_view.regs_len {
+                                    unsafe {
+                                        *script_view.regs_ptr.add(slot) = Value::unset();
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Module-scope `del x` (or non-global local): remove from
+                        // current env.  Raise NameError if not present.
+                        if self.env.borrow_mut().values.remove(&name).is_none() {
+                            vm_try!(Err(PyError::named(
+                                "NameError",
+                                format!("name '{}' is not defined", name),
+                            )));
+                        }
+                    }
                 }
                 Insn::DeleteLocal(reg) => {
                     regs[*reg as usize] = Value::unset();
