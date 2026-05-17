@@ -2911,11 +2911,18 @@ impl Compiler {
     fn intern_const(&mut self, val: Value) -> u16 {
         // PyKey treats `Bool(b)` and `Int(b as i64)` as hash/eq-equal (matching
         // CPython's `True == 1`), so they would collide in the constant pool's
-        // hash index even though they are type-distinct values.  Skip the
-        // hash-map fast path for booleans and rely on the type-exact linear
-        // scan instead.
+        // hash index even though they are type-distinct values.  Likewise,
+        // `Float(1.0)` and `Int(1)` are now hash/eq-equal in PyKey so that
+        // dict/set keys respect CPython's numeric equality invariant.  In both
+        // cases the constant pool must keep the values distinct, so we skip the
+        // hash-map fast path for booleans and integer-valued floats and fall
+        // through to the type-exact linear scan instead.
         let is_bool = matches!(val.kind(), ValueKind::Bool(_));
-        if !is_bool && let Some(key) = val.to_key() {
+        let is_float = matches!(val.kind(), ValueKind::Float(_));
+        if !is_bool
+            && !is_float
+            && let Some(key) = val.to_key()
+        {
             if let Some(&idx) = self.const_index.get(&key) {
                 return idx;
             }
@@ -2931,7 +2938,7 @@ impl Compiler {
             self.consts.push(val);
             return idx;
         }
-        // Non-hashable constants and booleans: type-exact linear scan.
+        // Non-hashable constants, booleans, and floats: type-exact linear scan.
         for (i, v) in self.consts.iter().enumerate() {
             if const_eq(v, &val) {
                 return i as u16;

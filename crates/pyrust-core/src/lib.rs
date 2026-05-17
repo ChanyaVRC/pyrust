@@ -174,6 +174,35 @@ pub enum PyKey {
     },
 }
 
+// ── PyKey cross-type numeric helpers ─────────────────────────────────────────
+//
+// CPython guarantees: `hash(x) == hash(y)` whenever `x == y`, even across
+// numeric types.  In particular `hash(1.0) == hash(1)` and `1.0 == 1` for
+// dict/set purposes.  The helpers below implement the required logic without
+// depending on the `pyrust` interpreter crate (which would create a cycle).
+
+/// If `bits` (an `f64` stored as its IEEE-754 bit pattern) represents a
+/// finite, integer-valued float whose magnitude fits in an `i64`, return
+/// `Some(i as i64)`.  Otherwise return `None`.
+///
+/// Safe conversion range: `[i64::MIN, 2^63)`.  `i64::MIN as f64` is exactly
+/// representable; `i64::MAX as f64` rounds up to `2^63`, so the upper bound
+/// is strictly less than `-(i64::MIN as f64)`.
+#[inline]
+fn float_bits_as_exact_i64(bits: u64) -> Option<i64> {
+    let f = f64::from_bits(bits);
+    if !f.is_finite() || f.fract() != 0.0 {
+        return None;
+    }
+    let min_f = i64::MIN as f64; // exact: -9223372036854775808.0
+    let max_exclusive = -min_f; // 9223372036854775808.0 = 2^63
+    if f >= min_f && f < max_exclusive {
+        Some(f as i64)
+    } else {
+        None
+    }
+}
+
 impl PartialEq for PyKey {
     fn eq(&self, other: &Self) -> bool {
         // In CPython, `True == 1` and `False == 0`, and they hash equal, so
@@ -181,6 +210,10 @@ impl PartialEq for PyKey {
         // (e.g. `{True: 1, 1: 2}` keeps `True` as the visible key) by storing
         // `PyKey::Bool` distinctly, but we make `Bool(b) == Int(b as i64)` so
         // lookups across the two types succeed.
+        //
+        // CPython also guarantees `1.0 == 1` for dict/set purposes, so
+        // `Float` and `Int` (or `Bool`) must compare equal when the float is
+        // integer-valued and representable as an `i64`.
         //
         // Two `Object` keys compare equal only when the underlying value
         // identity matches.  This is intentionally strict: the dict/set
@@ -192,6 +225,15 @@ impl PartialEq for PyKey {
             (PyKey::Bool(a), PyKey::Bool(b)) => a == b,
             (PyKey::Bool(a), PyKey::Int(b)) | (PyKey::Int(b), PyKey::Bool(a)) => *b == *a as i64,
             (PyKey::Float(a), PyKey::Float(b)) => a == b,
+            // Cross-type: Float vs Int (and Bool, since Bool is a subtype of int).
+            // A float equals an int key iff the float is finite, has no
+            // fractional part, and its value equals the integer exactly.
+            (PyKey::Float(bits), PyKey::Int(i)) | (PyKey::Int(i), PyKey::Float(bits)) => {
+                float_bits_as_exact_i64(*bits).is_some_and(|fi| fi == *i)
+            }
+            (PyKey::Float(bits), PyKey::Bool(b)) | (PyKey::Bool(b), PyKey::Float(bits)) => {
+                float_bits_as_exact_i64(*bits).is_some_and(|fi| fi == *b as i64)
+            }
             (PyKey::Str(a), PyKey::Str(b)) => a == b,
             (PyKey::None, PyKey::None) => true,
             (PyKey::FrozenSet(a), PyKey::FrozenSet(b)) => a == b,
@@ -210,6 +252,12 @@ impl Hash for PyKey {
         // collide in dict/set buckets and PartialEq can deduplicate them.
         // We therefore deliberately omit `std::mem::discriminant` here and
         // hash a per-variant tag instead, treating Bool as Int.
+        //
+        // `Float` must also hash equal to `Int` when they are equal (CPython
+        // invariant: `hash(1.0) == hash(1)`).  Integer-valued floats use tag 0
+        // and the same `i64` value as the equivalent `Int`, satisfying the
+        // `Hash + PartialEq` contract.  Fractional or non-finite floats use
+        // tag 1, keeping them in a separate hash space.
         match self {
             PyKey::Int(v) => {
                 0u8.hash(state);
@@ -220,8 +268,17 @@ impl Hash for PyKey {
                 (*b as i64).hash(state);
             }
             PyKey::Float(bits) => {
-                1u8.hash(state);
-                bits.hash(state);
+                if let Some(i) = float_bits_as_exact_i64(*bits) {
+                    // Integer-valued float: hash identically to PyKey::Int(i)
+                    // so that equal keys land in the same bucket.
+                    0u8.hash(state);
+                    i.hash(state);
+                } else {
+                    // Fractional or non-finite float: use a distinct tag so
+                    // it can never collide with Int/Bool hashes.
+                    1u8.hash(state);
+                    bits.hash(state);
+                }
             }
             PyKey::Str(s) => {
                 2u8.hash(state);
