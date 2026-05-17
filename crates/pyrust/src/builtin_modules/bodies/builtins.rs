@@ -2095,6 +2095,11 @@ fn hash_value(value: &Value) -> Result<i64> {
                 // to get the Mersenne reduction and -1→-2 sentinel remap, so
                 // that e.g. hash(-1.0) == -2 and hash(float(2**62)) == 2.
                 Ok(int_hash(v as i64))
+            } else if v.is_infinite() {
+                // CPython uses _PyHASH_INF = 314159 as the sentinel for
+                // infinities (Python/pyhash.c).  The bit-cast would give the
+                // raw IEEE-754 pattern instead.
+                Ok(if v > 0.0 { 314159 } else { -314159 })
             } else {
                 Ok(v.to_bits() as i64)
             }
