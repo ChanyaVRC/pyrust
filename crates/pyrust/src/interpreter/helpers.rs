@@ -839,9 +839,9 @@ fn key_to_value(key: PyKey) -> Value {
 ///     each generator resume (the frame view's regs pointer comes
 ///     from the heap-allocated `GeneratorFrame::regs`, which is
 ///     stable across yields).
-/// Class-body evaluation (`Insn::MakeClass`) deliberately does NOT
-/// publish a frame view; class-body `locals()` is tracked as a
-/// known follow-up (issue #487).
+/// Class-body evaluation (`Insn::MakeClass`) publishes a `FrameKind::Class`
+/// view so that `locals()` inside a class body returns the partially-built
+/// class attrs dict (issue #487).
 /// The slice is read-only here.
 fn merge_frame_view_into_dict(
     view: &VmFrameView,
@@ -916,6 +916,16 @@ pub(crate) fn snapshot_current_locals(
             for (k, v) in me.borrow().values.iter() {
                 dict.insert(PyKey::Str(k.clone()), v.clone());
             }
+            merge_frame_view_into_dict(view, &mut dict);
+        }
+        Some(view) if view.kind == FrameKind::Class => {
+            // Class-body scope (issue #487): return the partially-built class
+            // attrs dict — i.e. the fastlocal registers of the class body,
+            // filtered to names that have been assigned so far.  CPython
+            // returns the class namespace dict (which becomes `__dict__`).
+            // We do NOT include the module env here, matching CPython:
+            // `locals()` inside a class body is the class namespace, not
+            // the module globals.
             merge_frame_view_into_dict(view, &mut dict);
         }
         Some(view) => {

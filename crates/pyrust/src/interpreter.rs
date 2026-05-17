@@ -133,9 +133,9 @@ pub struct Interpreter {
     ///   * `vm.rs::resume_generator_with_exc` — each generator resume
     ///     (`Function`; the regs pointer comes from the heap-allocated
     ///     `GeneratorFrame::regs`, stable across yields)
-    /// Class bodies (`Insn::MakeClass`) do NOT publish a view; calling
-    /// `locals()` inside a class body falls through to the module-
-    /// globals path.  Tracked as a known limitation (issue #487).
+    /// Class bodies (`Insn::MakeClass`) publish a `FrameKind::Class` view
+    /// so that `locals()` inside a class body returns the partially-built
+    /// class attrs dict (issue #487).
     pub(crate) vm_frame_views: Vec<VmFrameView>,
     /// Recursion stack for `values_user_eq` cycle detection (issue
     /// #436).  Each entry is the ordered `(value_id(lhs), value_id(rhs))`
@@ -173,13 +173,20 @@ pub struct Interpreter {
 }
 
 /// Discriminator for `VmFrameView`: script-level (module-scope) vs.
-/// function-level frames.  `globals()` and `locals()` need to tell
-/// these apart — `globals()` always wants the script-level view,
-/// `locals()` wants whichever is innermost.
+/// function-level vs. class-body frames.  `globals()` and `locals()` need to
+/// tell these apart — `globals()` always wants the script-level view,
+/// `locals()` wants whichever is innermost.  `Class` frames expose the
+/// in-progress class-body register file so `locals()` inside a class body
+/// returns the partially-built attrs dict (issue #487).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FrameKind {
     Script,
     Function,
+    /// Class-body evaluation frame.  The `regs_ptr`/`regs_len` point at the
+    /// class body's fastlocal register file; `local_index` maps names to
+    /// slots exactly as for `Function` frames.  `nonlocal_names` and `env`
+    /// are always `None` (class bodies have no nonlocal semantics).
+    Class,
 }
 
 /// Snapshot of a VM frame's register file and name index, used by
