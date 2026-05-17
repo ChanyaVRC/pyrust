@@ -133,7 +133,7 @@ mod tests {
         //    pure here, otherwise the optimizer's call-DCE pass would
         //    drift backwards relative to the legacy `PURE_BUILTINS`
         //    list.
-        for name in ["abs", "len", "chr", "ord", "type", "list", "tuple"] {
+        for name in ["abs", "len", "chr", "ord", "type"] {
             assert!(is_pure(name), "{name:?} must be registered as pure");
         }
 
@@ -148,7 +148,14 @@ mod tests {
 
         // 3. Known-impure / unknown — must come back `false` so the
         //    optimizer's conservative gate still rejects them.
-        for name in ["print", "open", "input"] {
+        //
+        //    `str`, `bool`, `list`, `tuple`, and `sorted` dispatch user
+        //    dunders (`__str__`/`__repr__`, `__bool__`/`__len__`,
+        //    `__iter__`/`__next__`, `__lt__` etc.) and must not be folded
+        //    away even when their result is unused (#538).
+        for name in [
+            "print", "open", "input", "str", "bool", "list", "tuple", "sorted",
+        ] {
             assert!(
                 !is_pure(name),
                 "{name:?} must NOT be marked pure (has observable side effects)"
