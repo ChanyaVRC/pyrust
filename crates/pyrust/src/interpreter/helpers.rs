@@ -919,23 +919,44 @@ pub(crate) fn snapshot_current_locals(
             merge_frame_view_into_dict(view, &mut dict);
         }
         Some(view) => {
-            // Function scope: only the function's own fastlocals.
-            // Matches CPython — `locals()` inside a function does NOT
-            // include module globals or names from enclosing functions.
+            // Function scope: the function's own fastlocals plus any
+            // nonlocal bindings.  Matches CPython — `locals()` inside a
+            // function includes `nonlocal` names as they live in an
+            // enclosing scope but are part of this function's logical
+            // local namespace (issue #486).
             //
             // The frame view's `local_index` enumerates exactly the
             // names the compiler allocated for THIS function call, so
-            // `merge_frame_view_into_dict` covers them precisely.  We
-            // deliberately do NOT also walk `interp.env.values`: when
+            // `merge_frame_view_into_dict` covers the fastlocal subset.
+            // We deliberately do NOT also walk `interp.env.values`: when
             // the callee did not need its own local env (the
             // `needs_local_env == false` path in
             // `call_user_function_expanded`), `interp.env` points at
-            // the function's *defining* env, and walking that would
-            // leak enclosing-scope names into the snapshot.  Cell
-            // vars / `nonlocal` / `global` bindings that the function
-            // legitimately reads but doesn't store as fastlocals are a
-            // known follow-up — tracked as issue #486.
+            // the function's *defining* env, and walking that would leak
+            // enclosing-scope names into the snapshot.
             merge_frame_view_into_dict(view, &mut dict);
+            // Nonlocal bindings: look up each name through the env chain
+            // starting from the function's own local env.  Fast-path:
+            // skip entirely when the function has no nonlocal names (the
+            // common case, zero overhead).
+            if let (Some(nonlocal_names), Some(env)) =
+                (&view.nonlocal_names, &view.env)
+            {
+                for name in nonlocal_names.iter() {
+                    // `lookup_name_in_enclosing_local_env` walks the env
+                    // parent chain from `env` upward to find the first
+                    // ancestor that declares `name` as a local and holds
+                    // its value.  Errors here are internal inconsistencies
+                    // (nonlocal declared but no enclosing binding found);
+                    // ignore them silently rather than propagating — a
+                    // missing nonlocal shouldn't crash `locals()`.
+                    if let Ok(Some(val)) =
+                        lookup_name_in_enclosing_local_env(env, name)
+                    {
+                        dict.insert(PyKey::Str(name.clone()), val);
+                    }
+                }
+            }
         }
         None => {
             // No active VM frame: fall back to env.values.

@@ -935,11 +935,26 @@ impl Interpreter {
                 // `locals()` can surface its fastlocal registers
                 // mid-call.  Popped immediately after `run_bytecode`
                 // returns so the raw pointer never outlives `regs`.
+                // Issue #486: also capture nonlocal_names and the
+                // current env so `snapshot_current_locals` can resolve
+                // nonlocal bindings that live in enclosing envs.
+                let nonlocal_names_opt = if function.nonlocal_names.is_empty() {
+                    None
+                } else {
+                    Some(Rc::clone(&function.nonlocal_names))
+                };
+                let env_opt = if function.nonlocal_names.is_empty() {
+                    None
+                } else {
+                    Some(Rc::clone(&self.env))
+                };
                 self.vm_frame_views.push(VmFrameView {
                     kind: FrameKind::Function,
                     regs_ptr: regs.as_mut_ptr(),
                     regs_len: regs.len(),
                     local_index: Rc::clone(&function.local_index),
+                    nonlocal_names: nonlocal_names_opt,
+                    env: env_opt,
                 });
                 let vm_result = self.run_bytecode_for_fn(&code, &mut regs, function.id);
                 self.vm_frame_views.pop();
@@ -1146,11 +1161,24 @@ impl Interpreter {
 
             // Issue #389: publish a function frame view (see the
             // matching push in the simple-path branch above).
+            // Issue #486: nonlocal_names + env for nonlocal resolution.
+            let nonlocal_names_opt = if function.nonlocal_names.is_empty() {
+                None
+            } else {
+                Some(Rc::clone(&function.nonlocal_names))
+            };
+            let env_opt = if function.nonlocal_names.is_empty() {
+                None
+            } else {
+                Some(Rc::clone(&self.env))
+            };
             self.vm_frame_views.push(VmFrameView {
                 kind: FrameKind::Function,
                 regs_ptr: regs.as_mut_ptr(),
                 regs_len: regs.len(),
                 local_index: Rc::clone(&function.local_index),
+                nonlocal_names: nonlocal_names_opt,
+                env: env_opt,
             });
             let vm_result = self.run_bytecode_for_fn(&code, &mut regs, function.id);
             self.vm_frame_views.pop();

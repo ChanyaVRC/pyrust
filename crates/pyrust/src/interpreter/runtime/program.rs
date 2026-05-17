@@ -85,6 +85,10 @@ impl Interpreter {
             regs_ptr: regs.as_mut_ptr(),
             regs_len: regs.len(),
             local_index: Rc::clone(&local_index),
+            // Script frames have no enclosing function scope, so there
+            // are no nonlocal bindings to resolve.
+            nonlocal_names: None,
+            env: None,
         });
         let vm_result = self.run_bytecode(&code, &mut regs);
         self.vm_frame_views.pop();
