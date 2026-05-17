@@ -445,57 +445,7 @@ pyrust_module! {
     /// `PyInstance` values, which may invoke arbitrary user code.
     fn hash(#[positional_only] obj: PyValue) -> Result<Value> {
         let value = obj.0;
-        // Dispatch user-defined __hash__ for PyInstance before falling
-        // through to the primitive hash_value path.  Mirrors CPython's
-        // tp_hash slot lookup.
-        if let ValueKind::PyInstance(inst) = value.kind() {
-            let inst_rc = Rc::clone(inst);
-            let class = Rc::clone(&inst_rc.borrow().class);
-            let class_name = class.borrow().name.clone();
-            if let Some(hash_method) = lookup_class_attr(&class, "__hash__") {
-                // __hash__ = None means explicitly unhashable (CPython rule).
-                if matches!(hash_method.kind(), ValueKind::None) {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!("unhashable type: '{class_name}'"),
-                    ));
-                }
-                let result = invoke_class_method(
-                    _interp,
-                    hash_method,
-                    Value::py_instance(inst_rc),
-                    &[],
-                )?;
-                // __hash__ must return an integer (bool is a subtype of int).
-                // CPython's slot_tp_hash semantics (issue #503):
-                //
-                // - Int (fits in ssize_t / i64): take as-is, apply only the
-                //   `-1 → -2` sentinel remap.  CPython does NOT apply
-                //   Mersenne-prime reduction here — that only happens when
-                //   hashing a bare int value directly (int.__hash__).
-                // - BigInt (overflows ssize_t): CPython falls back to
-                //   `long_hash` which applies Mersenne-prime reduction.
-                //   `bigint_hash` mirrors that.
-                let hash_val: i64 = match result.kind() {
-                    ValueKind::Int(n) => if n == -1 { -2 } else { n },
-                    ValueKind::Bool(b) => b as i64,
-                    ValueKind::BigInt(n) => bigint_hash(n),
-                    _ => {
-                        return Err(PyError::named(
-                            "TypeError",
-                            "__hash__ method should return an integer".to_string(),
-                        ));
-                    }
-                };
-                return Ok(Value::int(hash_val));
-            }
-            // No __hash__ at all: use object-identity hash, matching
-            // CPython's default object.__hash__ behaviour.
-            let ptr = Rc::as_ptr(&inst_rc) as i64;
-            let ptr = if ptr == -1 { -2 } else { ptr };
-            return Ok(Value::int(ptr));
-        }
-        let hash_val = hash_value(&value)?;
+        let hash_val = hash_value_with_interp(_interp, &value)?;
         Ok(Value::int(hash_val))
     }
 
@@ -2134,6 +2084,95 @@ fn hash_value(value: &Value) -> Result<i64> {
                 pyrust_core::builtin_type_name(value)
             ),
         )),
+    }
+}
+
+/// Interpreter-aware hash that dispatches `__hash__` for `PyInstance` values
+/// and handles `Tuple` elements by recursing with interpreter access.
+///
+/// This is the entry point used by the `hash` builtin.  `hash_value` (above)
+/// remains a pure helper for primitive leaf types; this function calls it for
+/// those cases to avoid duplicating their logic.
+///
+/// `Tuple`: uses the same initial value and multiply-add mixing as
+/// `hash_value`'s Tuple arm (`h = h.wrapping_mul(1000003).wrapping_add(elem)`),
+/// but each element is hashed via this function rather than `hash_value`, so
+/// `PyInstance` elements dispatch `__hash__` correctly (issue #502).
+///
+/// `PyInstance`: dispatches `__hash__` via the interpreter, then applies
+/// CPython's slot_tp_hash semantics (`-1 → -2`, Mersenne reduction for BigInt).
+/// Returns `true` if any element at any nesting depth is a `PyInstance`
+/// that requires interpreter access for `__hash__` dispatch.
+fn tuple_needs_interp(items: &[Value]) -> bool {
+    items.iter().any(|v| match v.kind() {
+        ValueKind::PyInstance(_) => true,
+        ValueKind::Tuple(inner) => tuple_needs_interp(inner),
+        _ => false,
+    })
+}
+
+fn hash_value_with_interp(interp: &mut crate::Interpreter, value: &Value) -> Result<i64> {
+    match value.kind() {
+        ValueKind::Tuple(items) => {
+            // Fast path: if no element at any depth is a PyInstance, delegate
+            // to the pure hash_value helper — no Vec allocation needed.
+            if !tuple_needs_interp(items) {
+                return hash_value(value);
+            }
+            // At least one element needs interpreter access (PyInstance or a
+            // nested tuple that may contain one).  Clone the slice to release
+            // the borrow of `value` before the mutable `interp` calls.
+            let items: Vec<Value> = items.to_vec();
+            let mut h: i64 = 3527539;
+            for item in &items {
+                let item_hash = hash_value_with_interp(interp, item)?;
+                h = h.wrapping_mul(1000003).wrapping_add(item_hash);
+            }
+            Ok(h)
+        }
+        ValueKind::PyInstance(inst) => {
+            let inst_rc = Rc::clone(inst);
+            let class = Rc::clone(&inst_rc.borrow().class);
+            let class_name = class.borrow().name.clone();
+            if let Some(hash_method) = lookup_class_attr(&class, "__hash__") {
+                // __hash__ = None means explicitly unhashable (CPython rule).
+                if matches!(hash_method.kind(), ValueKind::None) {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("unhashable type: '{class_name}'"),
+                    ));
+                }
+                let result = invoke_class_method(
+                    interp,
+                    hash_method,
+                    Value::py_instance(inst_rc),
+                    &[],
+                )?;
+                // CPython's slot_tp_hash semantics (issue #503):
+                // - Int: apply only the `-1 → -2` sentinel remap.
+                // - BigInt: apply Mersenne-prime reduction (long_hash).
+                let hash_val: i64 = match result.kind() {
+                    ValueKind::Int(n) => {
+                        if n == -1 { -2 } else { n }
+                    }
+                    ValueKind::Bool(b) => b as i64,
+                    ValueKind::BigInt(n) => bigint_hash(n),
+                    _ => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            "__hash__ method should return an integer".to_string(),
+                        ));
+                    }
+                };
+                return Ok(hash_val);
+            }
+            // No __hash__ at all: identity hash (CPython's default
+            // object.__hash__), with the -1 → -2 sentinel remap.
+            let ptr = Rc::as_ptr(&inst_rc) as i64;
+            Ok(if ptr == -1 { -2 } else { ptr })
+        }
+        // All other types are primitives; delegate to the pure hash_value helper.
+        _ => hash_value(value),
     }
 }
 
