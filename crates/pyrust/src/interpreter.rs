@@ -187,11 +187,14 @@ pub(crate) enum FrameKind {
 /// registers rather than `env.values` (issue #389).
 pub(crate) struct VmFrameView {
     pub(crate) kind: FrameKind,
-    /// Raw pointer to the active frame's register slice. Valid only
+    /// Raw pointer to the active frame's mutable register slice. Valid only
     /// while the corresponding `run_bytecode` invocation is on the
     /// call stack — `Interpreter::vm_frame_views` is pushed/popped
-    /// in lock-step with that lifetime by the caller.
-    pub(crate) regs_ptr: *const Value,
+    /// in lock-step with that lifetime by the caller.  The pointer is
+    /// `*mut` so that `assign_name`'s global-write path can update the
+    /// corresponding fastlocal register when `StoreGlobal` fires from a
+    /// nested scope (#520).
+    pub(crate) regs_ptr: *mut Value,
     pub(crate) regs_len: usize,
     pub(crate) local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
 }

@@ -306,7 +306,7 @@ impl Interpreter {
         // perspective.
         self.vm_frame_views.push(VmFrameView {
             kind: FrameKind::Function,
-            regs_ptr: frame.regs.as_ptr(),
+            regs_ptr: frame.regs.as_mut_ptr(),
             regs_len: frame.regs.len(),
             local_index: Rc::clone(&frame.local_index),
         });
