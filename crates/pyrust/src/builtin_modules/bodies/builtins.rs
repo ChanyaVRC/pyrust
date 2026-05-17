@@ -22,10 +22,10 @@ use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, P
 use crate::interpreter::{
     NativeIterFrame, apply_format_spec, ascii_repr, bigint_divmod_floor, class_is_subclass_of,
     compare_values, dir_names, instance_attrs_snapshot, int_pow_promoting, invoke_class_method,
-    is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_hash_bigint, py_hash_int,
-    py_mod_i64, py_round_half_even, py_round_half_even_f64, reject_keyword_args_expanded,
-    snapshot_current_locals, snapshot_module_namespace, value_to_bigint, value_to_float,
-    value_type_name_str,
+    is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_hash_bigint, py_hash_float,
+    py_hash_int, py_mod_i64, py_round_half_even, py_round_half_even_f64,
+    reject_keyword_args_expanded, snapshot_current_locals, snapshot_module_namespace,
+    value_to_bigint, value_to_float, value_type_name_str,
 };
 use crate::value::{PyClass, PyKey, PyZero, Value, ValueKind, range_len};
 use pyrust_derive::pyrust_module;
@@ -2029,22 +2029,7 @@ fn hash_value(value: &Value) -> Result<i64> {
         ValueKind::Bool(b) => Ok(b as i64),
         // BigInt arrives only when the value doesn't fit in i64 (|n| > i64::MAX).
         ValueKind::BigInt(n) => Ok(bigint_hash(n)),
-        ValueKind::Float(v) => {
-            if v.fract() == 0.0 && v.is_finite() {
-                // Integral floats share the same hash as the equivalent int
-                // (CPython invariant: hash(1.0) == hash(1)).  Apply int_hash
-                // to get the Mersenne reduction and -1→-2 sentinel remap, so
-                // that e.g. hash(-1.0) == -2 and hash(float(2**62)) == 2.
-                Ok(int_hash(v as i64))
-            } else if v.is_infinite() {
-                // CPython uses _PyHASH_INF = 314159 as the sentinel for
-                // infinities (Python/pyhash.c).  The bit-cast would give the
-                // raw IEEE-754 pattern instead.
-                Ok(if v > 0.0 { 314159 } else { -314159 })
-            } else {
-                Ok(v.to_bits() as i64)
-            }
-        }
+        ValueKind::Float(v) => Ok(py_hash_float(v)),
         ValueKind::Str(s) => {
             let mut h: u64 = 14695981039346656037u64;
             for b in s.bytes() {
