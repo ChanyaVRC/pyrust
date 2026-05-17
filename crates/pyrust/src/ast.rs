@@ -200,6 +200,8 @@ pub enum FStringPart {
 #[derive(Debug, Clone)]
 pub enum Expr {
     Int(i64),
+    /// Integer literal that does not fit in i64; stored as a decimal string.
+    BigInt(String),
     Float(f64),
     /// Complex literal: (real, imag) — produced from imaginary `Nj` tokens.
     Complex(f64, f64),

@@ -25,6 +25,8 @@ pub enum FStringPart {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     Int(i64),
+    /// Integer literal that does not fit in i64; stored as a decimal string.
+    BigInt(String),
     Float(f64),
     /// Imaginary literal, e.g. `3j` or `2.5j` (the f64 is the imaginary part)
     Imag(f64),

@@ -234,6 +234,13 @@ impl Parser {
                             expr: Box::new(Expr::Int(n)),
                         }))
                     }
+                    Some(Token::BigInt(s)) => {
+                        self.bump();
+                        Ok(Pattern::Literal(Expr::Unary {
+                            op: crate::ast::UnaryOp::Neg,
+                            expr: Box::new(Expr::BigInt(s)),
+                        }))
+                    }
                     Some(Token::Float(f)) => {
                         self.bump();
                         Ok(Pattern::Literal(Expr::Unary {
@@ -250,6 +257,10 @@ impl Parser {
             Some(Token::Int(n)) => {
                 self.bump();
                 Ok(Pattern::Literal(Expr::Int(n)))
+            }
+            Some(Token::BigInt(s)) => {
+                self.bump();
+                Ok(Pattern::Literal(Expr::BigInt(s)))
             }
             Some(Token::Float(f)) => {
                 self.bump();
@@ -1687,6 +1698,10 @@ impl Parser {
             Some(Token::Int(v)) => {
                 self.bump();
                 Ok(Expr::Int(v))
+            }
+            Some(Token::BigInt(s)) => {
+                self.bump();
+                Ok(Expr::BigInt(s))
             }
             Some(Token::Float(v)) => {
                 self.bump();

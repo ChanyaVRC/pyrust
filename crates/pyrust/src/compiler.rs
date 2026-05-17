@@ -582,6 +582,7 @@ fn lambda_captures_in_expr(
         }
         Expr::Var(_)
         | Expr::Int(_)
+        | Expr::BigInt(_)
         | Expr::Float(_)
         | Expr::Complex(_, _)
         | Expr::Str(_)
@@ -991,6 +992,7 @@ fn collect_free_var_reads_in_expr(expr: &Expr, uses: &mut HashSet<String>) {
             for_each_fstring_expr(parts, &mut |e| collect_free_var_reads_in_expr(e, uses));
         }
         Expr::Int(_)
+        | Expr::BigInt(_)
         | Expr::Float(_)
         | Expr::Str(_)
         | Expr::Bytes(_)
@@ -1331,6 +1333,7 @@ fn collect_transitive_free_vars_in_expr(expr: &Expr, uses: &mut HashSet<String>)
         }
         Expr::Var(_)
         | Expr::Int(_)
+        | Expr::BigInt(_)
         | Expr::Float(_)
         | Expr::Complex(_, _)
         | Expr::Str(_)
@@ -1363,6 +1366,7 @@ fn const_eq(a: &Value, b: &Value) -> bool {
 fn fold_constant(expr: &Expr) -> Option<Value> {
     match expr {
         Expr::Int(v) => Some(Value::int(*v)),
+        Expr::BigInt(s) => s.parse::<PyBigInt>().ok().map(Value::bigint),
         Expr::Float(v) => Some(Value::float(*v)),
         Expr::Str(s) => Some(Value::string(s.clone())),
         Expr::Bytes(b) => Some(Value::bytes(b.clone())),
@@ -1662,6 +1666,7 @@ fn rewrite_continue_top(body: Vec<Stmt>) -> Vec<Stmt> {
 fn expr_is_side_effect_free(expr: &Expr) -> bool {
     match expr {
         Expr::Int(_)
+        | Expr::BigInt(_)
         | Expr::Float(_)
         | Expr::Complex(_, _)
         | Expr::Str(_)
@@ -1829,6 +1834,7 @@ fn collect_written_target(target: &AssignTarget, names: &mut HashSet<String>) {
 fn expr_is_invariant(expr: &Expr, written: &HashSet<String>) -> bool {
     match expr {
         Expr::Int(_)
+        | Expr::BigInt(_)
         | Expr::Float(_)
         | Expr::Str(_)
         | Expr::Bytes(_)
@@ -2176,6 +2182,7 @@ fn nested_loop_body_safe(body: &[Stmt], i_name: &str, c_name: &str) -> bool {
 fn expr_safe(expr: &Expr, i_name: &str, c_name: &str) -> bool {
     match expr {
         Expr::Int(_)
+        | Expr::BigInt(_)
         | Expr::Float(_)
         | Expr::Complex(_, _)
         | Expr::Str(_)
@@ -2403,6 +2410,7 @@ fn expr_reads_var(expr: &Expr, name: &str) -> bool {
     match expr {
         Expr::Var(n) => n == name,
         Expr::Int(_)
+        | Expr::BigInt(_)
         | Expr::Float(_)
         | Expr::Complex(_, _)
         | Expr::Str(_)
@@ -2593,6 +2601,7 @@ fn rewrite_c_at_i_in_expr(expr: &mut Expr, c_name: &str, i_name: &str) {
     }
     match expr {
         Expr::Int(_)
+        | Expr::BigInt(_)
         | Expr::Float(_)
         | Expr::Complex(_, _)
         | Expr::Str(_)
@@ -2885,6 +2894,10 @@ impl Compiler {
     fn try_literal_const_idx(&mut self, expr: &Expr) -> Option<u16> {
         match expr {
             Expr::Int(v) => Some(self.intern_const(Value::int(*v))),
+            Expr::BigInt(s) => {
+                let n = s.parse::<PyBigInt>().ok()?;
+                Some(self.intern_const(Value::bigint(n)))
+            }
             Expr::Float(v) => Some(self.intern_const(Value::float(*v))),
             Expr::Str(s) => Some(self.intern_const(Value::string(s.clone()))),
             Expr::Bytes(b) => Some(self.intern_const(Value::bytes(b.clone()))),
@@ -5600,6 +5613,13 @@ impl Compiler {
                 dst
             }
             Expr::Int(v) => self.compile_literal(Value::int(*v)),
+            Expr::BigInt(s) => {
+                // The decimal string was validated at lex time; parse cannot fail.
+                let n = s
+                    .parse::<PyBigInt>()
+                    .expect("BigInt decimal string is valid");
+                self.compile_literal(Value::bigint(n))
+            }
             Expr::Float(v) => self.compile_literal(Value::float(*v)),
             Expr::Str(s) => self.compile_literal(Value::string(s.clone())),
             Expr::Bytes(b) => self.compile_literal(Value::bytes(b.clone())),
