@@ -2080,11 +2080,14 @@ impl Interpreter {
                     // Pre-push the two injected slots so they appear first in
                     // `vars(C)` (mirroring CPython) even if the body never
                     // explicitly assigns them.
+                    // CPython exposes __module__ before __qualname__ in the class
+                    // namespace (verified against python3.12 `list(locals().keys())`
+                    // at the top of a class body).  Mirror that order here.
                     let mut pre_order: Vec<crate::bytecode::Reg> = Vec::new();
-                    if let Some(slot) = qualname_slot {
+                    if let Some(slot) = module_slot {
                         pre_order.push(slot);
                     }
-                    if let Some(slot) = module_slot {
+                    if let Some(slot) = qualname_slot {
                         pre_order.push(slot);
                     }
                     self.class_store_order.push(pre_order);

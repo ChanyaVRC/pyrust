@@ -4991,7 +4991,8 @@ impl Compiler {
         // avoid a duplicate slot.
         let mut ordered: Vec<String> = Vec::with_capacity(body_local.len() + 2);
         let mut seen: HashSet<String> = HashSet::new();
-        for pre_name in ["__qualname__", "__module__"] {
+        // CPython injects __module__ first, __qualname__ second.
+        for pre_name in ["__module__", "__qualname__"] {
             if !body_local.contains(pre_name) {
                 ordered.push(pre_name.to_string());
                 seen.insert(pre_name.to_string());

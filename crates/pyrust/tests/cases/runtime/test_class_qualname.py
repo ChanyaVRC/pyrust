@@ -34,6 +34,13 @@ class G:
     print(__qualname__)  # G
     print(__module__)    # __main__
 
+# __module__ must appear before __qualname__ in locals() — matches CPython ordering.
+class H:
+    keys = list(locals().keys())
+
+print(H.keys[0])  # __module__
+print(H.keys[1])  # __qualname__
+
 # Nested class: __qualname__ must not raise NameError inside the inner body.
 # pyrust uses just the bare class name (not the dotted CPython form Outer.Inner)
 # because nested qualname tracking is not yet implemented.
