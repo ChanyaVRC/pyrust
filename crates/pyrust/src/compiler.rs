@@ -7,7 +7,7 @@ use crate::ast::{
 };
 use crate::bytecode::{CellVar, FnCode, FnParamSpec, FnProto, Insn, Reg};
 use crate::error::PyError;
-use crate::value::{PyBigInt, PyPow, Value, ValueKind};
+use crate::value::{PyBigInt, PyPow, PyToPrimitive, Value, ValueKind};
 
 /// Compile a top-level script body.  All script-level names are locals.
 ///
@@ -1464,11 +1464,23 @@ pub(crate) fn fold_binop(l: &Value, op: BinaryOp, r: &Value) -> Option<Value> {
         (ValueKind::Int(a), BinaryOp::BitAnd, ValueKind::Int(b)) => Some(Value::int(a & b)),
         (ValueKind::Int(a), BinaryOp::BitOr, ValueKind::Int(b)) => Some(Value::int(a | b)),
         (ValueKind::Int(a), BinaryOp::BitXor, ValueKind::Int(b)) => Some(Value::int(a ^ b)),
-        (ValueKind::Int(a), BinaryOp::LShift, ValueKind::Int(b)) if (0..64).contains(&b) => {
-            Some(Value::int(a.wrapping_shl(b as u32)))
+        (ValueKind::Int(a), BinaryOp::LShift, ValueKind::Int(b)) if b >= 0 => {
+            // Promote to BigInt when the shift overflows i64 — identical to
+            // the runtime path in eval_binary.
+            let n = b as usize;
+            let big = PyBigInt::from(a) << n;
+            Some(match big.to_i64() {
+                Some(r) => Value::int(r),
+                None => Value::bigint(big),
+            })
         }
-        (ValueKind::Int(a), BinaryOp::RShift, ValueKind::Int(b)) if (0..64).contains(&b) => {
-            Some(Value::int(a >> b))
+        (ValueKind::Int(a), BinaryOp::RShift, ValueKind::Int(b)) if b >= 0 => {
+            // Right-shift by ≥ 64 saturates to the sign bit (0 or -1).
+            if b >= 64 {
+                Some(Value::int(if a < 0 { -1 } else { 0 }))
+            } else {
+                Some(Value::int(a >> b))
+            }
         }
         (ValueKind::Float(a), BinaryOp::Add, ValueKind::Float(b)) => Some(Value::float(a + b)),
         (ValueKind::Float(a), BinaryOp::Sub, ValueKind::Float(b)) => Some(Value::float(a - b)),
