@@ -2383,8 +2383,13 @@ fn int_float_eq(i: i64, f: f64) -> bool {
 ///
 /// Mirrors `int_float_eq` for arbitrarily large integers.  The float is
 /// converted to its exact `BigInt` representation (via `BigInt::from_f64`,
-/// which returns `None` for non-finite or fractional values) and then
-/// compared directly to the BigInt operand.
+/// which returns `None` only for non-finite values; for fractional finite
+/// floats it truncates toward zero) and then compared directly to the BigInt
+/// operand.  Non-finite floats can never equal any integer, so the `None`
+/// arm correctly returns `false`.  Fractional floats never equal an integer
+/// either; `BigInt::from_f64` on a fractional value yields a truncated
+/// BigInt that will differ from `big`, so the comparison still returns the
+/// correct result.
 fn bigint_float_eq(big: &BigInt, f: f64) -> bool {
     match BigInt::from_f64(f) {
         Some(f_as_bigint) => f_as_bigint == *big,

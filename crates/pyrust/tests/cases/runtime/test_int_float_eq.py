@@ -43,3 +43,22 @@ print(float('nan') == 0)               # False
 # 10**16 and 10**18: both happen to be exactly representable as f64.
 print(10**16 == float(10**16))         # True
 print(10**18 == float(10**18))         # True
+
+# Ordering comparisons at the 2^53 precision boundary.
+# float(2**53 + 1) rounds to 2**53 (nearest-even), so 2**53+1 > that float.
+print(2**53 + 1 > float(2**53))       # True
+print(2**53 + 1 >= float(2**53))      # True
+print(float(2**53) < 2**53 + 1)       # True
+print(float(2**53) <= 2**53 + 1)      # True
+# float(2**53+1) rounds to 2**53, so 2**53 is NOT less than it.
+print(2**53 < float(2**53 + 1))       # False
+# 2**53+1 is strictly greater than float(2**53+1) == 2**53.
+print(2**53 + 1 > float(2**53 + 1))   # True
+
+# Ordering with small integers and fractional floats.
+print(1 < 1.5)                         # True
+print(2 > 1.5)                         # True
+print(1 <= 1.0)                        # True
+print(1 >= 1.0)                        # True
+print(1 < 1.0)                         # False
+print(1 > 1.0)                         # False

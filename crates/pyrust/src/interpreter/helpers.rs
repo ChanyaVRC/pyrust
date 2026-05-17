@@ -84,9 +84,11 @@ fn int_float_cmp(i: i64, f: f64) -> Option<std::cmp::Ordering> {
 
 /// Exact ordering between a `BigInt` and an `f64` float.
 ///
-/// Uses `BigInt::from_f64` (returns `None` for NaN / fractional) for the
-/// integer-valued case, then compares the exact BigInt.  For out-of-range
-/// or non-integer floats, falls back to a sign + magnitude heuristic that
+/// Uses `BigInt::from_f64` (returns `None` for NaN/infinity; for fractional
+/// finite floats it truncates toward zero rather than returning `None`) for
+/// the integer-valued case — guarded by `f == f.trunc()` so fractional
+/// floats fall through to the heuristic path below.  For out-of-range or
+/// non-integer floats, falls back to a sign + magnitude heuristic that
 /// mirrors CPython's implementation.
 fn bigint_float_cmp(big: &crate::value::PyBigInt, f: f64) -> Option<std::cmp::Ordering> {
     use crate::value::PyBigInt;
