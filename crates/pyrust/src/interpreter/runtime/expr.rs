@@ -295,9 +295,10 @@ impl Interpreter {
     /// For values that already map cleanly to a hashable `PyKey` variant
     /// via `Value::to_key`, this is a thin wrapper that surfaces the
     /// canonical "unhashable type" error.  For `PyInstance`, it looks up
-    /// `__hash__` on the class, invokes it, and packages the resulting
-    /// `u64` (mod 2^64 reduction matches CPython's `hash()` builtin) into
-    /// a `PyKey::Object` along with the instance value.
+    /// `__hash__` on the class, invokes it, and packages the `u64` hash
+    /// (Mersenne-prime reduction + `-1 → -2` sentinel remap, matching the
+    /// `hash()` builtin — issue #503) into a `PyKey::Object` along with the
+    /// instance value.
     pub(crate) fn value_to_pykey(&mut self, value: &Value) -> Result<PyKey> {
         // Tuples need special handling: the core `Value::to_key` cannot
         // recurse through `PyInstance` elements (it has no interpreter
@@ -336,15 +337,25 @@ impl Interpreter {
                         Value::py_instance(Rc::clone(inst)),
                         &[],
                     )?;
-                    let hash = match result.kind() {
-                        ValueKind::Int(n) => n as u64,
-                        ValueKind::Bool(b) => b as u64,
-                        ValueKind::BigInt(n) => {
-                            // CPython folds arbitrary-precision hash results
-                            // mod 2^64; mimic that by taking the low 64 bits.
-                            let (_sign, digits) = n.to_u64_digits();
-                            *digits.first().unwrap_or(&0)
-                        }
+                    // Mirror CPython's slot_tp_hash semantics (issue #503):
+                    //
+                    // When `__hash__` returns an integer that fits in ssize_t
+                    // (i64), CPython takes it as-is, applying only the
+                    // `-1 → -2` sentinel remap (`-1` is the C-level tp_hash
+                    // error indicator and must never appear as a hash value).
+                    //
+                    // When `__hash__` returns a value larger than ssize_t can
+                    // hold (BigInt here), CPython calls `long_hash` on the
+                    // returned Python int, applying Mersenne-prime reduction
+                    // (mod 2^61-1) before the remap.  `py_hash_bigint` does
+                    // exactly that.
+                    //
+                    // The stored `u64` must match what `hash(obj)` returns so
+                    // that direct-hash probes into the table find their entry.
+                    let raw: i64 = match result.kind() {
+                        ValueKind::Int(n) => if n == -1 { -2 } else { n },
+                        ValueKind::Bool(b) => b as i64,
+                        ValueKind::BigInt(n) => py_hash_bigint(n),
                         _ => {
                             return Err(PyError::named(
                                 "TypeError",
@@ -353,7 +364,7 @@ impl Interpreter {
                         }
                     };
                     return Ok(PyKey::Object {
-                        hash,
+                        hash: raw as u64,
                         value: value.clone(),
                     });
                 }
