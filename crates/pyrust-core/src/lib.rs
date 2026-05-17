@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use indexmap::{IndexMap, IndexSet};
 use num_bigint::BigInt;
-use num_traits::{ToPrimitive, Zero};
+use num_traits::{FromPrimitive, ToPrimitive, Zero};
 
 pub use num_bigint::BigInt as PyBigInt;
 pub use num_bigint::Sign as PyBigIntSign;
@@ -2347,6 +2347,51 @@ impl Drop for Value {
     }
 }
 
+// ── PartialEq helpers ─────────────────────────────────────────────────────────
+
+/// Exact equality between an `i64` integer and an `f64` float.
+///
+/// CPython's int-float comparison converts the float to its exact integer
+/// representation and compares, rather than converting the int to float (which
+/// loses precision beyond 2^53).  Concretely: `2**53 + 1 == float(2**53 + 1)`
+/// is `False` in CPython because `float(2**53 + 1)` rounds to `2**53`.
+///
+/// The algorithm:
+/// 1. If `f` is not finite, return `false`.
+/// 2. If `f` has a fractional part, return `false` (no integer can equal it).
+/// 3. If `f` is outside the `i64` value range, return `false`.
+/// 4. Otherwise convert `f` to `i64` exactly (safe: `f` is finite,
+///    integer-valued, and in range) and compare.
+///
+/// Step 4 is the key insight: `f as i64` gives the *float's* exact integer
+/// value, not a lossy round-trip through `i as f64`.
+fn int_float_eq(i: i64, f: f64) -> bool {
+    if !f.is_finite() || f != f.trunc() {
+        return false;
+    }
+    // 9223372036854775808.0 is 2^63, the smallest f64 strictly greater than
+    // i64::MAX.  Any finite integer-valued float in [i64::MIN, 2^63) is
+    // safely representable as i64.
+    const I64_MAX_PLUS_ONE: f64 = 9_223_372_036_854_775_808.0_f64;
+    if f < (i64::MIN as f64) || f >= I64_MAX_PLUS_ONE {
+        return false;
+    }
+    (f as i64) == i
+}
+
+/// Exact equality between a `BigInt` and an `f64` float.
+///
+/// Mirrors `int_float_eq` for arbitrarily large integers.  The float is
+/// converted to its exact `BigInt` representation (via `BigInt::from_f64`,
+/// which returns `None` for non-finite or fractional values) and then
+/// compared directly to the BigInt operand.
+fn bigint_float_eq(big: &BigInt, f: f64) -> bool {
+    match BigInt::from_f64(f) {
+        Some(f_as_bigint) => f_as_bigint == *big,
+        None => false,
+    }
+}
+
 // ── PartialEq ─────────────────────────────────────────────────────────────────
 
 impl PartialEq for Value {
@@ -2376,15 +2421,17 @@ impl PartialEq for Value {
         };
         match (self.kind(), other.kind()) {
             (ValueKind::Int(a), ValueKind::Int(b)) => a == b,
-            // Python: 1 == 1.0 is True
-            (ValueKind::Int(a), ValueKind::Float(b)) => (a as f64) == b,
-            (ValueKind::Float(a), ValueKind::Int(b)) => a == (b as f64),
+            // Python: 1 == 1.0 is True, but 2**53+1 == float(2**53+1) is False.
+            // Convert the float to its exact integer value (not the int to float)
+            // to avoid precision loss for values beyond the 53-bit mantissa.
+            (ValueKind::Int(a), ValueKind::Float(b)) => int_float_eq(a, b),
+            (ValueKind::Float(a), ValueKind::Int(b)) => int_float_eq(b, a),
             (ValueKind::Float(a), ValueKind::Float(b)) => a == b,
             (ValueKind::BigInt(a), ValueKind::BigInt(b)) => a == b,
             (ValueKind::BigInt(a), ValueKind::Int(b)) => *a == BigInt::from(b),
             (ValueKind::Int(a), ValueKind::BigInt(b)) => BigInt::from(a) == *b,
-            (ValueKind::BigInt(a), ValueKind::Float(b)) => a.to_f64() == Some(b),
-            (ValueKind::Float(a), ValueKind::BigInt(b)) => b.to_f64() == Some(a),
+            (ValueKind::BigInt(a), ValueKind::Float(b)) => bigint_float_eq(a, b),
+            (ValueKind::Float(a), ValueKind::BigInt(b)) => bigint_float_eq(b, a),
             (ValueKind::Str(a), ValueKind::Str(b)) => a == b,
             (ValueKind::Bool(a), ValueKind::Bool(b)) => a == b,
             // Python: True == 1 is True
