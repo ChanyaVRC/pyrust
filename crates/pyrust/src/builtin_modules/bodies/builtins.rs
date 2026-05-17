@@ -21,7 +21,7 @@ use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
     NativeIterFrame, apply_format_spec, ascii_repr, bigint_divmod_floor, class_is_subclass_of,
-    compare_values, dir_names, instance_attrs_snapshot, int_pow_promoting, invoke_class_method,
+    dir_names, instance_attrs_snapshot, int_pow_promoting, invoke_class_method,
     is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_hash_bigint, py_hash_int,
     py_mod_i64, py_round_half_even, py_round_half_even_f64, reject_keyword_args_expanded,
     snapshot_current_locals, snapshot_module_namespace, value_to_bigint, value_to_float,
@@ -1303,7 +1303,7 @@ pyrust_module! {
             let mut sort_err: Option<PyError> = None;
             keyed.sort_by(|(a, _), (b, _)| {
                 if sort_err.is_some() { return std::cmp::Ordering::Equal; }
-                match compare_values(a, b) {
+                match _interp.richcmp_order(a, b) {
                     Ok(ord) => ord,
                     Err(e) => { sort_err = Some(e); std::cmp::Ordering::Equal }
                 }
@@ -1314,7 +1314,7 @@ pyrust_module! {
             let mut sort_err: Option<PyError> = None;
             items.sort_by(|a, b| {
                 if sort_err.is_some() { return std::cmp::Ordering::Equal; }
-                match compare_values(a, b) {
+                match _interp.richcmp_order(a, b) {
                     Ok(ord) => ord,
                     Err(e) => { sort_err = Some(e); std::cmp::Ordering::Equal }
                 }
@@ -1329,14 +1329,18 @@ pyrust_module! {
 
     /// CPython: min(iterable, /, *, key=None) or min(*args, key=None).
     /// <https://docs.python.org/3/library/functions.html#min>
-    #[pure]
+    /// Not marked `#[pure]` — dispatches user `__lt__` (and related
+    /// comparison dunders) when comparing elements, and may invoke the
+    /// user-supplied key function.
     fn min(args) -> Result<Value> {
         min_max_impl(_interp, args, false, FN_NAME)
     }
 
     /// CPython: max(iterable, /, *, key=None) or max(*args, key=None).
     /// <https://docs.python.org/3/library/functions.html#max>
-    #[pure]
+    /// Not marked `#[pure]` — dispatches user `__lt__` (and related
+    /// comparison dunders) when comparing elements, and may invoke the
+    /// user-supplied key function.
     fn max(args) -> Result<Value> {
         min_max_impl(_interp, args, true, FN_NAME)
     }
@@ -2554,7 +2558,7 @@ fn min_max_impl(
         let mut result_err: Option<PyError> = None;
         let result = keyed.into_iter().reduce(|acc, item| {
             if result_err.is_some() { return acc; }
-            match compare_values(&item.0, &acc.0) {
+            match interp.richcmp_order(&item.0, &acc.0) {
                 Ok(cmp) => {
                     if (is_max && cmp == std::cmp::Ordering::Greater)
                         || (!is_max && cmp == std::cmp::Ordering::Less) { item }
@@ -2569,7 +2573,7 @@ fn min_max_impl(
         let mut result_err: Option<PyError> = None;
         let result = items.into_iter().reduce(|acc, v| {
             if result_err.is_some() { return acc; }
-            match compare_values(&v, &acc) {
+            match interp.richcmp_order(&v, &acc) {
                 Ok(cmp) => {
                     if (is_max && cmp == std::cmp::Ordering::Greater)
                         || (!is_max && cmp == std::cmp::Ordering::Less) { v }

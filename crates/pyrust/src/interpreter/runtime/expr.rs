@@ -288,6 +288,64 @@ impl Interpreter {
         None
     }
 
+    /// Three-way ordering comparison that dispatches `__lt__` / `__gt__` on
+    /// user instances before falling back to `compare_values` for primitives.
+    ///
+    /// Used by `sorted()`, `min()`, and `max()` so that user-defined classes
+    /// with comparison dunders are sorted and compared correctly.
+    ///
+    /// Algorithm:
+    /// 1. If neither operand is a `PyInstance`, delegate to `compare_values`
+    ///    (fast primitive path — zero overhead for the common int/str case).
+    /// 2. Try `a < b` via `__lt__` on `a` / `__gt__` on `b`.  If truthy →
+    ///    `Less`.
+    /// 3. If step 2 returned falsy, try `b < a` to distinguish `Equal` from
+    ///    `Greater`.
+    /// 4. If no dunder was found, fall through to `compare_values` (which
+    ///    raises `TypeError` for incomparable types, matching CPython).
+    pub(crate) fn richcmp_order(
+        &mut self,
+        a: &Value,
+        b: &Value,
+    ) -> Result<std::cmp::Ordering> {
+        use std::cmp::Ordering;
+
+        // Fast path: neither operand is a user instance.
+        if !matches!(a.kind(), ValueKind::PyInstance(_))
+            && !matches!(b.kind(), ValueKind::PyInstance(_))
+        {
+            return compare_values(a, b);
+        }
+
+        // Try a < b (dispatches __lt__ on a, then __gt__ on b).
+        match self.try_dunder_binary(a, b, "__lt__", "__gt__") {
+            Some(Ok(v)) => {
+                let lt = self.truthy_value(&v)?;
+                if lt {
+                    return Ok(Ordering::Less);
+                }
+                // a is not less than b; try b < a to tell Equal from Greater.
+                match self.try_dunder_binary(b, a, "__lt__", "__gt__") {
+                    Some(Ok(v2)) => {
+                        return Ok(if self.truthy_value(&v2)? {
+                            Ordering::Greater
+                        } else {
+                            Ordering::Equal
+                        });
+                    }
+                    Some(Err(e)) => return Err(e),
+                    None => return Ok(Ordering::Equal),
+                }
+            }
+            Some(Err(e)) => return Err(e),
+            // No __lt__/__gt__ on either operand; fall through to primitive
+            // comparison, which raises TypeError for incomparable instance
+            // pairs — matches CPython's behaviour when no comparison dunder
+            // is defined.
+            None => compare_values(a, b),
+        }
+    }
+
     /// Convert a `Value` to a `PyKey`, dispatching the user's `__hash__`
     /// when the value is a `PyInstance` so user-defined classes can be used
     /// as dict/set keys (issue #368).
