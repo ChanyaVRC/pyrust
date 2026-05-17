@@ -200,6 +200,9 @@ fn collect_transitive_global_names(body: &[Stmt], out: &mut HashSet<String>) {
             } => {
                 collect_transitive_global_names(nested_body, out);
             }
+            Stmt::Class { body, .. } => {
+                collect_transitive_global_names(body, out);
+            }
             Stmt::If {
                 branches,
                 else_branch,
