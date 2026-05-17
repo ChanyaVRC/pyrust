@@ -1333,11 +1333,12 @@ fn values_are_identical(a: &Value, b: &Value) -> bool {
         // BuiltinFunction values are singletons by name (static str identity).
         // This makes `type(5) is type(5)` True since both return the same name tag.
         (ValueKind::BuiltinFunction(x), ValueKind::BuiltinFunction(y)) => x == y,
-        // For mutable containers (list/dict/set) and tuples, identity is the
-        // shared backing-storage id surfaced by `value_id()` — `b = a; a is b`
-        // is True after Rc-sharing storage on clone (#305).  Two distinct
-        // literals of the same shape produce different ids, matching CPython.
-        (ValueKind::List(_), ValueKind::List(_))
+        // For heap-backed values, identity is the shared backing-storage id
+        // surfaced by `value_id()` — `b = a; a is b` is True after Rc-sharing
+        // storage on clone (#305/#523).  Two distinct literals of the same
+        // shape/value produce different ids, matching CPython.
+        (ValueKind::BigInt(_), ValueKind::BigInt(_))
+        | (ValueKind::List(_), ValueKind::List(_))
         | (ValueKind::Set(_), ValueKind::Set(_))
         | (ValueKind::Dict(_), ValueKind::Dict(_))
         | (ValueKind::Tuple(_), ValueKind::Tuple(_)) => match (a.value_id(), b.value_id()) {

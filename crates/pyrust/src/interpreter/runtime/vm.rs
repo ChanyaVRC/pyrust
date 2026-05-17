@@ -2643,13 +2643,17 @@ fn vm_eval_unary(op: UnaryOp, val: Value) -> Result<Value> {
                 "bad operand type for unary ~: use integer".to_string(),
             )),
         },
-        UnaryOp::Pos => match val.kind() {
-            ValueKind::Int(v) => Ok(Value::int(v)),
-            ValueKind::Float(v) => Ok(Value::float(v)),
-            ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
-            ValueKind::BigInt(b) => Ok(Value::bigint(b.clone())),
-            _ => Err(PyError::named("TypeError", "bad operand type for unary +".to_string())),
-        },
+        UnaryOp::Pos => {
+            if matches!(val.kind(), ValueKind::BigInt(_)) {
+                return Ok(val);
+            }
+            match val.kind() {
+                ValueKind::Int(v) => Ok(Value::int(v)),
+                ValueKind::Float(v) => Ok(Value::float(v)),
+                ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
+                _ => Err(PyError::named("TypeError", "bad operand type for unary +".to_string())),
+            }
+        }
     }
 }
 
