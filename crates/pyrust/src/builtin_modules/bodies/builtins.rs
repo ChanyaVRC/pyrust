@@ -21,7 +21,7 @@ use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
     NativeIterFrame, apply_format_spec, ascii_repr, bigint_divmod_floor, class_is_subclass_of,
-    dir_names, instance_attrs_snapshot, int_pow_promoting, invoke_class_method,
+    compare_values, dir_names, instance_attrs_snapshot, int_pow_promoting, invoke_class_method,
     is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_hash_bigint, py_hash_int,
     py_mod_i64, py_round_half_even, py_round_half_even_f64, reject_keyword_args_expanded,
     snapshot_current_locals, snapshot_module_namespace, value_to_bigint, value_to_float,
@@ -1300,25 +1300,54 @@ pyrust_module! {
                     Ok((k, v))
                 })
                 .collect::<Result<_>>()?;
+            // Pre-scan: if no key is a PyInstance, all comparisons are
+            // primitive — skip the interpreter-dispatch overhead entirely.
+            let has_instance =
+                keyed.iter().any(|(k, _)| matches!(k.kind(), ValueKind::PyInstance(_)));
             let mut sort_err: Option<PyError> = None;
-            keyed.sort_by(|(a, _), (b, _)| {
-                if sort_err.is_some() { return std::cmp::Ordering::Equal; }
-                match _interp.richcmp_order(a, b) {
-                    Ok(ord) => ord,
-                    Err(e) => { sort_err = Some(e); std::cmp::Ordering::Equal }
-                }
-            });
+            if has_instance {
+                keyed.sort_by(|(a, _), (b, _)| {
+                    if sort_err.is_some() { return std::cmp::Ordering::Equal; }
+                    match _interp.richcmp_order(a, b) {
+                        Ok(ord) => ord,
+                        Err(e) => { sort_err = Some(e); std::cmp::Ordering::Equal }
+                    }
+                });
+            } else {
+                keyed.sort_by(|(a, _), (b, _)| {
+                    if sort_err.is_some() { return std::cmp::Ordering::Equal; }
+                    match compare_values(a, b) {
+                        Ok(ord) => ord,
+                        Err(e) => { sort_err = Some(e); std::cmp::Ordering::Equal }
+                    }
+                });
+            }
             if let Some(e) = sort_err { return Err(e); }
             items = keyed.into_iter().map(|(_, v)| v).collect();
         } else {
+            // Pre-scan: if no item is a PyInstance, use compare_values
+            // directly — zero interpreter-dispatch overhead for the common
+            // all-primitive case (ints, strings, …).
+            let has_instance =
+                items.iter().any(|v| matches!(v.kind(), ValueKind::PyInstance(_)));
             let mut sort_err: Option<PyError> = None;
-            items.sort_by(|a, b| {
-                if sort_err.is_some() { return std::cmp::Ordering::Equal; }
-                match _interp.richcmp_order(a, b) {
-                    Ok(ord) => ord,
-                    Err(e) => { sort_err = Some(e); std::cmp::Ordering::Equal }
-                }
-            });
+            if has_instance {
+                items.sort_by(|a, b| {
+                    if sort_err.is_some() { return std::cmp::Ordering::Equal; }
+                    match _interp.richcmp_order(a, b) {
+                        Ok(ord) => ord,
+                        Err(e) => { sort_err = Some(e); std::cmp::Ordering::Equal }
+                    }
+                });
+            } else {
+                items.sort_by(|a, b| {
+                    if sort_err.is_some() { return std::cmp::Ordering::Equal; }
+                    match compare_values(a, b) {
+                        Ok(ord) => ord,
+                        Err(e) => { sort_err = Some(e); std::cmp::Ordering::Equal }
+                    }
+                });
+            }
             if let Some(e) = sort_err { return Err(e); }
         }
         if reverse {
@@ -2555,10 +2584,26 @@ fn min_max_impl(
                 Ok((k, v))
             })
             .collect::<Result<_>>()?;
+        // Pre-scan: if no key is a PyInstance, all comparisons are primitive —
+        // use compare_values directly to avoid interpreter-dispatch overhead.
+        let has_instance =
+            keyed.iter().any(|(k, _)| matches!(k.kind(), ValueKind::PyInstance(_)));
         let mut result_err: Option<PyError> = None;
         let result = keyed.into_iter().reduce(|acc, item| {
             if result_err.is_some() { return acc; }
-            match interp.richcmp_order(&item.0, &acc.0) {
+            let cmp = if has_instance {
+                // max uses richcmp_order_gt (tries __gt__ first, '>' error on
+                // miss); min uses richcmp_order (__lt__ first, '<' error on
+                // miss). Matches CPython's Py_GT / Py_LT reduction paths.
+                if is_max {
+                    interp.richcmp_order_gt(&item.0, &acc.0)
+                } else {
+                    interp.richcmp_order(&item.0, &acc.0)
+                }
+            } else {
+                compare_values(&item.0, &acc.0)
+            };
+            match cmp {
                 Ok(cmp) => {
                     if (is_max && cmp == std::cmp::Ordering::Greater)
                         || (!is_max && cmp == std::cmp::Ordering::Less) { item }
@@ -2570,10 +2615,23 @@ fn min_max_impl(
         if let Some(e) = result_err { return Err(e); }
         Ok(result.1)
     } else {
+        // Pre-scan: if no item is a PyInstance, use compare_values directly —
+        // zero interpreter-dispatch overhead for all-primitive sequences.
+        let has_instance =
+            items.iter().any(|v| matches!(v.kind(), ValueKind::PyInstance(_)));
         let mut result_err: Option<PyError> = None;
         let result = items.into_iter().reduce(|acc, v| {
             if result_err.is_some() { return acc; }
-            match interp.richcmp_order(&v, &acc) {
+            let cmp = if has_instance {
+                if is_max {
+                    interp.richcmp_order_gt(&v, &acc)
+                } else {
+                    interp.richcmp_order(&v, &acc)
+                }
+            } else {
+                compare_values(&v, &acc)
+            };
+            match cmp {
                 Ok(cmp) => {
                     if (is_max && cmp == std::cmp::Ordering::Greater)
                         || (!is_max && cmp == std::cmp::Ordering::Less) { v }
