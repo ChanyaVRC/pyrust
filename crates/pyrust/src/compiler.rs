@@ -2915,7 +2915,7 @@ impl Compiler {
         // `Float(1.0)` and `Int(1)` are now hash/eq-equal in PyKey so that
         // dict/set keys respect CPython's numeric equality invariant.  In both
         // cases the constant pool must keep the values distinct, so we skip the
-        // hash-map fast path for booleans and integer-valued floats and fall
+        // hash-map fast path for booleans and all floats and fall
         // through to the type-exact linear scan instead.
         let is_bool = matches!(val.kind(), ValueKind::Bool(_));
         let is_float = matches!(val.kind(), ValueKind::Float(_));

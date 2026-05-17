@@ -1357,6 +1357,9 @@ impl Interpreter {
                     } else {
                         None
                     };
+                    // FIXME(#562): same memoization-key type-collision issue as calls.rs —
+                    // Float(1.0) and Int(1) share the same PyKey and can return stale results
+                    // for type-sensitive pure functions.  See issue #562 for the full fix.
                     if let Some(fn_id) = fn_id_opt {
                         let mut key = std::mem::take(&mut self.key_scratch);
                         key.clear();

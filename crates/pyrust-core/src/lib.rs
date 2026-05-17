@@ -224,7 +224,7 @@ impl PartialEq for PyKey {
             (PyKey::Int(a), PyKey::Int(b)) => a == b,
             (PyKey::Bool(a), PyKey::Bool(b)) => a == b,
             (PyKey::Bool(a), PyKey::Int(b)) | (PyKey::Int(b), PyKey::Bool(a)) => *b == *a as i64,
-            (PyKey::Float(a), PyKey::Float(b)) => a == b,
+            (PyKey::Float(a), PyKey::Float(b)) => f64::from_bits(*a) == f64::from_bits(*b),
             // Cross-type: Float vs Int (and Bool, since Bool is a subtype of int).
             // A float equals an int key iff the float is finite, has no
             // fractional part, and its value equals the integer exactly.
