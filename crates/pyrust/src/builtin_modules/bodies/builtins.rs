@@ -22,8 +22,8 @@ use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, P
 use crate::interpreter::{
     NativeIterFrame, apply_format_spec, ascii_repr, bigint_divmod_floor, class_is_subclass_of,
     compare_values, dir_names, instance_attrs_snapshot, int_pow_promoting, invoke_class_method,
-    is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_mod_i64,
-    py_round_half_even, py_round_half_even_f64, reject_keyword_args_expanded,
+    is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_hash_bigint, py_hash_int,
+    py_mod_i64, py_round_half_even, py_round_half_even_f64, reject_keyword_args_expanded,
     snapshot_current_locals, snapshot_module_namespace, value_to_bigint, value_to_float,
     value_type_name_str,
 };
@@ -467,11 +467,17 @@ pyrust_module! {
                     &[],
                 )?;
                 // __hash__ must return an integer (bool is a subtype of int).
-                // CPython maps -1 → -2 (C-level tp_hash error sentinel) and
-                // reduces large integers modulo 2^61-1 (Py_HASH_MODULUS).
-                // Both int_hash and bigint_hash encapsulate these rules.
+                // CPython's slot_tp_hash semantics (issue #503):
+                //
+                // - Int (fits in ssize_t / i64): take as-is, apply only the
+                //   `-1 → -2` sentinel remap.  CPython does NOT apply
+                //   Mersenne-prime reduction here — that only happens when
+                //   hashing a bare int value directly (int.__hash__).
+                // - BigInt (overflows ssize_t): CPython falls back to
+                //   `long_hash` which applies Mersenne-prime reduction.
+                //   `bigint_hash` mirrors that.
                 let hash_val: i64 = match result.kind() {
-                    ValueKind::Int(n) => int_hash(n),
+                    ValueKind::Int(n) => if n == -1 { -2 } else { n },
                     ValueKind::Bool(b) => b as i64,
                     ValueKind::BigInt(n) => bigint_hash(n),
                     _ => {
@@ -2033,40 +2039,16 @@ pub(super) fn materialize_user_iter(
 }
 
 
-/// CPython's Py_HASH_MODULUS = 2^61 - 1 (Mersenne prime).
-const PY_HASH_MODULUS: i64 = (1i64 << 61) - 1;
-
-/// Hash an `i64` integer using CPython's Mersenne-prime scheme.
-///
-/// For values whose absolute value is less than `Py_HASH_MODULUS` the result
-/// is the value itself (identity), subject to the `-1 → -2` sentinel remap.
-/// Values with `|v| >= 2^61-1` are reduced modulo `2^61-1` first.
-///
-/// The `-1 → -2` remap is always applied: `-1` is CPython's C-level tp_hash
-/// error sentinel and must never be returned from a Python `__hash__`.
-fn int_hash(v: i64) -> i64 {
-    // Rust's `%` for i64 is sign-preserving (C99 remainder), matching CPython's
-    // `long_hash` for values that fit in a C long (platform i64 on 64-bit).
-    let raw = v % PY_HASH_MODULUS;
-    if raw == -1 { -2 } else { raw }
-}
-
-/// Reduce a `BigInt` to an `i64` hash using CPython's Mersenne-prime scheme.
-///
-/// Algorithm (mirrors CPython `_Py_HashDouble` / `long_hash`):
-/// 1. `r = n % (2^61 - 1)` — sign-preserving remainder (num-bigint semantics).
-/// 2. If `r == -1`, remap to `-2` (the C-level error-sentinel exclusion).
-///
-/// The result is in `[-(2^61-2), 2^61-1]`, always fitting in `i64`.
-fn bigint_hash(n: &crate::value::PyBigInt) -> i64 {
-    use crate::value::PyBigInt;
-    use crate::value::PyToPrimitive;
-    let modulus = PyBigInt::from(PY_HASH_MODULUS);
-    // num-bigint's `%` preserves the sign of the dividend, matching CPython.
-    let reduced = n.clone() % &modulus;
-    let raw = reduced.to_i64().unwrap_or(0);
-    if raw == -1 { -2 } else { raw }
-}
+// `int_hash` and `bigint_hash` were previously defined here.  They are now
+// shared helpers (`py_hash_int` / `py_hash_bigint`) in
+// `crate::interpreter::helpers` so that `value_to_pykey` (dict/set key
+// storage) and the `hash()` builtin both apply identical Mersenne-prime
+// reduction and the `-1 → -2` sentinel remap (issue #503).
+// Local aliases preserve the call sites below unchanged.
+#[inline(always)]
+fn int_hash(v: i64) -> i64 { py_hash_int(v) }
+#[inline(always)]
+fn bigint_hash(n: &crate::value::PyBigInt) -> i64 { py_hash_bigint(n) }
 
 /// Compute the hash of a `Value` for the `hash()` builtin.  Mirrors
 /// CPython's semantics:

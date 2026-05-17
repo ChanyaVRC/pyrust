@@ -546,6 +546,40 @@ pub(crate) fn py_mod_i64(a: i64, b: i64) -> i64 {
     remainder
 }
 
+/// CPython's Py_HASH_MODULUS = 2^61 - 1 (Mersenne prime).
+///
+/// Used by `py_hash_int` and `py_hash_bigint` to reduce hash values the
+/// same way CPython's `long_hash` does.  Shared between `value_to_pykey`
+/// (dict/set key storage) and the `hash()` builtin so both code paths stay
+/// in sync (issue #503).
+pub(crate) const PY_HASH_MODULUS: i64 = (1i64 << 61) - 1;
+
+/// Hash an `i64` integer using CPython's Mersenne-prime scheme.
+///
+/// For values with `|v| < 2^61-1` the result equals `v`, subject to the
+/// `-1 → -2` sentinel remap.  Larger values are reduced modulo `2^61-1`
+/// first (matching CPython `long_hash`).
+///
+/// The `-1 → -2` remap is always applied: `-1` is the C-level `tp_hash`
+/// error sentinel and must never be the hash of any Python object.
+pub(crate) fn py_hash_int(v: i64) -> i64 {
+    let raw = v % PY_HASH_MODULUS;
+    if raw == -1 { -2 } else { raw }
+}
+
+/// Reduce a `BigInt` to an `i64` hash using CPython's Mersenne-prime scheme.
+///
+/// Algorithm mirrors CPython `long_hash`:
+/// 1. `r = n % (2^61 - 1)` — sign-preserving remainder.
+/// 2. If `r == -1`, remap to `-2` (sentinel exclusion).
+///
+/// The result is in `[-(2^61-2), 2^61-1]`, always fitting in `i64`.
+pub(crate) fn py_hash_bigint(n: &PyBigInt) -> i64 {
+    let modulus = PyBigInt::from(PY_HASH_MODULUS);
+    let reduced = n.clone() % &modulus;
+    let raw = reduced.to_i64().unwrap_or(0);
+    if raw == -1 { -2 } else { raw }
+}
 
 fn normalize_index(index: &Value, len: usize, label: &str) -> Result<usize> {
     let mut value = match index.kind() {
