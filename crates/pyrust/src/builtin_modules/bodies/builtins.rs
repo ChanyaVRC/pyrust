@@ -2103,8 +2103,19 @@ fn hash_value(value: &Value) -> Result<i64> {
 fn hash_value_with_interp(interp: &mut crate::Interpreter, value: &Value) -> Result<i64> {
     match value.kind() {
         ValueKind::Tuple(items) => {
-            // Clone the slice to release the borrow of `value` before the
-            // mutable `interp` calls that follow.
+            // Fast path: if no element is a PyInstance, delegate to the pure
+            // hash_value helper which avoids a Vec allocation and the mutable
+            // borrow split entirely.  This preserves the master-branch perf
+            // for primitive-only tuples (the common case).
+            if !items
+                .iter()
+                .any(|v| matches!(v.kind(), ValueKind::PyInstance(_) | ValueKind::Tuple(_)))
+            {
+                return hash_value(value);
+            }
+            // At least one element needs interpreter access (PyInstance or a
+            // nested tuple that may contain one).  Clone the slice to release
+            // the borrow of `value` before the mutable `interp` calls.
             let items: Vec<Value> = items.to_vec();
             let mut h: i64 = 3527539;
             for item in &items {
