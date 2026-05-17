@@ -1367,8 +1367,8 @@ pyrust_module! {
 
     /// CPython: max(iterable, /, *, key=None) or max(*args, key=None).
     /// <https://docs.python.org/3/library/functions.html#max>
-    /// Not marked `#[pure]` — dispatches user `__lt__` (and related
-    /// comparison dunders) when comparing elements, and may invoke the
+    /// Not marked `#[pure]` — dispatches user `__gt__` (with `__lt__` as
+    /// reflected fallback) when comparing elements, and may invoke the
     /// user-supplied key function.
     fn max(args) -> Result<Value> {
         min_max_impl(_interp, args, true, FN_NAME)

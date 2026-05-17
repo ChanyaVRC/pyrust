@@ -37,3 +37,26 @@ print(max(3, 1, 2))   # 3
 print(min([5, 2, 8]))  # 2
 print(max([5, 2, 8]))  # 8
 print("ok")
+
+# Incomparable instances (no __lt__ / __gt__) must raise TypeError,
+# matching CPython 3.12 behaviour for sorted() and min()/max().
+class Incomparable:
+    pass
+
+try:
+    sorted([Incomparable(), Incomparable()])
+    print('no error')
+except TypeError:
+    print('TypeError')  # TypeError
+
+try:
+    min(Incomparable(), Incomparable())
+    print('no error')
+except TypeError:
+    print('TypeError')  # TypeError
+
+try:
+    max(Incomparable(), Incomparable())
+    print('no error')
+except TypeError:
+    print('TypeError')  # TypeError

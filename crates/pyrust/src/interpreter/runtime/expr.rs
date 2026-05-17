@@ -337,7 +337,9 @@ impl Interpreter {
                         });
                     }
                     Some(Err(e)) => return Err(e),
-                    None => return Ok(Ordering::Equal),
+                    // No reverse dunder found: incomparable pair — raise
+                    // TypeError just as CPython does for these builtins.
+                    None => return compare_values(a, b),
                 }
             }
             Some(Err(e)) => return Err(e),
@@ -388,7 +390,16 @@ impl Interpreter {
                         });
                     }
                     Some(Err(e)) => return Err(e),
-                    None => return Ok(Ordering::Equal),
+                    // No reverse dunder found: incomparable pair — raise
+                    // TypeError just as CPython does for max().
+                    None => return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "'>' not supported between instances of '{}' and '{}'",
+                            value_type_name_str(a),
+                            value_type_name_str(b),
+                        ),
+                    )),
                 }
             }
             Some(Err(e)) => return Err(e),
