@@ -2042,11 +2042,52 @@ impl Interpreter {
                     };
                     let num_class_regs = class_code.num_regs as usize;
                     let mut class_regs: RegsBuf = smallvec![Value::unset(); num_class_regs];
+                    // Issue #546: CPython pre-injects `__qualname__` and
+                    // `__module__` into the class namespace before the body
+                    // runs.  The compiler (compile_class) now always allocates
+                    // register slots for these two names at slots 0 and 1
+                    // (unless the user explicitly assigned them, in which case
+                    // the slot is also present but may be at a different index).
+                    // Pre-populate those slots here so that:
+                    //   * reads of `__qualname__` / `__module__` inside the
+                    //     class body see the correct values (via CheckLocal),
+                    //   * `locals()` at the top of the class body includes them,
+                    //   * the resulting class object has `C.__qualname__` and
+                    //     `C.__module__` set correctly.
+                    // The nested-class qualname (`Outer.Inner`) is not tracked
+                    // here; the value is just the bare class name.
+                    let qualname_slot = local_index.get("__qualname__").copied();
+                    let module_slot = local_index.get("__module__").copied();
+                    if let Some(slot) = qualname_slot {
+                        let slot = slot as usize;
+                        if slot < class_regs.len() {
+                            class_regs[slot] = Value::string(class_name.clone());
+                        }
+                    }
+                    if let Some(slot) = module_slot {
+                        let slot = slot as usize;
+                        if slot < class_regs.len() {
+                            // Use "__main__" for top-level scripts.  Module-name
+                            // tracking is not yet implemented; this matches the
+                            // CPython default for scripts run directly.
+                            class_regs[slot] = Value::string("__main__".to_string());
+                        }
+                    }
                     // Push a fresh class-store-order list onto the interpreter
                     // stack so `RecordClassStore` / `RecordClassDel` insns
                     // emitted inside the class body record into *this* class
                     // — supports `class A: class B: ...` nesting cleanly.
-                    self.class_store_order.push(Vec::new());
+                    // Pre-push the two injected slots so they appear first in
+                    // `vars(C)` (mirroring CPython) even if the body never
+                    // explicitly assigns them.
+                    let mut pre_order: Vec<crate::bytecode::Reg> = Vec::new();
+                    if let Some(slot) = qualname_slot {
+                        pre_order.push(slot);
+                    }
+                    if let Some(slot) = module_slot {
+                        pre_order.push(slot);
+                    }
+                    self.class_store_order.push(pre_order);
                     // Issue #487: publish a FrameKind::Class view so that
                     // `locals()` called inside the class body returns the
                     // partially-built class attrs dict (the fastlocal register
@@ -2089,6 +2130,18 @@ impl Interpreter {
                             attrs.insert(name.clone(), v.clone());
                         }
                     }
+                    // Issue #546: Ensure `__qualname__` and `__module__` are
+                    // always present in the class attrs dict.  Under normal
+                    // operation the pre-populated slots flow through `store_order`
+                    // above; this `entry().or_insert()` guard is a safety net for
+                    // any edge case where the slot mechanism is bypassed (e.g. the
+                    // body explicitly deleted one of these names with `del`).
+                    attrs
+                        .entry("__qualname__".to_string())
+                        .or_insert_with(|| Value::string(class_name.clone()));
+                    attrs
+                        .entry("__module__".to_string())
+                        .or_insert_with(|| Value::string("__main__".to_string()));
                     // CPython rule (Objects/typeobject.c `type_new_set_slots`):
                     // if a class defines `__eq__` in its own body without also
                     // defining `__hash__`, implicitly set `__hash__ = None` so
