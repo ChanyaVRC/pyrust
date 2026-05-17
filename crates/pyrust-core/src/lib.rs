@@ -3108,4 +3108,108 @@ mod tests {
         });
         assert_ne!(a.value_id(), c.value_id());
     }
+
+    // ── float_bits_as_exact_i64 boundary tests ───────────────────────────────
+
+    #[test]
+    fn float_bits_exact_i64_integer_values() {
+        // Ordinary integer-valued floats within i64 range.
+        assert_eq!(float_bits_as_exact_i64(1.0f64.to_bits()), Some(1));
+        assert_eq!(float_bits_as_exact_i64((-1.0f64).to_bits()), Some(-1));
+        assert_eq!(float_bits_as_exact_i64(0.0f64.to_bits()), Some(0));
+        assert_eq!(float_bits_as_exact_i64(42.0f64.to_bits()), Some(42));
+        assert_eq!(
+            float_bits_as_exact_i64(1_000_000_000_000_000.0f64.to_bits()),
+            Some(1_000_000_000_000_000)
+        );
+    }
+
+    #[test]
+    fn float_bits_exact_i64_fractional_returns_none() {
+        assert_eq!(float_bits_as_exact_i64(0.5f64.to_bits()), None);
+        assert_eq!(float_bits_as_exact_i64(1.5f64.to_bits()), None);
+        assert_eq!(float_bits_as_exact_i64((-0.1f64).to_bits()), None);
+    }
+
+    #[test]
+    fn float_bits_exact_i64_non_finite_returns_none() {
+        assert_eq!(float_bits_as_exact_i64(f64::INFINITY.to_bits()), None);
+        assert_eq!(float_bits_as_exact_i64(f64::NEG_INFINITY.to_bits()), None);
+        assert_eq!(float_bits_as_exact_i64(f64::NAN.to_bits()), None);
+    }
+
+    #[test]
+    fn float_bits_exact_i64_i64_min_is_exact() {
+        // i64::MIN as f64 is exactly representable (-2^63); must return Some.
+        let min_f = i64::MIN as f64;
+        assert_eq!(float_bits_as_exact_i64(min_f.to_bits()), Some(i64::MIN));
+    }
+
+    #[test]
+    fn float_bits_exact_i64_i64_max_rounds_up() {
+        // i64::MAX = 2^63-1 is not exactly representable as f64; the nearest f64
+        // is 2^63, which is out of range.  Must return None.
+        let max_f = i64::MAX as f64; // rounds up to 2^63
+        assert_eq!(float_bits_as_exact_i64(max_f.to_bits()), None);
+    }
+
+    #[test]
+    fn float_bits_exact_i64_out_of_range_large() {
+        // 2^63 is exactly representable but exceeds i64::MAX (= 2^63 - 1).
+        let too_big = 9_223_372_036_854_775_808.0f64; // 2^63
+        assert_eq!(float_bits_as_exact_i64(too_big.to_bits()), None);
+        // 2^64 — clearly out of range.
+        let much_bigger = 1.844_674_407_370_955_2e19_f64; // 2^64
+        assert_eq!(float_bits_as_exact_i64(much_bigger.to_bits()), None);
+        // Negative out-of-range: the f64 immediately below i64::MIN as f64.
+        // i64::MIN as f64 is exactly -2^63 (in range); the next f64 towards
+        // -inf has integer value -2^63 - 2^10, which is out of i64 range.
+        let min_f = i64::MIN as f64;
+        // Construct the next representable f64 below min_f by decrementing bits.
+        let next_below_bits = min_f.to_bits() + 1; // negative floats: +1 bits → more negative
+        let too_small = f64::from_bits(next_below_bits);
+        assert!(
+            too_small < min_f,
+            "sanity: next_below must be more negative than i64::MIN as f64"
+        );
+        assert_eq!(float_bits_as_exact_i64(next_below_bits), None);
+    }
+
+    #[test]
+    fn pykey_float_int_cross_type_eq() {
+        // Core contract: Float(1.0) == Int(1) and they hash equal.
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn key_hash(k: &PyKey) -> u64 {
+            let mut h = DefaultHasher::new();
+            k.hash(&mut h);
+            h.finish()
+        }
+
+        let f1 = PyKey::Float(1.0f64.to_bits());
+        let i1 = PyKey::Int(1);
+        assert_eq!(f1, i1, "Float(1.0) must equal Int(1)");
+        assert_eq!(
+            key_hash(&f1),
+            key_hash(&i1),
+            "hash(Float(1.0)) must equal hash(Int(1))"
+        );
+
+        // 0.5 must NOT equal 0
+        let f05 = PyKey::Float(0.5f64.to_bits());
+        let i0 = PyKey::Int(0);
+        assert_ne!(f05, i0, "Float(0.5) must not equal Int(0)");
+
+        // Float(-1.0) == Int(-1)
+        let fn1 = PyKey::Float((-1.0f64).to_bits());
+        let in1 = PyKey::Int(-1);
+        assert_eq!(fn1, in1, "Float(-1.0) must equal Int(-1)");
+        assert_eq!(key_hash(&fn1), key_hash(&in1), "hash contract for -1.0/-1");
+
+        // Float(1.0) == Bool(true)
+        let bt = PyKey::Bool(true);
+        assert_eq!(f1, bt, "Float(1.0) must equal Bool(true)");
+        assert_eq!(key_hash(&f1), key_hash(&bt), "hash contract for 1.0/true");
+    }
 }
