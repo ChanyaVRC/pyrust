@@ -1612,6 +1612,16 @@ impl Interpreter {
                 self.set_lookup(&container, &key)?.is_some(),
             ));
         }
+        // Frozenset membership — must intercept before the generic BuiltinObject
+        // arm because `FrozenSetOps::contains` calls `item.to_key()` which has
+        // no interpreter access and cannot dispatch user `__hash__`.  Mirror the
+        // Set path above: get the key via `value_to_pykey` (which runs user
+        // `__hash__`) then search the underlying `IndexSet` via `set_lookup_in`
+        // (which dispatches user `__eq__` for `PyKey::Object` entries).
+        if let Some(rc) = pyrust_builtins::frozenset::as_items(&container) {
+            let key = self.value_to_pykey(&item)?;
+            return Ok(Value::bool_(self.set_lookup_in(&rc, &key)?.is_some()));
+        }
         match container.kind() {
             ValueKind::List(items) => Ok(Value::bool_(items.iter().any(|b| b == &item))),
             ValueKind::Tuple(items) => Ok(Value::bool_(items.contains(&item))),
