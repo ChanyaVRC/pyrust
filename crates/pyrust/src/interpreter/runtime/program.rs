@@ -82,7 +82,7 @@ impl Interpreter {
         // afterwards so the raw pointer never outlives the local `regs`.
         self.vm_frame_views.push(VmFrameView {
             kind: FrameKind::Script,
-            regs_ptr: regs.as_ptr(),
+            regs_ptr: regs.as_mut_ptr(),
             regs_len: regs.len(),
             local_index: Rc::clone(&local_index),
         });
@@ -90,6 +90,9 @@ impl Interpreter {
         self.vm_frame_views.pop();
         // Write fastlocal registers back to the module env so that imported
         // modules and post-run inspection can find all names.
+        // StoreGlobal from nested scopes already updated the register via
+        // the script-frame view (#520), so the write-back naturally carries
+        // the correct value.
         for (name, &idx) in local_index.iter() {
             if !regs[idx as usize].is_unset() {
                 let val = std::mem::replace(&mut regs[idx as usize], Value::unset());

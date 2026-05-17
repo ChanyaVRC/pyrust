@@ -613,7 +613,30 @@ impl Interpreter {
             (env.global_names.contains(&name), env.nonlocal_names.contains(&name))
         };
         if is_global {
-            module_env(&self.env).borrow_mut().values.insert(name, value);
+            // Write to the module env HashMap so LoadGlobal / post-run
+            // inspection can find the new value.
+            module_env(&self.env).borrow_mut().values.insert(name.clone(), value.clone());
+            // Also update the module-level fastlocal register if one exists
+            // for this name.  Without this, `print(x)` at module scope reads
+            // the stale register value and ignores the StoreGlobal write (#520).
+            // SAFETY: the Script frame view is pushed before `run_bytecode` and
+            // popped immediately after; while a nested function's StoreGlobal
+            // fires the outer script frame is suspended (the VM is not executing
+            // its dispatch loop), so this write does not race with anything.
+            if let Some(script_view) = self
+                .vm_frame_views
+                .iter()
+                .find(|v| v.kind == FrameKind::Script)
+            {
+                if let Some(&slot) = script_view.local_index.get(&name) {
+                    let slot = slot as usize;
+                    if slot < script_view.regs_len {
+                        unsafe {
+                            *script_view.regs_ptr.add(slot) = value;
+                        }
+                    }
+                }
+            }
             return;
         }
         if is_nonlocal

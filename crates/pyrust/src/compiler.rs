@@ -72,12 +72,16 @@ fn collect_cell_vars_in(
                 // Free variable references: names read in the nested body that are
                 // not the nested function's own locals or globals.
                 let inner_globals = crate::interpreter::collect_global_names(nested_body);
-                // Names declared `global` in the nested function reference the
-                // enclosing module env directly.  If those names are fastlocals
-                // in the current scope, promote them to cell vars so they live
-                // in the env rather than registers — otherwise nested writes via
-                // `global` and register write-back at script end would conflict.
-                for name in &inner_globals {
+                // Names declared `global` in the nested function (or any transitively
+                // nested function within it) reference the module env directly.  If
+                // those names are fastlocals at the current scope, promote them to cell
+                // vars so they live in env.values rather than registers.  Without this,
+                // a doubly-nested `global x` would leave `x` as a fastlocal register at
+                // module scope: `StoreGlobal` would write to env.values but
+                // `LoadGlobal` inside the nested function would find nothing there (#520).
+                let mut all_nested_globals = inner_globals.clone();
+                collect_transitive_global_names(nested_body, &mut all_nested_globals);
+                for name in &all_nested_globals {
                     if local_index.contains_key(name) {
                         cells.insert(name.clone());
                     }
@@ -172,6 +176,83 @@ fn collect_cell_vars_in(
             Stmt::Match { arms, .. } => {
                 for arm in arms {
                     collect_cell_vars_in(&arm.body, local_index, cells);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Collect every name declared `global` in `body` or in any transitively-nested
+/// `Stmt::Def` body, at any depth.  Used by `collect_cell_vars_in` so that a
+/// module-level fastlocal referenced via `global x` inside a doubly-nested
+/// function is promoted to a cell var, making both `StoreGlobal` (write) and
+/// `LoadGlobal` (read) work correctly via `env.values` rather than a stale
+/// register.
+fn collect_transitive_global_names(body: &[Stmt], out: &mut HashSet<String>) {
+    for stmt in body {
+        match stmt {
+            Stmt::Global(names) => {
+                out.extend(names.iter().cloned());
+            }
+            Stmt::Def {
+                body: nested_body, ..
+            } => {
+                collect_transitive_global_names(nested_body, out);
+            }
+            Stmt::Class { body, .. } => {
+                collect_transitive_global_names(body, out);
+            }
+            Stmt::If {
+                branches,
+                else_branch,
+            } => {
+                for (_, b) in branches {
+                    collect_transitive_global_names(b, out);
+                }
+                if let Some(b) = else_branch {
+                    collect_transitive_global_names(b, out);
+                }
+            }
+            Stmt::While {
+                body, else_branch, ..
+            } => {
+                collect_transitive_global_names(body, out);
+                if let Some(b) = else_branch {
+                    collect_transitive_global_names(b, out);
+                }
+            }
+            Stmt::For {
+                body, else_branch, ..
+            } => {
+                collect_transitive_global_names(body, out);
+                if let Some(b) = else_branch {
+                    collect_transitive_global_names(b, out);
+                }
+            }
+            Stmt::Try {
+                body,
+                handlers,
+                else_branch,
+                finally_branch,
+            } => {
+                collect_transitive_global_names(body, out);
+                for h in handlers {
+                    collect_transitive_global_names(&h.body, out);
+                }
+                if let Some(b) = else_branch {
+                    collect_transitive_global_names(b, out);
+                }
+                if let Some(b) = finally_branch {
+                    collect_transitive_global_names(b, out);
+                }
+            }
+            Stmt::With { body, .. } => {
+                collect_transitive_global_names(body, out);
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    collect_transitive_global_names(&arm.body, out);
                 }
             }
             _ => {}

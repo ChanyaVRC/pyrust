@@ -937,7 +937,7 @@ impl Interpreter {
                 // returns so the raw pointer never outlives `regs`.
                 self.vm_frame_views.push(VmFrameView {
                     kind: FrameKind::Function,
-                    regs_ptr: regs.as_ptr(),
+                    regs_ptr: regs.as_mut_ptr(),
                     regs_len: regs.len(),
                     local_index: Rc::clone(&function.local_index),
                 });
@@ -1148,7 +1148,7 @@ impl Interpreter {
             // matching push in the simple-path branch above).
             self.vm_frame_views.push(VmFrameView {
                 kind: FrameKind::Function,
-                regs_ptr: regs.as_ptr(),
+                regs_ptr: regs.as_mut_ptr(),
                 regs_len: regs.len(),
                 local_index: Rc::clone(&function.local_index),
             });
