@@ -128,6 +128,13 @@ enum ShiftCount {
     Saturated,
 }
 
+/// Maximum left-shift count we are willing to materialise at runtime.
+/// CPython raises `OverflowError` ("too many digits in integer") for
+/// results that would exceed `sys.maxsize` digits; we are more
+/// conservative and cap at 2^30 ≈ 10^9 bits (~128 MiB worst-case),
+/// which is large enough for any realistic computation.
+const MAX_SHIFT: usize = 1 << 30;
+
 /// Validate a shift count and convert it to `ShiftCount`.  Returns
 /// `Err(ValueError)` for negative shifts and `Err(TypeError)` if the
 /// operand isn't an int / bool.  Matches CPython's error messages
@@ -1170,7 +1177,15 @@ impl Interpreter {
                         PyError::named("TypeError", "bitwise op requires integer".to_string())
                     })?;
                     return match shift_count(&right)? {
-                        ShiftCount::Fits(n) => Ok(Value::bigint(a << n)),
+                        ShiftCount::Fits(n) => {
+                            if n > MAX_SHIFT && !a.is_zero() {
+                                return Err(PyError::named(
+                                    "OverflowError",
+                                    "too many digits in integer".to_string(),
+                                ));
+                            }
+                            Ok(Value::bigint(a << n))
+                        }
                         // CPython: `0 << huge == 0` (no allocation
                         // needed), otherwise OverflowError because the
                         // result would not fit in memory.
@@ -1186,10 +1201,38 @@ impl Interpreter {
                         }
                     };
                 }
-                self.bitwise_op(&left, &right, |a, b| {
-                    if b < 0 { return Err(PyError::named("ValueError", "negative shift count".to_string())); }
-                    Ok(a << (b & 63))
-                })
+                // Int LHS, Int (or Bool) RHS — must validate and may promote to BigInt.
+                let a = match left.kind() {
+                    ValueKind::Int(v) => v,
+                    ValueKind::Bool(b) => if b { 1 } else { 0 },
+                    _ => return Err(PyError::named("TypeError", "bitwise op requires integer".to_string())),
+                };
+                match shift_count(&right)? {
+                    ShiftCount::Fits(n) => {
+                        if n > MAX_SHIFT && a != 0 {
+                            return Err(PyError::named(
+                                "OverflowError",
+                                "too many digits in integer".to_string(),
+                            ));
+                        }
+                        // Shift left, promoting to BigInt when bits are lost.
+                        let big = PyBigInt::from(a) << n;
+                        Ok(match big.to_i64() {
+                            Some(r) => Value::int(r),
+                            None => Value::bigint(big),
+                        })
+                    }
+                    ShiftCount::Saturated => {
+                        if a == 0 {
+                            Ok(Value::int(0))
+                        } else {
+                            Err(PyError::named(
+                                "OverflowError",
+                                "too many digits in integer".to_string(),
+                            ))
+                        }
+                    }
+                }
             }
             BinaryOp::RShift => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__rshift__", "__rrshift__") {
@@ -1211,10 +1254,24 @@ impl Interpreter {
                         })),
                     };
                 }
-                self.bitwise_op(&left, &right, |a, b| {
-                    if b < 0 { return Err(PyError::named("ValueError", "negative shift count".to_string())); }
-                    Ok(a >> (b & 63))
-                })
+                // Int LHS, Int (or Bool) RHS.
+                let a = match left.kind() {
+                    ValueKind::Int(v) => v,
+                    ValueKind::Bool(b) => if b { 1 } else { 0 },
+                    _ => return Err(PyError::named("TypeError", "bitwise op requires integer".to_string())),
+                };
+                match shift_count(&right)? {
+                    ShiftCount::Fits(n) => {
+                        // Arithmetic right shift: always fits in i64.
+                        if n >= 64 {
+                            Ok(Value::int(if a < 0 { -1 } else { 0 }))
+                        } else {
+                            Ok(Value::int(a >> n))
+                        }
+                    }
+                    // Saturate to sign bit — matches CPython, no error.
+                    ShiftCount::Saturated => Ok(Value::int(if a < 0 { -1 } else { 0 })),
+                }
             }
             BinaryOp::In => self.eval_in(right, left),
             BinaryOp::NotIn => Ok(Value::bool_(!self.eval_in(right, left)?.truthy())),

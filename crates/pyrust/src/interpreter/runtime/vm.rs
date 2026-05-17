@@ -137,8 +137,39 @@ fn int_int_fast(a: i64, b: i64, op: BinaryOp) -> Option<Value> {
         BinaryOp::BitAnd => Some(Value::int(a & b)),
         BinaryOp::BitOr  => Some(Value::int(a | b)),
         BinaryOp::BitXor => Some(Value::int(a ^ b)),
-        BinaryOp::LShift => if b < 0 { None } else { Some(Value::int(a << (b & 63))) },
-        BinaryOp::RShift => if b < 0 { None } else { Some(Value::int(a >> (b & 63))) },
+        BinaryOp::LShift => {
+            if b < 0 {
+                // Negative shift → ValueError; fall through to eval_binary.
+                None
+            } else if b >= 64 {
+                // Shift count ≥ 64: result is BigInt (or 0 for a==0).
+                // Fall through to eval_binary which handles BigInt promotion.
+                None
+            } else {
+                let n = b as u32;
+                // Shift left then shift right; if we get back the original
+                // value no significant bits were lost and the result fits i64.
+                let r = a.wrapping_shl(n);
+                if r.wrapping_shr(n) == a {
+                    Some(Value::int(r))
+                } else {
+                    // Overflow: fall through for BigInt promotion.
+                    None
+                }
+            }
+        }
+        BinaryOp::RShift => {
+            if b < 0 {
+                // Negative shift → ValueError; fall through to eval_binary.
+                None
+            } else if b >= 64 {
+                // Saturate to sign bit (0 for non-negative, -1 for negative).
+                // This is safe to handle here without BigInt.
+                Some(Value::int(if a < 0 { -1 } else { 0 }))
+            } else {
+                Some(Value::int(a >> b))
+            }
+        }
         BinaryOp::Eq  => Some(Value::bool_(a == b)),
         BinaryOp::Ne  => Some(Value::bool_(a != b)),
         BinaryOp::Lt  => Some(Value::bool_(a < b)),
