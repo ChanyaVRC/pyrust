@@ -1541,7 +1541,8 @@ pyrust_module! {
 
     /// CPython: set([iterable]) — set constructor.
     /// <https://docs.python.org/3/library/functions.html#func-set>
-    #[pure]
+    /// Not marked `#[pure]` because it dispatches user `__hash__` via
+    /// `value_to_pykey` when building the set, and `__eq__` via `set_insert`.
     fn set(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         match args.len() {
