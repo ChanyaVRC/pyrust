@@ -2093,24 +2093,29 @@ fn hash_value(value: &Value) -> Result<i64> {
 /// remains a pure helper for primitive leaf types; this function calls it for
 /// those cases to avoid duplicating their logic.
 ///
-/// `Tuple`: uses the same initial value and multiply-xor mixing as
-/// `hash_value`'s Tuple arm, but each element is hashed via this function
-/// rather than `hash_value`, so `PyInstance` elements dispatch `__hash__`
-/// correctly (issue #502).
+/// `Tuple`: uses the same initial value and multiply-add mixing as
+/// `hash_value`'s Tuple arm (`h = h.wrapping_mul(1000003).wrapping_add(elem)`),
+/// but each element is hashed via this function rather than `hash_value`, so
+/// `PyInstance` elements dispatch `__hash__` correctly (issue #502).
 ///
 /// `PyInstance`: dispatches `__hash__` via the interpreter, then applies
 /// CPython's slot_tp_hash semantics (`-1 → -2`, Mersenne reduction for BigInt).
+/// Returns `true` if any element at any nesting depth is a `PyInstance`
+/// that requires interpreter access for `__hash__` dispatch.
+fn tuple_needs_interp(items: &[Value]) -> bool {
+    items.iter().any(|v| match v.kind() {
+        ValueKind::PyInstance(_) => true,
+        ValueKind::Tuple(inner) => tuple_needs_interp(inner),
+        _ => false,
+    })
+}
+
 fn hash_value_with_interp(interp: &mut crate::Interpreter, value: &Value) -> Result<i64> {
     match value.kind() {
         ValueKind::Tuple(items) => {
-            // Fast path: if no element is a PyInstance, delegate to the pure
-            // hash_value helper which avoids a Vec allocation and the mutable
-            // borrow split entirely.  This preserves the master-branch perf
-            // for primitive-only tuples (the common case).
-            if !items
-                .iter()
-                .any(|v| matches!(v.kind(), ValueKind::PyInstance(_) | ValueKind::Tuple(_)))
-            {
+            // Fast path: if no element at any depth is a PyInstance, delegate
+            // to the pure hash_value helper — no Vec allocation needed.
+            if !tuple_needs_interp(items) {
                 return hash_value(value);
             }
             // At least one element needs interpreter access (PyInstance or a
