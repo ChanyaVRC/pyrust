@@ -1831,6 +1831,79 @@ pub(crate) fn modpow_i64(base: i64, exp: u64, modulus: i64) -> i64 {
     result
 }
 
+/// CPython's `_Py_HashDouble` algorithm for float hashing.
+///
+/// Implements the Mersenne-prime hash (P = 2^61 - 1) that CPython uses for
+/// floating-point values.  The float is represented as `m * 2^e` (with integer
+/// `m` and `e`) and the hash is `m * 2^e mod P`, signed to match the float's
+/// sign.  The `-1 → -2` sentinel remap is applied at the end.
+///
+/// Special cases:
+/// - `+inf` → `314159`, `-inf` → `-314159`  (CPython: `sys.hash_info.inf`)
+/// - `NaN`  → `0`  (CPython uses object-identity hash for NaN; pyrust returns
+///   `sys.hash_info.nan = 0` as a stable fallback since float NaN values are
+///   not objects with stable addresses in this VM)
+/// - `0.0` / `-0.0` → `0`
+/// - Integral floats (e.g. `1.0`, `2.0`) hash the same as the corresponding
+///   integer: `hash(1.0) == hash(1)` (CPython invariant).
+pub(crate) fn py_hash_float(v: f64) -> i64 {
+    // CPython Mersenne prime: P = 2^61 - 1.
+    const P: u64 = (1u64 << 61) - 1;
+
+    if v.is_infinite() {
+        return if v > 0.0 { 314159 } else { -314159 };
+    }
+    if v.is_nan() {
+        // CPython calls PyObject_GenericHash (id-based) for NaN; pyrust
+        // doesn't have stable float object identity, so return the canonical
+        // sys.hash_info.nan value (0) as a stable substitute.
+        return 0;
+    }
+    if v == 0.0 {
+        return 0;
+    }
+
+    // Decompose v using IEEE 754 bits: [sign(1)][exponent(11)][mantissa(52)].
+    let bits = v.to_bits();
+    let sign: i64 = if v < 0.0 { -1 } else { 1 };
+    let biased_exp = ((bits >> 52) & 0x7ff) as i64;
+    let mantissa_bits = bits & 0x000f_ffff_ffff_ffff;
+
+    // Build (m, e) such that |v| = m * 2^e with m a positive integer.
+    // For normal numbers:  m = mantissa | (1 << 52),  e = biased_exp - 1023 - 52
+    // For subnormal numbers: m = mantissa,             e = 1 - 1023 - 52 = -1074
+    let (m, e): (u64, i64) = if biased_exp == 0 {
+        (mantissa_bits, -1074)
+    } else {
+        (mantissa_bits | (1u64 << 52), biased_exp - 1023 - 52)
+    };
+
+    // Compute h = m * 2^e mod P.
+    //
+    // Key identity: 2^61 ≡ 1 (mod P), so only the residue of e mod 61 matters
+    // for the shift direction.
+    //
+    // Positive e: h = m * 2^(e mod 61) mod P.
+    //   m fits in 53 bits, 2^(e mod 61) fits in 61 bits; product ≤ 2^114 → u128.
+    //
+    // Negative e: h = m * inv(2^|e|) mod P.
+    //   inv(2^k) ≡ 2^(61 - k mod 61) mod P  when k mod 61 ≠ 0,
+    //            ≡ 1                          when k mod 61 == 0.
+    //   (Proof: 2^(k mod 61) * 2^(61 - k mod 61) = 2^61 ≡ 1 mod P.)
+    let h: u64 = if e >= 0 {
+        let shift = (e as u64) % 61;
+        ((m as u128 * (1u128 << shift)) % (P as u128)) as u64
+    } else {
+        let neg_e_mod = ((-e) as u64) % 61;
+        let inv_shift = if neg_e_mod == 0 { 0u64 } else { 61 - neg_e_mod };
+        ((m as u128 * (1u128 << inv_shift)) % (P as u128)) as u64
+    };
+
+    // Apply sign, then remap the C-level sentinel -1 to -2.
+    let signed = h as i64 * sign;
+    if signed == -1 { -2 } else { signed }
+}
+
 #[cfg(test)]
 mod purity_tests {
     use super::is_pure_body;
