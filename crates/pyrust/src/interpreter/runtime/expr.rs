@@ -1165,25 +1165,25 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__lt__", "__gt__") {
                     return r;
                 }
-                self.compare(left, right, |o| o.is_lt())
+                self.compare(left, right, "<", |o| o.is_lt())
             }
             BinaryOp::Le => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__le__", "__ge__") {
                     return r;
                 }
-                self.compare(left, right, |o| o.is_le())
+                self.compare(left, right, "<=", |o| o.is_le())
             }
             BinaryOp::Gt => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__gt__", "__lt__") {
                     return r;
                 }
-                self.compare(left, right, |o| o.is_gt())
+                self.compare(left, right, ">", |o| o.is_gt())
             }
             BinaryOp::Ge => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__ge__", "__le__") {
                     return r;
                 }
-                self.compare(left, right, |o| o.is_ge())
+                self.compare(left, right, ">=", |o| o.is_ge())
             }
             BinaryOp::Pow => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__pow__", "__rpow__") {
@@ -1723,13 +1723,19 @@ impl Interpreter {
         Ok(Value::float(a - b * (a / b).floor()))
     }
 
-    fn compare(&self, left: Value, right: Value, cmp: impl Fn(std::cmp::Ordering) -> bool) -> Result<Value> {
+    fn compare(
+        &self,
+        left: Value,
+        right: Value,
+        op_name: &str,
+        cmp: impl Fn(std::cmp::Ordering) -> bool,
+    ) -> Result<Value> {
         if matches!(left.kind(), ValueKind::Float(f) if f.is_nan())
             || matches!(right.kind(), ValueKind::Float(f) if f.is_nan())
         {
             return Ok(Value::bool_(false));
         }
-        Ok(Value::bool_(cmp(compare_values(&left, &right)?)))
+        Ok(Value::bool_(cmp(compare_values_with_op(&left, &right, op_name)?)))
     }
 
     fn to_pair_number(&self, left: Value, right: Value) -> Result<(f64, f64)> {
