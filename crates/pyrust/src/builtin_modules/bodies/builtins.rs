@@ -27,7 +27,7 @@ use crate::interpreter::{
     reject_keyword_args_expanded, snapshot_current_locals, snapshot_module_namespace,
     value_to_bigint, value_to_float, value_type_name_str,
 };
-use crate::value::{PyClass, PyKey, PyZero, Value, ValueKind, range_len};
+use crate::value::{PyClass, PyKey, PyToPrimitive, PyZero, Value, ValueKind, range_len};
 use pyrust_derive::pyrust_module;
 
 pyrust_module! {
@@ -1703,6 +1703,16 @@ pyrust_module! {
                 ValueKind::Float(v) => Ok(Value::float(v)),
                 ValueKind::Int(v) => Ok(Value::float(v as f64)),
                 ValueKind::Bool(b) => Ok(Value::float(if b { 1.0 } else { 0.0 })),
+                ValueKind::BigInt(b) => b
+                    .to_f64()
+                    .filter(|f| f.is_finite())
+                    .map(Value::float)
+                    .ok_or_else(|| {
+                        PyError::named(
+                            "OverflowError",
+                            "int too large to convert to float".to_string(),
+                        )
+                    }),
                 ValueKind::Str(s) => s.trim().parse::<f64>().map(Value::float).map_err(|_| {
                     PyError::Runtime(format!("could not convert string to float: '{s}'"))
                 }),
