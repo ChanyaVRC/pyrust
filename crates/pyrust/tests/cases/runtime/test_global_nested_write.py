@@ -32,6 +32,21 @@ inc()
 inc()
 print(z)   # 3
 
+# --- Doubly-nested global increment: LoadGlobal must find the value in env ---
+# (z is initialized at module scope; the doubly-nested inc() must both read and
+#  write z via env.values because z is a cell var — not a fastlocal — after the
+#  compiler promotes it due to the deep global declaration, #520)
+w = 0
+def outer_inc():
+    def inc():
+        global w
+        w += 1
+    inc()
+    inc()
+    inc()
+outer_inc()
+print(w)   # 3
+
 # --- Normal fastlocal write-back still works ---
 # (a is never declared global, so it should be written back from regs)
 a = 100
