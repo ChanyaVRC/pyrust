@@ -485,11 +485,19 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
 /// Look up or insert `val` in the const pool; return its index.
 /// Returns `None` if the pool is full (>= u16::MAX entries).
 fn intern_const_in_pool(consts: &mut Vec<Value>, val: Value) -> Option<u16> {
-    // Type-exact linear scan to avoid Bool/Int key collisions.
+    // Type-exact linear scan to avoid Bool/Int key collisions and to handle
+    // non-hashable types (Complex, Bytes) that cannot use a HashMap fast path.
     for (i, existing) in consts.iter().enumerate() {
         let same = match (existing.kind(), val.kind()) {
             (ValueKind::Int(a), ValueKind::Int(b)) => a == b,
+            (ValueKind::BigInt(a), ValueKind::BigInt(b)) => a == b,
             (ValueKind::Float(a), ValueKind::Float(b)) => a.to_bits() == b.to_bits(),
+            // Bit-level comparison so that NaN-keyed constants share a slot.
+            (ValueKind::Complex(ar, ai), ValueKind::Complex(br, bi)) => {
+                ar.to_bits() == br.to_bits() && ai.to_bits() == bi.to_bits()
+            }
+            (ValueKind::Str(a), ValueKind::Str(b)) => a == b,
+            (ValueKind::Bytes(a), ValueKind::Bytes(b)) => a.as_ref() == b.as_ref(),
             (ValueKind::Bool(a), ValueKind::Bool(b)) => a == b,
             (ValueKind::None, ValueKind::None) => true,
             _ => false,

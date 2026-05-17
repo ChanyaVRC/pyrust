@@ -1352,8 +1352,15 @@ fn const_eq(a: &Value, b: &Value) -> bool {
     use ValueKind::*;
     match (a.kind(), b.kind()) {
         (Int(x), Int(y)) => x == y,
+        (BigInt(x), BigInt(y)) => x == y,
         (Float(x), Float(y)) => x.to_bits() == y.to_bits(),
+        // Use bit-level comparison for complex parts so that NaN-keyed
+        // constants are treated as the same pool entry (same as Float above).
+        (Complex(ar, ai), Complex(br, bi)) => {
+            ar.to_bits() == br.to_bits() && ai.to_bits() == bi.to_bits()
+        }
         (Str(x), Str(y)) => x == y,
+        (Bytes(x), Bytes(y)) => x.as_ref() == y.as_ref(),
         (Bool(x), Bool(y)) => x == y,
         (None, None) => true,
         _ => false,
