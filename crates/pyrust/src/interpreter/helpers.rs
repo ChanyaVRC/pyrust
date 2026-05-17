@@ -1566,6 +1566,7 @@ pub(crate) fn value_to_float(v: &Value, ctx: &str) -> Result<f64> {
 fn is_pure_expr(expr: &Expr, pure_fns: &std::collections::HashSet<String>) -> bool {
     match expr {
         Expr::Int(_)
+        | Expr::BigInt(_)
         | Expr::Float(_)
         | Expr::Complex(_, _)
         | Expr::Str(_)

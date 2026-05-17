@@ -198,6 +198,7 @@ name = "pyrust"
 version = "0.1.0"
 dependencies = [
  "indexmap",
+ "num-bigint",
  "pyrust-builtins",
  "pyrust-core",
  "pyrust-derive",

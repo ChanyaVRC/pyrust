@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 indexmap = "2"
+num-bigint = "0.4"
 rustyline = "14"
 smallvec = "1"
 pyrust-core = { path = "../pyrust-core" }

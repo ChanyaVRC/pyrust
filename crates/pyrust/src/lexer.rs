@@ -1,3 +1,5 @@
+use num_bigint::BigInt;
+
 use crate::error::{PyError, Result};
 use crate::token::{FStringPart, Token};
 
@@ -356,43 +358,103 @@ fn count_indent(line: &str) -> Result<usize> {
     Ok(count)
 }
 
+/// Validate underscore placement in a raw digit string (before stripping `_`).
+///
+/// CPython rules (same across 3.11 / 3.12):
+/// - A trailing underscore is a SyntaxError.
+/// - Two consecutive underscores (`__`) are a SyntaxError.
+/// - A leading underscore after the base prefix (e.g. `0x_FF`) is **valid**.
+///
+/// `kind` is used only in the error message (e.g. `"decimal"`, `"hexadecimal"`).
+fn validate_underscores(raw: &[char], kind: &str) -> Result<()> {
+    let mut prev_was_under = false;
+    for &c in raw {
+        if c == '_' {
+            if prev_was_under {
+                return Err(PyError::Lex(format!("invalid {kind} literal")));
+            }
+            prev_was_under = true;
+        } else {
+            prev_was_under = false;
+        }
+    }
+    if prev_was_under {
+        return Err(PyError::Lex(format!("invalid {kind} literal")));
+    }
+    Ok(())
+}
+
 fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
     let mut pos = start;
     // Hex
     if chars.get(pos) == Some(&'0') && matches!(chars.get(pos + 1), Some(&'x') | Some(&'X')) {
         pos += 2;
         let hex_start = pos;
-        while matches!(chars.get(pos), Some('0'..='9' | 'a'..='f' | 'A'..='F')) {
+        while matches!(
+            chars.get(pos),
+            Some('0'..='9' | 'a'..='f' | 'A'..='F' | '_')
+        ) {
             pos += 1;
         }
-        let text: String = chars[hex_start..pos].iter().collect();
-        let val = i64::from_str_radix(&text, 16)
-            .map_err(|_| PyError::Lex(format!("invalid hex literal '0x{text}'")))?;
-        return Ok((Token::Int(val), pos));
+        let raw_hex = &chars[hex_start..pos];
+        if raw_hex.is_empty() || raw_hex.iter().all(|&c| c == '_') {
+            return Err(PyError::Lex("invalid hexadecimal literal".to_string()));
+        }
+        validate_underscores(raw_hex, "hexadecimal")?;
+        let text: String = raw_hex.iter().filter(|&&c| c != '_').collect();
+        return match i64::from_str_radix(&text, 16) {
+            Ok(val) => Ok((Token::Int(val), pos)),
+            Err(_) => {
+                // Overflow: parse as BigInt and store decimal representation.
+                let big = BigInt::parse_bytes(text.as_bytes(), 16)
+                    .ok_or_else(|| PyError::Lex(format!("invalid hexadecimal literal")))?;
+                Ok((Token::BigInt(big.to_string()), pos))
+            }
+        };
     }
     // Octal
     if chars.get(pos) == Some(&'0') && matches!(chars.get(pos + 1), Some(&'o') | Some(&'O')) {
         pos += 2;
         let oct_start = pos;
-        while matches!(chars.get(pos), Some('0'..='7')) {
+        while matches!(chars.get(pos), Some('0'..='7' | '_')) {
             pos += 1;
         }
-        let text: String = chars[oct_start..pos].iter().collect();
-        let val = i64::from_str_radix(&text, 8)
-            .map_err(|_| PyError::Lex(format!("invalid octal literal '0o{text}'")))?;
-        return Ok((Token::Int(val), pos));
+        let raw_oct = &chars[oct_start..pos];
+        if raw_oct.is_empty() || raw_oct.iter().all(|&c| c == '_') {
+            return Err(PyError::Lex("invalid octal literal".to_string()));
+        }
+        validate_underscores(raw_oct, "octal")?;
+        let text: String = raw_oct.iter().filter(|&&c| c != '_').collect();
+        return match i64::from_str_radix(&text, 8) {
+            Ok(val) => Ok((Token::Int(val), pos)),
+            Err(_) => {
+                let big = BigInt::parse_bytes(text.as_bytes(), 8)
+                    .ok_or_else(|| PyError::Lex("invalid octal literal".to_string()))?;
+                Ok((Token::BigInt(big.to_string()), pos))
+            }
+        };
     }
     // Binary
     if chars.get(pos) == Some(&'0') && matches!(chars.get(pos + 1), Some(&'b') | Some(&'B')) {
         pos += 2;
         let bin_start = pos;
-        while matches!(chars.get(pos), Some('0'..='1')) {
+        while matches!(chars.get(pos), Some('0'..='1' | '_')) {
             pos += 1;
         }
-        let text: String = chars[bin_start..pos].iter().collect();
-        let val = i64::from_str_radix(&text, 2)
-            .map_err(|_| PyError::Lex(format!("invalid binary literal '0b{text}'")))?;
-        return Ok((Token::Int(val), pos));
+        let raw_bin = &chars[bin_start..pos];
+        if raw_bin.is_empty() || raw_bin.iter().all(|&c| c == '_') {
+            return Err(PyError::Lex("invalid binary literal".to_string()));
+        }
+        validate_underscores(raw_bin, "binary")?;
+        let text: String = raw_bin.iter().filter(|&&c| c != '_').collect();
+        return match i64::from_str_radix(&text, 2) {
+            Ok(val) => Ok((Token::Int(val), pos)),
+            Err(_) => {
+                let big = BigInt::parse_bytes(text.as_bytes(), 2)
+                    .ok_or_else(|| PyError::Lex("invalid binary literal".to_string()))?;
+                Ok((Token::BigInt(big.to_string()), pos))
+            }
+        };
     }
 
     while matches!(chars.get(pos), Some('0'..='9' | '_')) {
@@ -447,17 +509,27 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
         }
         // Imaginary suffix on bare int: 5j
         if matches!(chars.get(pos), Some(&'j') | Some(&'J')) {
-            let text: String = chars[start..pos].iter().filter(|&&c| c != '_').collect();
+            let raw_imag = &chars[start..pos];
+            validate_underscores(raw_imag, "decimal")?;
+            let text: String = raw_imag.iter().filter(|&&c| c != '_').collect();
             let val = text
                 .parse::<f64>()
                 .map_err(|_| PyError::Lex(format!("invalid imaginary literal '{text}j'")))?;
             return Ok((Token::Imag(val), pos + 1));
         }
-        let text: String = chars[start..pos].iter().filter(|&&c| c != '_').collect();
-        let val = text
-            .parse::<i64>()
-            .map_err(|_| PyError::Lex(format!("invalid integer '{text}'")))?;
-        Ok((Token::Int(val), pos))
+        let raw_dec = &chars[start..pos];
+        validate_underscores(raw_dec, "decimal")?;
+        let text: String = raw_dec.iter().filter(|&&c| c != '_').collect();
+        match text.parse::<i64>() {
+            Ok(val) => Ok((Token::Int(val), pos)),
+            Err(_) => {
+                // Overflow: try parsing as an arbitrary-precision integer.
+                let big = text
+                    .parse::<BigInt>()
+                    .map_err(|_| PyError::Lex(format!("invalid integer '{text}'")))?;
+                Ok((Token::BigInt(big.to_string()), pos))
+            }
+        }
     }
 }
 
