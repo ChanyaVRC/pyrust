@@ -1459,6 +1459,10 @@ impl Value {
                 // Dicts already share an Rc backing.  Surface the Rc pointer
                 // address so `b = a; id(a) == id(b)` for dicts too (#305).
                 Opaque::Dict(rc) => Some(Rc::as_ptr(rc) as i64),
+                // BigInt clones share the inner Rc even though the opaque
+                // wrapper is reallocated.  Use that Rc address for Python
+                // object identity (`b = a; a is b`) parity (#523).
+                Opaque::PyBigInt(rc) => Some(Rc::as_ptr(rc) as i64),
                 _ => None,
             },
             _ => None,
