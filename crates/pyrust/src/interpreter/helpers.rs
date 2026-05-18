@@ -745,12 +745,35 @@ pub(crate) fn instance_attrs_snapshot(instance: &Rc<RefCell<PyInstance>>) -> Val
 }
 
 fn install_exception_builtins(env: &EnvRef) {
-    let exception = Rc::new(RefCell::new(PyClass {
-        name: "Exception".to_string(),
+    // CPython 3.12 hierarchy (single-inheritance model):
+    //   BaseException
+    //     Exception
+    //       ArithmeticError
+    //         OverflowError, ZeroDivisionError, FloatingPointError
+    //       LookupError
+    //         IndexError, KeyError
+    //       ValueError → UnicodeError → UnicodeEncodeError / UnicodeDecodeError
+    //       RuntimeError → RecursionError, NotImplementedError
+    //       TypeError, NameError, AssertionError, AttributeError,
+    //       StopIteration, SyntaxError, ImportError → ModuleNotFoundError
+    //     SystemExit, GeneratorExit  (direct BaseException children)
+    //   OSError → FileNotFoundError
+
+    // Root: BaseException (no base).
+    let base_exception = Rc::new(RefCell::new(PyClass {
+        name: "BaseException".to_string(),
         base: None,
         attrs: IndexMap::new(),
     }));
 
+    // Exception derives from BaseException.
+    let exception = Rc::new(RefCell::new(PyClass {
+        name: "Exception".to_string(),
+        base: Some(Rc::clone(&base_exception)),
+        attrs: IndexMap::new(),
+    }));
+
+    // Helper: direct child of Exception.
     let make_child = |name: &str| {
         Rc::new(RefCell::new(PyClass {
             name: name.to_string(),
@@ -759,12 +782,41 @@ fn install_exception_builtins(env: &EnvRef) {
         }))
     };
 
-    let runtime_error = make_child("RuntimeError");
+    // ArithmeticError (child of Exception) and its leaf subclasses.
+    let arithmetic_error = make_child("ArithmeticError");
+    let overflow_error = Rc::new(RefCell::new(PyClass {
+        name: "OverflowError".to_string(),
+        base: Some(Rc::clone(&arithmetic_error)),
+        attrs: IndexMap::new(),
+    }));
+    let zero_division_error = Rc::new(RefCell::new(PyClass {
+        name: "ZeroDivisionError".to_string(),
+        base: Some(Rc::clone(&arithmetic_error)),
+        attrs: IndexMap::new(),
+    }));
+    let floating_point_error = Rc::new(RefCell::new(PyClass {
+        name: "FloatingPointError".to_string(),
+        base: Some(Rc::clone(&arithmetic_error)),
+        attrs: IndexMap::new(),
+    }));
 
+    // LookupError (child of Exception) and its leaf subclasses.
+    let lookup_error = make_child("LookupError");
+    let index_error = Rc::new(RefCell::new(PyClass {
+        name: "IndexError".to_string(),
+        base: Some(Rc::clone(&lookup_error)),
+        attrs: IndexMap::new(),
+    }));
+    let key_error = Rc::new(RefCell::new(PyClass {
+        name: "KeyError".to_string(),
+        base: Some(Rc::clone(&lookup_error)),
+        attrs: IndexMap::new(),
+    }));
+
+    // RuntimeError and its children.
+    let runtime_error = make_child("RuntimeError");
     // RecursionError and NotImplementedError derive from RuntimeError in
-    // CPython 3.12 (`RecursionError → RuntimeError → Exception`).  Use a
-    // separate helper so that `isinstance(RecursionError(), RuntimeError)`
-    // returns True, matching CPython parity (#513).
+    // CPython 3.12 (`RecursionError → RuntimeError → Exception`).
     let make_runtime_child = |name: &str| {
         Rc::new(RefCell::new(PyClass {
             name: name.to_string(),
@@ -772,30 +824,26 @@ fn install_exception_builtins(env: &EnvRef) {
             attrs: IndexMap::new(),
         }))
     };
+    let recursion_error = make_runtime_child("RecursionError");
+    let not_implemented_error = make_runtime_child("NotImplementedError");
 
+    // Other direct Exception children.
     let type_error = make_child("TypeError");
     let value_error = make_child("ValueError");
     let name_error = make_child("NameError");
     let assertion_error = make_child("AssertionError");
-    let recursion_error = make_runtime_child("RecursionError");
-    let not_implemented_error = make_runtime_child("NotImplementedError");
     let stop_iteration = make_child("StopIteration");
-    let index_error = make_child("IndexError");
-    let key_error = make_child("KeyError");
     let attribute_error = make_child("AttributeError");
-    let overflow_error = make_child("OverflowError");
-    let zero_division_error = make_child("ZeroDivisionError");
-    let system_exit = make_child("SystemExit");
-    let os_error = make_child("OSError");
-    // FileNotFoundError inherits from OSError in CPython; we just register it
-    // as a sibling for now.
-    let file_not_found_error = make_child("FileNotFoundError");
-    // LookupError is a base class for IndexError / KeyError in CPython.  We
-    // register it as a direct child of Exception for now (so
-    // `except LookupError:` is at least catchable from explicit raises),
-    // without rewiring IndexError/KeyError's bases — that would be a wider
-    // hierarchy change.  Tracked as a follow-up.
-    let lookup_error = make_child("LookupError");
+    let syntax_error = make_child("SyntaxError");
+
+    // ImportError and ModuleNotFoundError (child of ImportError).
+    let import_error = make_child("ImportError");
+    let module_not_found_error = Rc::new(RefCell::new(PyClass {
+        name: "ModuleNotFoundError".to_string(),
+        base: Some(Rc::clone(&import_error)),
+        attrs: IndexMap::new(),
+    }));
+
     // UnicodeError derives from ValueError in CPython; mirror that so
     // `except ValueError:` catches a `UnicodeEncodeError` raised by
     // `bytes(str, encoding)` (#391).  UnicodeEncodeError derives from
@@ -815,23 +863,66 @@ fn install_exception_builtins(env: &EnvRef) {
         base: Some(Rc::clone(&unicode_error)),
         attrs: IndexMap::new(),
     }));
-    // `GeneratorExit` is a sibling root in CPython (derives from
-    // `BaseException`, not `Exception`).  Modelled here as a class with no
-    // base so that `except Exception:` does NOT catch it, while
-    // `except GeneratorExit:` and bare `except:` / `finally` still do.
+
+    // OSError and FileNotFoundError (child of OSError, not Exception).
+    let os_error = make_child("OSError");
+    let file_not_found_error = Rc::new(RefCell::new(PyClass {
+        name: "FileNotFoundError".to_string(),
+        base: Some(Rc::clone(&os_error)),
+        attrs: IndexMap::new(),
+    }));
+
+    // SystemExit and GeneratorExit are direct children of BaseException in
+    // CPython, so `except Exception:` does NOT catch them.
+    let system_exit = Rc::new(RefCell::new(PyClass {
+        name: "SystemExit".to_string(),
+        base: Some(Rc::clone(&base_exception)),
+        attrs: IndexMap::new(),
+    }));
+    // `GeneratorExit` derives from BaseException in CPython.
     let generator_exit = Rc::new(RefCell::new(PyClass {
         name: "GeneratorExit".to_string(),
-        base: None,
+        base: Some(Rc::clone(&base_exception)),
         attrs: IndexMap::new(),
     }));
 
     let mut module = env.borrow_mut();
     module
         .values
+        .insert("BaseException".to_string(), Value::py_class(base_exception));
+    module
+        .values
         .insert("Exception".to_string(), Value::py_class(exception));
     module
         .values
+        .insert("ArithmeticError".to_string(), Value::py_class(arithmetic_error));
+    module
+        .values
+        .insert("OverflowError".to_string(), Value::py_class(overflow_error));
+    module
+        .values
+        .insert("ZeroDivisionError".to_string(), Value::py_class(zero_division_error));
+    module
+        .values
+        .insert("FloatingPointError".to_string(), Value::py_class(floating_point_error));
+    module
+        .values
+        .insert("LookupError".to_string(), Value::py_class(lookup_error));
+    module
+        .values
+        .insert("IndexError".to_string(), Value::py_class(index_error));
+    module
+        .values
+        .insert("KeyError".to_string(), Value::py_class(key_error));
+    module
+        .values
         .insert("RuntimeError".to_string(), Value::py_class(runtime_error));
+    module
+        .values
+        .insert("RecursionError".to_string(), Value::py_class(recursion_error));
+    module
+        .values
+        .insert("NotImplementedError".to_string(), Value::py_class(not_implemented_error));
     module
         .values
         .insert("TypeError".to_string(), Value::py_class(type_error));
@@ -846,40 +937,20 @@ fn install_exception_builtins(env: &EnvRef) {
         .insert("AssertionError".to_string(), Value::py_class(assertion_error));
     module
         .values
-        .insert("RecursionError".to_string(), Value::py_class(recursion_error));
-    module
-        .values
-        .insert("NotImplementedError".to_string(), Value::py_class(not_implemented_error));
-    module
-        .values
         .insert("StopIteration".to_string(), Value::py_class(stop_iteration));
-    module
-        .values
-        .insert("IndexError".to_string(), Value::py_class(index_error));
-    module
-        .values
-        .insert("KeyError".to_string(), Value::py_class(key_error));
     module
         .values
         .insert("AttributeError".to_string(), Value::py_class(attribute_error));
     module
         .values
-        .insert("OverflowError".to_string(), Value::py_class(overflow_error));
+        .insert("SyntaxError".to_string(), Value::py_class(syntax_error));
     module
         .values
-        .insert("ZeroDivisionError".to_string(), Value::py_class(zero_division_error));
-    module
-        .values
-        .insert("SystemExit".to_string(), Value::py_class(system_exit));
-    module
-        .values
-        .insert("OSError".to_string(), Value::py_class(os_error));
-    module
-        .values
-        .insert("FileNotFoundError".to_string(), Value::py_class(file_not_found_error));
-    module
-        .values
-        .insert("LookupError".to_string(), Value::py_class(lookup_error));
+        .insert("ImportError".to_string(), Value::py_class(import_error));
+    module.values.insert(
+        "ModuleNotFoundError".to_string(),
+        Value::py_class(module_not_found_error),
+    );
     module
         .values
         .insert("UnicodeError".to_string(), Value::py_class(unicode_error));
@@ -891,6 +962,16 @@ fn install_exception_builtins(env: &EnvRef) {
         "UnicodeDecodeError".to_string(),
         Value::py_class(unicode_decode_error),
     );
+    module
+        .values
+        .insert("OSError".to_string(), Value::py_class(os_error));
+    module.values.insert(
+        "FileNotFoundError".to_string(),
+        Value::py_class(file_not_found_error),
+    );
+    module
+        .values
+        .insert("SystemExit".to_string(), Value::py_class(system_exit));
     module
         .values
         .insert("GeneratorExit".to_string(), Value::py_class(generator_exit));

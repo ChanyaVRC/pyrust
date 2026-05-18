@@ -2753,11 +2753,10 @@ pub fn is_exception_instance(instance: &Rc<RefCell<PyInstance>>) -> bool {
 /// `repr(X(...))` falls back to the default `<X object>` formatting (issue
 /// #429).
 ///
-/// `Exception` and `GeneratorExit` are both treated as roots because
-/// pyrust does not (yet) model `BaseException` as a real class: `Exception`
-/// is registered with `base: None`, and `GeneratorExit` — which in CPython
-/// derives from `BaseException`, *not* `Exception` — is a sibling root
-/// modelled the same way.  See
+/// `BaseException` is the root of the CPython exception hierarchy (#574).
+/// Any class whose base chain reaches `"BaseException"` (or the legacy
+/// sentinels `"Exception"` / `"GeneratorExit"` kept for backward compat) is
+/// treated as an exception class.  See
 /// [`crate::interpreter::helpers::install_exception_builtins`] in the
 /// `pyrust` crate for where the classes are constructed.
 pub fn class_chain_contains_exception(class: &Rc<RefCell<PyClass>>) -> bool {
@@ -2765,7 +2764,7 @@ pub fn class_chain_contains_exception(class: &Rc<RefCell<PyClass>>) -> bool {
         let borrowed = class.borrow();
         (borrowed.name.clone(), borrowed.base.clone())
     };
-    if name == "Exception" || name == "GeneratorExit" {
+    if name == "BaseException" || name == "Exception" || name == "GeneratorExit" {
         return true;
     }
     base.is_some_and(|base| class_chain_contains_exception(&base))
