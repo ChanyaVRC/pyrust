@@ -1581,6 +1581,12 @@ pyrust_module! {
                         "complex() can't take second arg if first is a string",
                     ));
                 }
+                if matches!(args[1].value.kind(), ValueKind::Str(_)) {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "complex() second arg can't be a string",
+                    ));
+                }
                 let re = to_f64(&args[0].value, "real")?;
                 let im = to_f64(&args[1].value, "imag")?;
                 Ok(Value::complex(re, im))

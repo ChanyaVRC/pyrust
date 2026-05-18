@@ -44,3 +44,9 @@ try:
     complex("1+2j", 0)
 except TypeError as e:
     print(e)
+
+# Error: second arg is a string -> TypeError
+try:
+    complex(1, "2")
+except TypeError as e:
+    print(e)
