@@ -70,3 +70,27 @@ try:
     ''.join(IntIter())
 except TypeError as e:
     print(e)                             # sequence item 0: expected str instance, int found
+
+# --- error: TypeError raised inside __next__ must propagate unchanged ---
+# Regression for #576: join must NOT rewrite user TypeErrors to
+# "can only join an iterable".
+class RaisingIter:
+    def __iter__(self):
+        return self
+    def __next__(self):
+        raise TypeError("custom error from __next__")
+
+try:
+    ''.join(RaisingIter())
+except TypeError as e:
+    print(e)                             # custom error from __next__
+
+# --- error: TypeError raised inside a generator body must propagate ---
+def bad_gen():
+    raise TypeError("custom error from generator")
+    yield 'x'
+
+try:
+    ''.join(bad_gen())
+except TypeError as e:
+    print(e)                             # custom error from generator

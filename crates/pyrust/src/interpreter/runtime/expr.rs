@@ -1132,7 +1132,15 @@ impl Interpreter {
             );
             let iterable = if needs_collect {
                 let items = self.collect_iterable(iterable).map_err(|e| {
-                    if e.class_name_is("TypeError") {
+                    // Only rewrite "not iterable" TypeErrors as CPython's
+                    // "can only join an iterable". TypeErrors raised by user
+                    // code inside __iter__/__next__ or a generator body must
+                    // propagate unchanged (#576 Copilot review).
+                    let is_not_iterable = e.class_name_is("TypeError")
+                        && matches!(&e,
+                            PyError::Named(_, msg) | PyError::Class(_, msg)
+                                if msg.contains("is not iterable"));
+                    if is_not_iterable {
                         PyError::named("TypeError", "can only join an iterable".to_string())
                     } else {
                         e

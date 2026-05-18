@@ -855,16 +855,19 @@ fn rsplit(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
 
 /// Return the CPython type name for a `PyKey` variant — used in join's
 /// "sequence item N: expected str instance, X found" error messages.
-fn pykey_type_name(k: &PyKey) -> &'static str {
+/// `PyKey::Object` stores the original `Value`, so we derive the name
+/// via `builtin_type_name` rather than hardcoding "object" (#576 Copilot
+/// review: use the runtime class name, e.g. "MyKey").
+fn pykey_type_name(k: &PyKey) -> std::borrow::Cow<'static, str> {
     match k {
-        PyKey::Int(_) => "int",
-        PyKey::Float(_) => "float",
-        PyKey::Bool(_) => "bool",
-        PyKey::Str(_) => "str",
-        PyKey::None => "NoneType",
-        PyKey::FrozenSet(_) => "frozenset",
-        PyKey::Tuple(_) => "tuple",
-        PyKey::Object { .. } => "object",
+        PyKey::Int(_) => std::borrow::Cow::Borrowed("int"),
+        PyKey::Float(_) => std::borrow::Cow::Borrowed("float"),
+        PyKey::Bool(_) => std::borrow::Cow::Borrowed("bool"),
+        PyKey::Str(_) => std::borrow::Cow::Borrowed("str"),
+        PyKey::None => std::borrow::Cow::Borrowed("NoneType"),
+        PyKey::FrozenSet(_) => std::borrow::Cow::Borrowed("frozenset"),
+        PyKey::Tuple(_) => std::borrow::Cow::Borrowed("tuple"),
+        PyKey::Object { value, .. } => builtin_type_name(value),
     }
 }
 
