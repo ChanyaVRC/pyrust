@@ -640,6 +640,26 @@ impl Interpreter {
                     let name = pool_get!(code.names, *name_idx, "name");
                     let val = if let Some(v) = vm_try!(self.lookup_name(name)) {
                         v
+                    } else if let Some(v) = self
+                        .vm_frame_views
+                        .iter()
+                        .find(|v| v.kind == FrameKind::Script)
+                        .and_then(|script_view| {
+                            let slot = *script_view.local_index.get(name)?;
+                            let slot = slot as usize;
+                            if slot >= script_view.regs_len {
+                                return None;
+                            }
+                            // SAFETY: the Script frame view is pushed before
+                            // run_bytecode and popped immediately after; while
+                            // a nested class body or function executes, the
+                            // script frame is suspended so the pointer is
+                            // valid and uncontested.
+                            let v = unsafe { &*script_view.regs_ptr.add(slot) };
+                            if v.is_unset() { None } else { Some(v.clone()) }
+                        })
+                    {
+                        v
                     } else {
                         vm_try!(resolve_builtin(name).ok_or_else(|| {
                             PyError::named(
