@@ -1642,10 +1642,12 @@ fn is_control_flow(insn: &Insn) -> bool {
 ///
 /// - Only temp registers (`>= num_locals`) are considered; named locals may
 ///   escape via closures.
-/// - Only *pure* instructions are removed: `LoadConst`, `LoadNone`,
-///   `LoadGlobal`, `Move`, `BinOp`, `BinOpConst`, `UnaryOp`.  Instructions
-///   with potential side effects (`Call`, `GetAttr`, `BinOpInPlace`, …) are
-///   always preserved.
+/// - Only *unconditionally pure* instructions are removed: `LoadConst`,
+///   `LoadNone`, `Move`, `CopyReg`.  Instructions that can raise exceptions
+///   (`LoadGlobal` → NameError; `BinOp`/`BinOpConst` → ValueError /
+///   ZeroDivisionError / etc.; `UnaryOp` → TypeError) are always preserved
+///   so that expression statements like `a << b` or `undefined_name` still
+///   propagate their errors instead of being silently dropped.
 /// - A back-edge guard (`slice_has_back_edge`) prevents removing a store that
 ///   is the initial value consumed by a later loop iteration.
 fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
@@ -1654,14 +1656,7 @@ fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
 
     for i in 0..n {
         let dst = match &insns[i] {
-            Insn::LoadConst(r, _)
-            | Insn::LoadNone(r)
-            | Insn::LoadGlobal(r, _)
-            | Insn::Move(r, _)
-            | Insn::CopyReg(r, _)
-            | Insn::BinOp(r, _, _, _)
-            | Insn::BinOpConst(r, _, _, _)
-            | Insn::UnaryOp(r, _, _)
+            Insn::LoadConst(r, _) | Insn::LoadNone(r) | Insn::Move(r, _) | Insn::CopyReg(r, _)
                 if *r >= num_locals =>
             {
                 *r
