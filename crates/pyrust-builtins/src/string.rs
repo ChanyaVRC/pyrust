@@ -1,6 +1,21 @@
 use pyrust_core::{PyError, PyKey, Result, Value, ValueKind};
 use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
+/// Return the Python type name for a `PyKey` variant.  Used to build the
+/// CPython-matching `TypeError` message in `join` when a dict key is not `str`.
+fn pykey_type_name(k: &PyKey) -> &'static str {
+    match k {
+        PyKey::Int(_) => "int",
+        PyKey::Float(_) => "float",
+        PyKey::Str(_) => "str",
+        PyKey::Bool(_) => "bool",
+        PyKey::None => "NoneType",
+        PyKey::FrozenSet(_) => "frozenset",
+        PyKey::Tuple(_) => "tuple",
+        PyKey::Object { .. } => "object",
+    }
+}
+
 /// Compute the byte offset of a subslice `sub` within its parent `parent`.
 ///
 /// `sub` must be a contiguous subslice of `parent` (i.e. produced by Rust's
@@ -860,16 +875,30 @@ fn join(sep: &str, args: &[Value]) -> Result<Value> {
     let parts: Vec<String> = match iterable.kind() {
         ValueKind::List(items) => items
             .iter()
-            .map(|v| match v.kind() {
+            .enumerate()
+            .map(|(i, v)| match v.kind() {
                 ValueKind::Str(s) => Ok(s.to_string()),
-                _ => Err(PyError::Runtime("sequence item must be str".to_string())),
+                _ => Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "sequence item {i}: expected str instance, {} found",
+                        pyrust_core::builtin_type_name(v),
+                    ),
+                )),
             })
             .collect::<Result<_>>()?,
         ValueKind::Tuple(items) => items
             .iter()
-            .map(|v| match v.kind() {
+            .enumerate()
+            .map(|(i, v)| match v.kind() {
                 ValueKind::Str(s) => Ok(s.to_string()),
-                _ => Err(PyError::Runtime("sequence item must be str".to_string())),
+                _ => Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "sequence item {i}: expected str instance, {} found",
+                        pyrust_core::builtin_type_name(v),
+                    ),
+                )),
             })
             .collect::<Result<_>>()?,
         ValueKind::Str(s) => s
@@ -878,14 +907,25 @@ fn join(sep: &str, args: &[Value]) -> Result<Value> {
             .collect::<Result<_>>()?,
         ValueKind::Dict(d) => d
             .keys()
-            .map(|k| match k {
+            .enumerate()
+            .map(|(i, k)| match k {
                 PyKey::Str(s) => Ok(s.clone()),
-                _ => Err(PyError::Runtime("sequence item must be str".to_string())),
+                _ => Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "sequence item {i}: expected str instance, {} found",
+                        pykey_type_name(k),
+                    ),
+                )),
             })
             .collect::<Result<_>>()?,
         _ => {
-            return Err(PyError::Runtime(
-                "str.join() argument must be iterable".to_string(),
+            // Generic iterables are materialised by the interpreter via
+            // `call_str_join` before reaching this function.  This arm is a
+            // defensive fallback for any path that bypasses the intercept.
+            return Err(PyError::named(
+                "TypeError",
+                "can only join an iterable".to_string(),
             ));
         }
     };

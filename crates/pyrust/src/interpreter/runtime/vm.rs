@@ -2318,6 +2318,10 @@ impl Interpreter {
                         .ok_or_else(|| PyError::Runtime("internal: expected str".to_string()))?;
                     return format_str_template(template, &args, &[]);
                 }
+                if method == "join" {
+                    let receiver = vm_read(regs, obj, num_locals)?;
+                    return self.call_str_join(receiver, args);
+                }
                 if let Some(v) = regs[obj as usize].as_some() {
                     pyrust_builtins::string::call(&method, v, args)
                 } else { unreachable!() }
@@ -2486,6 +2490,10 @@ impl Interpreter {
                         .as_str()
                         .ok_or_else(|| PyError::Runtime("internal: expected str".to_string()))?;
                     return format_str_template(template, &pos_items, &keyword);
+                }
+                if method == "join" {
+                    let receiver = vm_read(regs, obj, num_locals)?;
+                    return self.call_str_join(receiver, pos_items);
                 }
                 if let Some(v) = regs[obj as usize].as_some() {
                     pyrust_builtins::string::call(&method, v, pos_items)

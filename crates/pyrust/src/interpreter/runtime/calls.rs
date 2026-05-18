@@ -131,7 +131,13 @@ impl Interpreter {
                     _ => Kind::Other,
                 };
                 match kind_tag {
-                    Kind::Str => pyrust_builtins::string::call(method, &receiver, pos),
+                    Kind::Str => {
+                        if method == "join" {
+                            self.call_str_join(receiver, pos)
+                        } else {
+                            pyrust_builtins::string::call(method, &receiver, pos)
+                        }
+                    }
                     Kind::List => pyrust_builtins::list::call(method, &receiver, pos, &kw),
                     Kind::Dict => self.call_dict_method(method, receiver, pos),
                     Kind::Set => self.call_set_method(method, receiver, pos),
@@ -188,6 +194,40 @@ impl Interpreter {
                     )),
                     },
                 }
+            }
+            // str.join needs the interpreter to drive __iter__/__next__ on
+            // generic iterables (generators, custom classes, etc.).  The
+            // pyrust-builtins crate has no interpreter reference, so this arm
+            // intercepts the class-method form (`str.join(sep, iterable)`)
+            // and materialises non-concrete iterables before delegating.
+            // The bound-method form (`sep.join(iterable)`) is intercepted
+            // in the Kind::Str arm above via `call_str_join`, and the
+            // `CallMethod` bytecode path is intercepted in `exec_call_method`.
+            ValueKind::BuiltinFunction("str.join") => {
+                let self_val = args
+                    .first()
+                    .map(|a| a.value.clone())
+                    .ok_or_else(|| PyError::named(
+                        "TypeError",
+                        "descriptor 'join' of 'str' object needs an argument".to_string(),
+                    ))?;
+                match self_val.kind() {
+                    ValueKind::Str(_) => {}
+                    _ => {
+                        let actual = pyrust_core::builtin_type_name(&self_val);
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "descriptor 'join' for 'str' objects doesn't apply to a '{actual}' object",
+                            ),
+                        ));
+                    }
+                }
+                let iterable_args: Vec<Value> = args[1..].iter()
+                    .filter(|a| a.name.is_none())
+                    .map(|a| a.value.clone())
+                    .collect();
+                self.call_str_join(self_val, iterable_args)
             }
             ValueKind::BuiltinFunction("str.format") => {
                 let self_val = args
@@ -1312,6 +1352,47 @@ impl Interpreter {
             .precompiled_code
             .as_ref()
             .and_then(|rc| Rc::clone(rc).downcast::<FnCode>().ok())
+    }
+
+    /// Drive `sep.join(iterable)` with full iterator-protocol support.
+    ///
+    /// Called from the bound-method path (`sep.join(iterable)` → `Kind::Str`
+    /// arm), the `BuiltinFunction("str.join")` arm (class-method form), and
+    /// `exec_call_method` / `exec_call_method_expanded` in `vm.rs` (direct
+    /// `CallMethod` bytecode).  When the iterable is not a concrete
+    /// `list`/`tuple`/`str`/`dict`, it is materialised via `collect_iterable`
+    /// (which drives `__iter__`/`__next__` and handles generators) before being
+    /// forwarded to `pyrust_builtins::string::call("join", …)` as a `Value::list`.
+    pub(crate) fn call_str_join(&mut self, receiver: Value, args: Vec<Value>) -> Result<Value> {
+        let iterable = args
+            .first()
+            .ok_or_else(|| {
+                PyError::named(
+                    "TypeError",
+                    "str.join() requires 1 argument".to_string(),
+                )
+            })?
+            .clone();
+        // Fast path: concrete types that pyrust-builtins can handle natively.
+        let needs_collect = !matches!(
+            iterable.kind(),
+            ValueKind::List(_) | ValueKind::Tuple(_) | ValueKind::Str(_) | ValueKind::Dict(_)
+        );
+        let iterable = if needs_collect {
+            // Translate the generic "not iterable" error from collect_iterable
+            // into the exact message CPython str.join emits.
+            let items = self.collect_iterable(iterable).map_err(|e| {
+                if e.class_name_is("TypeError") {
+                    PyError::named("TypeError", "can only join an iterable".to_string())
+                } else {
+                    e
+                }
+            })?;
+            Value::list(items)
+        } else {
+            iterable
+        };
+        pyrust_builtins::string::call("join", &receiver, vec![iterable])
     }
 
 }
