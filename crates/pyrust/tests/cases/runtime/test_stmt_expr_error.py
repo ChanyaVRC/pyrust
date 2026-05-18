@@ -5,9 +5,6 @@
 # never read (because the result of the expression statement is discarded).
 # This caused exceptions raised during evaluation to be swallowed.
 
-import sys
-
-
 def try_run(fn):
     """Run fn; print the exception class name if it raises, else print 'no error'."""
     try:
