@@ -4072,6 +4072,74 @@ mod tests {
         );
     }
 
+    /// `LoadConst(dst, idx)` where `dst < num_locals` (a named local) must NOT be
+    /// hoisted: a zero-trip loop must not unconditionally assign named locals.
+    ///
+    /// This is the core regression guard for issue #580.
+    #[test]
+    fn licm_does_not_hoist_loadconst_to_named_local() {
+        use crate::ast::BinaryOp;
+
+        // Loop layout:
+        //  [0] ForCountConst(r0, Lt, 0, 1, 2) — header, exits to [3]
+        //  [1] LoadConst(r1, 0)                — r1 IS a named local (< num_locals=5)
+        //  [2] Jump(-3)                         — back edge → [0]
+        //  [3] Return(r1)
+        //
+        // r0..r4 are named locals; r1 is named local → LoadConst(r1) must NOT be hoisted.
+        let insns = vec![
+            Insn::ForCountConst(0, BinaryOp::Lt, 0, 1, 2), // [0] header
+            Insn::LoadConst(1, 0),                         // [1] dst=r1, named local
+            Insn::Jump(-3),                                // [2] back edge → [0]
+            Insn::Return(1),                               // [3]
+        ];
+        let before = insns.clone();
+        // r1 < num_locals=5 → named local → must not be hoisted.
+        let out = pass_licm(insns, 5);
+
+        // Instruction count must be unchanged (nothing hoisted).
+        assert_eq!(out.len(), before.len(), "instruction count must not change");
+        assert!(
+            matches!(out[0], Insn::ForCountConst(0, BinaryOp::Lt, 0, 1, _)),
+            "loop header must remain at position 0; LoadConst(r1) must not be hoisted before it"
+        );
+        assert!(
+            matches!(out[1], Insn::LoadConst(1, 0)),
+            "LoadConst to named local must stay in loop body"
+        );
+    }
+
+    /// `BinOpConst(dst, src, op, c)` where `dst < num_locals` (a named local) must NOT
+    /// be hoisted: a zero-trip loop must not unconditionally assign named locals.
+    #[test]
+    fn licm_does_not_hoist_binopconst_to_named_local() {
+        use crate::ast::BinaryOp;
+
+        // Loop layout:
+        //  [0] ForCountConst(r0, Lt, 0, 1, 2) — header
+        //  [1] BinOpConst(r1, r2, Add, 0)      — r1 IS a named local (< num_locals=5)
+        //  [2] Jump(-3)                          — back edge → [0]
+        //  [3] Return(r1)
+        let insns = vec![
+            Insn::ForCountConst(0, BinaryOp::Lt, 0, 1, 2), // [0]
+            Insn::BinOpConst(1, 2, BinaryOp::Add, 0),      // [1] dst=r1 < 5 → keep
+            Insn::Jump(-3),                                // [2]
+            Insn::Return(1),                               // [3]
+        ];
+        let before = insns.clone();
+        let out = pass_licm(insns, 5);
+
+        assert_eq!(out.len(), before.len(), "instruction count must not change");
+        assert!(
+            matches!(out[0], Insn::ForCountConst(0, BinaryOp::Lt, 0, 1, _)),
+            "loop header must remain at position 0"
+        );
+        assert!(
+            matches!(out[1], Insn::BinOpConst(1, 2, BinaryOp::Add, 0)),
+            "BinOpConst to named local must stay in loop body"
+        );
+    }
+
     /// `BinOpConst(dst, src, op, c)` where `src` IS written in the loop must NOT
     /// be hoisted.
     #[test]
