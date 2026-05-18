@@ -1566,9 +1566,21 @@ pyrust_module! {
             0 => Ok(Value::complex(0.0, 0.0)),
             1 => match args[0].value.kind() {
                 ValueKind::Complex(re, im) => Ok(Value::complex(re, im)),
+                ValueKind::Str(s) => {
+                    let (re, im) = parse_complex_str(&s).ok_or_else(|| {
+                        PyError::named("ValueError", "complex() arg is a malformed string")
+                    })?;
+                    Ok(Value::complex(re, im))
+                }
                 _ => Ok(Value::complex(to_f64(&args[0].value, "real")?, 0.0)),
             },
             2 => {
+                if matches!(args[0].value.kind(), ValueKind::Str(_)) {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "complex() can't take second arg if first is a string",
+                    ));
+                }
                 let re = to_f64(&args[0].value, "real")?;
                 let im = to_f64(&args[1].value, "imag")?;
                 Ok(Value::complex(re, im))
@@ -2015,6 +2027,104 @@ pyrust_module! {
             _ => false,
         };
         Ok(Value::bool_(is_callable))
+    }
+}
+
+/// Parse a string argument to `complex()`, mirroring CPython 3.12 semantics.
+///
+/// Accepts the forms:
+///   - real-only:      `"1"`, `"1.5"`, `"inf"`, `"-nan"`, `"+1e2"`, …
+///   - imaginary-only: `"3j"`, `"-j"`, `"+j"`, `"infj"`, `"nanj"`, …
+///   - combined:       `"1+2j"`, `"-1-2j"`, `"1.5e+2-3j"`, `"nan+nanj"`, …
+///   - parenthesized:  `"(1+2j)"` (CPython also accepts this form)
+///
+/// Leading/trailing whitespace (and spaces inside parentheses) is stripped.
+/// Internal whitespace (e.g. `"1 + 2j"`) is rejected (returns `None`).
+/// Returns `None` for any malformed input so the caller can raise `ValueError`.
+fn parse_complex_str(s: &str) -> Option<(f64, f64)> {
+    let s = s.trim();
+
+    // Parenthesized form: "(1+2j)" — strip parens and recurse once.
+    let s = if s.starts_with('(') && s.ends_with(')') {
+        s[1..s.len() - 1].trim()
+    } else {
+        s
+    };
+
+    if s.is_empty() {
+        return None;
+    }
+
+    // Reject any internal whitespace.
+    if s.bytes().any(|b| b == b' ' || b == b'\t') {
+        return None;
+    }
+
+    // Parse a float token that may be "inf", "nan", "+inf", "-nan", digits, etc.
+    // Returns None if the token is empty or malformed.
+    let parse_float = |tok: &str| -> Option<f64> {
+        if tok.is_empty() {
+            return None;
+        }
+        tok.parse::<f64>().ok()
+    };
+
+    // Handle the bare-j shorthand: "+j" and "-j" used as imag-part coefficient.
+    let parse_float_or_bare_j = |tok: &str| -> Option<f64> {
+        match tok {
+            "+j" => Some(1.0),
+            "-j" => Some(-1.0),
+            _ => parse_float(tok),
+        }
+    };
+
+    if s.ends_with('j') || s.ends_with('J') {
+        // Has an imaginary part.  Strip the trailing 'j'/'J'.
+        let body = &s[..s.len() - 1];
+
+        // Find the last '+' or '-' that is NOT at position 0 and NOT
+        // immediately after an 'e'/'E' (scientific-notation exponent sign).
+        // Scan right-to-left; take the first qualifying split point.
+        let split_pos = body
+            .char_indices()
+            .rev()
+            .find(|&(i, c)| {
+                if i == 0 {
+                    return false; // leading sign belongs to the number
+                }
+                if c != '+' && c != '-' {
+                    return false;
+                }
+                // Exclude exponent signs: the preceding char must not be 'e'/'E'.
+                let prev = body[..i].chars().next_back().unwrap_or('\0');
+                prev != 'e' && prev != 'E'
+            })
+            .map(|(i, _)| i);
+
+        match split_pos {
+            None => {
+                // Pure imaginary: "3j", "infj", "+j", "-j", "j", etc.
+                let im = match body {
+                    "" | "+" => Some(1.0),
+                    "-" => Some(-1.0),
+                    _ => parse_float(body),
+                }?;
+                Some((0.0, im))
+            }
+            Some(i) => {
+                // Combined: real part is body[..i], imag part is body[i..].
+                let real_tok = &body[..i];
+                let imag_tok = &body[i..]; // includes the leading sign
+
+                let re = parse_float(real_tok)?;
+                let im = parse_float_or_bare_j(imag_tok)?;
+                Some((re, im))
+            }
+        }
+    } else {
+        // Real only.
+        let re = parse_float(s)?;
+        Some((re, 0.0))
     }
 }
 
