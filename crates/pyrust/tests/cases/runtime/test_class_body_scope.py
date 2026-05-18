@@ -58,3 +58,31 @@ class Derived(Base):
     sentinel = Base()
 
 print(type(Derived.sentinel).__name__)  # Base
+
+# --- Class body inside a function still sees module globals -----------------
+
+MODULE_CONST = "from_module"
+
+def make_class():
+    class Inner:
+        val = MODULE_CONST
+    return Inner
+
+print(make_class().val)     # from_module
+
+# --- is_unset guard: name not yet assigned when class body runs -------------
+#
+# `Late` is defined AFTER `UsesBefore` runs.  The compiler allocates a
+# register for `Late` in the script frame (because it appears later in the
+# source), but the register is still Value::unset() when the class body
+# executes.  The fallback must treat unset registers as missing and fall
+# through to NameError — not return the unset sentinel as a value.
+
+class UsesBefore:
+    try:
+        v = Late
+    except NameError:
+        v = "NameError caught"
+
+Late = 42
+print(UsesBefore.v)         # NameError caught
