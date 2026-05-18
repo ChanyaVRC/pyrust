@@ -1,4 +1,4 @@
-use pyrust_core::{PyError, PyKey, Result, Value, ValueKind};
+use pyrust_core::{PyError, PyKey, Result, Value, ValueKind, builtin_type_name};
 use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
 /// Compute the byte offset of a subslice `sub` within its parent `parent`.
@@ -860,16 +860,30 @@ fn join(sep: &str, args: &[Value]) -> Result<Value> {
     let parts: Vec<String> = match iterable.kind() {
         ValueKind::List(items) => items
             .iter()
-            .map(|v| match v.kind() {
+            .enumerate()
+            .map(|(i, v)| match v.kind() {
                 ValueKind::Str(s) => Ok(s.to_string()),
-                _ => Err(PyError::Runtime("sequence item must be str".to_string())),
+                _ => Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "sequence item {i}: expected str instance, {} found",
+                        builtin_type_name(v),
+                    ),
+                )),
             })
             .collect::<Result<_>>()?,
         ValueKind::Tuple(items) => items
             .iter()
-            .map(|v| match v.kind() {
+            .enumerate()
+            .map(|(i, v)| match v.kind() {
                 ValueKind::Str(s) => Ok(s.to_string()),
-                _ => Err(PyError::Runtime("sequence item must be str".to_string())),
+                _ => Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "sequence item {i}: expected str instance, {} found",
+                        builtin_type_name(v),
+                    ),
+                )),
             })
             .collect::<Result<_>>()?,
         ValueKind::Str(s) => s
@@ -878,14 +892,19 @@ fn join(sep: &str, args: &[Value]) -> Result<Value> {
             .collect::<Result<_>>()?,
         ValueKind::Dict(d) => d
             .keys()
-            .map(|k| match k {
+            .enumerate()
+            .map(|(i, k)| match k {
                 PyKey::Str(s) => Ok(s.clone()),
-                _ => Err(PyError::Runtime("sequence item must be str".to_string())),
+                _ => Err(PyError::named(
+                    "TypeError",
+                    format!("sequence item {i}: expected str instance, int found"),
+                )),
             })
             .collect::<Result<_>>()?,
         _ => {
-            return Err(PyError::Runtime(
-                "str.join() argument must be iterable".to_string(),
+            return Err(PyError::named(
+                "TypeError",
+                "can only join an iterable".to_string(),
             ));
         }
     };

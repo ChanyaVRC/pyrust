@@ -2338,9 +2338,8 @@ impl Interpreter {
                         .ok_or_else(|| PyError::Runtime("internal: expected str".to_string()))?;
                     return format_str_template(template, &args, &[]);
                 }
-                if let Some(v) = regs[obj as usize].as_some() {
-                    pyrust_builtins::string::call(&method, v, args)
-                } else { unreachable!() }
+                let receiver = vm_read(regs, obj, num_locals)?;
+                self.call_str_method(method.as_str(), receiver, args)
             }
             5 => {
                 let receiver = vm_read(regs, obj, num_locals)?;
@@ -2507,9 +2506,8 @@ impl Interpreter {
                         .ok_or_else(|| PyError::Runtime("internal: expected str".to_string()))?;
                     return format_str_template(template, &pos_items, &keyword);
                 }
-                if let Some(v) = regs[obj as usize].as_some() {
-                    pyrust_builtins::string::call(&method, v, pos_items)
-                } else { unreachable!() }
+                let receiver = vm_read(regs, obj, num_locals)?;
+                self.call_str_method(method.as_str(), receiver, pos_items)
             }
             5 => {
                 let receiver = vm_read(regs, obj, num_locals)?;

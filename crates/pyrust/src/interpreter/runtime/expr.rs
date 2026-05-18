@@ -1097,6 +1097,56 @@ impl Interpreter {
         }
     }
 
+    /// Dispatch any str method.  `join` is handled here to support generators
+    /// and any custom iterable via `collect_iterable`; `format` stays in its
+    /// existing location in vm.rs/calls.rs because it needs keyword args
+    /// threading that doesn't fit cleanly here.  Everything else delegates to
+    /// the interpreter-free `pyrust_builtins::string::call`.
+    pub(crate) fn call_str_method(
+        &mut self,
+        method: &str,
+        receiver: Value,
+        args: Vec<Value>,
+    ) -> Result<Value> {
+        if method == "join" {
+            if args.len() != 1 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "str.join() takes exactly one argument ({} given)",
+                        args.len()
+                    ),
+                ));
+            }
+            let iterable = args.into_iter().next().unwrap();
+            // Fast paths: types already handled directly by the builtins join fn.
+            // Check the tag first (drops the borrow) before deciding whether to
+            // call collect_iterable — the borrow from kind() must not overlap
+            // with the &mut self borrow that collect_iterable needs.
+            let needs_collect = !matches!(
+                iterable.kind(),
+                ValueKind::List(_)
+                    | ValueKind::Tuple(_)
+                    | ValueKind::Str(_)
+                    | ValueKind::Dict(_)
+            );
+            let iterable = if needs_collect {
+                let items = self.collect_iterable(iterable).map_err(|e| {
+                    if e.class_name_is("TypeError") {
+                        PyError::named("TypeError", "can only join an iterable".to_string())
+                    } else {
+                        e
+                    }
+                })?;
+                Value::list(items)
+            } else {
+                iterable
+            };
+            return pyrust_builtins::string::call("join", &receiver, vec![iterable]);
+        }
+        pyrust_builtins::string::call(method, &receiver, args)
+    }
+
     pub(crate) fn eval_binary(&mut self, left: Value, op: BinaryOp, right: Value) -> Result<Value> {
         match op {
             BinaryOp::Add => {
