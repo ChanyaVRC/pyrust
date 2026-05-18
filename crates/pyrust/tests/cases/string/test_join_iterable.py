@@ -64,3 +64,15 @@ try:
     ''.join(None)
 except TypeError as e:
     print(e)
+
+# ── Wrong argument count raises TypeError ────────────────────────────────────
+
+try:
+    ''.join()
+except TypeError as e:
+    print(e)
+
+try:
+    ''.join(['a'], ['b'])
+except TypeError as e:
+    print(e)

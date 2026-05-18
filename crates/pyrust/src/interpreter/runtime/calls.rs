@@ -1364,15 +1364,17 @@ impl Interpreter {
     /// (which drives `__iter__`/`__next__` and handles generators) before being
     /// forwarded to `pyrust_builtins::string::call("join", …)` as a `Value::list`.
     pub(crate) fn call_str_join(&mut self, receiver: Value, args: Vec<Value>) -> Result<Value> {
-        let iterable = args
-            .first()
-            .ok_or_else(|| {
-                PyError::named(
-                    "TypeError",
-                    "str.join() requires 1 argument".to_string(),
-                )
-            })?
-            .clone();
+        // CPython enforces exactly one argument; match its error messages exactly.
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "str.join() takes exactly one argument ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        let iterable = args.into_iter().next().unwrap();
         // Fast path: concrete types that pyrust-builtins can handle natively.
         let needs_collect = !matches!(
             iterable.kind(),

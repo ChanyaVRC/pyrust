@@ -869,9 +869,18 @@ fn rsplit(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
 }
 
 fn join(sep: &str, args: &[Value]) -> Result<Value> {
-    let iterable = args
-        .first()
-        .ok_or_else(|| PyError::Runtime("str.join() requires 1 argument".to_string()))?;
+    // Arity is enforced by call_str_join before reaching here; this guard is a
+    // defensive fallback in case the function is ever called directly.
+    if args.len() != 1 {
+        return Err(PyError::named(
+            "TypeError",
+            format!(
+                "str.join() takes exactly one argument ({} given)",
+                args.len()
+            ),
+        ));
+    }
+    let iterable = args.first().expect("checked above");
     let parts: Vec<String> = match iterable.kind() {
         ValueKind::List(items) => items
             .iter()
