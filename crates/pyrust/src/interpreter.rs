@@ -17,7 +17,33 @@ use crate::value::{
 };
 
 type ModuleCache = Rc<RefCell<HashMap<String, Value>>>;
-type FnCache = HashMap<(u64, Vec<PyKey>), Value>;
+
+/// A memoisation key that is type-aware: `Float(1.0)` and `Int(1)` are
+/// equal as `PyKey` (dict/set semantics) but must be distinct memo keys
+/// because a pure function may branch on `type(x)`.
+///
+/// We include the `PyKey` variant discriminant alongside the `PyKey` value so
+/// that two calls are only considered cache-equivalent when both the runtime
+/// type *and* the value agree.
+#[derive(Clone)]
+pub(crate) struct MemoKey(pub(crate) PyKey);
+
+impl PartialEq for MemoKey {
+    fn eq(&self, other: &Self) -> bool {
+        std::mem::discriminant(&self.0) == std::mem::discriminant(&other.0) && self.0 == other.0
+    }
+}
+
+impl Eq for MemoKey {}
+
+impl std::hash::Hash for MemoKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(&self.0).hash(state);
+        self.0.hash(state);
+    }
+}
+
+type FnCache = HashMap<(u64, Vec<MemoKey>), Value>;
 
 const MAX_CALL_DEPTH: usize = 1000;
 const ENV_POOL_MAX: usize = 64;
@@ -108,7 +134,7 @@ pub struct Interpreter {
     call_arg_buf: Vec<ExpandedCallArg>,
     /// Reusable scratch buffer for building fn_cache probe keys — avoids a
     /// per-probe heap allocation in CallMemo's cache-hit path.
-    key_scratch: Vec<crate::value::PyKey>,
+    key_scratch: Vec<MemoKey>,
     /// Stack of class-namespace store-order lists, pushed by `MakeClass` before
     /// running a class body and popped after.  Each entry tracks the slot numbers
     /// for class-body locals in the **order stores actually executed** at

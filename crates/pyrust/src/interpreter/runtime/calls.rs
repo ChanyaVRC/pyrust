@@ -815,17 +815,14 @@ impl Interpreter {
             }
 
             // Memoization: build cache key by borrowing from bound_args — no extra clone.
-            // FIXME(#562): PyKey treats Float(1.0) and Int(1) as equal (CPython numeric
-            // equality invariant), so a pure function that branches on type(x) can return
-            // a stale cached result when called with 1.0 after being called with 1 (or
-            // vice versa).  The cache key needs a type-distinguishing wrapper (e.g. a
-            // MemoKey newtype that includes the ValueKind discriminant) to be fully correct.
-            // See the follow-up issue for the full fix.
-            let cache_key: Option<(u64, Vec<PyKey>)> = if function.is_pure {
+            // MemoKey wraps PyKey and includes the ValueKind discriminant so that
+            // Float(1.0) and Int(1) — equal as PyKey but distinct types — are never
+            // treated as the same cache entry (fixes #562).
+            let cache_key: Option<(u64, Vec<MemoKey>)> = if function.is_pure {
                 bound_args
                     .iter()
-                    .map(|v| v.as_ref().unwrap().to_key())
-                    .collect::<Option<Vec<PyKey>>>()
+                    .map(|v| v.as_ref().unwrap().to_key().map(MemoKey))
+                    .collect::<Option<Vec<MemoKey>>>()
                     .map(|keys| (function.id, keys))
             } else {
                 None
