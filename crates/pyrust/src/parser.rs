@@ -75,7 +75,7 @@ impl Parser {
                 if self.at_stmt_end() {
                     Ok(vec![Stmt::Return(None)])
                 } else {
-                    Ok(vec![Stmt::Return(Some(self.parse_expr()?))])
+                    Ok(vec![Stmt::Return(Some(self.parse_expr_or_tuple()?))])
                 }
             }
             Some(Token::Break) => {
@@ -1184,6 +1184,28 @@ impl Parser {
     // parse_postfix   (call, index, attr)
     // parse_primary
 
+    /// Parse one expression.  If followed by a comma (and we are not at a
+    /// statement boundary), collect additional comma-separated expressions and
+    /// wrap the whole list in `Expr::Tuple`.  A trailing comma is allowed and
+    /// also produces a tuple (single-element when only one item precedes it).
+    /// This matches CPython's grammar for `return` and `yield` value positions.
+    fn parse_expr_or_tuple(&mut self) -> Result<Expr> {
+        let first = self.parse_expr()?;
+        if !self.is(&Token::Comma) {
+            return Ok(first);
+        }
+        // At least one comma seen — collect items into a tuple.
+        let mut items = vec![first];
+        while self.is(&Token::Comma) {
+            self.bump(); // consume comma
+            if self.at_stmt_end() {
+                break; // trailing comma — stop here, still produce a tuple
+            }
+            items.push(self.parse_expr()?);
+        }
+        Ok(Expr::Tuple(items))
+    }
+
     fn parse_expr(&mut self) -> Result<Expr> {
         // Yield / yield from
         if self.is(&Token::Yield) {
@@ -1197,7 +1219,7 @@ impl Parser {
             if self.at_stmt_end() {
                 return Ok(Expr::Yield(None));
             }
-            let val = self.parse_expr()?;
+            let val = self.parse_expr_or_tuple()?;
             return Ok(Expr::Yield(Some(Box::new(val))));
         }
         // Lambda
