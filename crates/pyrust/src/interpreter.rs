@@ -22,7 +22,7 @@ type ModuleCache = Rc<RefCell<HashMap<String, Value>>>;
 /// equal as `PyKey` (dict/set semantics) but must be distinct memo keys
 /// because a pure function may branch on `type(x)`.
 ///
-/// We include the `ValueKind` discriminant alongside the `PyKey` value so
+/// We include the `PyKey` variant discriminant alongside the `PyKey` value so
 /// that two calls are only considered cache-equivalent when both the runtime
 /// type *and* the value agree.
 #[derive(Clone)]
