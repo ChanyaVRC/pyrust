@@ -853,6 +853,21 @@ fn rsplit(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
     Ok(Value::list(parts))
 }
 
+/// Return the CPython type name for a `PyKey` variant — used in join's
+/// "sequence item N: expected str instance, X found" error messages.
+fn pykey_type_name(k: &PyKey) -> &'static str {
+    match k {
+        PyKey::Int(_) => "int",
+        PyKey::Float(_) => "float",
+        PyKey::Bool(_) => "bool",
+        PyKey::Str(_) => "str",
+        PyKey::None => "NoneType",
+        PyKey::FrozenSet(_) => "frozenset",
+        PyKey::Tuple(_) => "tuple",
+        PyKey::Object { .. } => "object",
+    }
+}
+
 fn join(sep: &str, args: &[Value]) -> Result<Value> {
     let iterable = args
         .first()
@@ -897,7 +912,10 @@ fn join(sep: &str, args: &[Value]) -> Result<Value> {
                 PyKey::Str(s) => Ok(s.clone()),
                 _ => Err(PyError::named(
                     "TypeError",
-                    format!("sequence item {i}: expected str instance, int found"),
+                    format!(
+                        "sequence item {i}: expected str instance, {} found",
+                        pykey_type_name(k),
+                    ),
                 )),
             })
             .collect::<Result<_>>()?,
