@@ -2131,19 +2131,18 @@ impl Interpreter {
                     // stack so `RecordClassStore` / `RecordClassDel` insns
                     // emitted inside the class body record into *this* class
                     // — supports `class A: class B: ...` nesting cleanly.
-                    // Pre-push the two injected slots so they appear first in
-                    // `vars(C)` (mirroring CPython) even if the body never
-                    // explicitly assigns them.
                     // CPython exposes __module__ before __qualname__ in the class
                     // namespace (verified against python3.12 `list(locals().keys())`
-                    // at the top of a class body).  Mirror that order here.
+                    // at the top of a class body).  Only pre-push __module__:
+                    // __qualname__ is a type-level descriptor on `type` in CPython
+                    // and must NOT appear in `vars(C)` / the class attrs dict.
                     let mut pre_order: Vec<crate::bytecode::Reg> = Vec::new();
                     if let Some(slot) = module_slot {
                         pre_order.push(slot);
                     }
-                    if let Some(slot) = qualname_slot {
-                        pre_order.push(slot);
-                    }
+                    // qualname_slot is intentionally not added to pre_order so
+                    // __qualname__ never flows into attrs (it's intercepted in
+                    // get_attr instead — see issue #553).
                     self.class_store_order.push(pre_order);
                     // Issue #487: publish a FrameKind::Class view so that
                     // `locals()` called inside the class body returns the
@@ -2187,15 +2186,26 @@ impl Interpreter {
                             attrs.insert(name.clone(), v.clone());
                         }
                     }
-                    // Issue #546: Ensure `__qualname__` and `__module__` are
-                    // always present in the class attrs dict.  Under normal
-                    // operation the pre-populated slots flow through `store_order`
-                    // above; this `entry().or_insert()` guard is a safety net for
-                    // any edge case where the slot mechanism is bypassed (e.g. the
-                    // body explicitly deleted one of these names with `del`).
-                    attrs
-                        .entry("__qualname__".to_string())
-                        .or_insert_with(|| Value::string(class_name.clone()));
+                    // Issue #553: __qualname__ must NOT live in the class attrs
+                    // dict — in CPython it is a descriptor on `type`, not an
+                    // entry in the instance dict.  Remove it if the class body
+                    // stored it explicitly (e.g. `__qualname__ = "X"`), then
+                    // capture its value for the PyClass.qualname field which
+                    // get_attr intercepts.
+                    let qualname = attrs
+                        .shift_remove("__qualname__")
+                        .and_then(|v| {
+                            if let ValueKind::Str(s) = v.kind() {
+                                Some(s.to_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or_else(|| class_name.clone());
+                    // Issue #546: Ensure `__module__` is always present in the
+                    // class attrs dict.  Under normal operation the pre-populated
+                    // slot flows through `store_order` above; this `entry()` guard
+                    // is a safety net for edge cases (e.g. `del __module__`).
                     attrs
                         .entry("__module__".to_string())
                         .or_insert_with(|| Value::string("__main__".to_string()));
@@ -2222,8 +2232,12 @@ impl Interpreter {
                     } else {
                         None
                     };
-                    let class =
-                        Rc::new(RefCell::new(PyClass { name: class_name, base, attrs }));
+                    let class = Rc::new(RefCell::new(PyClass {
+                        name: class_name,
+                        qualname,
+                        base,
+                        attrs,
+                    }));
                     regs[*dst as usize] = Value::py_class(class);
                 }
 

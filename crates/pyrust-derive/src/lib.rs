@@ -1532,6 +1532,7 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
                 #(#method_attr_inserts)*
                 crate::value::Value::py_class(Rc::new(RefCell::new(crate::value::PyClass {
                     name: #class_name_lit.to_string(),
+                    qualname: #class_name_lit.to_string(),
                     base: None,
                     attrs,
                 })))

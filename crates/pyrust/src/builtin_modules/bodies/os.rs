@@ -767,6 +767,7 @@ thread_local! {
         }
         Rc::new(RefCell::new(PyClass {
             name: "_Environ".to_string(),
+            qualname: "_Environ".to_string(),
             base: None,
             attrs,
         }))

@@ -146,6 +146,12 @@ impl Interpreter {
                 if name == "__name__" {
                     return Ok(Value::string(class.borrow().name.clone()));
                 }
+                if name == "__qualname__" {
+                    // __qualname__ is a type-level descriptor on `type` in CPython,
+                    // not stored in the class attrs dict.  Intercept here so that
+                    // C.__qualname__ works without polluting vars(C) (issue #553).
+                    return Ok(Value::string(class.borrow().qualname.clone()));
+                }
                 if name == "__bases__" {
                     // `__bases__` reports the immediate parents — a 1-tuple
                     // containing `base` if set, else a 1-tuple containing

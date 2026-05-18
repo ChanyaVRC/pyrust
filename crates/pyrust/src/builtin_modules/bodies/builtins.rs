@@ -954,6 +954,7 @@ pyrust_module! {
                 )),
             }
             return Ok(Value::py_class(Rc::new(RefCell::new(PyClass {
+                qualname: name.clone(),
                 name,
                 base,
                 attrs,
