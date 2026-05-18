@@ -6278,8 +6278,8 @@ impl Compiler {
     ///   2. Compile an anonymous generator function whose parameter receives
     ///      that iterable and whose body iterates over it, handling nested
     ///      clauses, and yields `elt` on each matching element.
-    ///   3. Call the anonymous generator immediately with the evaluated
-    ///      iterable to produce the generator object.
+    ///   3. Emit `MakeFunction` directly into a temp register — no global
+    ///      store/reload — then call it immediately with the iterable.
     fn compile_gen_exp(&mut self, elt: &Expr, clauses: &[CompClause]) -> Reg {
         if clauses.is_empty() {
             self.failed = true;
@@ -6294,9 +6294,11 @@ impl Compiler {
         // before creating the nested function.
         let iter_reg = self.compile_expr(&clauses[0].iter);
 
-        // Build a synthetic AST body for the generator function.
-        // The parameter name for the outermost iterable.
-        const IT_PARAM: &str = "__genexp_it__";
+        // Use ".0" as the implicit parameter name — matches CPython's internal
+        // convention and is not a valid Python identifier (cannot be lexed), so
+        // user code inside the genexp body cannot accidentally reference or
+        // shadow it.
+        const IT_PARAM: &str = ".0";
 
         // Build the inner body working from the innermost clause outward.
         // Start with: yield elt
@@ -6350,18 +6352,85 @@ impl Compiler {
             is_positional_only: false,
         }];
 
-        // Compile the anonymous generator def.  `compile_def` stores the
-        // result under the given name and returns nothing; we load it back.
-        let gen_fn_name = "<genexp>";
-        self.compile_def(gen_fn_name, &params, &body, &[]);
+        // Inline the function-object construction (mirrors compile_def) but
+        // emit MakeFunction directly into a temp register instead of binding
+        // the function into the global/local environment.  This avoids the
+        // observable StoreGlobal("<genexp>") / LoadGlobal("<genexp>") pair.
+        let inner_global = crate::interpreter::collect_global_names(&body);
+        let inner_nonlocal = crate::interpreter::collect_nonlocal_names(&body);
+        let inner_local =
+            crate::interpreter::collect_local_names(&params, &body, &inner_global, &inner_nonlocal);
 
-        // Load the newly created function.
-        let fn_reg = self.alloc_temp();
-        let name_idx = self.intern_name(gen_fn_name);
-        self.emit(Insn::LoadGlobal(fn_reg, name_idx));
+        let mut inner_index: HashMap<String, Reg> = HashMap::new();
+        let mut slot: Reg = 0;
+        for param in &params {
+            if inner_local.contains(&param.name) {
+                inner_index.insert(param.name.clone(), slot);
+                slot += 1;
+            }
+        }
+        for loc in &inner_local {
+            if !inner_index.contains_key(loc) {
+                inner_index.insert(loc.clone(), slot);
+                slot += 1;
+            }
+        }
+        let inner_index_rc: Rc<HashMap<String, Reg>> = Rc::new(inner_index);
+        let def_bound = crate::interpreter::compute_def_bound_mask(&params, &inner_index_rc);
+        // Genexp bodies are never pure (they produce a generator object with
+        // side-effectful iteration).
+        let is_pure = false;
+        let inner_cell_vars = collect_cell_vars(&body, &inner_index_rc);
+        let inner_global_rc = Rc::new(inner_global);
+        let inner_nonlocal_rc = Rc::new(inner_nonlocal);
 
-        // Call the generator function with the outermost iterable.
+        let mut sub = Compiler::new(Rc::clone(&inner_index_rc), def_bound, inner_cell_vars);
+        sub.compile_block(&body);
+        let inner_code = match sub.finish() {
+            Ok(c) => c,
+            Err(msg) => {
+                self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some(msg);
+                }
+                return 0;
+            }
+        };
+
+        if self.fn_protos.len() >= 256 {
+            self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg =
+                    Some("too many nested functions in one scope (max 256)".to_string());
+            }
+            return 0;
+        }
+        let proto_idx = self.fn_protos.len() as u8;
+        let local_names = Rc::new(inner_index_rc.keys().cloned().collect::<HashSet<_>>());
+        self.fn_protos.push(FnProto {
+            name: "<genexp>".to_string(),
+            param_spec: Rc::new(FnParamSpec {
+                names: params.iter().map(|p| p.name.clone()).collect(),
+                has_default: params.iter().map(|p| p.default.is_some()).collect(),
+                is_args: params.iter().map(|p| p.is_args).collect(),
+                is_kwargs: params.iter().map(|p| p.is_kwargs).collect(),
+                is_keyword_only: params.iter().map(|p| p.is_keyword_only).collect(),
+                is_positional_only: params.iter().map(|p| p.is_positional_only).collect(),
+            }),
+            code: Rc::new(inner_code),
+            local_index: inner_index_rc,
+            local_names,
+            global_names: inner_global_rc,
+            nonlocal_names: inner_nonlocal_rc,
+            is_pure,
+        });
+
+        // Allocate a temp for the function value, emit MakeFunction (no
+        // defaults — the single parameter has no default), then call it.
         // Layout: fn_reg = function, fn_reg+1 = iterable arg.
+        let fn_reg = self.alloc_temp();
+        self.emit(Insn::MakeFunction(fn_reg, proto_idx, 0, 0));
+
         let arg_reg = fn_reg + 1;
         if arg_reg > self.max_reg {
             self.max_reg = arg_reg;
@@ -6371,6 +6440,8 @@ impl Compiler {
         }
         self.emit(Insn::Move(arg_reg, iter_reg));
         self.emit(Insn::Call(fn_reg, 1));
+        // Release the arg register slot; fn_reg stays live as the result.
+        self.next_temp = fn_reg + 1;
         self.free_temp(iter_reg);
 
         fn_reg
