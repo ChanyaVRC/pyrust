@@ -550,7 +550,9 @@ fn lambda_captures_in_expr(
                 }
             }
         }
-        Expr::ListComp { elt, clauses } | Expr::SetComp { elt, clauses } => {
+        Expr::ListComp { elt, clauses }
+        | Expr::SetComp { elt, clauses }
+        | Expr::GenExp { elt, clauses } => {
             for clause in clauses {
                 lambda_captures_in_expr(&clause.iter, local_index, cells);
                 if let Some(c) = &clause.cond {
@@ -962,7 +964,9 @@ fn collect_free_var_reads_in_expr(expr: &Expr, uses: &mut HashSet<String>) {
                 }
             }
         }
-        Expr::ListComp { elt, clauses } | Expr::SetComp { elt, clauses } => {
+        Expr::ListComp { elt, clauses }
+        | Expr::SetComp { elt, clauses }
+        | Expr::GenExp { elt, clauses } => {
             for clause in clauses {
                 collect_free_var_reads_in_expr(&clause.iter, uses);
                 if let Some(c) = &clause.cond {
@@ -1301,7 +1305,9 @@ fn collect_transitive_free_vars_in_expr(expr: &Expr, uses: &mut HashSet<String>)
                 }
             }
         }
-        Expr::ListComp { elt, clauses } | Expr::SetComp { elt, clauses } => {
+        Expr::ListComp { elt, clauses }
+        | Expr::SetComp { elt, clauses }
+        | Expr::GenExp { elt, clauses } => {
             for clause in clauses {
                 collect_transitive_free_vars_in_expr(&clause.iter, uses);
                 if let Some(c) = &clause.cond {
@@ -2274,6 +2280,7 @@ fn expr_safe(expr: &Expr, i_name: &str, c_name: &str) -> bool {
         Expr::ListComp { .. }
         | Expr::DictComp { .. }
         | Expr::SetComp { .. }
+        | Expr::GenExp { .. }
         | Expr::Lambda { .. }
         | Expr::Named { .. }
         | Expr::Yield(_)
@@ -2480,7 +2487,9 @@ fn expr_reads_var(expr: &Expr, name: &str) -> bool {
             DictItem::Pair(k, v) => expr_reads_var(k, name) || expr_reads_var(v, name),
             DictItem::DoubleSplat(e) => expr_reads_var(e, name),
         }),
-        Expr::ListComp { elt, clauses } | Expr::SetComp { elt, clauses } => {
+        Expr::ListComp { elt, clauses }
+        | Expr::SetComp { elt, clauses }
+        | Expr::GenExp { elt, clauses } => {
             expr_reads_var(elt, name)
                 || clauses.iter().any(|c| {
                     expr_reads_var(&c.iter, name)
@@ -2704,6 +2713,7 @@ fn rewrite_c_at_i_in_expr(expr: &mut Expr, c_name: &str, i_name: &str) {
         Expr::ListComp { .. }
         | Expr::DictComp { .. }
         | Expr::SetComp { .. }
+        | Expr::GenExp { .. }
         | Expr::Lambda { .. }
         | Expr::Named { .. }
         | Expr::Yield(_)
@@ -5840,6 +5850,7 @@ impl Compiler {
             Expr::ListComp { elt, clauses } => self.compile_list_comp(elt, clauses),
             Expr::DictComp { key, val, clauses } => self.compile_dict_comp(key, val, clauses),
             Expr::SetComp { elt, clauses } => self.compile_set_comp(elt, clauses),
+            Expr::GenExp { elt, clauses } => self.compile_gen_exp(elt, clauses),
             Expr::Named { target, value } => {
                 let val_reg = self.compile_expr(value);
                 if let Some(reg) = self.local_reg(target) {
@@ -6224,6 +6235,111 @@ impl Compiler {
         });
 
         acc
+    }
+
+    /// Compile a generator expression `(elt for target in iter ...)`.
+    ///
+    /// Strategy (mirrors CPython):
+    ///   1. Evaluate the outermost iterable in the enclosing scope.
+    ///   2. Compile an anonymous generator function whose parameter receives
+    ///      that iterable and whose body iterates over it, handling nested
+    ///      clauses, and yields `elt` on each matching element.
+    ///   3. Call the anonymous generator immediately with the evaluated
+    ///      iterable to produce the generator object.
+    fn compile_gen_exp(&mut self, elt: &Expr, clauses: &[CompClause]) -> Reg {
+        if clauses.is_empty() {
+            self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg =
+                    Some("generator expression requires at least one clause".to_string());
+            }
+            return 0;
+        }
+
+        // Evaluate the outermost iterable in the enclosing (current) scope
+        // before creating the nested function.
+        let iter_reg = self.compile_expr(&clauses[0].iter);
+
+        // Build a synthetic AST body for the generator function.
+        // The parameter name for the outermost iterable.
+        const IT_PARAM: &str = "__genexp_it__";
+
+        // Build the inner body working from the innermost clause outward.
+        // Start with: yield elt
+        let yield_stmt = Stmt::Expr(Expr::Yield(Some(Box::new(elt.clone()))));
+
+        // Wrap in if-cond guard for the first clause if present, then
+        // for each additional clause build a nested for-if structure.
+        //
+        // clauses[0]: for target in IT_PARAM (if cond0)?
+        // clauses[1..]: for target in iter (if cond)?
+        //
+        // Inner body (innermost clause to outermost inner clause):
+        let mut body = vec![yield_stmt];
+        for clause in clauses[1..].iter().rev() {
+            // Optional if-cond filter.
+            if let Some(cond) = &clause.cond {
+                body = vec![Stmt::If {
+                    branches: vec![(cond.clone(), body)],
+                    else_branch: None,
+                }];
+            }
+            body = vec![Stmt::For {
+                target: clause.target.clone(),
+                iter: clause.iter.clone(),
+                body,
+                else_branch: None,
+            }];
+        }
+        // Wrap the first clause's optional if-cond around the body.
+        if let Some(cond) = &clauses[0].cond {
+            body = vec![Stmt::If {
+                branches: vec![(cond.clone(), body)],
+                else_branch: None,
+            }];
+        }
+        // Outermost loop: iterate over the parameter.
+        body = vec![Stmt::For {
+            target: clauses[0].target.clone(),
+            iter: Expr::Var(IT_PARAM.to_string()),
+            body,
+            else_branch: None,
+        }];
+
+        // Parameter spec for the anonymous generator function.
+        let params = vec![FunctionParam {
+            name: IT_PARAM.to_string(),
+            default: None,
+            is_args: false,
+            is_kwargs: false,
+            is_keyword_only: false,
+            is_positional_only: false,
+        }];
+
+        // Compile the anonymous generator def.  `compile_def` stores the
+        // result under the given name and returns nothing; we load it back.
+        let gen_fn_name = "<genexp>";
+        self.compile_def(gen_fn_name, &params, &body, &[]);
+
+        // Load the newly created function.
+        let fn_reg = self.alloc_temp();
+        let name_idx = self.intern_name(gen_fn_name);
+        self.emit(Insn::LoadGlobal(fn_reg, name_idx));
+
+        // Call the generator function with the outermost iterable.
+        // Layout: fn_reg = function, fn_reg+1 = iterable arg.
+        let arg_reg = fn_reg + 1;
+        if arg_reg > self.max_reg {
+            self.max_reg = arg_reg;
+        }
+        if fn_reg + 2 > self.next_temp {
+            self.next_temp = fn_reg + 2;
+        }
+        self.emit(Insn::Move(arg_reg, iter_reg));
+        self.emit(Insn::Call(fn_reg, 1));
+        self.free_temp(iter_reg);
+
+        fn_reg
     }
 
     fn compile_call(&mut self, func: &Expr, args: &[crate::ast::CallArg]) -> Reg {
