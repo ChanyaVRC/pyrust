@@ -1408,16 +1408,16 @@ impl Interpreter {
                     } else {
                         None
                     };
-                    // FIXME(#562): same memoization-key type-collision issue as calls.rs —
-                    // Float(1.0) and Int(1) share the same PyKey and can return stale results
-                    // for type-sensitive pure functions.  See issue #562 for the full fix.
+                    // MemoKey wraps PyKey and includes the ValueKind discriminant so that
+                    // Float(1.0) and Int(1) — equal as PyKey but distinct types — are never
+                    // treated as the same cache entry (fixes #562).
                     if let Some(fn_id) = fn_id_opt {
                         let mut key = std::mem::take(&mut self.key_scratch);
                         key.clear();
                         let mut all_hashable = true;
                         for i in 0..*argc as usize {
                             match regs[*func_reg as usize + 1 + i].to_key() {
-                                Some(k) => key.push(k),
+                                Some(k) => key.push(MemoKey(k)),
                                 None => {
                                     all_hashable = false;
                                     break;
