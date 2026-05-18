@@ -442,6 +442,36 @@ impl Interpreter {
                         ),
                     ));
                 }
+                // Issue #553: __qualname__ is a type-level descriptor on `type`
+                // in CPython — assigning it updates the descriptor slot, not the
+                // class attrs dict.  CPython also requires the value to be a str.
+                if name == "__qualname__" {
+                    // Extract the string while the kind() Ref is alive, then
+                    // drop the borrow before taking the error path.
+                    let as_str: Option<String> = if let ValueKind::Str(s) = value.kind() {
+                        Some(s.to_string())
+                    } else {
+                        None
+                    };
+                    match as_str {
+                        Some(s) => {
+                            class.borrow_mut().qualname = s;
+                            return Ok(());
+                        }
+                        None => {
+                            let type_name =
+                                pyrust_core::builtin_type_name(&value).into_owned();
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "can only assign string to {}.__qualname__, not '{}'",
+                                    class.borrow().name,
+                                    type_name,
+                                ),
+                            ));
+                        }
+                    }
+                }
                 class.borrow_mut().attrs.insert(name.to_string(), value);
                 Ok(())
             }
@@ -484,6 +514,19 @@ impl Interpreter {
                 // original insertion order so `vars(obj)` after `del obj.x`
                 // still matches CPython's stable ordering contract.
                 instance.borrow_mut().attrs.shift_remove(name);
+                Ok(())
+            }
+            ValueKind::PyClass(class) => {
+                // Issue #553: __qualname__ is a type-level descriptor on `type`
+                // in CPython — you cannot delete it.  CPython raises TypeError.
+                if name == "__qualname__" {
+                    let n = class.borrow().name.clone();
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("cannot delete '__qualname__' attribute of immutable type '{n}'"),
+                    ));
+                }
+                class.borrow_mut().attrs.shift_remove(name);
                 Ok(())
             }
             _ => Err(PyError::Runtime(

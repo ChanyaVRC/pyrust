@@ -2191,17 +2191,36 @@ impl Interpreter {
                     // entry in the instance dict.  Remove it if the class body
                     // stored it explicitly (e.g. `__qualname__ = "X"`), then
                     // capture its value for the PyClass.qualname field which
-                    // get_attr intercepts.
-                    let qualname = attrs
-                        .shift_remove("__qualname__")
-                        .and_then(|v| {
-                            if let ValueKind::Str(s) = v.kind() {
+                    // get_attr intercepts.  CPython raises TypeError if the
+                    // class body assigns a non-str to __qualname__
+                    // (Objects/typeobject.c `type_new_set_names`).
+                    let qualname = match attrs.shift_remove("__qualname__") {
+                        None => class_name.clone(),
+                        Some(v) => {
+                            // Extract while kind() Ref is live, then drop it
+                            // before the error path moves `v`.
+                            let as_str: Option<String> = if let ValueKind::Str(s) = v.kind() {
                                 Some(s.to_string())
                             } else {
                                 None
+                            };
+                            match as_str {
+                                Some(s) => s,
+                                None => {
+                                    // CPython: "type __qualname__ must be a str, not <type>"
+                                    let tname =
+                                        pyrust_core::builtin_type_name(&v).into_owned();
+                                    vm_try!(Err(PyError::named(
+                                        "TypeError",
+                                        format!(
+                                            "type __qualname__ must be a str, not {tname}"
+                                        ),
+                                    )));
+                                    unreachable!()
+                                }
                             }
-                        })
-                        .unwrap_or_else(|| class_name.clone());
+                        }
+                    };
                     // Issue #546: Ensure `__module__` is always present in the
                     // class attrs dict.  Under normal operation the pre-populated
                     // slot flows through `store_order` above; this `entry()` guard
