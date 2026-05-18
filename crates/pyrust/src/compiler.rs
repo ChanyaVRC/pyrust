@@ -550,9 +550,7 @@ fn lambda_captures_in_expr(
                 }
             }
         }
-        Expr::ListComp { elt, clauses }
-        | Expr::SetComp { elt, clauses }
-        | Expr::GenExp { elt, clauses } => {
+        Expr::ListComp { elt, clauses } | Expr::SetComp { elt, clauses } => {
             for clause in clauses {
                 lambda_captures_in_expr(&clause.iter, local_index, cells);
                 if let Some(c) = &clause.cond {
@@ -560,6 +558,42 @@ fn lambda_captures_in_expr(
                 }
             }
             lambda_captures_in_expr(elt, local_index, cells);
+        }
+        Expr::GenExp { elt, clauses } => {
+            // The outermost iterable is evaluated in the enclosing scope.
+            if let Some(first) = clauses.first() {
+                lambda_captures_in_expr(&first.iter, local_index, cells);
+            }
+            // Everything inside the genexp body (outermost cond, inner
+            // iters/conds, and the element expression) runs in the genexp's
+            // own scope.  Collect all free-var reads from that inner body,
+            // subtract the loop-target names that are bound by the genexp
+            // itself, and promote any remaining names that live in the
+            // enclosing local_index to cell vars so they're accessible via
+            // the env chain when the generator body resumes.
+            let mut inner_uses: HashSet<String> = HashSet::new();
+            if let Some(first) = clauses.first() {
+                if let Some(c) = &first.cond {
+                    collect_free_var_reads_in_expr(c, &mut inner_uses);
+                }
+            }
+            for clause in clauses.iter().skip(1) {
+                collect_free_var_reads_in_expr(&clause.iter, &mut inner_uses);
+                if let Some(c) = &clause.cond {
+                    collect_free_var_reads_in_expr(c, &mut inner_uses);
+                }
+            }
+            collect_free_var_reads_in_expr(elt, &mut inner_uses);
+            // Remove names bound by the genexp's own clause targets.
+            let mut bound: HashSet<String> = HashSet::new();
+            for clause in clauses {
+                collect_written_target(&clause.target, &mut bound);
+            }
+            for name in inner_uses {
+                if !bound.contains(&name) && local_index.contains_key(&name) {
+                    cells.insert(name);
+                }
+            }
         }
         Expr::DictComp { key, val, clauses } => {
             for clause in clauses {
