@@ -49,7 +49,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_cmpjump_fusion(insns, num_locals);
     let insns = pass_binopinplace_downgrade(insns, num_locals);
     let insns = pass_exit_inline(insns);
-    let insns = pass_licm(insns);
+    let insns = pass_licm(insns, num_locals);
     let insns = pass_cse(insns);
     let insns = pass_dead_code(insns);
     let insns = pass_dead_store_elim(insns, num_locals);
@@ -1127,19 +1127,24 @@ fn pass_exit_inline(insns: Vec<Insn>) -> Vec<Insn> {
 ///
 /// ## What is hoisted
 ///
-/// Only instructions that are definitely free of observable side effects:
-/// - `LoadConst(dst, idx)` — always loop-invariant (constant value).
-/// - `BinOpConst(dst, src, op, idx)` — loop-invariant when `src` is not written
-///   anywhere in the loop body.
-/// - `UnaryOp(dst, op, src)` — loop-invariant when `src` is not written in the
-///   loop body.
+/// Only instructions that are definitely free of observable side effects and
+/// write to a temporary register (`dst >= num_locals`):
+/// - `LoadConst(dst, idx)` — loop-invariant when `dst` is a temp.  Named
+///   locals (`dst < num_locals`) must not be hoisted: a zero-trip loop must
+///   not assign them.
+/// - `BinOpConst(dst, src, op, idx)` — loop-invariant when `src` is not
+///   written in the loop body, `dst` is a temp, and `op` is provably
+///   non-raising (`Add`, `Sub`, `Mul`, `BitAnd/Or/Xor`, comparisons, `And`,
+///   `Or`).  `Div`, `FloorDiv`, `Mod`, `Pow`, `LShift`, `RShift` are
+///   excluded because they can raise at runtime.
 ///
 /// ## What is NOT hoisted
 ///
-/// `BinOp`, `Call`, `CallMethod`, `GetAttr`, `SetAttr`, `LoadGlobal`,
-/// `StoreGlobal`, store instructions, and all loop/branch/exception instructions
-/// are left in place because they may have side effects or their correct
-/// behaviour depends on the iteration context.
+/// `UnaryOp` (`Pos`, `Neg`, `BitNot`, `Not`) can raise `TypeError`; excluded
+/// entirely.  `BinOp`, `Call`, `CallMethod`, `GetAttr`, `SetAttr`,
+/// `LoadGlobal`, `StoreGlobal`, store instructions, and all loop/branch/
+/// exception instructions are left in place because they may have side effects
+/// or their correct behaviour depends on the iteration context.
 ///
 /// ## Loop detection
 ///
@@ -1159,7 +1164,7 @@ fn pass_exit_inline(insns: Vec<Insn>) -> Vec<Insn> {
 /// The pass repeats the hoist loop until no new instructions are moved, so that
 /// an instruction whose invariant inputs were themselves just hoisted can also be
 /// hoisted in the same call.
-fn pass_licm(insns: Vec<Insn>) -> Vec<Insn> {
+fn pass_licm(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
     let n = insns.len();
     if n == 0 {
         return insns;
@@ -1268,10 +1273,10 @@ fn pass_licm(insns: Vec<Insn>) -> Vec<Insn> {
             // Collect indices (in order) of instructions to hoist.
             // Only consider instructions strictly within [body_start .. hoist_bound).
             // These are the instructions that dominate the back edge (guaranteed to
-            // execute every iteration) and are pure (LoadConst, BinOpConst, UnaryOp).
+            // execute every iteration) and are pure (LoadConst for temps, safe BinOpConst).
             let mut to_hoist: Vec<usize> = Vec::new();
             for pc in body_start..hoist_bound {
-                if is_loop_invariant(&insns[pc], &written, &write_count) {
+                if is_loop_invariant(&insns[pc], &written, &write_count, num_locals) {
                     to_hoist.push(pc);
                 }
             }
@@ -1468,27 +1473,69 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
 /// set of registers written anywhere inside the loop body.
 ///
 /// An instruction is loop-invariant when:
-/// 1. It is one of the safe-to-hoist variants (`LoadConst`, `BinOpConst`, `UnaryOp`).
+/// 1. It is one of the safe-to-hoist variants (`LoadConst`, `BinOpConst`).
 /// 2. None of its *source* registers appear in `written`.
-/// 3. Its *destination* register is written only by this instruction inside the
+/// 3. Its *destination* register is a temporary (`>= num_locals`).  Named
+///    locals (index `< num_locals`) are visible outside the loop; hoisting a
+///    write to a named local would make the assignment unconditional, which is
+///    wrong for zero-trip loops.
+/// 4. Its *destination* register is written only by this instruction inside the
 ///    loop body (`write_count[dst] == 1`).  If another instruction in the body
 ///    also writes `dst`, hoisting would change the value seen by instructions
 ///    that execute between the hoist point and the in-body write — incorrect.
+/// 5. For `BinOpConst`: the operator cannot raise at runtime.  `Div`,
+///    `FloorDiv`, `Mod` can raise `ZeroDivisionError`; `LShift`/`RShift` can
+///    raise `ValueError` for a negative constant; `Pow` can raise
+///    `OverflowError`.  These are excluded because hoisting them before the
+///    loop header changes observable semantics for zero-trip loops.
+///
+/// `UnaryOp` is excluded entirely: `Pos` and `Neg` raise `TypeError` for
+/// non-numeric operands, and `BitNot` raises `TypeError` for non-int operands.
 fn is_loop_invariant(
     insn: &Insn,
     written: &HashSet<u32>,
     write_count: &HashMap<u32, usize>,
+    num_locals: u32,
 ) -> bool {
+    use crate::ast::BinaryOp;
+
+    // True when `dst` is a temporary register (not a named local).
+    let is_temp = |dst: u32| dst >= num_locals;
     // True when `dst` is the sole writer of that register inside the body.
     let sole_writer = |dst: u32| write_count.get(&dst).copied().unwrap_or(0) == 1;
 
     match insn {
-        // LoadConst has no register source; invariant if this is the sole write of dst.
-        Insn::LoadConst(dst, _) => sole_writer(*dst),
-        // BinOpConst reads `src`; invariant if `src` not written AND sole write of dst.
-        Insn::BinOpConst(dst, src, _, _) => !written.contains(src) && sole_writer(*dst),
-        // UnaryOp reads `src`; invariant if `src` not written AND sole write of dst.
-        Insn::UnaryOp(dst, _, src) => !written.contains(src) && sole_writer(*dst),
+        // LoadConst has no register source; safe to hoist only when dst is a
+        // temporary.  Named locals must not be hoisted: a zero-trip loop must
+        // not assign them.
+        Insn::LoadConst(dst, _) => is_temp(*dst) && sole_writer(*dst),
+        // BinOpConst reads `src`; invariant when `src` is not written, dst is a
+        // temp, this is the sole write of dst, and the operator cannot raise.
+        Insn::BinOpConst(dst, src, op, _) => {
+            let op_is_safe = matches!(
+                op,
+                BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Mul
+                    | BinaryOp::BitAnd
+                    | BinaryOp::BitOr
+                    | BinaryOp::BitXor
+                    | BinaryOp::Eq
+                    | BinaryOp::Ne
+                    | BinaryOp::Lt
+                    | BinaryOp::Le
+                    | BinaryOp::Gt
+                    | BinaryOp::Ge
+                    | BinaryOp::Is
+                    | BinaryOp::IsNot
+                    | BinaryOp::And
+                    | BinaryOp::Or
+            );
+            op_is_safe && !written.contains(src) && is_temp(*dst) && sole_writer(*dst)
+        }
+        // UnaryOp (Pos, Neg, BitNot, Not) can raise TypeError for non-numeric /
+        // non-bool operands.  Excluded entirely: hoisting fires the raise in
+        // zero-trip loops where CPython 3.12 never enters the body.
         // Everything else: not hoisted.
         _ => false,
     }
@@ -3966,7 +4013,8 @@ mod tests {
             Insn::Jump(-4),                                // [3] back edge → [0]
             Insn::Return(1),                               // [4]
         ];
-        let out = pass_licm(insns);
+        // r0..r4 are named locals; r5 is a temp (>= num_locals=5) → hoistable.
+        let out = pass_licm(insns, 5);
 
         // After hoisting LoadConst(r5, 0) before header [0], the new layout is:
         //  [0] LoadConst(r5, 0)               — hoisted
@@ -4009,7 +4057,8 @@ mod tests {
             Insn::Jump(-4),                                // [3]
             Insn::Return(1),                               // [4]
         ];
-        let out = pass_licm(insns);
+        // r0..r4 are named locals; r5 is a temp (>= num_locals=5) → BinOpConst(r5) hoistable.
+        let out = pass_licm(insns, 5);
 
         assert_eq!(out.len(), 5);
         assert!(
@@ -4043,7 +4092,8 @@ mod tests {
             Insn::Return(1),                               // [4]
         ];
         let before = insns.clone();
-        let out = pass_licm(insns);
+        // r5 is a temp but r0 (src) IS written by ForCountConst → still not hoisted.
+        let out = pass_licm(insns, 5);
 
         // Nothing should move: BinOpConst reads r0 which is written by ForCountConst.
         assert_eq!(
@@ -4091,7 +4141,8 @@ mod tests {
             Insn::Jump(-8),                                // [7] outer back edge → [0]
             Insn::Return(1),                               // [8]
         ];
-        let out = pass_licm(insns);
+        // r0..r4 are named locals; r9 is a temp (>= num_locals=5) → LoadConst(r9) hoistable.
+        let out = pass_licm(insns, 5);
 
         assert_eq!(out.len(), 9, "total instruction count unchanged");
 
