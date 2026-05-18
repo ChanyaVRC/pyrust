@@ -1634,20 +1634,51 @@ pub(crate) fn float_to_bigint(f: f64) -> Value {
 }
 
 /// Coerce a `Value` to `f64` for numeric ops.  Returns the raw `f64` on
-/// success or `None` for non-numeric types — the caller chooses the error
-/// wording so CPython-parity messages stay precise at each call site.
+/// success or `None` for non-numeric types (including BigInt values that
+/// overflow to ±inf) — the caller chooses the error wording so
+/// CPython-parity messages stay precise at each call site.
+///
+/// For BigInt, use [`value_to_float`] instead when you need the
+/// CPython-matching `OverflowError` (rather than a `TypeError`) for integers
+/// too large to represent as a finite `f64`.
 pub(crate) fn try_value_to_float(v: &Value) -> Option<f64> {
     match v.kind() {
         ValueKind::Float(f) => Some(f),
         ValueKind::Int(i) => Some(i as f64),
         ValueKind::Bool(b) => Some(if b { 1.0 } else { 0.0 }),
+        ValueKind::BigInt(b) => {
+            // `ToPrimitive::to_f64` always returns `Some` for BigInt (never
+            // `None`); the result is `±inf` when the magnitude exceeds f64
+            // range.  Filter those out so callers receive `None` rather than a
+            // silent infinity that would bypass CPython's OverflowError.
+            // Callers that need the proper OverflowError should use
+            // `value_to_float` instead.
+            b.to_f64().filter(|f| f.is_finite())
+        }
         _ => None,
     }
 }
 
 /// Coerce a `Value` to `f64` with the `math`/builtins-style error message,
 /// matching CPython's `math.sqrt`-family error wording.
+///
+/// Raises `OverflowError` (not `TypeError`) when a `BigInt` argument is too
+/// large to represent as a finite `f64`, mirroring CPython's behaviour:
+/// `math.sqrt(2**10000)` → `OverflowError: int too large to convert to float`.
 pub(crate) fn value_to_float(v: &Value, ctx: &str) -> Result<f64> {
+    // Handle BigInt before falling through to try_value_to_float so we can
+    // distinguish a non-numeric type (TypeError) from an overflow (OverflowError).
+    if let ValueKind::BigInt(b) = v.kind() {
+        let f = b.to_f64().unwrap_or(f64::INFINITY);
+        return if f.is_finite() {
+            Ok(f)
+        } else {
+            Err(PyError::named(
+                "OverflowError",
+                "int too large to convert to float".to_string(),
+            ))
+        };
+    }
     try_value_to_float(v).ok_or_else(|| {
         PyError::named(
             "TypeError",

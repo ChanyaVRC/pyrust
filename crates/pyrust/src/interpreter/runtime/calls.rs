@@ -2141,7 +2141,22 @@ fn normalise_exp_digits(s: String) -> String {
 /// Coerce a `Value` to `f64` for format-spec (`format(x, ".2f")` / f-string)
 /// numeric formatting.  Thin wrapper around [`try_value_to_float`] that
 /// reports the format-path CPython-parity error message.
+///
+/// Raises `OverflowError` (not `TypeError`) when a `BigInt` argument overflows
+/// f64 range, matching CPython's behaviour for `format(2**10000, ".2f")`.
 fn fmt_value_to_float(value: &Value) -> Result<f64> {
+    if let ValueKind::BigInt(b) = value.kind() {
+        use crate::value::PyToPrimitive;
+        let f = b.to_f64().unwrap_or(f64::INFINITY);
+        return if f.is_finite() {
+            Ok(f)
+        } else {
+            Err(PyError::named(
+                "OverflowError",
+                "int too large to convert to float".to_string(),
+            ))
+        };
+    }
     try_value_to_float(value).ok_or_else(|| {
         PyError::named(
             "TypeError",
