@@ -139,8 +139,8 @@ impl Interpreter {
                     ValueKind::Tuple(items) => {
                         pyrust_builtins::tuple::call(method, items, pos)
                     }
-                    ValueKind::Complex(re, im) if method == "conjugate" => {
-                        Ok(Value::complex(re, -im))
+                    ValueKind::Complex(_, _) => {
+                        pyrust_builtins::complex::call(method, &receiver, pos)
                     }
                     ValueKind::BuiltinObject { ops, state } => {
                         let empty_kw: indexmap::IndexMap<String, Value> =
