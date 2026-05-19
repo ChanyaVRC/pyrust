@@ -164,10 +164,21 @@ fn collect_cell_vars_in(
                 // does not promote the enclosing scope's `x` — that is handled
                 // separately for the class body's own register map in
                 // `collect_cell_vars_for_class_body` (issue #624).
-                let class_body_globals = crate::interpreter::collect_global_names(nested_body);
-                for name in &class_body_globals {
-                    if local_index.contains_key(name) {
-                        cells.insert(name.clone());
+                //
+                // Exception: when the current scope is itself a class body
+                // (`is_class_scope == true`), skip this promotion.  A `global x`
+                // in the directly-nested class body goes straight to the module
+                // env, bypassing the outer class namespace entirely.  Promoting
+                // the outer class's `x` to a cell var here would force its
+                // assignment (`Outer.x = 50`) to emit `StoreGlobal` instead of
+                // `RecordClassStore`, leaving the attribute absent from the class
+                // dict and causing `AttributeError` on `Outer.x` (issue #679).
+                if !is_class_scope {
+                    let class_body_globals = crate::interpreter::collect_global_names(nested_body);
+                    for name in &class_body_globals {
+                        if local_index.contains_key(name) {
+                            cells.insert(name.clone());
+                        }
                     }
                 }
                 // Methods inside a class access the enclosing scope directly
