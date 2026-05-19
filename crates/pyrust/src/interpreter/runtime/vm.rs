@@ -2036,6 +2036,7 @@ impl Interpreter {
                     // Rc bumps only — no Vec clones for param metadata or local_names.
                     let proto_code = Rc::clone(&proto.code);
                     let proto_name = proto.name.clone();
+                    let proto_qualname = proto.qualname.clone();
                     let proto_local_index = Rc::clone(&proto.local_index);
                     let proto_local_names = Rc::clone(&proto.local_names);
                     let proto_global_names = Rc::clone(&proto.global_names);
@@ -2077,6 +2078,9 @@ impl Interpreter {
                         id: crate::value::next_fn_id(),
                         kind: crate::value::UserFunctionKind::Regular,
                         name: proto_name,
+                        qualname: proto_qualname,
+                        user_name: std::cell::RefCell::new(None),
+                        user_qualname: std::cell::RefCell::new(None),
                         params,
                         local_names: proto_local_names,
                         local_index: proto_local_index,

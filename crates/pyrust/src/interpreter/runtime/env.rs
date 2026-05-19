@@ -319,6 +319,33 @@ impl Interpreter {
                     format!("module '{mod_name}' has no attribute '{name}'"),
                 ))
             }
+            ValueKind::UserFunction(func) => {
+                match name {
+                    "__name__" => {
+                        let n = func
+                            .user_name
+                            .borrow()
+                            .as_deref()
+                            .unwrap_or(&func.name)
+                            .to_string();
+                        return Ok(Value::string(n));
+                    }
+                    "__qualname__" => {
+                        let q = func
+                            .user_qualname
+                            .borrow()
+                            .as_deref()
+                            .unwrap_or(&func.qualname)
+                            .to_string();
+                        return Ok(Value::string(q));
+                    }
+                    _ => {}
+                }
+                Err(PyError::named(
+                    "AttributeError",
+                    format!("'function' object has no attribute '{name}'"),
+                ))
+            }
             ValueKind::BuiltinFunction(func_name) => {
                 // __name__ is supported on all builtin type/function values so that
                 // `type(x).__name__` works for both builtin and user-defined types.
@@ -361,6 +388,33 @@ impl Interpreter {
                 }
             }
             _ => {
+                // BoundMethod / ClassBoundMethod: delegate __name__ / __qualname__
+                // to the underlying function, matching CPython's method proxy semantics.
+                match target.kind() {
+                    ValueKind::BoundMethod { function, .. }
+                    | ValueKind::ClassBoundMethod { function, .. } => match name {
+                        "__name__" => {
+                            let n = function
+                                .user_name
+                                .borrow()
+                                .as_deref()
+                                .unwrap_or(&function.name)
+                                .to_string();
+                            return Ok(Value::string(n));
+                        }
+                        "__qualname__" => {
+                            let q = function
+                                .user_qualname
+                                .borrow()
+                                .as_deref()
+                                .unwrap_or(&function.qualname)
+                                .to_string();
+                            return Ok(Value::string(q));
+                        }
+                        _ => {}
+                    },
+                    _ => {}
+                }
                 // Complex .real / .imag attribute access.
                 if let ValueKind::Complex(re, im) = target.kind() {
                     match name {
@@ -475,6 +529,37 @@ impl Interpreter {
                 class.borrow_mut().attrs.insert(name.to_string(), value);
                 Ok(())
             }
+            ValueKind::UserFunction(func) => {
+                // CPython allows assigning to __name__ and __qualname__ on
+                // functions — both must be set to a str, otherwise TypeError.
+                match name {
+                    "__name__" | "__qualname__" => {
+                        let as_str: Option<String> = if let ValueKind::Str(s) = value.kind() {
+                            Some(s.to_string())
+                        } else {
+                            None
+                        };
+                        match as_str {
+                            Some(s) => {
+                                if name == "__name__" {
+                                    *func.user_name.borrow_mut() = Some(s);
+                                } else {
+                                    *func.user_qualname.borrow_mut() = Some(s);
+                                }
+                                Ok(())
+                            }
+                            None => Err(PyError::named(
+                                "TypeError",
+                                format!("{name} must be set to a string object"),
+                            )),
+                        }
+                    }
+                    _ => Err(PyError::named(
+                        "AttributeError",
+                        format!("'function' object attribute '{name}' is read-only"),
+                    )),
+                }
+            }
             _ => Err(PyError::Runtime(format!(
                 "object has no writable attribute '{}'",
                 name
@@ -515,6 +600,21 @@ impl Interpreter {
                 // still matches CPython's stable ordering contract.
                 instance.borrow_mut().attrs.shift_remove(name);
                 Ok(())
+            }
+            ValueKind::UserFunction(_) => {
+                // CPython raises TypeError for `del f.__name__` / `del f.__qualname__`
+                // with the same message as a non-string assignment — these slots exist
+                // but cannot be deleted.
+                match name {
+                    "__name__" | "__qualname__" => Err(PyError::named(
+                        "TypeError",
+                        format!("{name} must be set to a string object"),
+                    )),
+                    _ => Err(PyError::named(
+                        "AttributeError",
+                        format!("'function' object has no attribute '{name}'"),
+                    )),
+                }
             }
             ValueKind::PyClass(class) => {
                 // Issue #553: __qualname__ is a type-level descriptor on `type`
