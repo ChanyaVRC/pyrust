@@ -85,3 +85,17 @@ G = make_class2()
 print(G.a)        # 10
 print(G().fn1())  # 1
 print(G().fn2())  # 2
+
+# ── Case 9: nested class + lambda — outer class attr must not be stripped ────
+# A lambda inside Inner that reads module-level 'x' must not cause Outer.x to
+# be promoted to a cell var (which would strip the Outer class attribute).
+x3 = 99
+class Outer9:
+    x3 = 10
+    class Inner9:
+        x3 = 20
+        fn = lambda self: x3  # reads module x3, not class attrs
+
+print(Outer9.x3)          # 10  (Outer attr must survive)
+print(Outer9.Inner9.x3)   # 20  (Inner attr must survive)
+print(Outer9.Inner9().fn())  # 99 (lambda reads module x3)

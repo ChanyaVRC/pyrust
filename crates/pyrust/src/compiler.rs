@@ -215,10 +215,11 @@ fn collect_cell_vars_in(
                         }
                     }
                 }
-                // Methods inside a class access the enclosing scope directly
-                // (Python class scope is not a closure scope for methods).
-                // Find names that class methods read as free variables and
-                // promote them to cell vars so they live in the env.
+                // Methods and lambdas inside a class access the enclosing scope
+                // directly (Python class scope is not a closure scope for
+                // methods or lambdas).  Find names that class methods/lambdas
+                // read as free variables and promote them to cell vars so they
+                // live in the env.
                 // Pass `is_class_scope` so the callee knows whether `local_index`
                 // belongs to a function scope (must promote even when the name
                 // is also a class attr) or a class scope (must not promote,
