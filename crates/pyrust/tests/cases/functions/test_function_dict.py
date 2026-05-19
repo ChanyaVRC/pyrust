@@ -77,3 +77,19 @@ class Cls2:
     def cm(cls): pass
 
 print(Cls2.cm.__dict__)       # {} (underlying function attrs are empty)
+
+# --- __dict__ returns a live object (mutations propagate back) ---
+def bar(): pass
+bar.p = 10
+d = bar.__dict__
+d['q'] = 20
+print(bar.q)                  # 20 — live reference, not a snapshot
+bar.__dict__['r'] = 30
+print(bar.r)                  # 30 — subscript-assign via returned dict
+
+# --- del __defaults__ / __annotations__ / __kwdefaults__ succeeds ---
+def baz(): pass
+del baz.__defaults__          # no error
+del baz.__annotations__       # no error
+del baz.__kwdefaults__        # no error
+print('slots cleared ok')     # slots cleared ok
