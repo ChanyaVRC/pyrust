@@ -60,6 +60,17 @@ try:
 except TypeError as e:
     print("TypeError:", e)
 
+# send() with wrong arity raises TypeError with the correct message.
+def gen_arity():
+    yield 1
+
+ga = gen_arity()
+try:
+    ga.send(1, 2)
+    print("ERROR: expected TypeError")
+except TypeError as e:
+    print("TypeError wrong arity:", e)
+
 # send on a done generator raises StopIteration.
 def gen_done():
     yield 1

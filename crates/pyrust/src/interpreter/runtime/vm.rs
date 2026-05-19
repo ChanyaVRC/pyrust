@@ -2664,7 +2664,7 @@ impl Interpreter {
                     return Err(PyError::named(
                         "TypeError",
                         format!(
-                            "send() takes exactly one argument ({} given)",
+                            "generator.send() takes exactly one argument ({} given)",
                             args.len()
                         ),
                     ));
