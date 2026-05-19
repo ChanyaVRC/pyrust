@@ -102,7 +102,13 @@ fn collect_cell_vars_in(
                 ..
             } => {
                 // Explicit `nonlocal x` in nested body → x is a cell var.
-                let nonlocals = crate::interpreter::collect_nonlocal_names(nested_body);
+                // Use `collect_nonlocal_names_through_classes` so that a
+                // `nonlocal x` declared inside a class body inside this nested
+                // function is also seen (issue #735: class scope is transparent
+                // to `nonlocal`, so `def inner(): class C: nonlocal x` still
+                // requires `outer` to promote `x` to a cell var).
+                let mut nonlocals = HashSet::new();
+                collect_nonlocal_names_through_classes(nested_body, &mut nonlocals);
                 for name in &nonlocals {
                     if local_index.contains_key(name) {
                         cells.insert(name.clone());
@@ -177,7 +183,8 @@ fn collect_cell_vars_in(
                 // `nonlocal x` declared in any depth of nested class bodies still
                 // reaches the enclosing *function* scope.  We use
                 // `collect_nonlocal_names_through_classes` to find all such names
-                // (issue #708: handles `def f(): x=1; class C: class D: nonlocal x`).
+                // (issue #708: handles `def f(): x=1; class C: class D: nonlocal x`,
+                //  issue #735: handles `def f(): x=1; class C: nonlocal x`).
                 let mut nonlocals = HashSet::new();
                 collect_nonlocal_names_through_classes(nested_body, &mut nonlocals);
                 for name in &nonlocals {
@@ -1770,7 +1777,11 @@ fn collect_transitive_free_vars_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>)
             // Names locally bound inside the nested function — exclude them
             // when contributing to the enclosing scope's free-var set.
             let nested_globals = crate::interpreter::collect_global_names(nested_body);
-            let nested_nonlocals = crate::interpreter::collect_nonlocal_names(nested_body);
+            // Use `collect_nonlocal_names_through_classes` so that a `nonlocal x`
+            // declared inside a class body inside this nested function is treated
+            // as an enclosing-scope reference (issue #735).
+            let mut nested_nonlocals = HashSet::new();
+            collect_nonlocal_names_through_classes(nested_body, &mut nested_nonlocals);
             let nested_locals = crate::interpreter::collect_local_names(
                 params,
                 nested_body,
@@ -1813,13 +1824,24 @@ fn collect_transitive_free_vars_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>)
             }
             // Class body itself: methods read enclosing scope (skipping class scope).
             // We approximate the class scope conservatively by collecting class-level
-            // assignments as the local set.
+            // assignments as the local set, while excluding any `nonlocal` names so
+            // they remain visible as enclosing-scope references (issue #735).
             let empty_set: HashSet<String> = HashSet::new();
-            let class_locals =
-                crate::interpreter::collect_local_names(&[], nested_body, &empty_set, &empty_set);
+            let mut class_nonlocals: HashSet<String> = HashSet::new();
+            collect_nonlocal_names_through_classes(nested_body, &mut class_nonlocals);
+            let class_locals = crate::interpreter::collect_local_names(
+                &[],
+                nested_body,
+                &empty_set,
+                &class_nonlocals,
+            );
             let mut class_uses: HashSet<String> = HashSet::new();
             collect_free_var_reads_in_stmts(nested_body, &mut class_uses);
             collect_transitive_free_vars_in_stmts(nested_body, &mut class_uses);
+            // `nonlocal x` in the class body is an enclosing-scope reference.
+            for n in &class_nonlocals {
+                class_uses.insert(n.clone());
+            }
             for name in class_uses {
                 if !class_locals.contains(&name) {
                     uses.insert(name);
@@ -6221,12 +6243,12 @@ impl Compiler {
         // inside a class body silently stored into the class attribute dict
         // rather than the module-level global (issue #618).
         let body_global = Rc::new(crate::interpreter::collect_global_names(body));
-        // Collect `nonlocal` declarations in the class body (issue #708).
+        // Collect `nonlocal` declarations in the class body (issue #708 / #735).
         // These names must not get a class-body register slot — they are
         // stored/loaded via the enclosing function's env, not the class namespace.
         let body_nonlocal = crate::interpreter::collect_nonlocal_names(body);
-        // Validate: every `nonlocal x` in the class body must have a binding
-        // in some enclosing *function* scope.  Module scope and class scope do not
+        // Validate: every `nonlocal x` in the class body must have a binding in
+        // some enclosing *function* scope.  Module scope and class scope do not
         // count — `nonlocal` requires an enclosing function binding (CPython 3.12
         // raises SyntaxError: no binding for nonlocal 'x' found).
         {
