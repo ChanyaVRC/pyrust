@@ -2385,6 +2385,8 @@ impl Interpreter {
     /// Renders a value to a string using the same priority as `str(x)`:
     /// `__str__` first, then `__repr__`, then the default object repr.
     /// For non-PyInstance values falls back to `Value::to_py_str()`.
+    /// Exception instances bypass dunder dispatch (matching CPython's
+    /// `BaseException.__str__` special-casing) and use `to_py_str()`.
     /// Used by `str.format` for the `!s` conversion and the empty-spec path.
     fn render_value_as_str(&mut self, value: &Value) -> Result<String> {
         let ValueKind::PyInstance(inst) = value.kind() else {
@@ -2392,6 +2394,10 @@ impl Interpreter {
         };
         let inst_rc = Rc::clone(inst);
         let class = Rc::clone(&inst_rc.borrow().class);
+        // Exception instances use the built-in formatting (CPython special-case).
+        if is_exception_class(&class) {
+            return Ok(value.to_py_str());
+        }
         for dunder in &["__str__", "__repr__"] {
             if let Some(method_val) = lookup_class_attr(&class, dunder) {
                 let result = invoke_class_method(
@@ -2412,7 +2418,9 @@ impl Interpreter {
                 };
             }
         }
-        Ok(format!("<{} object>", class.borrow().name))
+        // No dunders found: fall back to Value::repr(), which produces
+        // `<module.qualname object at 0xADDR>` matching CPython's object.__repr__.
+        Ok(value.repr())
     }
 }
 
