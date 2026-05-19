@@ -93,3 +93,34 @@ del baz.__defaults__          # no error
 del baz.__annotations__       # no error
 del baz.__kwdefaults__        # no error
 print('slots cleared ok')     # slots cleared ok
+
+# --- __defaults__ = None and tuple are accepted; anything else raises TypeError ---
+def qux(): pass
+qux.__defaults__ = None
+print('defaults=None ok')
+qux.__defaults__ = (1, 2)
+print('defaults=tuple ok')
+try:
+    qux.__defaults__ = [1, 2]
+except TypeError as e:
+    print(e)
+
+# --- __kwdefaults__ = None and dict are accepted; anything else raises TypeError ---
+qux.__kwdefaults__ = None
+print('kwdefaults=None ok')
+qux.__kwdefaults__ = {'x': 1}
+print('kwdefaults=dict ok')
+try:
+    qux.__kwdefaults__ = 'bad'
+except TypeError as e:
+    print(e)
+
+# --- __annotations__ = None and dict are accepted; anything else raises TypeError ---
+qux.__annotations__ = None
+print('annotations=None ok')
+qux.__annotations__ = {}
+print('annotations=dict ok')
+try:
+    qux.__annotations__ = []
+except TypeError as e:
+    print(e)

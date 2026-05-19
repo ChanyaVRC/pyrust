@@ -635,24 +635,46 @@ impl Interpreter {
                     }
                     // CPython validates these slots and rejects arbitrary values.
                     // They are not yet implemented as real fields in pyrust, so
-                    // fall back to the CPython error rather than silently storing
-                    // the value in the dynamic attrs dict.
+                    // validate the type and silently succeed for accepted values
+                    // (pyrust is already in the "unset" state CPython would be
+                    // in after the assignment).
                     "__code__" => Err(PyError::named(
                         "TypeError",
                         "__code__ must be set to a code object".to_string(),
                     )),
-                    "__defaults__" => Err(PyError::named(
-                        "TypeError",
-                        "__defaults__ must be set to a tuple object".to_string(),
-                    )),
-                    "__kwdefaults__" => Err(PyError::named(
-                        "TypeError",
-                        "__kwdefaults__ must be set to a dict object".to_string(),
-                    )),
-                    "__annotations__" => Err(PyError::named(
-                        "TypeError",
-                        "__annotations__ must be set to a dict object".to_string(),
-                    )),
+                    "__defaults__" => {
+                        // CPython accepts None or a tuple; anything else → TypeError.
+                        if value.is_none() || matches!(value.kind(), ValueKind::Tuple(_)) {
+                            Ok(())
+                        } else {
+                            Err(PyError::named(
+                                "TypeError",
+                                "__defaults__ must be set to a tuple object".to_string(),
+                            ))
+                        }
+                    }
+                    "__kwdefaults__" => {
+                        // CPython accepts None or a dict; anything else → TypeError.
+                        if value.is_none() || matches!(value.kind(), ValueKind::Dict(_)) {
+                            Ok(())
+                        } else {
+                            Err(PyError::named(
+                                "TypeError",
+                                "__kwdefaults__ must be set to a dict object".to_string(),
+                            ))
+                        }
+                    }
+                    "__annotations__" => {
+                        // CPython accepts None (stores as {}) or a dict; anything else → TypeError.
+                        if value.is_none() || matches!(value.kind(), ValueKind::Dict(_)) {
+                            Ok(())
+                        } else {
+                            Err(PyError::named(
+                                "TypeError",
+                                "__annotations__ must be set to a dict object".to_string(),
+                            ))
+                        }
+                    }
                     "__globals__" | "__closure__" => Err(PyError::named(
                         "AttributeError",
                         "readonly attribute".to_string(),
