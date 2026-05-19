@@ -111,6 +111,61 @@ mod tests {
         );
     }
 
+    // Issue #639: the SyntaxError must be raised at compile time — before any
+    // statement in the module executes.  If the check were deferred to the
+    // MakeFunction VM instruction, the print() would run first.
+    #[test]
+    fn nonlocal_without_binding_errors_before_any_statement_executes() {
+        let src = "print('before')\ndef f():\n    nonlocal missing\n    missing = 1\nprint('after')\n";
+        let tokens = Lexer::new(src).unwrap().into_tokens();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut interpreter = Interpreter::default();
+
+        let error = interpreter.exec_program(&program, false).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "SyntaxError: no binding for nonlocal 'missing' found"
+        );
+    }
+
+    // Issue #639: nonlocal where the enclosing scope only has `global x` (not a
+    // true local binding) must also raise SyntaxError.
+    #[test]
+    fn nonlocal_where_enclosing_scope_has_global_errors() {
+        let src = "x = 1\ndef outer():\n    global x\n    def inner():\n        nonlocal x\n        x = 99\n    inner()\nouter()\n";
+        let tokens = Lexer::new(src).unwrap().into_tokens();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut interpreter = Interpreter::default();
+
+        let error = interpreter.exec_program(&program, false).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "SyntaxError: no binding for nonlocal 'x' found"
+        );
+    }
+
+    // Issue #639: nonlocal in a doubly-nested function with no binding at any
+    // enclosing level must raise SyntaxError at compile time.
+    #[test]
+    fn nonlocal_doubly_nested_without_any_binding_errors() {
+        let src = "print('before')\ndef outer():\n    def middle():\n        def inner():\n            nonlocal x\n            x = 10\n        inner()\n    middle()\nprint('after')\n";
+        let tokens = Lexer::new(src).unwrap().into_tokens();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut interpreter = Interpreter::default();
+
+        let error = interpreter.exec_program(&program, false).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "SyntaxError: no binding for nonlocal 'x' found"
+        );
+    }
+
     #[test]
     fn break_outside_loop_is_syntax_error() {
         let tokens = Lexer::new("break\n").unwrap().into_tokens();
