@@ -3982,9 +3982,69 @@ impl Compiler {
                         }
                     }
                 }
-                // Def and Class bodies have independent scopes; skip them.
-                // Their own compilation will validate their interiors.
-                Stmt::Def { .. } | Stmt::Class { .. } => {}
+                // Def bodies open a new function scope: break/continue are not
+                // valid inside a function (even inside a loop in the enclosing
+                // scope), and nonlocal names must be bound in an enclosing
+                // function scope.  CPython validates these even for defs that
+                // appear in dead-code branches, so we must run the checks here
+                // rather than relying on child compilation (which is skipped for
+                // dead code).
+                Stmt::Def { params, body, .. } => {
+                    // Validate nonlocal bindings — identical to compile_def
+                    // lines ~5157-5174.  Collect the nonlocal names declared in
+                    // the function body and verify each has a binding in some
+                    // enclosing function scope.
+                    let inner_nonlocal = crate::interpreter::collect_nonlocal_names(body);
+                    let mut sorted_nonlocals: Vec<&String> = inner_nonlocal.iter().collect();
+                    sorted_nonlocals.sort();
+                    for nonlocal_name in sorted_nonlocals {
+                        // The parameter list of this Def is also an enclosing
+                        // binding for the nonlocal names it declares (but only
+                        // if the param name matches — which is unusual; still,
+                        // be consistent with compile_def).
+                        let in_params = params.iter().any(|p| &p.name == nonlocal_name);
+                        let found = in_params
+                            || self
+                                .outer_locals
+                                .iter()
+                                .any(|m| m.contains_key(nonlocal_name))
+                            || (self.is_function_scope
+                                && self.local_index.contains_key(nonlocal_name));
+                        if !found {
+                            self.failed = true;
+                            self.is_syntax_error = true;
+                            if self.error_msg.is_none() {
+                                self.error_msg = Some(format!(
+                                    "no binding for nonlocal '{}' found",
+                                    nonlocal_name
+                                ));
+                            }
+                            return;
+                        }
+                    }
+                    // Recurse into the function body.  A new function scope
+                    // resets in_loop (break/continue are never valid across a
+                    // function boundary) and sets is_function_scope.
+                    let saved_is_function_scope = self.is_function_scope;
+                    let saved_is_class_body = self.is_class_body;
+                    self.is_function_scope = true;
+                    self.is_class_body = false;
+                    self.check_dead_block(body, false);
+                    self.is_function_scope = saved_is_function_scope;
+                    self.is_class_body = saved_is_class_body;
+                }
+                // Class bodies open a new class scope: break/continue are not
+                // valid (class body is not a loop), and nonlocal checks use
+                // class-body rules.
+                Stmt::Class { body, .. } => {
+                    let saved_is_function_scope = self.is_function_scope;
+                    let saved_is_class_body = self.is_class_body;
+                    self.is_function_scope = false;
+                    self.is_class_body = true;
+                    self.check_dead_block(body, false);
+                    self.is_function_scope = saved_is_function_scope;
+                    self.is_class_body = saved_is_class_body;
+                }
                 // All other statements have no nested blocks or no context rules.
                 _ => {}
             }
