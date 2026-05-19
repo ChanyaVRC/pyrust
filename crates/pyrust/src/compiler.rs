@@ -3862,6 +3862,135 @@ impl Compiler {
         }
     }
 
+    // ── Syntax validation for dead-code bodies ───────────────────────────────
+
+    /// Walk `stmts` without emitting code and report any context-sensitive
+    /// syntax errors that CPython catches even in unreachable branches:
+    ///
+    /// * `break` / `continue` when not inside a loop
+    /// * `nonlocal` at module level (not inside a function or class body)
+    ///
+    /// `in_loop` starts as `self.loops.is_empty()` (inverted) at the call site
+    /// and becomes `true` whenever we recurse into a loop body.  `Stmt::Def`
+    /// and `Stmt::Class` are skipped — they get their own child compiler with
+    /// independent scope rules.
+    fn check_dead_block(&mut self, stmts: &[Stmt], in_loop: bool) {
+        for stmt in stmts {
+            if self.failed {
+                return;
+            }
+            match stmt {
+                Stmt::Break => {
+                    if !in_loop {
+                        self.failed = true;
+                        self.is_syntax_error = true;
+                        if self.error_msg.is_none() {
+                            self.error_msg = Some("'break' outside loop".to_string());
+                        }
+                    }
+                }
+                Stmt::Continue => {
+                    if !in_loop {
+                        self.failed = true;
+                        self.is_syntax_error = true;
+                        if self.error_msg.is_none() {
+                            self.error_msg = Some("'continue' not properly in loop".to_string());
+                        }
+                    }
+                }
+                Stmt::Nonlocal(_) => {
+                    if !self.is_function_scope && !self.is_class_body {
+                        self.failed = true;
+                        self.is_syntax_error = true;
+                        if self.error_msg.is_none() {
+                            self.error_msg = Some(
+                                "nonlocal declaration not allowed at module level".to_string(),
+                            );
+                        }
+                    }
+                }
+                Stmt::If {
+                    branches,
+                    else_branch,
+                } => {
+                    for (_, body) in branches {
+                        self.check_dead_block(body, in_loop);
+                        if self.failed {
+                            return;
+                        }
+                    }
+                    if let Some(else_stmts) = else_branch {
+                        self.check_dead_block(else_stmts, in_loop);
+                    }
+                }
+                Stmt::While {
+                    body, else_branch, ..
+                } => {
+                    self.check_dead_block(body, true);
+                    if self.failed {
+                        return;
+                    }
+                    if let Some(else_stmts) = else_branch {
+                        self.check_dead_block(else_stmts, in_loop);
+                    }
+                }
+                Stmt::For {
+                    body, else_branch, ..
+                } => {
+                    self.check_dead_block(body, true);
+                    if self.failed {
+                        return;
+                    }
+                    if let Some(else_stmts) = else_branch {
+                        self.check_dead_block(else_stmts, in_loop);
+                    }
+                }
+                Stmt::Try {
+                    body,
+                    handlers,
+                    else_branch,
+                    finally_branch,
+                } => {
+                    self.check_dead_block(body, in_loop);
+                    if self.failed {
+                        return;
+                    }
+                    for handler in handlers {
+                        self.check_dead_block(&handler.body, in_loop);
+                        if self.failed {
+                            return;
+                        }
+                    }
+                    if let Some(else_stmts) = else_branch {
+                        self.check_dead_block(else_stmts, in_loop);
+                        if self.failed {
+                            return;
+                        }
+                    }
+                    if let Some(finally_stmts) = finally_branch {
+                        self.check_dead_block(finally_stmts, in_loop);
+                    }
+                }
+                Stmt::With { body, .. } => {
+                    self.check_dead_block(body, in_loop);
+                }
+                Stmt::Match { arms, .. } => {
+                    for arm in arms {
+                        self.check_dead_block(&arm.body, in_loop);
+                        if self.failed {
+                            return;
+                        }
+                    }
+                }
+                // Def and Class bodies have independent scopes; skip them.
+                // Their own compilation will validate their interiors.
+                Stmt::Def { .. } | Stmt::Class { .. } => {}
+                // All other statements have no nested blocks or no context rules.
+                _ => {}
+            }
+        }
+    }
+
     // ── Control flow ──────────────────────────────────────────────────────────
 
     fn compile_if(&mut self, branches: &[(Expr, Vec<Stmt>)], else_branch: Option<&[Stmt]>) {
@@ -3899,9 +4028,29 @@ impl Compiler {
                     } else {
                         self.def_set = pre_def_set | branch_def_sets[0];
                     }
+                    // Validate skipped elif/else bodies as dead code so that
+                    // context-sensitive syntax errors are not silently swallowed.
+                    let in_loop = !self.loops.is_empty();
+                    for (_, dead_body) in &branches[bi + 1..] {
+                        self.check_dead_block(dead_body, in_loop);
+                        if self.failed {
+                            return;
+                        }
+                    }
+                    if let Some(else_stmts) = else_branch {
+                        self.check_dead_block(else_stmts, in_loop);
+                    }
                     return;
                 } else {
-                    // Always-false branch: skip it entirely.
+                    // Always-false branch: skip code generation but still
+                    // run syntax validation — CPython reports SyntaxError for
+                    // `break`/`continue` outside loops and `nonlocal` at module
+                    // level even when the branch is statically unreachable.
+                    let in_loop = !self.loops.is_empty();
+                    self.check_dead_block(body, in_loop);
+                    if self.failed {
+                        return;
+                    }
                     continue;
                 }
             }
@@ -4258,6 +4407,15 @@ impl Compiler {
 
     fn compile_while(&mut self, cond: &Expr, body: &[Stmt], else_branch: Option<&[Stmt]>) {
         if is_const_false_expr(cond) {
+            // The loop body is statically unreachable, but CPython still
+            // validates context-sensitive syntax inside it (break/continue
+            // outside any loop, nonlocal at module level).  Run the dead-code
+            // checker before skipping the body.  The body is itself a loop
+            // context, so pass `in_loop = true` for its direct children.
+            self.check_dead_block(body, true);
+            if self.failed {
+                return;
+            }
             if let Some(else_stmts) = else_branch {
                 self.compile_block(else_stmts);
             }
