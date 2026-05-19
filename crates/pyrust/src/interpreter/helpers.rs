@@ -1496,14 +1496,6 @@ fn collect_local_names_from_block(
             | Stmt::Break
             | Stmt::Continue
             | Stmt::Pass => {}
-            Stmt::AnnAssign { name, value: Some(_), .. } => {
-                if !global_names.contains(name) && !nonlocal_names.contains(name) {
-                    names.insert(name.clone());
-                }
-            }
-            // Bare annotation or annotated assign without value — no-op at runtime,
-            // does not create a local.
-            Stmt::AnnAssign { value: None, .. } | Stmt::AnnDeclare(_) => {}
             // Walk expressions for walrus operator targets.
             Stmt::Expr(e) => {
                 collect_walrus_targets_in_expr(e, names, global_names, nonlocal_names);
@@ -1644,6 +1636,23 @@ fn collect_pattern_names(
             }
         }
     }
+}
+
+/// Collect the simple names that appear as annotation targets in the top level
+/// of `body`.  Both `Stmt::AnnDeclare(name)` and `Stmt::AnnAssign(name, _)`
+/// contribute.  This does **not** recurse into nested function or class bodies;
+/// it is used to validate `global`/`nonlocal` conflicts at the same scope level.
+pub(crate) fn collect_annotation_target_names(body: &[Stmt]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for stmt in body {
+        match stmt {
+            Stmt::AnnDeclare(name) | Stmt::AnnAssign(name, _) => {
+                names.insert(name.clone());
+            }
+            _ => {}
+        }
+    }
+    names
 }
 
 pub(crate) fn collect_global_names(body: &[Stmt]) -> HashSet<String> {

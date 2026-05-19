@@ -127,6 +127,14 @@ pub enum Stmt {
     Break,
     Continue,
     Pass,
+    /// Bare annotation declaration: `name: Type` with no value.
+    /// The annotation expression is discarded; this records only that an
+    /// annotation was present so `compile_class` / `compile_def` can validate
+    /// it against `global` / `nonlocal` declarations in the same scope.
+    AnnDeclare(String),
+    /// Annotated assignment: `name: Type = value`.
+    /// Same motivation as `AnnDeclare`; carries the RHS value.
+    AnnAssign(String, Expr),
     Delete(Vec<Expr>),
     Assert {
         test: Expr,

@@ -729,6 +729,7 @@ fn lambda_captures_in_stmt(
         | Stmt::Break
         | Stmt::Continue
         | Stmt::Raise { expr: None, .. } => {}
+        Stmt::AnnAssign(_, expr) => lambda_captures_in_expr(expr, local_index, cells),
     }
 }
 
@@ -1648,6 +1649,7 @@ fn collect_free_var_reads_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>) {
         | Stmt::Break
         | Stmt::Continue
         | Stmt::Raise { expr: None, .. } => {}
+        Stmt::AnnAssign(_, expr) => collect_free_var_reads_in_expr(expr, uses),
     }
 }
 
@@ -2017,6 +2019,7 @@ fn collect_transitive_free_vars_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>)
         | Stmt::Break
         | Stmt::Continue
         | Stmt::Raise { expr: None, .. } => {}
+        Stmt::AnnAssign(_, expr) => collect_transitive_free_vars_in_expr(expr, uses),
     }
 }
 
@@ -3244,6 +3247,7 @@ fn stmt_reads_var(stmt: &Stmt, name: &str) -> bool {
         | Stmt::AnnDeclare(_)
         | Stmt::Import { .. }
         | Stmt::ImportFrom { .. } => false,
+        Stmt::AnnAssign(_, expr) => expr_reads_var(expr, name),
     }
 }
 
@@ -6109,37 +6113,26 @@ impl Compiler {
         // Detect cell vars for the inner function.
         let inner_cell_vars = collect_cell_vars(body, &inner_index_rc);
 
-        // Compile-time validation: annotated names may not also be global or
-        // nonlocal in the same function scope.  CPython 3.12 raises SyntaxError
-        // at compile time; pyrust matches that behaviour here.
-        {
-            let ann_targets = crate::interpreter::collect_annotation_targets(body);
-            let mut conflicting: Vec<&str> = inner_global
-                .iter()
-                .filter(|n| ann_targets.contains(*n))
-                .map(String::as_str)
-                .collect();
-            conflicting.sort();
-            for n in conflicting {
+        // Validate annotation targets against global/nonlocal declarations.
+        // CPython 3.12 raises SyntaxError for `def f(): global x; x: int` and
+        // `def f(): nonlocal x; x: int` (issue #748 / companion to #770).
+        let def_ann_targets = crate::interpreter::collect_annotation_target_names(body);
+        for ann_name in &def_ann_targets {
+            if inner_global.contains(ann_name) {
                 self.failed = true;
                 self.is_syntax_error = true;
                 if self.error_msg.is_none() {
-                    self.error_msg = Some(format!("annotated name '{}' can't be global", n));
+                    self.error_msg =
+                        Some(format!("annotated name '{}' can't be global", ann_name));
                 }
                 return;
             }
-
-            let mut conflicting: Vec<&str> = inner_nonlocal
-                .iter()
-                .filter(|n| ann_targets.contains(*n))
-                .map(String::as_str)
-                .collect();
-            conflicting.sort();
-            for n in conflicting {
+            if inner_nonlocal.contains(ann_name) {
                 self.failed = true;
                 self.is_syntax_error = true;
                 if self.error_msg.is_none() {
-                    self.error_msg = Some(format!("annotated name '{}' can't be nonlocal", n));
+                    self.error_msg =
+                        Some(format!("annotated name '{}' can't be nonlocal", ann_name));
                 }
                 return;
             }
@@ -6462,43 +6455,35 @@ impl Compiler {
             }
         }
         let body_nonlocal_rc: Rc<HashSet<String>> = Rc::new(body_nonlocal.clone());
-        let body_local =
-            crate::interpreter::collect_local_names(&[], body, &body_global, &body_nonlocal_rc);
 
-        // Compile-time validation: annotated names may not also be global or
-        // nonlocal in the same class body scope.  CPython 3.12 raises SyntaxError
-        // here too (not just in function bodies).
-        {
-            let ann_targets = crate::interpreter::collect_annotation_targets(body);
-            let mut conflicting: Vec<&str> = body_global
-                .iter()
-                .filter(|n| ann_targets.contains(*n))
-                .map(String::as_str)
-                .collect();
-            conflicting.sort();
-            if let Some(n) = conflicting.first() {
+        // Validate annotation targets against global/nonlocal declarations.
+        // CPython 3.12 raises SyntaxError for `class C: global x; x: int` and
+        // `class C: nonlocal x; x: int`.  Declaration order does not matter —
+        // the check is whole-scope (issue #770).
+        let ann_targets = crate::interpreter::collect_annotation_target_names(body);
+        for ann_name in &ann_targets {
+            if body_global.contains(ann_name) {
                 self.failed = true;
                 self.is_syntax_error = true;
                 if self.error_msg.is_none() {
-                    self.error_msg = Some(format!("annotated name '{}' can't be global", n));
+                    self.error_msg =
+                        Some(format!("annotated name '{}' can't be global", ann_name));
                 }
                 return;
             }
-            let mut conflicting: Vec<&str> = body_nonlocal
-                .iter()
-                .filter(|n| ann_targets.contains(*n))
-                .map(String::as_str)
-                .collect();
-            conflicting.sort();
-            if let Some(n) = conflicting.first() {
+            if body_nonlocal.contains(ann_name) {
                 self.failed = true;
                 self.is_syntax_error = true;
                 if self.error_msg.is_none() {
-                    self.error_msg = Some(format!("annotated name '{}' can't be nonlocal", n));
+                    self.error_msg =
+                        Some(format!("annotated name '{}' can't be nonlocal", ann_name));
                 }
                 return;
             }
         }
+
+        let body_local =
+            crate::interpreter::collect_local_names(&[], body, &body_global, &body_nonlocal_rc);
         // Allocate a register slot for every potential class-body local.
         // Slot order is **not** used to encode class-namespace insertion
         // order any more — the order CPython exposes via `vars(C)` is the
