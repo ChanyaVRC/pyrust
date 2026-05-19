@@ -431,6 +431,48 @@ impl Interpreter {
                     ))
                 }
             }
+            ValueKind::BuiltinObject { .. } => {
+                // Builtin bound methods (BuiltinObject with BoundMethodState):
+                // expose __name__, __qualname__, __self__, __module__, __doc__
+                // to match CPython's builtin_function_or_method attributes.
+                // __module__ is always None for built-in bound methods (CPython
+                // does not set m_module on method_descriptor objects).
+                //
+                // Kept in its own arm so the as_bound_method check is only
+                // reached for BuiltinObject values — not for List/Dict/Set/etc.
+                // (which previously fell through to _ and paid the check cost
+                // on every method lookup like lst.append).
+                if let Some((method_name, receiver)) =
+                    pyrust_builtins::bound_method::as_bound_method(&target)
+                {
+                    match name {
+                        "__name__" => return Ok(Value::string(method_name.as_str())),
+                        "__qualname__" => {
+                            let type_name = pyrust_core::builtin_type_name(&receiver);
+                            return Ok(Value::string(format!("{type_name}.{method_name}")));
+                        }
+                        "__self__" => return Ok(receiver),
+                        "__module__" => return Ok(Value::none()),
+                        "__doc__" => return Ok(Value::none()),
+                        _ => {}
+                    }
+                }
+                // Non-bound-method BuiltinObjects (frozenset, dict views, file,
+                // enumerate, zip, reversed, chain, cached_property, …) also
+                // reach this arm.  Delegate to builtin_has_method / bound_method
+                // so that e.g. `frozenset().isdisjoint` keeps working.
+                if builtin_has_method(&target, name) {
+                    return Ok(pyrust_builtins::bound_method::bound_method(
+                        name,
+                        target.clone(),
+                    ));
+                }
+                let type_name = pyrust_core::builtin_type_name(&target);
+                Err(PyError::named(
+                    "AttributeError",
+                    format!("'{type_name}' object has no attribute '{name}'"),
+                ))
+            }
             _ => {
                 // BoundMethod / ClassBoundMethod: delegate __name__ / __qualname__ /
                 // __module__ / __doc__ / __dict__ and arbitrary dynamic attrs to the
