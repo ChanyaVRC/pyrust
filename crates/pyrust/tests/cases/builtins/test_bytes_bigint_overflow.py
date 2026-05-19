@@ -10,6 +10,12 @@ try:
 except OverflowError as e:
     print("OverflowError:", e)
 
+# Negative BigInt raises OverflowError (range check before sign check)
+try:
+    bytes(-(2**63 + 5))
+except OverflowError as e:
+    print("OverflowError:", e)
+
 # Regression guards: small non-negative int still works
 print(bytes(0))
 print(bytes(1))
