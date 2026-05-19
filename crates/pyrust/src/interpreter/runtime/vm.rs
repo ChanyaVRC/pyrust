@@ -493,7 +493,7 @@ impl Interpreter {
                 // Generator returned normally (fell off end or hit explicit `return`).
                 // Stash the return value so Insn::YieldFrom can extract it as
                 // StopIteration.value (PEP 380 §3 step 4).
-                frame.last_return_value = Some(ret_val);
+                frame.last_return_value = Some(ret_val.clone());
                 frame.done = true;
                 let exc = if let Some(cls) = self.exc_classes.get("StopIteration") {
                     PyError::Raised(instantiate_exception(cls, vec![ret_val]))

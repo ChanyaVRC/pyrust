@@ -219,22 +219,11 @@ fn collect_cell_vars_in(
                 // (Python class scope is not a closure scope for methods).
                 // Find names that class methods read as free variables and
                 // promote them to cell vars so they live in the env.
-                //
-                // Exception: when the current scope is itself a class body
-                // (`is_class_scope == true`), skip this promotion.  When the outer
-                // scope is a class body, its names must not be forced into cell vars
-                // by free-variable reads inside a nested class's methods.  Doing so
-                // would cause assignments in the outer class body (e.g. `Outer.x = 50`)
-                // to emit `StoreGlobal` instead of `RecordClassStore`, leaving the
-                // attribute absent from the class dict and raising `AttributeError`
-                // on `Outer.x` (issue #690).
-                //
-                // Cell vars for those free variables in an enclosing *function* scope
-                // are handled when `collect_cell_vars_in` is called for that function
-                // scope (where `is_class_scope == false`).
-                if !is_class_scope {
-                    collect_class_method_outer_refs(nested_body, local_index, cells);
-                }
+                // Pass `is_class_scope` so the callee knows whether `local_index`
+                // belongs to a function scope (must promote even when the name
+                // is also a class attr) or a class scope (must not promote,
+                // since class scope is not visible to further-nested methods).
+                collect_class_method_outer_refs(nested_body, local_index, is_class_scope, cells);
             }
             Stmt::If {
                 branches,
@@ -932,13 +921,30 @@ fn collect_assign_target_textual(
 fn collect_class_method_outer_refs(
     class_body: &[Stmt],
     local_index: &HashMap<String, Reg>,
+    outer_is_class_scope: bool,
     cells: &mut HashSet<String>,
 ) {
-    // Collect names assigned at class level (they shadow outer names for the
-    // class scope itself, though not for methods — but we're conservative here).
-    let empty_set: HashSet<String> = HashSet::new();
-    let class_locals =
-        crate::interpreter::collect_local_names(&[], class_body, &empty_set, &empty_set);
+    // When `local_index` belongs to a *function* scope (`outer_is_class_scope=false`),
+    // methods inside this class can close over function locals even when those names
+    // are also assigned in the class body.  Python class scope is not a closure scope
+    // for methods — a method's free-variable lookup skips the class body entirely.
+    //
+    // When `local_index` belongs to a *class* scope (`outer_is_class_scope=true`),
+    // we must NOT promote class-body names as cell vars just because a further-nested
+    // method reads a name that happens to be a class attribute.  The nested method
+    // also skips the outer class scope, so promoting would incorrectly turn class
+    // attribute assignments into StoreGlobal, stripping the attribute from the dict.
+    let class_locals_opt: Option<HashSet<String>> = if outer_is_class_scope {
+        let empty_set: HashSet<String> = HashSet::new();
+        Some(crate::interpreter::collect_local_names(
+            &[],
+            class_body,
+            &empty_set,
+            &empty_set,
+        ))
+    } else {
+        None
+    };
 
     for stmt in class_body {
         match stmt {
@@ -979,21 +985,30 @@ fn collect_class_method_outer_refs(
                     if !inner_locals.contains(&name)
                         && !inner_globals.contains(&name)
                         && !inner_nonlocals.contains(&name)
-                        && !class_locals.contains(&name)
+                        && class_locals_opt
+                            .as_ref()
+                            .map_or(true, |cl| !cl.contains(&name))
                         && local_index.contains_key(&name)
                     {
                         cells.insert(name);
                     }
                 }
             }
-            // Recursively handle nested classes: a method inside `class Outer:
-            // class Inner:` still needs to promote nonlocals into the outer
-            // function scope.
+            // Recursively handle nested classes.  Methods nested inside a class
+            // that is itself nested inside a class still skip all class scopes and
+            // read from the enclosing *function* scope.  Recurse with the same
+            // `outer_is_class_scope` flag so the caller's class-local filter is
+            // re-evaluated for the nested class's own body.
             Stmt::Class {
                 body: nested_class_body,
                 ..
             } => {
-                collect_class_method_outer_refs(nested_class_body, local_index, cells);
+                collect_class_method_outer_refs(
+                    nested_class_body,
+                    local_index,
+                    outer_is_class_scope,
+                    cells,
+                );
             }
             // Recursively handle class-level control flow.
             Stmt::If {
@@ -1001,26 +1016,26 @@ fn collect_class_method_outer_refs(
                 else_branch,
             } => {
                 for (_, b) in branches {
-                    collect_class_method_outer_refs(b, local_index, cells);
+                    collect_class_method_outer_refs(b, local_index, outer_is_class_scope, cells);
                 }
                 if let Some(b) = else_branch {
-                    collect_class_method_outer_refs(b, local_index, cells);
+                    collect_class_method_outer_refs(b, local_index, outer_is_class_scope, cells);
                 }
             }
             Stmt::While {
                 body, else_branch, ..
             } => {
-                collect_class_method_outer_refs(body, local_index, cells);
+                collect_class_method_outer_refs(body, local_index, outer_is_class_scope, cells);
                 if let Some(b) = else_branch {
-                    collect_class_method_outer_refs(b, local_index, cells);
+                    collect_class_method_outer_refs(b, local_index, outer_is_class_scope, cells);
                 }
             }
             Stmt::For {
                 body, else_branch, ..
             } => {
-                collect_class_method_outer_refs(body, local_index, cells);
+                collect_class_method_outer_refs(body, local_index, outer_is_class_scope, cells);
                 if let Some(b) = else_branch {
-                    collect_class_method_outer_refs(b, local_index, cells);
+                    collect_class_method_outer_refs(b, local_index, outer_is_class_scope, cells);
                 }
             }
             Stmt::Try {
@@ -1029,23 +1044,33 @@ fn collect_class_method_outer_refs(
                 else_branch,
                 finally_branch,
             } => {
-                collect_class_method_outer_refs(body, local_index, cells);
+                collect_class_method_outer_refs(body, local_index, outer_is_class_scope, cells);
                 for h in handlers {
-                    collect_class_method_outer_refs(&h.body, local_index, cells);
+                    collect_class_method_outer_refs(
+                        &h.body,
+                        local_index,
+                        outer_is_class_scope,
+                        cells,
+                    );
                 }
                 if let Some(b) = else_branch {
-                    collect_class_method_outer_refs(b, local_index, cells);
+                    collect_class_method_outer_refs(b, local_index, outer_is_class_scope, cells);
                 }
                 if let Some(b) = finally_branch {
-                    collect_class_method_outer_refs(b, local_index, cells);
+                    collect_class_method_outer_refs(b, local_index, outer_is_class_scope, cells);
                 }
             }
             Stmt::With { body, .. } => {
-                collect_class_method_outer_refs(body, local_index, cells);
+                collect_class_method_outer_refs(body, local_index, outer_is_class_scope, cells);
             }
             Stmt::Match { arms, .. } => {
                 for arm in arms {
-                    collect_class_method_outer_refs(&arm.body, local_index, cells);
+                    collect_class_method_outer_refs(
+                        &arm.body,
+                        local_index,
+                        outer_is_class_scope,
+                        cells,
+                    );
                 }
             }
             _ => {}
