@@ -2919,10 +2919,10 @@ impl Interpreter {
         match self.resume_generator_with_exc(frame, Some(inject), Value::none()) {
             // Generator caught the injected exception and yielded.
             Ok(v) => Ok(v),
-            // Generator returned normally — convert to StopIteration.
-            Err(ref e) if e.class_name_is("StopIteration") => {
-                Err(PyError::named("StopIteration", String::new()))
-            }
+            // Generator returned normally: propagate the original StopIteration so
+            // .value (set by resume_generator_with_exc via instantiate_exception)
+            // is preserved (PEP 380 / issue #600).
+            Err(e) if e.class_name_is("StopIteration") => Err(e),
             // Any other propagating error (including a re-raise of the
             // injected exception) flows through unchanged.
             Err(e) => Err(e),
