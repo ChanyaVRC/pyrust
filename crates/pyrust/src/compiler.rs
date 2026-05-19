@@ -5063,10 +5063,15 @@ impl Compiler {
         decorators: &[Expr],
     ) {
         // Class body: zero-param function that returns its locals as class dict.
-        let empty_global: Rc<HashSet<String>> = Rc::new(HashSet::new());
+        // Collect names explicitly declared `global` in the class body so they
+        // are excluded from `body_local` and routed to `Insn::StoreGlobal`
+        // instead of `Insn::RecordClassStore`.  Without this, `global x; x = 42`
+        // inside a class body silently stored into the class attribute dict
+        // rather than the module-level global (issue #618).
+        let body_global = Rc::new(crate::interpreter::collect_global_names(body));
         let empty_nonlocal: Rc<HashSet<String>> = Rc::new(HashSet::new());
         let body_local =
-            crate::interpreter::collect_local_names(&[], body, &empty_global, &empty_nonlocal);
+            crate::interpreter::collect_local_names(&[], body, &body_global, &empty_nonlocal);
         // Allocate a register slot for every potential class-body local.
         // Slot order is **not** used to encode class-namespace insertion
         // order any more — the order CPython exposes via `vars(C)` is the
@@ -5157,7 +5162,7 @@ impl Compiler {
             code: Rc::new(body_code),
             local_index: body_index_rc,
             local_names,
-            global_names: empty_global,
+            global_names: body_global,
             nonlocal_names: empty_nonlocal,
             is_pure: false,
         });
