@@ -1572,6 +1572,13 @@ impl Interpreter {
                     out.extend_from_slice(b);
                     Ok(Value::bytes(out))
                 }
+                (ValueKind::Bytes(_), _) => Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "can't concat {} to bytes",
+                        pyrust_core::builtin_type_name(&r)
+                    ),
+                )),
                 _ => Err(Self::unsupported_binary_operand("+")),
         }
     }
