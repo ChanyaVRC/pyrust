@@ -74,3 +74,106 @@ def outer6():
             return y  # outer's y=20
     return A.x, A.y, A().mx(), A().my()
 print(outer6())  # ('ax', 'ay', 10, 20)
+
+# Tests for free-variable lookup in class methods defined inside functions (issue #700).
+#
+# Python class scope is not a closure scope for methods.  When a method reads a
+# name, it skips the class namespace entirely and looks in the enclosing function
+# (or module) scope.  When the class also defines an attribute with the same
+# name, the outer function's value must still be reachable by the method, and
+# the class attribute must remain intact.
+
+# --- Basic case: outer function var shadowed by class attr ---
+
+def outer_basic():
+    w = 55
+    class Inner:
+        w = 11
+        def method(self):
+            return w  # must see outer function's w=55, not class w=11
+    return Inner.w, Inner().method()
+
+print(outer_basic())  # (11, 55)
+
+
+# --- No name collision: regression guard ---
+
+def outer_no_collision():
+    x = 99
+    class Inner:
+        y = 22
+        def method(self):
+            return x
+    return Inner.y, Inner().method()
+
+print(outer_no_collision())  # (22, 99)
+
+
+# --- Class attr only (no method reads outer var) ---
+
+def outer_attr_only():
+    w = 55
+    class Inner:
+        w = 11
+    return Inner.w  # class attr must be 11, not 55
+
+print(outer_attr_only())  # 11
+
+
+# --- Multiple colliding names ---
+
+def outer_multi():
+    a = 10
+    b = 20
+    class Inner:
+        a = 100  # collides with outer's a
+        def method(self):
+            return a, b  # a -> outer's 10; b -> outer's 20
+    return Inner.a, Inner().method()
+
+print(outer_multi())  # (100, (10, 20))
+
+
+# --- Method reads a name that is NOT an outer function var (module-level) ---
+
+module_z = 88
+
+def outer_module_global():
+    class Inner:
+        module_z = 33
+        def method(self):
+            return module_z  # module_z=88, class's module_z=33 is skipped
+    return Inner.module_z, Inner().method()
+
+print(outer_module_global())  # (33, 88)
+
+
+# --- Doubly nested: function > class > inner-class > method ---
+
+def outer_double():
+    z = 77
+    class Outer:
+        z = 44
+        class Inner:
+            z = 22
+            def method(self):
+                return z  # must see outer_double's z=77
+    return Outer.z, Outer.Inner.z, Outer.Inner().method()
+
+print(outer_double())  # (44, 22, 77)
+
+
+# --- global declaration in method bypasses both class and function scopes ---
+
+g = 999
+
+def outer_global_method():
+    g = 42  # local, shadows module g
+    class Inner:
+        g = 100
+        def method(self):
+            global g
+            return g  # must see module g=999
+    return Inner.g, Inner().method()
+
+print(outer_global_method())  # (100, 999)
