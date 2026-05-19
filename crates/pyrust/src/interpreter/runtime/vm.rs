@@ -394,7 +394,11 @@ impl Interpreter {
             Err(e) => {
                 // Propagating exception or other error.
                 frame.done = true;
-                Err(e)
+                // PEP 479 (enforced since Python 3.7): if a StopIteration (or
+                // any subclass) escapes from a generator frame, convert it to
+                // RuntimeError("generator raised StopIteration").  The original
+                // exception becomes the __cause__ of the RuntimeError.
+                Err(pep479_wrap_stop_iteration(&self.env, e))
             }
         }
     }
@@ -2877,6 +2881,72 @@ fn vm_eval_unary(op: UnaryOp, val: Value) -> Result<Value> {
                 _ => Err(PyError::named("TypeError", "bad operand type for unary +".to_string())),
             }
         }
+    }
+}
+
+/// PEP 479 conversion: if `err` is a `StopIteration` or any subclass, replace
+/// it with `RuntimeError("generator raised StopIteration")`.  Otherwise return
+/// `err` unchanged.
+///
+/// Called from the `Err(e)` arm of `resume_generator_with_exc` so that any
+/// `StopIteration` that escapes a generator body is wrapped before it reaches
+/// the caller.  The check is subclass-aware: a user-defined subclass of
+/// `StopIteration` is also wrapped.
+fn pep479_wrap_stop_iteration(env: &crate::interpreter::EnvRef, err: PyError) -> PyError {
+    let is_stop = match &err {
+        // VM-internal named raises (e.g. from builtin code): match by name.
+        PyError::Named(cls, _) => cls.as_ref() == "StopIteration",
+        // Class-identity raises: exact name check suffices for built-in StopIteration;
+        // also walk the base chain for subclasses expressed as Class errors.
+        PyError::Class(cls, _) => {
+            let built_in_stop = {
+                let v = lookup_name_in_module(env, "StopIteration");
+                v.and_then(|v| match v.kind() {
+                    ValueKind::PyClass(c) => Some(Rc::clone(c)),
+                    _ => None,
+                })
+            };
+            let cls_rc = Rc::clone(cls);
+            match built_in_stop {
+                Some(ref base) => class_is_subclass_of(&cls_rc, base),
+                // Fallback: name match only (startup before builtins are installed).
+                None => cls.borrow().name == "StopIteration",
+            }
+        }
+        // User raise (raise StopIteration / raise MyStop()) — the error carries
+        // a fully materialised exception Value.
+        PyError::Raised(exc) => {
+            let built_in_stop = {
+                let v = lookup_name_in_module(env, "StopIteration");
+                v.and_then(|v| match v.kind() {
+                    ValueKind::PyClass(c) => Some(Rc::clone(c)),
+                    _ => None,
+                })
+            };
+            match exc.kind() {
+                ValueKind::PyInstance(inst) => {
+                    let cls = Rc::clone(&inst.borrow().class);
+                    match built_in_stop {
+                        Some(ref base) => class_is_subclass_of(&cls, base),
+                        None => cls.borrow().name == "StopIteration",
+                    }
+                }
+                ValueKind::PyClass(cls) => {
+                    let cls = Rc::clone(cls);
+                    match built_in_stop {
+                        Some(ref base) => class_is_subclass_of(&cls, base),
+                        None => cls.borrow().name == "StopIteration",
+                    }
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    };
+    if is_stop {
+        PyError::named("RuntimeError", "generator raised StopIteration")
+    } else {
+        err
     }
 }
 
