@@ -139,21 +139,24 @@ fn collect_cell_vars_in(
                     &inner_globals,
                     &nonlocals,
                 );
-                let mut inner_uses: HashSet<String> = HashSet::new();
-                collect_free_var_reads_in_stmts(nested_body, &mut inner_uses);
-                // Also include names referenced freely by ANY function/class/lambda
-                // nested deeper inside this body.  Even if `nested_body` itself never
-                // names `x`, an inner-inner function might read `x`; the current scope
-                // must still promote `x` to a cell var so the env chain carries it.
-                collect_transitive_free_vars_in_stmts(nested_body, &mut inner_uses);
-                // When the current scope is a class body, skip free-var promotion.
-                // Python class scope is not a closure scope for methods: a method
-                // reading `x` as a free variable refers to the enclosing module/function
-                // scope, NOT the class body.  Promoting `x` here would turn the
-                // class-body assignment `x = …` into a `StoreGlobal`, stripping `x`
-                // from the class attribute dict (issue #695).  The `global`-name block
-                // above already has this guard for the same reason (issue #624).
+                // When compiling a class body (`is_class_scope = true`), do NOT
+                // promote method free-variable reads to cell vars here.  Python class
+                // scope is not a closure scope for methods: `def method(self): return x`
+                // reads the enclosing *function* scope's `x`, not the class-body `x`.
+                // Promoting `x` to a class-body cell var would route `x = val` inside
+                // the class body through `StoreGlobal` (not `RecordClassStore`), silently
+                // stripping `x` from the class attribute dict (issue #695).
+                // The enclosing function is responsible for promoting its own locals to
+                // cell vars via `collect_class_method_outer_refs` (called from the
+                // `Stmt::Class` arm of this function).
                 if !is_class_scope {
+                    let mut inner_uses: HashSet<String> = HashSet::new();
+                    collect_free_var_reads_in_stmts(nested_body, &mut inner_uses);
+                    // Also include names referenced freely by ANY function/class/lambda
+                    // nested deeper inside this body.  Even if `nested_body` itself never
+                    // names `x`, an inner-inner function might read `x`; the current scope
+                    // must still promote `x` to a cell var so the env chain carries it.
+                    collect_transitive_free_vars_in_stmts(nested_body, &mut inner_uses);
                     for name in inner_uses {
                         if !inner_locals.contains(&name)
                             && !inner_globals.contains(&name)
@@ -1126,6 +1129,12 @@ fn collect_class_method_outer_refs(
                 // Functions/classes nested deeper inside this method may also
                 // reference outer names that the method itself never mentions.
                 collect_transitive_free_vars_in_stmts(method_body, &mut uses);
+                // Note: we intentionally do NOT filter by class-body locals here.
+                // Python class scope is not a closure scope for methods: a method
+                // reading `x` skips the class namespace entirely and looks in the
+                // enclosing function scope.  Even when the class also defines `x`,
+                // the outer function's `x` must be promoted to a cell var so the
+                // method can reach it (issue #700).
                 for name in uses {
                     if !inner_locals.contains(&name)
                         && !inner_globals.contains(&name)
@@ -1229,6 +1238,47 @@ fn collect_class_method_outer_refs(
                         outer_is_class_scope,
                         cells,
                     );
+                }
+            }
+            Stmt::While {
+                body, else_branch, ..
+            } => {
+                collect_class_method_outer_refs(body, local_index, cells);
+                if let Some(b) = else_branch {
+                    collect_class_method_outer_refs(b, local_index, cells);
+                }
+            }
+            Stmt::For {
+                body, else_branch, ..
+            } => {
+                collect_class_method_outer_refs(body, local_index, cells);
+                if let Some(b) = else_branch {
+                    collect_class_method_outer_refs(b, local_index, cells);
+                }
+            }
+            Stmt::Try {
+                body,
+                handlers,
+                else_branch,
+                finally_branch,
+            } => {
+                collect_class_method_outer_refs(body, local_index, cells);
+                for h in handlers {
+                    collect_class_method_outer_refs(&h.body, local_index, cells);
+                }
+                if let Some(b) = else_branch {
+                    collect_class_method_outer_refs(b, local_index, cells);
+                }
+                if let Some(b) = finally_branch {
+                    collect_class_method_outer_refs(b, local_index, cells);
+                }
+            }
+            Stmt::With { body, .. } => {
+                collect_class_method_outer_refs(body, local_index, cells);
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    collect_class_method_outer_refs(&arm.body, local_index, cells);
                 }
             }
             _ => {}
