@@ -45,9 +45,10 @@ class Plain:
 s = str(Plain())
 print(s.startswith("<__main__.Plain object at 0x"))  # True
 
-# Address part must be valid lowercase hex digits.
+# Address part must consist of hex digits (CPython uses %p which is uppercase
+# on MSVC Windows; normalise before checking so the test is platform-neutral).
 hex_part = r.split("0x")[1].rstrip(">")
-print(all(c in "0123456789abcdef" for c in hex_part))  # True
+print(all(c in "0123456789abcdef" for c in hex_part.lower()) and len(hex_part) > 0)  # True
 
 # Built-in type instances are unaffected.
 print(repr(42))                                      # 42
