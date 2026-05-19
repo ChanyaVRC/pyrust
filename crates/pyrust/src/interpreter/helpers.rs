@@ -932,6 +932,8 @@ fn install_exception_builtins(env: &EnvRef) {
     let stop_iteration = make_child("StopIteration");
     let attribute_error = make_child("AttributeError");
     let syntax_error = make_child("SyntaxError");
+    // MemoryError: direct child of Exception (CPython 3.12 hierarchy).
+    let memory_error = make_child("MemoryError");
 
     // ImportError and ModuleNotFoundError (child of ImportError).
     let import_error = make_child("ImportError");
@@ -1059,6 +1061,9 @@ fn install_exception_builtins(env: &EnvRef) {
     module
         .values
         .insert("SyntaxError".to_string(), Value::py_class(syntax_error));
+    module
+        .values
+        .insert("MemoryError".to_string(), Value::py_class(memory_error));
     module
         .values
         .insert("ImportError".to_string(), Value::py_class(import_error));

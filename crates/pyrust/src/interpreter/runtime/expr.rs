@@ -236,6 +236,29 @@ fn shift_count(v: &Value) -> Result<ShiftCount> {
     }
 }
 
+/// Repeat a tuple slice `n` times, matching CPython 3.12 `tuplerepeat`
+/// semantics:
+///
+/// - `n <= 0` → empty tuple (no allocation).
+/// - `items.len() * n > isize::MAX` → `MemoryError` (catches overflow
+///   before any allocation attempt, preventing an allocator abort).
+/// - allocation failure (Vec::try_reserve) → `MemoryError`.
+fn seq_repeat_tuple(items: &[Value], n: i64) -> Result<Value> {
+    if n <= 0 {
+        return Ok(Value::tuple(Vec::new()));
+    }
+    let n = n as usize;
+    let total = items.len().checked_mul(n).filter(|&t| t <= isize::MAX as usize);
+    let total = total.ok_or_else(|| PyError::named("MemoryError", String::new()))?;
+    let mut out: Vec<Value> = Vec::new();
+    out.try_reserve(total)
+        .map_err(|_| PyError::named("MemoryError", String::new()))?;
+    for _ in 0..n {
+        out.extend_from_slice(items);
+    }
+    Ok(Value::tuple(out))
+}
+
 impl Interpreter {
     fn unsupported_binary_operand(op: &str) -> PyError {
         PyError::named("TypeError", format!("unsupported operand type(s) for {op}"))
@@ -1805,6 +1828,22 @@ impl Interpreter {
             (ValueKind::Int(n), ValueKind::Bytes(data)) => seq_repeat_bytes(&data, n),
             (ValueKind::Bytes(_), ValueKind::BigInt(_))
             | (ValueKind::BigInt(_), ValueKind::Bytes(_)) => Err(PyError::named(
+                "OverflowError",
+                "cannot fit 'int' into an index-sized integer".to_string(),
+            )),
+            // Tuple * Int / Int * Tuple — checked repeat, MemoryError on
+            // overflow (matches CPython 3.12 `tuplerepeat` behaviour).
+            (ValueKind::Tuple(items), ValueKind::Int(n)) => {
+                seq_repeat_tuple(&items[..], n)
+            }
+            (ValueKind::Int(n), ValueKind::Tuple(items)) => {
+                seq_repeat_tuple(&items[..], n)
+            }
+            // Tuple * BigInt / BigInt * Tuple — any BigInt is too large to
+            // fit in a platform index; CPython raises OverflowError for both
+            // positive and negative BigInt values.
+            (ValueKind::Tuple(_), ValueKind::BigInt(_))
+            | (ValueKind::BigInt(_), ValueKind::Tuple(_)) => Err(PyError::named(
                 "OverflowError",
                 "cannot fit 'int' into an index-sized integer".to_string(),
             )),
