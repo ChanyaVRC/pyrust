@@ -1347,6 +1347,16 @@ impl Interpreter {
                         }
                         let a = value_to_float(&left, "**")?;
                         let b = value_to_float(&right, "**")?;
+                        // CPython `float_pow` (Objects/floatobject.c) checks
+                        // `iv == 0.0 && iw < 0.0` before delegating to pow().
+                        // IEEE 754 equality treats +0.0 and -0.0 as equal, so
+                        // this guard covers both signs with the same message.
+                        if a == 0.0 && b < 0.0 {
+                            return Err(PyError::named(
+                                "ZeroDivisionError",
+                                "0.0 cannot be raised to a negative power".to_string(),
+                            ));
+                        }
                         let result = a.powf(b);
                         // CPython promotes negative_real ** non-integer_float to
                         // complex when the real result would be NaN (principal
