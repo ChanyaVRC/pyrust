@@ -26,6 +26,10 @@ pub fn seq_index(items: &[Value], args: &[Value], type_name: &str) -> Result<Val
         }
         None => items.len(),
     };
+    // An inverted window (start > stop after normalisation) must be treated as empty,
+    // matching CPython's semantics: the search yields zero iterations and falls through
+    // to the ValueError below.
+    let stop = stop.max(start);
     for (i, item) in items[start..stop].iter().enumerate() {
         if item == target {
             return Ok(Value::int((start + i) as i64));
