@@ -510,7 +510,12 @@ pub struct UserFunction {
     ///      `*attrs.borrow_mut() = new_dict_value`.
     ///   3. Bound-method copies and `@classmethod`/`@staticmethod` wrappers
     ///      share the same `Rc` (same as before) so they all see the same dict.
-    pub attrs: Rc<RefCell<Value>>,
+    ///
+    /// Initialized lazily on first use (`None` means no attrs have been set
+    /// yet).  The `RefCell` provides interior mutability so that
+    /// `get_attr("__dict__")` can initialize the dict through a shared
+    /// `Rc<UserFunction>` without requiring `&mut self`.
+    pub attrs: RefCell<Option<Rc<RefCell<Value>>>>,
     pub params: Vec<UserFunctionParam>,
     pub local_names: NameSet,
     pub local_index: Rc<HashMap<String, u32>>,
@@ -1485,7 +1490,7 @@ impl Value {
                 user_qualname: RefCell::new(None),
                 module: RefCell::new(Value::none()),
                 doc: RefCell::new(Value::none()),
-                attrs: Rc::new(RefCell::new(Value::dict(IndexMap::new()))),
+                attrs: RefCell::new(None),
                 params: Vec::new(),
                 local_names: Rc::new(HashSet::new()),
                 local_index: Rc::new(HashMap::new()),
@@ -1550,7 +1555,7 @@ impl Value {
             user_qualname: RefCell::new(f.user_qualname.borrow().clone()),
             module: RefCell::new(f.module.borrow().clone()),
             doc: RefCell::new(f.doc.borrow().clone()),
-            attrs: Rc::clone(&f.attrs),
+            attrs: RefCell::new(f.attrs.borrow().as_ref().map(Rc::clone)),
             params: f.params.clone(),
             local_names: Rc::clone(&f.local_names),
             local_index: Rc::clone(&f.local_index),
@@ -3349,7 +3354,7 @@ mod tests {
             user_qualname: RefCell::new(None),
             module: RefCell::new(Value::string("__main__".to_string())),
             doc: RefCell::new(Value::none()),
-            attrs: Rc::new(RefCell::new(Value::dict(IndexMap::new()))),
+            attrs: RefCell::new(None),
             params: Vec::new(),
             local_names: Rc::new(HashSet::new()),
             local_index: Rc::new(HashMap::new()),

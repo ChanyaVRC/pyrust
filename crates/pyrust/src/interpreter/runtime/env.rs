@@ -344,16 +344,19 @@ impl Interpreter {
                     "__dict__" => {
                         // Return the live dict object — CPython returns the same
                         // object every time, so `d = f.__dict__; d['x'] = 1`
-                        // makes `f.x` visible.  Cloning a `Value::dict` is cheap
-                        // (it clones the Rc pointer, not the IndexMap).
-                        return Ok(func.attrs.borrow().clone());
+                        // makes `f.x` visible.  Initialise lazily on first access.
+                        let attrs_rc = func_attrs_rc(func);
+                        return Ok(attrs_rc.borrow().clone());
                     }
                     _ => {}
                 }
                 // Fall through to arbitrary dynamic attrs.
+                // Short-circuit without initialising if no attrs have been stored yet.
                 let key = PyKey::Str(name.to_string());
-                if let Some(v) = func.attrs.borrow().as_dict().and_then(|d| d.get(&key).cloned()) {
-                    return Ok(v);
+                if let Some(rc) = func.attrs.borrow().as_ref().map(Rc::clone) {
+                    if let Some(v) = rc.borrow().as_dict().and_then(|d| d.get(&key).cloned()) {
+                        return Ok(v);
+                    }
                 }
                 Err(PyError::named(
                     "AttributeError",
@@ -448,18 +451,19 @@ impl Interpreter {
                         "__doc__" => return Ok(function.doc.borrow().clone()),
                         "__dict__" => {
                             // Live dict object — same semantics as UserFunction.
-                            return Ok(function.attrs.borrow().clone());
+                            let attrs_rc = func_attrs_rc(function);
+                            return Ok(attrs_rc.borrow().clone());
                         }
                         _ => {
                             // Arbitrary dynamic attrs delegate to the underlying function.
+                            // Short-circuit without initialising if no attrs set yet.
                             let key = PyKey::Str(name.to_string());
-                            if let Some(v) = function
-                                .attrs
-                                .borrow()
-                                .as_dict()
-                                .and_then(|d| d.get(&key).cloned())
-                            {
-                                return Ok(v);
+                            if let Some(rc) = function.attrs.borrow().as_ref().map(Rc::clone) {
+                                if let Some(v) =
+                                    rc.borrow().as_dict().and_then(|d| d.get(&key).cloned())
+                                {
+                                    return Ok(v);
+                                }
                             }
                         }
                     },
@@ -619,9 +623,15 @@ impl Interpreter {
                     "__dict__" => {
                         // CPython requires the replacement to be a dict.
                         if matches!(value.kind(), ValueKind::Dict(_)) {
-                            // Replace the inner Value (a Value::dict) in place.
-                            // All Rc clones (bound methods, etc.) now see the new dict.
-                            *func.attrs.borrow_mut() = value;
+                            // Replace the inner Value in place through the existing Rc so
+                            // that any Rc clones (bound methods, etc.) see the new dict.
+                            // If attrs was never initialised, just store a fresh Rc.
+                            let mut slot = func.attrs.borrow_mut();
+                            if let Some(rc) = slot.as_ref() {
+                                *rc.borrow_mut() = value;
+                            } else {
+                                *slot = Some(Rc::new(RefCell::new(value)));
+                            }
                             Ok(())
                         } else {
                             let type_name = pyrust_core::builtin_type_name(&value);
@@ -680,8 +690,10 @@ impl Interpreter {
                         "readonly attribute".to_string(),
                     )),
                     _ => {
-                        // Arbitrary dynamic attribute — insert into the live dict.
-                        func.attrs
+                        // Arbitrary dynamic attribute — insert into the live dict,
+                        // initialising attrs lazily if this is the first write.
+                        let attrs_rc = func_attrs_rc(func);
+                        attrs_rc
                             .borrow()
                             .dict_insert(PyKey::Str(name.to_string()), value)
                             .map(|_| ())
@@ -788,12 +800,14 @@ impl Interpreter {
                     // state the caller intended (unset) already matches pyrust's state.
                     "__defaults__" | "__annotations__" | "__kwdefaults__" => Ok(()),
                     _ => {
+                        // Short-circuit: if attrs were never initialised, there
+                        // is nothing to delete — raise AttributeError immediately.
                         let key = PyKey::Str(name.to_string());
                         let removed = func
                             .attrs
                             .borrow()
-                            .dict_shift_remove(&key)
-                            .unwrap_or(None);
+                            .as_ref()
+                            .and_then(|rc| rc.borrow().dict_shift_remove(&key).ok().flatten());
                         if removed.is_some() {
                             Ok(())
                         } else {
@@ -1077,6 +1091,19 @@ impl Interpreter {
         Ok(value.truthy())
     }
 
+}
+
+/// Returns the attrs `Rc` for `func`, initialising it lazily on first call.
+///
+/// Lazy init avoids two heap allocations per function definition for the common
+/// case where no attrs are ever set.  Interior mutability (`RefCell`) allows
+/// initialization through a shared `Rc<UserFunction>`.
+fn func_attrs_rc(func: &UserFunction) -> Rc<RefCell<Value>> {
+    let mut slot = func.attrs.borrow_mut();
+    if slot.is_none() {
+        *slot = Some(Rc::new(RefCell::new(Value::dict(IndexMap::new()))));
+    }
+    Rc::clone(slot.as_ref().unwrap())
 }
 
 /// Returns `true` if `name` is a built-in method on `target`'s type.
