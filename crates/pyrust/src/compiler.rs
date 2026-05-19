@@ -148,6 +148,28 @@ fn collect_cell_vars_in(
                         cells.insert(name.clone());
                     }
                 }
+                // Names declared `global` directly in the class body (i.e. via
+                // `global x` statements at the top level of the class body, NOT
+                // from methods) target the module env at runtime via `StoreGlobal`.
+                // `assign_name` also updates the enclosing scope's fastlocal
+                // register through the `vm_frame_views` side-channel, but the
+                // optimizer may have constant-folded that register using the
+                // pre-class value.  Promoting these names to cell vars in the
+                // enclosing scope forces reads/writes through `LoadGlobal` /
+                // `StoreGlobal`, which the optimizer does not constant-fold,
+                // so the post-class value is seen correctly (issue #618).
+                //
+                // Note: we use `collect_global_names` (non-recursive) here, NOT
+                // `collect_transitive_global_names`, so that a method's `global x`
+                // does not promote the enclosing scope's `x` — that is handled
+                // separately for the class body's own register map in
+                // `collect_cell_vars_for_class_body` (issue #624).
+                let class_body_globals = crate::interpreter::collect_global_names(nested_body);
+                for name in &class_body_globals {
+                    if local_index.contains_key(name) {
+                        cells.insert(name.clone());
+                    }
+                }
                 // Methods inside a class access the enclosing scope directly
                 // (Python class scope is not a closure scope for methods).
                 // Find names that class methods read as free variables and
