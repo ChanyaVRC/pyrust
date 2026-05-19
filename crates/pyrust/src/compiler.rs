@@ -800,6 +800,15 @@ fn collect_class_method_outer_refs(
                 // cell var, which for a class body means `x = ...` emits StoreGlobal
                 // instead of RecordClassStore (issue #629; see also issue #624).
                 let inner_nonlocals = crate::interpreter::collect_nonlocal_names(method_body);
+                // Promote nonlocal declarations in methods to cell vars in the
+                // enclosing function scope.  This mirrors what `collect_cell_vars_in`
+                // does for plain nested `Def`s: any name declared `nonlocal` inside a
+                // method must live in the outer env so the method closure can mutate it.
+                for name in &inner_nonlocals {
+                    if local_index.contains_key(name) {
+                        cells.insert(name.clone());
+                    }
+                }
                 let inner_locals = crate::interpreter::collect_local_names(
                     params,
                     method_body,
@@ -821,6 +830,15 @@ fn collect_class_method_outer_refs(
                         cells.insert(name);
                     }
                 }
+            }
+            // Recursively handle nested classes: a method inside `class Outer:
+            // class Inner:` still needs to promote nonlocals into the outer
+            // function scope.
+            Stmt::Class {
+                body: nested_class_body,
+                ..
+            } => {
+                collect_class_method_outer_refs(nested_class_body, local_index, cells);
             }
             // Recursively handle class-level control flow.
             Stmt::If {
