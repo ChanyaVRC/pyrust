@@ -30,7 +30,28 @@ pub(crate) struct MemoKey(pub(crate) PyKey);
 
 impl PartialEq for MemoKey {
     fn eq(&self, other: &Self) -> bool {
-        std::mem::discriminant(&self.0) == std::mem::discriminant(&other.0) && self.0 == other.0
+        if std::mem::discriminant(&self.0) != std::mem::discriminant(&other.0) {
+            return false;
+        }
+        // For tuple and frozenset, recurse into elements using MemoKey so that
+        // Float(1.0) and Int(1) inside a container are treated as distinct keys.
+        match (&self.0, &other.0) {
+            (PyKey::Tuple(a), PyKey::Tuple(b)) => {
+                a.len() == b.len()
+                    && a.iter()
+                        .zip(b.iter())
+                        .all(|(x, y)| MemoKey(x.clone()) == MemoKey(y.clone()))
+            }
+            (PyKey::FrozenSet(a), PyKey::FrozenSet(b)) => {
+                // FrozenSet elements are stored in sorted canonical order by the
+                // PyKey constructor; element-wise MemoKey comparison suffices.
+                a.len() == b.len()
+                    && a.iter()
+                        .zip(b.iter())
+                        .all(|(x, y)| MemoKey(x.clone()) == MemoKey(y.clone()))
+            }
+            _ => self.0 == other.0,
+        }
     }
 }
 
@@ -39,7 +60,22 @@ impl Eq for MemoKey {}
 impl std::hash::Hash for MemoKey {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         std::mem::discriminant(&self.0).hash(state);
-        self.0.hash(state);
+        // For tuple and frozenset, hash each element through MemoKey so that
+        // Float(1.0) and Int(1) produce distinct hashes inside containers.
+        match &self.0 {
+            PyKey::Tuple(items) => {
+                items.len().hash(state);
+                for k in items {
+                    MemoKey(k.clone()).hash(state);
+                }
+            }
+            PyKey::FrozenSet(items) => {
+                for k in items {
+                    MemoKey(k.clone()).hash(state);
+                }
+            }
+            _ => self.0.hash(state),
+        }
     }
 }
 
