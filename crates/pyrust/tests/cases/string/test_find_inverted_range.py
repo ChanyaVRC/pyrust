@@ -42,6 +42,17 @@ print("hello".count("", 4, 2))
 print("héllo".find("", 4, 2))
 print("héllo".count("", 4, 2))
 
+# --- startswith / endswith with inverted window ---
+# CPython: inverted window always yields False, even with empty prefix/suffix.
+# (An empty prefix matches any string, but an inverted window has no valid slice.)
+print("hello".startswith("", 5, 2))   # False  (inverted, empty prefix)
+print("hello".startswith("h", 5, 2))  # False  (inverted, non-empty prefix)
+print("hello".endswith("", 5, 2))     # False  (inverted, empty suffix)
+print("hello".endswith("o", 5, 2))    # False  (inverted, non-empty suffix)
+# Zero-length window (start == stop) is NOT inverted:
+print("hello".startswith("", 2, 2))   # True   (empty prefix matches empty slice)
+print("hello".endswith("", 2, 2))     # True
+
 # --- normal (non-inverted) calls: must be unaffected ---
 print("hello".find("l", 2, 5))
 print("hello".rfind("l", 0, 4))
