@@ -1508,6 +1508,10 @@ pyrust_module! {
                     }
                     Ok(Value::bytes(out))
                 }
+                ValueKind::BigInt(_) => Err(PyError::named(
+                    "OverflowError",
+                    "cannot fit 'int' into an index-sized integer".to_string(),
+                )),
                 _ => {
                     // General iterable fallback: any object supporting __iter__ /
                     // __next__ (range, generators, user-defined iterables, etc.).
@@ -1548,10 +1552,7 @@ pyrust_module! {
                     }
                     Ok(Value::bytes(out))
                 }
-                ValueKind::BigInt(_) => Err(PyError::named(
-                    "OverflowError",
-                    "cannot fit 'int' into an index-sized integer".to_string(),
-                )),
+                #[allow(unreachable_patterns)]
                 _ => Err(PyError::named(
                     "TypeError",
                     "cannot convert to bytes".to_string(),
@@ -1570,6 +1571,10 @@ pyrust_module! {
                 // argument" if not).
                 let encoding: String = match args[1].value.kind() {
                     ValueKind::Str(s) => s.to_string(),
+                    ValueKind::None => return Err(PyError::named(
+                        "TypeError",
+                        "bytes() argument 'encoding' must be str, not None".to_string(),
+                    )),
                     _ => return Err(PyError::named(
                         "TypeError",
                         format!(
@@ -1588,6 +1593,10 @@ pyrust_module! {
                 let errors: String = if args.len() == 3 {
                     match args[2].value.kind() {
                         ValueKind::Str(s) => s.to_string(),
+                        ValueKind::None => return Err(PyError::named(
+                            "TypeError",
+                            "bytes() argument 'errors' must be str, not None".to_string(),
+                        )),
                         _ => return Err(PyError::named(
                             "TypeError",
                             format!(
