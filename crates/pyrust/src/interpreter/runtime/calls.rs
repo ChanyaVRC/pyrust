@@ -2947,7 +2947,7 @@ fn format_str_template(
             // Apply conversion (`!r`, `!s`, `!a`).
             // `!s` dispatches `__str__` on user instances (mirrors `str(x)`).
             let value = match conversion {
-                Some('r') => Value::string(value.repr()),
+                Some('r') => Value::string(render_instance_repr(self, &value)?),
                 Some('s') => Value::string(self.render_value_as_str(&value)?),
                 Some('a') => Value::string(ascii_repr(&value)),
                 Some(c) => {
@@ -3209,6 +3209,37 @@ pub(crate) fn is_sequence_iter_terminator(interp: &Interpreter, err: &PyError) -
         },
         _ => false,
     }
+}
+
+/// Renders a value using its `__repr__` dunder for the `!r` conversion flag in
+/// `str.format`.  Mirrors the `repr()` builtin's dispatch: for `PyInstance`
+/// values, looks up `__repr__` via MRO, calls it, and validates the return is a
+/// `str`.  Non-instances (built-in types) fall back to `value.repr()` unchanged.
+///
+/// Note: exception instances do not bypass `__repr__` here — CPython dispatches
+/// `__repr__` on exceptions normally (only `__str__` has the special-case).
+fn render_instance_repr(interp: &mut Interpreter, value: &Value) -> Result<String> {
+    let ValueKind::PyInstance(inst) = value.kind() else {
+        return Ok(value.repr());
+    };
+    let inst_rc = Rc::clone(&inst);
+    let class = Rc::clone(&inst_rc.borrow().class);
+    if let Some(method_val) = lookup_class_attr(&class, "__repr__") {
+        let result = invoke_class_method(
+            interp,
+            method_val,
+            Value::py_instance(Rc::clone(&inst_rc)),
+            &[],
+        )?;
+        return match result.kind() {
+            ValueKind::Str(s) => Ok(s.to_string()),
+            _ => Err(PyError::named(
+                "TypeError",
+                "__repr__ returned non-string".to_string(),
+            )),
+        };
+    }
+    Ok(value.repr())
 }
 
 /// Returns the ASCII-escaped repr of a value (like the built-in `ascii()`).
