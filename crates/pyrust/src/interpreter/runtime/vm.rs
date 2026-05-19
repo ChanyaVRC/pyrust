@@ -2090,9 +2090,13 @@ impl Interpreter {
                 }
                 Insn::MakeClass(dst, proto_idx, bases_base, bases_n, name_idx) => {
                     let class_name = pool_get!(code.names, *name_idx, "name").clone();
-                    let (class_code, local_index) = {
+                    let (class_code, local_index, proto_qualname) = {
                         let proto = pool_get!(code.fn_protos, *proto_idx, "fn_proto");
-                        (Rc::clone(&proto.code), Rc::clone(&proto.local_index))
+                        (
+                            Rc::clone(&proto.code),
+                            Rc::clone(&proto.local_index),
+                            proto.qualname.clone(),
+                        )
                     };
                     let num_class_regs = class_code.num_regs as usize;
                     let mut class_regs: RegsBuf = smallvec![Value::unset(); num_class_regs];
@@ -2108,14 +2112,15 @@ impl Interpreter {
                     //   * `locals()` at the top of the class body includes them,
                     //   * the resulting class object has `C.__qualname__` and
                     //     `C.__module__` set correctly.
-                    // The nested-class qualname (`Outer.Inner`) is not tracked
-                    // here; the value is just the bare class name.
+                    // Issue #592: the compiler now computes the full dotted qualname
+                    // (e.g. "Outer.Inner") and stores it in FnProto::qualname so
+                    // the VM can use it here without any runtime prefix tracking.
                     let qualname_slot = local_index.get("__qualname__").copied();
                     let module_slot = local_index.get("__module__").copied();
                     if let Some(slot) = qualname_slot {
                         let slot = slot as usize;
                         if slot < class_regs.len() {
-                            class_regs[slot] = Value::string(class_name.clone());
+                            class_regs[slot] = Value::string(proto_qualname.clone());
                         }
                     }
                     if let Some(slot) = module_slot {
@@ -2195,7 +2200,7 @@ impl Interpreter {
                     // class body assigns a non-str to __qualname__
                     // (Objects/typeobject.c `type_new_set_names`).
                     let qualname = match attrs.shift_remove("__qualname__") {
-                        None => class_name.clone(),
+                        None => proto_qualname,
                         Some(v) => {
                             // Extract while kind() Ref is live, then drop it
                             // before the error path moves `v`.
