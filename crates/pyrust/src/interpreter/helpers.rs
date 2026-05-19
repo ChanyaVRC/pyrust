@@ -350,6 +350,25 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
         .borrow_mut()
         .attrs
         .insert("fromhex".to_string(), Value::builtin_function("float.fromhex"));
+    // PEP 585: `__class_getitem__` on the five collection types that support
+    // `list[int]`-style generic subscripting.  Each gets a
+    // `BuiltinFunction("<type>.__class_getitem__")` sentinel so that both
+    // `list[int]` (via `eval_index`) and `list.__class_getitem__(int)` (via
+    // `call_function_expanded`) produce a `GenericAlias` value.  CPython 3.12
+    // exposes `__class_getitem__` only on these five built-in types.
+    for (cls, type_name) in [
+        (&list_class, "list"),
+        (&tuple_class, "tuple"),
+        (&dict_class, "dict"),
+        (&set_class, "set"),
+        (&frozenset_class, "frozenset"),
+    ] {
+        let sentinel: &'static str =
+            Box::leak(format!("{type_name}.__class_getitem__").into_boxed_str());
+        cls.borrow_mut()
+            .attrs
+            .insert("__class_getitem__".to_string(), Value::builtin_function(sentinel));
+    }
     PrimitiveClasses {
         bytes_class,
         complex_class,

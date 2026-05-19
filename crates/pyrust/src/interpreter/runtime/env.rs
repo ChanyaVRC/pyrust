@@ -547,6 +547,15 @@ impl Interpreter {
                         _ => {}
                     }
                 }
+                // `BuiltinObject` types can expose arbitrary attributes via
+                // `BuiltinTypeOps::getattr` (e.g. `GenericAlias.__origin__`,
+                // `GenericAlias.__args__`).  Probe before the generic
+                // `has_method` bound-method path.
+                if let ValueKind::BuiltinObject { ops, state } = target.kind() {
+                    if let Some(val) = ops.getattr(state, name) {
+                        return Ok(val);
+                    }
+                }
                 // Built-in type instance method lookup: list.append, str.upper, etc.
                 if builtin_has_method(&target, name) {
                     return Ok(pyrust_builtins::bound_method::bound_method(
