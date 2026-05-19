@@ -192,15 +192,22 @@ impl Interpreter {
                     return Ok(Value::tuple(items));
                 }
                 if name == "__annotations__" {
-                    // `type.__annotations__` in CPython is a descriptor that
-                    // returns the stored annotations dict for the class, or a
-                    // fresh empty dict when none have been set.  Intercept here
-                    // so that `hasattr(Foo, '__annotations__')` is always True
-                    // and `Foo.__annotations__` always returns a dict (issue #737).
-                    return Ok(
-                        lookup_class_attr(&class, "__annotations__")
-                            .unwrap_or_else(|| Value::dict(IndexMap::new())),
-                    );
+                    // `type.__annotations__` in CPython is a data descriptor on
+                    // `type` itself.  On first access it synthesises an empty dict,
+                    // writes it back into the class's own `__dict__`, and returns
+                    // that same dict.  Subsequent accesses hit `lookup_class_attr`
+                    // and return the stored (potentially mutated) dict — so
+                    // `Foo.__annotations__ is Foo.__annotations__` is `True` and
+                    // mutations via subscript-assignment persist (issue #737).
+                    if let Some(stored) = lookup_class_attr(&class, "__annotations__") {
+                        return Ok(stored);
+                    }
+                    let empty = Value::dict(IndexMap::new());
+                    class
+                        .borrow_mut()
+                        .attrs
+                        .insert("__annotations__".to_string(), empty.clone());
+                    return Ok(empty);
                 }
                 if let Some(value) = lookup_class_attr(&class, name) {
                     // Drop the kind() Ref before the `_ => value` arm
@@ -1021,6 +1028,18 @@ impl Interpreter {
                     return Err(PyError::named(
                         "TypeError",
                         format!("cannot delete '__qualname__' attribute of immutable type '{n}'"),
+                    ));
+                }
+                // Issue #737: `del Cls.__annotations__` must raise
+                // `AttributeError` when no annotations dict has been
+                // materialised yet — matching CPython's descriptor, which
+                // refuses to delete a slot that was never written.
+                if name == "__annotations__"
+                    && !class.borrow().attrs.contains_key("__annotations__")
+                {
+                    return Err(PyError::named(
+                        "AttributeError",
+                        "__annotations__".to_string(),
                     ));
                 }
                 // CPython raises AttributeError when the attribute is absent.
