@@ -212,6 +212,8 @@ name = "pyrust-builtins"
 version = "0.1.0"
 dependencies = [
  "indexmap",
+ "num-bigint",
+ "num-traits",
  "pyrust-core",
  "unicode-properties",
 ]

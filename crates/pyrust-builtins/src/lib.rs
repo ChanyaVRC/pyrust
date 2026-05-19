@@ -4,6 +4,7 @@ pub mod complex;
 pub mod dict;
 pub mod dict_views;
 pub mod file;
+pub mod float;
 pub mod frozenset;
 pub mod int;
 pub mod iter_helpers;
@@ -68,6 +69,17 @@ mod method_table_drift_guard {
             let r = super::int::call(name, &receiver, &[]);
             if let Err(ref e) = r {
                 assert!(!is_fallback(e), "int::call({name}) hit fallback: {e:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn float_methods_dispatched() {
+        let receiver = Value::float(1.0);
+        for &name in super::float::METHODS {
+            let r = super::float::call(name, &receiver, &[]);
+            if let Err(ref e) = r {
+                assert!(!is_fallback(e), "float::call({name}) hit fallback: {e:?}");
             }
         }
     }

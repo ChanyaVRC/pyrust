@@ -329,11 +329,21 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
     let dict_class = make("dict", None);
     let set_class = make("set", None);
     populate_primitive_methods(&int_class, "int", INT_METHODS);
+    let float_class = make("float", None);
     populate_primitive_methods(&str_class, "str", STR_METHODS);
     populate_primitive_methods(&list_class, "list", LIST_METHODS);
     populate_primitive_methods(&tuple_class, "tuple", TUPLE_METHODS);
     populate_primitive_methods(&dict_class, "dict", DICT_METHODS);
     populate_primitive_methods(&set_class, "set", SET_METHODS);
+    populate_primitive_methods(&float_class, "float", FLOAT_METHODS);
+    // Install `fromhex` as a class-level (not instance) method.
+    {
+        let mut cls = float_class.borrow_mut();
+        cls.attrs.insert(
+            "fromhex".to_string(),
+            Value::builtin_function("float.fromhex"),
+        );
+    }
     let complex_class = make("complex", None);
     let frozenset_class = make("frozenset", None);
     populate_primitive_methods(&complex_class, "complex", COMPLEX_METHODS);
@@ -342,7 +352,7 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
         bytes_class: make("bytes", None),
         complex_class,
         dict_class,
-        float_class: make("float", None),
+        float_class,
         frozenset_class,
         list_class,
         set_class,
@@ -362,6 +372,11 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
 /// dispatched by the unified `<type>.<method>` arm in
 /// `call_function_expanded`.
 const INT_METHODS: &[&str] = &["bit_length", "bit_count", "is_integer"];
+
+// The `fromhex` class method is installed separately in the float class's
+// attrs and dispatched by the dedicated `"float.fromhex"` arm in
+// `call_function_expanded`.  It is not an instance method.
+const FLOAT_METHODS: &[&str] = pyrust_builtins::float::METHODS;
 
 const STR_METHODS: &[&str] = &[
     "index", "count",

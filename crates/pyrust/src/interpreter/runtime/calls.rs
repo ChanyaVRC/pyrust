@@ -121,6 +121,7 @@ impl Interpreter {
                 // the receiver.
                 enum Kind {
                     Int,
+                    Float,
                     Str,
                     List,
                     Dict,
@@ -131,6 +132,7 @@ impl Interpreter {
                     // bool is a subclass of int in CPython; route to the int
                     // dispatch so True.bit_length() / True.is_integer() work.
                     ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Bool(_) => Kind::Int,
+                    ValueKind::Float(_) => Kind::Float,
                     ValueKind::Str(_) => Kind::Str,
                     ValueKind::List(_) => Kind::List,
                     ValueKind::Dict(_) => Kind::Dict,
@@ -147,6 +149,7 @@ impl Interpreter {
                         }
                         pyrust_builtins::int::call(method, &receiver, &pos)
                     }
+                    Kind::Float => pyrust_builtins::float::call(method, &receiver, &pos),
                     Kind::Str => self.call_str_method(method, receiver, pos),
                     Kind::List => pyrust_builtins::list::call(method, &receiver, pos, &kw),
                     Kind::Dict => self.call_dict_method(method, receiver, pos),
@@ -205,6 +208,30 @@ impl Interpreter {
                     },
                 }
             }
+            // float.fromhex is a class method — it takes a string and returns
+            // a float, with no float receiver.
+            ValueKind::BuiltinFunction("float.fromhex") => {
+                let s_val = args
+                    .first()
+                    .ok_or_else(|| PyError::named(
+                        "TypeError",
+                        "float.fromhex() requires at least 1 argument (0 given)".to_string(),
+                    ))?;
+                if args.len() > 1 {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("float.fromhex() takes exactly 1 argument ({} given)", args.len()),
+                    ));
+                }
+                let s = match s_val.value.kind() {
+                    ValueKind::Str(s) => s.to_string(),
+                    _ => return Err(PyError::named(
+                        "TypeError",
+                        "float.fromhex() argument must be a string".to_string(),
+                    )),
+                };
+                pyrust_builtins::float::from_hex(&s)
+            }
             ValueKind::BuiltinFunction("str.format") => {
                 let self_val = args
                     .first()
@@ -240,7 +267,7 @@ impl Interpreter {
             ValueKind::BuiltinFunction(name)
                 if name
                     .split_once('.')
-                    .is_some_and(|(t, _)| matches!(t, "int" | "str" | "list" | "tuple" | "dict" | "set" | "complex" | "frozenset")) =>
+                    .is_some_and(|(t, _)| matches!(t, "int" | "float" | "str" | "list" | "tuple" | "dict" | "set" | "complex" | "frozenset")) =>
             {
                 let (type_name, method) = name.split_once('.').unwrap();
                 let self_val = args
@@ -265,6 +292,7 @@ impl Interpreter {
                 // CPython raises.  See Copilot review on #463.
                 let kind_ok = match (type_name, self_val.kind()) {
                     ("int", ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Bool(_)) => true,
+                    ("float", ValueKind::Float(_)) => true,
                     ("str", ValueKind::Str(_)) => true,
                     ("list", ValueKind::List(_)) => true,
                     ("tuple", ValueKind::Tuple(_)) => true,
@@ -294,6 +322,7 @@ impl Interpreter {
                         }
                         pyrust_builtins::int::call(method, &self_val, &pos)
                     }
+                    "float" => pyrust_builtins::float::call(method, &self_val, &pos),
                     "str" => self.call_str_method(method, self_val, pos),
                     "list" => pyrust_builtins::list::call(method, &self_val, pos, &kw),
                     "tuple" => match self_val.kind() {
@@ -2301,6 +2330,7 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
         ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Bool(_) => {
             builtin_method_names("int")
         }
+        ValueKind::Float(_) => builtin_method_names("float"),
         ValueKind::Str(_) => builtin_method_names("str"),
         ValueKind::List(_) => builtin_method_names("list"),
         ValueKind::Tuple(_) => builtin_method_names("tuple"),
@@ -2329,6 +2359,7 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
 fn builtin_method_names(type_name: &str) -> Vec<String> {
     let names: &[&str] = match type_name {
         "int" => pyrust_builtins::int::METHODS,
+        "float" => pyrust_builtins::float::METHODS,
         "str" => pyrust_builtins::string::METHODS,
         "list" => pyrust_builtins::list::METHODS,
         "tuple" => pyrust_builtins::tuple::METHODS,
