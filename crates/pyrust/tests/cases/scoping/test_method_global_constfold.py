@@ -50,3 +50,20 @@ class Bar:
 
 print(w)       # 99
 print(w + 1)   # 100
+
+# --- copy-prop: named-local alias must not survive across call boundary ---
+# When a named local is assigned from another named local (x = y), the
+# copy-propagation pass may record "x aliases y".  If a subsequent call
+# writes to x via assign_name write-through, the alias is stale and must
+# be evicted before propagating x to any downstream instruction.
+p = 5
+q = p          # q aliases p in copy-prop
+
+class Alias:
+    def update(self):
+        global q
+        q = 100
+
+Alias().update()
+print(q)       # 100  (was 5 before fix — copy-prop substituted q with p)
+print(q + 1)   # 101

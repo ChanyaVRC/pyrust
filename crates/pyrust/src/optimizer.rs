@@ -53,7 +53,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_cse(insns, num_locals);
     let insns = pass_dead_code(insns);
     let insns = pass_dead_store_elim(insns, num_locals);
-    let insns = pass_copy_prop(insns);
+    let insns = pass_copy_prop(insns, num_locals);
     let insns = pass_trivial_nop(insns);
     let insns = pass_self_tail_call(insns);
     let insns = pass_forcount_const_inline(insns, &consts);
@@ -2201,7 +2201,7 @@ fn pass_ivsr(insns: Vec<Insn>, consts: &mut Vec<Value>, num_regs: &mut u32) -> V
 /// subsequent `pass_trivial_nop`.
 ///
 /// Reference: GCC `-ftree-copy-prop`; Shi/Gregg/Beatty/Ertl *VEE'05*.
-fn pass_copy_prop(insns: Vec<Insn>) -> Vec<Insn> {
+fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
     use std::collections::HashMap;
 
     let n = insns.len();
@@ -2319,6 +2319,33 @@ fn pass_copy_prop(insns: Vec<Insn>) -> Vec<Insn> {
             // do not substitute the base register as that would misalign the arg block.
             other => other,
         };
+
+        // Call-boundary invalidation: a user-defined callee that declares
+        // `global x` and assigns it will write the new value directly into the
+        // module-level fastlocal register (r < num_locals) via the
+        // `assign_name` write-through in `vm_frame_views`.  Any copy-
+        // propagation alias whose *key* is a named-local register is therefore
+        // stale after a call — using the pre-call value instead of the updated
+        // register would silently produce wrong results.
+        //
+        // We also evict entries whose *value* is a named local, because the
+        // value register is the "canonical source" used in substitution; if
+        // it was mutated by the callee, downstream reads that copy-prop
+        // redirected to it would see the wrong (pre-call) value.
+        //
+        // Temporaries (r >= num_locals) are safe to retain — no callee can
+        // reach them through `assign_name`.  This mirrors the fix applied to
+        // `pass_const_fold` and `pass_cse` for issue #671.
+        if matches!(
+            insn,
+            Insn::Call(..)
+                | Insn::CallMemo(..)
+                | Insn::CallMethod { .. }
+                | Insn::CallMethodExpanded { .. }
+                | Insn::MakeClass(..)
+        ) {
+            copies.retain(|k, v| *k >= num_locals && *v >= num_locals);
+        }
 
         // Kill map entries: any key or value that == dst is stale after a write.
         if let Some(dst) = writable_dst(&insn) {
@@ -3801,7 +3828,7 @@ mod tests {
             Insn::BinOp(2, 1, BinaryOp::Add, 3),
             Insn::Return(2),
         ];
-        let out = pass_copy_prop(insns);
+        let out = pass_copy_prop(insns, 0);
         assert!(
             matches!(out[2], Insn::BinOp(2, 0, BinaryOp::Add, 3)),
             "r1 should be substituted with r0 in BinOp"
@@ -3817,7 +3844,7 @@ mod tests {
             Insn::Move(0, 2),
             Insn::Return(1),
         ];
-        let out = pass_copy_prop(insns);
+        let out = pass_copy_prop(insns, 0);
         assert!(
             matches!(out[4], Insn::Return(1)),
             "r1 alias must be killed when r0 is overwritten"
@@ -3834,7 +3861,7 @@ mod tests {
             Insn::BinOp(0, 0, BinaryOp::Add, 2),
             Insn::Return(1),
         ];
-        let out = pass_copy_prop(insns);
+        let out = pass_copy_prop(insns, 0);
         assert!(
             matches!(out[4], Insn::Return(1)),
             "r1→r0 alias must be killed when BinOp writes r0"
@@ -3851,10 +3878,44 @@ mod tests {
             Insn::DictUpdate(5, 6),
             Insn::Return(5),
         ];
-        let out = pass_copy_prop(insns);
+        let out = pass_copy_prop(insns, 0);
         assert!(
             matches!(out[4], Insn::DictUpdate(5, 4)),
             "DictUpdate: receiver unchanged, src substituted"
+        );
+    }
+
+    #[test]
+    fn copy_prop_invalidates_named_local_alias_on_call() {
+        use crate::ast::BinaryOp;
+        // Simulates the pattern from issue #671 applied to copy propagation:
+        //
+        //   [0] LoadConst(r5, 0)      r5 is a temp (>= num_locals=2): consts[0]=5
+        //   [1] Move(r0, r5)          r0 is a named local (< num_locals=2)
+        //                             copy-prop records copies[r0] = r5
+        //   [2] Call(r8, 0)           user call — may write r0 via assign_name
+        //                             write-through; copies[r0 → r5] must be evicted
+        //   [3] BinOpConst(r3, r0, Add, 0)  must use r0 (not r5)
+        //   [4] Return(r3)
+        //
+        // Without the call-boundary invalidation, copy-prop would replace r0
+        // with r5 in [3], producing BinOpConst(r3, r5, Add, 0), which would
+        // compute the pre-call value of r5 rather than the updated r0.
+        let insns = vec![
+            Insn::LoadConst(5, 0),                    // r5 = consts[0]
+            Insn::Move(0, 5),                         // r0 (named local) = r5
+            Insn::Call(8, 0),                         // call — may clobber r0
+            Insn::BinOpConst(3, 0, BinaryOp::Add, 0), // r3 = r0 + consts[0]
+            Insn::Return(3),
+        ];
+        // num_locals=2: r0 and r1 are named locals; r2+ are temps.
+        let out = pass_copy_prop(insns, 2);
+        // After Call, copies[r0 → r5] must be evicted. The BinOpConst at [3]
+        // must still use r0, not the aliased r5.
+        assert!(
+            matches!(out[3], Insn::BinOpConst(3, 0, BinaryOp::Add, 0)),
+            "named-local alias r0→r5 must not be propagated past Call: found {:?}",
+            out[3]
         );
     }
 
