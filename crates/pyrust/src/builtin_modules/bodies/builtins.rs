@@ -1447,6 +1447,10 @@ pyrust_module! {
                     }
                     Ok(Value::bytes(vec![0u8; n as usize]))
                 }
+                ValueKind::Bool(b) => {
+                    // bool is a subclass of int; True == 1, False == 0
+                    Ok(Value::bytes(vec![0u8; b as usize]))
+                }
                 ValueKind::Bytes(rc) => Ok(Value::bytes((**rc).clone())),
                 ValueKind::Str(_) => Err(PyError::named(
                     "TypeError",
@@ -1463,6 +1467,7 @@ pyrust_module! {
                                     "bytes must be in range(0, 256)".to_string(),
                                 ))
                             }
+                            ValueKind::Bool(b) => out.push(b as u8),
                             _ => {
                                 return Err(PyError::named(
                                     "TypeError",
@@ -1487,6 +1492,7 @@ pyrust_module! {
                                     "bytes must be in range(0, 256)".to_string(),
                                 ))
                             }
+                            ValueKind::Bool(b) => out.push(b as u8),
                             _ => {
                                 return Err(PyError::named(
                                     "TypeError",
@@ -1593,7 +1599,13 @@ pyrust_module! {
                 };
                 encode_str_to_bytes(&source, &encoding, &errors)
             }
-            _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most 3 arguments"))),
+            _ => Err(PyError::named(
+                "TypeError",
+                format!(
+                    "bytes() takes at most 3 arguments ({} given)",
+                    args.len()
+                ),
+            )),
         }
     }
 
