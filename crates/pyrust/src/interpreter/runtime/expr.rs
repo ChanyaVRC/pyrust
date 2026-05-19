@@ -1548,7 +1548,7 @@ impl Interpreter {
     }
 
     fn add(&self, left: Value, right: Value) -> Result<Value> {
-        if let Some((a, b)) = both_as_complex(&left, &right) {
+        if let Some((a, b)) = both_as_complex(&left, &right)? {
             return Ok(Value::complex(a.0 + b.0, a.1 + b.1));
         }
         let (l, r) = (coerce_numeric(left), coerce_numeric(right));
@@ -1597,7 +1597,7 @@ impl Interpreter {
     }
 
     fn sub(&self, left: Value, right: Value) -> Result<Value> {
-        if let Some((a, b)) = both_as_complex(&left, &right) {
+        if let Some((a, b)) = both_as_complex(&left, &right)? {
             return Ok(Value::complex(a.0 - b.0, a.1 - b.1));
         }
         let (l, r) = (coerce_numeric(left), coerce_numeric(right));
@@ -1623,7 +1623,7 @@ impl Interpreter {
     }
 
     fn mul(&self, left: Value, right: Value) -> Result<Value> {
-        if let Some((a, b)) = both_as_complex(&left, &right) {
+        if let Some((a, b)) = both_as_complex(&left, &right)? {
             // (ar+ai*j) * (br+bi*j) = (ar*br - ai*bi) + (ar*bi + ai*br)j
             return Ok(Value::complex(a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0));
         }
@@ -1756,7 +1756,7 @@ impl Interpreter {
 
 
     fn div(&self, left: Value, right: Value) -> Result<Value> {
-        if let Some((a, b)) = both_as_complex(&left, &right) {
+        if let Some((a, b)) = both_as_complex(&left, &right)? {
             // (ar+ai*j) / (br+bi*j) = ((ar*br + ai*bi) + (ai*br - ar*bi)j) / (br^2 + bi^2)
             let denom = b.0 * b.0 + b.1 * b.1;
             if denom == 0.0 {
@@ -2371,28 +2371,45 @@ fn set_binary_op(left: &Value, right: &Value, op: SetOp) -> Option<Result<Value>
 }
 
 /// Coerce a numeric value to a `(real, imag)` pair if possible.
-fn as_complex_pair(v: &Value) -> Option<(f64, f64)> {
+///
+/// Returns `Ok(Some(...))` on success, `Ok(None)` when the value is not a
+/// numeric type that participates in complex arithmetic, and `Err(...)` when
+/// the value is a `BigInt` that is too large to convert to `f64` (matching
+/// CPython 3.12's `OverflowError: int too large to convert to float`).
+fn as_complex_pair(v: &Value) -> Result<Option<(f64, f64)>> {
     match v.kind() {
-        ValueKind::Complex(re, im) => Some((re, im)),
-        ValueKind::Int(n) => Some((n as f64, 0.0)),
-        ValueKind::Float(f) => Some((f, 0.0)),
-        ValueKind::Bool(b) => Some((if b { 1.0 } else { 0.0 }, 0.0)),
-        _ => None,
+        ValueKind::Complex(re, im) => Ok(Some((re, im))),
+        ValueKind::Int(n) => Ok(Some((n as f64, 0.0))),
+        ValueKind::Float(f) => Ok(Some((f, 0.0))),
+        ValueKind::Bool(b) => Ok(Some((if b { 1.0 } else { 0.0 }, 0.0))),
+        ValueKind::BigInt(b) => Ok(Some((bigint_to_float_or_overflow(b)?, 0.0))),
+        _ => Ok(None),
     }
 }
 
 /// Returns the two operands as complex `(re, im)` pairs only when AT LEAST
 /// one of them is already a complex number — that way pure int/float
 /// arithmetic continues to use the dedicated fast paths.
-fn both_as_complex(left: &Value, right: &Value) -> Option<((f64, f64), (f64, f64))> {
+///
+/// Returns `Ok(None)` when neither operand is complex or when one operand is
+/// not a numeric type.  Returns `Err(...)` when a `BigInt` operand overflows
+/// `f64` (propagated as `OverflowError`).
+fn both_as_complex(
+    left: &Value,
+    right: &Value,
+) -> Result<Option<((f64, f64), (f64, f64))>> {
     let l_is_c = matches!(left.kind(), ValueKind::Complex(_, _));
     let r_is_c = matches!(right.kind(), ValueKind::Complex(_, _));
     if !l_is_c && !r_is_c {
-        return None;
+        return Ok(None);
     }
-    let a = as_complex_pair(left)?;
-    let b = as_complex_pair(right)?;
-    Some((a, b))
+    let Some(a) = as_complex_pair(left)? else {
+        return Ok(None);
+    };
+    let Some(b) = as_complex_pair(right)? else {
+        return Ok(None);
+    };
+    Ok(Some((a, b)))
 }
 
 /// Compute complex exponentiation `(zr + zi*j) ** (wr + wi*j)` with
