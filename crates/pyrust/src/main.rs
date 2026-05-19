@@ -54,7 +54,8 @@ fn run_file(path: &str) -> Result<()> {
         .expect("interpreter thread panicked");
 
     if let Some(msg) = err_str {
-        return Err(PyError::Runtime(msg));
+        eprintln!("{msg}");
+        std::process::exit(1);
     }
     Ok(())
 }
