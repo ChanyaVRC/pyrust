@@ -69,6 +69,17 @@ impl Interpreter {
             Ok(c) => Rc::new(crate::optimizer::optimize(c)),
             Err(e) => return Some(Err(e)),
         };
+        // Issue #711: CPython pre-seeds `__doc__ = None` in the module namespace
+        // before executing any user code.  A module-level docstring (first-statement
+        // string literal) is compiled into a `StoreGlobal("__doc__", ...)` and
+        // overwrites this sentinel; scripts without a docstring leave it as None.
+        // Without this seed, `print(__doc__)` in a script with no docstring raises
+        // NameError instead of printing None.
+        module_env(&self.env)
+            .borrow_mut()
+            .values
+            .entry("__doc__".to_string())
+            .or_insert_with(Value::none);
         let num_regs = code.num_regs as usize;
         let mut regs: RegsBuf = smallvec![Value::unset(); num_regs];
         let _depth_guard = CallDepthGuard::enter();
