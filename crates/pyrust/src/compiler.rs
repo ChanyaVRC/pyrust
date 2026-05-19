@@ -3657,6 +3657,14 @@ impl Compiler {
                 }
             }
             Stmt::Return(None) => {
+                if !self.is_function_scope {
+                    self.failed = true;
+                    self.is_syntax_error = true;
+                    if self.error_msg.is_none() {
+                        self.error_msg = Some("'return' outside function".to_string());
+                    }
+                    return;
+                }
                 self.emit_early_exit_cleanups(0);
                 if self.failed {
                     return;
@@ -3664,6 +3672,14 @@ impl Compiler {
                 self.emit(Insn::ReturnNone);
             }
             Stmt::Return(Some(expr)) => {
+                if !self.is_function_scope {
+                    self.failed = true;
+                    self.is_syntax_error = true;
+                    if self.error_msg.is_none() {
+                        self.error_msg = Some("'return' outside function".to_string());
+                    }
+                    return;
+                }
                 let r = self.compile_expr(expr);
                 self.emit_early_exit_cleanups(0);
                 if self.failed {
@@ -4177,15 +4193,16 @@ impl Compiler {
     // ── Syntax validation for dead-code bodies ───────────────────────────────
 
     /// Walk `stmts` without emitting code and report any context-sensitive
-    /// syntax errors that CPython catches even in unreachable branches:
+    /// syntax errors that CPython catches even in unreachable branches.
     ///
-    /// * `break` / `continue` when not inside a loop
+    /// Checks enforced:
+    /// * `break` / `continue` when `in_loop` is false
+    /// * `return` / `yield` / `yield from` when not in a function scope
     /// * `nonlocal` at module level (not inside a function or class body)
     ///
-    /// `in_loop` starts as `self.loops.is_empty()` (inverted) at the call site
-    /// and becomes `true` whenever we recurse into a loop body.  `Stmt::Def`
-    /// and `Stmt::Class` are skipped — they get their own child compiler with
-    /// independent scope rules.
+    /// `in_loop` becomes `true` when we recurse into a loop body.
+    /// `Stmt::Def` and `Stmt::Class` bodies are recursed with their own scope
+    /// rules (is_function_scope / is_class_body) to validate their interiors.
     fn check_dead_block(&mut self, stmts: &[Stmt], in_loop: bool) {
         for stmt in stmts {
             if self.failed {
@@ -4209,6 +4226,18 @@ impl Compiler {
                             self.error_msg = Some("'continue' not properly in loop".to_string());
                         }
                     }
+                }
+                Stmt::Return(_) => {
+                    if !self.is_function_scope {
+                        self.failed = true;
+                        self.is_syntax_error = true;
+                        if self.error_msg.is_none() {
+                            self.error_msg = Some("'return' outside function".to_string());
+                        }
+                    }
+                }
+                Stmt::Expr(expr) => {
+                    self.check_dead_expr(expr);
                 }
                 Stmt::Nonlocal(_) => {
                     if !self.is_function_scope && !self.is_class_body {
@@ -4302,18 +4331,10 @@ impl Compiler {
                 // rather than relying on child compilation (which is skipped for
                 // dead code).
                 Stmt::Def { params, body, .. } => {
-                    // Validate nonlocal bindings — identical to compile_def
-                    // lines ~5157-5174.  Collect the nonlocal names declared in
-                    // the function body and verify each has a binding in some
-                    // enclosing function scope.
                     let inner_nonlocal = crate::interpreter::collect_nonlocal_names(body);
                     let mut sorted_nonlocals: Vec<&String> = inner_nonlocal.iter().collect();
                     sorted_nonlocals.sort();
                     for nonlocal_name in sorted_nonlocals {
-                        // The parameter list of this Def is also an enclosing
-                        // binding for the nonlocal names it declares (but only
-                        // if the param name matches — which is unusual; still,
-                        // be consistent with compile_def).
                         let in_params = params.iter().any(|p| &p.name == nonlocal_name);
                         let found = in_params
                             || self
@@ -4334,9 +4355,6 @@ impl Compiler {
                             return;
                         }
                     }
-                    // Recurse into the function body.  A new function scope
-                    // resets in_loop (break/continue are never valid across a
-                    // function boundary) and sets is_function_scope.
                     let saved_is_function_scope = self.is_function_scope;
                     let saved_is_class_body = self.is_class_body;
                     self.is_function_scope = true;
@@ -4345,9 +4363,6 @@ impl Compiler {
                     self.is_function_scope = saved_is_function_scope;
                     self.is_class_body = saved_is_class_body;
                 }
-                // Class bodies open a new class scope: break/continue are not
-                // valid (class body is not a loop), and nonlocal checks use
-                // class-body rules.
                 Stmt::Class { body, .. } => {
                     let saved_is_function_scope = self.is_function_scope;
                     let saved_is_class_body = self.is_class_body;
@@ -4357,11 +4372,73 @@ impl Compiler {
                     self.is_function_scope = saved_is_function_scope;
                     self.is_class_body = saved_is_class_body;
                 }
-                // All other statements have no nested blocks or no context rules.
+                // All other statements have no nested blocks or context rules.
                 _ => {}
             }
         }
     }
+
+    fn check_dead_expr(&mut self, expr: &Expr) {
+        if self.failed {
+            return;
+        }
+        match expr {
+            Expr::Yield(_) | Expr::YieldFrom(_) => {
+                if !self.is_function_scope {
+                    self.failed = true;
+                    self.is_syntax_error = true;
+                    if self.error_msg.is_none() {
+                        self.error_msg = Some("'yield' outside function".to_string());
+                    }
+                }
+            }
+            Expr::Binary { left, right, .. } => {
+                self.check_dead_expr(left);
+                if !self.failed {
+                    self.check_dead_expr(right);
+                }
+            }
+            Expr::Unary { expr: e, .. } => {
+                self.check_dead_expr(e);
+            }
+            Expr::Ternary { cond, then, else_ } => {
+                self.check_dead_expr(cond);
+                if !self.failed {
+                    self.check_dead_expr(then);
+                }
+                if !self.failed {
+                    self.check_dead_expr(else_);
+                }
+            }
+            Expr::Call { func, args } => {
+                self.check_dead_expr(func);
+                for a in args {
+                    if self.failed {
+                        return;
+                    }
+                    self.check_dead_expr(&a.value);
+                }
+            }
+            Expr::Tuple(elts) | Expr::List(elts) | Expr::Set(elts) => {
+                for e in elts {
+                    if self.failed {
+                        return;
+                    }
+                    self.check_dead_expr(e);
+                }
+            }
+            Expr::Named { value, .. } => {
+                self.check_dead_expr(value);
+            }
+            Expr::Lambda { .. }
+            | Expr::ListComp { .. }
+            | Expr::SetComp { .. }
+            | Expr::DictComp { .. }
+            | Expr::GenExp { .. } => {}
+            _ => {}
+        }
+    }
+
 
     // ── Control flow ──────────────────────────────────────────────────────────
 
@@ -4391,6 +4468,21 @@ impl Compiler {
                     if has_else {
                         branch_def_sets.push(pre_def_set);
                     }
+                    // Skipped elif/else bodies are dead code but CPython still
+                    // validates their context-sensitive syntax.
+                    let in_loop = !self.loops.is_empty();
+                    for (_, skipped_body) in &branches[bi + 1..] {
+                        self.check_dead_block(skipped_body, in_loop);
+                        if self.failed {
+                            return;
+                        }
+                    }
+                    if let Some(else_stmts) = else_branch {
+                        self.check_dead_block(else_stmts, in_loop);
+                        if self.failed {
+                            return;
+                        }
+                    }
                     for idx in end_patches {
                         self.patch_jump(idx);
                     }
@@ -4414,12 +4506,9 @@ impl Compiler {
                     }
                     return;
                 } else {
-                    // Always-false branch: skip code generation but still
-                    // run syntax validation — CPython reports SyntaxError for
-                    // `break`/`continue` outside loops and `nonlocal` at module
-                    // level even when the branch is statically unreachable.
-                    let in_loop = !self.loops.is_empty();
-                    self.check_dead_block(body, in_loop);
+                    // Always-false branch: skip emitting code, but still
+                    // validate context-sensitive syntax (CPython does this).
+                    self.check_dead_block(body, !self.loops.is_empty());
                     if self.failed {
                         return;
                     }
@@ -4779,11 +4868,10 @@ impl Compiler {
 
     fn compile_while(&mut self, cond: &Expr, body: &[Stmt], else_branch: Option<&[Stmt]>) {
         if is_const_false_expr(cond) {
-            // The loop body is statically unreachable, but CPython still
-            // validates context-sensitive syntax inside it (break/continue
-            // outside any loop, nonlocal at module level).  Run the dead-code
-            // checker before skipping the body.  The body is itself a loop
-            // context, so pass `in_loop = true` for its direct children.
+            // The while body is statically unreachable, but CPython still
+            // validates context-sensitive syntax inside it.  The body counts
+            // as a loop context (break/continue inside it are valid), but
+            // return/yield are still gated by is_function_scope.
             self.check_dead_block(body, true);
             if self.failed {
                 return;
@@ -6644,6 +6732,14 @@ impl Compiler {
             Expr::FString(parts) => self.compile_fstring(parts),
 
             Expr::Yield(val_expr) => {
+                if !self.is_function_scope {
+                    self.failed = true;
+                    self.is_syntax_error = true;
+                    if self.error_msg.is_none() {
+                        self.error_msg = Some("'yield' outside function".to_string());
+                    }
+                    return 0;
+                }
                 // Compile the yielded value (or None if bare `yield`).
                 let src = if let Some(e) = val_expr {
                     self.compile_expr(e)
@@ -6659,6 +6755,14 @@ impl Compiler {
             }
 
             Expr::YieldFrom(iter_expr) => {
+                if !self.is_function_scope {
+                    self.failed = true;
+                    self.is_syntax_error = true;
+                    if self.error_msg.is_none() {
+                        self.error_msg = Some("'yield' outside function".to_string());
+                    }
+                    return 0;
+                }
                 // PEP 380 `yield from` delegation via the single YieldFrom instruction.
                 //
                 // The VM handles the send/yield/StopIteration loop internally:

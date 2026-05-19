@@ -208,6 +208,97 @@ mod tests {
     }
 
     #[test]
+    fn return_at_module_level_is_syntax_error() {
+        let tokens = Lexer::new("return\n").unwrap().into_tokens();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut interpreter = Interpreter::default();
+
+        let error = interpreter.exec_program(&program, false).unwrap_err();
+
+        assert_eq!(error.to_string(), "SyntaxError: 'return' outside function");
+    }
+
+    #[test]
+    fn return_with_value_at_module_level_is_syntax_error() {
+        let tokens = Lexer::new("return 42\n").unwrap().into_tokens();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut interpreter = Interpreter::default();
+
+        let error = interpreter.exec_program(&program, false).unwrap_err();
+
+        assert_eq!(error.to_string(), "SyntaxError: 'return' outside function");
+    }
+
+    #[test]
+    fn yield_at_module_level_is_syntax_error() {
+        let tokens = Lexer::new("yield\n").unwrap().into_tokens();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut interpreter = Interpreter::default();
+
+        let error = interpreter.exec_program(&program, false).unwrap_err();
+
+        assert_eq!(error.to_string(), "SyntaxError: 'yield' outside function");
+    }
+
+    #[test]
+    fn yield_from_at_module_level_is_syntax_error() {
+        let tokens = Lexer::new("yield from []\n").unwrap().into_tokens();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut interpreter = Interpreter::default();
+
+        let error = interpreter.exec_program(&program, false).unwrap_err();
+
+        assert_eq!(error.to_string(), "SyntaxError: 'yield' outside function");
+    }
+
+    #[test]
+    fn return_in_dead_code_at_module_level_is_syntax_error() {
+        // CPython validates return/yield even in statically-dead branches.
+        let tokens = Lexer::new("if False:\n    return\n")
+            .unwrap()
+            .into_tokens();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut interpreter = Interpreter::default();
+
+        let error = interpreter.exec_program(&program, false).unwrap_err();
+
+        assert_eq!(error.to_string(), "SyntaxError: 'return' outside function");
+    }
+
+    #[test]
+    fn yield_in_dead_code_at_module_level_is_syntax_error() {
+        let tokens = Lexer::new("if False:\n    yield\n")
+            .unwrap()
+            .into_tokens();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut interpreter = Interpreter::default();
+
+        let error = interpreter.exec_program(&program, false).unwrap_err();
+
+        assert_eq!(error.to_string(), "SyntaxError: 'yield' outside function");
+    }
+
+    #[test]
+    fn return_at_module_level_in_for_loop_is_syntax_error() {
+        let tokens = Lexer::new("for i in [1, 2]:\n    return i\n")
+            .unwrap()
+            .into_tokens();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut interpreter = Interpreter::default();
+
+        let error = interpreter.exec_program(&program, false).unwrap_err();
+
+        assert_eq!(error.to_string(), "SyntaxError: 'return' outside function");
+    }
+
+    #[test]
     fn class_instances_bind_methods_and_init() {
         let interpreter = run_program(
             "class Counter:\n    def __init__(self, start):\n        self.value = start\n    def inc(self, step=1):\n        self.value = self.value + step\n        return self.value\nc = Counter(10)\nresult = [c.value, c.inc(), c.inc(4), c.value]\n",
