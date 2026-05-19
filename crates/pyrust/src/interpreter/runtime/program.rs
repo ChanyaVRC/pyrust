@@ -59,6 +59,39 @@ impl Interpreter {
         self.try_exec_vm_script_with_index(program, local_index, repl_mode)
     }
 
+    /// Seed the module-level global namespace with the standard dunder keys
+    /// that CPython 3.12 always pre-populates for `__main__` (issue #675).
+    ///
+    /// Inserts only keys that are not already present, so a REPL second-pass
+    /// or a future import path that has already seeded the namespace does not
+    /// clobber any existing value.  User assignments made during script
+    /// execution override the pre-seeded values naturally: they either update
+    /// the fastlocal register (which shadows the env entry while executing)
+    /// or call `assign_name` which overwrites the env entry directly.
+    fn seed_module_dunders(&mut self) {
+        // `__builtins__` is the builtins module object in `__main__`.
+        let builtins_val = crate::builtin_modules::load_builtin_module("builtins")
+            .unwrap_or_else(Value::none);
+
+        let me_ref = module_env(&self.env);
+        let mut me = me_ref.borrow_mut();
+        // Insert each dunder only if absent — do not overwrite an existing binding.
+        macro_rules! seed {
+            ($name:literal, $val:expr) => {
+                me.values.entry($name.to_string()).or_insert_with(|| $val);
+            };
+        }
+        seed!("__name__", Value::string("__main__"));
+        seed!("__doc__", Value::none());
+        seed!("__package__", Value::none());
+        seed!("__spec__", Value::none());
+        seed!("__loader__", Value::none());
+        seed!("__file__", Value::none());
+        seed!("__cached__", Value::none());
+        seed!("__annotations__", Value::dict(IndexMap::new()));
+        seed!("__builtins__", builtins_val);
+    }
+
     fn try_exec_vm_script_with_index(
         &mut self,
         program: &[Stmt],
@@ -69,17 +102,14 @@ impl Interpreter {
             Ok(c) => Rc::new(crate::optimizer::optimize(c)),
             Err(e) => return Some(Err(e)),
         };
-        // Issue #711: CPython pre-seeds `__doc__ = None` in the module namespace
-        // before executing any user code.  A module-level docstring (first-statement
-        // string literal) is compiled into a `StoreGlobal("__doc__", ...)` and
-        // overwrites this sentinel; scripts without a docstring leave it as None.
-        // Without this seed, `print(__doc__)` in a script with no docstring raises
-        // NameError instead of printing None.
-        module_env(&self.env)
-            .borrow_mut()
-            .values
-            .entry("__doc__".to_string())
-            .or_insert_with(Value::none);
+        // Seed standard module-level dunders (issue #675), including __doc__
+        // (issue #711).  Must happen after compilation (so `local_index` is
+        // finalized) and before the script frame is pushed and `run_bytecode`
+        // fires, so that the keys are visible in `module_env.values` from the
+        // very first instruction.  User assignments override them naturally
+        // (they either update the fastlocal register which shadows the env
+        // entry, or call `assign_name` which overwrites the env entry directly).
+        self.seed_module_dunders();
         let num_regs = code.num_regs as usize;
         let mut regs: RegsBuf = smallvec![Value::unset(); num_regs];
         let _depth_guard = CallDepthGuard::enter();
