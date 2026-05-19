@@ -86,6 +86,7 @@ impl ExcClasses {
             "FileNotFoundError",
             "SystemExit",
             "GeneratorExit",
+            "KeyboardInterrupt",
         ];
         let mut map = HashMap::with_capacity(names.len());
         let module = env.borrow();
