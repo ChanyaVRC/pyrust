@@ -1089,11 +1089,17 @@ pub enum Opaque {
     BoundMethod {
         function: Rc<UserFunction>,
         receiver: Rc<RefCell<PyInstance>>,
+        /// Monotonic allocation id so that `a = obj.method; a is a` is True
+        /// while `obj.method is obj.method` is False (#722).  Preserved across
+        /// clones (Rc-sharing semantics), matches the `SmallTuple2` pattern.
+        obj_id: u64,
     },
     /// A classmethod bound to a specific class (the first argument will be `cls`).
     ClassBoundMethod {
         function: Rc<UserFunction>,
         class: Rc<RefCell<PyClass>>,
+        /// Monotonic allocation id for identity semantics (#722).
+        obj_id: u64,
     },
     /// Proxy returned by `super(cls, instance)`. Attribute lookup on this proxy
     /// starts from `cls`'s parent class and binds to `instance`.
@@ -1103,6 +1109,8 @@ pub enum Opaque {
     SuperProxy {
         class: Rc<RefCell<PyClass>>,
         instance: Rc<RefCell<PyInstance>>,
+        /// Monotonic allocation id for identity semantics (#722).
+        obj_id: u64,
     },
     /// Proxy returned by `super(cls, cls_instance)` where the second argument is
     /// a class (used in classmethods). Attribute lookup starts from `cls`'s parent
@@ -1110,6 +1118,8 @@ pub enum Opaque {
     SuperProxyClass {
         class: Rc<RefCell<PyClass>>,
         obj_class: Rc<RefCell<PyClass>>,
+        /// Monotonic allocation id for identity semantics (#722).
+        obj_id: u64,
     },
     /// A live generator object.  The concrete execution state (registers, pc,
     /// iterator slots, etc.) is stored as a type-erased `Box<dyn Any>` so that
@@ -1163,21 +1173,41 @@ impl Clone for Opaque {
             Opaque::PyClass(c) => Opaque::PyClass(Rc::clone(c)),
             Opaque::PyInstance(i) => Opaque::PyInstance(Rc::clone(i)),
             Opaque::PyModule(m) => Opaque::PyModule(Rc::clone(m)),
-            Opaque::BoundMethod { function, receiver } => Opaque::BoundMethod {
+            Opaque::BoundMethod {
+                function,
+                receiver,
+                obj_id,
+            } => Opaque::BoundMethod {
                 function: Rc::clone(function),
                 receiver: Rc::clone(receiver),
+                obj_id: *obj_id,
             },
-            Opaque::ClassBoundMethod { function, class } => Opaque::ClassBoundMethod {
+            Opaque::ClassBoundMethod {
+                function,
+                class,
+                obj_id,
+            } => Opaque::ClassBoundMethod {
                 function: Rc::clone(function),
                 class: Rc::clone(class),
+                obj_id: *obj_id,
             },
-            Opaque::SuperProxy { class, instance } => Opaque::SuperProxy {
+            Opaque::SuperProxy {
+                class,
+                instance,
+                obj_id,
+            } => Opaque::SuperProxy {
                 class: Rc::clone(class),
                 instance: Rc::clone(instance),
+                obj_id: *obj_id,
             },
-            Opaque::SuperProxyClass { class, obj_class } => Opaque::SuperProxyClass {
+            Opaque::SuperProxyClass {
+                class,
+                obj_class,
+                obj_id,
+            } => Opaque::SuperProxyClass {
                 class: Rc::clone(class),
                 obj_class: Rc::clone(obj_class),
+                obj_id: *obj_id,
             },
             Opaque::Generator(state) => Opaque::Generator(Rc::clone(state)),
             Opaque::Bytes(rc) => Opaque::Bytes(Rc::clone(rc)),
@@ -1737,7 +1767,11 @@ impl Value {
     }
 
     pub fn bound_method(function: Rc<UserFunction>, receiver: Rc<RefCell<PyInstance>>) -> Self {
-        Value::opaque(Opaque::BoundMethod { function, receiver })
+        Value::opaque(Opaque::BoundMethod {
+            function,
+            receiver,
+            obj_id: next_obj_id(),
+        })
     }
 
     /// Wrap a function with a different `UserFunctionKind` tag.  Used by
@@ -1786,15 +1820,27 @@ impl Value {
     }
 
     pub fn class_bound_method(function: Rc<UserFunction>, class: Rc<RefCell<PyClass>>) -> Self {
-        Value::opaque(Opaque::ClassBoundMethod { function, class })
+        Value::opaque(Opaque::ClassBoundMethod {
+            function,
+            class,
+            obj_id: next_obj_id(),
+        })
     }
 
     pub fn super_proxy(class: Rc<RefCell<PyClass>>, instance: Rc<RefCell<PyInstance>>) -> Self {
-        Value::opaque(Opaque::SuperProxy { class, instance })
+        Value::opaque(Opaque::SuperProxy {
+            class,
+            instance,
+            obj_id: next_obj_id(),
+        })
     }
 
     pub fn super_proxy_class(class: Rc<RefCell<PyClass>>, obj_class: Rc<RefCell<PyClass>>) -> Self {
-        Value::opaque(Opaque::SuperProxyClass { class, obj_class })
+        Value::opaque(Opaque::SuperProxyClass {
+            class,
+            obj_class,
+            obj_id: next_obj_id(),
+        })
     }
 
     /// Create a generator value.  `state` is the type-erased `GeneratorFrame`
@@ -1904,6 +1950,17 @@ impl Value {
                 // Rc pointer address so `b = a; id(a) == id(b)` holds (#722).
                 Opaque::Bytes(rc) => Some(Rc::as_ptr(rc) as i64),
                 Opaque::PyModule(rc) => Some(Rc::as_ptr(rc) as i64),
+                // BoundMethod / ClassBoundMethod / SuperProxy / SuperProxyClass:
+                // each allocation gets a unique monotonic obj_id so that
+                // `a = obj.method; a is a` is True while
+                // `obj.method is obj.method` is False (#722).
+                Opaque::BoundMethod { obj_id, .. } => Some(*obj_id as i64),
+                Opaque::ClassBoundMethod { obj_id, .. } => Some(*obj_id as i64),
+                Opaque::SuperProxy { obj_id, .. } => Some(*obj_id as i64),
+                Opaque::SuperProxyClass { obj_id, .. } => Some(*obj_id as i64),
+                // BuiltinObject: the Rc<RefCell<...>> state is shared across
+                // clones; its address is a stable, per-object id (#722).
+                Opaque::BuiltinObject { state, .. } => Some(Rc::as_ptr(state) as i64),
                 _ => None,
             },
             _ => None,
@@ -2474,16 +2531,18 @@ impl Value {
                 Opaque::PyClass(c) => ValueKind::PyClass(c),
                 Opaque::PyInstance(i) => ValueKind::PyInstance(i),
                 Opaque::PyModule(m) => ValueKind::PyModule(m),
-                Opaque::BoundMethod { function, receiver } => {
-                    ValueKind::BoundMethod { function, receiver }
-                }
-                Opaque::ClassBoundMethod { function, class } => {
-                    ValueKind::ClassBoundMethod { function, class }
-                }
-                Opaque::SuperProxy { class, instance } => ValueKind::SuperProxy { class, instance },
-                Opaque::SuperProxyClass { class, obj_class } => {
-                    ValueKind::SuperProxyClass { class, obj_class }
-                }
+                Opaque::BoundMethod {
+                    function, receiver, ..
+                } => ValueKind::BoundMethod { function, receiver },
+                Opaque::ClassBoundMethod {
+                    function, class, ..
+                } => ValueKind::ClassBoundMethod { function, class },
+                Opaque::SuperProxy {
+                    class, instance, ..
+                } => ValueKind::SuperProxy { class, instance },
+                Opaque::SuperProxyClass {
+                    class, obj_class, ..
+                } => ValueKind::SuperProxyClass { class, obj_class },
                 Opaque::Generator(state) => ValueKind::Generator(state),
                 Opaque::Bytes(rc) => ValueKind::Bytes(rc),
                 Opaque::Complex(re, im) => ValueKind::Complex(*re, *im),
