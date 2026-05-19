@@ -222,11 +222,17 @@ const PY_HASH_MODULUS_BIGINT: i64 = (1i64 << 61) - 1;
 /// Hash a `BigInt` key using CPython's Mersenne-prime scheme so that
 /// `PyKey::BigInt(n)` hashes identically to `hash(n)` and equal to the
 /// corresponding `PyKey::Float` when `bigint_float_eq(n, f)` holds.
+///
+/// The remainder `n % modulus` is in `[-(modulus-1), modulus-1]`, which is
+/// strictly within `i64` range (`modulus = 2^61 - 1 < i64::MAX`), so
+/// `to_i64()` is always `Some`.  We use `expect` rather than `unwrap_or(0)`
+/// so that any future logic error surfaces immediately instead of silently
+/// producing a wrong hash.
 #[inline]
 fn pykey_hash_bigint(n: &BigInt) -> i64 {
     let modulus = BigInt::from(PY_HASH_MODULUS_BIGINT);
-    let reduced = n.clone() % &modulus;
-    let raw = reduced.to_i64().unwrap_or(0);
+    let reduced = n % &modulus;
+    let raw = reduced.to_i64().expect("n % (2^61-1) always fits in i64");
     if raw == -1 { -2 } else { raw }
 }
 
@@ -271,9 +277,9 @@ impl PartialEq for PyKey {
             // Cross-type: BigInt vs BigInt.
             (PyKey::BigInt(a), PyKey::BigInt(b)) => a == b,
             // Cross-type: Float vs BigInt.  Uses `bigint_float_eq` which
-            // round-trips the float through `BigInt::from_f64` and compares —
-            // this correctly handles non-finite and fractional floats (both
-            // return false, matching CPython).
+            // guards that the float is finite and integer-valued before
+            // converting to BigInt; non-finite and fractional floats always
+            // return false, matching CPython.
             (PyKey::Float(bits), PyKey::BigInt(n)) | (PyKey::BigInt(n), PyKey::Float(bits)) => {
                 bigint_float_eq(n, f64::from_bits(*bits))
             }
@@ -301,6 +307,12 @@ impl Hash for PyKey {
         // and the same `i64` value as the equivalent `Int`, satisfying the
         // `Hash + PartialEq` contract.  Fractional or non-finite floats use
         // tag 1, keeping them in a separate hash space.
+        //
+        // `BigInt` that fits in i64 uses tag 0 (same as Int/Bool) so that
+        // `BigInt(n) == Int(n)` implies identical hashes — required by the
+        // Hash+Eq contract.  BigInt values beyond i64 range use tag 1 +
+        // Mersenne-prime reduction, matching the large-integer-valued Float
+        // path.
         match self {
             PyKey::Int(v) => {
                 0u8.hash(state);
@@ -334,10 +346,18 @@ impl Hash for PyKey {
                 }
             }
             PyKey::BigInt(n) => {
-                // Large integer beyond i64 range: use tag 1 + Mersenne-prime
-                // hash, matching the Float path above for the same value.
-                1u8.hash(state);
-                pykey_hash_bigint(n).hash(state);
+                // BigInt that fits in i64 must hash identically to PyKey::Int
+                // with the same value, because PartialEq makes them equal (the
+                // `BigInt <-> Int` arm).  When it does not fit in i64 we use
+                // tag 1 + Mersenne-prime reduction, which matches the Float
+                // path for the same large integer-valued float.
+                if let Some(i) = n.to_i64() {
+                    0u8.hash(state);
+                    i.hash(state);
+                } else {
+                    1u8.hash(state);
+                    pykey_hash_bigint(n).hash(state);
+                }
             }
             PyKey::Str(s) => {
                 2u8.hash(state);
@@ -2502,16 +2522,18 @@ fn int_float_eq(i: i64, f: f64) -> bool {
 
 /// Exact equality between a `BigInt` and an `f64` float.
 ///
-/// Mirrors `int_float_eq` for arbitrarily large integers.  The float is
-/// converted to its exact `BigInt` representation (via `BigInt::from_f64`,
-/// which returns `None` only for non-finite values; for fractional finite
-/// floats it truncates toward zero) and then compared directly to the BigInt
-/// operand.  Non-finite floats can never equal any integer, so the `None`
-/// arm correctly returns `false`.  Fractional floats never equal an integer
-/// either; `BigInt::from_f64` on a fractional value yields a truncated
-/// BigInt that will differ from `big`, so the comparison still returns the
-/// correct result.
+/// Mirrors `int_float_eq` for arbitrarily large integers.  Only finite,
+/// integer-valued floats can equal a `BigInt`; anything else (NaN, infinity,
+/// or a fractional value like 1.2) returns `false` immediately.
+///
+/// We must guard with `f.is_finite() && f == f.trunc()` before calling
+/// `BigInt::from_f64`, because `from_f64` **truncates** fractional floats
+/// (e.g. 1.2 → BigInt(1)) rather than returning `None`, which would make
+/// `bigint_float_eq(&BigInt::from(1), 1.2)` incorrectly return `true`.
 fn bigint_float_eq(big: &BigInt, f: f64) -> bool {
+    if !f.is_finite() || f != f.trunc() {
+        return false;
+    }
     match BigInt::from_f64(f) {
         Some(f_as_bigint) => f_as_bigint == *big,
         None => false,

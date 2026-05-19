@@ -741,7 +741,7 @@ fn value_as_count(v: &Value) -> i64 {
 fn key_to_value(key: PyKey) -> Value {
     match key {
         PyKey::Int(v) => Value::int(v),
-        PyKey::BigInt(v) => Value::bigint((*v).clone()),
+        PyKey::BigInt(v) => Value::bigint(*v),
         PyKey::Float(bits) => Value::float(f64::from_bits(bits)),
         PyKey::Str(s) => Value::string(s),
         PyKey::Bool(b) => Value::bool_(b),
