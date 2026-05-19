@@ -3515,8 +3515,21 @@ impl Compiler {
             } => {
                 self.compile_for(target, iter, body, else_branch.as_deref());
             }
-            Stmt::Global(_) | Stmt::Nonlocal(_) => {
-                // These are purely compile-time declarations; no runtime effect.
+            Stmt::Global(_) => {
+                // Purely a compile-time declaration; no runtime effect.
+            }
+            Stmt::Nonlocal(_) => {
+                // Nonlocal is a compile-time declaration in function bodies.
+                // At module level (not inside any function or class), it is a
+                // SyntaxError — CPython rejects it at compile time.
+                if !self.is_function_scope && !self.is_class_body {
+                    self.failed = true;
+                    self.is_syntax_error = true;
+                    if self.error_msg.is_none() {
+                        self.error_msg =
+                            Some("nonlocal declaration not allowed at module level".to_string());
+                    }
+                }
             }
             Stmt::Raise { expr, cause } => {
                 self.compile_raise(expr.as_ref(), cause.as_ref());
