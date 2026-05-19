@@ -31,10 +31,12 @@ pub fn seq_index(items: &[Value], args: &[Value], type_name: &str) -> Result<Val
             return Ok(Value::int((start + i) as i64));
         }
     }
-    Err(PyError::named(
-        "ValueError",
-        format!("{target} is not in {type_name}"),
-    ))
+    let msg = if type_name == "tuple" {
+        "tuple.index(x): x not in tuple".to_string()
+    } else {
+        format!("{target} is not in {type_name}")
+    };
+    Err(PyError::named("ValueError", msg))
 }
 
 pub fn seq_count(items: &[Value], args: &[Value], type_name: &str) -> Result<Value> {
