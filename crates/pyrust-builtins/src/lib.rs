@@ -157,7 +157,7 @@ mod method_table_drift_guard {
     fn bytes_methods_dispatched() {
         let receiver = Value::bytes(vec![]);
         for &name in super::bytes::METHODS {
-            let r = super::bytes::call(name, &receiver, &[]);
+            let r = super::bytes::call(name, &receiver, &[], &IndexMap::new());
             if let Err(ref e) = r {
                 assert!(!is_fallback(e), "bytes::call({name}) hit fallback: {e:?}");
             }
