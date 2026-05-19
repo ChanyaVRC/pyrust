@@ -2851,6 +2851,13 @@ struct Compiler {
     /// CPython guarantees class-namespace order follows the order names
     /// are first bound at runtime — not source-walk / slot-allocation order.
     is_class_body: bool,
+    /// The qualname prefix for classes/functions defined in this scope.
+    /// Empty for the top-level scope.  When entering a class `Foo`, the child
+    /// compiler's prefix becomes `"Foo"` (or `"Outer.Foo"` if nested).  When
+    /// entering a function `fn_name`, the child compiler's prefix becomes
+    /// `"fn_name.<locals>"` so that classes inside functions get the CPython
+    /// `"fn_name.<locals>.ClassName"` form.
+    qualname_prefix: String,
 }
 
 impl Compiler {
@@ -2894,6 +2901,7 @@ impl Compiler {
             fn_protos: Vec::new(),
             pure_locals: HashSet::new(),
             is_class_body: false,
+            qualname_prefix: String::new(),
         }
     }
 
@@ -4912,6 +4920,15 @@ impl Compiler {
             def_bound,
             inner_cell_vars.clone(),
         );
+        // Compute the qualname for this function and its `<locals>` prefix.
+        // Classes defined inside this function inherit `"fn_name.<locals>"` as
+        // their qualname prefix — matching CPython's `"fn_name.<locals>.ClassName"`.
+        let fn_qualname = if self.qualname_prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}.{}", self.qualname_prefix, name)
+        };
+        sub.qualname_prefix = format!("{fn_qualname}.<locals>");
         if is_pure {
             // Seed the inner compiler with the function's own name so that
             // direct self-recursive calls are compiled as CallMemo rather than
@@ -4946,6 +4963,7 @@ impl Compiler {
         let local_names = Rc::new(inner_index_rc.keys().cloned().collect::<HashSet<_>>());
         self.fn_protos.push(FnProto {
             name: name.to_string(),
+            qualname: fn_qualname,
             param_spec: Rc::new(FnParamSpec {
                 names: params.iter().map(|p| p.name.clone()).collect(),
                 has_default: params.iter().map(|p| p.default.is_some()).collect(),
@@ -5088,8 +5106,20 @@ impl Compiler {
         let body_index_rc: Rc<HashMap<String, Reg>> = Rc::new(body_index);
         let cell_vars = collect_cell_vars(body, &body_index_rc);
 
+        // Compute the full qualname for this class.
+        // For `class Outer: class Inner`, `self.qualname_prefix` is `"Outer"` and
+        // `class_qualname` becomes `"Outer.Inner"`.
+        // The child compiler's `qualname_prefix` is set to `class_qualname` so
+        // that further nested classes or functions inside it get the right prefix.
+        let class_qualname = if self.qualname_prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}.{}", self.qualname_prefix, name)
+        };
+
         let mut sub = Compiler::new(Rc::clone(&body_index_rc), 0, cell_vars);
         sub.is_class_body = true;
+        sub.qualname_prefix = class_qualname.clone();
         sub.compile_block(body);
         // Add implicit ReturnNone at end of class body
         sub.emit(Insn::ReturnNone);
@@ -5115,6 +5145,7 @@ impl Compiler {
         let local_names = Rc::new(body_index_rc.keys().cloned().collect::<HashSet<_>>());
         self.fn_protos.push(FnProto {
             name: name.to_string(),
+            qualname: class_qualname,
             param_spec: Rc::new(FnParamSpec {
                 names: vec![],
                 has_default: vec![],
@@ -6409,6 +6440,7 @@ impl Compiler {
         let local_names = Rc::new(inner_index_rc.keys().cloned().collect::<HashSet<_>>());
         self.fn_protos.push(FnProto {
             name: "<genexp>".to_string(),
+            qualname: "<genexp>".to_string(),
             param_spec: Rc::new(FnParamSpec {
                 names: params.iter().map(|p| p.name.clone()).collect(),
                 has_default: params.iter().map(|p| p.default.is_some()).collect(),
