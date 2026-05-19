@@ -2974,7 +2974,13 @@ impl Interpreter {
             .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;
 
         if frame.done {
-            return Err(PyError::named("StopIteration", String::new()));
+            // Exhausted generator: StopIteration() with no args → .value is None.
+            let exc = if let Some(cls) = self.exc_classes.get("StopIteration") {
+                PyError::Raised(instantiate_exception(cls, vec![]))
+            } else {
+                PyError::named("StopIteration", String::new())
+            };
+            return Err(exc);
         }
 
         // CPython: sending a non-None value to a just-started generator is an
@@ -2988,9 +2994,9 @@ impl Interpreter {
 
         match self.resume_generator_with_exc(frame, None, sent_value) {
             Ok(yielded) => Ok(yielded),
-            Err(ref e) if e.class_name_is("StopIteration") => {
-                Err(PyError::named("StopIteration", String::new()))
-            }
+            // Propagate the original StopIteration so .value is preserved
+            // (PEP 380 / issue #600).  Mirrors the same fix in call_next.
+            Err(e) if e.class_name_is("StopIteration") => Err(e),
             Err(e) => Err(e),
         }
     }

@@ -70,3 +70,33 @@ try:
     next(g)
 except StopIteration as e:
     print(e.value)   # 7
+
+# --- generator.send() must preserve StopIteration.value (PEP 380) ---
+
+def gen_send():
+    yield 1
+    return "send_done"
+
+g = gen_send()
+g.send(None)   # advance past first yield (same as next(g))
+try:
+    g.send(None)
+except StopIteration as e:
+    print(e.value)   # send_done
+
+# --- generator.send() on already-exhausted generator → .value is None ---
+
+def gen_exhaust():
+    yield 1
+
+g = gen_exhaust()
+next(g)
+try:
+    next(g)
+except StopIteration:
+    pass
+
+try:
+    g.send(None)
+except StopIteration as e:
+    print(repr(e.value))   # None
