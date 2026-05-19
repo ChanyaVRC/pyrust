@@ -2805,8 +2805,16 @@ impl Interpreter {
                             }
                         }
                     } else {
-                        // typ is already an instance (1-arg-style usage via
-                        // the 2-arg API); ignore val and forward the instance.
+                        // typ is already an instance.  CPython 3.12 requires
+                        // val to be None in this case; any other value is a
+                        // TypeError ("instance exception may not have a
+                        // separate value").
+                        if !val.is_none() {
+                            return Err(PyError::named(
+                                "TypeError",
+                                "instance exception may not have a separate value".to_string(),
+                            ));
+                        }
                         typ
                     }
                 };
