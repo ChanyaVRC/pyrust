@@ -33,7 +33,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_thread_jumps(code.insns);
     let insns = pass_binop_const_fusion(insns, num_locals);
     let insns = pass_fold_const_tuple(insns, num_locals, &mut consts);
-    let insns = pass_const_fold(insns, &mut consts);
+    let insns = pass_const_fold(insns, &mut consts, num_locals);
 
     let insns = pass_algebraic_simplify(insns, &mut consts);
     let insns = pass_unary_fold(insns, num_locals, &mut consts);
@@ -50,10 +50,10 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_binopinplace_downgrade(insns, num_locals);
     let insns = pass_exit_inline(insns);
     let insns = pass_licm(insns, num_locals);
-    let insns = pass_cse(insns);
+    let insns = pass_cse(insns, num_locals);
     let insns = pass_dead_code(insns);
     let insns = pass_dead_store_elim(insns, num_locals);
-    let insns = pass_copy_prop(insns);
+    let insns = pass_copy_prop(insns, num_locals);
     let insns = pass_trivial_nop(insns);
     let insns = pass_self_tail_call(insns);
     let insns = pass_forcount_const_inline(insns, &consts);
@@ -320,7 +320,7 @@ fn pass_cmpjump_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
 /// The map is cleared at branch/loop instructions where we cannot guarantee
 /// which path was taken at runtime, and also at loop headers (targets of
 /// backward jumps) to avoid incorrectly folding loop conditions.
-fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn> {
+fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -> Vec<Insn> {
     // Pre-pass: collect every instruction index that is the target of *any*
     // jump (forward or backward).  At every such basic-block boundary the
     // known-constant map must be cleared, otherwise a value that was assigned
@@ -430,6 +430,28 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn> {
             | Insn::Unpack(..)
             | Insn::UnpackEx { .. }) => {
                 known.clear();
+                out.push(insn);
+            }
+            // Call instructions: invalidate the destination register AND any
+            // named-local registers (r < num_locals) that may have been
+            // updated via the `assign_name` write-through.  A user-defined
+            // callee that declares `global x` and assigns it will, at
+            // runtime, write the new value directly into the module-level
+            // fastlocal register through `vm_frame_views`.  The optimizer
+            // must not retain a stale `LoadConst`-derived entry for such a
+            // register across the call boundary.
+            //
+            // Temporaries (r >= num_locals) are safe to retain: they are
+            // single-use scratch registers that no external callee can reach.
+            insn @ (Insn::Call(..)
+            | Insn::CallMemo(..)
+            | Insn::CallMethod { .. }
+            | Insn::CallMethodExpanded { .. }
+            | Insn::MakeClass(..)) => {
+                known.retain(|&r, _| r >= num_locals);
+                if let Some(dst) = writable_dst(&insn) {
+                    known.remove(&dst);
+                }
                 out.push(insn);
             }
             // Any other instruction: invalidate dst if we can identify it.
@@ -1766,7 +1788,7 @@ fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
 ///
 /// Reference: Aho, Lam, Sethi, Ullman *Compilers* §9.1 (available expressions);
 /// Kennedy *A Survey of Data-Flow Analysis Techniques* §3 (CSE).
-fn pass_cse(insns: Vec<Insn>) -> Vec<Insn> {
+fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
     use std::collections::HashMap;
 
     /// Discriminator tag for a CSE key — keeps `LoadConst`, `BinOpConst`, and
@@ -1880,6 +1902,29 @@ fn pass_cse(insns: Vec<Insn>) -> Vec<Insn> {
                     CseKey::BinOpConst(src, _, _) => *src != w,
                     CseKey::UnaryOp(_, src) => *src != w,
                 }
+            });
+        }
+
+        // Call-boundary invalidation: any user-defined callee may update
+        // named-local registers (r < num_locals) via the `assign_name`
+        // write-through in `vm_frame_views`.  CSE entries whose source
+        // register is a named local must not survive across call boundaries.
+        //
+        // Temporaries (r >= num_locals) are safe to retain — no callee can
+        // reach them through `assign_name`.  This mirrors the same fix applied
+        // to `pass_const_fold` for issue #671.
+        if matches!(
+            insn,
+            Insn::Call(..)
+                | Insn::CallMemo(..)
+                | Insn::CallMethod { .. }
+                | Insn::CallMethodExpanded { .. }
+                | Insn::MakeClass(..)
+        ) {
+            table.retain(|k, _| match k {
+                CseKey::LoadConst(_) => true,
+                CseKey::BinOpConst(src, _, _) => *src >= num_locals,
+                CseKey::UnaryOp(_, src) => *src >= num_locals,
             });
         }
 
@@ -2156,7 +2201,7 @@ fn pass_ivsr(insns: Vec<Insn>, consts: &mut Vec<Value>, num_regs: &mut u32) -> V
 /// subsequent `pass_trivial_nop`.
 ///
 /// Reference: GCC `-ftree-copy-prop`; Shi/Gregg/Beatty/Ertl *VEE'05*.
-fn pass_copy_prop(insns: Vec<Insn>) -> Vec<Insn> {
+fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
     use std::collections::HashMap;
 
     let n = insns.len();
@@ -2274,6 +2319,33 @@ fn pass_copy_prop(insns: Vec<Insn>) -> Vec<Insn> {
             // do not substitute the base register as that would misalign the arg block.
             other => other,
         };
+
+        // Call-boundary invalidation: a user-defined callee that declares
+        // `global x` and assigns it will write the new value directly into the
+        // module-level fastlocal register (r < num_locals) via the
+        // `assign_name` write-through in `vm_frame_views`.  Any copy-
+        // propagation alias whose *key* is a named-local register is therefore
+        // stale after a call — using the pre-call value instead of the updated
+        // register would silently produce wrong results.
+        //
+        // We also evict entries whose *value* is a named local, because the
+        // value register is the "canonical source" used in substitution; if
+        // it was mutated by the callee, downstream reads that copy-prop
+        // redirected to it would see the wrong (pre-call) value.
+        //
+        // Temporaries (r >= num_locals) are safe to retain — no callee can
+        // reach them through `assign_name`.  This mirrors the fix applied to
+        // `pass_const_fold` and `pass_cse` for issue #671.
+        if matches!(
+            insn,
+            Insn::Call(..)
+                | Insn::CallMemo(..)
+                | Insn::CallMethod { .. }
+                | Insn::CallMethodExpanded { .. }
+                | Insn::MakeClass(..)
+        ) {
+            copies.retain(|k, v| *k >= num_locals && *v >= num_locals);
+        }
 
         // Kill map entries: any key or value that == dst is stale after a write.
         if let Some(dst) = writable_dst(&insn) {
@@ -2989,7 +3061,7 @@ mod tests {
             Insn::BinOpConst(1, 0, BinaryOp::Add, 1), // r1 = r0 + 3
             Insn::Return(1),
         ];
-        let out = pass_const_fold(insns, &mut consts);
+        let out = pass_const_fold(insns, &mut consts, 0);
         assert!(
             matches!(out[1], Insn::LoadConst(1, _)),
             "BinOpConst with known lhs should be folded to LoadConst"
@@ -3015,7 +3087,7 @@ mod tests {
             Insn::BinOp(2, 0, BinaryOp::Mul, 1), // r2 = r0 * r1
             Insn::Return(2),
         ];
-        let out = pass_const_fold(insns, &mut consts);
+        let out = pass_const_fold(insns, &mut consts, 0);
         assert!(
             matches!(out[2], Insn::LoadConst(2, _)),
             "BinOp with both operands known should fold to LoadConst"
@@ -3043,7 +3115,7 @@ mod tests {
             Insn::BinOpConst(1, 0, BinaryOp::Add, 1), // y = x + 3
             Insn::Return(1),
         ];
-        let out = pass_const_fold(insns, &mut consts);
+        let out = pass_const_fold(insns, &mut consts, 0);
         assert!(
             matches!(out[2], Insn::LoadConst(1, _)),
             "BinOpConst should fold after Move propagates known value"
@@ -3063,7 +3135,7 @@ mod tests {
             Insn::BinOpConst(1, 0, BinaryOp::Add, 1),
             Insn::Return(1),
         ];
-        let out = pass_const_fold(insns, &mut consts);
+        let out = pass_const_fold(insns, &mut consts, 0);
         assert!(
             matches!(out[2], Insn::BinOpConst(1, 0, BinaryOp::Add, 1)),
             "no folding after a branch clears known map"
@@ -3113,7 +3185,7 @@ mod tests {
             Insn::BinOpConst(3, 2, BinaryOp::Add, 2),
             Insn::Return(3),
         ];
-        let out = pass_const_fold(insns, &mut consts);
+        let out = pass_const_fold(insns, &mut consts, 0);
         assert!(
             matches!(out[4], Insn::BinOpConst(3, 2, BinaryOp::Add, 2)),
             "merge point must clear known map; BinOpConst on a phi'd value must not fold",
@@ -3141,11 +3213,49 @@ mod tests {
             Insn::Jump(-4),
             Insn::Return(0),
         ];
-        let out = pass_const_fold(insns, &mut consts);
+        let out = pass_const_fold(insns, &mut consts, 0);
         // [1] must NOT fold to LoadConst(True) — the loop would become infinite.
         assert!(
             matches!(out[1], Insn::BinOpConst(1, 0, BinaryOp::Gt, 1)),
             "loop condition must not be folded; known map must clear at loop header"
+        );
+    }
+
+    #[test]
+    fn const_fold_call_invalidates_named_locals_but_not_temps() {
+        use crate::ast::BinaryOp;
+        use crate::value::Value;
+        // Simulates the issue #671 pattern at the instruction level:
+        //
+        //   [0] LoadConst(r0, 0)      r0 is a named local (< num_locals=2): consts[0]=10
+        //   [1] LoadConst(r5, 1)      r5 is a temp (>= num_locals=2): consts[1]=3
+        //   [2] Call(r2, 0)           user call — may write r0 via assign_name write-through
+        //   [3] BinOpConst(r3, r0, Add, 1)  must NOT fold (r0 was a named local)
+        //   [4] BinOpConst(r4, r5, Add, 1)  MUST fold (r5 is a temp, safe to retain)
+        //   [5] Return(r3)
+        //
+        // With num_locals=2, after Call at [2]:
+        //   known[r0] must be removed  → BinOpConst at [3] stays unfused
+        //   known[r5] must survive     → BinOpConst at [4] folds to LoadConst
+        let mut consts = vec![Value::int(10), Value::int(3)];
+        let insns = vec![
+            Insn::LoadConst(0, 0),                    // r0 = 10 (named local)
+            Insn::LoadConst(5, 1),                    // r5 = 3  (temp)
+            Insn::Call(2, 0),                         // call — may clobber r0
+            Insn::BinOpConst(3, 0, BinaryOp::Add, 1), // r3 = r0 + 3
+            Insn::BinOpConst(4, 5, BinaryOp::Add, 1), // r4 = r5 + 3
+            Insn::Return(3),
+        ];
+        let out = pass_const_fold(insns, &mut consts, 2);
+        assert!(
+            matches!(out[3], Insn::BinOpConst(3, 0, BinaryOp::Add, 1)),
+            "named-local r0 must not be folded after Call: found {:?}",
+            out[3]
+        );
+        assert!(
+            matches!(out[4], Insn::LoadConst(4, _)),
+            "temp r5 must still be folded after Call: found {:?}",
+            out[4]
         );
     }
 
@@ -3718,7 +3828,7 @@ mod tests {
             Insn::BinOp(2, 1, BinaryOp::Add, 3),
             Insn::Return(2),
         ];
-        let out = pass_copy_prop(insns);
+        let out = pass_copy_prop(insns, 0);
         assert!(
             matches!(out[2], Insn::BinOp(2, 0, BinaryOp::Add, 3)),
             "r1 should be substituted with r0 in BinOp"
@@ -3734,7 +3844,7 @@ mod tests {
             Insn::Move(0, 2),
             Insn::Return(1),
         ];
-        let out = pass_copy_prop(insns);
+        let out = pass_copy_prop(insns, 0);
         assert!(
             matches!(out[4], Insn::Return(1)),
             "r1 alias must be killed when r0 is overwritten"
@@ -3751,7 +3861,7 @@ mod tests {
             Insn::BinOp(0, 0, BinaryOp::Add, 2),
             Insn::Return(1),
         ];
-        let out = pass_copy_prop(insns);
+        let out = pass_copy_prop(insns, 0);
         assert!(
             matches!(out[4], Insn::Return(1)),
             "r1→r0 alias must be killed when BinOp writes r0"
@@ -3768,10 +3878,44 @@ mod tests {
             Insn::DictUpdate(5, 6),
             Insn::Return(5),
         ];
-        let out = pass_copy_prop(insns);
+        let out = pass_copy_prop(insns, 0);
         assert!(
             matches!(out[4], Insn::DictUpdate(5, 4)),
             "DictUpdate: receiver unchanged, src substituted"
+        );
+    }
+
+    #[test]
+    fn copy_prop_invalidates_named_local_alias_on_call() {
+        use crate::ast::BinaryOp;
+        // Simulates the pattern from issue #671 applied to copy propagation:
+        //
+        //   [0] LoadConst(r5, 0)      r5 is a temp (>= num_locals=2): consts[0]=5
+        //   [1] Move(r0, r5)          r0 is a named local (< num_locals=2)
+        //                             copy-prop records copies[r0] = r5
+        //   [2] Call(r8, 0)           user call — may write r0 via assign_name
+        //                             write-through; copies[r0 → r5] must be evicted
+        //   [3] BinOpConst(r3, r0, Add, 0)  must use r0 (not r5)
+        //   [4] Return(r3)
+        //
+        // Without the call-boundary invalidation, copy-prop would replace r0
+        // with r5 in [3], producing BinOpConst(r3, r5, Add, 0), which would
+        // compute the pre-call value of r5 rather than the updated r0.
+        let insns = vec![
+            Insn::LoadConst(5, 0),                    // r5 = consts[0]
+            Insn::Move(0, 5),                         // r0 (named local) = r5
+            Insn::Call(8, 0),                         // call — may clobber r0
+            Insn::BinOpConst(3, 0, BinaryOp::Add, 0), // r3 = r0 + consts[0]
+            Insn::Return(3),
+        ];
+        // num_locals=2: r0 and r1 are named locals; r2+ are temps.
+        let out = pass_copy_prop(insns, 2);
+        // After Call, copies[r0 → r5] must be evicted. The BinOpConst at [3]
+        // must still use r0, not the aliased r5.
+        assert!(
+            matches!(out[3], Insn::BinOpConst(3, 0, BinaryOp::Add, 0)),
+            "named-local alias r0→r5 must not be propagated past Call: found {:?}",
+            out[3]
         );
     }
 
@@ -4269,7 +4413,7 @@ mod tests {
             Insn::LoadConst(3, 0), // duplicate
             Insn::Return(2),
         ];
-        let out = pass_cse(insns);
+        let out = pass_cse(insns, 0);
         assert_eq!(out.len(), 3, "instruction count unchanged");
         assert!(
             matches!(out[0], Insn::LoadConst(2, 0)),
@@ -4291,7 +4435,7 @@ mod tests {
             Insn::BinOpConst(5, 0, BinaryOp::Add, 1), // duplicate
             Insn::Return(4),
         ];
-        let out = pass_cse(insns);
+        let out = pass_cse(insns, 0); // num_locals=0: r0 is a temp, CSE valid
         assert_eq!(out.len(), 3);
         assert!(
             matches!(out[0], Insn::BinOpConst(4, 0, BinaryOp::Add, 1)),
@@ -4315,7 +4459,7 @@ mod tests {
             Insn::BinOpConst(5, 0, BinaryOp::Add, 1),
             Insn::Return(4),
         ];
-        let out = pass_cse(insns);
+        let out = pass_cse(insns, 0);
         assert_eq!(out.len(), 4, "no elimination when input clobbered");
         assert!(
             matches!(out[2], Insn::BinOpConst(5, 0, BinaryOp::Add, 1)),
@@ -4335,7 +4479,7 @@ mod tests {
             Insn::LoadConst(3, 0),   // idx 2 is a BB start (jump target)
             Insn::Return(2),
         ];
-        let out = pass_cse(insns);
+        let out = pass_cse(insns, 0);
         // The third instruction (idx 2) is a BB start, so the CSE table is cleared
         // before it is processed; the second LoadConst(r3, 0) must NOT be replaced.
         assert!(
@@ -4353,7 +4497,7 @@ mod tests {
             Insn::UnaryOp(5, UnaryOp::Neg, 0), // duplicate
             Insn::Return(4),
         ];
-        let out = pass_cse(insns);
+        let out = pass_cse(insns, 0); // num_locals=0: r0 is a temp, CSE valid
         assert_eq!(out.len(), 3);
         assert!(
             matches!(out[0], Insn::UnaryOp(4, UnaryOp::Neg, 0)),
@@ -4380,11 +4524,43 @@ mod tests {
             Insn::LoadConst(3, 0),
             Insn::Return(3),
         ];
-        let out = pass_cse(insns);
+        let out = pass_cse(insns, 0);
         assert_eq!(out.len(), 4, "no elimination when output clobbered");
         assert!(
             matches!(out[2], Insn::LoadConst(3, 0)),
             "LoadConst must not be replaced after its output register is clobbered"
+        );
+    }
+
+    #[test]
+    fn cse_does_not_match_binopconst_across_call_boundary() {
+        use crate::ast::BinaryOp;
+        // Simulates the pattern where a named-local register (r0) is used
+        // as a source in BinOpConst before and after a Call instruction that
+        // may update r0 via assign_name write-through.
+        //
+        // A Call writes to r9 (a temp, not r0 or r4).  The CSE table entry
+        // {BinOpConst(r0, Add, 1) -> r4} must NOT survive across the Call,
+        // because at runtime r0 may have been updated by the callee.
+        //
+        //   [0] BinOpConst(r4, r0, Add, 1)   <- first occurrence; r4 = r0 + c1
+        //   [1] Call(r9, r2)                  <- may update r0 via write-through
+        //   [2] BinOpConst(r5, r0, Add, 1)   <- second occurrence; must NOT be CopyReg(r5, r4)
+        //   [3] Return(r5)
+        // num_locals=1: r0 is a named local; r4, r5, r9 are temps.
+        let insns = vec![
+            Insn::BinOpConst(4, 0, BinaryOp::Add, 1), // r4 = r0 + c1
+            Insn::Call(9, 2),                         // call; writes r9 (temp), may clobber r0
+            Insn::BinOpConst(5, 0, BinaryOp::Add, 1), // r5 = r0 + c1 (same expr)
+            Insn::Return(5),
+        ];
+        let out = pass_cse(insns, 1); // r0 < num_locals: named local, must not be CSE'd across call
+        // The second BinOpConst MUST NOT be replaced by CopyReg(r5, r4)
+        // because r0 may have been mutated by the Call.
+        assert!(
+            matches!(out[2], Insn::BinOpConst(5, 0, BinaryOp::Add, 1)),
+            "BinOpConst after Call must not be CSE-replaced when src is a named local: {:?}",
+            out[2]
         );
     }
 
