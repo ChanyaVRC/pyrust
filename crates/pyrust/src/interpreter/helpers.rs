@@ -207,6 +207,7 @@ pub(crate) fn lookup_class_attr(class: &Rc<RefCell<PyClass>>, name: &str) -> Opt
 thread_local! {
     static OBJECT_CLASS: Rc<RefCell<PyClass>> = Rc::new(RefCell::new(PyClass {
         name: "object".to_string(),
+        qualname: "object".to_string(),
         base: None,
         attrs: IndexMap::new(),
     }));
@@ -316,6 +317,7 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
         // mismatch).  See Copilot review on #463.
         Rc::new(RefCell::new(PyClass {
             name: name.to_string(),
+            qualname: name.to_string(),
             base,
             attrs,
         }))
@@ -762,6 +764,7 @@ fn install_exception_builtins(env: &EnvRef) {
     // Root: BaseException (no base).
     let base_exception = Rc::new(RefCell::new(PyClass {
         name: "BaseException".to_string(),
+        qualname: "BaseException".to_string(),
         base: None,
         attrs: IndexMap::new(),
     }));
@@ -769,6 +772,7 @@ fn install_exception_builtins(env: &EnvRef) {
     // Exception derives from BaseException.
     let exception = Rc::new(RefCell::new(PyClass {
         name: "Exception".to_string(),
+        qualname: "Exception".to_string(),
         base: Some(Rc::clone(&base_exception)),
         attrs: IndexMap::new(),
     }));
@@ -776,6 +780,7 @@ fn install_exception_builtins(env: &EnvRef) {
     // Helper: direct child of Exception.
     let make_child = |name: &str| {
         Rc::new(RefCell::new(PyClass {
+            qualname: name.to_string(),
             name: name.to_string(),
             base: Some(Rc::clone(&exception)),
             attrs: IndexMap::new(),
@@ -786,16 +791,19 @@ fn install_exception_builtins(env: &EnvRef) {
     let arithmetic_error = make_child("ArithmeticError");
     let overflow_error = Rc::new(RefCell::new(PyClass {
         name: "OverflowError".to_string(),
+        qualname: "OverflowError".to_string(),
         base: Some(Rc::clone(&arithmetic_error)),
         attrs: IndexMap::new(),
     }));
     let zero_division_error = Rc::new(RefCell::new(PyClass {
         name: "ZeroDivisionError".to_string(),
+        qualname: "ZeroDivisionError".to_string(),
         base: Some(Rc::clone(&arithmetic_error)),
         attrs: IndexMap::new(),
     }));
     let floating_point_error = Rc::new(RefCell::new(PyClass {
         name: "FloatingPointError".to_string(),
+        qualname: "FloatingPointError".to_string(),
         base: Some(Rc::clone(&arithmetic_error)),
         attrs: IndexMap::new(),
     }));
@@ -804,11 +812,13 @@ fn install_exception_builtins(env: &EnvRef) {
     let lookup_error = make_child("LookupError");
     let index_error = Rc::new(RefCell::new(PyClass {
         name: "IndexError".to_string(),
+        qualname: "IndexError".to_string(),
         base: Some(Rc::clone(&lookup_error)),
         attrs: IndexMap::new(),
     }));
     let key_error = Rc::new(RefCell::new(PyClass {
         name: "KeyError".to_string(),
+        qualname: "KeyError".to_string(),
         base: Some(Rc::clone(&lookup_error)),
         attrs: IndexMap::new(),
     }));
@@ -819,6 +829,7 @@ fn install_exception_builtins(env: &EnvRef) {
     // CPython 3.12 (`RecursionError → RuntimeError → Exception`).
     let make_runtime_child = |name: &str| {
         Rc::new(RefCell::new(PyClass {
+            qualname: name.to_string(),
             name: name.to_string(),
             base: Some(Rc::clone(&runtime_error)),
             attrs: IndexMap::new(),
@@ -840,6 +851,7 @@ fn install_exception_builtins(env: &EnvRef) {
     let import_error = make_child("ImportError");
     let module_not_found_error = Rc::new(RefCell::new(PyClass {
         name: "ModuleNotFoundError".to_string(),
+        qualname: "ModuleNotFoundError".to_string(),
         base: Some(Rc::clone(&import_error)),
         attrs: IndexMap::new(),
     }));
@@ -850,16 +862,19 @@ fn install_exception_builtins(env: &EnvRef) {
     // UnicodeError.
     let unicode_error = Rc::new(RefCell::new(PyClass {
         name: "UnicodeError".to_string(),
+        qualname: "UnicodeError".to_string(),
         base: Some(Rc::clone(&value_error)),
         attrs: IndexMap::new(),
     }));
     let unicode_encode_error = Rc::new(RefCell::new(PyClass {
         name: "UnicodeEncodeError".to_string(),
+        qualname: "UnicodeEncodeError".to_string(),
         base: Some(Rc::clone(&unicode_error)),
         attrs: IndexMap::new(),
     }));
     let unicode_decode_error = Rc::new(RefCell::new(PyClass {
         name: "UnicodeDecodeError".to_string(),
+        qualname: "UnicodeDecodeError".to_string(),
         base: Some(Rc::clone(&unicode_error)),
         attrs: IndexMap::new(),
     }));
@@ -868,6 +883,7 @@ fn install_exception_builtins(env: &EnvRef) {
     let os_error = make_child("OSError");
     let file_not_found_error = Rc::new(RefCell::new(PyClass {
         name: "FileNotFoundError".to_string(),
+        qualname: "FileNotFoundError".to_string(),
         base: Some(Rc::clone(&os_error)),
         attrs: IndexMap::new(),
     }));
@@ -876,12 +892,14 @@ fn install_exception_builtins(env: &EnvRef) {
     // CPython, so `except Exception:` does NOT catch them.
     let system_exit = Rc::new(RefCell::new(PyClass {
         name: "SystemExit".to_string(),
+        qualname: "SystemExit".to_string(),
         base: Some(Rc::clone(&base_exception)),
         attrs: IndexMap::new(),
     }));
     // `GeneratorExit` derives from BaseException in CPython.
     let generator_exit = Rc::new(RefCell::new(PyClass {
         name: "GeneratorExit".to_string(),
+        qualname: "GeneratorExit".to_string(),
         base: Some(Rc::clone(&base_exception)),
         attrs: IndexMap::new(),
     }));

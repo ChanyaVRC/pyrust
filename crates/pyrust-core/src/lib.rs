@@ -379,6 +379,11 @@ pub struct UserFunction {
 #[derive(Debug, Clone)]
 pub struct PyClass {
     pub name: String,
+    /// Qualified name (e.g. `Outer.Inner` for nested classes).  Exposed as
+    /// `C.__qualname__` via the attribute lookup fast-path in `get_attr`; NOT
+    /// stored in `attrs` — CPython keeps `__qualname__` as a type-level
+    /// descriptor on `type`, not as an entry in the class's own `__dict__`.
+    pub qualname: String,
     pub base: Option<Rc<RefCell<PyClass>>>,
     pub attrs: IndexMap<String, Value>,
 }
