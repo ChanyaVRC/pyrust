@@ -419,7 +419,7 @@ pyrust_module! {
                     &[args[1].clone()],
                 );
             }
-            Err(PyError::named("KeyError", args[1].value.repr()))
+            Err(PyError::key_error(args[1].value.clone()))
         }
 
         /// `__missing__(key)` — call the factory (if non-None), store
@@ -437,7 +437,7 @@ pyrust_module! {
                 .cloned()
                 .unwrap_or_else(Value::none);
             if factory.is_none() {
-                return Err(PyError::named("KeyError", key_arg.value.repr()));
+                return Err(PyError::key_error(key_arg.value.clone()));
             }
             // Call the factory with no args.  The result is stored
             // under `key` and returned.

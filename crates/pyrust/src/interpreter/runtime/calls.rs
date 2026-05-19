@@ -2400,10 +2400,7 @@ fn format_str_template(
                     .iter()
                     .find(|(k, _)| k == head)
                     .map(|(_, v)| v.clone())
-                    .ok_or_else(|| PyError::named(
-                        "KeyError",
-                        format!("'{head}'"),
-                    ))?
+                    .ok_or_else(|| PyError::key_error(Value::string(head.to_string())))?
             };
 
             // Apply field accessors (`.attr` / `[key]`) — limited support.
@@ -2545,10 +2542,7 @@ fn apply_field_accessors(mut value: Value, mut rest: &str) -> Result<Value> {
                     ValueKind::Dict(map) => match map.get(&PyKey::Int(idx)).cloned() {
                         Some(v) => SeqGet::DictMatch(v),
                         None => {
-                            return Err(PyError::named(
-                                "KeyError",
-                                format!("{idx}"),
-                            ));
+                            return Err(PyError::key_error(Value::int(idx)));
                         }
                     },
                     _ => SeqGet::NotSubscriptable,
@@ -2578,10 +2572,7 @@ fn apply_field_accessors(mut value: Value, mut rest: &str) -> Result<Value> {
                     ValueKind::Dict(map) => map
                         .get(&PyKey::Str(key_str.to_string()))
                         .cloned()
-                        .ok_or_else(|| PyError::named(
-                            "KeyError",
-                            format!("'{key_str}'"),
-                        ))?,
+                        .ok_or_else(|| PyError::key_error(Value::string(key_str.to_string())))?,
                     ValueKind::List(_) | ValueKind::Tuple(_) => {
                         return Err(PyError::named(
                             "TypeError",

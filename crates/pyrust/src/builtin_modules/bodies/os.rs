@@ -443,7 +443,7 @@ pyrust_module! {
         // is a Mapping, not a defaulting view).
         match std::env::var_os(&key) {
             Some(v) => Ok(Value::string(v.to_string_lossy().into_owned())),
-            None => Err(PyError::named("KeyError", format!("'{key}'"))),
+            None => Err(PyError::key_error(Value::string(key.clone()))),
         }
     }
 
@@ -479,7 +479,7 @@ pyrust_module! {
         // interleaved with another pyrust-side write.
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if std::env::var_os(&key).is_none() {
-            return Err(PyError::named("KeyError", format!("'{key}'")));
+            return Err(PyError::key_error(Value::string(key.clone())));
         }
         unsafe { std::env::remove_var(&key) };
         Ok(Value::none())
