@@ -5,6 +5,7 @@ pub mod complex;
 pub mod dict;
 pub mod dict_views;
 pub mod file;
+pub mod float;
 pub mod frozenset;
 pub mod int;
 pub mod iter_helpers;
@@ -60,6 +61,16 @@ mod method_table_drift_guard {
 
     fn is_fallback(e: &PyError) -> bool {
         matches!(e, PyError::Runtime(msg) if msg.contains("has no attribute"))
+    }
+
+    #[test]
+    fn float_methods_dispatched() {
+        for &name in super::float::METHODS {
+            let r = super::float::call(name, 1.0_f64, &[]);
+            if let Err(ref e) = r {
+                assert!(!is_fallback(e), "float::call({name}) hit fallback: {e:?}");
+            }
+        }
     }
 
     #[test]

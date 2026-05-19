@@ -338,13 +338,22 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
     populate_primitive_methods(&set_class, "set", SET_METHODS);
     let complex_class = make("complex", None);
     let frozenset_class = make("frozenset", None);
+    let float_class = make("float", None);
     populate_primitive_methods(&complex_class, "complex", COMPLEX_METHODS);
     populate_primitive_methods(&frozenset_class, "frozenset", FROZENSET_METHODS);
+    populate_primitive_methods(&float_class, "float", FLOAT_METHODS);
+    // `fromhex` is a classmethod: register it directly in float_class.attrs
+    // so both `float.fromhex(s)` and `(1.0).fromhex(s)` resolve to the
+    // same `BuiltinFunction("float.fromhex")` sentinel.
+    float_class
+        .borrow_mut()
+        .attrs
+        .insert("fromhex".to_string(), Value::builtin_function("float.fromhex"));
     PrimitiveClasses {
         bytes_class,
         complex_class,
         dict_class,
-        float_class: make("float", None),
+        float_class,
         frozenset_class,
         list_class,
         set_class,
@@ -407,6 +416,9 @@ const FROZENSET_METHODS: &[&str] = &[
     "copy", "union", "intersection", "difference", "symmetric_difference",
     "issubset", "issuperset", "isdisjoint",
 ];
+
+// `fromhex` is a classmethod and is registered separately in build_primitive_classes.
+const FLOAT_METHODS: &[&str] = pyrust_builtins::float::METHODS;
 
 /// Install `BuiltinFunction("<type>.<name>")` sentinels into the class's
 /// `attrs` for every name in `methods`.  Each qualified name is leaked

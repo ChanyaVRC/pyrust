@@ -459,6 +459,13 @@ impl Interpreter {
                         target.clone(),
                     ));
                 }
+                // Fallback: check the primitive class attrs for classmethods
+                // accessible on instances (e.g. `(1.0).fromhex`).
+                if let Some(cls) = crate::interpreter::primitive_class_for_value(&target) {
+                    if let Some(val) = lookup_class_attr(&cls, name) {
+                        return Ok(val);
+                    }
+                }
                 let type_name = pyrust_core::builtin_type_name(&target);
                 Err(PyError::named(
                     "AttributeError",
@@ -951,6 +958,7 @@ fn builtin_has_method(target: &Value, name: &str) -> bool {
         ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Bool(_) => {
             pyrust_builtins::int::has_method(name)
         }
+        ValueKind::Float(_) => pyrust_builtins::float::has_method(name),
         ValueKind::Bytes(_) => pyrust_builtins::bytes::has_method(name),
         ValueKind::Str(_) => pyrust_builtins::string::has_method(name),
         ValueKind::List(_) => pyrust_builtins::list::has_method(name),
