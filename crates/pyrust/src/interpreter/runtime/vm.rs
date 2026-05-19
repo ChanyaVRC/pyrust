@@ -83,6 +83,11 @@ pub(crate) struct GeneratorFrame {
     /// views only in `call_user_function_expanded`, leaving generators
     /// to fall back to the caller's view).
     pub(crate) local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
+    /// The destination register of the most recent `Yield` instruction.
+    /// On the next resumption this register receives the sent value
+    /// (`Value::none()` for `next()`, the caller's argument for `send()`).
+    /// Meaningless until the generator has yielded at least once (`pc != 0`).
+    pub(crate) yield_dst: crate::bytecode::Reg,
 }
 
 /// Explicit suspension state for a generator frame.
@@ -96,6 +101,10 @@ pub(crate) struct GenSaveState {
     pub(crate) pc: usize,
     pub(crate) handled_exc_slice: Vec<Value>,
     pub(crate) active_exception: Option<Value>,
+    /// Destination register of the `Yield` that produced this suspension.
+    /// Carried here so `resume_generator_with_exc` can persist it onto
+    /// `GeneratorFrame::yield_dst` for the subsequent send() call.
+    pub(crate) yield_dst: crate::bytecode::Reg,
 }
 
 /// Outcome of executing a generator frame (returned by `run_bytecode_inner` and
@@ -281,18 +290,25 @@ impl Interpreter {
     }
 
     /// Resume (or initialise) a generator by executing from `frame.pc` until
-    /// the next yield or completion.  Returns:
+    /// the next yield or completion.  The sent value is `None` (equivalent to
+    /// `next(g)`).  Returns:
     /// - `Ok(val)`  — generator yielded `val`; frame updated in-place
     /// - `Err(Named("StopIteration", _))` — generator returned normally
     /// - `Err(other)` — propagating exception
     pub(crate) fn resume_generator(&mut self, frame: &mut GeneratorFrame) -> Result<Value> {
-        self.resume_generator_with_exc(frame, None)
+        self.resume_generator_with_exc(frame, None, Value::none())
     }
 
-    /// Resume a generator, optionally injecting `inject_exc` as if it had been
-    /// raised at the current yield point.  Underpins both `generator.close()`
-    /// (with a `GeneratorExit`) and `generator.throw()` (with the user-supplied
-    /// exception).
+    /// Resume a generator with an explicit sent value, optionally injecting
+    /// `inject_exc` as if it had been raised at the current yield point.
+    /// Underpins `generator.close()` (inject `GeneratorExit`),
+    /// `generator.throw()` (inject user exception), and `generator.send()`
+    /// (no injection, non-None `sent_value`).
+    ///
+    /// The `sent_value` is written to the destination register of the last
+    /// `Yield` instruction before execution resumes.  For fresh generators
+    /// (`frame.pc == 0`, never yielded yet) the sent value write is skipped
+    /// because `yield_dst` is not yet meaningful.
     ///
     /// Returns:
     /// - `Ok(val)` — generator yielded `val`; frame updated in-place
@@ -302,6 +318,7 @@ impl Interpreter {
         &mut self,
         frame: &mut GeneratorFrame,
         inject_exc: Option<PyError>,
+        sent_value: Value,
     ) -> Result<Value> {
         if frame.done {
             // A done generator can't be resumed; if the caller is injecting an
@@ -314,6 +331,13 @@ impl Interpreter {
                 "StopIteration",
                 String::new(),
             ));
+        }
+
+        // Write the sent value into the yield destination register.
+        // Skipped for fresh generators (pc == 0) because yield_dst is not
+        // yet initialised and the generator body hasn't reached its first yield.
+        if frame.pc != 0 {
+            frame.regs[frame.yield_dst as usize] = sent_value;
         }
 
         // Swap the saved env in.
@@ -383,6 +407,7 @@ impl Interpreter {
                 frame.pc = saved.pc;
                 frame.handled_exc_slice = saved.handled_exc_slice;
                 frame.active_exception = saved.active_exception;
+                frame.yield_dst = saved.yield_dst;
                 Ok(value)
             }
             Ok(FrameOutcome::Returned(_)) => {
@@ -1631,9 +1656,10 @@ impl Interpreter {
                     // Suspend the generator.  pc has already been incremented
                     // past this instruction, so resumption continues at pc.
                     let yielded = vm_try!(vm_read(regs, *src, num_locals));
-                    // Pre-fill dst with None: this is the sent value that the
-                    // yield expression evaluates to on resumption.  Proper
-                    // send() support would overwrite this in resume_generator.
+                    // Pre-fill dst with None so the register holds a valid
+                    // value while the frame is suspended.  resume_generator_with_exc
+                    // overwrites this with the sent value (None for next(),
+                    // the caller's argument for send()) before resuming.
                     regs[*dst as usize] = Value::none();
                     // PEP 3134: split the interpreter's handled-exception
                     // stack at this frame's base.  Entries pushed by THIS
@@ -1655,6 +1681,7 @@ impl Interpreter {
                             pc, // already past the Yield instruction
                             handled_exc_slice: saved_handled_slice,
                             active_exception: saved_active,
+                            yield_dst: *dst,
                         },
                     });
                 }
@@ -2632,6 +2659,19 @@ impl Interpreter {
                 let exc = args.into_iter().next().unwrap();
                 self.generator_throw(receiver, exc)
             }
+            "send" => {
+                if args.len() != 1 {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "send() takes exactly one argument ({} given)",
+                            args.len()
+                        ),
+                    ));
+                }
+                let sent_value = args.into_iter().next().unwrap();
+                self.generator_send(receiver, sent_value)
+            }
             other => Err(PyError::named(
                 "AttributeError",
                 format!("'generator' object has no attribute '{}'", other),
@@ -2702,7 +2742,7 @@ impl Interpreter {
         }
 
         let inject = PyError::named("GeneratorExit", String::new());
-        match self.resume_generator_with_exc(frame, Some(inject)) {
+        match self.resume_generator_with_exc(frame, Some(inject), Value::none()) {
             // Generator yielded again instead of returning/re-raising — that's
             // an error in CPython.
             Ok(_yielded) => {
@@ -2806,7 +2846,7 @@ impl Interpreter {
         }
 
         let inject = PyError::Raised(exc_val);
-        match self.resume_generator_with_exc(frame, Some(inject)) {
+        match self.resume_generator_with_exc(frame, Some(inject), Value::none()) {
             // Generator caught the injected exception and yielded.
             Ok(v) => Ok(v),
             // Generator returned normally — convert to StopIteration.
@@ -2815,6 +2855,72 @@ impl Interpreter {
             }
             // Any other propagating error (including a re-raise of the
             // injected exception) flows through unchanged.
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Implementation of `generator.send(value)`.
+    ///
+    /// Resumes the generator and delivers `sent_value` as the result of the
+    /// suspended `yield` expression inside the body.  Equivalent to `next(g)`
+    /// when `sent_value` is `None`.
+    ///
+    /// CPython raises `TypeError: can't send non-None value to a just-started
+    /// generator` when called on a generator that has never been advanced to
+    /// its first `yield`.
+    fn generator_send(&mut self, receiver: Value, sent_value: Value) -> Result<Value> {
+        let state_rc = match receiver.kind() {
+            ValueKind::Generator(rc) => Rc::clone(rc),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "generator.send() called on non-generator".to_string(),
+                ));
+            }
+        };
+
+        let mut borrow = match state_rc.try_borrow_mut() {
+            Ok(b) => b,
+            Err(_) => {
+                return Err(PyError::named(
+                    "ValueError",
+                    "generator already executing".to_string(),
+                ));
+            }
+        };
+
+        // NativeIterFrame and GetItemIter do not support send().
+        if borrow.downcast_mut::<NativeIterFrame>().is_some()
+            || borrow.downcast_mut::<GetItemIter>().is_some()
+        {
+            return Err(PyError::named(
+                "AttributeError",
+                "'generator' object has no attribute 'send'".to_string(),
+            ));
+        }
+
+        let frame = borrow
+            .downcast_mut::<GeneratorFrame>()
+            .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;
+
+        if frame.done {
+            return Err(PyError::named("StopIteration", String::new()));
+        }
+
+        // CPython: sending a non-None value to a just-started generator is an
+        // error.  A just-started generator has pc == 0 (never been resumed).
+        if frame.pc == 0 && !sent_value.is_none() {
+            return Err(PyError::named(
+                "TypeError",
+                "can't send non-None value to a just-started generator".to_string(),
+            ));
+        }
+
+        match self.resume_generator_with_exc(frame, None, sent_value) {
+            Ok(yielded) => Ok(yielded),
+            Err(ref e) if e.class_name_is("StopIteration") => {
+                Err(PyError::named("StopIteration", String::new()))
+            }
             Err(e) => Err(e),
         }
     }
