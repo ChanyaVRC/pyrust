@@ -189,6 +189,7 @@ fn popitem(dict: &mut IndexMap<PyKey, Value>) -> Result<Value> {
 fn key_to_value(k: PyKey) -> Value {
     match k {
         PyKey::Int(v) => Value::int(v),
+        PyKey::BigInt(v) => Value::bigint((*v).clone()),
         PyKey::Float(bits) => Value::float(f64::from_bits(bits)),
         PyKey::Str(s) => Value::string(s),
         PyKey::Bool(b) => Value::bool_(b),

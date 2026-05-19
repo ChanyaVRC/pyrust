@@ -146,6 +146,15 @@ impl Drop for EqGuard {
 #[derive(Debug, Clone)]
 pub enum PyKey {
     Int(i64),
+    /// Integer-valued `BigInt` key for values beyond `i64` range.  Produced by
+    /// `Value::to_key` when the BigInt does not fit in an `i64`.  Must hash and
+    /// compare equal to the corresponding `Float` key when the float is
+    /// integer-valued and exact (CPython: `hash(10**20) == hash(1e20)` and
+    /// `{1e20: 'a', 10**20: 'b'}` has length 1).
+    ///
+    /// Uses `Box` rather than `Rc` so that `PyKey` stays `Send + Sync`
+    /// (needed for `LazyLock<PyKey>` statics in `pyrust-builtins`).
+    BigInt(Box<BigInt>),
     Float(u64),
     Str(String),
     Bool(bool),
@@ -203,6 +212,24 @@ fn float_bits_as_exact_i64(bits: u64) -> Option<i64> {
     }
 }
 
+/// CPython's `Py_HASH_MODULUS = 2^61 - 1` (Mersenne prime).
+///
+/// Duplicated from `interpreter::helpers::PY_HASH_MODULUS` — pyrust-core
+/// cannot depend on the interpreter crate (that would create a cycle), so we
+/// keep a private copy here for `PyKey::BigInt` hashing.
+const PY_HASH_MODULUS_BIGINT: i64 = (1i64 << 61) - 1;
+
+/// Hash a `BigInt` key using CPython's Mersenne-prime scheme so that
+/// `PyKey::BigInt(n)` hashes identically to `hash(n)` and equal to the
+/// corresponding `PyKey::Float` when `bigint_float_eq(n, f)` holds.
+#[inline]
+fn pykey_hash_bigint(n: &BigInt) -> i64 {
+    let modulus = BigInt::from(PY_HASH_MODULUS_BIGINT);
+    let reduced = n.clone() % &modulus;
+    let raw = reduced.to_i64().unwrap_or(0);
+    if raw == -1 { -2 } else { raw }
+}
+
 impl PartialEq for PyKey {
     fn eq(&self, other: &Self) -> bool {
         // In CPython, `True == 1` and `False == 0`, and they hash equal, so
@@ -233,6 +260,22 @@ impl PartialEq for PyKey {
             }
             (PyKey::Float(bits), PyKey::Bool(b)) | (PyKey::Bool(b), PyKey::Float(bits)) => {
                 float_bits_as_exact_i64(*bits).is_some_and(|fi| fi == *b as i64)
+            }
+            // Cross-type: BigInt vs Int.  By construction `Value::to_key` only
+            // produces `PyKey::BigInt` for values that don't fit in i64, so
+            // this arm should never fire in practice; it is here for
+            // completeness.
+            (PyKey::BigInt(a), PyKey::Int(b)) | (PyKey::Int(b), PyKey::BigInt(a)) => {
+                *a.as_ref() == BigInt::from(*b)
+            }
+            // Cross-type: BigInt vs BigInt.
+            (PyKey::BigInt(a), PyKey::BigInt(b)) => a == b,
+            // Cross-type: Float vs BigInt.  Uses `bigint_float_eq` which
+            // round-trips the float through `BigInt::from_f64` and compares —
+            // this correctly handles non-finite and fractional floats (both
+            // return false, matching CPython).
+            (PyKey::Float(bits), PyKey::BigInt(n)) | (PyKey::BigInt(n), PyKey::Float(bits)) => {
+                bigint_float_eq(n, f64::from_bits(*bits))
             }
             (PyKey::Str(a), PyKey::Str(b)) => a == b,
             (PyKey::None, PyKey::None) => true,
@@ -269,16 +312,32 @@ impl Hash for PyKey {
             }
             PyKey::Float(bits) => {
                 if let Some(i) = float_bits_as_exact_i64(*bits) {
-                    // Integer-valued float: hash identically to PyKey::Int(i)
-                    // so that equal keys land in the same bucket.
+                    // Integer-valued float in i64 range: hash identically to
+                    // PyKey::Int(i) so that equal keys land in the same bucket.
                     0u8.hash(state);
                     i.hash(state);
                 } else {
-                    // Fractional or non-finite float: use a distinct tag so
-                    // it can never collide with Int/Bool hashes.
+                    // Float beyond i64 range (or fractional, or non-finite).
+                    // For integer-valued floats beyond i64 range, CPython's
+                    // `hash(float)` uses the Mersenne-prime reduction, matching
+                    // `hash(int)` for the same value.  We reproduce that here so
+                    // `PyKey::Float(1e20)` and `PyKey::BigInt(10**20)` collide.
+                    let f = f64::from_bits(*bits);
                     1u8.hash(state);
+                    if f.is_finite() && f.fract() == 0.0 {
+                        if let Some(big) = BigInt::from_f64(f) {
+                            pykey_hash_bigint(&big).hash(state);
+                            return;
+                        }
+                    }
                     bits.hash(state);
                 }
+            }
+            PyKey::BigInt(n) => {
+                // Large integer beyond i64 range: use tag 1 + Mersenne-prime
+                // hash, matching the Float path above for the same value.
+                1u8.hash(state);
+                pykey_hash_bigint(n).hash(state);
             }
             PyKey::Str(s) => {
                 2u8.hash(state);
@@ -2283,7 +2342,7 @@ impl Value {
             ValueKind::BigInt(v) => v
                 .to_i64()
                 .map(PyKey::Int)
-                .or_else(|| Some(PyKey::Str(v.to_string()))),
+                .or_else(|| Some(PyKey::BigInt(Box::new(v.clone())))),
             ValueKind::Float(v) => Some(PyKey::Float(v.to_bits())),
             ValueKind::Str(v) => Some(PyKey::Str(v.to_string())),
             ValueKind::Bool(v) => Some(PyKey::Bool(v)),
@@ -2715,6 +2774,7 @@ fn complex_repr(re: f64, im: f64) -> String {
 pub fn key_repr(key: &PyKey) -> String {
     match key {
         PyKey::Int(v) => v.to_string(),
+        PyKey::BigInt(v) => v.to_string(),
         PyKey::Float(v) => format_float(f64::from_bits(*v)),
         PyKey::Str(v) => format!("'{}'", escape_str(v)),
         PyKey::Bool(v) => {

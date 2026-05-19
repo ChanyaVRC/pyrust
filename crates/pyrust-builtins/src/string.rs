@@ -860,7 +860,7 @@ fn rsplit(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
 /// review: use the runtime class name, e.g. "MyKey").
 fn pykey_type_name(k: &PyKey) -> std::borrow::Cow<'static, str> {
     match k {
-        PyKey::Int(_) => std::borrow::Cow::Borrowed("int"),
+        PyKey::Int(_) | PyKey::BigInt(_) => std::borrow::Cow::Borrowed("int"),
         PyKey::Float(_) => std::borrow::Cow::Borrowed("float"),
         PyKey::Bool(_) => std::borrow::Cow::Borrowed("bool"),
         PyKey::Str(_) => std::borrow::Cow::Borrowed("str"),
