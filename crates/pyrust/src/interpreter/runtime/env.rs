@@ -459,6 +459,13 @@ impl Interpreter {
                         target.clone(),
                     ));
                 }
+                // `float.fromhex` is a class method: it can be accessed on
+                // both the class and any float instance.  The instance method
+                // table only covers regular instance methods, so we intercept
+                // it here explicitly, matching CPython's behaviour.
+                if matches!(target.kind(), ValueKind::Float(_)) && name == "fromhex" {
+                    return Ok(Value::builtin_function("float.fromhex"));
+                }
                 let type_name = pyrust_core::builtin_type_name(&target);
                 Err(PyError::named(
                     "AttributeError",

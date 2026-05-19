@@ -87,3 +87,7 @@ print(float.fromhex('0x1.0p-10000'))
 
 # fromhex with only fractional part (no integer digits before dot)
 print(float.fromhex('.8p0'))    # 0.5
+
+# fromhex is a class method: accessible on instances too
+print((1.5).fromhex('0x2.0p+0'))   # 2.0
+print('fromhex' in dir(1.5))        # True

@@ -2372,6 +2372,12 @@ fn builtin_method_names(type_name: &str) -> Vec<String> {
     if type_name == "str" {
         out.push("format".to_string());
     }
+    // `fromhex` is a class method installed separately in the float class
+    // attrs; it is not in float::METHODS (which only lists instance methods).
+    // Add it here so that `dir(1.5)` includes `fromhex`, matching CPython.
+    if type_name == "float" {
+        out.push("fromhex".to_string());
+    }
     out
 }
 
