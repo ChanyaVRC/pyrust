@@ -36,26 +36,19 @@ impl Interpreter {
     }
 
     fn try_exec_vm_script(&mut self, program: &[Stmt], repl_mode: bool) -> Option<Result<()>> {
-        // Build fastlocal registers for module-level names that are NOT captured
-        // by nested functions (those become cell vars and use StoreGlobal/env).
-        // This allows tight loops over plain variables to avoid HashMap overhead.
-        let empty: HashSet<String> = HashSet::new();
-        let local_names =
-            crate::interpreter::collect_local_names(&[], program, &empty, &empty);
-        // Cap script-level fastlocals so the register array stays small.
-        // Scripts with more names than this fall back to all-env mode where names
-        // live in a HashMap rather than a Vec<Option<Value>>.
-        const MAX_SCRIPT_LOCALS: usize = 200;
-        if local_names.len() > MAX_SCRIPT_LOCALS {
-            // Too many locals — fall back to all-env mode.
-            let local_index: Rc<HashMap<String, crate::bytecode::Reg>> = Rc::new(HashMap::new());
-            return self.try_exec_vm_script_with_index(program, local_index, repl_mode);
-        }
-        let local_index: Rc<HashMap<String, crate::bytecode::Reg>> = Rc::new(
-            (0u32..).zip(local_names.iter())
-                .map(|(i, n)| (n.clone(), i))
-                .collect(),
-        );
+        // Issue #706: always use all-env mode for script/module execution.
+        //
+        // Previously, pyrust allocated fastlocal registers for module-level names
+        // as an optimization, but that made it impossible for `globals()` to return
+        // a live dict: register writes bypassed `assign_name` entirely, so the
+        // `module_globals_dict` (and `env.values`) were never updated mid-execution.
+        //
+        // With an empty `local_index`, the compiler emits `StoreGlobal` for every
+        // module-level assignment.  `StoreGlobal` → `assign_name` → writes to both
+        // `env.values` and `module_globals_dict`, keeping the globals dict live.
+        // `LoadGlobal` checks `module_globals_dict` first, so `globals()["x"] = 99`
+        // is visible as the global `x` immediately (CPython parity, issue #706).
+        let local_index: Rc<HashMap<String, crate::bytecode::Reg>> = Rc::new(HashMap::new());
         self.try_exec_vm_script_with_index(program, local_index, repl_mode)
     }
 
@@ -65,9 +58,8 @@ impl Interpreter {
     /// Inserts only keys that are not already present, so a REPL second-pass
     /// or a future import path that has already seeded the namespace does not
     /// clobber any existing value.  User assignments made during script
-    /// execution override the pre-seeded values naturally: they either update
-    /// the fastlocal register (which shadows the env entry while executing)
-    /// or call `assign_name` which overwrites the env entry directly.
+    /// execution override the pre-seeded values naturally via `assign_name`,
+    /// which keeps both `env.values` and `module_globals_dict` in sync.
     fn seed_module_dunders(&mut self) {
         // `__builtins__` is the builtins module object in `__main__`.
         let builtins_val = crate::builtin_modules::load_builtin_module("builtins")
@@ -76,20 +68,38 @@ impl Interpreter {
         let me_ref = module_env(&self.env);
         let mut me = me_ref.borrow_mut();
         // Insert each dunder only if absent — do not overwrite an existing binding.
-        macro_rules! seed {
+        macro_rules! seed_env {
             ($name:literal, $val:expr) => {
-                me.values.entry($name.to_string()).or_insert_with(|| $val);
+                me.values.entry($name.to_string()).or_insert_with(|| $val)
             };
         }
-        seed!("__name__", Value::string("__main__"));
-        seed!("__doc__", Value::none());
-        seed!("__package__", Value::none());
-        seed!("__spec__", Value::none());
-        seed!("__loader__", Value::none());
-        seed!("__file__", Value::none());
-        seed!("__cached__", Value::none());
-        seed!("__annotations__", Value::dict(IndexMap::new()));
-        seed!("__builtins__", builtins_val);
+        seed_env!("__name__", Value::string("__main__"));
+        seed_env!("__doc__", Value::none());
+        seed_env!("__package__", Value::none());
+        seed_env!("__spec__", Value::none());
+        seed_env!("__loader__", Value::none());
+        seed_env!("__file__", Value::none());
+        seed_env!("__cached__", Value::none());
+        seed_env!("__annotations__", Value::dict(IndexMap::new()));
+        seed_env!("__builtins__", builtins_val);
+        // Mirror env values into module_globals_dict (issue #706: live globals dict).
+        // Only insert keys not already present in the dict (REPL re-run safety).
+        let dunders: &[&str] = &[
+            "__name__", "__doc__", "__package__", "__spec__", "__loader__",
+            "__file__", "__cached__", "__annotations__", "__builtins__",
+        ];
+        for name in dunders {
+            let key = PyKey::Str((*name).to_string());
+            let has_key = self
+                .module_globals_dict
+                .dict_with(|d| d.contains_key(&key))
+                .unwrap_or(false);
+            if !has_key {
+                if let Some(v) = me.values.get(*name).cloned() {
+                    let _ = self.module_globals_dict.dict_insert(key, v);
+                }
+            }
+        }
     }
 
     fn try_exec_vm_script_with_index(

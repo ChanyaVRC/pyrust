@@ -1100,6 +1100,14 @@ fn pass_binopinplace_downgrade(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         .enumerate()
         .map(|(i, insn)| {
             if let Insn::BinOpInPlace(dst, lhs, op, rhs) = insn
+                // Guard: num_locals > 0 ensures there IS a distinction between
+                // named locals (0..num_locals) and temp registers (>=num_locals).
+                // When num_locals == 0 (all-env module scope, issue #706), every
+                // register is a "temp" but may hold a module global loaded via
+                // LoadGlobal — such values can have user-defined __iadd__ etc.
+                // Downgrading those would skip __i<op>__ and break augmented
+                // assignment semantics for user-defined objects at module scope.
+                && num_locals > 0
                 && *lhs >= num_locals
                 && (*dst == *lhs || !reg_is_read_in(&insns[i + 1..], *lhs))
             {

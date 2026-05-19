@@ -1271,9 +1271,17 @@ impl Interpreter {
             // Write to the module env HashMap so LoadGlobal / post-run
             // inspection can find the new value.
             module_env(&self.env).borrow_mut().values.insert(name.clone(), value.clone());
+            // Mirror into the live module globals dict (issue #706).
+            let _ = self.module_globals_dict.dict_insert(
+                PyKey::Str(name.clone()),
+                value.clone(),
+            );
             // Also update the module-level fastlocal register if one exists
             // for this name.  Without this, `print(x)` at module scope reads
             // the stale register value and ignores the StoreGlobal write (#520).
+            // NOTE: with all-env mode (empty local_index, issue #706), there are
+            // no module-level fastlocal registers, so this loop is a no-op at
+            // module scope — kept for the (rare) non-all-env fallback path.
             // SAFETY: `script_view.regs_ptr` points to the script frame's
             // register file.  The script frame's dispatch loop uses `RegSlice`
             // (not `&mut [Value]`), so no LLVM `noalias` annotation covers the
@@ -1301,6 +1309,15 @@ impl Interpreter {
                 env_assign_local(&env, &name, value);
                 return;
             }
+        // Module scope: `self.env` is the root env (no parent).  Mirror into
+        // module_globals_dict so that `globals()` reflects the assignment (issue #706).
+        let is_module_scope = self.env.borrow().parent.is_none();
+        if is_module_scope {
+            let _ = self.module_globals_dict.dict_insert(
+                PyKey::Str(name.clone()),
+                value.clone(),
+            );
+        }
         env_assign_local(&self.env, &name, value);
     }
 

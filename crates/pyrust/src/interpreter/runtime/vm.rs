@@ -760,7 +760,24 @@ impl Interpreter {
                 }
                 Insn::LoadGlobal(dst, name_idx) => {
                     let name = pool_get!(code.names, *name_idx, "name");
+                    // Issue #706: look up the name through the env chain first
+                    // (this covers function-level cell vars, nonlocal bindings,
+                    // and module globals already in env.values).  Fall through to
+                    // module_globals_dict only when the env chain misses — that
+                    // handles names inserted via `globals()["x"] = val` (which
+                    // mutates the dict directly and bypasses assign_name /
+                    // env.values).  Putting the dict check BEFORE lookup_name
+                    // was wrong: a function-level cell var named "g" would have
+                    // shadowed by a same-named module global in the dict.
                     let val = if let Some(v) = vm_try!(self.lookup_name(name)) {
+                        v
+                    } else if let Some(v) = self
+                        .module_globals_dict
+                        .dict_with(|d| d.get(&PyKey::Str(name.to_string())).cloned())
+                        .flatten()
+                    {
+                        // Fallback: pick up globals()["x"] = val mutations that
+                        // write to the dict without going through assign_name.
                         v
                     } else if let Some(v) = self
                         .vm_frame_views
@@ -1281,10 +1298,17 @@ impl Interpreter {
                     let is_global = self.env.borrow().global_names.contains(&name);
                     if is_global {
                         // For `global x; del x` inside a function: target the module
-                        // env, not the function's local env.  Raise NameError if the
-                        // name is absent (matches CPython 3.12 behaviour).
+                        // env, not the function's local env.  Remove from both
+                        // env.values and module_globals_dict (issue #706); raise
+                        // NameError only if absent from both.
                         let me = module_env(&self.env);
-                        if me.borrow_mut().values.remove(&name).is_none() {
+                        let in_env = me.borrow_mut().values.remove(&name).is_some();
+                        let in_dict = self.module_globals_dict
+                            .dict_shift_remove(&PyKey::Str(name.clone()))
+                            .ok()
+                            .flatten()
+                            .is_some();
+                        if !in_env && !in_dict {
                             vm_try!(Err(PyError::named(
                                 "NameError",
                                 format!("name '{}' is not defined", name),
@@ -1294,6 +1318,8 @@ impl Interpreter {
                         // write-back loop in `program.rs` does not re-insert the
                         // stale value.  Mirrors the write-through that `assign_name`
                         // does for `StoreGlobal` (#520).
+                        // NOTE: with all-env mode (issue #706) local_index is empty,
+                        // so this loop is a no-op at module scope — kept for safety.
                         // SAFETY: `script_view.regs_ptr` points to the script
                         // frame's register file.  The script frame's dispatch
                         // loop uses `RegSlice` (not `&mut [Value]`), so no LLVM
@@ -1317,8 +1343,22 @@ impl Interpreter {
                         }
                     } else {
                         // Module-scope `del x` (or non-global local): remove from
-                        // current env.  Raise NameError if not present.
-                        if self.env.borrow_mut().values.remove(&name).is_none() {
+                        // current env.  At module scope, also remove from
+                        // module_globals_dict (issue #706) so LoadGlobal cannot
+                        // resurrect the deleted name.  Raise NameError if absent
+                        // from both.
+                        let in_env = self.env.borrow_mut().values.remove(&name).is_some();
+                        let is_module_scope = self.env.borrow().parent.is_none();
+                        let in_dict = if is_module_scope {
+                            self.module_globals_dict
+                                .dict_shift_remove(&PyKey::Str(name.clone()))
+                                .ok()
+                                .flatten()
+                                .is_some()
+                        } else {
+                            false
+                        };
+                        if !in_env && !in_dict {
                             vm_try!(Err(PyError::named(
                                 "NameError",
                                 format!("name '{}' is not defined", name),
