@@ -185,12 +185,24 @@ impl Lexer {
                 }
                 Some('a'..='z') | Some('A'..='Z') | Some('_') => {
                     let c = chars[pos];
-                    // Check for f-string prefix: f" or f' (or F" / F')
-                    if (c == 'f' || c == 'F')
+                    // rf"..." / fr"..." and all case variants — raw f-string
+                    if ((c == 'r' || c == 'R')
+                        && matches!(chars.get(pos + 1), Some('f') | Some('F'))
+                        && matches!(chars.get(pos + 2), Some('"') | Some('\'')))
+                        || ((c == 'f' || c == 'F')
+                            && matches!(chars.get(pos + 1), Some('r') | Some('R'))
+                            && matches!(chars.get(pos + 2), Some('"') | Some('\'')))
+                    {
+                        let quote = chars[pos + 2];
+                        let (tok, next) = lex_fstring(chars, pos + 3, quote, true)?;
+                        self.tokens.push(tok);
+                        pos = next;
+                    } else if (c == 'f' || c == 'F')
                         && matches!(chars.get(pos + 1), Some('"') | Some('\''))
                     {
+                        // Check for f-string prefix: f" or f' (or F" / F')
                         let quote = chars[pos + 1];
-                        let (tok, next) = lex_fstring(chars, pos + 2, quote)?;
+                        let (tok, next) = lex_fstring(chars, pos + 2, quote, false)?;
                         self.tokens.push(tok);
                         pos = next;
                     } else if (c == 'b' || c == 'B')
@@ -223,17 +235,6 @@ impl Lexer {
                         let (tok, next) = lex_bytes(&chars, pos + 2, true)?;
                         self.tokens.push(tok);
                         pos = next;
-                    } else if ((c == 'r' || c == 'R')
-                        && matches!(chars.get(pos + 1), Some('f') | Some('F'))
-                        && matches!(chars.get(pos + 2), Some('"') | Some('\'')))
-                        || ((c == 'f' || c == 'F')
-                            && matches!(chars.get(pos + 1), Some('r') | Some('R'))
-                            && matches!(chars.get(pos + 2), Some('"') | Some('\'')))
-                    {
-                        // Raw f-strings: rf"..." / fr"..." — not yet implemented
-                        return Err(PyError::Lex(
-                            "raw f-strings are not yet supported".to_string(),
-                        ));
                     } else {
                         let (tok, next) = lex_ident_or_keyword(chars, pos);
                         self.tokens.push(tok);
@@ -906,22 +907,60 @@ fn lex_string(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)>
     Err(PyError::Lex("unterminated string literal".to_string()))
 }
 
-/// Lex an f-string starting just after the opening quote character.
-/// `quote` is the quote char (`"` or `'`).
+/// Lex an f-string starting just after the opening quote character(s).
+///
+/// `start` points to the first content character (i.e. just after the `f"` /
+/// `rf"` / `fr"` prefix and the opening quote).  If the next two characters
+/// are also `quote`, this is a triple-quoted f-string; `start` is advanced
+/// past them automatically.
+///
+/// `quote` is the delimiter (`"` or `'`).
+/// `raw` — when `true`, backslash sequences are passed through literally
+/// (CPython raw mode); `{{` / `}}` double-brace escaping is still active.
+///
 /// Returns `(Token::FString(parts), next_pos)`.
-fn lex_fstring(chars: &[char], start: usize, quote: char) -> Result<(Token, usize)> {
+fn lex_fstring(chars: &[char], start: usize, quote: char, raw: bool) -> Result<(Token, usize)> {
     let mut parts: Vec<FStringPart> = Vec::new();
-    let mut pos = start;
     let mut literal = String::new();
 
-    while let Some(&c) = chars.get(pos) {
-        if c == quote {
-            // End of f-string.
-            if !literal.is_empty() {
-                parts.push(FStringPart::Literal(literal));
+    // Detect triple-quoted f-string.
+    let (triple, mut pos) =
+        if chars.get(start) == Some(&quote) && chars.get(start + 1) == Some(&quote) {
+            (true, start + 2)
+        } else {
+            (false, start)
+        };
+
+    loop {
+        let c = match chars.get(pos).copied() {
+            Some(c) => c,
+            None => {
+                return Err(PyError::Lex("unterminated f-string".to_string()));
             }
-            return Ok((Token::FString(parts), pos + 1));
+        };
+
+        // Check for closing delimiter.
+        if c == quote {
+            if triple {
+                if chars.get(pos + 1) == Some(&quote) && chars.get(pos + 2) == Some(&quote) {
+                    if !literal.is_empty() {
+                        parts.push(FStringPart::Literal(literal));
+                    }
+                    return Ok((Token::FString(parts), pos + 3));
+                }
+                // A lone quote inside a triple-quoted f-string is literal.
+                literal.push(c);
+                pos += 1;
+                continue;
+            } else {
+                // Single-quoted: end of f-string.
+                if !literal.is_empty() {
+                    parts.push(FStringPart::Literal(literal));
+                }
+                return Ok((Token::FString(parts), pos + 1));
+            }
         }
+
         if c == '{' {
             // Check for escaped {{ → literal {
             if chars.get(pos + 1) == Some(&'{') {
@@ -944,6 +983,7 @@ fn lex_fstring(chars: &[char], start: usize, quote: char) -> Result<(Token, usiz
             pos = next;
             continue;
         }
+
         if c == '}' {
             // Check for escaped }} → literal }
             if chars.get(pos + 1) == Some(&'}') {
@@ -953,20 +993,27 @@ fn lex_fstring(chars: &[char], start: usize, quote: char) -> Result<(Token, usiz
             }
             return Err(PyError::Lex("single '}' in f-string".to_string()));
         }
+
         if c == '\\' {
             pos += 1;
-            let escaped = chars
+            let next_ch = chars
                 .get(pos)
                 .copied()
                 .ok_or_else(|| PyError::Lex("unterminated escape in f-string".to_string()))?;
-            literal.push(map_escape(escaped)?);
+            if raw {
+                // Raw mode: pass backslash and the following character verbatim.
+                literal.push('\\');
+                literal.push(next_ch);
+            } else {
+                literal.push(map_escape(next_ch)?);
+            }
             pos += 1;
             continue;
         }
+
         literal.push(c);
         pos += 1;
     }
-    Err(PyError::Lex("unterminated f-string".to_string()))
 }
 
 /// Parse the expression inside `{...}` of an f-string.
