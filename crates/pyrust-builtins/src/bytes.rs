@@ -636,11 +636,17 @@ fn bytes_count(bytes: &[u8], args: &[Value]) -> Result<Value> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Parse start/end slice args (args[1], args[2]) into byte offsets, clamped to
-/// `[0, len]`.  Returns `Ok(Some((start, end)))` for a valid (possibly empty)
-/// range, or `Ok(None)` when `end < start` after clamping — an inverted range
-/// that CPython treats as "empty with no match" (find → -1, count → 0,
-/// startswith/endswith → False).
+/// Parse start/end slice args (args[1], args[2]) into byte offsets.
+///
+/// `end` is clamped to `[0, len]`.  `start` is clamped to `[0, len]` only
+/// when it is within bounds; a positive `start > len` is left unclamped so
+/// that the `end < start` guard below returns `None`, matching CPython's
+/// behaviour of returning -1 / ValueError for an out-of-bounds start.
+///
+/// Returns `Ok(Some((start, end)))` for a valid (possibly empty) range, or
+/// `Ok(None)` when `end < start` — an inverted or out-of-bounds-start range
+/// that CPython treats as "no match" (find → -1, count → 0,
+/// startswith/endswith → False, index/rindex → ValueError).
 fn bytes_slice_args(len: usize, args: &[Value]) -> Result<Option<(usize, usize)>> {
     let start: usize = match args.get(1).map(|v| v.kind()) {
         None => 0,
@@ -664,15 +670,16 @@ fn bytes_slice_args(len: usize, args: &[Value]) -> Result<Option<(usize, usize)>
             ));
         }
     };
-    let start = start.min(len);
-    // Don't clamp end up to start: an inverted range (end < start) must be
-    // distinguished from a genuinely empty range (end == start) because
-    // CPython returns -1/0/False for inverted ranges but a valid index for
-    // empty ranges at the boundary.
+    // Do NOT clamp start up to len here.  When the caller passes a positive
+    // start > len, leaving it unclamped means end (which IS clamped to len)
+    // satisfies end < start, triggering the None path below — the same
+    // result CPython returns for an out-of-bounds start.  Clamping start to
+    // len would incorrectly turn start=6 into start=5==end and produce a
+    // valid empty range (returning 5 for empty-sub rfind instead of -1).
     if end < start {
         Ok(None)
     } else {
-        Ok(Some((start, end)))
+        Ok(Some((start.min(len), end)))
     }
 }
 
