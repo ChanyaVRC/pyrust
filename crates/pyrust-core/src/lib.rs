@@ -365,7 +365,18 @@ pub struct UserFunction {
     /// Globally unique identity for fn_cache keying — stable across Rc drops/reallocations.
     pub id: u64,
     pub kind: UserFunctionKind,
+    /// The bare function name as declared.  Used for self-recursive slot lookup
+    /// and error messages.  Do not mutate through this field; user code that
+    /// assigns `f.__name__ = "x"` writes to `user_name` instead.
     pub name: String,
+    /// Fully-qualified compile-time name (e.g. `"outer.<locals>.inner"`).
+    /// Exposed as `f.__qualname__`.  User code that assigns `f.__qualname__ = "x"`
+    /// writes to `user_qualname` instead.
+    pub qualname: String,
+    /// Mutable override for `f.__name__`.  `None` means fall back to `name`.
+    pub user_name: RefCell<Option<String>>,
+    /// Mutable override for `f.__qualname__`.  `None` means fall back to `qualname`.
+    pub user_qualname: RefCell<Option<String>>,
     pub params: Vec<UserFunctionParam>,
     pub local_names: NameSet,
     pub local_index: Rc<HashMap<String, u32>>,
@@ -1335,6 +1346,9 @@ impl Value {
                 id: next_fn_id(),
                 kind: UserFunctionKind::Builtin(name),
                 name: name.to_string(),
+                qualname: name.to_string(),
+                user_name: RefCell::new(None),
+                user_qualname: RefCell::new(None),
                 params: Vec::new(),
                 local_names: Rc::new(HashSet::new()),
                 local_index: Rc::new(HashMap::new()),
@@ -1394,6 +1408,9 @@ impl Value {
             id: f.id,
             kind,
             name: f.name.clone(),
+            qualname: f.qualname.clone(),
+            user_name: RefCell::new(f.user_name.borrow().clone()),
+            user_qualname: RefCell::new(f.user_qualname.borrow().clone()),
             params: f.params.clone(),
             local_names: Rc::clone(&f.local_names),
             local_index: Rc::clone(&f.local_index),
@@ -3015,6 +3032,9 @@ mod tests {
             id: next_fn_id(),
             kind: UserFunctionKind::Regular,
             name: "f".to_string(),
+            qualname: "f".to_string(),
+            user_name: RefCell::new(None),
+            user_qualname: RefCell::new(None),
             params: Vec::new(),
             local_names: Rc::new(HashSet::new()),
             local_index: Rc::new(HashMap::new()),
