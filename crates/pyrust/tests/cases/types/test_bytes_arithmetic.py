@@ -1,0 +1,6 @@
+print(b"hello" + b" world")  # b'hello world'
+print(b"abc" * 3)             # b'abcabcabc'
+print(2 * b"xy")              # b'xyxy'
+print(b"x" * 0)               # b''
+print(b"x" * -1)              # b''
+print(b"" + b"abc")           # b'abc'
