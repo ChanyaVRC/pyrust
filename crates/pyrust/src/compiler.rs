@@ -722,6 +722,7 @@ fn lambda_captures_in_stmt(
         | Stmt::ImportFrom { .. }
         | Stmt::Global(_)
         | Stmt::Nonlocal(_)
+        | Stmt::AnnDeclare(_)
         | Stmt::Pass
         | Stmt::AnnDeclare(_)
         | Stmt::Break
@@ -1634,6 +1635,7 @@ fn collect_free_var_reads_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>) {
         | Stmt::ImportFrom { .. }
         | Stmt::Global(_)
         | Stmt::Nonlocal(_)
+        | Stmt::AnnDeclare(_)
         | Stmt::Pass
         | Stmt::AnnDeclare(_)
         | Stmt::Break
@@ -1991,6 +1993,7 @@ fn collect_transitive_free_vars_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>)
         | Stmt::ImportFrom { .. }
         | Stmt::Global(_)
         | Stmt::Nonlocal(_)
+        | Stmt::AnnDeclare(_)
         | Stmt::Pass
         | Stmt::AnnDeclare(_)
         | Stmt::Break
@@ -3194,6 +3197,7 @@ fn stmt_reads_var(stmt: &Stmt, name: &str) -> bool {
         }
         Stmt::Global(_)
         | Stmt::Nonlocal(_)
+        | Stmt::AnnDeclare(_)
         | Stmt::Break
         | Stmt::Continue
         | Stmt::Pass
@@ -6055,6 +6059,42 @@ impl Compiler {
 
         // Detect cell vars for the inner function.
         let inner_cell_vars = collect_cell_vars(body, &inner_index_rc);
+
+        // Compile-time validation: annotated names may not also be global or
+        // nonlocal in the same function scope.  CPython 3.12 raises SyntaxError
+        // at compile time; pyrust matches that behaviour here.
+        {
+            let ann_targets = crate::interpreter::collect_annotation_targets(body);
+            let mut conflicting: Vec<&str> = inner_global
+                .iter()
+                .filter(|n| ann_targets.contains(*n))
+                .map(String::as_str)
+                .collect();
+            conflicting.sort();
+            for n in conflicting {
+                self.failed = true;
+                self.is_syntax_error = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some(format!("annotated name '{}' can't be global", n));
+                }
+                return;
+            }
+
+            let mut conflicting: Vec<&str> = inner_nonlocal
+                .iter()
+                .filter(|n| ann_targets.contains(*n))
+                .map(String::as_str)
+                .collect();
+            conflicting.sort();
+            for n in conflicting {
+                self.failed = true;
+                self.is_syntax_error = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some(format!("annotated name '{}' can't be nonlocal", n));
+                }
+                return;
+            }
+        }
 
         let inner_global_rc = Rc::new(inner_global);
         let inner_nonlocal_rc = Rc::new(inner_nonlocal);

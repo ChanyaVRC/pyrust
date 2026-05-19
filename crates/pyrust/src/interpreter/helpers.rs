@@ -1451,7 +1451,7 @@ fn collect_local_names_from_block(
                     names.insert(name.clone());
                 }
             }
-            Stmt::Global(_) | Stmt::Nonlocal(_) => {}
+            Stmt::Global(_) | Stmt::Nonlocal(_) | Stmt::AnnDeclare(_) => {}
             Stmt::Import {
                 names: import_names,
             } => {
@@ -1648,6 +1648,69 @@ pub(crate) fn collect_nonlocal_names(body: &[Stmt]) -> HashSet<String> {
     collect_declared_names(body, |s| {
         if let Stmt::Nonlocal(names) = s { Some(names) } else { None }
     })
+}
+
+/// Collect all bare-annotation target names (`x: T` with no value) directly
+/// inside `body` — only at the top level of this scope (no recursion into
+/// nested `def` / `class` bodies, matching CPython's per-scope check).
+pub(crate) fn collect_annotation_targets(body: &[Stmt]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    collect_annotation_targets_from_block(body, &mut names);
+    names
+}
+
+fn collect_annotation_targets_from_block(body: &[Stmt], names: &mut HashSet<String>) {
+    for stmt in body {
+        match stmt {
+            Stmt::AnnDeclare(name) => {
+                names.insert(name.clone());
+            }
+            // Walk control-flow blocks: the annotation could appear inside an
+            // if/while/for/try/with/match arm at the same scope level.
+            Stmt::If { branches, else_branch } => {
+                for (_, branch) in branches {
+                    collect_annotation_targets_from_block(branch, names);
+                }
+                if let Some(branch) = else_branch {
+                    collect_annotation_targets_from_block(branch, names);
+                }
+            }
+            Stmt::While { body, else_branch, .. } => {
+                collect_annotation_targets_from_block(body, names);
+                if let Some(branch) = else_branch {
+                    collect_annotation_targets_from_block(branch, names);
+                }
+            }
+            Stmt::For { body, else_branch, .. } => {
+                collect_annotation_targets_from_block(body, names);
+                if let Some(branch) = else_branch {
+                    collect_annotation_targets_from_block(branch, names);
+                }
+            }
+            Stmt::Try { body, handlers, else_branch, finally_branch } => {
+                collect_annotation_targets_from_block(body, names);
+                for handler in handlers {
+                    collect_annotation_targets_from_block(&handler.body, names);
+                }
+                if let Some(branch) = else_branch {
+                    collect_annotation_targets_from_block(branch, names);
+                }
+                if let Some(branch) = finally_branch {
+                    collect_annotation_targets_from_block(branch, names);
+                }
+            }
+            Stmt::With { body, .. } => {
+                collect_annotation_targets_from_block(body, names);
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    collect_annotation_targets_from_block(&arm.body, names);
+                }
+            }
+            // Do not descend into nested def/class — each has its own scope.
+            _ => {}
+        }
+    }
 }
 
 fn collect_declared_names(body: &[Stmt], pick: fn(&Stmt) -> Option<&Vec<String>>) -> HashSet<String> {
@@ -2114,6 +2177,8 @@ fn is_pure_stmt(stmt: &Stmt, pure_fns: &std::collections::HashSet<String>) -> bo
     match stmt {
         // Explicit side effects on outer state.
         Stmt::Global(_) | Stmt::Nonlocal(_) => false,
+        // Bare annotation: no-op at runtime, no side effects.
+        Stmt::AnnDeclare(_) => true,
         // Object / container mutation.
         Stmt::AttrAssign { .. } | Stmt::IndexAssign { .. } | Stmt::SliceAssign { .. } => false,
         // Deletion and imports can affect shared state.

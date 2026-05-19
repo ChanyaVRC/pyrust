@@ -462,7 +462,8 @@ impl Parser {
             }
             // Bare annotation declaration without value.
             // If the target is a simple name, emit AnnDeclare so the compiler
-            // can allocate a local slot for it (CPython UnboundLocalError parity).
+            // can allocate a local slot for it (CPython UnboundLocalError parity)
+            // and check for global/nonlocal conflicts.
             // For attribute/index targets (e.g. `self.x: int`) there is no local
             // slot to declare, so this remains a no-op.
             if let Expr::Var(name) = &targets[0] {

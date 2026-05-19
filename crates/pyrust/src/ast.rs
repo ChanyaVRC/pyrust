@@ -85,6 +85,10 @@ pub enum Stmt {
     },
     Global(Vec<String>),
     Nonlocal(Vec<String>),
+    /// Bare annotation without a value: `name: Type`.  No-op at runtime but
+    /// carries the annotated name so the compiler can detect conflicts with
+    /// `global` / `nonlocal` declarations in the same scope.
+    AnnDeclare(String),
     If {
         branches: Vec<(Expr, Vec<Stmt>)>,
         else_branch: Option<Vec<Stmt>>,
