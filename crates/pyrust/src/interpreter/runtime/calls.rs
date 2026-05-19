@@ -117,6 +117,7 @@ impl Interpreter {
                 // working off the live Ref because they don't move
                 // the receiver.
                 enum Kind {
+                    Int,
                     Str,
                     List,
                     Dict,
@@ -124,6 +125,7 @@ impl Interpreter {
                     Other,
                 }
                 let kind_tag = match receiver.kind() {
+                    ValueKind::Int(_) | ValueKind::BigInt(_) => Kind::Int,
                     ValueKind::Str(_) => Kind::Str,
                     ValueKind::List(_) => Kind::List,
                     ValueKind::Dict(_) => Kind::Dict,
@@ -131,6 +133,7 @@ impl Interpreter {
                     _ => Kind::Other,
                 };
                 match kind_tag {
+                    Kind::Int => pyrust_builtins::int::call(method, &receiver, &pos),
                     Kind::Str => self.call_str_method(method, receiver, pos),
                     Kind::List => pyrust_builtins::list::call(method, &receiver, pos, &kw),
                     Kind::Dict => self.call_dict_method(method, receiver, pos),
@@ -224,7 +227,7 @@ impl Interpreter {
             ValueKind::BuiltinFunction(name)
                 if name
                     .split_once('.')
-                    .is_some_and(|(t, _)| matches!(t, "str" | "list" | "tuple" | "dict" | "set" | "complex" | "frozenset")) =>
+                    .is_some_and(|(t, _)| matches!(t, "int" | "str" | "list" | "tuple" | "dict" | "set" | "complex" | "frozenset")) =>
             {
                 let (type_name, method) = name.split_once('.').unwrap();
                 let self_val = args
@@ -248,6 +251,7 @@ impl Interpreter {
                 // list"` runtime error instead of the descriptor TypeError that
                 // CPython raises.  See Copilot review on #463.
                 let kind_ok = match (type_name, self_val.kind()) {
+                    ("int", ValueKind::Int(_) | ValueKind::BigInt(_)) => true,
                     ("str", ValueKind::Str(_)) => true,
                     ("list", ValueKind::List(_)) => true,
                     ("tuple", ValueKind::Tuple(_)) => true,
@@ -268,6 +272,7 @@ impl Interpreter {
                     ));
                 }
                 match type_name {
+                    "int" => pyrust_builtins::int::call(method, &self_val, &pos),
                     "str" => self.call_str_method(method, self_val, pos),
                     "list" => pyrust_builtins::list::call(method, &self_val, pos, &kw),
                     "tuple" => match self_val.kind() {
@@ -2272,6 +2277,7 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
             names
         }
         ValueKind::PyModule(module) => module.borrow().attrs.keys().cloned().collect(),
+        ValueKind::Int(_) | ValueKind::BigInt(_) => builtin_method_names("int"),
         ValueKind::Str(_) => builtin_method_names("str"),
         ValueKind::List(_) => builtin_method_names("list"),
         ValueKind::Tuple(_) => builtin_method_names("tuple"),
@@ -2299,6 +2305,7 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
 /// currently get a partial answer.  Tracked separately.
 fn builtin_method_names(type_name: &str) -> Vec<String> {
     let names: &[&str] = match type_name {
+        "int" => pyrust_builtins::int::METHODS,
         "str" => pyrust_builtins::string::METHODS,
         "list" => pyrust_builtins::list::METHODS,
         "tuple" => pyrust_builtins::tuple::METHODS,

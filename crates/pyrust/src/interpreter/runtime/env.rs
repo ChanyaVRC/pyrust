@@ -902,6 +902,7 @@ impl Interpreter {
 /// Used by `get_attr` to produce `BuiltinBoundMethod` values.
 fn builtin_has_method(target: &Value, name: &str) -> bool {
     match target.kind() {
+        ValueKind::Int(_) | ValueKind::BigInt(_) => pyrust_builtins::int::has_method(name),
         ValueKind::Str(_) => pyrust_builtins::string::has_method(name),
         ValueKind::List(_) => pyrust_builtins::list::has_method(name),
         ValueKind::Tuple(_) => pyrust_builtins::tuple::has_method(name),
