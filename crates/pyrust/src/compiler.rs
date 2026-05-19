@@ -1243,17 +1243,17 @@ fn collect_class_method_outer_refs(
             Stmt::While {
                 body, else_branch, ..
             } => {
-                collect_class_method_outer_refs(body, local_index, cells);
+                collect_class_method_outer_refs(body, local_index, outer_is_class_scope, cells);
                 if let Some(b) = else_branch {
-                    collect_class_method_outer_refs(b, local_index, cells);
+                    collect_class_method_outer_refs(b, local_index, outer_is_class_scope, cells);
                 }
             }
             Stmt::For {
                 body, else_branch, ..
             } => {
-                collect_class_method_outer_refs(body, local_index, cells);
+                collect_class_method_outer_refs(body, local_index, outer_is_class_scope, cells);
                 if let Some(b) = else_branch {
-                    collect_class_method_outer_refs(b, local_index, cells);
+                    collect_class_method_outer_refs(b, local_index, outer_is_class_scope, cells);
                 }
             }
             Stmt::Try {
@@ -1262,23 +1262,33 @@ fn collect_class_method_outer_refs(
                 else_branch,
                 finally_branch,
             } => {
-                collect_class_method_outer_refs(body, local_index, cells);
+                collect_class_method_outer_refs(body, local_index, outer_is_class_scope, cells);
                 for h in handlers {
-                    collect_class_method_outer_refs(&h.body, local_index, cells);
+                    collect_class_method_outer_refs(
+                        &h.body,
+                        local_index,
+                        outer_is_class_scope,
+                        cells,
+                    );
                 }
                 if let Some(b) = else_branch {
-                    collect_class_method_outer_refs(b, local_index, cells);
+                    collect_class_method_outer_refs(b, local_index, outer_is_class_scope, cells);
                 }
                 if let Some(b) = finally_branch {
-                    collect_class_method_outer_refs(b, local_index, cells);
+                    collect_class_method_outer_refs(b, local_index, outer_is_class_scope, cells);
                 }
             }
             Stmt::With { body, .. } => {
-                collect_class_method_outer_refs(body, local_index, cells);
+                collect_class_method_outer_refs(body, local_index, outer_is_class_scope, cells);
             }
             Stmt::Match { arms, .. } => {
                 for arm in arms {
-                    collect_class_method_outer_refs(&arm.body, local_index, cells);
+                    collect_class_method_outer_refs(
+                        &arm.body,
+                        local_index,
+                        outer_is_class_scope,
+                        cells,
+                    );
                 }
             }
             _ => {}
