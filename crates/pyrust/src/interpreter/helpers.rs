@@ -1496,6 +1496,13 @@ fn collect_local_names_from_block(
             | Stmt::Break
             | Stmt::Continue
             | Stmt::Pass => {}
+            Stmt::AnnAssign { target, .. } => {
+                if !global_names.contains(target) && !nonlocal_names.contains(target) {
+                    names.insert(target.clone());
+                }
+            }
+            // Bare annotation — no-op at runtime, does not create a local.
+            Stmt::AnnDeclare(_) => {}
             // Walk expressions for walrus operator targets.
             Stmt::Expr(e) => {
                 collect_walrus_targets_in_expr(e, names, global_names, nonlocal_names);
@@ -1708,6 +1715,69 @@ fn collect_annotation_targets_from_block(body: &[Stmt], names: &mut HashSet<Stri
                 }
             }
             // Do not descend into nested def/class — each has its own scope.
+            _ => {}
+        }
+    }
+}
+
+/// Collect the names used as annotation targets (`x: T` or `x: T = v`) in the
+/// direct body, without descending into nested `Def` or `Class` scopes.  Used
+/// by `compile_def` to detect conflicts between annotated names and
+/// `global`/`nonlocal` declarations (CPython raises `SyntaxError` for these).
+pub(crate) fn collect_annotation_target_names(body: &[Stmt]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    collect_annotation_target_names_from_block(body, &mut names);
+    names
+}
+
+fn collect_annotation_target_names_from_block(body: &[Stmt], names: &mut HashSet<String>) {
+    for stmt in body {
+        match stmt {
+            Stmt::AnnAssign { name, .. } | Stmt::AnnDeclare(name) => {
+                names.insert(name.clone());
+            }
+            // Do not descend into nested function/class scopes.
+            Stmt::Def { .. } | Stmt::Class { .. } => {}
+            Stmt::If { branches, else_branch } => {
+                for (_, branch) in branches {
+                    collect_annotation_target_names_from_block(branch, names);
+                }
+                if let Some(branch) = else_branch {
+                    collect_annotation_target_names_from_block(branch, names);
+                }
+            }
+            Stmt::While { body, else_branch, .. } => {
+                collect_annotation_target_names_from_block(body, names);
+                if let Some(branch) = else_branch {
+                    collect_annotation_target_names_from_block(branch, names);
+                }
+            }
+            Stmt::For { body, else_branch, .. } => {
+                collect_annotation_target_names_from_block(body, names);
+                if let Some(branch) = else_branch {
+                    collect_annotation_target_names_from_block(branch, names);
+                }
+            }
+            Stmt::Try { body, handlers, else_branch, finally_branch } => {
+                collect_annotation_target_names_from_block(body, names);
+                for handler in handlers {
+                    collect_annotation_target_names_from_block(&handler.body, names);
+                }
+                if let Some(branch) = else_branch {
+                    collect_annotation_target_names_from_block(branch, names);
+                }
+                if let Some(branch) = finally_branch {
+                    collect_annotation_target_names_from_block(branch, names);
+                }
+            }
+            Stmt::With { body, .. } => {
+                collect_annotation_target_names_from_block(body, names);
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    collect_annotation_target_names_from_block(&arm.body, names);
+                }
+            }
             _ => {}
         }
     }

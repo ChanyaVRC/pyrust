@@ -208,6 +208,68 @@ mod tests {
     }
 
     #[test]
+    fn annotated_assign_with_global_is_syntax_error() {
+        // `x: int = 99` combined with `global x` must raise SyntaxError.
+        let src = "x = 0\ndef f():\n    global x\n    x: int = 99\nf()\n";
+        let tokens = Lexer::new(src).unwrap().into_tokens();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut interpreter = Interpreter::default();
+
+        let error = interpreter.exec_program(&program, false).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "SyntaxError: annotated name 'x' can't be global"
+        );
+    }
+
+    #[test]
+    fn annotated_assign_with_nonlocal_is_syntax_error() {
+        // `x: int = 5` combined with `nonlocal x` must raise SyntaxError.
+        let src =
+            "def outer():\n    x = 1\n    def inner():\n        nonlocal x\n        x: int = 5\n    inner()\nouter()\n";
+        let tokens = Lexer::new(src).unwrap().into_tokens();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut interpreter = Interpreter::default();
+
+        let error = interpreter.exec_program(&program, false).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "SyntaxError: annotated name 'x' can't be nonlocal"
+        );
+    }
+
+    #[test]
+    fn bare_annotation_with_global_is_syntax_error() {
+        // `x: int` (bare annotation, no value) combined with `global x` must raise SyntaxError.
+        let src = "x = 0\ndef f():\n    global x\n    x: int\nf()\n";
+        let tokens = Lexer::new(src).unwrap().into_tokens();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut interpreter = Interpreter::default();
+
+        let error = interpreter.exec_program(&program, false).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "SyntaxError: annotated name 'x' can't be global"
+        );
+    }
+
+    #[test]
+    fn annotated_assign_without_conflict_works() {
+        // `x: int = 5` with no global/nonlocal conflict should work normally.
+        let interpreter = run_program("def f():\n    x: int = 42\n    return x\nresult = f()\n");
+        assert_eq!(
+            interpreter.lookup_name("result").unwrap(),
+            Some(Value::int(42))
+        );
+    }
+
+    #[test]
     fn return_at_module_level_is_syntax_error() {
         let tokens = Lexer::new("return\n").unwrap().into_tokens();
         let mut parser = Parser::new(tokens);

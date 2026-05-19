@@ -718,6 +718,7 @@ fn lambda_captures_in_stmt(
                 lambda_captures_in_expr(v, local_index, is_class_scope, cells);
             }
         }
+        Stmt::AnnDeclare(_) => {}
         Stmt::Import { .. }
         | Stmt::ImportFrom { .. }
         | Stmt::Global(_)
@@ -987,6 +988,11 @@ fn collect_class_body_names_textual(
         match stmt {
             Stmt::Assign(target, _) => {
                 collect_assign_target_textual(target, ordered, seen, body_local);
+            }
+            Stmt::AnnAssign { target, .. } => {
+                if body_local.contains(target) && seen.insert(target.clone()) {
+                    ordered.push(target.clone());
+                }
             }
             Stmt::Def { name, .. } | Stmt::Class { name, .. } => {
                 if body_local.contains(name) && seen.insert(name.clone()) {
@@ -1631,6 +1637,7 @@ fn collect_free_var_reads_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>) {
                 collect_free_var_reads_in_expr(v, uses);
             }
         }
+        Stmt::AnnDeclare(_) => {}
         Stmt::Import { .. }
         | Stmt::ImportFrom { .. }
         | Stmt::Global(_)
@@ -1998,6 +2005,7 @@ fn collect_transitive_free_vars_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>)
                 collect_transitive_free_vars_in_expr(v, uses);
             }
         }
+        Stmt::AnnDeclare(_) => {}
         Stmt::Return(None)
         | Stmt::Import { .. }
         | Stmt::ImportFrom { .. }
@@ -2580,6 +2588,9 @@ fn collect_written_in(body: &[Stmt], names: &mut HashSet<String>) {
             Stmt::Assign(target, _) | Stmt::AugAssign { target, .. } => {
                 collect_written_target(target, names);
             }
+            Stmt::AnnAssign { target, .. } => {
+                names.insert(target.clone());
+            }
             Stmt::If {
                 branches,
                 else_branch,
@@ -2922,6 +2933,10 @@ fn stmt_safe_for_index_rewrite(stmt: &Stmt, i_name: &str, c_name: &str) -> bool 
                     .is_none_or(|b| body_index_pattern_is_safe(b, i_name, c_name))
         }
         Stmt::Pass | Stmt::AnnDeclare(_) | Stmt::Global(_) | Stmt::Nonlocal(_) => true,
+        Stmt::AnnAssign {
+            value: Some(v), ..
+        } => expr_safe(v, i_name, c_name),
+        Stmt::AnnAssign { value: None, .. } => true,
         Stmt::Delete(exprs) => {
             // `del c[i]` is unsafe; any other delete is OK as long as it
             // doesn't reference i in a bare way.
@@ -3205,6 +3220,7 @@ fn stmt_reads_var(stmt: &Stmt, name: &str) -> bool {
             expr_reads_var(annotation, name)
                 || value.as_ref().is_some_and(|v| expr_reads_var(v, name))
         }
+        Stmt::AnnDeclare(_) => false,
         Stmt::Global(_)
         | Stmt::Nonlocal(_)
         | Stmt::AnnDeclare(_)
@@ -4170,6 +4186,9 @@ impl Compiler {
                 value,
             } => {
                 self.compile_ann_assign(name, annotation, value.as_ref().map(|v| v as &Expr));
+            }
+            Stmt::AnnDeclare(_) => {
+                // Bare annotation with no value: no-op at runtime.
             }
             Stmt::AugAssign { target, op, expr } => {
                 self.compile_aug_assign(target, *op, expr);
@@ -6132,6 +6151,33 @@ impl Compiler {
                 if self.error_msg.is_none() {
                     self.error_msg =
                         Some(format!("no binding for nonlocal '{}' found", nonlocal_name));
+                }
+                return;
+            }
+        }
+
+        // Compile-time validation: an annotated name (`x: T` or `x: T = v`)
+        // cannot also be declared `global` or `nonlocal` in the same function
+        // scope.  CPython 3.12 raises `SyntaxError: annotated name 'x' can't
+        // be global` / `can't be nonlocal`.
+        let ann_targets = crate::interpreter::collect_annotation_target_names(body);
+        let mut sorted_ann: Vec<&String> = ann_targets.iter().collect();
+        sorted_ann.sort();
+        for ann_name in sorted_ann {
+            if inner_global_rc.contains(ann_name) {
+                self.failed = true;
+                self.is_syntax_error = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some(format!("annotated name '{}' can't be global", ann_name));
+                }
+                return;
+            }
+            if inner_nonlocal_rc.contains(ann_name) {
+                self.failed = true;
+                self.is_syntax_error = true;
+                if self.error_msg.is_none() {
+                    self.error_msg =
+                        Some(format!("annotated name '{}' can't be nonlocal", ann_name));
                 }
                 return;
             }
