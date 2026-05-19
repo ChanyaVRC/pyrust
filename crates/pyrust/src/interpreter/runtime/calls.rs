@@ -135,7 +135,15 @@ impl Interpreter {
                     _ => Kind::Other,
                 };
                 match kind_tag {
-                    Kind::Int => pyrust_builtins::int::call(method, &receiver, &pos),
+                    Kind::Int => {
+                        if !kw.is_empty() {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!("int.{method}() takes no keyword arguments"),
+                            ));
+                        }
+                        pyrust_builtins::int::call(method, &receiver, &pos)
+                    }
                     Kind::Str => self.call_str_method(method, receiver, pos),
                     Kind::List => pyrust_builtins::list::call(method, &receiver, pos, &kw),
                     Kind::Dict => self.call_dict_method(method, receiver, pos),
@@ -274,7 +282,15 @@ impl Interpreter {
                     ));
                 }
                 match type_name {
-                    "int" => pyrust_builtins::int::call(method, &self_val, &pos),
+                    "int" => {
+                        if !kw.is_empty() {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!("int.{method}() takes no keyword arguments"),
+                            ));
+                        }
+                        pyrust_builtins::int::call(method, &self_val, &pos)
+                    }
                     "str" => self.call_str_method(method, self_val, pos),
                     "list" => pyrust_builtins::list::call(method, &self_val, pos, &kw),
                     "tuple" => match self_val.kind() {

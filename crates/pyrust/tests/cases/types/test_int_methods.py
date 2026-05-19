@@ -51,3 +51,35 @@ try:
     (5).is_integer(1)
 except TypeError as e:
     print(e)
+
+# TypeError: unexpected keyword arguments (bound-method form)
+try:
+    (5).bit_length(x=1)
+except TypeError as e:
+    print(e)
+
+try:
+    (5).bit_count(x=1)
+except TypeError as e:
+    print(e)
+
+try:
+    (5).is_integer(x=1)
+except TypeError as e:
+    print(e)
+
+# TypeError: unexpected keyword arguments (descriptor/unbound form)
+try:
+    int.bit_length(5, x=1)
+except TypeError as e:
+    print(e)
+
+try:
+    int.bit_count(5, x=1)
+except TypeError as e:
+    print(e)
+
+try:
+    int.is_integer(5, x=1)
+except TypeError as e:
+    print(e)
