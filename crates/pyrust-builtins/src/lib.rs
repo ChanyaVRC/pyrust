@@ -1,4 +1,5 @@
 pub mod bound_method;
+pub mod bytes;
 pub mod cached_property;
 pub mod complex;
 pub mod dict;
@@ -148,6 +149,17 @@ mod method_table_drift_guard {
                     !is_fallback(e),
                     "frozenset::call({name}) hit fallback: {e:?}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn bytes_methods_dispatched() {
+        let receiver = Value::bytes(vec![]);
+        for &name in super::bytes::METHODS {
+            let r = super::bytes::call(name, &receiver, &[]);
+            if let Err(ref e) = r {
+                assert!(!is_fallback(e), "bytes::call({name}) hit fallback: {e:?}");
             }
         }
     }

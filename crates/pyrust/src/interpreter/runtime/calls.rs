@@ -121,6 +121,7 @@ impl Interpreter {
                 // the receiver.
                 enum Kind {
                     Int,
+                    Bytes,
                     Str,
                     List,
                     Dict,
@@ -131,6 +132,7 @@ impl Interpreter {
                     // bool is a subclass of int in CPython; route to the int
                     // dispatch so True.bit_length() / True.is_integer() work.
                     ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Bool(_) => Kind::Int,
+                    ValueKind::Bytes(_) => Kind::Bytes,
                     ValueKind::Str(_) => Kind::Str,
                     ValueKind::List(_) => Kind::List,
                     ValueKind::Dict(_) => Kind::Dict,
@@ -147,6 +149,7 @@ impl Interpreter {
                         }
                         pyrust_builtins::int::call(method, &receiver, &pos)
                     }
+                    Kind::Bytes => pyrust_builtins::bytes::call(method, &receiver, &pos),
                     Kind::Str => self.call_str_method(method, receiver, pos),
                     Kind::List => pyrust_builtins::list::call(method, &receiver, pos, &kw),
                     Kind::Dict => self.call_dict_method(method, receiver, pos),
@@ -240,7 +243,7 @@ impl Interpreter {
             ValueKind::BuiltinFunction(name)
                 if name
                     .split_once('.')
-                    .is_some_and(|(t, _)| matches!(t, "int" | "str" | "list" | "tuple" | "dict" | "set" | "complex" | "frozenset")) =>
+                    .is_some_and(|(t, _)| matches!(t, "int" | "bytes" | "str" | "list" | "tuple" | "dict" | "set" | "complex" | "frozenset")) =>
             {
                 let (type_name, method) = name.split_once('.').unwrap();
                 let self_val = args
@@ -265,6 +268,7 @@ impl Interpreter {
                 // CPython raises.  See Copilot review on #463.
                 let kind_ok = match (type_name, self_val.kind()) {
                     ("int", ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Bool(_)) => true,
+                    ("bytes", ValueKind::Bytes(_)) => true,
                     ("str", ValueKind::Str(_)) => true,
                     ("list", ValueKind::List(_)) => true,
                     ("tuple", ValueKind::Tuple(_)) => true,
@@ -294,6 +298,7 @@ impl Interpreter {
                         }
                         pyrust_builtins::int::call(method, &self_val, &pos)
                     }
+                    "bytes" => pyrust_builtins::bytes::call(method, &self_val, &pos),
                     "str" => self.call_str_method(method, self_val, pos),
                     "list" => pyrust_builtins::list::call(method, &self_val, pos, &kw),
                     "tuple" => match self_val.kind() {
@@ -2301,6 +2306,7 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
         ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Bool(_) => {
             builtin_method_names("int")
         }
+        ValueKind::Bytes(_) => builtin_method_names("bytes"),
         ValueKind::Str(_) => builtin_method_names("str"),
         ValueKind::List(_) => builtin_method_names("list"),
         ValueKind::Tuple(_) => builtin_method_names("tuple"),
@@ -2329,6 +2335,7 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
 fn builtin_method_names(type_name: &str) -> Vec<String> {
     let names: &[&str] = match type_name {
         "int" => pyrust_builtins::int::METHODS,
+        "bytes" => pyrust_builtins::bytes::METHODS,
         "str" => pyrust_builtins::string::METHODS,
         "list" => pyrust_builtins::list::METHODS,
         "tuple" => pyrust_builtins::tuple::METHODS,
