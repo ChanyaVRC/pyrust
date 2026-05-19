@@ -285,6 +285,7 @@ pub(crate) struct PrimitiveClasses {
     pub(crate) frozenset_class: Rc<RefCell<PyClass>>,
     pub(crate) int_class: Rc<RefCell<PyClass>>,
     pub(crate) list_class: Rc<RefCell<PyClass>>,
+    pub(crate) mappingproxy_class: Rc<RefCell<PyClass>>,
     pub(crate) set_class: Rc<RefCell<PyClass>>,
     pub(crate) str_class: Rc<RefCell<PyClass>>,
     pub(crate) tuple_class: Rc<RefCell<PyClass>>,
@@ -347,6 +348,7 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
         float_class: make("float", None),
         frozenset_class,
         list_class,
+        mappingproxy_class: make("mappingproxy", None),
         set_class,
         str_class,
         tuple_class,
@@ -456,6 +458,7 @@ pub(crate) fn primitive_class_by_name(name: &str) -> Option<Rc<RefCell<PyClass>>
             "frozenset" => &c.frozenset_class,
             "int" => &c.int_class,
             "list" => &c.list_class,
+            "mappingproxy" => &c.mappingproxy_class,
             "set" => &c.set_class,
             "str" => &c.str_class,
             "tuple" => &c.tuple_class,
@@ -481,6 +484,11 @@ pub(crate) fn primitive_class_for_value(v: &Value) -> Option<Rc<RefCell<PyClass>
         ValueKind::Bytes(_) => "bytes",
         ValueKind::Complex(_, _) => "complex",
         ValueKind::BuiltinObject { ops, .. } if ops.type_name() == "frozenset" => "frozenset",
+        ValueKind::BuiltinObject { ops, .. }
+            if ops.type_name() == pyrust_builtins::mapping_proxy::TYPE_NAME =>
+        {
+            "mappingproxy"
+        }
         _ => return None,
     };
     primitive_class_by_name(name)
@@ -561,6 +569,13 @@ pub(crate) fn primitive_class_isinstance_fast(
             return Some(matches!(
                 obj.kind(),
                 ValueKind::BuiltinObject { ops, .. } if ops.type_name() == "frozenset"
+            ));
+        }
+        if cls_ptr == Rc::as_ptr(&c.mappingproxy_class) {
+            return Some(matches!(
+                obj.kind(),
+                ValueKind::BuiltinObject { ops, .. }
+                    if ops.type_name() == pyrust_builtins::mapping_proxy::TYPE_NAME
             ));
         }
         None

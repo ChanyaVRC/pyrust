@@ -925,6 +925,18 @@ pyrust_module! {
                         }
                     }
                 }
+                ValueKind::BuiltinObject { ops, .. }
+                    if ops.type_name() == pyrust_builtins::mapping_proxy::TYPE_NAME =>
+                {
+                    if let Some(class_rc) =
+                        pyrust_builtins::mapping_proxy::as_class_rc(&args[2].value)
+                    {
+                        let class = class_rc.borrow();
+                        for (k, v) in class.attrs.iter() {
+                            attrs.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
                 _ => return Err(PyError::named(
                     "TypeError",
                     format!("{FN_NAME}() argument 3 must be a dict"),
@@ -1078,11 +1090,7 @@ pyrust_module! {
                 Ok(Value::dict(dict))
             }
             ValueKind::PyClass(class) => {
-                let mut dict: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
-                for (k, v) in class.borrow().attrs.iter() {
-                    dict.insert(PyKey::Str(k.clone()), v.clone());
-                }
-                Ok(Value::dict(dict))
+                Ok(pyrust_builtins::mapping_proxy::mapping_proxy(Rc::clone(class)))
             }
             _ => Err(PyError::named(
                 "TypeError",
@@ -1837,13 +1845,35 @@ pyrust_module! {
     fn dict(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.is_empty() {
-            Ok(Value::dict(indexmap::IndexMap::new()))
-        } else {
-            Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}() with arguments is not yet supported"),
-            ))
+            return Ok(Value::dict(indexmap::IndexMap::new()));
         }
+        if args.len() == 1 {
+            match args[0].value.kind() {
+                ValueKind::Dict(map) => {
+                    return Ok(Value::dict(map.clone()));
+                }
+                ValueKind::BuiltinObject { ops, .. }
+                    if ops.type_name() == pyrust_builtins::mapping_proxy::TYPE_NAME =>
+                {
+                    if let Some(class_rc) =
+                        pyrust_builtins::mapping_proxy::as_class_rc(&args[0].value)
+                    {
+                        let class = class_rc.borrow();
+                        let mut d: indexmap::IndexMap<PyKey, Value> =
+                            indexmap::IndexMap::new();
+                        for (k, v) in class.attrs.iter() {
+                            d.insert(PyKey::Str(k.clone()), v.clone());
+                        }
+                        return Ok(Value::dict(d));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Err(PyError::named(
+            "TypeError",
+            format!("{FN_NAME}() with arguments is not yet supported"),
+        ))
     }
 
     /// CPython: print(*objects, sep=' ', end='\n', file=sys.stdout, flush=False).
