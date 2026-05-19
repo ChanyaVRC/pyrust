@@ -33,7 +33,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_thread_jumps(code.insns);
     let insns = pass_binop_const_fusion(insns, num_locals);
     let insns = pass_fold_const_tuple(insns, num_locals, &mut consts);
-    let insns = pass_const_fold(insns, &mut consts);
+    let insns = pass_const_fold(insns, &mut consts, num_locals);
 
     let insns = pass_algebraic_simplify(insns, &mut consts);
     let insns = pass_unary_fold(insns, num_locals, &mut consts);
@@ -320,7 +320,7 @@ fn pass_cmpjump_fusion(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
 /// The map is cleared at branch/loop instructions where we cannot guarantee
 /// which path was taken at runtime, and also at loop headers (targets of
 /// backward jumps) to avoid incorrectly folding loop conditions.
-fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn> {
+fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -> Vec<Insn> {
     // Pre-pass: collect every instruction index that is the target of *any*
     // jump (forward or backward).  At every such basic-block boundary the
     // known-constant map must be cleared, otherwise a value that was assigned
@@ -430,6 +430,28 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn> {
             | Insn::Unpack(..)
             | Insn::UnpackEx { .. }) => {
                 known.clear();
+                out.push(insn);
+            }
+            // Call instructions: invalidate the destination register AND any
+            // named-local registers (r < num_locals) that may have been
+            // updated via the `assign_name` write-through.  A user-defined
+            // callee that declares `global x` and assigns it will, at
+            // runtime, write the new value directly into the module-level
+            // fastlocal register through `vm_frame_views`.  The optimizer
+            // must not retain a stale `LoadConst`-derived entry for such a
+            // register across the call boundary.
+            //
+            // Temporaries (r >= num_locals) are safe to retain: they are
+            // single-use scratch registers that no external callee can reach.
+            insn @ (Insn::Call(..)
+            | Insn::CallMemo(..)
+            | Insn::CallMethod { .. }
+            | Insn::CallMethodExpanded { .. }
+            | Insn::MakeClass(..)) => {
+                known.retain(|&r, _| r >= num_locals);
+                if let Some(dst) = writable_dst(&insn) {
+                    known.remove(&dst);
+                }
                 out.push(insn);
             }
             // Any other instruction: invalidate dst if we can identify it.
@@ -2989,7 +3011,7 @@ mod tests {
             Insn::BinOpConst(1, 0, BinaryOp::Add, 1), // r1 = r0 + 3
             Insn::Return(1),
         ];
-        let out = pass_const_fold(insns, &mut consts);
+        let out = pass_const_fold(insns, &mut consts, 0);
         assert!(
             matches!(out[1], Insn::LoadConst(1, _)),
             "BinOpConst with known lhs should be folded to LoadConst"
@@ -3015,7 +3037,7 @@ mod tests {
             Insn::BinOp(2, 0, BinaryOp::Mul, 1), // r2 = r0 * r1
             Insn::Return(2),
         ];
-        let out = pass_const_fold(insns, &mut consts);
+        let out = pass_const_fold(insns, &mut consts, 0);
         assert!(
             matches!(out[2], Insn::LoadConst(2, _)),
             "BinOp with both operands known should fold to LoadConst"
@@ -3043,7 +3065,7 @@ mod tests {
             Insn::BinOpConst(1, 0, BinaryOp::Add, 1), // y = x + 3
             Insn::Return(1),
         ];
-        let out = pass_const_fold(insns, &mut consts);
+        let out = pass_const_fold(insns, &mut consts, 0);
         assert!(
             matches!(out[2], Insn::LoadConst(1, _)),
             "BinOpConst should fold after Move propagates known value"
@@ -3063,7 +3085,7 @@ mod tests {
             Insn::BinOpConst(1, 0, BinaryOp::Add, 1),
             Insn::Return(1),
         ];
-        let out = pass_const_fold(insns, &mut consts);
+        let out = pass_const_fold(insns, &mut consts, 0);
         assert!(
             matches!(out[2], Insn::BinOpConst(1, 0, BinaryOp::Add, 1)),
             "no folding after a branch clears known map"
@@ -3113,7 +3135,7 @@ mod tests {
             Insn::BinOpConst(3, 2, BinaryOp::Add, 2),
             Insn::Return(3),
         ];
-        let out = pass_const_fold(insns, &mut consts);
+        let out = pass_const_fold(insns, &mut consts, 0);
         assert!(
             matches!(out[4], Insn::BinOpConst(3, 2, BinaryOp::Add, 2)),
             "merge point must clear known map; BinOpConst on a phi'd value must not fold",
@@ -3141,7 +3163,7 @@ mod tests {
             Insn::Jump(-4),
             Insn::Return(0),
         ];
-        let out = pass_const_fold(insns, &mut consts);
+        let out = pass_const_fold(insns, &mut consts, 0);
         // [1] must NOT fold to LoadConst(True) — the loop would become infinite.
         assert!(
             matches!(out[1], Insn::BinOpConst(1, 0, BinaryOp::Gt, 1)),
