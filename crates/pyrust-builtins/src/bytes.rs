@@ -1,4 +1,5 @@
-use pyrust_core::{PyError, Result, Value, ValueKind};
+use indexmap::IndexMap;
+use pyrust_core::{PyError, PyKey, Result, Value, ValueKind};
 
 /// Canonical list of method names dispatched by `call`.
 /// Single source of truth for `has_method` and the drift-guard test.
@@ -20,7 +21,12 @@ pub fn has_method(method: &str) -> bool {
     METHODS.contains(&method)
 }
 
-pub fn call(method: &str, receiver: &Value, args: &[Value]) -> Result<Value> {
+pub fn call(
+    method: &str,
+    receiver: &Value,
+    args: &[Value],
+    kwargs: &IndexMap<PyKey, Value>,
+) -> Result<Value> {
     let bytes: &[u8] = match receiver.kind() {
         ValueKind::Bytes(rc) => rc.as_slice(),
         _ => {
@@ -35,7 +41,7 @@ pub fn call(method: &str, receiver: &Value, args: &[Value]) -> Result<Value> {
     };
     match method {
         "hex" => bytes_hex(bytes, args),
-        "decode" => bytes_decode(bytes, args),
+        "decode" => bytes_decode(bytes, args, kwargs),
         "startswith" => bytes_startswith(bytes, args),
         "endswith" => bytes_endswith(bytes, args),
         "find" => bytes_find(bytes, args),
@@ -177,28 +183,56 @@ fn bytes_hex(bytes: &[u8], args: &[Value]) -> Result<Value> {
 // decode
 // ---------------------------------------------------------------------------
 
-fn bytes_decode(bytes: &[u8], args: &[Value]) -> Result<Value> {
+fn bytes_decode(bytes: &[u8], args: &[Value], kwargs: &IndexMap<PyKey, Value>) -> Result<Value> {
     // Signature: decode(encoding='utf-8', errors='strict')
+    // Positional args take precedence; keyword args fill in when positional are absent.
+    let kw_encoding = kwargs
+        .get(&PyKey::Str("encoding".into()))
+        .and_then(|v| match v.kind() {
+            ValueKind::Str(s) => Some(s.to_owned()),
+            _ => None,
+        });
+    let kw_errors = kwargs
+        .get(&PyKey::Str("errors".into()))
+        .and_then(|v| match v.kind() {
+            ValueKind::Str(s) => Some(s.to_owned()),
+            _ => None,
+        });
+
+    // Validate that a keyword isn't also supplied positionally.
+    if args.first().is_some() && kw_encoding.is_some() {
+        return Err(PyError::named(
+            "TypeError",
+            "bytes.decode() got multiple values for argument 'encoding'".to_string(),
+        ));
+    }
+    if args.get(1).is_some() && kw_errors.is_some() {
+        return Err(PyError::named(
+            "TypeError",
+            "bytes.decode() got multiple values for argument 'errors'".to_string(),
+        ));
+    }
+
     let encoding: &str = match args.first().map(|v| v.kind()) {
-        None => "utf-8",
         Some(ValueKind::Str(s)) => s,
-        _ => {
+        Some(_) => {
             return Err(PyError::named(
                 "TypeError",
                 "bytes.decode() encoding must be a str".to_string(),
             ));
         }
+        None => kw_encoding.as_deref().unwrap_or("utf-8"),
     };
 
     let errors: &str = match args.get(1).map(|v| v.kind()) {
-        None => "strict",
         Some(ValueKind::Str(s)) => s,
-        _ => {
+        Some(_) => {
             return Err(PyError::named(
                 "TypeError",
                 "bytes.decode() errors must be a str".to_string(),
             ));
         }
+        None => kw_errors.as_deref().unwrap_or("strict"),
     };
 
     // Normalise encoding name (strip hyphens/underscores, lowercase).
@@ -310,13 +344,24 @@ fn bytes_decode_utf8_ignore(bytes: &[u8]) -> String {
 // startswith / endswith
 // ---------------------------------------------------------------------------
 
-fn extract_bytes_arg<'a>(arg: &'a Value) -> Result<&'a [u8]> {
+/// Like `extract_bytes_arg` but also accepts an integer byte value (0..=255),
+/// converting it to a one-byte owned `Vec<u8>` needle.  CPython's `find` and
+/// `count` accept integer sub-sequences via this path.  Returns `Err(ValueError)`
+/// when the integer is outside `0..=255`.
+fn extract_bytes_or_int_arg(arg: &Value) -> Result<std::borrow::Cow<'_, [u8]>> {
     match arg.kind() {
-        ValueKind::Bytes(rc) => Ok(rc.as_slice()),
+        ValueKind::Bytes(rc) => Ok(std::borrow::Cow::Borrowed(rc.as_slice())),
+        ValueKind::Int(n) => {
+            let b = u8::try_from(n).map_err(|_| {
+                PyError::named("ValueError", "byte must be in range(0, 256)".to_string())
+            })?;
+            Ok(std::borrow::Cow::Owned(vec![b]))
+        }
+        ValueKind::Bool(b) => Ok(std::borrow::Cow::Owned(vec![b as u8])),
         _ => Err(PyError::named(
             "TypeError",
             format!(
-                "a bytes-like object is required, not '{}'",
+                "argument should be integer or bytes-like object, not '{}'",
                 pyrust_core::builtin_type_name(arg),
             ),
         )),
@@ -418,7 +463,8 @@ fn bytes_find(bytes: &[u8], args: &[Value]) -> Result<Value> {
             "bytes.find() requires at least 1 argument".to_string(),
         )
     })?;
-    let sub = extract_bytes_arg(sub_val)?;
+    let sub_cow = extract_bytes_or_int_arg(sub_val)?;
+    let sub: &[u8] = &sub_cow;
     let range = bytes_slice_args(bytes.len(), args)?;
     let Some((start, end)) = range else {
         // Inverted range: CPython returns -1 even for empty sub.
@@ -448,7 +494,8 @@ fn bytes_count(bytes: &[u8], args: &[Value]) -> Result<Value> {
             "bytes.count() requires at least 1 argument".to_string(),
         )
     })?;
-    let sub = extract_bytes_arg(sub_val)?;
+    let sub_cow = extract_bytes_or_int_arg(sub_val)?;
+    let sub: &[u8] = &sub_cow;
     let range = bytes_slice_args(bytes.len(), args)?;
     let Some((start, end)) = range else {
         // Inverted range: CPython returns 0 even for empty sub.

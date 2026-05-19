@@ -149,7 +149,7 @@ impl Interpreter {
                         }
                         pyrust_builtins::int::call(method, &receiver, &pos)
                     }
-                    Kind::Bytes => pyrust_builtins::bytes::call(method, &receiver, &pos),
+                    Kind::Bytes => pyrust_builtins::bytes::call(method, &receiver, &pos, &kw),
                     Kind::Str => self.call_str_method(method, receiver, pos),
                     Kind::List => pyrust_builtins::list::call(method, &receiver, pos, &kw),
                     Kind::Dict => self.call_dict_method(method, receiver, pos),
@@ -298,7 +298,7 @@ impl Interpreter {
                         }
                         pyrust_builtins::int::call(method, &self_val, &pos)
                     }
-                    "bytes" => pyrust_builtins::bytes::call(method, &self_val, &pos),
+                    "bytes" => pyrust_builtins::bytes::call(method, &self_val, &pos, &kw),
                     "str" => self.call_str_method(method, self_val, pos),
                     "list" => pyrust_builtins::list::call(method, &self_val, pos, &kw),
                     "tuple" => match self_val.kind() {
