@@ -412,6 +412,37 @@ impl Interpreter {
                     type_args,
                 ))
             }
+            ValueKind::BuiltinFunction("str.format_map") => {
+                let self_val = args
+                    .first()
+                    .map(|a| &a.value)
+                    .ok_or_else(|| PyError::named(
+                        "TypeError",
+                        "descriptor 'format_map' of 'str' object needs an argument".to_string(),
+                    ))?;
+                let template = match self_val.kind() {
+                    ValueKind::Str(s) => s.to_string(),
+                    _ => return Err(PyError::named(
+                        "TypeError",
+                        "descriptor 'format_map' requires a 'str' object".to_string(),
+                    )),
+                };
+                // format_map takes exactly one positional argument (the mapping).
+                let rest = &args[1..];
+                let kw_count = rest.iter().filter(|a| a.name.is_some()).count();
+                let pos_count = rest.iter().filter(|a| a.name.is_none()).count();
+                if pos_count != 1 || kw_count != 0 {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "str.format_map() takes exactly one argument ({} given)",
+                            pos_count + kw_count
+                        ),
+                    ));
+                }
+                let mapping = rest[0].value.clone();
+                self.format_str_template_map(&template, mapping)
+            }
             // #462: class-method-of-primitive dispatch.  When a primitive
             // class's attr is `BuiltinFunction("<type>.<method>")` — populated
             // by `populate_*_methods` in `helpers.rs` — calling it dispatches
@@ -1564,6 +1595,114 @@ impl Interpreter {
             .and_then(|rc| Rc::clone(rc).downcast::<FnCode>().ok())
     }
 
+    /// Implements `str.format_map(mapping)`.  Parses `{name}` replacement
+    /// fields and looks up each name via `mapping[name]` (`__getitem__`).
+    ///
+    /// Unlike `format_str_template`, positional fields (`{}` or `{0}`) raise
+    /// `ValueError: Format string contains positional fields`, matching CPython
+    /// 3.12.  Conversion (`!r`/`!s`/`!a`), format specs (`:…`), and field
+    /// accessors (`.attr` / `[key]`) are supported identically to `format`.
+    pub(crate) fn format_str_template_map(
+        &mut self,
+        template: &str,
+        mapping: Value,
+    ) -> Result<Value> {
+        let bytes = template.as_bytes();
+        let mut out = String::with_capacity(template.len());
+        let mut i = 0;
+
+        while i < bytes.len() {
+            let c = bytes[i];
+            if c == b'{'  {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'{' {
+                    out.push('{');
+                    i += 2;
+                    continue;
+                }
+                // Find matching '}'.
+                let mut depth = 1;
+                let mut j = i + 1;
+                while j < bytes.len() && depth > 0 {
+                    match bytes[j] {
+                        b'{' => depth += 1,
+                        b'}' => depth -= 1,
+                        _ => {}
+                    }
+                    if depth == 0 {
+                        break;
+                    }
+                    j += 1;
+                }
+                if depth != 0 {
+                    return Err(PyError::named(
+                        "ValueError",
+                        "Single '{' encountered in format string".to_string(),
+                    ));
+                }
+                let field = &template[i + 1..j];
+                i = j + 1;
+
+                let (field_name_full, spec) = split_field_and_spec(field);
+                let (field_name, conversion) = match field_name_full.rsplit_once('!') {
+                    Some((name, conv)) if conv.len() == 1 => {
+                        (name, Some(conv.chars().next().unwrap()))
+                    }
+                    _ => (field_name_full, None),
+                };
+
+                let (head, rest) = split_head_and_accessors(field_name);
+                // format_map does not support positional fields.
+                if head.is_empty() || head.parse::<usize>().is_ok() {
+                    return Err(PyError::named(
+                        "ValueError",
+                        "Format string contains positional fields".to_string(),
+                    ));
+                }
+                // Look up the named key in the mapping via __getitem__.
+                let base =
+                    self.eval_index(mapping.clone(), Value::string(head.to_string()))?;
+
+                let value = apply_field_accessors(base, rest)?;
+                let value = match conversion {
+                    Some('r') => Value::string(value.repr()),
+                    Some('s') => Value::string(value.to_py_str()),
+                    Some('a') => Value::string(ascii_repr(&value)),
+                    Some(c) => {
+                        return Err(PyError::named(
+                            "ValueError",
+                            format!("Unknown conversion specifier {c}"),
+                        ));
+                    }
+                    None => value,
+                };
+                let formatted = apply_format_spec(&value, spec)?;
+                if let ValueKind::Str(s) = formatted.kind() {
+                    out.push_str(s);
+                } else {
+                    out.push_str(&formatted.to_py_str());
+                }
+            } else if c == b'}' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'}' {
+                    out.push('}');
+                    i += 2;
+                } else {
+                    return Err(PyError::named(
+                        "ValueError",
+                        "Single '}' encountered in format string".to_string(),
+                    ));
+                }
+            } else {
+                let ch_start = i;
+                i += 1;
+                while i < bytes.len() && (bytes[i] & 0xC0) == 0x80 {
+                    i += 1;
+                }
+                out.push_str(&template[ch_start..i]);
+            }
+        }
+        Ok(Value::string(out))
+    }
+
 }
 
 /// Apply a Python format spec string to a `Value` and return the formatted string.
@@ -2556,7 +2695,12 @@ fn builtin_method_names(type_name: &str) -> Vec<String> {
         "frozenset" => pyrust_builtins::frozenset::METHODS,
         _ => &[],
     };
-    names.iter().map(|s| (*s).to_string()).collect()
+    let mut out: Vec<String> = names.iter().map(|s| (*s).to_string()).collect();
+    if type_name == "str" {
+        out.push("format".to_string());
+        out.push("format_map".to_string());
+    }
+    out
 }
 
 impl Interpreter {
