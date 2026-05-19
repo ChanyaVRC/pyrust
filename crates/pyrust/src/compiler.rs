@@ -743,12 +743,12 @@ fn collect_class_method_outer_refs(
                 ..
             } => {
                 let inner_globals = crate::interpreter::collect_global_names(method_body);
-                // Promote global declarations in methods (same as for top-level defs).
-                for name in &inner_globals {
-                    if local_index.contains_key(name) {
-                        cells.insert(name.clone());
-                    }
-                }
+                // Do NOT promote `global x` declarations from methods here.
+                // A method's `global x` routes directly to the module environment
+                // regardless of whether the enclosing scope is a function or a class.
+                // Promoting them would incorrectly force the outer scope's `x` into a
+                // cell var, which for a class body means `x = ...` emits StoreGlobal
+                // instead of RecordClassStore (issue #629; see also issue #624).
                 let inner_nonlocals = crate::interpreter::collect_nonlocal_names(method_body);
                 let inner_locals = crate::interpreter::collect_local_names(
                     params,
