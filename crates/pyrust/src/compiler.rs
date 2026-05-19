@@ -257,11 +257,17 @@ fn collect_cell_vars_in(
                 // methods or lambdas).  Find names that class methods/lambdas
                 // read as free variables and promote them to cell vars so they
                 // live in the env.
-                // Pass `is_class_scope` so the callee knows whether `local_index`
-                // belongs to a function scope (must promote even when the name
-                // is also a class attr) or a class scope (must not promote,
-                // since class scope is not visible to further-nested methods).
-                collect_class_method_outer_refs(nested_body, local_index, is_class_scope, cells);
+                //
+                // Guard: only promote when the *current* scope is a function
+                // (is_class_scope == false).  When is_class_scope == true, local_index
+                // belongs to an outer class body — promoting its names to cell vars
+                // would turn `Outer.x = val` into StoreGlobal, stripping the
+                // class attribute (issue #690 / #701).  The enclosing function, if
+                // any, handles promotion correctly when it encounters the outer
+                // class via its own collect_cell_vars_in with is_class_scope=false.
+                if !is_class_scope {
+                    collect_class_method_outer_refs(nested_body, local_index, false, cells);
+                }
             }
             Stmt::If {
                 branches,
