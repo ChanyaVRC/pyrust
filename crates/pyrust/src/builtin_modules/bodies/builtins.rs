@@ -419,13 +419,15 @@ pyrust_module! {
                     Value::py_instance(instance_rc),
                     &[],
                 )?;
-                let is_str = matches!(result.kind(), ValueKind::Str(_));
-                return if is_str {
+                return if matches!(result.kind(), ValueKind::Str(_)) {
                     Ok(result)
                 } else {
                     Err(PyError::named(
                         "TypeError",
-                        "__repr__ returned non-string".to_string(),
+                        format!(
+                            "__repr__ returned non-string (type {})",
+                            pyrust_core::builtin_type_name(&result)
+                        ),
                     ))
                 };
             }
