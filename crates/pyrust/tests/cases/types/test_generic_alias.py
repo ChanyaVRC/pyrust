@@ -50,6 +50,15 @@ d = {list[int]: "ok"}
 print(d[list[int]])
 print(list[int] in {list[int]})
 
+# User class with custom __class_getitem__ classmethod: subscript calls it
+class WithCGI:
+    @classmethod
+    def __class_getitem__(cls, item):
+        return f"WithCGI[{item.__name__}]"
+
+print(WithCGI[int])
+print(type(WithCGI[int]).__name__)
+
 # User class without __class_getitem__ raises TypeError
 class MyClass:
     pass

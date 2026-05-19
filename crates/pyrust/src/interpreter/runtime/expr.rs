@@ -208,28 +208,52 @@ impl Interpreter {
             }
             ValueKind::PyClass(class_rc) => {
                 let class = Rc::clone(class_rc);
-                // Check for `__class_getitem__` in the class's own attrs (not
+                // Look up `__class_getitem__` in the class's own attrs (not
                 // the MRO).  Built-in collection types have a
-                // `BuiltinFunction("<type>.__class_getitem__")` registered by
-                // `build_primitive_classes`; user-defined classes that don't
-                // define it raise TypeError here (matching CPython 3.12, which
-                // does not expose `type.__class_getitem__`).
-                let has_cgitem = class.borrow().attrs.contains_key("__class_getitem__");
-                if has_cgitem {
-                    // Normalise the subscript into a tuple for
-                    // `GenericAlias.__args__`:
-                    //   `list[int]`       → args = (int,)
-                    //   `dict[str, int]`  → args = (str, int) [tuple index]
-                    let is_tuple = matches!(index.kind(), ValueKind::Tuple(_));
-                    let type_args = if is_tuple {
-                        index
+                // `BuiltinFunction("<type>.__class_getitem__")` sentinel
+                // registered by `build_primitive_classes`.  User-defined
+                // classes may define it as a classmethod.  Classes without
+                // it raise TypeError (matching CPython 3.12).
+                let cgitem = class.borrow().attrs.get("__class_getitem__").cloned();
+                if let Some(method_val) = cgitem {
+                    // Distinguish between the built-in sentinel and a
+                    // user-defined classmethod.
+                    let is_builtin_sentinel = matches!(
+                        method_val.kind(),
+                        ValueKind::BuiltinFunction(name)
+                            if name.contains(".__class_getitem__")
+                    );
+                    if is_builtin_sentinel {
+                        // Built-in sentinel: create a `GenericAlias` directly.
+                        // Normalise the subscript into a tuple for
+                        // `GenericAlias.__args__`:
+                        //   `list[int]`       → args = (int,)
+                        //   `dict[str, int]`  → args = (str, int) [tuple index]
+                        let is_tuple = matches!(index.kind(), ValueKind::Tuple(_));
+                        let type_args = if is_tuple {
+                            index
+                        } else {
+                            Value::tuple(vec![index])
+                        };
+                        Ok(pyrust_builtins::generic_alias::generic_alias(
+                            Value::py_class(class),
+                            type_args,
+                        ))
                     } else {
-                        Value::tuple(vec![index])
-                    };
-                    Ok(pyrust_builtins::generic_alias::generic_alias(
-                        Value::py_class(class),
-                        type_args,
-                    ))
+                        // User-defined `__class_getitem__` (typically a
+                        // classmethod): call it with the class as the
+                        // implicit receiver and the subscript as the arg.
+                        let class_val = Value::py_class(class);
+                        invoke_class_method(
+                            self,
+                            method_val,
+                            class_val,
+                            &[ExpandedCallArg {
+                                name: None,
+                                value: index,
+                            }],
+                        )
+                    }
                 } else {
                     Err(PyError::named(
                         "TypeError",
