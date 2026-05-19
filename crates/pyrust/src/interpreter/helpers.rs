@@ -903,6 +903,14 @@ fn install_exception_builtins(env: &EnvRef) {
         base: Some(Rc::clone(&base_exception)),
         attrs: IndexMap::new(),
     }));
+    // `KeyboardInterrupt` is a direct child of BaseException (not Exception).
+    // `except Exception:` must NOT catch it.
+    let keyboard_interrupt = Rc::new(RefCell::new(PyClass {
+        name: "KeyboardInterrupt".to_string(),
+        qualname: "KeyboardInterrupt".to_string(),
+        base: Some(Rc::clone(&base_exception)),
+        attrs: IndexMap::new(),
+    }));
 
     let mut module = env.borrow_mut();
     module
@@ -993,6 +1001,10 @@ fn install_exception_builtins(env: &EnvRef) {
     module
         .values
         .insert("GeneratorExit".to_string(), Value::py_class(generator_exit));
+    module.values.insert(
+        "KeyboardInterrupt".to_string(),
+        Value::py_class(keyboard_interrupt),
+    );
 }
 
 /// Register built-in singleton values (currently just `NotImplemented`).
