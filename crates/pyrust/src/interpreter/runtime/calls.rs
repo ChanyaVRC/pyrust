@@ -121,6 +121,7 @@ impl Interpreter {
                 // the receiver.
                 enum Kind {
                     Int,
+                    Float,
                     Bytes,
                     Str,
                     List,
@@ -132,6 +133,7 @@ impl Interpreter {
                     // bool is a subclass of int in CPython; route to the int
                     // dispatch so True.bit_length() / True.is_integer() work.
                     ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Bool(_) => Kind::Int,
+                    ValueKind::Float(_) => Kind::Float,
                     ValueKind::Bytes(_) => Kind::Bytes,
                     ValueKind::Str(_) => Kind::Str,
                     ValueKind::List(_) => Kind::List,
@@ -148,6 +150,13 @@ impl Interpreter {
                             ));
                         }
                         pyrust_builtins::int::call(method, &receiver, &pos)
+                    }
+                    Kind::Float => {
+                        let f = match receiver.kind() {
+                            ValueKind::Float(f) => f,
+                            _ => unreachable!("kind_tag guard above"),
+                        };
+                        pyrust_builtins::float::call(method, f, &pos)
                     }
                     Kind::Bytes => pyrust_builtins::bytes::call(method, &receiver, &pos, &kw),
                     Kind::Str => {
@@ -255,6 +264,103 @@ impl Interpreter {
                     }
                 }
                 format_str_template(&template, &positional, &keyword)
+            }
+            // `float.fromhex` is a classmethod: the first positional arg is the
+            // string to parse.  It must be dispatched before the generic
+            // `"float.*"` arm below so that the arg-0-is-receiver assumption
+            // in that arm is not applied here.
+            ValueKind::BuiltinFunction("float.fromhex") => {
+                // Accept both `float.fromhex(s)` and `(1.0).fromhex(s)`.
+                // Filter out a leading float or class receiver if present, then
+                // enforce exactly one remaining positional argument.
+                let positional_args: Vec<_> = args
+                    .iter()
+                    .filter(|a| {
+                        a.name.is_none()
+                            && !matches!(
+                                a.value.kind(),
+                                ValueKind::Float(_) | ValueKind::PyClass(_)
+                            )
+                    })
+                    .collect();
+                // If every arg was a float/class receiver (e.g. pure class call
+                // with no string) fall back to requiring exactly one total arg.
+                let n_payload = if positional_args.is_empty() {
+                    args.len()
+                } else {
+                    positional_args.len()
+                };
+                if n_payload == 0 {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "float.fromhex() takes exactly one argument (0 given)",
+                    ));
+                }
+                if n_payload > 1 {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "float.fromhex() takes exactly one argument ({} given)",
+                            n_payload
+                        ),
+                    ));
+                }
+                let s_val = if positional_args.is_empty() {
+                    args.first().map(|a| a.value.clone())
+                } else {
+                    positional_args.first().map(|a| a.value.clone())
+                }
+                .ok_or_else(|| {
+                    PyError::named(
+                        "TypeError",
+                        "float.fromhex() takes exactly one argument (0 given)",
+                    )
+                })?;
+                let s = match s_val.kind() {
+                    ValueKind::Str(s) => s.to_string(),
+                    _ => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            "bad argument type for built-in operation",
+                        ))
+                    }
+                };
+                pyrust_builtins::float::fromhex(&s).map(Value::float)
+            }
+            // float instance methods via descriptor call: `float.is_integer(x)`.
+            // The float call fn takes an `f64` receiver directly, so this arm
+            // is separate from the generic str/list/… arm below.
+            ValueKind::BuiltinFunction(name)
+                if name.split_once('.').is_some_and(|(t, _)| t == "float") =>
+            {
+                let (_, method) = name.split_once('.').unwrap();
+                let self_val = args
+                    .first()
+                    .map(|a| a.value.clone())
+                    .ok_or_else(|| {
+                        PyError::named(
+                            "TypeError",
+                            format!("descriptor '{method}' of 'float' object needs an argument"),
+                        )
+                    })?;
+                let f = match self_val.kind() {
+                    ValueKind::Float(f) => f,
+                    _ => {
+                        let actual = pyrust_core::builtin_type_name(&self_val);
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "descriptor '{method}' for 'float' objects doesn't apply to a '{actual}' object",
+                            ),
+                        ));
+                    }
+                };
+                let pos: Vec<Value> = args[1..]
+                    .iter()
+                    .filter(|a| a.name.is_none())
+                    .map(|a| a.value.clone())
+                    .collect();
+                pyrust_builtins::float::call(method, f, &pos)
             }
             // #462: class-method-of-primitive dispatch.  When a primitive
             // class's attr is `BuiltinFunction("<type>.<method>")` — populated
