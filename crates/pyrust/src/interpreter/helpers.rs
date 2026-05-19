@@ -744,9 +744,32 @@ pub(crate) fn is_exception_class(class: &Rc<RefCell<PyClass>>) -> bool {
     pyrust_core::class_chain_contains_exception(class)
 }
 
+/// Walk the class base chain and return `true` if any class in the chain has
+/// the given `name`.  Used to check subclass relationships by class name when
+/// the `Rc` singleton for the expected class is not in scope.
+fn class_chain_contains_name(class: &Rc<RefCell<PyClass>>, name: &str) -> bool {
+    let (class_name, base) = {
+        let borrowed = class.borrow();
+        (borrowed.name.clone(), borrowed.base.clone())
+    };
+    if class_name == name {
+        return true;
+    }
+    base.is_some_and(|base| class_chain_contains_name(&base, name))
+}
+
 pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value>) -> Value {
     let mut attrs = IndexMap::new();
-    attrs.insert("args".to_string(), Value::tuple(args));
+    // CPython 3.12: StopIteration.__init__ sets self.value = args[0] if args else None.
+    // Mirror that here so `except StopIteration as e: e.value` always works.
+    // Use a name-chain walk so subclasses (e.g. `class MyStop(StopIteration)`) also
+    // get the `.value` attribute set — fixes #612.
+    let is_stop_iteration = class_chain_contains_name(&class, "StopIteration");
+    attrs.insert("args".to_string(), Value::tuple(args.clone()));
+    if is_stop_iteration {
+        let val = args.into_iter().next().unwrap_or_else(Value::none);
+        attrs.insert("value".to_string(), val);
+    }
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 

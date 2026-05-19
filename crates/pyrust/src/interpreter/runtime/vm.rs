@@ -328,10 +328,13 @@ impl Interpreter {
             if let Some(e) = inject_exc {
                 return Err(e);
             }
-            return Err(PyError::named(
-                "StopIteration",
-                String::new(),
-            ));
+            // Exhausted generator: StopIteration() with no args → .value is None.
+            let exc = if let Some(cls) = self.exc_classes.get("StopIteration") {
+                PyError::Raised(instantiate_exception(cls, vec![]))
+            } else {
+                PyError::named("StopIteration", String::new())
+            };
+            return Err(exc);
         }
 
         // Write the sent value into the yield destination register.
@@ -431,11 +434,18 @@ impl Interpreter {
                 frame.yield_dst = saved.yield_dst;
                 Ok(value)
             }
-            Ok(FrameOutcome::Returned(_)) => {
+            Ok(FrameOutcome::Returned(ret_val)) => {
                 // Generator returned normally (fell off end or hit explicit `return`).
-                // Signal exhaustion as StopIteration so ForIter and call_next handle it uniformly.
+                // CPython 3.12 sets StopIteration.value to the returned value (PEP 380).
+                // Construct the exception with `ret_val` as the arg so that
+                // `instantiate_exception` can set `.value = args[0]`.
                 frame.done = true;
-                Err(PyError::named("StopIteration", String::new()))
+                let exc = if let Some(cls) = self.exc_classes.get("StopIteration") {
+                    PyError::Raised(instantiate_exception(cls, vec![ret_val]))
+                } else {
+                    PyError::named("StopIteration", String::new())
+                };
+                Err(exc)
             }
             Err(e) => {
                 // Propagating exception or other error.
@@ -2980,10 +2990,10 @@ impl Interpreter {
         match self.resume_generator_with_exc(frame, Some(inject), Value::none()) {
             // Generator caught the injected exception and yielded.
             Ok(v) => Ok(v),
-            // Generator returned normally — convert to StopIteration.
-            Err(ref e) if e.class_name_is("StopIteration") => {
-                Err(PyError::named("StopIteration", String::new()))
-            }
+            // Generator returned normally: propagate the original StopIteration so
+            // .value (set by resume_generator_with_exc via instantiate_exception)
+            // is preserved (PEP 380 / issue #600).
+            Err(e) if e.class_name_is("StopIteration") => Err(e),
             // Any other propagating error (including a re-raise of the
             // injected exception) flows through unchanged.
             Err(e) => Err(e),
@@ -3035,7 +3045,13 @@ impl Interpreter {
             .ok_or_else(|| PyError::Runtime("invalid generator state".to_string()))?;
 
         if frame.done {
-            return Err(PyError::named("StopIteration", String::new()));
+            // Exhausted generator: StopIteration() with no args → .value is None.
+            let exc = if let Some(cls) = self.exc_classes.get("StopIteration") {
+                PyError::Raised(instantiate_exception(cls, vec![]))
+            } else {
+                PyError::named("StopIteration", String::new())
+            };
+            return Err(exc);
         }
 
         // CPython: sending a non-None value to a just-started generator is an
@@ -3049,9 +3065,9 @@ impl Interpreter {
 
         match self.resume_generator_with_exc(frame, None, sent_value) {
             Ok(yielded) => Ok(yielded),
-            Err(ref e) if e.class_name_is("StopIteration") => {
-                Err(PyError::named("StopIteration", String::new()))
-            }
+            // Propagate the original StopIteration so .value is preserved
+            // (PEP 380 / issue #600).  Mirrors the same fix in call_next.
+            Err(e) if e.class_name_is("StopIteration") => Err(e),
             Err(e) => Err(e),
         }
     }
