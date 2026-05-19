@@ -1571,6 +1571,10 @@ pyrust_module! {
                 // argument" if not).
                 let encoding: String = match args[1].value.kind() {
                     ValueKind::Str(s) => s.to_string(),
+                    // CPython 3.12 formats the type name of the encoding
+                    // argument as "None" (not "NoneType") for the None
+                    // singleton — matching the singleton's display name rather
+                    // than its class name.  All other types use the class name.
                     ValueKind::None => return Err(PyError::named(
                         "TypeError",
                         "bytes() argument 'encoding' must be str, not None".to_string(),
@@ -1593,6 +1597,7 @@ pyrust_module! {
                 let errors: String = if args.len() == 3 {
                     match args[2].value.kind() {
                         ValueKind::Str(s) => s.to_string(),
+                        // Same None special-case as encoding above.
                         ValueKind::None => return Err(PyError::named(
                             "TypeError",
                             "bytes() argument 'errors' must be str, not None".to_string(),
