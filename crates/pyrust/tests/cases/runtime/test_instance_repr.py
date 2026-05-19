@@ -45,6 +45,12 @@ class Plain:
 s = str(Plain())
 print(s.startswith("<__main__.Plain object at 0x"))  # True
 
+# Address part must be unpadded hex (no leading zeros beyond what the value
+# requires), matching CPython's hex(id(obj)) format.  A zero-padded 16-digit
+# address like "0x0000773f7001f8f0" would fail this check.
+hex_part = r.split("0x")[1].rstrip(">")
+print(not hex_part.startswith("0"))                  # True
+
 # Built-in type instances are unaffected.
 print(repr(42))                                      # 42
 print(repr("hi"))                                    # 'hi'

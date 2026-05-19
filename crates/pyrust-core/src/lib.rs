@@ -2239,7 +2239,7 @@ impl Value {
                     (qualname, module)
                 };
                 let addr = Rc::as_ptr(instance) as usize;
-                format!("<{module}.{qualname} object at 0x{addr:016x}>")
+                format!("<{module}.{qualname} object at 0x{addr:x}>")
             }
             ValueKind::BoundMethod { function, receiver } => {
                 let class_name = receiver.borrow().class.borrow().name.clone();
