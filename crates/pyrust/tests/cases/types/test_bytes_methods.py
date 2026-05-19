@@ -29,8 +29,8 @@ print(b'hello'.count(b'l', 2, 5)) # 2
 # startswith with empty bytes
 print(b'hello'.startswith(b''))   # True
 
-# decode latin-1
-print(b'\xff'.decode('latin-1'))  # ÿ
+# decode latin-1 — use ord() to avoid Windows console encoding mismatch
+print(ord(b'\xff'.decode('latin-1')))  # 255
 
 # decode ascii
 print(b'hello'.decode('ascii'))   # hello
