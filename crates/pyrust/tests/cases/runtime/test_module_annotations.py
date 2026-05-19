@@ -66,4 +66,15 @@ class Ordered:
 
 print(list(Ordered.__annotations__.keys()))   # ['c', 'a', 'b']
 
+# ── Annotations in dead conditional branch ───────────────────────────────────
+# CPython emits SETUP_ANNOTATIONS before the class body runs, seeding
+# __annotations__ = {} even when annotations only appear in an `if False:` branch.
+
+class DeadBranch:
+    if False:
+        x: int = 1
+
+assert hasattr(DeadBranch, "__annotations__")
+assert DeadBranch.__annotations__ == {}
+
 print("module annotations OK")

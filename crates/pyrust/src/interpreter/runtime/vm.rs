@@ -2252,11 +2252,19 @@ impl Interpreter {
                     // qualname_slot is intentionally not added to pre_order so
                     // __qualname__ never flows into attrs (it's intercepted in
                     // get_attr instead — see issue #553).
-                    // annotations_slot: do NOT pre-push __annotations__ to pre_order.
-                    // The dict will be placed in attrs only if the class body actually
-                    // ran at least one `RecordClassStore` on it (i.e. had an annotation).
-                    // That happens naturally via compile_ann_assign's SetItem +
-                    // RecordClassStore(annotations_slot).
+                    // annotations_slot: pre-push into pre_order (right after __module__)
+                    // so that __annotations__ always appears in the class attrs dict
+                    // when the class body was compiled with any annotation, even if
+                    // those annotations are inside a branch that never executes at
+                    // runtime (e.g. `if False: x: int`).  CPython always seeds
+                    // __annotations__ via SETUP_ANNOTATIONS before the class body
+                    // runs; we mirror that by making it a pre-order slot.
+                    // RecordClassStore calls from compile_ann_assign are still emitted
+                    // but are harmless duplicates (deduplication happens naturally
+                    // because store_order is built from the same slot registry).
+                    if let Some(slot) = annotations_slot {
+                        pre_order.push(slot as crate::bytecode::Reg);
+                    }
                     self.class_store_order.push(pre_order);
                     // Issue #618: if the class body declares `global x`, we need
                     // `assign_name("x", ...)` to find "x" in `self.env.global_names`
