@@ -9,6 +9,9 @@ pub const METHODS: &[&str] = &[
     "startswith",
     "endswith",
     "find",
+    "rfind",
+    "index",
+    "rindex",
     "count",
     "upper",
     "lower",
@@ -45,6 +48,9 @@ pub fn call(
         "startswith" => bytes_startswith(bytes, args),
         "endswith" => bytes_endswith(bytes, args),
         "find" => bytes_find(bytes, args),
+        "rfind" => bytes_rfind(bytes, args),
+        "index" => bytes_index(bytes, args),
+        "rindex" => bytes_rindex(bytes, args),
         "count" => bytes_count(bytes, args),
         "upper" => Ok(Value::bytes(
             bytes.iter().map(|b| b.to_ascii_uppercase()).collect(),
@@ -484,6 +490,111 @@ fn bytes_find(bytes: &[u8], args: &[Value]) -> Result<Value> {
 }
 
 // ---------------------------------------------------------------------------
+// rfind
+// ---------------------------------------------------------------------------
+
+fn bytes_rfind(bytes: &[u8], args: &[Value]) -> Result<Value> {
+    let sub_val = args.first().ok_or_else(|| {
+        PyError::named(
+            "TypeError",
+            "bytes.rfind() requires at least 1 argument".to_string(),
+        )
+    })?;
+    let sub_cow = extract_bytes_or_int_arg(sub_val)?;
+    let sub: &[u8] = &sub_cow;
+    let range = bytes_slice_args(bytes.len(), args)?;
+    let Some((start, end)) = range else {
+        // Inverted range: CPython returns -1 even for empty sub.
+        return Ok(Value::int(-1));
+    };
+    let haystack = &bytes[start..end];
+
+    if sub.is_empty() {
+        // CPython: empty sub rfind in a valid range returns end offset.
+        return Ok(Value::int(end as i64));
+    }
+
+    match rfind_subsequence(haystack, sub) {
+        Some(pos) => Ok(Value::int((start + pos) as i64)),
+        None => Ok(Value::int(-1)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// index
+// ---------------------------------------------------------------------------
+
+fn bytes_index(bytes: &[u8], args: &[Value]) -> Result<Value> {
+    let sub_val = args.first().ok_or_else(|| {
+        PyError::named(
+            "TypeError",
+            "bytes.index() requires at least 1 argument".to_string(),
+        )
+    })?;
+    let sub_cow = extract_bytes_or_int_arg(sub_val)?;
+    let sub: &[u8] = &sub_cow;
+    let range = bytes_slice_args(bytes.len(), args)?;
+    let Some((start, end)) = range else {
+        // Inverted range: CPython raises ValueError.
+        return Err(PyError::named(
+            "ValueError",
+            "subsection not found".to_string(),
+        ));
+    };
+    let haystack = &bytes[start..end];
+
+    if sub.is_empty() {
+        // CPython: empty sub in a valid (possibly empty) range returns start.
+        return Ok(Value::int(start as i64));
+    }
+
+    match find_subsequence(haystack, sub) {
+        Some(pos) => Ok(Value::int((start + pos) as i64)),
+        None => Err(PyError::named(
+            "ValueError",
+            "subsection not found".to_string(),
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// rindex
+// ---------------------------------------------------------------------------
+
+fn bytes_rindex(bytes: &[u8], args: &[Value]) -> Result<Value> {
+    let sub_val = args.first().ok_or_else(|| {
+        PyError::named(
+            "TypeError",
+            "bytes.rindex() requires at least 1 argument".to_string(),
+        )
+    })?;
+    let sub_cow = extract_bytes_or_int_arg(sub_val)?;
+    let sub: &[u8] = &sub_cow;
+    let range = bytes_slice_args(bytes.len(), args)?;
+    let Some((start, end)) = range else {
+        // Inverted range: CPython raises ValueError.
+        return Err(PyError::named(
+            "ValueError",
+            "subsection not found".to_string(),
+        ));
+    };
+    let haystack = &bytes[start..end];
+
+    if sub.is_empty() {
+        // CPython: empty sub rindex in a valid range returns end offset.
+        return Ok(Value::int(end as i64));
+    }
+
+    match rfind_subsequence(haystack, sub) {
+        Some(pos) => Ok(Value::int((start + pos) as i64)),
+        None => Err(PyError::named(
+            "ValueError",
+            "subsection not found".to_string(),
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // count
 // ---------------------------------------------------------------------------
 
@@ -581,4 +692,13 @@ fn find_subsequence(haystack: &[u8], sub: &[u8]) -> Option<usize> {
         return None;
     }
     haystack.windows(sub.len()).position(|w| w == sub)
+}
+
+/// Naive substring search: find last occurrence of `sub` in `haystack`,
+/// returning the starting byte index, or `None` if not found.
+fn rfind_subsequence(haystack: &[u8], sub: &[u8]) -> Option<usize> {
+    if sub.len() > haystack.len() {
+        return None;
+    }
+    haystack.windows(sub.len()).rposition(|w| w == sub)
 }
