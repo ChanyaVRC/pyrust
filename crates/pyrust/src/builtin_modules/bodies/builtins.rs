@@ -1425,7 +1425,9 @@ pyrust_module! {
 
     /// CPython: bytes() — bytes constructor.
     /// <https://docs.python.org/3/library/functions.html#func-bytes>
-    #[pure]
+    /// Not marked `#[pure]` because the iterable fallback dispatches user
+    /// `__iter__` and `__next__` when consuming a general iterable (e.g. range,
+    /// generator expressions, user-defined iterables).
     fn bytes(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         match args.len() {
@@ -1447,17 +1449,21 @@ pyrust_module! {
                     for v in items.iter() {
                         match v.kind() {
                             ValueKind::Int(n) if (0..=255).contains(&n) => out.push(n as u8),
-                            ValueKind::Int(_) => return Err(PyError::named(
-                                "ValueError",
-                                "bytes must be in range(0, 256)".to_string(),
-                            )),
-                            _ => return Err(PyError::named(
-                                "TypeError",
-                                format!(
-                                    "'{}' object cannot be interpreted as an integer",
-                                    pyrust_core::builtin_type_name(v),
-                                ),
-                            )),
+                            ValueKind::Int(_) | ValueKind::BigInt(_) => {
+                                return Err(PyError::named(
+                                    "ValueError",
+                                    "bytes must be in range(0, 256)".to_string(),
+                                ))
+                            }
+                            _ => {
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    format!(
+                                        "'{}' object cannot be interpreted as an integer",
+                                        pyrust_core::builtin_type_name(v),
+                                    ),
+                                ))
+                            }
                         }
                     }
                     Ok(Value::bytes(out))
@@ -1467,25 +1473,65 @@ pyrust_module! {
                     for v in items.iter() {
                         match v.kind() {
                             ValueKind::Int(n) if (0..=255).contains(&n) => out.push(n as u8),
-                            ValueKind::Int(_) => return Err(PyError::named(
-                                "ValueError",
-                                "bytes must be in range(0, 256)".to_string(),
-                            )),
-                            _ => return Err(PyError::named(
-                                "TypeError",
-                                format!(
-                                    "'{}' object cannot be interpreted as an integer",
-                                    pyrust_core::builtin_type_name(v),
-                                ),
-                            )),
+                            ValueKind::Int(_) | ValueKind::BigInt(_) => {
+                                return Err(PyError::named(
+                                    "ValueError",
+                                    "bytes must be in range(0, 256)".to_string(),
+                                ))
+                            }
+                            _ => {
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    format!(
+                                        "'{}' object cannot be interpreted as an integer",
+                                        pyrust_core::builtin_type_name(v),
+                                    ),
+                                ))
+                            }
                         }
                     }
                     Ok(Value::bytes(out))
                 }
-                _ => Err(PyError::named(
-                    "TypeError",
-                    "cannot convert to bytes".to_string(),
-                )),
+                _ => {
+                    // General iterable fallback: any object supporting __iter__ /
+                    // __next__ (range, generators, user-defined iterables, etc.).
+                    // Non-iterable arguments produce CPython-compatible
+                    // "cannot convert 'X' object to bytes".
+                    let type_name = pyrust_core::builtin_type_name(&args[0].value).into_owned();
+                    let items =
+                        _interp.collect_iterable(args[0].value.clone()).map_err(|e| {
+                            if e.class_name_is("TypeError") {
+                                PyError::named(
+                                    "TypeError",
+                                    format!("cannot convert '{type_name}' object to bytes"),
+                                )
+                            } else {
+                                e
+                            }
+                        })?;
+                    let mut out = Vec::with_capacity(items.len());
+                    for v in &items {
+                        match v.kind() {
+                            ValueKind::Int(n) if (0..=255).contains(&n) => out.push(n as u8),
+                            ValueKind::Int(_) | ValueKind::BigInt(_) => {
+                                return Err(PyError::named(
+                                    "ValueError",
+                                    "bytes must be in range(0, 256)".to_string(),
+                                ))
+                            }
+                            _ => {
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    format!(
+                                        "'{}' object cannot be interpreted as an integer",
+                                        pyrust_core::builtin_type_name(v),
+                                    ),
+                                ))
+                            }
+                        }
+                    }
+                    Ok(Value::bytes(out))
+                }
             },
             // bytes(source, encoding[, errors]) — encode `source` using
             // `encoding`.  CPython accepts a wide spectrum of codecs; we
