@@ -1290,7 +1290,17 @@ impl Interpreter {
                     _ => {
                         let a = value_to_float(&left, "**")?;
                         let b = value_to_float(&right, "**")?;
-                        Ok(Value::float(a.powf(b)))
+                        let result = a.powf(b);
+                        // CPython promotes negative_real ** non-integer_float to
+                        // complex when the real result would be NaN (principal
+                        // log branch: a^b = |a|^b * e^(i*π*b)).
+                        if a < 0.0 && result.is_nan() {
+                            let abs_val = a.abs().powf(b);
+                            let angle = std::f64::consts::PI * b;
+                            Ok(Value::complex(abs_val * angle.cos(), abs_val * angle.sin()))
+                        } else {
+                            Ok(Value::float(result))
+                        }
                     }
                 }
             }
