@@ -342,19 +342,17 @@ impl Interpreter {
                     "__module__" => return Ok(func.module.borrow().clone()),
                     "__doc__" => return Ok(func.doc.borrow().clone()),
                     "__dict__" => {
-                        // Return a snapshot of the function's attribute dict.
-                        // CPython returns the live __dict__ object; we return a
-                        // copy (the same live-dict limitation as instance.__dict__).
-                        let mut dict: IndexMap<PyKey, Value> = IndexMap::new();
-                        for (k, v) in func.attrs.borrow().iter() {
-                            dict.insert(PyKey::Str(k.clone()), v.clone());
-                        }
-                        return Ok(Value::dict(dict));
+                        // Return the live dict object — CPython returns the same
+                        // object every time, so `d = f.__dict__; d['x'] = 1`
+                        // makes `f.x` visible.  Cloning a `Value::dict` is cheap
+                        // (it clones the Rc pointer, not the IndexMap).
+                        return Ok(func.attrs.borrow().clone());
                     }
                     _ => {}
                 }
                 // Fall through to arbitrary dynamic attrs.
-                if let Some(v) = func.attrs.borrow().get(name).cloned() {
+                let key = PyKey::Str(name.to_string());
+                if let Some(v) = func.attrs.borrow().as_dict().and_then(|d| d.get(&key).cloned()) {
                     return Ok(v);
                 }
                 Err(PyError::named(
@@ -449,15 +447,18 @@ impl Interpreter {
                         "__module__" => return Ok(function.module.borrow().clone()),
                         "__doc__" => return Ok(function.doc.borrow().clone()),
                         "__dict__" => {
-                            let mut dict: IndexMap<PyKey, Value> = IndexMap::new();
-                            for (k, v) in function.attrs.borrow().iter() {
-                                dict.insert(PyKey::Str(k.clone()), v.clone());
-                            }
-                            return Ok(Value::dict(dict));
+                            // Live dict object — same semantics as UserFunction.
+                            return Ok(function.attrs.borrow().clone());
                         }
                         _ => {
                             // Arbitrary dynamic attrs delegate to the underlying function.
-                            if let Some(v) = function.attrs.borrow().get(name).cloned() {
+                            let key = PyKey::Str(name.to_string());
+                            if let Some(v) = function
+                                .attrs
+                                .borrow()
+                                .as_dict()
+                                .and_then(|d| d.get(&key).cloned())
+                            {
                                 return Ok(v);
                             }
                         }
@@ -617,17 +618,10 @@ impl Interpreter {
                     }
                     "__dict__" => {
                         // CPython requires the replacement to be a dict.
-                        if let ValueKind::Dict(new_dict) = value.kind() {
-                            let mut new_attrs: IndexMap<String, Value> = IndexMap::new();
-                            for (k, v) in new_dict.iter() {
-                                if let PyKey::Str(s) = k {
-                                    new_attrs.insert(s.clone(), v.clone());
-                                }
-                                // Non-string keys in the new dict are silently
-                                // dropped — CPython allows them in __dict__ but
-                                // they are not reachable via attribute syntax.
-                            }
-                            *func.attrs.borrow_mut() = new_attrs;
+                        if matches!(value.kind(), ValueKind::Dict(_)) {
+                            // Replace the inner Value (a Value::dict) in place.
+                            // All Rc clones (bound methods, etc.) now see the new dict.
+                            *func.attrs.borrow_mut() = value;
                             Ok(())
                         } else {
                             let type_name = pyrust_core::builtin_type_name(&value);
@@ -664,9 +658,11 @@ impl Interpreter {
                         "readonly attribute".to_string(),
                     )),
                     _ => {
-                        // Arbitrary dynamic attribute.
-                        func.attrs.borrow_mut().insert(name.to_string(), value);
-                        Ok(())
+                        // Arbitrary dynamic attribute — insert into the live dict.
+                        func.attrs
+                            .borrow()
+                            .dict_insert(PyKey::Str(name.to_string()), value)
+                            .map(|_| ())
                     }
                 }
             }
@@ -676,6 +672,16 @@ impl Interpreter {
                 Err(PyError::named(
                     "AttributeError",
                     format!("'method' object has no attribute '{name}'"),
+                ))
+            }
+            ValueKind::BuiltinFunction(_) => {
+                // CPython: builtin_function_or_method objects have no __dict__
+                // and do not support arbitrary attribute assignment.
+                Err(PyError::named(
+                    "AttributeError",
+                    format!(
+                        "'builtin_function_or_method' object has no attribute '{name}'"
+                    ),
                 ))
             }
             _ => Err(PyError::Runtime(format!(
@@ -754,8 +760,19 @@ impl Interpreter {
                         "AttributeError",
                         "readonly attribute".to_string(),
                     )),
+                    // CPython allows `del f.__defaults__` / `del f.__annotations__` /
+                    // `del f.__kwdefaults__` (they reset to None / {} / None).  Since
+                    // pyrust doesn't implement these slots yet, silently succeed — the
+                    // state the caller intended (unset) already matches pyrust's state.
+                    "__defaults__" | "__annotations__" | "__kwdefaults__" => Ok(()),
                     _ => {
-                        if func.attrs.borrow_mut().shift_remove(name).is_some() {
+                        let key = PyKey::Str(name.to_string());
+                        let removed = func
+                            .attrs
+                            .borrow()
+                            .dict_shift_remove(&key)
+                            .unwrap_or(None);
+                        if removed.is_some() {
                             Ok(())
                         } else {
                             Err(PyError::named(

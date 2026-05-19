@@ -501,11 +501,16 @@ pub struct UserFunction {
     /// `del f.__doc__` resets it to `None`.
     pub doc: RefCell<Value>,
     /// Arbitrary dynamic attributes set by user code (`f.x = v`).
-    /// Exposed as `f.__dict__`.  Shared via `Rc<RefCell<...>>` so that bound-
-    /// method copies and `@classmethod` / `@staticmethod` wrappers all see the
-    /// same dict (matching CPython where `bound_method.__dict__` delegates to
-    /// the underlying function object).
-    pub attrs: Rc<RefCell<IndexMap<String, Value>>>,
+    /// Exposed as `f.__dict__`.  Stored as a `Value::dict` wrapped in
+    /// `Rc<RefCell<...>>` so that:
+    ///   1. `get_attr("__dict__")` returns the **live** dict object (CPython
+    ///      semantics: mutations through the returned dict propagate back to
+    ///      the function).
+    ///   2. `f.__dict__ = new_dict` replaces the inner Value via
+    ///      `*attrs.borrow_mut() = new_dict_value`.
+    ///   3. Bound-method copies and `@classmethod`/`@staticmethod` wrappers
+    ///      share the same `Rc` (same as before) so they all see the same dict.
+    pub attrs: Rc<RefCell<Value>>,
     pub params: Vec<UserFunctionParam>,
     pub local_names: NameSet,
     pub local_index: Rc<HashMap<String, u32>>,
@@ -1480,7 +1485,7 @@ impl Value {
                 user_qualname: RefCell::new(None),
                 module: RefCell::new(Value::none()),
                 doc: RefCell::new(Value::none()),
-                attrs: Rc::new(RefCell::new(IndexMap::new())),
+                attrs: Rc::new(RefCell::new(Value::dict(IndexMap::new()))),
                 params: Vec::new(),
                 local_names: Rc::new(HashSet::new()),
                 local_index: Rc::new(HashMap::new()),
@@ -3344,7 +3349,7 @@ mod tests {
             user_qualname: RefCell::new(None),
             module: RefCell::new(Value::string("__main__".to_string())),
             doc: RefCell::new(Value::none()),
-            attrs: Rc::new(RefCell::new(IndexMap::new())),
+            attrs: Rc::new(RefCell::new(Value::dict(IndexMap::new()))),
             params: Vec::new(),
             local_names: Rc::new(HashSet::new()),
             local_index: Rc::new(HashMap::new()),
