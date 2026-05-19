@@ -9,6 +9,9 @@ pub const METHODS: &[&str] = &[
     "startswith",
     "endswith",
     "find",
+    "rfind",
+    "index",
+    "rindex",
     "count",
     "upper",
     "lower",
@@ -45,6 +48,9 @@ pub fn call(
         "startswith" => bytes_startswith(bytes, args),
         "endswith" => bytes_endswith(bytes, args),
         "find" => bytes_find(bytes, args),
+        "rfind" => bytes_rfind(bytes, args),
+        "index" => bytes_index(bytes, args),
+        "rindex" => bytes_rindex(bytes, args),
         "count" => bytes_count(bytes, args),
         "upper" => Ok(Value::bytes(
             bytes.iter().map(|b| b.to_ascii_uppercase()).collect(),
@@ -484,6 +490,111 @@ fn bytes_find(bytes: &[u8], args: &[Value]) -> Result<Value> {
 }
 
 // ---------------------------------------------------------------------------
+// rfind
+// ---------------------------------------------------------------------------
+
+fn bytes_rfind(bytes: &[u8], args: &[Value]) -> Result<Value> {
+    let sub_val = args.first().ok_or_else(|| {
+        PyError::named(
+            "TypeError",
+            "bytes.rfind() requires at least 1 argument".to_string(),
+        )
+    })?;
+    let sub_cow = extract_bytes_or_int_arg(sub_val)?;
+    let sub: &[u8] = &sub_cow;
+    let range = bytes_slice_args(bytes.len(), args)?;
+    let Some((start, end)) = range else {
+        // Inverted range: CPython returns -1 even for empty sub.
+        return Ok(Value::int(-1));
+    };
+    let haystack = &bytes[start..end];
+
+    if sub.is_empty() {
+        // CPython: empty sub rfind in a valid range returns end offset.
+        return Ok(Value::int(end as i64));
+    }
+
+    match rfind_subsequence(haystack, sub) {
+        Some(pos) => Ok(Value::int((start + pos) as i64)),
+        None => Ok(Value::int(-1)),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// index
+// ---------------------------------------------------------------------------
+
+fn bytes_index(bytes: &[u8], args: &[Value]) -> Result<Value> {
+    let sub_val = args.first().ok_or_else(|| {
+        PyError::named(
+            "TypeError",
+            "bytes.index() requires at least 1 argument".to_string(),
+        )
+    })?;
+    let sub_cow = extract_bytes_or_int_arg(sub_val)?;
+    let sub: &[u8] = &sub_cow;
+    let range = bytes_slice_args(bytes.len(), args)?;
+    let Some((start, end)) = range else {
+        // Inverted range: CPython raises ValueError.
+        return Err(PyError::named(
+            "ValueError",
+            "subsection not found".to_string(),
+        ));
+    };
+    let haystack = &bytes[start..end];
+
+    if sub.is_empty() {
+        // CPython: empty sub in a valid (possibly empty) range returns start.
+        return Ok(Value::int(start as i64));
+    }
+
+    match find_subsequence(haystack, sub) {
+        Some(pos) => Ok(Value::int((start + pos) as i64)),
+        None => Err(PyError::named(
+            "ValueError",
+            "subsection not found".to_string(),
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// rindex
+// ---------------------------------------------------------------------------
+
+fn bytes_rindex(bytes: &[u8], args: &[Value]) -> Result<Value> {
+    let sub_val = args.first().ok_or_else(|| {
+        PyError::named(
+            "TypeError",
+            "bytes.rindex() requires at least 1 argument".to_string(),
+        )
+    })?;
+    let sub_cow = extract_bytes_or_int_arg(sub_val)?;
+    let sub: &[u8] = &sub_cow;
+    let range = bytes_slice_args(bytes.len(), args)?;
+    let Some((start, end)) = range else {
+        // Inverted range: CPython raises ValueError.
+        return Err(PyError::named(
+            "ValueError",
+            "subsection not found".to_string(),
+        ));
+    };
+    let haystack = &bytes[start..end];
+
+    if sub.is_empty() {
+        // CPython: empty sub rindex in a valid range returns end offset.
+        return Ok(Value::int(end as i64));
+    }
+
+    match rfind_subsequence(haystack, sub) {
+        Some(pos) => Ok(Value::int((start + pos) as i64)),
+        None => Err(PyError::named(
+            "ValueError",
+            "subsection not found".to_string(),
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // count
 // ---------------------------------------------------------------------------
 
@@ -525,11 +636,17 @@ fn bytes_count(bytes: &[u8], args: &[Value]) -> Result<Value> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Parse start/end slice args (args[1], args[2]) into byte offsets, clamped to
-/// `[0, len]`.  Returns `Ok(Some((start, end)))` for a valid (possibly empty)
-/// range, or `Ok(None)` when `end < start` after clamping — an inverted range
-/// that CPython treats as "empty with no match" (find → -1, count → 0,
-/// startswith/endswith → False).
+/// Parse start/end slice args (args[1], args[2]) into byte offsets.
+///
+/// `end` is clamped to `[0, len]`.  `start` is clamped to `[0, len]` only
+/// when it is within bounds; a positive `start > len` is left unclamped so
+/// that the `end < start` guard below returns `None`, matching CPython's
+/// behaviour of returning -1 / ValueError for an out-of-bounds start.
+///
+/// Returns `Ok(Some((start, end)))` for a valid (possibly empty) range, or
+/// `Ok(None)` when `end < start` — an inverted or out-of-bounds-start range
+/// that CPython treats as "no match" (find → -1, count → 0,
+/// startswith/endswith → False, index/rindex → ValueError).
 fn bytes_slice_args(len: usize, args: &[Value]) -> Result<Option<(usize, usize)>> {
     let start: usize = match args.get(1).map(|v| v.kind()) {
         None => 0,
@@ -553,15 +670,16 @@ fn bytes_slice_args(len: usize, args: &[Value]) -> Result<Option<(usize, usize)>
             ));
         }
     };
-    let start = start.min(len);
-    // Don't clamp end up to start: an inverted range (end < start) must be
-    // distinguished from a genuinely empty range (end == start) because
-    // CPython returns -1/0/False for inverted ranges but a valid index for
-    // empty ranges at the boundary.
+    // Do NOT clamp start up to len here.  When the caller passes a positive
+    // start > len, leaving it unclamped means end (which IS clamped to len)
+    // satisfies end < start, triggering the None path below — the same
+    // result CPython returns for an out-of-bounds start.  Clamping start to
+    // len would incorrectly turn start=6 into start=5==end and produce a
+    // valid empty range (returning 5 for empty-sub rfind instead of -1).
     if end < start {
         Ok(None)
     } else {
-        Ok(Some((start, end)))
+        Ok(Some((start.min(len), end)))
     }
 }
 
@@ -581,4 +699,13 @@ fn find_subsequence(haystack: &[u8], sub: &[u8]) -> Option<usize> {
         return None;
     }
     haystack.windows(sub.len()).position(|w| w == sub)
+}
+
+/// Naive substring search: find last occurrence of `sub` in `haystack`,
+/// returning the starting byte index, or `None` if not found.
+fn rfind_subsequence(haystack: &[u8], sub: &[u8]) -> Option<usize> {
+    if sub.len() > haystack.len() {
+        return None;
+    }
+    haystack.windows(sub.len()).rposition(|w| w == sub)
 }
