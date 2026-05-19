@@ -36,6 +36,20 @@ print(hasattr(bytes, "__class_getitem__"))
 # type(ga).__name__ == "GenericAlias"
 print(type(list[int]).__name__)
 
+# Equality: two aliases with the same origin and args must be equal
+print(list[int] == list[int])
+print(list[int] == list[str])
+print(list[int] == dict[str, int])
+
+# Hashing: GenericAlias is hashable and consistent with equality
+print(hash(list[int]) == hash(list[int]))
+print(hash(list[int]) == hash(list[str]))
+
+# Usable as dict key and in set
+d = {list[int]: "ok"}
+print(d[list[int]])
+print(list[int] in {list[int]})
+
 # User class without __class_getitem__ raises TypeError
 class MyClass:
     pass
