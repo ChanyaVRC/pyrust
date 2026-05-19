@@ -1638,23 +1638,6 @@ fn collect_pattern_names(
     }
 }
 
-/// Collect the simple names that appear as annotation targets in the top level
-/// of `body`.  Both `Stmt::AnnDeclare(name)` and `Stmt::AnnAssign(name, _)`
-/// contribute.  This does **not** recurse into nested function or class bodies;
-/// it is used to validate `global`/`nonlocal` conflicts at the same scope level.
-pub(crate) fn collect_annotation_target_names(body: &[Stmt]) -> HashSet<String> {
-    let mut names = HashSet::new();
-    for stmt in body {
-        match stmt {
-            Stmt::AnnDeclare(name) | Stmt::AnnAssign(name, _) => {
-                names.insert(name.clone());
-            }
-            _ => {}
-        }
-    }
-    names
-}
-
 pub(crate) fn collect_global_names(body: &[Stmt]) -> HashSet<String> {
     collect_declared_names(body, |s| {
         if let Stmt::Global(names) = s { Some(names) } else { None }

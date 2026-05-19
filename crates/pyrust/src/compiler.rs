@@ -723,13 +723,10 @@ fn lambda_captures_in_stmt(
         | Stmt::ImportFrom { .. }
         | Stmt::Global(_)
         | Stmt::Nonlocal(_)
-        | Stmt::AnnDeclare(_)
         | Stmt::Pass
-        | Stmt::AnnDeclare(_)
         | Stmt::Break
         | Stmt::Continue
         | Stmt::Raise { expr: None, .. } => {}
-        Stmt::AnnAssign(_, expr) => lambda_captures_in_expr(expr, local_index, cells),
     }
 }
 
@@ -1643,13 +1640,10 @@ fn collect_free_var_reads_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>) {
         | Stmt::ImportFrom { .. }
         | Stmt::Global(_)
         | Stmt::Nonlocal(_)
-        | Stmt::AnnDeclare(_)
         | Stmt::Pass
-        | Stmt::AnnDeclare(_)
         | Stmt::Break
         | Stmt::Continue
         | Stmt::Raise { expr: None, .. } => {}
-        Stmt::AnnAssign(_, expr) => collect_free_var_reads_in_expr(expr, uses),
     }
 }
 
@@ -2013,13 +2007,10 @@ fn collect_transitive_free_vars_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>)
         | Stmt::ImportFrom { .. }
         | Stmt::Global(_)
         | Stmt::Nonlocal(_)
-        | Stmt::AnnDeclare(_)
         | Stmt::Pass
-        | Stmt::AnnDeclare(_)
         | Stmt::Break
         | Stmt::Continue
         | Stmt::Raise { expr: None, .. } => {}
-        Stmt::AnnAssign(_, expr) => collect_transitive_free_vars_in_expr(expr, uses),
     }
 }
 
@@ -3240,14 +3231,11 @@ fn stmt_reads_var(stmt: &Stmt, name: &str) -> bool {
         Stmt::AnnDeclare(_) => false,
         Stmt::Global(_)
         | Stmt::Nonlocal(_)
-        | Stmt::AnnDeclare(_)
         | Stmt::Break
         | Stmt::Continue
         | Stmt::Pass
-        | Stmt::AnnDeclare(_)
         | Stmt::Import { .. }
         | Stmt::ImportFrom { .. } => false,
-        Stmt::AnnAssign(_, expr) => expr_reads_var(expr, name),
     }
 }
 
@@ -6122,8 +6110,7 @@ impl Compiler {
                 self.failed = true;
                 self.is_syntax_error = true;
                 if self.error_msg.is_none() {
-                    self.error_msg =
-                        Some(format!("annotated name '{}' can't be global", ann_name));
+                    self.error_msg = Some(format!("annotated name '{}' can't be global", ann_name));
                 }
                 return;
             }
@@ -6466,8 +6453,7 @@ impl Compiler {
                 self.failed = true;
                 self.is_syntax_error = true;
                 if self.error_msg.is_none() {
-                    self.error_msg =
-                        Some(format!("annotated name '{}' can't be global", ann_name));
+                    self.error_msg = Some(format!("annotated name '{}' can't be global", ann_name));
                 }
                 return;
             }
