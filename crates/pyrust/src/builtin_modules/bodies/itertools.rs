@@ -1251,20 +1251,11 @@ fn make_iter(interp: &mut crate::Interpreter, iterable: Value) -> Result<Value> 
     )
 }
 
-/// Recognise StopIteration in both the plain (`PyError::Named`),
-/// class-identity (`PyError::Class`), and exception-instance
-/// (`PyError::Raised`) forms.
+/// Recognise StopIteration in all PyError forms, including user-defined
+/// subclasses carried as `PyError::Raised`.  `class_name_is` walks the base
+/// chain for `Raised` variants so this is subclass-aware.
 fn is_stop_iteration(e: &PyError) -> bool {
-    if e.class_name_is("StopIteration") {
-        return true;
-    }
-    matches!(
-        e,
-        PyError::Raised(exc) if matches!(
-            exc.kind(),
-            ValueKind::PyInstance(i) if i.borrow().class.borrow().name == "StopIteration"
-        )
-    )
+    e.class_name_is("StopIteration")
 }
 
 /// Apply `key_fn(item)` if it's callable (i.e. not None); otherwise the
