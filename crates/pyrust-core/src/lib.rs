@@ -491,6 +491,15 @@ pub struct UserFunction {
     pub user_name: RefCell<Option<String>>,
     /// Mutable override for `f.__qualname__`.  `None` means fall back to `qualname`.
     pub user_qualname: RefCell<Option<String>>,
+    /// `f.__module__` — the name of the module in which the function was defined.
+    /// Defaults to `"__main__"` (module-name tracking is not yet implemented).
+    /// User code may assign any value; `del f.__module__` resets it to `None`.
+    pub module: RefCell<Value>,
+    /// `f.__doc__` — the function's docstring, or `None` if absent.
+    /// pyrust does not yet extract docstrings at compile time, so this is always
+    /// `None` at construction time.  User code may assign any value;
+    /// `del f.__doc__` resets it to `None`.
+    pub doc: RefCell<Value>,
     pub params: Vec<UserFunctionParam>,
     pub local_names: NameSet,
     pub local_index: Rc<HashMap<String, u32>>,
@@ -1463,6 +1472,8 @@ impl Value {
                 qualname: name.to_string(),
                 user_name: RefCell::new(None),
                 user_qualname: RefCell::new(None),
+                module: RefCell::new(Value::none()),
+                doc: RefCell::new(Value::none()),
                 params: Vec::new(),
                 local_names: Rc::new(HashSet::new()),
                 local_index: Rc::new(HashMap::new()),
@@ -1525,6 +1536,8 @@ impl Value {
             qualname: f.qualname.clone(),
             user_name: RefCell::new(f.user_name.borrow().clone()),
             user_qualname: RefCell::new(f.user_qualname.borrow().clone()),
+            module: RefCell::new(f.module.borrow().clone()),
+            doc: RefCell::new(f.doc.borrow().clone()),
             params: f.params.clone(),
             local_names: Rc::clone(&f.local_names),
             local_index: Rc::clone(&f.local_index),
@@ -3321,6 +3334,8 @@ mod tests {
             qualname: "f".to_string(),
             user_name: RefCell::new(None),
             user_qualname: RefCell::new(None),
+            module: RefCell::new(Value::string("__main__".to_string())),
+            doc: RefCell::new(Value::none()),
             params: Vec::new(),
             local_names: Rc::new(HashSet::new()),
             local_index: Rc::new(HashMap::new()),

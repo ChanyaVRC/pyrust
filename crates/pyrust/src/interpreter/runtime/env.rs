@@ -339,6 +339,8 @@ impl Interpreter {
                             .to_string();
                         return Ok(Value::string(q));
                     }
+                    "__module__" => return Ok(func.module.borrow().clone()),
+                    "__doc__" => return Ok(func.doc.borrow().clone()),
                     _ => {}
                 }
                 Err(PyError::named(
@@ -388,8 +390,9 @@ impl Interpreter {
                 }
             }
             _ => {
-                // BoundMethod / ClassBoundMethod: delegate __name__ / __qualname__
-                // to the underlying function, matching CPython's method proxy semantics.
+                // BoundMethod / ClassBoundMethod: delegate __name__ / __qualname__ /
+                // __module__ / __doc__ to the underlying function, matching CPython's
+                // method proxy semantics.
                 match target.kind() {
                     ValueKind::BoundMethod { function, .. }
                     | ValueKind::ClassBoundMethod { function, .. } => match name {
@@ -411,6 +414,8 @@ impl Interpreter {
                                 .to_string();
                             return Ok(Value::string(q));
                         }
+                        "__module__" => return Ok(function.module.borrow().clone()),
+                        "__doc__" => return Ok(function.doc.borrow().clone()),
                         _ => {}
                     },
                     _ => {}
@@ -532,6 +537,8 @@ impl Interpreter {
             ValueKind::UserFunction(func) => {
                 // CPython allows assigning to __name__ and __qualname__ on
                 // functions — both must be set to a str, otherwise TypeError.
+                // __module__ and __doc__ accept any value (CPython imposes no
+                // type constraint on these).
                 match name {
                     "__name__" | "__qualname__" => {
                         let as_str: Option<String> = if let ValueKind::Str(s) = value.kind() {
@@ -553,6 +560,14 @@ impl Interpreter {
                                 format!("{name} must be set to a string object"),
                             )),
                         }
+                    }
+                    "__module__" => {
+                        *func.module.borrow_mut() = value;
+                        Ok(())
+                    }
+                    "__doc__" => {
+                        *func.doc.borrow_mut() = value;
+                        Ok(())
                     }
                     _ => Err(PyError::named(
                         "AttributeError",
@@ -609,15 +624,25 @@ impl Interpreter {
                 instance.borrow_mut().attrs.shift_remove(name);
                 Ok(())
             }
-            ValueKind::UserFunction(_) => {
+            ValueKind::UserFunction(func) => {
                 // CPython raises TypeError for `del f.__name__` / `del f.__qualname__`
                 // with the same message as a non-string assignment — these slots exist
                 // but cannot be deleted.
+                // `del f.__module__` and `del f.__doc__` are allowed; they reset
+                // the slot to None (matching CPython).
                 match name {
                     "__name__" | "__qualname__" => Err(PyError::named(
                         "TypeError",
                         format!("{name} must be set to a string object"),
                     )),
+                    "__module__" => {
+                        *func.module.borrow_mut() = Value::none();
+                        Ok(())
+                    }
+                    "__doc__" => {
+                        *func.doc.borrow_mut() = Value::none();
+                        Ok(())
+                    }
                     _ => Err(PyError::named(
                         "AttributeError",
                         format!("'function' object has no attribute '{name}'"),
