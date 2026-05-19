@@ -1351,7 +1351,10 @@ impl Interpreter {
                         // `iv == 0.0 && iw < 0.0` before delegating to pow().
                         // IEEE 754 equality treats +0.0 and -0.0 as equal, so
                         // this guard covers both signs with the same message.
-                        if a == 0.0 && b < 0.0 {
+                        // The exponent must be finite: 0.0 ** -inf = inf per
+                        // IEEE 754 (|0| < 1, so |0|^(-inf) = inf), which
+                        // CPython's C pow() returns correctly.
+                        if a == 0.0 && b < 0.0 && b.is_finite() {
                             return Err(PyError::named(
                                 "ZeroDivisionError",
                                 "0.0 cannot be raised to a negative power".to_string(),
