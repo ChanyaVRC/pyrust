@@ -182,39 +182,63 @@ fn collect_cell_vars_in(
                         cells.insert(name.clone());
                     }
                 }
-                // Names declared `global` directly in the class body (i.e. via
-                // `global x` statements at the top level of the class body, NOT
-                // from methods) target the module env at runtime via `StoreGlobal`.
-                // `assign_name` also updates the enclosing scope's fastlocal
-                // register through the `vm_frame_views` side-channel, but the
-                // optimizer may have constant-folded that register using the
-                // pre-class value.  Promoting these names to cell vars in the
-                // enclosing scope forces reads/writes through `LoadGlobal` /
-                // `StoreGlobal`, which the optimizer does not constant-fold,
-                // so the post-class value is seen correctly (issue #618).
-                //
-                // We use `collect_global_names_via_class_chain` (which recurses
-                // through nested class bodies) so that a `global x` declaration
-                // inside a doubly-nested class body is visible when scanning the
-                // outer class body (issue #672).  We do NOT use
-                // `collect_transitive_global_names` (which also crosses Stmt::Def
-                // boundaries) to avoid the #624 regression where a method's
-                // `global x` would incorrectly promote the enclosing scope's `x`.
-                //
-                // Exception: when the current scope is itself a class body
-                // (`is_class_scope == true`), skip this promotion entirely.
-                // A `global x` in a directly-nested class body goes straight
-                // to the module env, bypassing the outer class namespace.
-                // Promoting the outer class's `x` to a cell var here would
-                // force `Outer.x = 50` to emit `StoreGlobal` instead of
-                // `RecordClassStore`, leaving the attribute absent from the
-                // class dict and causing `AttributeError` on `Outer.x`
-                // (issue #679).
+                // Only promote names to cell vars when the enclosing scope is a
+                // function (not another class body).  When is_class_scope == true,
+                // local_index belongs to the outer class — promoting its names to
+                // cell vars would force `Outer.x = 50` to emit StoreGlobal instead
+                // of RecordClassStore, losing the class attribute (issue #679).
                 if !is_class_scope {
+                    // Names declared `global` in the class body (including in
+                    // doubly-nested class bodies via collect_global_names_via_class_chain)
+                    // target the module env at runtime.  Promoting them to cell vars
+                    // prevents the optimizer from const-folding the enclosing register
+                    // using the pre-class value (issue #618, #672).
                     let class_body_globals = collect_global_names_via_class_chain(nested_body);
                     for name in &class_body_globals {
                         if local_index.contains_key(name) {
                             cells.insert(name.clone());
+                        }
+                    }
+
+                    // Names directly read by top-level class-body statements (not
+                    // inside methods) can refer to enclosing function locals.
+                    // CPython promotes such names to cells so they are reachable
+                    // via the env chain when the class body executes (issue #577).
+                    let empty_set: HashSet<String> = HashSet::new();
+                    let class_locals = crate::interpreter::collect_local_names(
+                        &[],
+                        nested_body,
+                        &empty_set,
+                        &empty_set,
+                    );
+                    let inner_globals = crate::interpreter::collect_global_names(nested_body);
+                    // Collect names that appear as AugAssign targets at class body level.
+                    // An AugAssign at class scope (e.g. `n += 1`) requires `n` to already
+                    // be defined in the class scope — it does NOT capture from the enclosing
+                    // function scope.  `collect_free_var_reads_in_stmts` inserts AugAssign
+                    // target names as "uses", so we must subtract them here to avoid
+                    // wrongly promoting enclosing-function locals to cell vars.
+                    let mut class_aug_targets: HashSet<String> = HashSet::new();
+                    for stmt in nested_body.iter() {
+                        if let Stmt::AugAssign {
+                            target: AssignTarget::Name(n),
+                            ..
+                        } = stmt
+                        {
+                            class_aug_targets.insert(n.clone());
+                        }
+                    }
+                    let mut body_uses: HashSet<String> = HashSet::new();
+                    collect_free_var_reads_in_stmts(nested_body, &mut body_uses);
+                    collect_transitive_free_vars_in_stmts(nested_body, &mut body_uses);
+                    for name in body_uses {
+                        if !class_locals.contains(&name)
+                            && !class_aug_targets.contains(&name)
+                            && !inner_globals.contains(&name)
+                            && !nonlocals.contains(&name)
+                            && local_index.contains_key(&name)
+                        {
+                            cells.insert(name);
                         }
                     }
                 }
