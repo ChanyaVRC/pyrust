@@ -989,9 +989,9 @@ fn collect_class_body_names_textual(
             Stmt::Assign(target, _) => {
                 collect_assign_target_textual(target, ordered, seen, body_local);
             }
-            Stmt::AnnAssign { target, .. } => {
-                if body_local.contains(target) && seen.insert(target.clone()) {
-                    ordered.push(target.clone());
+            Stmt::AnnAssign { name, .. } => {
+                if body_local.contains(name) && seen.insert(name.clone()) {
+                    ordered.push(name.clone());
                 }
             }
             Stmt::Def { name, .. } | Stmt::Class { name, .. } => {
@@ -2588,9 +2588,14 @@ fn collect_written_in(body: &[Stmt], names: &mut HashSet<String>) {
             Stmt::Assign(target, _) | Stmt::AugAssign { target, .. } => {
                 collect_written_target(target, names);
             }
-            Stmt::AnnAssign { target, .. } => {
-                names.insert(target.clone());
+            Stmt::AnnAssign {
+                name,
+                value: Some(_),
+                ..
+            } => {
+                names.insert(name.clone());
             }
+            Stmt::AnnAssign { value: None, .. } | Stmt::AnnDeclare(_) => {}
             Stmt::If {
                 branches,
                 else_branch,
@@ -3323,7 +3328,10 @@ fn rewrite_c_at_i_in_stmt(stmt: &mut Stmt, c_name: &str, i_name: &str) {
         Stmt::Assign(_, e) | Stmt::AugAssign { expr: e, .. } | Stmt::Expr(e) => {
             rewrite_c_at_i_in_expr(e, c_name, i_name);
         }
-        Stmt::AnnAssign { value, .. } => rewrite_c_at_i_in_expr(value, c_name, i_name),
+        Stmt::AnnAssign {
+            value: Some(value), ..
+        } => rewrite_c_at_i_in_expr(value, c_name, i_name),
+        Stmt::AnnAssign { value: None, .. } => {}
         Stmt::Return(Some(e)) => rewrite_c_at_i_in_expr(e, c_name, i_name),
         Stmt::AttrAssign { target, expr, .. } => {
             rewrite_c_at_i_in_expr(target, c_name, i_name);

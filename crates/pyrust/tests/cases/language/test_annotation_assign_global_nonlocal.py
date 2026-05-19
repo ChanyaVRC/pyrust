@@ -63,3 +63,14 @@ b = Box()
 b.set(55)
 print(b.value)  # 55
 print(Box.value)  # 0
+
+# Annotated assignment inside a while-index loop body — the optimizer must
+# rewrite `c[i]` inside the annotated value, not leave it unrewritten.
+items = [10, 20, 30]
+i = 0
+results = []
+while i < len(items):
+    val: int = items[i]
+    results.append(val)
+    i += 1
+print(results)  # [10, 20, 30]

@@ -1496,13 +1496,14 @@ fn collect_local_names_from_block(
             | Stmt::Break
             | Stmt::Continue
             | Stmt::Pass => {}
-            Stmt::AnnAssign { target, .. } => {
-                if !global_names.contains(target) && !nonlocal_names.contains(target) {
-                    names.insert(target.clone());
+            Stmt::AnnAssign { name, value: Some(_), .. } => {
+                if !global_names.contains(name) && !nonlocal_names.contains(name) {
+                    names.insert(name.clone());
                 }
             }
-            // Bare annotation — no-op at runtime, does not create a local.
-            Stmt::AnnDeclare(_) => {}
+            // Bare annotation or annotated assign without value — no-op at runtime,
+            // does not create a local.
+            Stmt::AnnAssign { value: None, .. } | Stmt::AnnDeclare(_) => {}
             // Walk expressions for walrus operator targets.
             Stmt::Expr(e) => {
                 collect_walrus_targets_in_expr(e, names, global_names, nonlocal_names);
