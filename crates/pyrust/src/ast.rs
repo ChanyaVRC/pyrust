@@ -121,6 +121,9 @@ pub enum Stmt {
     Break,
     Continue,
     Pass,
+    /// Bare type annotation without a value: `x: int` at function scope.
+    /// Declares `x` as a local variable (uninitialized) without emitting a store.
+    AnnDeclare(String),
     Delete(Vec<Expr>),
     Assert {
         test: Expr,

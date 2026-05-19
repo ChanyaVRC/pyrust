@@ -115,6 +115,7 @@ impl ExcClasses {
             "TypeError",
             "ValueError",
             "NameError",
+            "UnboundLocalError",
             "AssertionError",
             "StopIteration",
             "AttributeError",
