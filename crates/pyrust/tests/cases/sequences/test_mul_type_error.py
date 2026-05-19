@@ -40,6 +40,25 @@ try:
 except TypeError as e:
     print(e)  # can't multiply sequence by non-int of type 'float'
 
+# Non-float non-int types also raise the type-named TypeError (issue #756 full fix)
+try:
+    result = [1, 2] * None
+except TypeError as e:
+    print(e)  # can't multiply sequence by non-int of type 'NoneType'
+
+try:
+    result = None * [1, 2]
+except TypeError as e:
+    print(e)  # can't multiply sequence by non-int of type 'NoneType'
+
+try:
+    result = "ab" * "x"
+except TypeError as e:
+    print(e)  # can't multiply sequence by non-int of type 'str'
+
 # Regression guards: valid sequence multiplication must still work
 print([1, 2] * 3)    # [1, 2, 1, 2, 1, 2]
 print("ab" * 4)      # abababab
+# bool is a subclass of int — should be accepted
+print([1, 2] * True)   # [1, 2]
+print([1, 2] * False)  # []
