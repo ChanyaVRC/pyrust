@@ -16,6 +16,9 @@ except RuntimeError as e:
     print("cause type:", type(e.__cause__).__name__)
     print("cause str:", str(e.__cause__))
     print("suppress_context:", e.__suppress_context__)
+    # CPython also sets __context__ to the same StopIteration instance.
+    print("context type:", type(e.__context__).__name__)
+    print("context is cause:", e.__context__ is e.__cause__)
 
 # --- StopIteration with no arguments: __cause__ is StopIteration() not None ---
 def gen_cause_no_args():
@@ -30,6 +33,7 @@ except RuntimeError as e:
     print("no-args cause repr:", repr(e.__cause__))
     print("no-args cause type:", type(e.__cause__).__name__)
     print("no-args suppress_context:", e.__suppress_context__)
+    print("no-args context type:", type(e.__context__).__name__)
 
 # --- StopIteration subclass: __cause__ is instance of the subclass ---
 class MyStop(StopIteration):

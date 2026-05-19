@@ -2973,8 +2973,12 @@ fn pep479_wrap_stop_iteration(env: &crate::interpreter::EnvRef, err: PyError) ->
         _ => None,
     };
 
-    // Build the RuntimeError instance and attach __cause__ + __suppress_context__,
-    // mirroring the Insn::RaiseFrom handler (vm.rs:1337-1339).
+    // Build the RuntimeError instance and attach __cause__, __context__, and
+    // __suppress_context__, mirroring CPython's PEP 479 behaviour.
+    // CPython sets both __cause__ and __context__ to the original StopIteration
+    // instance (they are the same object: `e.__context__ is e.__cause__`), and
+    // sets __suppress_context__ = True so the "During handling of..." context
+    // chain is suppressed in tracebacks.
     if let Some(cause) = cause_val {
         if let Some(rt_cls) = lookup_name_in_module(env, "RuntimeError").and_then(|v| match v.kind() {
             ValueKind::PyClass(c) => Some(Rc::clone(c)),
@@ -2985,9 +2989,15 @@ fn pep479_wrap_stop_iteration(env: &crate::interpreter::EnvRef, err: PyError) ->
                 vec![Value::string("generator raised StopIteration")],
             );
             if let ValueKind::PyInstance(inst) = rt_err.kind() {
+                // Clone before the first insert so both __cause__ and __context__
+                // share the same underlying Rc (preserving CPython identity: is).
+                let context = cause.clone();
                 inst.borrow_mut()
                     .attrs
                     .insert("__cause__".to_string(), cause);
+                inst.borrow_mut()
+                    .attrs
+                    .insert("__context__".to_string(), context);
                 inst.borrow_mut()
                     .attrs
                     .insert("__suppress_context__".to_string(), Value::bool_(true));
