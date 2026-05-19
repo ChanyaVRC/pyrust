@@ -2934,8 +2934,17 @@ fn stmt_safe_for_index_rewrite(stmt: &Stmt, i_name: &str, c_name: &str) -> bool 
         }
         Stmt::Pass | Stmt::AnnDeclare(_) | Stmt::Global(_) | Stmt::Nonlocal(_) => true,
         Stmt::AnnAssign {
-            value: Some(v), ..
-        } => expr_safe(v, i_name, c_name),
+            name,
+            value: Some(value),
+            ..
+        } => {
+            // Annotated assignment to `i` or `c` breaks the rewrite invariant
+            // (same reason as plain Assign).
+            if name == i_name || name == c_name {
+                return false;
+            }
+            expr_safe(value, i_name, c_name)
+        }
         Stmt::AnnAssign { value: None, .. } => true,
         Stmt::Delete(exprs) => {
             // `del c[i]` is unsafe; any other delete is OK as long as it
@@ -3314,6 +3323,7 @@ fn rewrite_c_at_i_in_stmt(stmt: &mut Stmt, c_name: &str, i_name: &str) {
         Stmt::Assign(_, e) | Stmt::AugAssign { expr: e, .. } | Stmt::Expr(e) => {
             rewrite_c_at_i_in_expr(e, c_name, i_name);
         }
+        Stmt::AnnAssign { value, .. } => rewrite_c_at_i_in_expr(value, c_name, i_name),
         Stmt::Return(Some(e)) => rewrite_c_at_i_in_expr(e, c_name, i_name),
         Stmt::AttrAssign { target, expr, .. } => {
             rewrite_c_at_i_in_expr(target, c_name, i_name);
