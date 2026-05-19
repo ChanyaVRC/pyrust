@@ -21,34 +21,73 @@ impl Lexer {
     fn lex_source(&mut self, src: &str) -> Result<()> {
         let mut indent_stack: Vec<usize> = vec![0];
         let mut paren_depth: usize = 0; // track ( [ { for implicit line continuation
-        let mut line_continued = false; // track \ line continuation
 
-        let lines: Vec<&str> = src.split('\n').collect();
-        let mut i = 0;
-        while i < lines.len() {
-            let raw = lines[i];
-            let line = raw.trim_end_matches('\r');
-            let indent = count_indent(line)?;
-            let content = &line[indent..];
+        // Work on the full source as a flat char array so that string literals
+        // (including triple-quoted ones) can span line boundaries naturally.
+        let chars: Vec<char> = src.chars().collect();
+        let mut pos = 0;
 
-            if content.trim().is_empty() || content.trim_start().starts_with('#') {
-                if !line_continued {
+        while pos <= chars.len() {
+            // Measure the indentation of the current logical line.
+            // We do this at the start of each physical line (pos points just
+            // after the preceding '\n', or at 0 for the first line).
+            let line_start = pos;
+
+            // Count leading spaces (tabs are rejected by count_indent_chars).
+            let indent = count_indent_chars(&chars, pos)?;
+            pos += indent;
+
+            // Collect the rest of this line (up to '\n' or end-of-source) to
+            // decide whether it is blank / comment-only before we emit INDENT /
+            // DEDENT tokens.
+            let content_start = pos;
+            let mut eol = pos;
+            while eol < chars.len() && chars[eol] != '\n' {
+                eol += 1;
+            }
+            // Trim a trailing '\r' if present (CRLF sources).
+            let line_end = if eol > 0 && chars[eol.saturating_sub(1)] == '\r' {
+                eol - 1
+            } else {
+                eol
+            };
+
+            // Determine whether the visible content of this line is empty or a
+            // comment.  We check from content_start to line_end.
+            let visible: String = chars[content_start..line_end].iter().collect();
+            let is_blank_or_comment =
+                visible.trim().is_empty() || visible.trim_start().starts_with('#');
+
+            if is_blank_or_comment {
+                // Blank / comment lines do not affect indentation or emit
+                // logical-line tokens (they emit Newline only at the top level,
+                // matching CPython's behaviour for blank lines outside parens).
+                if paren_depth == 0 {
                     self.tokens.push(Token::Newline);
                 }
-                i += 1;
+                // Advance past the '\n' (or reach end-of-source).
+                pos = if eol < chars.len() {
+                    eol + 1
+                } else {
+                    chars.len() + 1
+                };
                 continue;
             }
 
-            if paren_depth == 0 && !line_continued {
+            // Non-blank line: handle indentation.
+            if paren_depth == 0 {
                 self.handle_indent(indent, &mut indent_stack)?;
             }
-            let (new_depth, continued) = self.lex_content_tracking(content, paren_depth)?;
+
+            // Lex tokens on this logical line.  `lex_line_tokens` advances
+            // `pos` past the last token on the line (including any '\n') and
+            // returns the updated paren depth.  It may consume multiple physical
+            // lines when it encounters a triple-quoted string.
+            pos = content_start; // reset to after-indent start
+            let _ = line_start; // silence unused-variable warning
+            let new_depth;
+            (pos, new_depth) = self.lex_line_tokens(&chars, pos, paren_depth)?;
             paren_depth = new_depth;
-            line_continued = continued;
-            if paren_depth == 0 && !line_continued {
-                self.tokens.push(Token::Newline);
-            }
-            i += 1;
         }
 
         while indent_stack.len() > 1 {
@@ -81,51 +120,100 @@ impl Lexer {
         Ok(())
     }
 
-    fn lex_content_tracking(
+    /// Lex tokens starting at `pos` in the full source `chars`, up to (and
+    /// including) the logical end of the current line.  Returns `(next_pos,
+    /// new_paren_depth)` where `next_pos` points to the character just after
+    /// the consumed '\n' (or `chars.len() + 1` when at EOF).
+    ///
+    /// Triple-quoted string literals are read across '\n' boundaries here, so
+    /// the returned `next_pos` may skip many physical lines.
+    fn lex_line_tokens(
         &mut self,
-        content: &str,
+        chars: &[char],
+        start: usize,
         mut paren_depth: usize,
-    ) -> Result<(usize, bool)> {
-        let chars: Vec<char> = content.chars().collect();
-        let mut pos = 0;
+    ) -> Result<(usize, usize)> {
+        let mut pos = start;
+        let mut line_continued = false;
 
-        while let Some(c) = chars.get(pos).copied() {
-            match c {
-                ' ' | '\t' => pos += 1,
-                '#' => break,
-                '0'..='9' => {
-                    let (tok, next) = lex_number(&chars, pos)?;
+        loop {
+            match chars.get(pos).copied() {
+                None => {
+                    // End of source.
+                    if paren_depth == 0 && !line_continued {
+                        self.tokens.push(Token::Newline);
+                    }
+                    return Ok((chars.len() + 1, paren_depth));
+                }
+                Some('\n') => {
+                    if line_continued {
+                        // Backslash continuation: consume '\n' and keep going
+                        // on the next physical line (do NOT emit Newline).
+                        pos += 1;
+                        // Skip leading whitespace on the continuation line.
+                        while matches!(chars.get(pos), Some(&' ') | Some(&'\t')) {
+                            pos += 1;
+                        }
+                        line_continued = false;
+                        continue;
+                    }
+                    if paren_depth == 0 {
+                        self.tokens.push(Token::Newline);
+                    }
+                    // Advance past '\n' and return so that lex_source can
+                    // process the indentation of the next line.
+                    return Ok((pos + 1, paren_depth));
+                }
+                Some('\r') => {
+                    // Bare CR: skip (CRLF handled by consuming \r then \n above)
+                    pos += 1;
+                }
+                Some(' ') | Some('\t') => {
+                    pos += 1;
+                }
+                Some('#') => {
+                    // Comment: skip to end of line.
+                    while pos < chars.len() && chars[pos] != '\n' {
+                        pos += 1;
+                    }
+                    // '\n' will be handled on the next iteration.
+                }
+                Some('0'..='9') => {
+                    let (tok, next) = lex_number(chars, pos)?;
                     self.tokens.push(tok);
                     pos = next;
                 }
-                'a'..='z' | 'A'..='Z' | '_' => {
+                Some('a'..='z') | Some('A'..='Z') | Some('_') => {
+                    let c = chars[pos];
                     // Check for f-string prefix: f" or f' (or F" / F')
                     if (c == 'f' || c == 'F')
                         && matches!(chars.get(pos + 1), Some('"') | Some('\''))
                     {
                         let quote = chars[pos + 1];
-                        let (tok, next) = lex_fstring(&chars, pos + 2, quote)?;
+                        let (tok, next) = lex_fstring(chars, pos + 2, quote)?;
                         self.tokens.push(tok);
                         pos = next;
                     } else if (c == 'b' || c == 'B')
                         && matches!(chars.get(pos + 1), Some('"') | Some('\''))
                     {
                         // Bytes literal: b"..." or b'...' (no rb/br combos yet)
-                        let (tok, next) = lex_bytes(&chars, pos + 1)?;
+                        let (tok, next) = lex_bytes(chars, pos + 1)?;
                         self.tokens.push(tok);
                         pos = next;
                     } else {
-                        let (tok, next) = lex_ident_or_keyword(&chars, pos);
+                        let (tok, next) = lex_ident_or_keyword(chars, pos);
                         self.tokens.push(tok);
                         pos = next;
                     }
                 }
-                '"' | '\'' => {
-                    let (tok, next) = lex_string(&chars, pos)?;
+                Some('"') | Some('\'') => {
+                    // lex_string now receives the full chars slice so triple-
+                    // quoted strings can span physical lines.
+                    let (tok, next) = lex_string(chars, pos)?;
                     self.tokens.push(tok);
                     pos = next;
                 }
-                '+' => {
+                Some('+') => {
                     if chars.get(pos + 1) == Some(&'=') {
                         self.tokens.push(Token::PlusAssign);
                         pos += 2;
@@ -134,7 +222,7 @@ impl Lexer {
                         pos += 1;
                     }
                 }
-                '-' => {
+                Some('-') => {
                     if chars.get(pos + 1) == Some(&'=') {
                         self.tokens.push(Token::MinusAssign);
                         pos += 2;
@@ -146,7 +234,7 @@ impl Lexer {
                         pos += 1;
                     }
                 }
-                '@' => {
+                Some('@') => {
                     if chars.get(pos + 1) == Some(&'=') {
                         self.tokens.push(Token::AtAssign);
                         pos += 2;
@@ -155,11 +243,11 @@ impl Lexer {
                         pos += 1;
                     }
                 }
-                ';' => {
+                Some(';') => {
                     self.tokens.push(Token::Semicolon);
                     pos += 1;
                 }
-                '*' => {
+                Some('*') => {
                     if chars.get(pos + 1) == Some(&'*') {
                         if chars.get(pos + 2) == Some(&'=') {
                             self.tokens.push(Token::StarStarAssign);
@@ -176,7 +264,7 @@ impl Lexer {
                         pos += 1;
                     }
                 }
-                '/' => {
+                Some('/') => {
                     if chars.get(pos + 1) == Some(&'/') {
                         if chars.get(pos + 2) == Some(&'=') {
                             self.tokens.push(Token::SlashSlashAssign);
@@ -193,7 +281,7 @@ impl Lexer {
                         pos += 1;
                     }
                 }
-                '%' => {
+                Some('%') => {
                     if chars.get(pos + 1) == Some(&'=') {
                         self.tokens.push(Token::PercentAssign);
                         pos += 2;
@@ -202,7 +290,7 @@ impl Lexer {
                         pos += 1;
                     }
                 }
-                '&' => {
+                Some('&') => {
                     if chars.get(pos + 1) == Some(&'=') {
                         self.tokens.push(Token::AmpersandAssign);
                         pos += 2;
@@ -211,7 +299,7 @@ impl Lexer {
                         pos += 1;
                     }
                 }
-                '|' => {
+                Some('|') => {
                     if chars.get(pos + 1) == Some(&'=') {
                         self.tokens.push(Token::PipeAssign);
                         pos += 2;
@@ -220,7 +308,7 @@ impl Lexer {
                         pos += 1;
                     }
                 }
-                '^' => {
+                Some('^') => {
                     if chars.get(pos + 1) == Some(&'=') {
                         self.tokens.push(Token::CaretAssign);
                         pos += 2;
@@ -229,11 +317,11 @@ impl Lexer {
                         pos += 1;
                     }
                 }
-                '~' => {
+                Some('~') => {
                     self.tokens.push(Token::Tilde);
                     pos += 1;
                 }
-                '<' => {
+                Some('<') => {
                     if chars.get(pos + 1) == Some(&'<') {
                         if chars.get(pos + 2) == Some(&'=') {
                             self.tokens.push(Token::LShiftAssign);
@@ -250,7 +338,7 @@ impl Lexer {
                         pos += 1;
                     }
                 }
-                '>' => {
+                Some('>') => {
                     if chars.get(pos + 1) == Some(&'>') {
                         if chars.get(pos + 2) == Some(&'=') {
                             self.tokens.push(Token::RShiftAssign);
@@ -267,41 +355,41 @@ impl Lexer {
                         pos += 1;
                     }
                 }
-                '(' => {
+                Some('(') => {
                     self.tokens.push(Token::LParen);
                     paren_depth += 1;
                     pos += 1;
                 }
-                ')' => {
+                Some(')') => {
                     self.tokens.push(Token::RParen);
                     paren_depth = paren_depth.saturating_sub(1);
                     pos += 1;
                 }
-                '[' => {
+                Some('[') => {
                     self.tokens.push(Token::LBracket);
                     paren_depth += 1;
                     pos += 1;
                 }
-                ']' => {
+                Some(']') => {
                     self.tokens.push(Token::RBracket);
                     paren_depth = paren_depth.saturating_sub(1);
                     pos += 1;
                 }
-                '{' => {
+                Some('{') => {
                     self.tokens.push(Token::LBrace);
                     paren_depth += 1;
                     pos += 1;
                 }
-                '}' => {
+                Some('}') => {
                     self.tokens.push(Token::RBrace);
                     paren_depth = paren_depth.saturating_sub(1);
                     pos += 1;
                 }
-                ',' => {
+                Some(',') => {
                     self.tokens.push(Token::Comma);
                     pos += 1;
                 }
-                ':' => {
+                Some(':') => {
                     if chars.get(pos + 1) == Some(&'=') {
                         self.tokens.push(Token::Walrus);
                         pos += 2;
@@ -310,11 +398,11 @@ impl Lexer {
                         pos += 1;
                     }
                 }
-                '.' => {
+                Some('.') => {
                     self.tokens.push(Token::Dot);
                     pos += 1;
                 }
-                '=' => {
+                Some('=') => {
                     if chars.get(pos + 1) == Some(&'=') {
                         self.tokens.push(Token::Eq);
                         pos += 2;
@@ -323,7 +411,7 @@ impl Lexer {
                         pos += 1;
                     }
                 }
-                '!' => {
+                Some('!') => {
                     if chars.get(pos + 1) == Some(&'=') {
                         self.tokens.push(Token::Ne);
                         pos += 2;
@@ -331,23 +419,31 @@ impl Lexer {
                         return Err(PyError::Lex("expected '=' after '!'".to_string()));
                     }
                 }
-                '\\' => {
-                    return Ok((paren_depth, true));
+                Some('\\') => {
+                    // Backslash continuation: consume the '\' and set flag.
+                    // The '\n' will be consumed on the next iteration.
+                    line_continued = true;
+                    pos += 1;
                 }
-                _ => return Err(PyError::Lex(format!("unexpected character '{c}'"))),
+                Some(c) => return Err(PyError::Lex(format!("unexpected character '{c}'"))),
             }
         }
-
-        Ok((paren_depth, false))
     }
 }
 
-fn count_indent(line: &str) -> Result<usize> {
+/// Count the leading spaces in `chars` starting at `start`.
+/// Tabs are rejected (same rule as before).  Stops at any non-space, non-tab
+/// character (including '\n') so it is safe to call on the full source array.
+fn count_indent_chars(chars: &[char], start: usize) -> Result<usize> {
     let mut count = 0;
-    for c in line.chars() {
-        match c {
-            ' ' => count += 1,
-            '\t' => {
+    let mut pos = start;
+    loop {
+        match chars.get(pos) {
+            Some(&' ') => {
+                count += 1;
+                pos += 1;
+            }
+            Some(&'\t') => {
                 return Err(PyError::Lex(
                     "tabs are not supported; use spaces".to_string(),
                 ));
@@ -669,8 +765,30 @@ fn lex_string(chars: &[char], start: usize) -> Result<(Token, usize)> {
                         .get(pos)
                         .copied()
                         .ok_or_else(|| PyError::Lex("unterminated escape".to_string()))?;
-                    out.push(map_escape(escaped)?);
+                    // \<newline> inside a triple-quoted string: skip both
+                    // (line continuation within the string literal, same as CPython).
+                    // Also handle CRLF (\r\n): \<CR><LF> drops all three characters.
+                    if escaped == '\n' {
+                        pos += 1;
+                    } else if escaped == '\r' {
+                        pos += 1;
+                        // If \r is followed by \n (CRLF), skip the \n too.
+                        if chars.get(pos) == Some(&'\n') {
+                            pos += 1;
+                        }
+                    } else {
+                        out.push(map_escape(escaped)?);
+                        pos += 1;
+                    }
+                }
+                Some(&'\r') => {
+                    // Normalize CR and CRLF to LF inside triple-quoted strings,
+                    // matching CPython's universal-newline handling (tokenize.c).
                     pos += 1;
+                    if chars.get(pos) == Some(&'\n') {
+                        pos += 1;
+                    }
+                    out.push('\n');
                 }
                 Some(&c) => {
                     out.push(c);
