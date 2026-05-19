@@ -2616,6 +2616,11 @@ impl Interpreter {
             1 => {
                 let receiver = regs[obj as usize].clone();
                 let empty_kw = indexmap::IndexMap::new();
+                let args = if method == "index" {
+                    self.resolve_seq_index_pos(args)?
+                } else {
+                    args
+                };
                 pyrust_builtins::list::call(&method, &receiver, args, &empty_kw)
             }
             2 => {
@@ -2639,6 +2644,11 @@ impl Interpreter {
             }
             3 => {
                 if let Some(ValueKind::Tuple(items)) = regs[obj as usize].as_some().map(|v| v.kind()) {
+                    let args = if method == "index" {
+                        self.resolve_seq_index_pos(args)?
+                    } else {
+                        args
+                    };
                     pyrust_builtins::tuple::call(&method, items, args)
                 } else {
                     unreachable!()
@@ -2796,6 +2806,11 @@ impl Interpreter {
                     // No key: delegate to builtins (handles reverse kwarg)
                     return pyrust_builtins::list::call(&method, &receiver, pos_items, &kw_map);
                 }
+                let pos_items = if method == "index" {
+                    self.resolve_seq_index_pos(pos_items)?
+                } else {
+                    pos_items
+                };
                 pyrust_builtins::list::call(&method, &receiver, pos_items, &kw_map)
             }
             2 => {
@@ -2818,6 +2833,11 @@ impl Interpreter {
             }
             3 => {
                 if let Some(ValueKind::Tuple(items)) = regs[obj as usize].as_some().map(|v| v.kind()) {
+                    let pos_items = if method == "index" {
+                        self.resolve_seq_index_pos(pos_items)?
+                    } else {
+                        pos_items
+                    };
                     pyrust_builtins::tuple::call(&method, items, pos_items)
                 } else {
                     Err(PyError::Runtime("internal: expected tuple".to_string()))
