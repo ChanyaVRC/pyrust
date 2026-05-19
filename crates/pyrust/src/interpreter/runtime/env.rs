@@ -951,6 +951,7 @@ fn builtin_has_method(target: &Value, name: &str) -> bool {
         ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Bool(_) => {
             pyrust_builtins::int::has_method(name)
         }
+        ValueKind::Bytes(_) => pyrust_builtins::bytes::has_method(name),
         ValueKind::Str(_) => pyrust_builtins::string::has_method(name),
         ValueKind::List(_) => pyrust_builtins::list::has_method(name),
         ValueKind::Tuple(_) => pyrust_builtins::tuple::has_method(name),

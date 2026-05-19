@@ -328,7 +328,9 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
     let tuple_class = make("tuple", None);
     let dict_class = make("dict", None);
     let set_class = make("set", None);
+    let bytes_class = make("bytes", None);
     populate_primitive_methods(&int_class, "int", INT_METHODS);
+    populate_primitive_methods(&bytes_class, "bytes", BYTES_METHODS);
     populate_primitive_methods(&str_class, "str", STR_METHODS);
     populate_primitive_methods(&list_class, "list", LIST_METHODS);
     populate_primitive_methods(&tuple_class, "tuple", TUPLE_METHODS);
@@ -339,7 +341,7 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
     populate_primitive_methods(&complex_class, "complex", COMPLEX_METHODS);
     populate_primitive_methods(&frozenset_class, "frozenset", FROZENSET_METHODS);
     PrimitiveClasses {
-        bytes_class: make("bytes", None),
+        bytes_class,
         complex_class,
         dict_class,
         float_class: make("float", None),
@@ -362,6 +364,7 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
 /// dispatched by the unified `<type>.<method>` arm in
 /// `call_function_expanded`.
 const INT_METHODS: &[&str] = &["bit_length", "bit_count", "is_integer"];
+const BYTES_METHODS: &[&str] = pyrust_builtins::bytes::METHODS;
 
 const STR_METHODS: &[&str] = &[
     "index", "count",
