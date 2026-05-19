@@ -66,3 +66,14 @@ try:
     d2[42]
 except KeyError as e:
     print(type(e.args[0]).__name__)  # int
+
+# Multi-arg KeyError: repr shows all args comma-separated (not wrapped as tuple)
+e_multi = KeyError('x', 'y')
+print(repr(e_multi))   # KeyError('x', 'y')
+print(str(e_multi))    # ('x', 'y')
+print(len(e_multi.args))  # 2
+
+# Multi-arg ValueError: same repr convention
+e_val = ValueError('a', 'b', 'c')
+print(repr(e_val))     # ValueError('a', 'b', 'c')
+print(str(e_val))      # ('a', 'b', 'c')

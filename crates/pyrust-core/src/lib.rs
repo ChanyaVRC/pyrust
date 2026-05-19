@@ -2839,7 +2839,13 @@ fn exception_repr(instance: &Rc<RefCell<PyInstance>>) -> String {
     if args.is_empty() {
         format!("{class_name}()")
     } else {
-        format!("{class_name}({})", format_exception_args(&args, true))
+        // CPython's BaseException.__repr__ renders all args comma-separated
+        // inside the class-name parens: `ExcName(repr(a0), repr(a1), ...)`.
+        // Do NOT use `format_exception_args` here — its multi-arg branch wraps
+        // in an extra pair of parens (`"(a, b)"`), which produces the wrong
+        // `ExcName((a, b))` instead of `ExcName(a, b)`.
+        let inner = args.iter().map(|v| v.repr()).collect::<Vec<_>>().join(", ");
+        format!("{class_name}({inner})")
     }
 }
 
