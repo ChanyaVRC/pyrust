@@ -152,6 +152,19 @@ impl Interpreter {
                     // C.__qualname__ works without polluting vars(C) (issue #553).
                     return Ok(Value::string(class.borrow().qualname.clone()));
                 }
+                if name == "__dict__" {
+                    // TODO #661: return a mappingproxy wrapping the live attrs dict.
+                    // For now return a snapshot copy so that `Foo.__dict__['x']`
+                    // works and `AttributeError` is no longer raised.  Mutations
+                    // on the returned dict do not propagate back to the class —
+                    // which is acceptable because CPython's mappingproxy also
+                    // rejects item assignment.
+                    let mut dict: IndexMap<PyKey, Value> = IndexMap::new();
+                    for (k, v) in class.borrow().attrs.iter() {
+                        dict.insert(PyKey::Str(k.clone()), v.clone());
+                    }
+                    return Ok(Value::dict(dict));
+                }
                 if name == "__bases__" {
                     // `__bases__` reports the immediate parents — a 1-tuple
                     // containing `base` if set, else a 1-tuple containing
@@ -608,6 +621,14 @@ impl Interpreter {
                         ),
                     ));
                 }
+                // __dict__ is a read-only descriptor on type objects — CPython
+                // raises AttributeError on direct assignment.
+                if name == "__dict__" {
+                    return Err(PyError::named(
+                        "AttributeError",
+                        "attribute '__dict__' of 'type' objects is not writable".to_string(),
+                    ));
+                }
                 // Issue #553: __qualname__ is a type-level descriptor on `type`
                 // in CPython — assigning it updates the descriptor slot, not the
                 // class attrs dict.  CPython also requires the value to be a str.
@@ -964,6 +985,14 @@ impl Interpreter {
                 }
             }
             ValueKind::PyClass(class) => {
+                // __dict__ is a read-only descriptor on type objects — CPython
+                // raises AttributeError on `del C.__dict__`.
+                if name == "__dict__" {
+                    return Err(PyError::named(
+                        "AttributeError",
+                        "attribute '__dict__' of 'type' objects is not writable".to_string(),
+                    ));
+                }
                 // Issue #553: __qualname__ is a type-level descriptor on `type`
                 // in CPython — you cannot delete it.  CPython raises TypeError.
                 if name == "__qualname__" {
