@@ -2334,6 +2334,44 @@ mod purity_tests {
             "print(...) is registered impure and must NOT pass the gate"
         );
     }
+
+    /// A body containing a nested `def` must be classified impure.
+    /// Each execution of `def f(): ...` allocates a fresh Rc<UserFunction>
+    /// with a unique identity; memoising the outer call would skip that
+    /// allocation and return the same function object every time, breaking
+    /// `f1 is f2 == False` (#769).
+    #[test]
+    fn nested_def_is_impure() {
+        let body = parse_body("def f(): pass\nreturn f\n");
+        assert!(
+            !is_pure_body(&body, &HashSet::new()),
+            "body with nested def must be impure (fixes #769)"
+        );
+    }
+
+    /// A body containing a nested `class` must be classified impure for the
+    /// same reason as `nested_def_is_impure`: each class statement allocates
+    /// a fresh PyClass object whose identity is observable via `is` / `id()`.
+    #[test]
+    fn nested_class_is_impure() {
+        let body = parse_body("class C: pass\nreturn C\n");
+        assert!(
+            !is_pure_body(&body, &HashSet::new()),
+            "body with nested class must be impure (fixes #769)"
+        );
+    }
+
+    /// A `lambda` expression allocates a fresh Rc<UserFunction> on every
+    /// evaluation, so a body that contains a lambda return is not pure in
+    /// the identity sense.
+    #[test]
+    fn lambda_expr_is_impure() {
+        let body = parse_body("return lambda x: x + 1\n");
+        assert!(
+            !is_pure_body(&body, &HashSet::new()),
+            "body returning a lambda must be impure (fixes #769)"
+        );
+    }
 }
 
 
