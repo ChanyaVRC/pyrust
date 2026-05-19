@@ -1655,7 +1655,45 @@ impl Interpreter {
                 if n <= 0 { return Ok(Value::bytes(Vec::new())); }
                 Ok(Value::bytes(data.repeat(n as usize)))
             }
-            _ => Err(Self::unsupported_binary_operand("*")),
+            _ => {
+                let l_is_seq = matches!(
+                    l.kind(),
+                    ValueKind::Str(_)
+                        | ValueKind::List(_)
+                        | ValueKind::Tuple(_)
+                        | ValueKind::Bytes(_)
+                );
+                let r_is_seq = matches!(
+                    r.kind(),
+                    ValueKind::Str(_)
+                        | ValueKind::List(_)
+                        | ValueKind::Tuple(_)
+                        | ValueKind::Bytes(_)
+                );
+                let l_is_int = matches!(
+                    l.kind(),
+                    ValueKind::Int(_) | ValueKind::BigInt(_)
+                );
+                let r_is_int = matches!(
+                    r.kind(),
+                    ValueKind::Int(_) | ValueKind::BigInt(_)
+                );
+                if l_is_seq && !r_is_int {
+                    let type_name = value_type_name_str(&r);
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("can't multiply sequence by non-int of type '{type_name}'"),
+                    ));
+                }
+                if r_is_seq && !l_is_int {
+                    let type_name = value_type_name_str(&l);
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("can't multiply sequence by non-int of type '{type_name}'"),
+                    ));
+                }
+                Err(Self::unsupported_binary_operand("*"))
+            }
         }
     }
 
