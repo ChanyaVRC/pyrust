@@ -22,21 +22,24 @@ pub fn compile_script(
     // locals via nonlocal from a nested scope at this level.
     let cell_vars = collect_cell_vars(stmts, &local_index);
     let mut c = Compiler::new(local_index, 0, cell_vars);
-    // Issue #711: if the first statement is a bare string literal, it is the
-    // module docstring.  Emit a StoreGlobal for `__doc__` (CPython parity)
-    // before compiling the rest.  In repl_mode we also emit PrintExpr so the
-    // interactive session shows the value, matching CPython's REPL behaviour.
-    let body = match stmts {
-        [Stmt::Expr(Expr::Str(s)), rest @ ..] => {
-            let r = c.compile_literal(Value::string(s.clone()));
-            if repl_mode {
-                c.emit(Insn::PrintExpr(r));
+    // Issue #711: if the first statement is a bare string literal and we are
+    // compiling a script file (not the REPL), it is the module docstring.
+    // Emit a StoreGlobal for `__doc__` (CPython parity) before compiling the
+    // rest.  In REPL mode every string-expression is just a value expression
+    // whose repr is printed; it is NOT a module docstring (CPython's interactive
+    // console does not set __doc__ from string literals typed interactively).
+    let body = if !repl_mode {
+        match stmts {
+            [Stmt::Expr(Expr::Str(s)), rest @ ..] => {
+                let r = c.compile_literal(Value::string(s.clone()));
+                c.compile_store_name("__doc__", r);
+                c.free_temp(r);
+                rest
             }
-            c.compile_store_name("__doc__", r);
-            c.free_temp(r);
-            rest
+            _ => stmts,
         }
-        _ => stmts,
+    } else {
+        stmts
     };
     if repl_mode {
         for stmt in body {
