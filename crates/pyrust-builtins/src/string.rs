@@ -630,7 +630,10 @@ fn str_index(s: &str, args: &[Value]) -> Result<Value> {
             let char_pos = s[..start + byte_pos].chars().count();
             Ok(Value::int(char_pos as i64))
         }
-        None => Err(PyError::Runtime("substring not found".to_string())),
+        None => Err(PyError::named(
+            "ValueError",
+            "substring not found".to_string(),
+        )),
     }
 }
 
@@ -698,7 +701,10 @@ fn str_rfind(s: &str, args: &[Value], raise_on_miss: bool) -> Result<Value> {
         }
         None => {
             if raise_on_miss {
-                Err(PyError::Runtime("substring not found".to_string()))
+                Err(PyError::named(
+                    "ValueError",
+                    "substring not found".to_string(),
+                ))
             } else {
                 Ok(Value::int(-1))
             }
@@ -1102,7 +1108,7 @@ fn str_slice_args(s: &str, args: &[Value]) -> Result<(usize, usize)> {
                 ));
             }
         };
-        return Ok((start_char, end_char));
+        return Ok((start_char, end_char.max(start_char)));
     }
 
     // Unicode: single scan for char_len + both byte positions
@@ -1127,6 +1133,8 @@ fn str_slice_args(s: &str, args: &[Value]) -> Result<(usize, usize)> {
             ));
         }
     };
+    // Clamp end_char so that an inverted window (start > stop) becomes empty.
+    let end_char = end_char.max(start_char);
     // Single pass to find both byte positions
     let mut start_byte = s.len();
     let mut end_byte = s.len();
