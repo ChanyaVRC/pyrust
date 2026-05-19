@@ -28,18 +28,59 @@ type ModuleCache = Rc<RefCell<HashMap<String, Value>>>;
 #[derive(Clone)]
 pub(crate) struct MemoKey(pub(crate) PyKey);
 
+/// Type-aware equality for a single `PyKey`, borrowing both sides to avoid
+/// unnecessary clones in the hot tuple/frozenset element comparison path.
+fn memo_key_eq(a: &PyKey, b: &PyKey) -> bool {
+    if std::mem::discriminant(a) != std::mem::discriminant(b) {
+        return false;
+    }
+    match (a, b) {
+        (PyKey::Tuple(xs), PyKey::Tuple(ys)) => {
+            xs.len() == ys.len() && xs.iter().zip(ys.iter()).all(|(x, y)| memo_key_eq(x, y))
+        }
+        (PyKey::FrozenSet(xs), PyKey::FrozenSet(ys)) => {
+            // FrozenSet elements are stored in sorted canonical order by the
+            // PyKey constructor; element-wise comparison suffices.
+            xs.len() == ys.len() && xs.iter().zip(ys.iter()).all(|(x, y)| memo_key_eq(x, y))
+        }
+        _ => a == b,
+    }
+}
+
+/// Type-aware hashing for a single `PyKey`, borrowing the key to avoid
+/// unnecessary clones in the hot tuple/frozenset element hashing path.
+fn hash_memo_key<H: std::hash::Hasher>(k: &PyKey, state: &mut H) {
+    use std::hash::Hash;
+    std::mem::discriminant(k).hash(state);
+    match k {
+        PyKey::Tuple(items) => {
+            items.len().hash(state);
+            for elem in items {
+                hash_memo_key(elem, state);
+            }
+        }
+        PyKey::FrozenSet(items) => {
+            for elem in items {
+                hash_memo_key(elem, state);
+            }
+        }
+        _ => k.hash(state),
+    }
+}
+
 impl PartialEq for MemoKey {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
-        std::mem::discriminant(&self.0) == std::mem::discriminant(&other.0) && self.0 == other.0
+        memo_key_eq(&self.0, &other.0)
     }
 }
 
 impl Eq for MemoKey {}
 
 impl std::hash::Hash for MemoKey {
+    #[inline]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::mem::discriminant(&self.0).hash(state);
-        self.0.hash(state);
+        hash_memo_key(&self.0, state);
     }
 }
 
