@@ -28,8 +28,19 @@ except ValueError:
     print("ValueError")
 
 # --- equal start == stop (zero-length range) ---
+# An equal-window is NOT the same as an inverted window:
+# find("") at equal-window returns the position; count("") returns 1.
 print("hello".find("l", 2, 2))
 print("hello".count("l", 2, 2))
+print("hello".find("", 2, 2))
+print("hello".count("", 2, 2))
+
+# --- empty substring with inverted window ---
+# CPython: find("") => -1, count("") => 0 (inverted is distinct from zero-length)
+print("hello".find("", 4, 2))
+print("hello".count("", 4, 2))
+print("héllo".find("", 4, 2))
+print("héllo".count("", 4, 2))
 
 # --- normal (non-inverted) calls: must be unaffected ---
 print("hello".find("l", 2, 5))

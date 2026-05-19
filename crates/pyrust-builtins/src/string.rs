@@ -623,7 +623,12 @@ fn str_index(s: &str, args: &[Value]) -> Result<Value> {
             ));
         }
     };
-    let (start, end) = str_slice_args(s, args)?;
+    let Some((start, end)) = str_slice_args(s, args)? else {
+        return Err(PyError::named(
+            "ValueError",
+            "substring not found".to_string(),
+        ));
+    };
     let haystack = &s[start..end];
     match haystack.find(sub) {
         Some(byte_pos) => {
@@ -646,12 +651,14 @@ fn str_count(s: &str, args: &[Value]) -> Result<Value> {
             ));
         }
     };
+    let Some((start, end)) = str_slice_args(s, args)? else {
+        // Inverted window: CPython returns 0 for all substrings including empty.
+        return Ok(Value::int(0));
+    };
     if sub.is_empty() {
-        let (start, end) = str_slice_args(s, args)?;
         let haystack = &s[start..end];
         return Ok(Value::int((haystack.chars().count() + 1) as i64));
     }
-    let (start, end) = str_slice_args(s, args)?;
     let haystack = &s[start..end];
     let n = haystack.match_indices(sub).count();
     Ok(Value::int(n as i64))
@@ -666,7 +673,15 @@ fn str_find(s: &str, args: &[Value], raise_on_miss: bool) -> Result<Value> {
             ));
         }
     };
-    let (start, end) = str_slice_args(s, args)?;
+    let Some((start, end)) = str_slice_args(s, args)? else {
+        if raise_on_miss {
+            return Err(PyError::named(
+                "ValueError",
+                "substring not found".to_string(),
+            ));
+        }
+        return Ok(Value::int(-1));
+    };
     let haystack = &s[start..end];
     match haystack.find(sub) {
         Some(byte_pos) => {
@@ -675,7 +690,10 @@ fn str_find(s: &str, args: &[Value], raise_on_miss: bool) -> Result<Value> {
         }
         None => {
             if raise_on_miss {
-                Err(PyError::Runtime("substring not found".to_string()))
+                Err(PyError::named(
+                    "ValueError",
+                    "substring not found".to_string(),
+                ))
             } else {
                 Ok(Value::int(-1))
             }
@@ -692,7 +710,15 @@ fn str_rfind(s: &str, args: &[Value], raise_on_miss: bool) -> Result<Value> {
             ));
         }
     };
-    let (start, end) = str_slice_args(s, args)?;
+    let Some((start, end)) = str_slice_args(s, args)? else {
+        if raise_on_miss {
+            return Err(PyError::named(
+                "ValueError",
+                "substring not found".to_string(),
+            ));
+        }
+        return Ok(Value::int(-1));
+    };
     let haystack = &s[start..end];
     match haystack.rfind(sub) {
         Some(byte_pos) => {
@@ -978,8 +1004,10 @@ fn str_replace(s: &str, args: &[Value]) -> Result<Value> {
 }
 
 fn str_startswith(s: &str, args: &[Value]) -> Result<Value> {
-    let (start, end) = str_slice_args(s, args)?;
-    let slice = &s[start..end];
+    let slice = match str_slice_args(s, args)? {
+        Some((start, end)) => &s[start..end],
+        None => "",
+    };
     match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(p)) => Ok(Value::bool_(slice.starts_with(p))),
         Some(ValueKind::Tuple(prefixes)) => Ok(Value::bool_(prefixes.iter().any(|pv| {
@@ -996,8 +1024,10 @@ fn str_startswith(s: &str, args: &[Value]) -> Result<Value> {
 }
 
 fn str_endswith(s: &str, args: &[Value]) -> Result<Value> {
-    let (start, end) = str_slice_args(s, args)?;
-    let slice = &s[start..end];
+    let slice = match str_slice_args(s, args)? {
+        Some((start, end)) => &s[start..end],
+        None => "",
+    };
     match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(p)) => Ok(Value::bool_(slice.ends_with(p))),
         Some(ValueKind::Tuple(suffixes)) => Ok(Value::bool_(suffixes.iter().any(|sv| {
@@ -1077,12 +1107,19 @@ fn split_args(args: &[Value]) -> Result<(Option<&str>, i64)> {
 }
 
 /// Convert char-based start/end args (args[1], args[2]) to byte offsets.
-fn str_slice_args(s: &str, args: &[Value]) -> Result<(usize, usize)> {
+///
+/// Returns `Ok(None)` when the requested window is inverted (`start > stop`
+/// after clamping to string bounds). Callers must treat `None` as an empty
+/// search range (return -1 / 0 / raise ValueError as appropriate).
+/// This matches CPython's `adjust_indices` contract — an inverted window is
+/// distinct from a zero-length equal window (`start == stop`), which is
+/// represented as `Some((n, n))`.
+fn str_slice_args(s: &str, args: &[Value]) -> Result<Option<(usize, usize)>> {
     // Fast path: no start/end args — common case for find/startswith/etc.
     let has_start = args.get(1).is_some();
     let has_end = args.get(2).is_some();
     if !has_start && !has_end {
-        return Ok((0, s.len()));
+        return Ok(Some((0, s.len())));
     }
 
     // ASCII fast path: char index == byte index, no scanning needed
@@ -1108,7 +1145,10 @@ fn str_slice_args(s: &str, args: &[Value]) -> Result<(usize, usize)> {
                 ));
             }
         };
-        return Ok((start_char, end_char.max(start_char)));
+        if end_char < start_char {
+            return Ok(None);
+        }
+        return Ok(Some((start_char, end_char)));
     }
 
     // Unicode: single scan for char_len + both byte positions
@@ -1133,8 +1173,12 @@ fn str_slice_args(s: &str, args: &[Value]) -> Result<(usize, usize)> {
             ));
         }
     };
-    // Clamp end_char so that an inverted window (start > stop) becomes empty.
-    let end_char = end_char.max(start_char);
+    // Inverted window: start > stop after normalisation — signal to caller.
+    if end_char < start_char {
+        return Ok(None);
+    }
+    // Clamp start_char to char_len so the single-pass loop terminates correctly.
+    let start_char = start_char.min(char_len);
     // Single pass to find both byte positions
     let mut start_byte = s.len();
     let mut end_byte = s.len();
@@ -1147,7 +1191,7 @@ fn str_slice_args(s: &str, args: &[Value]) -> Result<(usize, usize)> {
             break;
         }
     }
-    Ok((start_byte, end_byte))
+    Ok(Some((start_byte, end_byte)))
 }
 
 fn normalise_char_idx(idx: i64, len: usize) -> usize {
