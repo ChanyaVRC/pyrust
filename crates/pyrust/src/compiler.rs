@@ -141,8 +141,14 @@ fn collect_cell_vars_in(
             Stmt::Class {
                 body: nested_body, ..
             } => {
-                // Class bodies can also reference outer nonlocals.
-                let nonlocals = crate::interpreter::collect_nonlocal_names(nested_body);
+                // Class bodies (and transitively nested class bodies) can reference
+                // outer nonlocals.  Class scope is transparent to `nonlocal`, so a
+                // `nonlocal x` declared in any depth of nested class bodies still
+                // reaches the enclosing *function* scope.  We use
+                // `collect_nonlocal_names_through_classes` to find all such names
+                // (issue #708: handles `def f(): x=1; class C: class D: nonlocal x`).
+                let mut nonlocals = HashSet::new();
+                collect_nonlocal_names_through_classes(nested_body, &mut nonlocals);
                 for name in &nonlocals {
                     if local_index.contains_key(name) {
                         cells.insert(name.clone());
@@ -226,6 +232,83 @@ fn collect_cell_vars_in(
             Stmt::Match { arms, .. } => {
                 for arm in arms {
                     collect_cell_vars_in(&arm.body, local_index, is_class_scope, cells);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Collect `nonlocal` declarations from `body`, recursing into nested class bodies
+/// (since class scope is transparent to `nonlocal`) but NOT into nested `Stmt::Def`
+/// bodies (function scope creates a new binding scope that stops the search).
+///
+/// Used by `collect_cell_vars_in` to find all nonlocal names visible from the
+/// enclosing function scope, including those declared in doubly-nested classes
+/// (e.g. `def f(): x=1; class C: class D: nonlocal x`).
+fn collect_nonlocal_names_through_classes(body: &[Stmt], out: &mut HashSet<String>) {
+    for stmt in body {
+        match stmt {
+            Stmt::Nonlocal(names) => {
+                out.extend(names.iter().cloned());
+            }
+            Stmt::Class {
+                body: class_body, ..
+            } => {
+                collect_nonlocal_names_through_classes(class_body, out);
+            }
+            // Stmt::Def and Stmt::Lambda start a new function scope —
+            // `nonlocal` inside them binds to their own enclosing scope, not ours.
+            Stmt::If {
+                branches,
+                else_branch,
+            } => {
+                for (_, b) in branches {
+                    collect_nonlocal_names_through_classes(b, out);
+                }
+                if let Some(b) = else_branch {
+                    collect_nonlocal_names_through_classes(b, out);
+                }
+            }
+            Stmt::While {
+                body, else_branch, ..
+            } => {
+                collect_nonlocal_names_through_classes(body, out);
+                if let Some(b) = else_branch {
+                    collect_nonlocal_names_through_classes(b, out);
+                }
+            }
+            Stmt::For {
+                body, else_branch, ..
+            } => {
+                collect_nonlocal_names_through_classes(body, out);
+                if let Some(b) = else_branch {
+                    collect_nonlocal_names_through_classes(b, out);
+                }
+            }
+            Stmt::Try {
+                body,
+                handlers,
+                else_branch,
+                finally_branch,
+            } => {
+                collect_nonlocal_names_through_classes(body, out);
+                for h in handlers {
+                    collect_nonlocal_names_through_classes(&h.body, out);
+                }
+                if let Some(b) = else_branch {
+                    collect_nonlocal_names_through_classes(b, out);
+                }
+                if let Some(b) = finally_branch {
+                    collect_nonlocal_names_through_classes(b, out);
+                }
+            }
+            Stmt::With { body, .. } => {
+                collect_nonlocal_names_through_classes(body, out);
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    collect_nonlocal_names_through_classes(&arm.body, out);
                 }
             }
             _ => {}
@@ -5183,9 +5266,37 @@ impl Compiler {
         // inside a class body silently stored into the class attribute dict
         // rather than the module-level global (issue #618).
         let body_global = Rc::new(crate::interpreter::collect_global_names(body));
-        let empty_nonlocal: Rc<HashSet<String>> = Rc::new(HashSet::new());
+        // Collect `nonlocal` declarations in the class body (issue #708).
+        // These names must not get a class-body register slot — they are
+        // stored/loaded via the enclosing function's env, not the class namespace.
+        let body_nonlocal = crate::interpreter::collect_nonlocal_names(body);
+        // Validate: every `nonlocal x` in the class body must have a binding
+        // in some enclosing *function* scope.  Module scope and class scope do not
+        // count — `nonlocal` requires an enclosing function binding (CPython 3.12
+        // raises SyntaxError: no binding for nonlocal 'x' found).
+        {
+            let mut sorted: Vec<&String> = body_nonlocal.iter().collect();
+            sorted.sort();
+            for nonlocal_name in sorted {
+                let found = self
+                    .outer_locals
+                    .iter()
+                    .any(|m| m.contains_key(nonlocal_name))
+                    || (self.is_function_scope && self.local_index.contains_key(nonlocal_name));
+                if !found {
+                    self.failed = true;
+                    self.is_syntax_error = true;
+                    if self.error_msg.is_none() {
+                        self.error_msg =
+                            Some(format!("no binding for nonlocal '{}' found", nonlocal_name));
+                    }
+                    return;
+                }
+            }
+        }
+        let body_nonlocal_rc: Rc<HashSet<String>> = Rc::new(body_nonlocal);
         let body_local =
-            crate::interpreter::collect_local_names(&[], body, &body_global, &empty_nonlocal);
+            crate::interpreter::collect_local_names(&[], body, &body_global, &body_nonlocal_rc);
         // Allocate a register slot for every potential class-body local.
         // Slot order is **not** used to encode class-namespace insertion
         // order any more — the order CPython exposes via `vars(C)` is the
@@ -5293,7 +5404,7 @@ impl Compiler {
             local_index: body_index_rc,
             local_names,
             global_names: body_global,
-            nonlocal_names: empty_nonlocal,
+            nonlocal_names: body_nonlocal_rc,
             is_pure: false,
         });
 
