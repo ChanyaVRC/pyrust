@@ -2805,10 +2805,68 @@ impl Interpreter {
                         "generator.throw() takes 1 to 3 arguments".to_string(),
                     ));
                 }
-                // CPython's throw(type, value=None, traceback=None) — we only
-                // honour the first argument (the type or instance) and ignore
-                // the legacy 3-arg form's value/traceback.
-                let exc = args.into_iter().next().unwrap();
+                // CPython's throw(typ, val=None, tb=None) semantics (3.12):
+                //   - 1 arg:  pass through to generator_throw (handles both
+                //             class and instance via coerce_to_exception).
+                //   - 2+ args: typ=args[0], val=args[1]; traceback (args[2])
+                //             is ignored (PEP 3109; deprecated since 3.12).
+                //     * val is None          → raise typ() with no message.
+                //     * val is instance of typ → use val directly.
+                //     * otherwise            → raise typ(val).
+                let exc = if args.len() == 1 {
+                    args.into_iter().next().unwrap()
+                } else {
+                    let mut arg_iter = args.into_iter();
+                    let typ = arg_iter.next().unwrap();
+                    let val = arg_iter.next().unwrap();
+                    // Extract the class Rc before consuming `typ`, so the
+                    // non-class fall-through branch can still return `typ`.
+                    let class_opt = match typ.kind() {
+                        ValueKind::PyClass(c) => Some(Rc::clone(c)),
+                        _ => None,
+                    };
+                    if let Some(class) = class_opt {
+                        // Two-arg construction: val=None, val=instance, or
+                        // val=arbitrary value to be passed to the constructor.
+                        if val.is_none() {
+                            // throw(ExcType, None) — same as throw(ExcType)
+                            instantiate_exception(class, Vec::new())
+                        } else {
+                            // Check if val is already a subclass instance of
+                            // typ; extract the Rc before we potentially move val.
+                            let val_inst_rc = match val.kind() {
+                                ValueKind::PyInstance(inst) => {
+                                    let inst_class = Rc::clone(&inst.borrow().class);
+                                    if class_is_subclass_of(&inst_class, &class) {
+                                        Some(Rc::clone(inst))
+                                    } else {
+                                        None
+                                    }
+                                }
+                                _ => None,
+                            };
+                            if let Some(inst_rc) = val_inst_rc {
+                                // val is already a suitable instance — use directly.
+                                Value::py_instance(inst_rc)
+                            } else {
+                                // Construct typ(val).
+                                instantiate_exception(class, vec![val])
+                            }
+                        }
+                    } else {
+                        // typ is already an instance.  CPython 3.12 requires
+                        // val to be None in this case; any other value is a
+                        // TypeError ("instance exception may not have a
+                        // separate value").
+                        if !val.is_none() {
+                            return Err(PyError::named(
+                                "TypeError",
+                                "instance exception may not have a separate value".to_string(),
+                            ));
+                        }
+                        typ
+                    }
+                };
                 self.generator_throw(receiver, exc)
             }
             "send" => {
