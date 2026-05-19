@@ -60,10 +60,10 @@ pub fn call(method: &str, receiver: &Value, args: &[Value]) -> Result<Value> {
 /// `bytes.hex(sep=None, bytes_per_sep=1)`
 ///
 /// Without a separator: return a hex string of all bytes.
-/// With a separator string: insert it between every `bytes_per_sep` bytes
-/// (default 1, positive means group from left, negative from right — only
-/// the simple case of one-byte groups is implemented here, matching CPython
-/// 3.12's most common usage).
+/// With a separator: positive `bytes_per_sep` groups from the RIGHT (leftmost
+/// group gets the remainder); negative groups from the LEFT (rightmost group
+/// gets the remainder).  `bytes_per_sep=0` is treated as "no separator".
+/// The separator must be a single ASCII character.
 fn bytes_hex(bytes: &[u8], args: &[Value]) -> Result<Value> {
     if args.is_empty() {
         // Fast path: no separator.
