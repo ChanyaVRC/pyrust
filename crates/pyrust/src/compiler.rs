@@ -4439,7 +4439,6 @@ impl Compiler {
         }
     }
 
-
     // ── Control flow ──────────────────────────────────────────────────────────
 
     fn compile_if(&mut self, branches: &[(Expr, Vec<Stmt>)], else_branch: Option<&[Stmt]>) {
