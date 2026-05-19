@@ -107,7 +107,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "Runtime error: no binding for nonlocal 'x' found"
+            "SyntaxError: no binding for nonlocal 'x' found"
         );
     }
 

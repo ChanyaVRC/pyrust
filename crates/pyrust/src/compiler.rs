@@ -35,7 +35,7 @@ pub fn compile_script(
     } else {
         c.compile_block(stmts);
     }
-    c.finish().map_err(PyError::Runtime)
+    c.finish()
 }
 
 // ─── Cell-variable collection ─────────────────────────────────────────────────
@@ -2858,6 +2858,22 @@ struct Compiler {
     /// `"fn_name.<locals>"` so that classes inside functions get the CPython
     /// `"fn_name.<locals>.ClassName"` form.
     qualname_prefix: String,
+    /// Chain of `local_index` maps for every enclosing **function** scope
+    /// (not module scope, not class scope — class scope is transparent to
+    /// `nonlocal`).  Innermost enclosing function is at the end of the Vec.
+    /// Used at compile time to validate `nonlocal` declarations in nested
+    /// function bodies.
+    outer_locals: Vec<Rc<HashMap<String, Reg>>>,
+    /// True when this Compiler is producing the body of a function `def`
+    /// (or a comprehension, which implicitly creates a function scope).
+    /// False for module-level compilation and class-body compilation.
+    /// Used to determine whether `self.local_index` counts as an enclosing
+    /// function scope for `nonlocal` validation in child compilers.
+    is_function_scope: bool,
+    /// True when a compile-time `SyntaxError` has been detected (e.g. a
+    /// `nonlocal` declaration with no enclosing binding).  Controls whether
+    /// `finish()` emits `PyError::Named("SyntaxError", …)` or `PyError::Runtime`.
+    is_syntax_error: bool,
 }
 
 impl Compiler {
@@ -2902,6 +2918,9 @@ impl Compiler {
             pure_locals: HashSet::new(),
             is_class_body: false,
             qualname_prefix: String::new(),
+            outer_locals: Vec::new(),
+            is_function_scope: false,
+            is_syntax_error: false,
         }
     }
 
@@ -3207,11 +3226,16 @@ impl Compiler {
         }
     }
 
-    fn finish(self) -> Result<FnCode, String> {
+    fn finish(self) -> Result<FnCode, PyError> {
         if self.failed {
-            return Err(self
+            let msg = self
                 .error_msg
-                .unwrap_or_else(|| "compilation failed".to_string()));
+                .unwrap_or_else(|| "compilation failed".to_string());
+            if self.is_syntax_error {
+                return Err(PyError::named("SyntaxError", msg));
+            } else {
+                return Err(PyError::Runtime(msg));
+            }
         }
         let num_regs = if self.max_reg >= self.base_temp || self.base_temp == 0 {
             self.max_reg.saturating_add(1)
@@ -3222,9 +3246,9 @@ impl Compiler {
         // Each register slot is one Option<Value>, so 1M slots ~= 8 MB per call frame.
         const MAX_REGS: u32 = 1 << 20;
         if num_regs > MAX_REGS {
-            return Err(format!(
+            return Err(PyError::Runtime(format!(
                 "function uses too many registers ({num_regs}); max is {MAX_REGS}"
-            ));
+            )));
         }
         let is_generator = self.insns.iter().any(|i| matches!(i, Insn::Yield { .. }));
         Ok(FnCode {
@@ -4915,11 +4939,45 @@ impl Compiler {
         let inner_global_rc = Rc::new(inner_global);
         let inner_nonlocal_rc = Rc::new(inner_nonlocal);
 
+        // Compile-time validation: every name in `inner_nonlocal` must have a
+        // binding in some enclosing *function* scope.  Module scope and class
+        // scope do not count (`nonlocal` is only valid inside a function).
+        //
+        // `self.outer_locals` is the chain of enclosing function scope
+        // `local_index` maps (outermost first).  If `self.is_function_scope`,
+        // `self.local_index` is also an enclosing function scope.
+        let mut sorted_nonlocals: Vec<&String> = inner_nonlocal_rc.iter().collect();
+        sorted_nonlocals.sort();
+        for nonlocal_name in sorted_nonlocals {
+            let found = self
+                .outer_locals
+                .iter()
+                .any(|m| m.contains_key(nonlocal_name))
+                || (self.is_function_scope && self.local_index.contains_key(nonlocal_name));
+            if !found {
+                self.failed = true;
+                self.is_syntax_error = true;
+                if self.error_msg.is_none() {
+                    self.error_msg =
+                        Some(format!("no binding for nonlocal '{}' found", nonlocal_name));
+                }
+                return;
+            }
+        }
+
         let mut sub = Compiler::new(
             Rc::clone(&inner_index_rc),
             def_bound,
             inner_cell_vars.clone(),
         );
+        // Thread the enclosing function scope chain into the child compiler.
+        // Since compile_def always produces a function scope, add self.local_index
+        // (if self is a function scope) and mark the child as a function scope.
+        sub.outer_locals = self.outer_locals.clone();
+        if self.is_function_scope {
+            sub.outer_locals.push(Rc::clone(&self.local_index));
+        }
+        sub.is_function_scope = true;
         // Compute the qualname for this function and its `<locals>` prefix.
         // Classes defined inside this function inherit `"fn_name.<locals>"` as
         // their qualname prefix — matching CPython's `"fn_name.<locals>.ClassName"`.
@@ -4942,10 +5000,16 @@ impl Compiler {
         sub.compile_block(body);
         let inner_code = match sub.finish() {
             Ok(c) => c,
-            Err(msg) => {
+            Err(e) => {
                 self.failed = true;
+                if matches!(e, PyError::Named(ref cls, _) if cls.as_ref() == "SyntaxError") {
+                    self.is_syntax_error = true;
+                }
                 if self.error_msg.is_none() {
-                    self.error_msg = Some(msg);
+                    self.error_msg = Some(match e {
+                        PyError::Named(_, msg) | PyError::Runtime(msg) => msg,
+                        other => other.to_string(),
+                    });
                 }
                 return;
             }
@@ -5125,15 +5189,29 @@ impl Compiler {
         let mut sub = Compiler::new(Rc::clone(&body_index_rc), 0, cell_vars);
         sub.is_class_body = true;
         sub.qualname_prefix = class_qualname.clone();
+        // Thread the enclosing function scope chain into the class body compiler.
+        // Class scope is transparent to `nonlocal` (not a function scope), so we
+        // pass through outer_locals without adding body_index_rc, and leave
+        // is_function_scope = false.
+        sub.outer_locals = self.outer_locals.clone();
+        if self.is_function_scope {
+            sub.outer_locals.push(Rc::clone(&self.local_index));
+        }
         sub.compile_block(body);
         // Add implicit ReturnNone at end of class body
         sub.emit(Insn::ReturnNone);
         let body_code = match sub.finish() {
             Ok(c) => c,
-            Err(msg) => {
+            Err(e) => {
                 self.failed = true;
+                if matches!(e, PyError::Named(ref cls, _) if cls.as_ref() == "SyntaxError") {
+                    self.is_syntax_error = true;
+                }
                 if self.error_msg.is_none() {
-                    self.error_msg = Some(msg);
+                    self.error_msg = Some(match e {
+                        PyError::Named(_, msg) | PyError::Runtime(msg) => msg,
+                        other => other.to_string(),
+                    });
                 }
                 return;
             }
@@ -6420,14 +6498,46 @@ impl Compiler {
         let inner_global_rc = Rc::new(inner_global);
         let inner_nonlocal_rc = Rc::new(inner_nonlocal);
 
+        // Validate nonlocal declarations in comprehension bodies (same as compile_def).
+        let mut sorted_nonlocals: Vec<&String> = inner_nonlocal_rc.iter().collect();
+        sorted_nonlocals.sort();
+        for nonlocal_name in sorted_nonlocals {
+            let found = self
+                .outer_locals
+                .iter()
+                .any(|m| m.contains_key(nonlocal_name))
+                || (self.is_function_scope && self.local_index.contains_key(nonlocal_name));
+            if !found {
+                self.failed = true;
+                self.is_syntax_error = true;
+                if self.error_msg.is_none() {
+                    self.error_msg =
+                        Some(format!("no binding for nonlocal '{}' found", nonlocal_name));
+                }
+                return 0;
+            }
+        }
+
         let mut sub = Compiler::new(Rc::clone(&inner_index_rc), def_bound, inner_cell_vars);
+        // Comprehensions create an implicit function scope; thread outer_locals.
+        sub.outer_locals = self.outer_locals.clone();
+        if self.is_function_scope {
+            sub.outer_locals.push(Rc::clone(&self.local_index));
+        }
+        sub.is_function_scope = true;
         sub.compile_block(&body);
         let inner_code = match sub.finish() {
             Ok(c) => c,
-            Err(msg) => {
+            Err(e) => {
                 self.failed = true;
+                if matches!(e, PyError::Named(ref cls, _) if cls.as_ref() == "SyntaxError") {
+                    self.is_syntax_error = true;
+                }
                 if self.error_msg.is_none() {
-                    self.error_msg = Some(msg);
+                    self.error_msg = Some(match e {
+                        PyError::Named(_, msg) | PyError::Runtime(msg) => msg,
+                        other => other.to_string(),
+                    });
                 }
                 return 0;
             }

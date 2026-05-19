@@ -168,7 +168,13 @@ fn main() {
     };
 
     if let Err(e) = result {
-        eprintln!("{e}");
+        // PyError::Runtime already carries a fully-formatted message (e.g.
+        // "SyntaxError: …" from the interpreter); print it raw so that we
+        // don't prepend an extra "Runtime error: " prefix via Display.
+        match e {
+            PyError::Runtime(msg) => eprintln!("{msg}"),
+            other => eprintln!("{other}"),
+        }
         std::process::exit(1);
     }
 }
