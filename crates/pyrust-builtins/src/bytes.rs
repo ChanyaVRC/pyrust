@@ -649,24 +649,24 @@ fn bytes_count(bytes: &[u8], args: &[Value]) -> Result<Value> {
 /// startswith/endswith → False, index/rindex → ValueError).
 fn bytes_slice_args(len: usize, args: &[Value]) -> Result<Option<(usize, usize)>> {
     let start: usize = match args.get(1).map(|v| v.kind()) {
-        None => 0,
+        None | Some(ValueKind::None) => 0,
         Some(ValueKind::Int(i)) => normalise_idx(i, len),
         Some(ValueKind::Bool(b)) => normalise_idx(b as i64, len),
         _ => {
             return Err(PyError::named(
                 "TypeError",
-                "slice indices must be integers".to_string(),
+                "slice indices must be integers or None or have an __index__ method".to_string(),
             ));
         }
     };
     let end: usize = match args.get(2).map(|v| v.kind()) {
-        None => len,
+        None | Some(ValueKind::None) => len,
         Some(ValueKind::Int(i)) => normalise_idx(i, len).min(len),
         Some(ValueKind::Bool(b)) => normalise_idx(b as i64, len).min(len),
         _ => {
             return Err(PyError::named(
                 "TypeError",
-                "slice indices must be integers".to_string(),
+                "slice indices must be integers or None or have an __index__ method".to_string(),
             ));
         }
     };

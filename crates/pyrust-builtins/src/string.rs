@@ -1159,20 +1159,22 @@ fn str_slice_args(s: &str, args: &[Value]) -> Result<Option<(usize, usize)>> {
         let start_char = match args.get(1).map(|v| v.kind()) {
             Some(ValueKind::Int(i)) => normalise_char_idx(i, byte_len).min(byte_len),
             Some(ValueKind::Bool(b)) => normalise_char_idx(b as i64, byte_len).min(byte_len),
-            None => 0,
+            Some(ValueKind::None) | None => 0,
             _ => {
-                return Err(PyError::Runtime(
-                    "slice indices must be integers".to_string(),
+                return Err(PyError::named(
+                    "TypeError",
+                    "slice indices must be integers or None or have an __index__ method",
                 ));
             }
         };
         let end_char = match args.get(2).map(|v| v.kind()) {
             Some(ValueKind::Int(i)) => normalise_char_idx(i, byte_len).min(byte_len),
             Some(ValueKind::Bool(b)) => normalise_char_idx(b as i64, byte_len).min(byte_len),
-            None => byte_len,
+            Some(ValueKind::None) | None => byte_len,
             _ => {
-                return Err(PyError::Runtime(
-                    "slice indices must be integers".to_string(),
+                return Err(PyError::named(
+                    "TypeError",
+                    "slice indices must be integers or None or have an __index__ method",
                 ));
             }
         };
@@ -1187,20 +1189,22 @@ fn str_slice_args(s: &str, args: &[Value]) -> Result<Option<(usize, usize)>> {
     let start_char = match args.get(1).map(|v| v.kind()) {
         Some(ValueKind::Int(i)) => normalise_char_idx(i, char_len),
         Some(ValueKind::Bool(b)) => normalise_char_idx(b as i64, char_len),
-        None => 0,
+        Some(ValueKind::None) | None => 0,
         _ => {
-            return Err(PyError::Runtime(
-                "slice indices must be integers".to_string(),
+            return Err(PyError::named(
+                "TypeError",
+                "slice indices must be integers or None or have an __index__ method",
             ));
         }
     };
     let end_char = match args.get(2).map(|v| v.kind()) {
         Some(ValueKind::Int(i)) => normalise_char_idx(i, char_len).min(char_len),
         Some(ValueKind::Bool(b)) => normalise_char_idx(b as i64, char_len).min(char_len),
-        None => char_len,
+        Some(ValueKind::None) | None => char_len,
         _ => {
-            return Err(PyError::Runtime(
-                "slice indices must be integers".to_string(),
+            return Err(PyError::named(
+                "TypeError",
+                "slice indices must be integers or None or have an __index__ method",
             ));
         }
     };
