@@ -768,11 +768,17 @@ impl Interpreter {
                         }
                     }
                     "__annotations__" => {
-                        // CPython allows replacing __annotations__ with a dict or None
-                        // (or raises TypeError if the value is anything else).
-                        // Store the whole Value (Rc) so the new dict is identity-stable.
-                        if matches!(value.kind(), ValueKind::Dict(_) | ValueKind::None) {
+                        // CPython accepts a dict or None; any other type raises TypeError.
+                        // Assigning None resets the annotations to an empty dict — CPython
+                        // stores None internally but the getter coerces it to {} on next
+                        // access.  We store the empty dict directly so that identity
+                        // semantics (`f.__annotations__ is f.__annotations__`) still hold.
+                        if matches!(value.kind(), ValueKind::Dict(_)) {
                             *func.annotations.borrow_mut() = value;
+                            Ok(())
+                        } else if value.is_none() {
+                            *func.annotations.borrow_mut() =
+                                Value::dict(indexmap::IndexMap::new());
                             Ok(())
                         } else {
                             Err(PyError::named(
