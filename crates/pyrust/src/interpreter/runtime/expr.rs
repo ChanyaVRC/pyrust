@@ -1848,36 +1848,26 @@ impl Interpreter {
                 "cannot fit 'int' into an index-sized integer".to_string(),
             )),
             _ => {
-                let l_is_seq = matches!(
-                    l.kind(),
-                    ValueKind::Str(_)
-                        | ValueKind::List(_)
-                        | ValueKind::Tuple(_)
-                        | ValueKind::Bytes(_)
-                );
-                let r_is_seq = matches!(
-                    r.kind(),
-                    ValueKind::Str(_)
-                        | ValueKind::List(_)
-                        | ValueKind::Tuple(_)
-                        | ValueKind::Bytes(_)
-                );
-                let l_is_int = matches!(
-                    l.kind(),
-                    ValueKind::Int(_) | ValueKind::BigInt(_)
-                );
-                let r_is_int = matches!(
-                    r.kind(),
-                    ValueKind::Int(_) | ValueKind::BigInt(_)
-                );
-                if l_is_seq && !r_is_int {
+                let is_sequence = |v: &Value| {
+                    matches!(
+                        v.kind(),
+                        ValueKind::Str(_)
+                            | ValueKind::List(_)
+                            | ValueKind::Tuple(_)
+                            | ValueKind::Bytes(_)
+                    )
+                };
+                let is_int_like = |v: &Value| {
+                    matches!(v.kind(), ValueKind::Int(_) | ValueKind::BigInt(_))
+                };
+                if is_sequence(&l) && !is_int_like(&r) {
                     let type_name = value_type_name_str(&r);
                     return Err(PyError::named(
                         "TypeError",
                         format!("can't multiply sequence by non-int of type '{type_name}'"),
                     ));
                 }
-                if r_is_seq && !l_is_int {
+                if is_sequence(&r) && !is_int_like(&l) {
                     let type_name = value_type_name_str(&l);
                     return Err(PyError::named(
                         "TypeError",
