@@ -1744,6 +1744,10 @@ impl Value {
                 // wrapper is reallocated.  Use that Rc address for Python
                 // object identity (`b = a; a is b`) parity (#523).
                 Opaque::PyBigInt(rc) => Some(Rc::as_ptr(rc) as i64),
+                // Generator clones share the same Rc<RefCell<...>>; surface its
+                // pointer address so `id(g)` is non-zero and stable, and so
+                // `g is iter(g)` can be backed by ptr equality (#714).
+                Opaque::Generator(rc) => Some(Rc::as_ptr(rc) as i64),
                 _ => None,
             },
             _ => None,
