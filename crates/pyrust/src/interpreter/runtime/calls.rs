@@ -581,17 +581,25 @@ impl Interpreter {
                 return if let Some(d) = default {
                     Ok(d)
                 } else {
-                    Err(PyError::named("StopIteration", String::new()))
+                    // Exhausted generator: StopIteration() with no args → .value is None.
+                    let exc = if let Some(cls) = self.exc_classes.get("StopIteration") {
+                        PyError::Raised(instantiate_exception(cls, vec![]))
+                    } else {
+                        PyError::named("StopIteration", String::new())
+                    };
+                    Err(exc)
                 };
             }
             match self.resume_generator(frame) {
                 Ok(yielded) => Ok(yielded),
-                Err(ref e) if e.class_name_is("StopIteration") => {
+                Err(e) if e.class_name_is("StopIteration") => {
                     drop(borrow);
                     if let Some(d) = default {
                         Ok(d)
                     } else {
-                        Err(PyError::named("StopIteration", String::new()))
+                        // Propagate the original error so StopIteration.value
+                        // is preserved (PEP 380 / issue #600).
+                        Err(e)
                     }
                 }
                 Err(e) => Err(e),

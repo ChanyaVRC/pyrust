@@ -310,10 +310,13 @@ impl Interpreter {
             if let Some(e) = inject_exc {
                 return Err(e);
             }
-            return Err(PyError::named(
-                "StopIteration",
-                String::new(),
-            ));
+            // Exhausted generator: StopIteration() with no args → .value is None.
+            let exc = if let Some(cls) = self.exc_classes.get("StopIteration") {
+                PyError::Raised(instantiate_exception(cls, vec![]))
+            } else {
+                PyError::named("StopIteration", String::new())
+            };
+            return Err(exc);
         }
 
         // Swap the saved env in.
@@ -385,11 +388,18 @@ impl Interpreter {
                 frame.active_exception = saved.active_exception;
                 Ok(value)
             }
-            Ok(FrameOutcome::Returned(_)) => {
+            Ok(FrameOutcome::Returned(ret_val)) => {
                 // Generator returned normally (fell off end or hit explicit `return`).
-                // Signal exhaustion as StopIteration so ForIter and call_next handle it uniformly.
+                // CPython 3.12 sets StopIteration.value to the returned value (PEP 380).
+                // Construct the exception with `ret_val` as the arg so that
+                // `instantiate_exception` can set `.value = args[0]`.
                 frame.done = true;
-                Err(PyError::named("StopIteration", String::new()))
+                let exc = if let Some(cls) = self.exc_classes.get("StopIteration") {
+                    PyError::Raised(instantiate_exception(cls, vec![ret_val]))
+                } else {
+                    PyError::named("StopIteration", String::new())
+                };
+                Err(exc)
             }
             Err(e) => {
                 // Propagating exception or other error.

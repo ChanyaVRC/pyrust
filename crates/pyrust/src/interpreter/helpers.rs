@@ -729,7 +729,14 @@ pub(crate) fn is_exception_class(class: &Rc<RefCell<PyClass>>) -> bool {
 
 pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value>) -> Value {
     let mut attrs = IndexMap::new();
-    attrs.insert("args".to_string(), Value::list(args));
+    // CPython 3.12: StopIteration.__init__ sets self.value = args[0] if args else None.
+    // Mirror that here so `except StopIteration as e: e.value` always works.
+    let is_stop_iteration = class.borrow().name == "StopIteration";
+    attrs.insert("args".to_string(), Value::list(args.clone()));
+    if is_stop_iteration {
+        let val = args.into_iter().next().unwrap_or_else(Value::none);
+        attrs.insert("value".to_string(), val);
+    }
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 
