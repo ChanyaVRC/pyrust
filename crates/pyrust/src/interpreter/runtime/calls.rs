@@ -187,11 +187,23 @@ impl Interpreter {
                         }
                         self.call_str_method(method, receiver, pos)
                     }
-                    Kind::List => pyrust_builtins::list::call(method, &receiver, pos, &kw),
+                    Kind::List => {
+                        let pos = if method == "index" {
+                            self.resolve_seq_index_pos(pos)?
+                        } else {
+                            pos
+                        };
+                        pyrust_builtins::list::call(method, &receiver, pos, &kw)
+                    }
                     Kind::Dict => self.call_dict_method(method, receiver, pos),
                     Kind::Set => self.call_set_method(method, receiver, pos),
                     Kind::Other => match receiver.kind() {
                     ValueKind::Tuple(items) => {
+                        let pos = if method == "index" {
+                            self.resolve_seq_index_pos(pos)?
+                        } else {
+                            pos
+                        };
                         pyrust_builtins::tuple::call(method, items, pos)
                     }
                     ValueKind::Complex(_, _) => {
@@ -510,11 +522,27 @@ impl Interpreter {
                     }
                     "bytes" => pyrust_builtins::bytes::call(method, &self_val, &pos, &kw),
                     "str" => self.call_str_method(method, self_val, pos),
-                    "list" => pyrust_builtins::list::call(method, &self_val, pos, &kw),
-                    "tuple" => match self_val.kind() {
-                        ValueKind::Tuple(items) => pyrust_builtins::tuple::call(method, items, pos),
-                        _ => unreachable!("kind_ok guard above"),
-                    },
+                    "list" => {
+                        let pos = if method == "index" {
+                            self.resolve_seq_index_pos(pos)?
+                        } else {
+                            pos
+                        };
+                        pyrust_builtins::list::call(method, &self_val, pos, &kw)
+                    }
+                    "tuple" => {
+                        let pos = if method == "index" {
+                            self.resolve_seq_index_pos(pos)?
+                        } else {
+                            pos
+                        };
+                        match self_val.kind() {
+                            ValueKind::Tuple(items) => {
+                                pyrust_builtins::tuple::call(method, items, pos)
+                            }
+                            _ => unreachable!("kind_ok guard above"),
+                        }
+                    }
                     "dict" => self.call_dict_method(method, self_val, pos),
                     "set" => self.call_set_method(method, self_val, pos),
                     "complex" => pyrust_builtins::complex::call(method, &self_val, pos),
@@ -1604,7 +1632,7 @@ impl Interpreter {
 
         while i < bytes.len() {
             let c = bytes[i];
-            if c == b'{'  {
+            if c == b'{' {
                 if i + 1 < bytes.len() && bytes[i + 1] == b'{' {
                     out.push('{');
                     i += 2;
@@ -1694,6 +1722,86 @@ impl Interpreter {
         Ok(Value::string(out))
     }
 
+    /// Resolve a single start/stop argument for `list.index` / `tuple.index`
+    /// through the `__index__` protocol, matching CPython 3.12 semantics.
+    ///
+    /// - `Int` / `Bool` / `BigInt`: returned unchanged (`BigInt` is still `int`).
+    /// - `PyInstance` with `__index__`: the method is called; its return value
+    ///   must be `Int`, `Bool`, or `BigInt`, and is returned.
+    /// - Anything else: `TypeError: slice indices must be integers or have an
+    ///   __index__ method`.
+    fn resolve_index_arg(&mut self, val: Value) -> Result<Value> {
+        // Probe the kind in a scoped block so the Ref guard drops before we
+        // may need to move `val`.
+        enum Tag {
+            Int,
+            Instance(Rc<RefCell<PyInstance>>),
+            Other,
+        }
+        let tag = match val.kind() {
+            ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => Tag::Int,
+            ValueKind::PyInstance(inst) => Tag::Instance(Rc::clone(inst)),
+            _ => Tag::Other,
+        };
+        match tag {
+            Tag::Int => Ok(val),
+            Tag::Instance(inst_rc) => {
+                let class = Rc::clone(&inst_rc.borrow().class);
+                if let Some(method_val) = lookup_class_attr(&class, "__index__") {
+                    let result = invoke_class_method(
+                        self,
+                        method_val,
+                        Value::py_instance(Rc::clone(&inst_rc)),
+                        &[],
+                    )?;
+                    // Check result kind in a scoped block to release the Ref.
+                    // BigInt is a valid int result (e.g. __index__ returning 2**100).
+                    let result_ok = matches!(
+                        result.kind(),
+                        ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+                    );
+                    if result_ok {
+                        Ok(result)
+                    } else {
+                        Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "__index__ returned non-int (type {})",
+                                value_type_name_str(&result),
+                            ),
+                        ))
+                    }
+                } else {
+                    Err(PyError::named(
+                        "TypeError",
+                        "slice indices must be integers or have an __index__ method".to_string(),
+                    ))
+                }
+            }
+            Tag::Other => Err(PyError::named(
+                "TypeError",
+                "slice indices must be integers or have an __index__ method".to_string(),
+            )),
+        }
+    }
+
+    /// For `list.index` / `tuple.index`, resolve start (pos[1]) and stop
+    /// (pos[2]) through `resolve_index_arg`.  pos[0] is the search target
+    /// and is left unchanged.  Returns a new `Vec<Value>` with the resolved
+    /// slice-boundary arguments in place.
+    fn resolve_seq_index_pos(&mut self, mut pos: Vec<Value>) -> Result<Vec<Value>> {
+        if pos.len() >= 2 {
+            let start = pos.remove(1);
+            let resolved = self.resolve_index_arg(start)?;
+            pos.insert(1, resolved);
+        }
+        if pos.len() >= 3 {
+            let stop = pos.remove(2);
+            let resolved = self.resolve_index_arg(stop)?;
+            pos.insert(2, resolved);
+        }
+        Ok(pos)
+    }
 }
 
 /// Apply a Python format spec string to a `Value` and return the formatted string.

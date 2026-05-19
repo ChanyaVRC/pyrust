@@ -1,4 +1,4 @@
-use pyrust_core::{PyError, Result, Value, ValueKind};
+use pyrust_core::{PyBigInt, PyBigIntSign, PyError, PyToPrimitive, Result, Value, ValueKind};
 
 /// Common Sequence Operations — index and count.
 /// These apply to both list (Vec<Value>) and tuple (Vec<Value>).
@@ -6,9 +6,11 @@ pub fn seq_index(items: &[Value], args: &[Value], type_name: &str) -> Result<Val
     let target = args
         .first()
         .ok_or_else(|| PyError::named("TypeError", "index expected at least 1 argument, got 0"))?;
+    let len = items.len();
     let start = match args.get(1).map(|v| v.kind()) {
-        Some(ValueKind::Int(i)) => normalise_index(i, items.len()).min(items.len()),
-        Some(ValueKind::Bool(b)) => normalise_index(b as i64, items.len()).min(items.len()),
+        Some(ValueKind::Int(i)) => normalise_index(i, len).min(len),
+        Some(ValueKind::Bool(b)) => normalise_index(b as i64, len).min(len),
+        Some(ValueKind::BigInt(b)) => normalise_bigint_index(b, len),
         Some(_) => {
             return Err(PyError::named(
                 "TypeError",
@@ -18,15 +20,16 @@ pub fn seq_index(items: &[Value], args: &[Value], type_name: &str) -> Result<Val
         None => 0,
     };
     let stop = match args.get(2).map(|v| v.kind()) {
-        Some(ValueKind::Int(i)) => normalise_index(i, items.len()).min(items.len()),
-        Some(ValueKind::Bool(b)) => normalise_index(b as i64, items.len()).min(items.len()),
+        Some(ValueKind::Int(i)) => normalise_index(i, len).min(len),
+        Some(ValueKind::Bool(b)) => normalise_index(b as i64, len).min(len),
+        Some(ValueKind::BigInt(b)) => normalise_bigint_index(b, len),
         Some(_) => {
             return Err(PyError::named(
                 "TypeError",
                 "slice indices must be integers or have an __index__ method",
             ));
         }
-        None => items.len(),
+        None => len,
     };
     // An inverted window (start > stop after normalisation) must be treated as empty,
     // matching CPython's semantics: the search yields zero iterations and falls through
@@ -66,5 +69,27 @@ pub fn normalise_index(idx: i64, len: usize) -> usize {
         len.saturating_sub(from_end)
     } else {
         idx as usize
+    }
+}
+
+/// Clamp a `BigInt` index into `[0, len]`.
+///
+/// A positive BigInt larger than `len` clamps to `len` (past-the-end).
+/// A negative BigInt with magnitude larger than `len` clamps to `0`.
+/// This matches CPython's `PySlice_AdjustIndices` behaviour for large ints.
+pub fn normalise_bigint_index(idx: &PyBigInt, len: usize) -> usize {
+    match idx.sign() {
+        PyBigIntSign::Minus => {
+            // Negative: try to convert to i64; if it doesn't fit it must be
+            // more negative than any valid sequence length → clamp to 0.
+            PyToPrimitive::to_i64(idx)
+                .map(|i| normalise_index(i, len))
+                .unwrap_or(0)
+        }
+        _ => {
+            // Zero or positive: if it fits in usize use it (capped at len by
+            // the caller's `.min(len)`); otherwise it's past the end → len.
+            PyToPrimitive::to_usize(idx).unwrap_or(len)
+        }
     }
 }
