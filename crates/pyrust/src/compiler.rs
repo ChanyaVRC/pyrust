@@ -212,11 +212,28 @@ fn collect_cell_vars_in(
                         &empty_set,
                     );
                     let inner_globals = crate::interpreter::collect_global_names(nested_body);
+                    // Collect names that appear as AugAssign targets at class body level.
+                    // An AugAssign at class scope (e.g. `n += 1`) requires `n` to already
+                    // be defined in the class scope — it does NOT capture from the enclosing
+                    // function scope.  `collect_free_var_reads_in_stmts` inserts AugAssign
+                    // target names as "uses", so we must subtract them here to avoid
+                    // wrongly promoting enclosing-function locals to cell vars.
+                    let mut class_aug_targets: HashSet<String> = HashSet::new();
+                    for stmt in nested_body.iter() {
+                        if let Stmt::AugAssign {
+                            target: AssignTarget::Name(n),
+                            ..
+                        } = stmt
+                        {
+                            class_aug_targets.insert(n.clone());
+                        }
+                    }
                     let mut body_uses: HashSet<String> = HashSet::new();
                     collect_free_var_reads_in_stmts(nested_body, &mut body_uses);
                     collect_transitive_free_vars_in_stmts(nested_body, &mut body_uses);
                     for name in body_uses {
                         if !class_locals.contains(&name)
+                            && !class_aug_targets.contains(&name)
                             && !inner_globals.contains(&name)
                             && !nonlocals.contains(&name)
                             && local_index.contains_key(&name)
