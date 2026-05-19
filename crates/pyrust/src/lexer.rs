@@ -196,10 +196,44 @@ impl Lexer {
                     } else if (c == 'b' || c == 'B')
                         && matches!(chars.get(pos + 1), Some('"') | Some('\''))
                     {
-                        // Bytes literal: b"..." or b'...' (no rb/br combos yet)
-                        let (tok, next) = lex_bytes(chars, pos + 1)?;
+                        // Bytes literal: b"..." or b'...'
+                        let (tok, next) = lex_bytes(chars, pos + 1, false)?;
                         self.tokens.push(tok);
                         pos = next;
+                    } else if (c == 'b' || c == 'B')
+                        && matches!(chars.get(pos + 1), Some('r') | Some('R'))
+                        && matches!(chars.get(pos + 2), Some('"') | Some('\''))
+                    {
+                        // Raw bytes literal: br"..." / bR"..." / BR"..." / Br"..."
+                        let (tok, next) = lex_bytes(&chars, pos + 2, true)?;
+                        self.tokens.push(tok);
+                        pos = next;
+                    } else if (c == 'r' || c == 'R')
+                        && matches!(chars.get(pos + 1), Some('"') | Some('\''))
+                    {
+                        // Raw string literal: r"..." / R"..."
+                        let (tok, next) = lex_string(&chars, pos + 1, true)?;
+                        self.tokens.push(tok);
+                        pos = next;
+                    } else if (c == 'r' || c == 'R')
+                        && matches!(chars.get(pos + 1), Some('b') | Some('B'))
+                        && matches!(chars.get(pos + 2), Some('"') | Some('\''))
+                    {
+                        // Raw bytes literal: rb"..." / rB"..." / RB"..." / Rb"..."
+                        let (tok, next) = lex_bytes(&chars, pos + 2, true)?;
+                        self.tokens.push(tok);
+                        pos = next;
+                    } else if ((c == 'r' || c == 'R')
+                        && matches!(chars.get(pos + 1), Some('f') | Some('F'))
+                        && matches!(chars.get(pos + 2), Some('"') | Some('\'')))
+                        || ((c == 'f' || c == 'F')
+                            && matches!(chars.get(pos + 1), Some('r') | Some('R'))
+                            && matches!(chars.get(pos + 2), Some('"') | Some('\'')))
+                    {
+                        // Raw f-strings: rf"..." / fr"..." — not yet implemented
+                        return Err(PyError::Lex(
+                            "raw f-strings are not yet supported".to_string(),
+                        ));
                     } else {
                         let (tok, next) = lex_ident_or_keyword(chars, pos);
                         self.tokens.push(tok);
@@ -207,9 +241,7 @@ impl Lexer {
                     }
                 }
                 Some('"') | Some('\'') => {
-                    // lex_string now receives the full chars slice so triple-
-                    // quoted strings can span physical lines.
-                    let (tok, next) = lex_string(chars, pos)?;
+                    let (tok, next) = lex_string(chars, pos, false)?;
                     self.tokens.push(tok);
                     pos = next;
                 }
@@ -679,7 +711,7 @@ fn lex_ident_or_keyword(chars: &[char], start: usize) -> (Token, usize) {
     (tok, pos)
 }
 
-fn lex_bytes(chars: &[char], start: usize) -> Result<(Token, usize)> {
+fn lex_bytes(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> {
     let quote = chars[start];
     let mut pos = start + 1;
     let mut out: Vec<u8> = Vec::new();
@@ -688,6 +720,27 @@ fn lex_bytes(chars: &[char], start: usize) -> Result<(Token, usize)> {
             return Ok((Token::Bytes(out), pos + 1));
         }
         if c == '\\' {
+            if raw {
+                // In raw mode: backslash is kept literally.
+                // A backslash before the quote character prevents the quote from
+                // ending the string, but the backslash itself is included in the output.
+                // A backslash at end of input is a syntax error.
+                let next = chars.get(pos + 1).copied().ok_or_else(|| {
+                    PyError::Lex(
+                        "EOL while scanning bytes literal (trailing backslash in raw bytes)"
+                            .to_string(),
+                    )
+                })?;
+                if (next as u32) > 0x7f {
+                    return Err(PyError::Lex(format!(
+                        "bytes can only contain ASCII literal characters (got {next:?})"
+                    )));
+                }
+                out.push(b'\\');
+                out.push(next as u8);
+                pos += 2;
+                continue;
+            }
             pos += 1;
             let esc = chars
                 .get(pos)
@@ -738,7 +791,7 @@ fn lex_bytes(chars: &[char], start: usize) -> Result<(Token, usize)> {
     Err(PyError::Lex("unterminated bytes literal".to_string()))
 }
 
-fn lex_string(chars: &[char], start: usize) -> Result<(Token, usize)> {
+fn lex_string(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> {
     let quote = chars[start];
 
     // Triple-quoted strings
@@ -758,6 +811,21 @@ fn lex_string(chars: &[char], start: usize) -> Result<(Token, usize)> {
                     return Err(PyError::Lex(
                         "unterminated triple-quoted string".to_string(),
                     ));
+                }
+                Some(&'\\') if raw => {
+                    // In raw mode: backslash is kept literally.
+                    // A backslash before the quote character prevents the quote from
+                    // ending the string, but the backslash itself is included in the output.
+                    // A backslash at end of input is a syntax error.
+                    let next = chars.get(pos + 1).copied().ok_or_else(|| {
+                        PyError::Lex(
+                            "EOL while scanning string literal (trailing backslash in raw string)"
+                                .to_string(),
+                        )
+                    })?;
+                    out.push('\\');
+                    out.push(next);
+                    pos += 2;
                 }
                 Some(&'\\') => {
                     pos += 1;
@@ -806,6 +874,22 @@ fn lex_string(chars: &[char], start: usize) -> Result<(Token, usize)> {
             return Ok((Token::Str(out), pos + 1));
         }
         if c == '\\' {
+            if raw {
+                // In raw mode: backslash is kept literally.
+                // A backslash before the quote character prevents the quote from
+                // ending the string, but the backslash itself is included in the output.
+                // A backslash at end of input is a syntax error.
+                let next = chars.get(pos + 1).copied().ok_or_else(|| {
+                    PyError::Lex(
+                        "EOL while scanning string literal (trailing backslash in raw string)"
+                            .to_string(),
+                    )
+                })?;
+                out.push('\\');
+                out.push(next);
+                pos += 2;
+                continue;
+            }
             pos += 1;
             let escaped = chars
                 .get(pos)
