@@ -1174,7 +1174,7 @@ impl Interpreter {
                             // default BuiltinTypeOps impl raises TypeError, so
                             // immutable types like mappingproxy don't need extra
                             // plumbing.
-                            let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
+                            let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
                             if let ValueKind::BuiltinObject { ops, state } = obj_val.kind() {
                                 vm_try!(ops.delete_item(state, &idx_val));
                             }
