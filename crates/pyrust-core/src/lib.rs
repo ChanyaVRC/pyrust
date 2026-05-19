@@ -782,6 +782,17 @@ pub trait BuiltinTypeOps: 'static {
         ))
     }
 
+    fn delete_item(&self, state: &BuiltinState, key: &Value) -> Result<()> {
+        let _ = (state, key);
+        Err(PyError::named(
+            "TypeError",
+            format!(
+                "'{}' object does not support item deletion",
+                self.type_name()
+            ),
+        ))
+    }
+
     fn contains(&self, state: &BuiltinState, item: &Value) -> Result<bool> {
         let _ = (state, item);
         Err(PyError::named(

@@ -2140,6 +2140,14 @@ pub(crate) fn iter_values(value: Value) -> Result<Vec<Value>> {
                         .collect(),
                 });
             }
+            if let Some(class_rc) = pyrust_builtins::mapping_proxy::as_class_rc(&value) {
+                let class = class_rc.borrow();
+                return Ok(class
+                    .attrs
+                    .keys()
+                    .map(|k| Value::string(k.clone()))
+                    .collect());
+            }
             let mut out = Vec::new();
             let ValueKind::BuiltinObject { ops, state } = value.kind() else {
                 unreachable!();

@@ -5368,24 +5368,36 @@ impl Compiler {
             // Note: we keep the [tup_base..bases_tuple_reg] region allocated so
             // bases_tuple_reg isn't clobbered by subsequent temp allocations.
 
-            // 2. Call vars(dst) to produce the namespace dict.
+            // 2. Call vars(dst) to get the class namespace proxy, then
+            //    dict(proxy) to convert to a mutable plain dict for the metaclass.
+            //    Register layout (3 slots):
+            //      vars_frame+0  -- function (vars / dict)
+            //      vars_frame+1  -- arg
+            //      vars_frame+2  -- stash proxy while loading dict fn
             let vars_name_idx = self.intern_name("vars");
+            let dict_name_idx_meta = self.intern_name("dict");
             let vars_frame = self.next_temp;
-            if vars_frame.checked_add(2).is_none() {
+            if vars_frame.checked_add(3).is_none() {
                 self.failed = true;
                 if self.error_msg.is_none() {
                     self.error_msg = Some("too many registers for metaclass call".to_string());
                 }
                 return;
             }
-            self.next_temp = vars_frame + 2;
-            if vars_frame + 1 > self.max_reg {
-                self.max_reg = vars_frame + 1;
+            self.next_temp = vars_frame + 3;
+            if vars_frame + 2 > self.max_reg {
+                self.max_reg = vars_frame + 2;
             }
+            // vars(dst) -> proxy in vars_frame
             self.emit(Insn::LoadGlobal(vars_frame, vars_name_idx));
             self.emit(Insn::Move(vars_frame + 1, dst));
             self.emit(Insn::Call(vars_frame, 1));
-            let ns_reg = vars_frame; // result of vars(dst)
+            // dict(proxy) -> plain dict in vars_frame
+            self.emit(Insn::Move(vars_frame + 2, vars_frame));
+            self.emit(Insn::LoadGlobal(vars_frame, dict_name_idx_meta));
+            self.emit(Insn::Move(vars_frame + 1, vars_frame + 2));
+            self.emit(Insn::Call(vars_frame, 1));
+            let ns_reg = vars_frame; // result of dict(vars(dst))
 
             // 3. Set up call frame for metaclass(name_str, bases_tuple, namespace).
             let frame = self.next_temp;

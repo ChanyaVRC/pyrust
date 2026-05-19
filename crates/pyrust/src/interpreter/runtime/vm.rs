@@ -1132,6 +1132,7 @@ impl Interpreter {
                         let target_kind = regs[*obj as usize].as_some().map(|v| match v.kind() {
                             ValueKind::List(_) => 1u8,
                             ValueKind::Dict(_) => 2u8,
+                            ValueKind::BuiltinObject { .. } => 3u8,
                             _ => 0u8,
                         }).unwrap_or(0);
                         if target_kind == 1 {
@@ -1166,6 +1167,16 @@ impl Interpreter {
                                 regs[*obj as usize].dict_with_mut(|dict| {
                                     dict.shift_remove(&key);
                                 });
+                            }
+                            handled = true;
+                        } else if target_kind == 3 {
+                            // BuiltinObject — delegate to ops.delete_item.  The
+                            // default BuiltinTypeOps impl raises TypeError, so
+                            // immutable types like mappingproxy don't need extra
+                            // plumbing.
+                            let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
+                            if let ValueKind::BuiltinObject { ops, state } = obj_val.kind() {
+                                vm_try!(ops.delete_item(state, &idx_val));
                             }
                             handled = true;
                         }
