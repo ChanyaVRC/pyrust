@@ -183,7 +183,7 @@ impl Interpreter {
                                     if let PyKey::Str(name) = k { Some((name, v)) } else { None }
                                 })
                                 .collect();
-                            return format_str_template(&template, &pos, &keyword);
+                            return self.format_str_template(&template, &pos, &keyword);
                         }
                         self.call_str_method(method, receiver, pos)
                     }
