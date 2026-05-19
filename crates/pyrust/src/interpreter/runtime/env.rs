@@ -433,6 +433,16 @@ impl Interpreter {
                         _ => {}
                     }
                 }
+                // Non-bound-method BuiltinObjects (frozenset, dict views, file,
+                // enumerate, zip, reversed, chain, cached_property, …) also
+                // reach this arm.  Delegate to builtin_has_method / bound_method
+                // so that e.g. `frozenset().isdisjoint` keeps working.
+                if builtin_has_method(&target, name) {
+                    return Ok(pyrust_builtins::bound_method::bound_method(
+                        name,
+                        target.clone(),
+                    ));
+                }
                 let type_name = pyrust_core::builtin_type_name(&target);
                 Err(PyError::named(
                     "AttributeError",
