@@ -174,7 +174,22 @@ fn collect_cell_vars_in(
                 // (Python class scope is not a closure scope for methods).
                 // Find names that class methods read as free variables and
                 // promote them to cell vars so they live in the env.
-                collect_class_method_outer_refs(nested_body, local_index, cells);
+                //
+                // Exception: when the current scope is itself a class body
+                // (`is_class_scope == true`), skip this promotion.  When the outer
+                // scope is a class body, its names must not be forced into cell vars
+                // by free-variable reads inside a nested class's methods.  Doing so
+                // would cause assignments in the outer class body (e.g. `Outer.x = 50`)
+                // to emit `StoreGlobal` instead of `RecordClassStore`, leaving the
+                // attribute absent from the class dict and raising `AttributeError`
+                // on `Outer.x` (issue #690).
+                //
+                // Cell vars for those free variables in an enclosing *function* scope
+                // are handled when `collect_cell_vars_in` is called for that function
+                // scope (where `is_class_scope == false`).
+                if !is_class_scope {
+                    collect_class_method_outer_refs(nested_body, local_index, cells);
+                }
             }
             Stmt::If {
                 branches,
