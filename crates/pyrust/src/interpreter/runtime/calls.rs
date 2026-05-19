@@ -263,7 +263,7 @@ impl Interpreter {
                         None => positional.push(a.value.clone()),
                     }
                 }
-                format_str_template(&template, &positional, &keyword)
+                self.format_str_template(&template, &positional, &keyword)
             }
             // `float.fromhex` is a classmethod: the first positional arg is the
             // string to parse.  It must be dispatched before the generic
@@ -2509,11 +2509,56 @@ fn builtin_method_names(type_name: &str) -> Vec<String> {
     names.iter().map(|s| (*s).to_string()).collect()
 }
 
+impl Interpreter {
+    /// Renders a value to a string using the same priority as `str(x)`:
+    /// `__str__` first, then `__repr__`, then the default object repr.
+    /// For non-PyInstance values falls back to `Value::to_py_str()`.
+    /// Exception instances bypass dunder dispatch (matching CPython's
+    /// `BaseException.__str__` special-casing) and use `to_py_str()`.
+    /// Used by `str.format` for the `!s` conversion and the empty-spec path.
+    fn render_value_as_str(&mut self, value: &Value) -> Result<String> {
+        let ValueKind::PyInstance(inst) = value.kind() else {
+            return Ok(value.to_py_str());
+        };
+        let inst_rc = Rc::clone(inst);
+        let class = Rc::clone(&inst_rc.borrow().class);
+        // Exception instances use the built-in formatting (CPython special-case).
+        if is_exception_class(&class) {
+            return Ok(value.to_py_str());
+        }
+        for dunder in &["__str__", "__repr__"] {
+            if let Some(method_val) = lookup_class_attr(&class, dunder) {
+                let result = invoke_class_method(
+                    self,
+                    method_val,
+                    Value::py_instance(Rc::clone(&inst_rc)),
+                    &[],
+                )?;
+                return match result.kind() {
+                    ValueKind::Str(s) => Ok(s.to_string()),
+                    _ => Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "{dunder} returned non-string (type {})",
+                            pyrust_core::builtin_type_name(&result)
+                        ),
+                    )),
+                };
+            }
+        }
+        // No dunders found: fall back to Value::repr(), which produces
+        // `<module.qualname object at 0xADDR>` matching CPython's object.__repr__.
+        Ok(value.repr())
+    }
+}
+
 /// Implements `str.format()`.  Parses `{...}` replacement fields in `template`
 /// and substitutes positional or keyword arguments, optionally formatted by
 /// a `:spec` and/or converted by `!r`/`!s`/`!a`.  Supports `{{` / `}}` for
 /// literal braces and `{0.attr}` / `{0[key]}` field accessors.
+impl Interpreter {
 fn format_str_template(
+    &mut self,
     template: &str,
     positional: &[Value],
     keyword: &[(String, Value)],
@@ -2607,9 +2652,10 @@ fn format_str_template(
             let value = apply_field_accessors(base, rest)?;
 
             // Apply conversion (`!r`, `!s`, `!a`).
+            // `!s` dispatches `__str__` on user instances (mirrors `str(x)`).
             let value = match conversion {
                 Some('r') => Value::string(value.repr()),
-                Some('s') => Value::string(value.to_py_str()),
+                Some('s') => Value::string(self.render_value_as_str(&value)?),
                 Some('a') => Value::string(ascii_repr(&value)),
                 Some(c) => {
                     return Err(PyError::named(
@@ -2620,8 +2666,14 @@ fn format_str_template(
                 None => value,
             };
 
-            // Apply the format spec.
-            let formatted = apply_format_spec(&value, spec)?;
+            // Apply the format spec.  When the spec is empty and the value is a
+            // PyInstance, dispatch `__str__` the same way `str(x)` would — the
+            // default `to_py_str()` falls through to repr instead of __str__.
+            let formatted = if spec.is_empty() && matches!(value.kind(), ValueKind::PyInstance(_)) {
+                Value::string(self.render_value_as_str(&value)?)
+            } else {
+                apply_format_spec(&value, spec)?
+            };
             if let ValueKind::Str(s) = formatted.kind() {
                 out.push_str(s);
             } else {
@@ -2652,6 +2704,7 @@ fn format_str_template(
     }
     Ok(Value::string(out))
 }
+} // impl Interpreter (format_str_template + render_value_as_str)
 
 /// Splits a replacement field on the first `:` that is not inside `[]`,
 /// returning `(field_name_with_conversion, format_spec)`.
@@ -2705,15 +2758,14 @@ fn apply_field_accessors(mut value: Value, mut rest: &str) -> Result<Value> {
                     format!("attribute access '.{attr}' is only supported on instances"),
                 )
             })?;
-            let v = inst
-                .borrow()
-                .attrs
-                .get(attr)
-                .cloned()
-                .ok_or_else(|| PyError::named(
-                    "AttributeError",
-                    format!("attribute '{attr}' not found"),
-                ))?;
+            // Look up the attribute: instance dict first, then class MRO.
+            let class = Rc::clone(&inst.borrow().class);
+            let v = inst.borrow().attrs.get(attr).cloned().or_else(|| {
+                lookup_class_attr(&class, attr)
+            }).ok_or_else(|| PyError::named(
+                "AttributeError",
+                format!("'{}' object has no attribute '{attr}'", class.borrow().name),
+            ))?;
             value = v;
         } else if bytes[0] == b'[' {
             let end = bytes
