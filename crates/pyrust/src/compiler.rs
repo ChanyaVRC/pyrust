@@ -193,13 +193,14 @@ fn collect_cell_vars_in(
                 // `global x` would incorrectly promote the enclosing scope's `x`.
                 //
                 // Exception: when the current scope is itself a class body
-                // (`is_class_scope == true`), skip this promotion.  A `global x`
-                // in the directly-nested class body goes straight to the module
-                // env, bypassing the outer class namespace entirely.  Promoting
-                // the outer class's `x` to a cell var here would force its
-                // assignment (`Outer.x = 50`) to emit `StoreGlobal` instead of
-                // `RecordClassStore`, leaving the attribute absent from the class
-                // dict and causing `AttributeError` on `Outer.x` (issue #679).
+                // (`is_class_scope == true`), skip this promotion entirely.
+                // A `global x` in a directly-nested class body goes straight
+                // to the module env, bypassing the outer class namespace.
+                // Promoting the outer class's `x` to a cell var here would
+                // force `Outer.x = 50` to emit `StoreGlobal` instead of
+                // `RecordClassStore`, leaving the attribute absent from the
+                // class dict and causing `AttributeError` on `Outer.x`
+                // (issue #679).
                 if !is_class_scope {
                     let class_body_globals = collect_global_names_via_class_chain(nested_body);
                     for name in &class_body_globals {
