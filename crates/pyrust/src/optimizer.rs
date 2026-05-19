@@ -3171,6 +3171,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn const_fold_call_invalidates_named_locals_but_not_temps() {
+        use crate::ast::BinaryOp;
+        use crate::value::Value;
+        // Simulates the issue #671 pattern at the instruction level:
+        //
+        //   [0] LoadConst(r0, 0)      r0 is a named local (< num_locals=2): consts[0]=10
+        //   [1] LoadConst(r5, 1)      r5 is a temp (>= num_locals=2): consts[1]=3
+        //   [2] Call(r2, 0)           user call — may write r0 via assign_name write-through
+        //   [3] BinOpConst(r3, r0, Add, 1)  must NOT fold (r0 was a named local)
+        //   [4] BinOpConst(r4, r5, Add, 1)  MUST fold (r5 is a temp, safe to retain)
+        //   [5] Return(r3)
+        //
+        // With num_locals=2, after Call at [2]:
+        //   known[r0] must be removed  → BinOpConst at [3] stays unfused
+        //   known[r5] must survive     → BinOpConst at [4] folds to LoadConst
+        let mut consts = vec![Value::int(10), Value::int(3)];
+        let insns = vec![
+            Insn::LoadConst(0, 0),                    // r0 = 10 (named local)
+            Insn::LoadConst(5, 1),                    // r5 = 3  (temp)
+            Insn::Call(2, 0),                         // call — may clobber r0
+            Insn::BinOpConst(3, 0, BinaryOp::Add, 1), // r3 = r0 + 3
+            Insn::BinOpConst(4, 5, BinaryOp::Add, 1), // r4 = r5 + 3
+            Insn::Return(3),
+        ];
+        let out = pass_const_fold(insns, &mut consts, 2);
+        assert!(
+            matches!(out[3], Insn::BinOpConst(3, 0, BinaryOp::Add, 1)),
+            "named-local r0 must not be folded after Call: found {:?}",
+            out[3]
+        );
+        assert!(
+            matches!(out[4], Insn::LoadConst(4, _)),
+            "temp r5 must still be folded after Call: found {:?}",
+            out[4]
+        );
+    }
+
     // ── pass_const_branch_elim ────────────────────────────────────────────────
 
     #[test]
