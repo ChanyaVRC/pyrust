@@ -1070,7 +1070,6 @@ fn collect_class_method_outer_refs(
         None
     };
 
-
     for stmt in class_body {
         match stmt {
             Stmt::Def {
