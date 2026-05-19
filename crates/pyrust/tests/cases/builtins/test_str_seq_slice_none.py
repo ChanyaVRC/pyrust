@@ -1,5 +1,6 @@
-# Parity fixture for str/list/tuple slice-arg None handling (issue #796).
-# CPython 3.12 treats None for start/end as omitted (0 / len).
+# Parity fixture for str slice-arg None handling (issue #796).
+# CPython 3.12 treats None for start/end as omitted (0 / len(s)).
+# Note: list.index/tuple.index do NOT accept None (TypeError in CPython 3.12).
 
 s = 'hello world'
 
@@ -29,13 +30,3 @@ try:
     s.find('l', [])
 except TypeError as e:
     print(e)
-
-# list.index / tuple.index with None start/end
-lst = [1, 2, 3, 2, 1]
-print(lst.index(2, None, None))   # 1
-print(lst.index(2, 2, None))      # 3
-print(lst.index(1, None, 2))      # 0
-
-t = (1, 2, 3, 2, 1)
-print(t.index(2, None, None))     # 1
-print(t.index(2, 2, None))        # 3

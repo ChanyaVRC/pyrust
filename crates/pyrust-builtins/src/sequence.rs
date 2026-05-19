@@ -11,25 +11,25 @@ pub fn seq_index(items: &[Value], args: &[Value], type_name: &str) -> Result<Val
         Some(ValueKind::Int(i)) => normalise_index(i, len).min(len),
         Some(ValueKind::Bool(b)) => normalise_index(b as i64, len).min(len),
         Some(ValueKind::BigInt(b)) => normalise_bigint_index(b, len),
-        Some(ValueKind::None) | None => 0,
         Some(_) => {
             return Err(PyError::named(
                 "TypeError",
-                "slice indices must be integers or None or have an __index__ method",
+                "slice indices must be integers or have an __index__ method",
             ));
         }
+        None => 0,
     };
     let stop = match args.get(2).map(|v| v.kind()) {
         Some(ValueKind::Int(i)) => normalise_index(i, len).min(len),
         Some(ValueKind::Bool(b)) => normalise_index(b as i64, len).min(len),
         Some(ValueKind::BigInt(b)) => normalise_bigint_index(b, len),
-        Some(ValueKind::None) | None => len,
         Some(_) => {
             return Err(PyError::named(
                 "TypeError",
-                "slice indices must be integers or None or have an __index__ method",
+                "slice indices must be integers or have an __index__ method",
             ));
         }
+        None => len,
     };
     // An inverted window (start > stop after normalisation) must be treated as empty,
     // matching CPython's semantics: the search yields zero iterations and falls through
