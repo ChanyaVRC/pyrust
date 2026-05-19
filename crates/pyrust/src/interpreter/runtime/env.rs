@@ -195,11 +195,15 @@ impl Interpreter {
                     // `type.__annotations__` in CPython is a data descriptor on
                     // `type` itself.  On first access it synthesises an empty dict,
                     // writes it back into the class's own `__dict__`, and returns
-                    // that same dict.  Subsequent accesses hit `lookup_class_attr`
+                    // that same dict.  Subsequent accesses hit the own-attrs check
                     // and return the stored (potentially mutated) dict — so
                     // `Foo.__annotations__ is Foo.__annotations__` is `True` and
                     // mutations via subscript-assignment persist (issue #737).
-                    if let Some(stored) = lookup_class_attr(&class, "__annotations__") {
+                    //
+                    // CPython does NOT inherit __annotations__ from base classes:
+                    // `B.__annotations__` is always B's own dict, never A's.
+                    // Use a direct own-attrs lookup (not lookup_class_attr) here.
+                    if let Some(stored) = class.borrow().attrs.get("__annotations__").cloned() {
                         return Ok(stored);
                     }
                     let empty = Value::dict(IndexMap::new());
@@ -757,10 +761,10 @@ impl Interpreter {
                         }
                     }
                     "__annotations__" => {
-                        // CPython allows replacing __annotations__ with any dict
-                        // (or raises TypeError if the value is not a dict).
+                        // CPython allows replacing __annotations__ with a dict or None
+                        // (or raises TypeError if the value is anything else).
                         // Store the whole Value (Rc) so the new dict is identity-stable.
-                        if matches!(value.kind(), ValueKind::Dict(_)) {
+                        if matches!(value.kind(), ValueKind::Dict(_) | ValueKind::None) {
                             *func.annotations.borrow_mut() = value;
                             Ok(())
                         } else {

@@ -1482,12 +1482,15 @@ fn collect_local_names_from_block(
                     names.insert(name.clone());
                 }
             }
-            Stmt::AnnAssign { name, value: Some(_), .. } => {
+            Stmt::AnnAssign { name, .. } => {
+                // Both `x: T = v` (value = Some) and `x: T` (value = None) declare
+                // a local slot.  At function scope the bare form causes UnboundLocalError
+                // on read (matching CPython); at class scope the slot is allocated but
+                // never stored via RecordClassStore so it does not appear in vars(C).
                 if !global_names.contains(name) && !nonlocal_names.contains(name) {
                     names.insert(name.clone());
                 }
             }
-            Stmt::AnnAssign { value: None, .. } => {}
             Stmt::AugAssign { .. }
             | Stmt::IndexAssign { .. }
             | Stmt::SliceAssign { .. }
