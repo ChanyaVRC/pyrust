@@ -570,20 +570,95 @@ const TAG_TUPLE: u16 = 0xFFFD;
 const TAG_LIST: u16 = 0xFFFE;
 const TAG_OPAQUE: u16 = 0xFFFF;
 
+/// Convert a ryu decimal string like `"0.00009999"` (or `"-0.00001"`) to
+/// CPython-style scientific notation like `"9.999e-05"`.  Only called when
+/// the value's absolute magnitude is known to be in (0, 1e-4), so the string
+/// always starts with `"0.000"` (possibly with a leading `"-"`).
+fn decimal_to_python_sci(s: &str) -> String {
+    // Handle sign.
+    let (neg, digits_str) = if let Some(d) = s.strip_prefix('-') {
+        (true, d)
+    } else {
+        (false, s)
+    };
+    let sign_prefix = if neg { "-" } else { "" };
+
+    // digits_str is like "0.00009999".  Split on '.'.
+    // We know it's "0.<zeros><sig_digits>".
+    let after_dot = digits_str
+        .split_once('.')
+        .map(|(_, frac)| frac)
+        .unwrap_or(digits_str);
+
+    // Count leading zeros to determine the exponent.
+    let leading_zeros = after_dot.chars().take_while(|&c| c == '0').count();
+    let exp = -(leading_zeros as i32 + 1);
+    let sig = &after_dot[leading_zeros..]; // significant digits, no leading zeros
+
+    // Build mantissa string: first digit, then '.' + rest (if any).
+    let mantissa = if sig.len() <= 1 {
+        sig.to_string()
+    } else {
+        format!("{}.{}", &sig[..1], &sig[1..])
+    };
+
+    let exp_abs = exp.unsigned_abs();
+    let exp_sign = if exp < 0 { "-" } else { "+" };
+    if exp_abs < 10 {
+        format!("{sign_prefix}{mantissa}e{exp_sign}0{exp_abs}")
+    } else {
+        format!("{sign_prefix}{mantissa}e{exp_sign}{exp_abs}")
+    }
+}
+
 fn format_float(v: f64) -> String {
     if v.is_nan() {
-        "nan".to_string()
-    } else if v.is_infinite() {
-        if v > 0.0 {
+        return "nan".to_string();
+    }
+    if v.is_infinite() {
+        return if v > 0.0 {
             "inf".to_string()
         } else {
             "-inf".to_string()
-        }
-    } else if v.fract() == 0.0 {
-        format!("{v:.1}")
-    } else {
-        v.to_string()
+        };
     }
+    // Use ryu for the shortest round-trip decimal representation.
+    let raw = ryu::Buffer::new().format(v).to_string();
+    // ryu omits the '+' in positive exponents and may use a single digit for the
+    // exponent, e.g. "1e20" or "1e-5".  CPython always writes "1e+20" and "1e-05"
+    // (sign present, exponent at least two digits).  Normalise to match.
+    if let Some(e_pos) = raw.find('e') {
+        let mantissa = &raw[..e_pos];
+        let exp_str = &raw[e_pos + 1..]; // everything after 'e'
+        let (sign, digits) = if let Some(d) = exp_str.strip_prefix('-') {
+            ("-", d)
+        } else if let Some(d) = exp_str.strip_prefix('+') {
+            ("+", d)
+        } else {
+            ("+", exp_str)
+        };
+        // Pad the exponent to at least two digits.
+        return if digits.len() < 2 {
+            format!("{mantissa}e{sign}0{digits}")
+        } else {
+            format!("{mantissa}e{sign}{digits}")
+        };
+    }
+    // No scientific notation in ryu output (e.g. "0.0001", "1.1", "1.0").
+    // CPython uses scientific notation when 0 < abs(v) < 1e-4, but ryu may
+    // produce a plain decimal string for those values (e.g. "0.00001" for 1e-5).
+    // Detect this case and reformat as scientific to match CPython.
+    let abs_v = v.abs();
+    if abs_v != 0.0 && abs_v < 1e-4 {
+        // ryu produced a decimal string (e.g. "0.00009999") for a value that
+        // CPython would render in scientific notation (e.g. "9.999e-05").
+        // Parse ryu's decimal string to extract the significant digits and
+        // exponent, then re-emit in CPython's exponent format.
+        return decimal_to_python_sci(&raw);
+    }
+    // ryu guarantees a decimal point for non-integer floats, and always includes
+    // ".0" for integer-valued floats, so no further fixup is needed.
+    raw
 }
 
 /// Returns the top 16 bits of a Value's u64 encoding — the tag.
