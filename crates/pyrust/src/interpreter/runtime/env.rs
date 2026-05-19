@@ -191,6 +191,17 @@ impl Interpreter {
                     items.push(Value::py_class(object_class_singleton()));
                     return Ok(Value::tuple(items));
                 }
+                if name == "__annotations__" {
+                    // `type.__annotations__` in CPython is a descriptor that
+                    // returns the stored annotations dict for the class, or a
+                    // fresh empty dict when none have been set.  Intercept here
+                    // so that `hasattr(Foo, '__annotations__')` is always True
+                    // and `Foo.__annotations__` always returns a dict (issue #737).
+                    return Ok(
+                        lookup_class_attr(&class, "__annotations__")
+                            .unwrap_or_else(|| Value::dict(IndexMap::new())),
+                    );
+                }
                 if let Some(value) = lookup_class_attr(&class, name) {
                     // Drop the kind() Ref before the `_ => value` arm
                     // may move `value` (#450).
