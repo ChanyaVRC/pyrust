@@ -2797,5 +2797,5 @@ fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result
             };
         }
     }
-    Ok(format!("<{} object>", class.borrow().name))
+    Ok(value.repr())
 }

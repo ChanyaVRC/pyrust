@@ -2227,8 +2227,19 @@ impl Value {
                 if is_exception_instance(instance) {
                     return exception_repr(instance);
                 }
-                let class_name = instance.borrow().class.borrow().name.clone();
-                format!("<{class_name} object>")
+                let (qualname, module) = {
+                    let inst = instance.borrow();
+                    let class = inst.class.borrow();
+                    let qualname = class.qualname.clone();
+                    let module = class
+                        .attrs
+                        .get("__module__")
+                        .and_then(|v| v.as_str().map(|s| s.to_string()))
+                        .unwrap_or_else(|| "__main__".to_string());
+                    (qualname, module)
+                };
+                let addr = Rc::as_ptr(instance) as usize;
+                format!("<{module}.{qualname} object at 0x{addr:016x}>")
             }
             ValueKind::BoundMethod { function, receiver } => {
                 let class_name = receiver.borrow().class.borrow().name.clone();
