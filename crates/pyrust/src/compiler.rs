@@ -45,14 +45,34 @@ pub fn compile_script(
 /// registers) so that inner closures can share them.
 fn collect_cell_vars(body: &[Stmt], local_index: &HashMap<String, Reg>) -> Vec<CellVar> {
     let mut cells: HashSet<String> = HashSet::new();
-    collect_cell_vars_in(body, local_index, &mut cells);
+    collect_cell_vars_in(body, local_index, false, &mut cells);
     collect_lambda_captures(body, local_index, &mut cells);
     cells.into_iter().collect()
 }
 
+/// Like `collect_cell_vars` but called when `local_index` is a class body's
+/// register map.  A `global x` declaration in a method does not promote the
+/// class-body name `x` to a cell var: methods access module globals directly
+/// and do not close over the class body scope (issue #624).
+fn collect_cell_vars_for_class_body(
+    body: &[Stmt],
+    local_index: &HashMap<String, Reg>,
+) -> Vec<CellVar> {
+    let mut cells: HashSet<String> = HashSet::new();
+    collect_cell_vars_in(body, local_index, true, &mut cells);
+    collect_lambda_captures(body, local_index, &mut cells);
+    cells.into_iter().collect()
+}
+
+/// `is_class_scope`: when true, the names in `local_index` belong to a class
+/// body.  In that case, a `global x` declaration in a directly-nested method
+/// must **not** promote `x` to a cell var here — Python class scope is not a
+/// closure scope for methods, so their `global` declarations bypass the class
+/// namespace entirely and go straight to the module environment.
 fn collect_cell_vars_in(
     body: &[Stmt],
     local_index: &HashMap<String, Reg>,
+    is_class_scope: bool,
     cells: &mut HashSet<String>,
 ) {
     for stmt in body {
@@ -79,11 +99,19 @@ fn collect_cell_vars_in(
                 // a doubly-nested `global x` would leave `x` as a fastlocal register at
                 // module scope: `StoreGlobal` would write to env.values but
                 // `LoadGlobal` inside the nested function would find nothing there (#520).
-                let mut all_nested_globals = inner_globals.clone();
-                collect_transitive_global_names(nested_body, &mut all_nested_globals);
-                for name in &all_nested_globals {
-                    if local_index.contains_key(name) {
-                        cells.insert(name.clone());
+                //
+                // Exception: when the current scope is a class body (`is_class_scope`),
+                // skip this promotion.  A method's `global x` refers to the module
+                // global, not the class-body name `x`.  Python class scope is never a
+                // closure scope for methods, so their `global` declarations must not
+                // force class-body names into cell vars (issue #624).
+                if !is_class_scope {
+                    let mut all_nested_globals = inner_globals.clone();
+                    collect_transitive_global_names(nested_body, &mut all_nested_globals);
+                    for name in &all_nested_globals {
+                        if local_index.contains_key(name) {
+                            cells.insert(name.clone());
+                        }
                     }
                 }
                 let inner_locals = crate::interpreter::collect_local_names(
@@ -131,26 +159,26 @@ fn collect_cell_vars_in(
                 else_branch,
             } => {
                 for (_, b) in branches {
-                    collect_cell_vars_in(b, local_index, cells);
+                    collect_cell_vars_in(b, local_index, is_class_scope, cells);
                 }
                 if let Some(b) = else_branch {
-                    collect_cell_vars_in(b, local_index, cells);
+                    collect_cell_vars_in(b, local_index, is_class_scope, cells);
                 }
             }
             Stmt::While {
                 body, else_branch, ..
             } => {
-                collect_cell_vars_in(body, local_index, cells);
+                collect_cell_vars_in(body, local_index, is_class_scope, cells);
                 if let Some(b) = else_branch {
-                    collect_cell_vars_in(b, local_index, cells);
+                    collect_cell_vars_in(b, local_index, is_class_scope, cells);
                 }
             }
             Stmt::For {
                 body, else_branch, ..
             } => {
-                collect_cell_vars_in(body, local_index, cells);
+                collect_cell_vars_in(body, local_index, is_class_scope, cells);
                 if let Some(b) = else_branch {
-                    collect_cell_vars_in(b, local_index, cells);
+                    collect_cell_vars_in(b, local_index, is_class_scope, cells);
                 }
             }
             Stmt::Try {
@@ -159,23 +187,23 @@ fn collect_cell_vars_in(
                 else_branch,
                 finally_branch,
             } => {
-                collect_cell_vars_in(body, local_index, cells);
+                collect_cell_vars_in(body, local_index, is_class_scope, cells);
                 for h in handlers {
-                    collect_cell_vars_in(&h.body, local_index, cells);
+                    collect_cell_vars_in(&h.body, local_index, is_class_scope, cells);
                 }
                 if let Some(b) = else_branch {
-                    collect_cell_vars_in(b, local_index, cells);
+                    collect_cell_vars_in(b, local_index, is_class_scope, cells);
                 }
                 if let Some(b) = finally_branch {
-                    collect_cell_vars_in(b, local_index, cells);
+                    collect_cell_vars_in(b, local_index, is_class_scope, cells);
                 }
             }
             Stmt::With { body, .. } => {
-                collect_cell_vars_in(body, local_index, cells);
+                collect_cell_vars_in(body, local_index, is_class_scope, cells);
             }
             Stmt::Match { arms, .. } => {
                 for arm in arms {
-                    collect_cell_vars_in(&arm.body, local_index, cells);
+                    collect_cell_vars_in(&arm.body, local_index, is_class_scope, cells);
                 }
             }
             _ => {}
@@ -5173,7 +5201,9 @@ impl Compiler {
             body_index.insert(loc.clone(), i);
         }
         let body_index_rc: Rc<HashMap<String, Reg>> = Rc::new(body_index);
-        let cell_vars = collect_cell_vars(body, &body_index_rc);
+        // Use the class-body variant: a method's `global x` must not promote
+        // the class-body name `x` to a cell var (issue #624).
+        let cell_vars = collect_cell_vars_for_class_body(body, &body_index_rc);
 
         // Compute the full qualname for this class.
         // For `class Outer: class Inner`, `self.qualname_prefix` is `"Outer"` and
