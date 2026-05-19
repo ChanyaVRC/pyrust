@@ -1472,17 +1472,21 @@ pyrust_module! {
                     for v in items.iter() {
                         match v.kind() {
                             ValueKind::Int(n) if (0..=255).contains(&n) => out.push(n as u8),
-                            ValueKind::Int(_) => return Err(PyError::named(
-                                "ValueError",
-                                "bytes must be in range(0, 256)".to_string(),
-                            )),
-                            _ => return Err(PyError::named(
-                                "TypeError",
-                                format!(
-                                    "'{}' object cannot be interpreted as an integer",
-                                    pyrust_core::builtin_type_name(v),
-                                ),
-                            )),
+                            ValueKind::Int(_) | ValueKind::BigInt(_) => {
+                                return Err(PyError::named(
+                                    "ValueError",
+                                    "bytes must be in range(0, 256)".to_string(),
+                                ))
+                            }
+                            _ => {
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    format!(
+                                        "'{}' object cannot be interpreted as an integer",
+                                        pyrust_core::builtin_type_name(v),
+                                    ),
+                                ))
+                            }
                         }
                     }
                     Ok(Value::bytes(out))
@@ -1492,17 +1496,21 @@ pyrust_module! {
                     for v in items.iter() {
                         match v.kind() {
                             ValueKind::Int(n) if (0..=255).contains(&n) => out.push(n as u8),
-                            ValueKind::Int(_) => return Err(PyError::named(
-                                "ValueError",
-                                "bytes must be in range(0, 256)".to_string(),
-                            )),
-                            _ => return Err(PyError::named(
-                                "TypeError",
-                                format!(
-                                    "'{}' object cannot be interpreted as an integer",
-                                    pyrust_core::builtin_type_name(v),
-                                ),
-                            )),
+                            ValueKind::Int(_) | ValueKind::BigInt(_) => {
+                                return Err(PyError::named(
+                                    "ValueError",
+                                    "bytes must be in range(0, 256)".to_string(),
+                                ))
+                            }
+                            _ => {
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    format!(
+                                        "'{}' object cannot be interpreted as an integer",
+                                        pyrust_core::builtin_type_name(v),
+                                    ),
+                                ))
+                            }
                         }
                     }
                     Ok(Value::bytes(out))
@@ -1528,17 +1536,21 @@ pyrust_module! {
                     for v in &items {
                         match v.kind() {
                             ValueKind::Int(n) if (0..=255).contains(&n) => out.push(n as u8),
-                            ValueKind::Int(_) => return Err(PyError::named(
-                                "ValueError",
-                                "bytes must be in range(0, 256)".to_string(),
-                            )),
-                            _ => return Err(PyError::named(
-                                "TypeError",
-                                format!(
-                                    "'{}' object cannot be interpreted as an integer",
-                                    pyrust_core::builtin_type_name(v),
-                                ),
-                            )),
+                            ValueKind::Int(_) | ValueKind::BigInt(_) => {
+                                return Err(PyError::named(
+                                    "ValueError",
+                                    "bytes must be in range(0, 256)".to_string(),
+                                ))
+                            }
+                            _ => {
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    format!(
+                                        "'{}' object cannot be interpreted as an integer",
+                                        pyrust_core::builtin_type_name(v),
+                                    ),
+                                ))
+                            }
                         }
                     }
                     Ok(Value::bytes(out))
