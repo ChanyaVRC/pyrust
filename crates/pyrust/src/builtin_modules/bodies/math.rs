@@ -132,9 +132,10 @@ pyrust_module! {
     fn pow(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 2 {
-            return Err(PyError::Runtime(format!(
-                "{FN_NAME}() takes exactly two arguments"
-            )));
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly two arguments"),
+            ));
         }
         let x = value_to_float(&args[0].value, FN_NAME)?;
         let y = value_to_float(&args[1].value, FN_NAME)?;
@@ -146,9 +147,10 @@ pyrust_module! {
     fn atan2(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 2 {
-            return Err(PyError::Runtime(format!(
-                "{FN_NAME}() takes exactly two arguments"
-            )));
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly two arguments"),
+            ));
         }
         let y = value_to_float(&args[0].value, FN_NAME)?;
         let x = value_to_float(&args[1].value, FN_NAME)?;
@@ -160,9 +162,10 @@ pyrust_module! {
     fn log(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.is_empty() || args.len() > 2 {
-            return Err(PyError::Runtime(format!(
-                "{FN_NAME}() takes one or two arguments"
-            )));
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes one or two arguments"),
+            ));
         }
         let x = value_to_float(&args[0].value, FN_NAME)?;
         if args.len() == 2 {
@@ -179,9 +182,10 @@ pyrust_module! {
     fn copysign(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 2 {
-            return Err(PyError::Runtime(format!(
-                "{FN_NAME}() takes exactly two arguments"
-            )));
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly two arguments"),
+            ));
         }
         let x = value_to_float(&args[0].value, FN_NAME)?;
         let y = value_to_float(&args[1].value, FN_NAME)?;
@@ -210,25 +214,30 @@ pyrust_module! {
     }
 
     /// CPython: math.dist(p, q) → float.  Euclidean distance between two points.
-    /// Both sequences must have the same length.
+    /// Both sequences must have the same length.  Any iterable is accepted.
     /// <https://docs.python.org/3/library/math.html#math.dist>
-    #[pure]
     fn dist(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 2 {
-            return Err(PyError::Runtime(format!(
-                "{FN_NAME}() takes exactly two arguments"
-            )));
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly two arguments"),
+            ));
         }
-        let p = collect_float_seq(&args[0].value, FN_NAME)?;
-        let q = collect_float_seq(&args[1].value, FN_NAME)?;
-        if p.len() != q.len() {
+        let p_items = _interp.collect_iterable(args[0].value.clone())?;
+        let q_items = _interp.collect_iterable(args[1].value.clone())?;
+        if p_items.len() != q_items.len() {
             return Err(PyError::named(
                 "ValueError",
                 "both points must have the same number of dimensions".to_string(),
             ));
         }
-        let sum_sq: f64 = p.iter().zip(q.iter()).map(|(a, b)| (a - b) * (a - b)).sum();
+        let mut sum_sq = 0.0f64;
+        for (pv, qv) in p_items.iter().zip(q_items.iter()) {
+            let a = value_to_float(pv, FN_NAME)?;
+            let b = value_to_float(qv, FN_NAME)?;
+            sum_sq += (a - b) * (a - b);
+        }
         Ok(Value::float(sum_sq.sqrt()))
     }
 
@@ -268,9 +277,10 @@ pyrust_module! {
     fn factorial(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 1 {
-            return Err(PyError::Runtime(format!(
-                "{FN_NAME}() takes exactly one argument"
-            )));
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly one argument"),
+            ));
         }
         let n_big = value_to_bigint_strict_int(FN_NAME, &args[0].value)?;
         use num_traits::Signed;
@@ -302,9 +312,10 @@ pyrust_module! {
     fn comb(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 2 {
-            return Err(PyError::Runtime(format!(
-                "{FN_NAME}() takes exactly two arguments"
-            )));
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly two arguments"),
+            ));
         }
         let n = value_to_bigint_int(FN_NAME, &args[0].value)?;
         let k = value_to_bigint_int(FN_NAME, &args[1].value)?;
@@ -327,7 +338,12 @@ pyrust_module! {
         // comb(n, k) = n! / (k! * (n-k)!)  — computed iteratively to avoid
         // materialising full factorials.  Use the smaller of k and n-k.
         let k_small = k.clone().min(n.clone() - k.clone());
-        let k_u64: u64 = k_small.to_u64().unwrap_or(u64::MAX);
+        let k_u64: u64 = k_small.to_u64().ok_or_else(|| {
+            PyError::named(
+                "OverflowError",
+                "comb() argument is too large".to_string(),
+            )
+        })?;
         let mut result = PyBigInt::from(1i64);
         for i in 0..k_u64 {
             result *= n.clone() - PyBigInt::from(i);
@@ -343,19 +359,26 @@ pyrust_module! {
     fn perm(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.is_empty() || args.len() > 2 {
-            return Err(PyError::Runtime(format!(
-                "{FN_NAME}() takes one or two arguments"
-            )));
-        }
-        let n = value_to_bigint_int(FN_NAME, &args[0].value)?;
-        use num_traits::Signed;
-        if n.is_negative() {
             return Err(PyError::named(
-                "ValueError",
-                "factorial() not defined for negative values".to_string(),
+                "TypeError",
+                format!("{FN_NAME}() takes one or two arguments"),
             ));
         }
-        let k = if args.len() == 2 && !matches!(args[1].value.kind(), ValueKind::None) {
+        let n = value_to_bigint_int(FN_NAME, &args[0].value)?;
+        // Whether k was explicitly supplied (not None) changes the error message
+        // CPython uses for negative n: when k is omitted/None it delegates to
+        // factorial's message; when k is an integer it uses perm's own wording.
+        let k_explicit = args.len() == 2 && !matches!(args[1].value.kind(), ValueKind::None);
+        use num_traits::Signed;
+        if n.is_negative() {
+            let msg = if k_explicit {
+                "n must be a non-negative integer".to_string()
+            } else {
+                "factorial() not defined for negative values".to_string()
+            };
+            return Err(PyError::named("ValueError", msg));
+        }
+        let k = if k_explicit {
             let kv = value_to_bigint_int(FN_NAME, &args[1].value)?;
             if kv.is_negative() {
                 return Err(PyError::named(
@@ -372,7 +395,12 @@ pyrust_module! {
             return Ok(Value::int(0));
         }
         // P(n, k) = n * (n-1) * ... * (n-k+1)
-        let k_u64: u64 = k.to_u64().unwrap_or(u64::MAX);
+        let k_u64: u64 = k.to_u64().ok_or_else(|| {
+            PyError::named(
+                "OverflowError",
+                "perm() argument is too large".to_string(),
+            )
+        })?;
         let mut result = PyBigInt::from(1i64);
         for i in 0..k_u64 {
             result *= n.clone() - PyBigInt::from(i);
@@ -387,9 +415,10 @@ pyrust_module! {
         let positional: Vec<&ExpandedCallArg> = args.iter().filter(|a| a.name.is_none()).collect();
         let keyword: Vec<&ExpandedCallArg> = args.iter().filter(|a| a.name.is_some()).collect();
         if positional.len() != 1 {
-            return Err(PyError::Runtime(format!(
-                "{FN_NAME}() takes exactly one positional argument"
-            )));
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly one positional argument"),
+            ));
         }
         for kw in &keyword {
             let name = kw.name.as_deref().unwrap_or("");
@@ -419,33 +448,12 @@ pyrust_module! {
 fn single_float(fn_name: &str, args: &[ExpandedCallArg]) -> Result<f64> {
     reject_keyword_args_expanded(fn_name, args)?;
     if args.len() != 1 {
-        return Err(PyError::Runtime(format!(
-            "{fn_name}() takes exactly one argument"
-        )));
+        return Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() takes exactly one argument"),
+        ));
     }
     value_to_float(&args[0].value, fn_name)
-}
-
-/// Extract all elements of a sequence/iterable-like value as `f64`.
-/// Used by `dist` which receives already-evaluated list/tuple literals.
-fn collect_float_seq(val: &Value, fn_name: &str) -> Result<Vec<f64>> {
-    match val.kind() {
-        ValueKind::List(items) => items
-            .iter()
-            .map(|v| value_to_float(v, fn_name))
-            .collect(),
-        ValueKind::Tuple(items) => items
-            .iter()
-            .map(|v| value_to_float(v, fn_name))
-            .collect(),
-        _ => Err(PyError::named(
-            "TypeError",
-            format!(
-                "{fn_name}() argument must be a sequence, not {}",
-                val.repr()
-            ),
-        )),
-    }
 }
 
 /// Extract a `Value` as a `PyBigInt` integer.
