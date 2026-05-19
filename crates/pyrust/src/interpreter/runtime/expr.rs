@@ -166,8 +166,15 @@ impl Interpreter {
         // (which may run user `__eq__` that mutates the dict — see the
         // aliasing notes on `Value::as_dict_mut`).
         if target.as_dict().is_some() {
-            let key = self.value_to_pykey(&index)?;
-            return match self.dict_lookup(&target, &key)? {
+            // Fast path for string keys (issue #506): probe via `StrKey` to
+            // skip the `PyKey::Str(String)` heap allocation.
+            let lookup = if let Some(s) = index.as_str() {
+                self.dict_str_lookup(&target, s)?
+            } else {
+                let key = self.value_to_pykey(&index)?;
+                self.dict_lookup(&target, &key)?
+            };
+            return match lookup {
                 Some((_, v)) => Ok(v),
                 None => Err(PyError::named("KeyError", index.repr())),
             };
@@ -615,6 +622,26 @@ impl Interpreter {
             }
         }
         Ok(None)
+    }
+
+    /// Zero-allocation string key lookup in a dict receiver (issue #506).
+    ///
+    /// Probes the `IndexMap<PyKey, Value>` using `StrKey`, which hashes
+    /// identically to `PyKey::Str` without allocating a `String`.  Use this
+    /// in place of `dict_lookup(&PyKey::Str(s.to_owned()))` whenever the
+    /// lookup key is already a `&str`.  The `PyKey::Object` slow path is
+    /// omitted: a `&str` can never match an `Object` key.
+    pub(crate) fn dict_str_lookup(
+        &mut self,
+        receiver: &Value,
+        key: &str,
+    ) -> Result<Option<(usize, Value)>> {
+        let dict = receiver
+            .as_dict()
+            .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+        Ok(dict
+            .get_full(&StrKey(key))
+            .map(|(idx, _, v)| (idx, v.clone())))
     }
 
     /// Check whether a set contains `key`, dispatching user `__eq__` for
@@ -1880,10 +1907,13 @@ impl Interpreter {
         // from `container.kind()` doesn't outlive the call into
         // `dict_lookup`/`set_lookup` (which may run user `__eq__`).
         if container.as_dict().is_some() {
-            let key = self.value_to_pykey(&item)?;
-            return Ok(Value::bool_(
-                self.dict_lookup(&container, &key)?.is_some(),
-            ));
+            let found = if let Some(s) = item.as_str() {
+                self.dict_str_lookup(&container, s)?.is_some()
+            } else {
+                let key = self.value_to_pykey(&item)?;
+                self.dict_lookup(&container, &key)?.is_some()
+            };
+            return Ok(Value::bool_(found));
         }
         if container.as_set().is_some() {
             let key = self.value_to_pykey(&item)?;

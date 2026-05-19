@@ -306,6 +306,41 @@ impl Hash for PyKey {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// StrKey — zero-alloc probe type for `IndexMap<PyKey, …>` string lookups
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A borrowed `&str` that hashes identically to `PyKey::Str` and can be used
+/// to probe an `IndexMap<PyKey, V>` without allocating a `PyKey::Str(String)`.
+///
+/// `PyKey::Str` hashes as `2u8.hash(state); s.hash(state)`.  `StrKey` applies
+/// the same sequence, satisfying the `Equivalent` contract (equal keys must
+/// hash equal).
+///
+/// # Why not `impl Borrow<str> for PyKey`?
+///
+/// The `Borrow` contract requires `hash(owned) == hash(borrowed)` using the
+/// same hasher.  `PyKey::Str` mixes a `2u8` discriminant tag before the string
+/// content, so `PyKey::Str("x")` hashes differently than bare `"x"`.  A
+/// blanket `Borrow<str>` impl would silently violate the contract.  `StrKey`
+/// with an explicit `Hash` impl matching `PyKey::Str` avoids this.
+pub struct StrKey<'a>(pub &'a str);
+
+impl Hash for StrKey<'_> {
+    #[inline]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        2u8.hash(state);
+        self.0.hash(state);
+    }
+}
+
+impl indexmap::Equivalent<PyKey> for StrKey<'_> {
+    #[inline]
+    fn equivalent(&self, key: &PyKey) -> bool {
+        matches!(key, PyKey::Str(s) if s == self.0)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Shared types
 // ─────────────────────────────────────────────────────────────────────────────
 
