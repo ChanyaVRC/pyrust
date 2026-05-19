@@ -1,4 +1,4 @@
-use pyrust_core::{PyError, PyKey, Result, Value, ValueKind};
+use pyrust_core::{PyError, PyKey, Result, Value, ValueKind, builtin_type_name};
 use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
 /// Compute the byte offset of a subslice `sub` within its parent `parent`.
@@ -853,6 +853,24 @@ fn rsplit(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
     Ok(Value::list(parts))
 }
 
+/// Return the CPython type name for a `PyKey` variant — used in join's
+/// "sequence item N: expected str instance, X found" error messages.
+/// `PyKey::Object` stores the original `Value`, so we derive the name
+/// via `builtin_type_name` rather than hardcoding "object" (#576 Copilot
+/// review: use the runtime class name, e.g. "MyKey").
+fn pykey_type_name(k: &PyKey) -> std::borrow::Cow<'static, str> {
+    match k {
+        PyKey::Int(_) => std::borrow::Cow::Borrowed("int"),
+        PyKey::Float(_) => std::borrow::Cow::Borrowed("float"),
+        PyKey::Bool(_) => std::borrow::Cow::Borrowed("bool"),
+        PyKey::Str(_) => std::borrow::Cow::Borrowed("str"),
+        PyKey::None => std::borrow::Cow::Borrowed("NoneType"),
+        PyKey::FrozenSet(_) => std::borrow::Cow::Borrowed("frozenset"),
+        PyKey::Tuple(_) => std::borrow::Cow::Borrowed("tuple"),
+        PyKey::Object { value, .. } => builtin_type_name(value),
+    }
+}
+
 fn join(sep: &str, args: &[Value]) -> Result<Value> {
     let iterable = args
         .first()
@@ -860,16 +878,30 @@ fn join(sep: &str, args: &[Value]) -> Result<Value> {
     let parts: Vec<String> = match iterable.kind() {
         ValueKind::List(items) => items
             .iter()
-            .map(|v| match v.kind() {
+            .enumerate()
+            .map(|(i, v)| match v.kind() {
                 ValueKind::Str(s) => Ok(s.to_string()),
-                _ => Err(PyError::Runtime("sequence item must be str".to_string())),
+                _ => Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "sequence item {i}: expected str instance, {} found",
+                        builtin_type_name(v),
+                    ),
+                )),
             })
             .collect::<Result<_>>()?,
         ValueKind::Tuple(items) => items
             .iter()
-            .map(|v| match v.kind() {
+            .enumerate()
+            .map(|(i, v)| match v.kind() {
                 ValueKind::Str(s) => Ok(s.to_string()),
-                _ => Err(PyError::Runtime("sequence item must be str".to_string())),
+                _ => Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "sequence item {i}: expected str instance, {} found",
+                        builtin_type_name(v),
+                    ),
+                )),
             })
             .collect::<Result<_>>()?,
         ValueKind::Str(s) => s
@@ -878,14 +910,22 @@ fn join(sep: &str, args: &[Value]) -> Result<Value> {
             .collect::<Result<_>>()?,
         ValueKind::Dict(d) => d
             .keys()
-            .map(|k| match k {
+            .enumerate()
+            .map(|(i, k)| match k {
                 PyKey::Str(s) => Ok(s.clone()),
-                _ => Err(PyError::Runtime("sequence item must be str".to_string())),
+                _ => Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "sequence item {i}: expected str instance, {} found",
+                        pykey_type_name(k),
+                    ),
+                )),
             })
             .collect::<Result<_>>()?,
         _ => {
-            return Err(PyError::Runtime(
-                "str.join() argument must be iterable".to_string(),
+            return Err(PyError::named(
+                "TypeError",
+                "can only join an iterable".to_string(),
             ));
         }
     };
