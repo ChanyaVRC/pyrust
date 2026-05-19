@@ -1508,6 +1508,10 @@ pyrust_module! {
                     }
                     Ok(Value::bytes(out))
                 }
+                ValueKind::BigInt(_) => Err(PyError::named(
+                    "OverflowError",
+                    "cannot fit 'int' into an index-sized integer".to_string(),
+                )),
                 _ => {
                     // General iterable fallback: any object supporting __iter__ /
                     // __next__ (range, generators, user-defined iterables, etc.).
@@ -1548,14 +1552,6 @@ pyrust_module! {
                     }
                     Ok(Value::bytes(out))
                 }
-                ValueKind::BigInt(_) => Err(PyError::named(
-                    "OverflowError",
-                    "cannot fit 'int' into an index-sized integer".to_string(),
-                )),
-                _ => Err(PyError::named(
-                    "TypeError",
-                    "cannot convert to bytes".to_string(),
-                )),
             },
             // bytes(source, encoding[, errors]) — encode `source` using
             // `encoding`.  CPython accepts a wide spectrum of codecs; we

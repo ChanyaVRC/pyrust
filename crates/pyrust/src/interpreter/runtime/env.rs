@@ -499,10 +499,17 @@ impl Interpreter {
                         _ => {}
                     }
                 }
-                // Non-bound-method BuiltinObjects (frozenset, dict views, file,
-                // enumerate, zip, reversed, chain, cached_property, …) also
-                // reach this arm.  Delegate to builtin_has_method / bound_method
-                // so that e.g. `frozenset().isdisjoint` keeps working.
+                // Non-bound-method BuiltinObjects (GenericAlias, frozenset,
+                // dict views, file, enumerate, zip, reversed, chain,
+                // cached_property, …) also reach this arm.
+                // First probe the type's custom `getattr` (e.g. GenericAlias
+                // exposes `__origin__` and `__args__` this way), then fall
+                // back to builtin method lookup.
+                if let ValueKind::BuiltinObject { ops, state } = target.kind() {
+                    if let Some(val) = ops.getattr(state, name) {
+                        return Ok(val);
+                    }
+                }
                 if builtin_has_method(&target, name) {
                     return Ok(pyrust_builtins::bound_method::bound_method(
                         name,
