@@ -1288,6 +1288,36 @@ impl Interpreter {
                         }
                     }
                     _ => {
+                        // When either operand is complex, use complex
+                        // exponentiation: z^w = exp(w * ln(z)).
+                        // `both_as_complex` returns Some only when at least
+                        // one operand is already a Complex value, so pure
+                        // int/float paths continue to use `powf` below.
+                        // BigInt is not handled by `as_complex_pair`
+                        // (changing that would affect add/sub/mul/div too);
+                        // instead we promote BigInt to f64 here when the
+                        // other operand is Complex, matching CPython's
+                        // `int.__pow__(complex)` coercion behaviour.
+                        if let Some(((zr, zi), (wr, wi))) = both_as_complex(&left, &right) {
+                            return Ok(complex_pow(zr, zi, wr, wi)?);
+                        }
+                        let l_is_c = matches!(left.kind(), ValueKind::Complex(_, _));
+                        let r_is_c = matches!(right.kind(), ValueKind::Complex(_, _));
+                        if l_is_c || r_is_c {
+                            // At least one is Complex but `both_as_complex` returned
+                            // None — the other operand must be BigInt.
+                            let (zr, zi) = match left.kind() {
+                                ValueKind::Complex(re, im) => (re, im),
+                                ValueKind::BigInt(b) => (bigint_to_float_or_overflow(b)?, 0.0),
+                                _ => unreachable!(),
+                            };
+                            let (wr, wi) = match right.kind() {
+                                ValueKind::Complex(re, im) => (re, im),
+                                ValueKind::BigInt(b) => (bigint_to_float_or_overflow(b)?, 0.0),
+                                _ => unreachable!(),
+                            };
+                            return Ok(complex_pow(zr, zi, wr, wi)?);
+                        }
                         let a = value_to_float(&left, "**")?;
                         let b = value_to_float(&right, "**")?;
                         Ok(Value::float(a.powf(b)))
@@ -2282,4 +2312,108 @@ fn both_as_complex(left: &Value, right: &Value) -> Option<((f64, f64), (f64, f64
     let a = as_complex_pair(left)?;
     let b = as_complex_pair(right)?;
     Some((a, b))
+}
+
+/// Compute complex exponentiation `(zr + zi*j) ** (wr + wi*j)` with
+/// CPython 3.12 parity.
+///
+/// Mirrors CPython's `_Py_c_pow` from `Objects/complexobject.c`:
+///   - For small non-negative integer exponents (`wi == 0`, `wr` is an
+///     integer in `0..=100`), use repeated squaring so that results like
+///     `(1+1j)**2 == 2j` are exact (no floating-point rounding in the
+///     imaginary part).
+///   - General case uses `r = |z|` (hypot), `ln_r = ln(r)`, `t = arg(z)`:
+///     `len = pow(r, wr) * exp(-wi * t)`,  `at = wr*t + wi*ln_r`,
+///     `result = len * (cos(at) + i*sin(at))`.
+///     Using `pow(r, wr)` rather than `exp(wr*ln_r)` matches CPython's
+///     rounding for cases like `(2+0j)**0.5`.
+///
+/// Special cases (CPython parity):
+///   - `w == 0+0j` → `(1+0j)` for any `z` (including `0j ** 0`).
+///   - `z == 0+0j`, `wi != 0` or `wr < 0` → `ZeroDivisionError`.
+///   - `z == 0+0j`, `wr > 0`, `wi == 0` → `0j`.
+fn complex_pow(zr: f64, zi: f64, wr: f64, wi: f64) -> Result<Value> {
+    // z^0 = 1 for any z (including 0j ** 0).
+    if wr == 0.0 && wi == 0.0 {
+        return Ok(Value::complex(1.0, 0.0));
+    }
+
+    let abs_r = zr.hypot(zi); // |z| = sqrt(zr² + zi²)
+    if abs_r == 0.0 {
+        // 0j ** w where w != 0.
+        // CPython raises ZeroDivisionError when the exponent has a nonzero
+        // imaginary part or a negative real part.
+        if wi != 0.0 || wr < 0.0 {
+            return Err(PyError::named(
+                "ZeroDivisionError",
+                "0.0 to a negative or complex power".to_string(),
+            ));
+        }
+        // wr > 0, wi == 0: 0j ** positive_real = 0j.
+        return Ok(Value::complex(0.0, 0.0));
+    }
+
+    // CPython optimisation: use repeated squaring for small integer
+    // exponents (wi==0, |wr| <= 100, wr == floor(wr)).
+    // This avoids rounding error in the exp/log path so that, e.g.,
+    // `(1+1j)**2` returns exactly `2j` rather than `(1.22e-16+2j)`.
+    // Negative exponents use the same squaring on |n| and then invert:
+    // `z**(-n) = 1 / z**n`.  CPython's `_Py_c_pow` applies the same
+    // |wr| <= 100 bound for both positive and negative integers.
+    if wi == 0.0 {
+        let n = wr as i64;
+        if n as f64 == wr && (-100..=100).contains(&n) {
+            let (mut re, mut im) = (1.0_f64, 0.0_f64);
+            let (mut br, mut bi) = (zr, zi);
+            let mut exp = n.unsigned_abs(); // works for n == i64::MIN too (can't happen: |n|<=100)
+            while exp > 0 {
+                if exp & 1 == 1 {
+                    let new_re = re * br - im * bi;
+                    let new_im = re * bi + im * br;
+                    re = new_re;
+                    im = new_im;
+                }
+                let new_br = br * br - bi * bi;
+                let new_bi = 2.0 * br * bi;
+                br = new_br;
+                bi = new_bi;
+                exp >>= 1;
+            }
+            if n < 0 {
+                // Invert: 1/(re + im*j) using the c_quot form from CPython's
+                // complexobject.c so that signed-zero behaviour matches.
+                // c_quot(1+0j, re+im*j):
+                //   result_re = (1*re + 0*im) / (re²+im²)
+                //   result_im = (0*re - 1*im) / (re²+im²)
+                // Writing im as `0.0 * old_re - 1.0 * im` rather than `-im`
+                // preserves positive zero when im == +0.0 (0.0*old_re yields
+                // +0.0, then +0.0 - +0.0 == +0.0; direct negation of +0.0
+                // yields -0.0, which diverges from CPython).
+                let denom = re * re + im * im;
+                let old_re = re;
+                re = (1.0 * old_re + 0.0 * im) / denom;
+                im = (0.0 * old_re - 1.0 * im) / denom;
+            }
+            return Ok(Value::complex(re, im));
+        }
+    }
+
+    // General case: matches CPython's `_Py_c_pow` from complexobject.c.
+    // Using pow(r, wr) rather than exp(wr * ln_r) is deliberate:
+    // `exp(0.5 * ln(2))` and `pow(2.0, 0.5)` differ by 1 ULP; CPython
+    // uses the `pow` path, so we must match it for parity.
+    let ln_r = abs_r.ln();
+    let t = zi.atan2(zr);
+    let len = abs_r.powf(wr) * (-wi * t).exp();
+    if len.is_infinite() {
+        // CPython's _Py_c_pow sets errno = ERANGE when `len` overflows to
+        // infinity and the caller raises OverflowError (e.g.
+        // `(1+1j) ** 10**20` → `OverflowError: complex exponentiation`).
+        return Err(PyError::named(
+            "OverflowError",
+            "complex exponentiation".to_string(),
+        ));
+    }
+    let at = wr * t + wi * ln_r;
+    Ok(Value::complex(len * at.cos(), len * at.sin()))
 }
