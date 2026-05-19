@@ -939,6 +939,8 @@ fn install_exception_builtins(env: &EnvRef) {
     let stop_iteration = make_child("StopIteration");
     let attribute_error = make_child("AttributeError");
     let syntax_error = make_child("SyntaxError");
+    // MemoryError: direct child of Exception (CPython 3.12 hierarchy).
+    let memory_error = make_child("MemoryError");
 
     // ImportError and ModuleNotFoundError (child of ImportError).
     let import_error = make_child("ImportError");
@@ -971,9 +973,6 @@ fn install_exception_builtins(env: &EnvRef) {
         base: Some(Rc::clone(&unicode_error)),
         attrs: IndexMap::new(),
     }));
-
-    // MemoryError is a direct child of Exception in CPython.
-    let memory_error = make_child("MemoryError");
 
     // OSError and FileNotFoundError (child of OSError, not Exception).
     let os_error = make_child("OSError");
@@ -1451,7 +1450,7 @@ fn collect_local_names_from_block(
                     names.insert(name.clone());
                 }
             }
-            Stmt::Global(_) | Stmt::Nonlocal(_) | Stmt::AnnDeclare(_) => {}
+            Stmt::Global(_) | Stmt::Nonlocal(_) => {}
             Stmt::Import {
                 names: import_names,
             } => {
@@ -1488,6 +1487,7 @@ fn collect_local_names_from_block(
                     names.insert(name.clone());
                 }
             }
+            Stmt::AnnAssign { value: None, .. } => {}
             Stmt::AugAssign { .. }
             | Stmt::IndexAssign { .. }
             | Stmt::SliceAssign { .. }

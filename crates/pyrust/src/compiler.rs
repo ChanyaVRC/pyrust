@@ -6321,9 +6321,44 @@ impl Compiler {
                 }
             }
         }
-        let body_nonlocal_rc: Rc<HashSet<String>> = Rc::new(body_nonlocal);
+        let body_nonlocal_rc: Rc<HashSet<String>> = Rc::new(body_nonlocal.clone());
         let body_local =
             crate::interpreter::collect_local_names(&[], body, &body_global, &body_nonlocal_rc);
+
+        // Compile-time validation: annotated names may not also be global or
+        // nonlocal in the same class body scope.  CPython 3.12 raises SyntaxError
+        // here too (not just in function bodies).
+        {
+            let ann_targets = crate::interpreter::collect_annotation_targets(body);
+            let mut conflicting: Vec<&str> = body_global
+                .iter()
+                .filter(|n| ann_targets.contains(*n))
+                .map(String::as_str)
+                .collect();
+            conflicting.sort();
+            if let Some(n) = conflicting.first() {
+                self.failed = true;
+                self.is_syntax_error = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some(format!("annotated name '{}' can't be global", n));
+                }
+                return;
+            }
+            let mut conflicting: Vec<&str> = body_nonlocal
+                .iter()
+                .filter(|n| ann_targets.contains(*n))
+                .map(String::as_str)
+                .collect();
+            conflicting.sort();
+            if let Some(n) = conflicting.first() {
+                self.failed = true;
+                self.is_syntax_error = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some(format!("annotated name '{}' can't be nonlocal", n));
+                }
+                return;
+            }
+        }
         // Allocate a register slot for every potential class-body local.
         // Slot order is **not** used to encode class-namespace insertion
         // order any more — the order CPython exposes via `vars(C)` is the
