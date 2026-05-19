@@ -38,3 +38,11 @@ print([1, 2] * False)  # []
 # int multiplication still works
 print([1, 2] * 3)   # [1, 2, 1, 2, 1, 2]
 print("ab" * 4)     # abababab
+
+# Tuple * Int and Bytes * Int positive cases (self-review catches: were missing arms)
+print((1, 2) * 3)   # (1, 2, 1, 2, 1, 2)
+print(3 * (1, 2))   # (1, 2, 1, 2, 1, 2)
+print(b"ab" * 2)    # b"abab"
+print(2 * b"ab")    # b"abab"
+print((1, 2) * 0)   # ()
+print((1, 2) * -1)  # ()
