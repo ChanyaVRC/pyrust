@@ -146,13 +146,22 @@ fn collect_cell_vars_in(
                 // names `x`, an inner-inner function might read `x`; the current scope
                 // must still promote `x` to a cell var so the env chain carries it.
                 collect_transitive_free_vars_in_stmts(nested_body, &mut inner_uses);
-                for name in inner_uses {
-                    if !inner_locals.contains(&name)
-                        && !inner_globals.contains(&name)
-                        && !nonlocals.contains(&name)
-                        && local_index.contains_key(&name)
-                    {
-                        cells.insert(name);
+                // When the current scope is a class body, skip free-var promotion.
+                // Python class scope is not a closure scope for methods: a method
+                // reading `x` as a free variable refers to the enclosing module/function
+                // scope, NOT the class body.  Promoting `x` here would turn the
+                // class-body assignment `x = …` into a `StoreGlobal`, stripping `x`
+                // from the class attribute dict (issue #695).  The `global`-name block
+                // above already has this guard for the same reason (issue #624).
+                if !is_class_scope {
+                    for name in inner_uses {
+                        if !inner_locals.contains(&name)
+                            && !inner_globals.contains(&name)
+                            && !nonlocals.contains(&name)
+                            && local_index.contains_key(&name)
+                        {
+                            cells.insert(name);
+                        }
                     }
                 }
                 // Don't recurse into nested defs - they see only their own cells.
