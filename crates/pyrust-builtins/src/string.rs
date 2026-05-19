@@ -21,11 +21,11 @@ fn subslice_offset(parent: &str, sub: &str) -> usize {
 /// Canonical list of method names dispatched by `call`.
 /// Single source of truth for `has_method` and the drift-guard test.
 ///
-/// Note: `format` is not listed here because it is dispatched separately at
-/// the VM level (see `BuiltinFunction("str.format")` and the `CallMethod`
-/// `"format"` arm). Adding it would require routing `getattr(s, "format")()`
-/// through that path; for now `hasattr(s, "format")` reports False through
-/// this table.
+/// Note: `format` is listed here so that `hasattr(s, "format")` and
+/// `getattr(s, "format")` work correctly for str instances.  The bound-method
+/// dispatch in `calls.rs` intercepts `"format"` before `call_str_method` to
+/// route kwargs through `format_str_template`; the arm in `call` below is a
+/// drift-guard stub that is never reached at runtime.
 pub const METHODS: &[&str] = &[
     "index",
     "count",
@@ -55,6 +55,7 @@ pub const METHODS: &[&str] = &[
     "rfind",
     "rindex",
     "replace",
+    "format",
     "startswith",
     "endswith",
     "isdigit",
@@ -147,6 +148,18 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
         "isascii" => Ok(Value::bool_(s.is_ascii())),
         "isidentifier" => Ok(Value::bool_(str_isidentifier(s))),
         "isprintable" => Ok(Value::bool_(s.chars().all(is_printable))),
+        // `format` is intercepted by the bound-method dispatch in `calls.rs`
+        // and routed through `format_str_template` (which handles kwargs).
+        // This arm exists solely to satisfy the drift-guard test that verifies
+        // every entry in METHODS has a dispatch arm; it is never reached at
+        // runtime.
+        "format" => Err(PyError::named(
+            "TypeError",
+            format!(
+                "descriptor 'format' of 'str' object needs an argument ({} given)",
+                args.len()
+            ),
+        )),
         _ => Err(PyError::Runtime(format!(
             "'str' object has no attribute '{method}'"
         ))),

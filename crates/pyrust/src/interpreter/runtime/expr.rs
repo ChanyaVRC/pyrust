@@ -1125,9 +1125,9 @@ impl Interpreter {
     }
 
     /// Dispatch any str method.  `join` is handled here to support generators
-    /// and any custom iterable via `collect_iterable`; `format` stays in its
-    /// existing location in vm.rs/calls.rs because it needs keyword args
-    /// threading that doesn't fit cleanly here.  Everything else delegates to
+    /// and any custom iterable via `collect_iterable`; `format` is intercepted
+    /// in the bound-method dispatch path in `calls.rs` (which has access to
+    /// kwargs) before reaching this function.  Everything else delegates to
     /// the interpreter-free `pyrust_builtins::string::call`.
     pub(crate) fn call_str_method(
         &mut self,
