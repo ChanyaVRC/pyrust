@@ -2225,6 +2225,17 @@ impl Interpreter {
                             class_regs[slot] = Value::string("__main__".to_string());
                         }
                     }
+                    // Issue #712: if the class body has annotations, the compiler
+                    // pre-allocated a register slot for __annotations__.  Pre-seed it
+                    // with an empty dict so compile_ann_assign's SetItem finds a live value.
+                    let annotations_slot = local_index.get("__annotations__").copied();
+                    if let Some(slot) = annotations_slot {
+                        let slot = slot as usize;
+                        if slot < class_regs.len() {
+                            class_regs[slot] =
+                                Value::dict(indexmap::IndexMap::new());
+                        }
+                    }
                     // Push a fresh class-store-order list onto the interpreter
                     // stack so `RecordClassStore` / `RecordClassDel` insns
                     // emitted inside the class body record into *this* class
@@ -2241,6 +2252,19 @@ impl Interpreter {
                     // qualname_slot is intentionally not added to pre_order so
                     // __qualname__ never flows into attrs (it's intercepted in
                     // get_attr instead — see issue #553).
+                    // annotations_slot: pre-push into pre_order (right after __module__)
+                    // so that __annotations__ always appears in the class attrs dict
+                    // when the class body was compiled with any annotation, even if
+                    // those annotations are inside a branch that never executes at
+                    // runtime (e.g. `if False: x: int`).  CPython always seeds
+                    // __annotations__ via SETUP_ANNOTATIONS before the class body
+                    // runs; we mirror that by making it a pre-order slot.
+                    // RecordClassStore calls from compile_ann_assign are still emitted
+                    // but are harmless duplicates (deduplication happens naturally
+                    // because store_order is built from the same slot registry).
+                    if let Some(slot) = annotations_slot {
+                        pre_order.push(slot as crate::bytecode::Reg);
+                    }
                     self.class_store_order.push(pre_order);
                     // Issue #618: if the class body declares `global x`, we need
                     // `assign_name("x", ...)` to find "x" in `self.env.global_names`

@@ -470,6 +470,14 @@ fn lambda_captures_in_stmt(
                 collect_lambda_captures(&arm.body, local_index, cells);
             }
         }
+        Stmt::AnnAssign {
+            annotation, value, ..
+        } => {
+            lambda_captures_in_expr(annotation, local_index, cells);
+            if let Some(v) = value {
+                lambda_captures_in_expr(v, local_index, cells);
+            }
+        }
         Stmt::Import { .. }
         | Stmt::ImportFrom { .. }
         | Stmt::Global(_)
@@ -759,6 +767,16 @@ fn collect_class_body_names_textual(
             Stmt::With { body, .. } => {
                 collect_class_body_names_textual(body, ordered, seen, body_local);
             }
+            Stmt::AnnAssign {
+                name,
+                value: Some(_),
+                ..
+            } => {
+                if body_local.contains(name) && seen.insert(name.clone()) {
+                    ordered.push(name.clone());
+                }
+            }
+            Stmt::AnnAssign { value: None, .. } => {}
             _ => {}
         }
     }
@@ -999,6 +1017,14 @@ fn collect_free_var_reads_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>) {
                     collect_free_var_reads_in_expr(guard, uses);
                 }
                 collect_free_var_reads_in_stmts(&arm.body, uses);
+            }
+        }
+        Stmt::AnnAssign {
+            annotation, value, ..
+        } => {
+            collect_free_var_reads_in_expr(annotation, uses);
+            if let Some(v) = value {
+                collect_free_var_reads_in_expr(v, uses);
             }
         }
         Stmt::Import { .. }
@@ -1331,6 +1357,14 @@ fn collect_transitive_free_vars_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>)
                     collect_transitive_free_vars_in_expr(guard, uses);
                 }
                 collect_transitive_free_vars_in_stmts(&arm.body, uses);
+            }
+        }
+        Stmt::AnnAssign {
+            annotation, value, ..
+        } => {
+            collect_transitive_free_vars_in_expr(annotation, uses);
+            if let Some(v) = value {
+                collect_transitive_free_vars_in_expr(v, uses);
             }
         }
         Stmt::Return(None)
@@ -2532,6 +2566,12 @@ fn stmt_reads_var(stmt: &Stmt, name: &str) -> bool {
         Stmt::Def { body, .. } | Stmt::Class { body, .. } => {
             body.iter().any(|s| stmt_reads_var(s, name))
         }
+        Stmt::AnnAssign {
+            annotation, value, ..
+        } => {
+            expr_reads_var(annotation, name)
+                || value.as_ref().is_some_and(|v| expr_reads_var(v, name))
+        }
         Stmt::Global(_)
         | Stmt::Nonlocal(_)
         | Stmt::Break
@@ -2943,6 +2983,23 @@ struct Compiler {
     /// `nonlocal` declaration with no enclosing binding).  Controls whether
     /// `finish()` emits `PyError::Named("SyntaxError", …)` or `PyError::Runtime`.
     is_syntax_error: bool,
+}
+
+fn class_body_has_annotations(body: &[Stmt]) -> bool {
+    body.iter().any(|s| match s {
+        Stmt::AnnAssign { .. } => true,
+        Stmt::If {
+            branches,
+            else_branch,
+        } => {
+            branches.iter().any(|(_, b)| class_body_has_annotations(b))
+                || else_branch
+                    .as_deref()
+                    .is_some_and(class_body_has_annotations)
+        }
+        Stmt::While { body, .. } | Stmt::For { body, .. } => class_body_has_annotations(body),
+        _ => false,
+    })
 }
 
 impl Compiler {
@@ -3451,6 +3508,13 @@ impl Compiler {
                 self.compile_assign(target, expr);
                 self.mark_target_def(target);
             }
+            Stmt::AnnAssign {
+                name,
+                annotation,
+                value,
+            } => {
+                self.compile_ann_assign(name, annotation, value.as_ref().map(|v| v as &Expr));
+            }
             Stmt::AugAssign { target, op, expr } => {
                 self.compile_aug_assign(target, *op, expr);
                 if let AssignTarget::Name(name) = target
@@ -3808,6 +3872,49 @@ impl Compiler {
                 }
             }
         }
+    }
+
+    fn compile_ann_assign(&mut self, name: &str, annotation: &Expr, value: Option<&Expr>) {
+        // 1. If there's a value, compile it as a regular assignment.
+        if let Some(val_expr) = value {
+            self.compile_assign(&AssignTarget::Name(name.to_string()), val_expr);
+            self.mark_target_def(&AssignTarget::Name(name.to_string()));
+        }
+        // 2. Function scope: annotations are NOT stored in __annotations__ at runtime.
+        if self.is_function_scope {
+            return;
+        }
+        // 3. Evaluate the annotation expression.
+        let ann_reg = self.compile_expr(annotation);
+        if self.failed {
+            self.free_temp(ann_reg);
+            return;
+        }
+        // 4. Load the string key for this annotation.
+        let name_str_val = crate::value::Value::string(name);
+        let key_idx = self.intern_const(name_str_val);
+        let key_reg = self.alloc_temp();
+        self.emit(Insn::LoadConst(key_reg, key_idx));
+        // 5. Load (or locate) the __annotations__ dict.
+        let ann_dict_name = "__annotations__";
+        let (dict_reg, is_temp) = if let Some(reg) = self.local_reg(ann_dict_name) {
+            // Class body: __annotations__ is a fastlocal register.
+            self.maybe_record_class_store(reg);
+            (reg, false)
+        } else {
+            // Module scope: load via LoadGlobal.
+            let ann_dict_idx = self.intern_name(ann_dict_name);
+            let r = self.alloc_temp();
+            self.emit(Insn::LoadGlobal(r, ann_dict_idx));
+            (r, true)
+        };
+        // 6. __annotations__[name] = annotation_value
+        self.emit(Insn::SetItem(dict_reg, key_reg, ann_reg));
+        if is_temp {
+            self.free_temp(dict_reg);
+        }
+        self.free_temp(key_reg);
+        self.free_temp(ann_reg);
     }
 
     /// Store the value in `src_reg` into `target` (a non-starred inner target).
@@ -5243,6 +5350,13 @@ impl Compiler {
                 ordered.push(pre_name.to_string());
                 seen.insert(pre_name.to_string());
             }
+        }
+        // Issue #712: if the class body has any annotations, pre-allocate
+        // a register slot for __annotations__ so compile_ann_assign can use a
+        // fastlocal (RecordClassStore) rather than a LoadGlobal.
+        if class_body_has_annotations(body) && !body_local.contains("__annotations__") {
+            ordered.push("__annotations__".to_string());
+            seen.insert("__annotations__".to_string());
         }
         collect_class_body_names_textual(body, &mut ordered, &mut seen, &body_local);
         for name in body_local.iter() {
