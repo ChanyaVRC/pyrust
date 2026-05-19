@@ -3,9 +3,9 @@ use pyrust_core::{PyError, Result, Value, ValueKind};
 /// Common Sequence Operations — index and count.
 /// These apply to both list (Vec<Value>) and tuple (Vec<Value>).
 pub fn seq_index(items: &[Value], args: &[Value], type_name: &str) -> Result<Value> {
-    let target = args.first().ok_or_else(|| {
-        PyError::Runtime(format!("{type_name}.index() requires at least 1 argument"))
-    })?;
+    let target = args
+        .first()
+        .ok_or_else(|| PyError::named("TypeError", "index expected at least 1 argument, got 0"))?;
     let start = match args.get(1).map(|v| v.kind()) {
         Some(ValueKind::Int(i)) => normalise_index(i, items.len()).min(items.len()),
         Some(ValueKind::Bool(b)) => normalise_index(b as i64, items.len()).min(items.len()),
@@ -38,9 +38,12 @@ pub fn seq_index(items: &[Value], args: &[Value], type_name: &str) -> Result<Val
 }
 
 pub fn seq_count(items: &[Value], args: &[Value], type_name: &str) -> Result<Value> {
-    let target = args
-        .first()
-        .ok_or_else(|| PyError::Runtime(format!("{type_name}.count() requires 1 argument")))?;
+    let target = args.first().ok_or_else(|| {
+        PyError::named(
+            "TypeError",
+            format!("{type_name}.count() takes exactly one argument (0 given)"),
+        )
+    })?;
     let n = items.iter().filter(|v| *v == target).count();
     Ok(Value::int(n as i64))
 }
