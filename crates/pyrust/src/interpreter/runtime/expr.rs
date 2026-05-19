@@ -28,27 +28,33 @@ fn seq_repeat_str(text: &str, n: i64) -> Result<Value> {
         return Ok(Value::string(String::new()));
     }
     let n = n as usize;
-    let char_count = text.chars().count();
-    // CPython checks char_count * n fits in Py_ssize_t before allocating.
-    if char_count.checked_mul(n).map_or(true, |t| t > isize::MAX as usize) {
-        return Err(PyError::named(
-            "OverflowError",
-            "repeated string is too long".to_string(),
-        ));
-    }
-    // Use try_reserve to catch OOM rather than letting the allocator abort.
+    // Fast path: if byte_total fits in isize::MAX then char_count * n ≤ byte_total
+    // ≤ isize::MAX, so the CPython char-count overflow check cannot fire.  We only
+    // pay for chars().count() when byte_total itself already approaches the limit.
     let byte_total = match text.len().checked_mul(n) {
         Some(b) => b,
         None => return Err(PyError::named("MemoryError", String::new())),
     };
-    let mut out = String::new();
-    if out.try_reserve(byte_total).is_err() {
+    if byte_total > isize::MAX as usize {
+        // Only compute char_count here; CPython raises OverflowError when
+        // char_count * n > Py_ssize_t_MAX, MemoryError otherwise.
+        let char_count = text.chars().count();
+        if char_count.checked_mul(n).map_or(true, |t| t > isize::MAX as usize) {
+            return Err(PyError::named(
+                "OverflowError",
+                "repeated string is too long".to_string(),
+            ));
+        }
+        // char_count * n fits, but byte_total doesn't — OOM.
         return Err(PyError::named("MemoryError", String::new()));
     }
-    for _ in 0..n {
-        out.push_str(text);
+    // Use try_reserve to catch OOM rather than letting the allocator abort,
+    // then delegate to str::repeat for its O(log n) doubling strategy.
+    let mut probe = String::new();
+    if probe.try_reserve(byte_total).is_err() {
+        return Err(PyError::named("MemoryError", String::new()));
     }
-    Ok(Value::string(out))
+    Ok(Value::string(text.repeat(n)))
 }
 
 fn seq_repeat_list(items: &[Value], n: i64) -> Result<Value> {
