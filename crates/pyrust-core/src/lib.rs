@@ -500,6 +500,12 @@ pub struct UserFunction {
     /// `None` at construction time.  User code may assign any value;
     /// `del f.__doc__` resets it to `None`.
     pub doc: RefCell<Value>,
+    /// Arbitrary dynamic attributes set by user code (`f.x = v`).
+    /// Exposed as `f.__dict__`.  Shared via `Rc<RefCell<...>>` so that bound-
+    /// method copies and `@classmethod` / `@staticmethod` wrappers all see the
+    /// same dict (matching CPython where `bound_method.__dict__` delegates to
+    /// the underlying function object).
+    pub attrs: Rc<RefCell<IndexMap<String, Value>>>,
     pub params: Vec<UserFunctionParam>,
     pub local_names: NameSet,
     pub local_index: Rc<HashMap<String, u32>>,
@@ -1474,6 +1480,7 @@ impl Value {
                 user_qualname: RefCell::new(None),
                 module: RefCell::new(Value::none()),
                 doc: RefCell::new(Value::none()),
+                attrs: Rc::new(RefCell::new(IndexMap::new())),
                 params: Vec::new(),
                 local_names: Rc::new(HashSet::new()),
                 local_index: Rc::new(HashMap::new()),
@@ -1538,6 +1545,7 @@ impl Value {
             user_qualname: RefCell::new(f.user_qualname.borrow().clone()),
             module: RefCell::new(f.module.borrow().clone()),
             doc: RefCell::new(f.doc.borrow().clone()),
+            attrs: Rc::clone(&f.attrs),
             params: f.params.clone(),
             local_names: Rc::clone(&f.local_names),
             local_index: Rc::clone(&f.local_index),
@@ -3336,6 +3344,7 @@ mod tests {
             user_qualname: RefCell::new(None),
             module: RefCell::new(Value::string("__main__".to_string())),
             doc: RefCell::new(Value::none()),
+            attrs: Rc::new(RefCell::new(IndexMap::new())),
             params: Vec::new(),
             local_names: Rc::new(HashSet::new()),
             local_index: Rc::new(HashMap::new()),

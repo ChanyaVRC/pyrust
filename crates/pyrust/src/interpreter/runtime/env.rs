@@ -341,7 +341,21 @@ impl Interpreter {
                     }
                     "__module__" => return Ok(func.module.borrow().clone()),
                     "__doc__" => return Ok(func.doc.borrow().clone()),
+                    "__dict__" => {
+                        // Return a snapshot of the function's attribute dict.
+                        // CPython returns the live __dict__ object; we return a
+                        // copy (the same live-dict limitation as instance.__dict__).
+                        let mut dict: IndexMap<PyKey, Value> = IndexMap::new();
+                        for (k, v) in func.attrs.borrow().iter() {
+                            dict.insert(PyKey::Str(k.clone()), v.clone());
+                        }
+                        return Ok(Value::dict(dict));
+                    }
                     _ => {}
+                }
+                // Fall through to arbitrary dynamic attrs.
+                if let Some(v) = func.attrs.borrow().get(name).cloned() {
+                    return Ok(v);
                 }
                 Err(PyError::named(
                     "AttributeError",
@@ -409,8 +423,8 @@ impl Interpreter {
             }
             _ => {
                 // BoundMethod / ClassBoundMethod: delegate __name__ / __qualname__ /
-                // __module__ / __doc__ to the underlying function, matching CPython's
-                // method proxy semantics.
+                // __module__ / __doc__ / __dict__ and arbitrary dynamic attrs to the
+                // underlying function, matching CPython's method proxy semantics.
                 match target.kind() {
                     ValueKind::BoundMethod { function, .. }
                     | ValueKind::ClassBoundMethod { function, .. } => match name {
@@ -434,7 +448,19 @@ impl Interpreter {
                         }
                         "__module__" => return Ok(function.module.borrow().clone()),
                         "__doc__" => return Ok(function.doc.borrow().clone()),
-                        _ => {}
+                        "__dict__" => {
+                            let mut dict: IndexMap<PyKey, Value> = IndexMap::new();
+                            for (k, v) in function.attrs.borrow().iter() {
+                                dict.insert(PyKey::Str(k.clone()), v.clone());
+                            }
+                            return Ok(Value::dict(dict));
+                        }
+                        _ => {
+                            // Arbitrary dynamic attrs delegate to the underlying function.
+                            if let Some(v) = function.attrs.borrow().get(name).cloned() {
+                                return Ok(v);
+                            }
+                        }
                     },
                     _ => {}
                 }
@@ -557,6 +583,8 @@ impl Interpreter {
                 // functions — both must be set to a str, otherwise TypeError.
                 // __module__ and __doc__ accept any value (CPython imposes no
                 // type constraint on these).
+                // __dict__ must be set to a dict; any other name goes into
+                // the function's dynamic attrs dict.
                 match name {
                     "__name__" | "__qualname__" => {
                         let as_str: Option<String> = if let ValueKind::Str(s) = value.kind() {
@@ -587,10 +615,35 @@ impl Interpreter {
                         *func.doc.borrow_mut() = value;
                         Ok(())
                     }
-                    _ => Err(PyError::named(
-                        "AttributeError",
-                        format!("'function' object attribute '{name}' is read-only"),
-                    )),
+                    "__dict__" => {
+                        // CPython requires the replacement to be a dict.
+                        if let ValueKind::Dict(new_dict) = value.kind() {
+                            let mut new_attrs: IndexMap<String, Value> = IndexMap::new();
+                            for (k, v) in new_dict.iter() {
+                                if let PyKey::Str(s) = k {
+                                    new_attrs.insert(s.clone(), v.clone());
+                                }
+                                // Non-string keys in the new dict are silently
+                                // dropped — CPython allows them in __dict__ but
+                                // they are not reachable via attribute syntax.
+                            }
+                            *func.attrs.borrow_mut() = new_attrs;
+                            Ok(())
+                        } else {
+                            let type_name = pyrust_core::builtin_type_name(&value);
+                            Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "__dict__ must be set to a dictionary, not a '{type_name}'"
+                                ),
+                            ))
+                        }
+                    }
+                    _ => {
+                        // Arbitrary dynamic attribute.
+                        func.attrs.borrow_mut().insert(name.to_string(), value);
+                        Ok(())
+                    }
                 }
             }
             ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. } => {
@@ -648,6 +701,9 @@ impl Interpreter {
                 // but cannot be deleted.
                 // `del f.__module__` and `del f.__doc__` are allowed; they reset
                 // the slot to None (matching CPython).
+                // `del f.__dict__` raises TypeError (CPython: "cannot delete __dict__").
+                // Arbitrary attrs are removed from the attrs dict; if absent,
+                // AttributeError (matching CPython).
                 match name {
                     "__name__" | "__qualname__" => Err(PyError::named(
                         "TypeError",
@@ -661,10 +717,20 @@ impl Interpreter {
                         *func.doc.borrow_mut() = Value::none();
                         Ok(())
                     }
-                    _ => Err(PyError::named(
-                        "AttributeError",
-                        format!("'function' object has no attribute '{name}'"),
+                    "__dict__" => Err(PyError::named(
+                        "TypeError",
+                        "cannot delete __dict__".to_string(),
                     )),
+                    _ => {
+                        if func.attrs.borrow_mut().shift_remove(name).is_some() {
+                            Ok(())
+                        } else {
+                            Err(PyError::named(
+                                "AttributeError",
+                                format!("'function' object has no attribute '{name}'"),
+                            ))
+                        }
+                    }
                 }
             }
             ValueKind::PyClass(class) => {

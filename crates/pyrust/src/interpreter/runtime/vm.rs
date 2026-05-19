@@ -2114,6 +2114,7 @@ impl Interpreter {
                         // initialise to None (matching CPython for functions without a
                         // docstring).
                         doc: std::cell::RefCell::new(Value::none()),
+                        attrs: Rc::new(std::cell::RefCell::new(IndexMap::new())),
                         params,
                         local_names: proto_local_names,
                         local_index: proto_local_index,
