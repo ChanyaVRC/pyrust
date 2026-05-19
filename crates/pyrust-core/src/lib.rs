@@ -1867,6 +1867,10 @@ impl Value {
                 // pointer address so `id(g)` is non-zero and stable, and so
                 // `g is iter(g)` can be backed by ptr equality (#714).
                 Opaque::Generator(rc) => Some(Rc::as_ptr(rc) as i64),
+                // Bytes and PyModule share Rc backing across clones; use the
+                // Rc pointer address so `b = a; id(a) == id(b)` holds (#722).
+                Opaque::Bytes(rc) => Some(Rc::as_ptr(rc) as i64),
+                Opaque::PyModule(rc) => Some(Rc::as_ptr(rc) as i64),
                 _ => None,
             },
             _ => None,

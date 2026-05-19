@@ -1716,6 +1716,8 @@ fn values_are_identical(a: &Value, b: &Value) -> bool {
             (Some(x), Some(y)) => x == y,
             _ => false,
         },
+        (ValueKind::Bytes(x), ValueKind::Bytes(y)) => Rc::ptr_eq(x, y),
+        (ValueKind::PyModule(x), ValueKind::PyModule(y)) => Rc::ptr_eq(x, y),
         _ => false,
     }
 }
