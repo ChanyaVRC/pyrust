@@ -1890,7 +1890,7 @@ fn is_pure_expr(expr: &Expr, pure_fns: &std::collections::HashSet<String>) -> bo
         }
         // Comprehensions involve iteration (GetIter, ForIter) which may call
         // __iter__/__next__ — conservatively treat as impure.
-        Expr::ListComp { .. } | Expr::DictComp { .. } | Expr::SetComp { .. } => false,
+        Expr::ListComp { .. } | Expr::DictComp { .. } | Expr::SetComp { .. } | Expr::GenExp { .. } => false,
         // Walrus has a side effect (assignment).
         Expr::Named { .. } => false,
         Expr::FString(parts) => {

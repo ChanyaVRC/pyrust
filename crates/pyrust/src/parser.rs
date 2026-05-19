@@ -1684,9 +1684,24 @@ impl Parser {
                             "positional argument follows keyword argument".to_string(),
                         ));
                     }
+                    let val = self.parse_expr()?;
+                    // Generator expression as sole call argument: f(expr for x in it)
+                    if self.is(&Token::For) && args.is_empty() {
+                        let clauses = self.parse_comp_clauses()?;
+                        args.push(CallArg {
+                            name: None,
+                            value: Expr::GenExp {
+                                elt: Box::new(val),
+                                clauses,
+                            },
+                            splat: false,
+                            double_splat: false,
+                        });
+                        break;
+                    }
                     args.push(CallArg {
                         name: None,
-                        value: self.parse_expr()?,
+                        value: val,
                         splat: false,
                         double_splat: false,
                     });
@@ -1697,9 +1712,24 @@ impl Parser {
                         "positional argument follows keyword argument".to_string(),
                     ));
                 }
+                let val = self.parse_expr()?;
+                // Generator expression as sole call argument: f(expr for x in it)
+                if self.is(&Token::For) && args.is_empty() {
+                    let clauses = self.parse_comp_clauses()?;
+                    args.push(CallArg {
+                        name: None,
+                        value: Expr::GenExp {
+                            elt: Box::new(val),
+                            clauses,
+                        },
+                        splat: false,
+                        double_splat: false,
+                    });
+                    break;
+                }
                 args.push(CallArg {
                     name: None,
-                    value: self.parse_expr()?,
+                    value: val,
                     splat: false,
                     double_splat: false,
                 });
@@ -1806,6 +1836,15 @@ impl Parser {
                     return Ok(Expr::Tuple(items));
                 }
                 let first = self.parse_expr()?;
+                if self.is(&Token::For) {
+                    // Generator expression: (elt for target in iter ...)
+                    let clauses = self.parse_comp_clauses()?;
+                    self.expect(&Token::RParen)?;
+                    return Ok(Expr::GenExp {
+                        elt: Box::new(first),
+                        clauses,
+                    });
+                }
                 if self.is(&Token::Comma) {
                     // Tuple
                     let mut items = vec![first];

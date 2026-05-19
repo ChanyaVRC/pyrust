@@ -238,6 +238,11 @@ pub enum Expr {
         elt: Box<Expr>,
         clauses: Vec<CompClause>,
     },
+    /// `(elt for target in iter ...)` — generator expression
+    GenExp {
+        elt: Box<Expr>,
+        clauses: Vec<CompClause>,
+    },
     Unary {
         op: UnaryOp,
         expr: Box<Expr>,

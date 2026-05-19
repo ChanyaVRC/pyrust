@@ -559,6 +559,42 @@ fn lambda_captures_in_expr(
             }
             lambda_captures_in_expr(elt, local_index, cells);
         }
+        Expr::GenExp { elt, clauses } => {
+            // The outermost iterable is evaluated in the enclosing scope.
+            if let Some(first) = clauses.first() {
+                lambda_captures_in_expr(&first.iter, local_index, cells);
+            }
+            // Everything inside the genexp body (outermost cond, inner
+            // iters/conds, and the element expression) runs in the genexp's
+            // own scope.  Collect all free-var reads from that inner body,
+            // subtract the loop-target names that are bound by the genexp
+            // itself, and promote any remaining names that live in the
+            // enclosing local_index to cell vars so they're accessible via
+            // the env chain when the generator body resumes.
+            let mut inner_uses: HashSet<String> = HashSet::new();
+            if let Some(first) = clauses.first() {
+                if let Some(c) = &first.cond {
+                    collect_free_var_reads_in_expr(c, &mut inner_uses);
+                }
+            }
+            for clause in clauses.iter().skip(1) {
+                collect_free_var_reads_in_expr(&clause.iter, &mut inner_uses);
+                if let Some(c) = &clause.cond {
+                    collect_free_var_reads_in_expr(c, &mut inner_uses);
+                }
+            }
+            collect_free_var_reads_in_expr(elt, &mut inner_uses);
+            // Remove names bound by the genexp's own clause targets.
+            let mut bound: HashSet<String> = HashSet::new();
+            for clause in clauses {
+                collect_written_target(&clause.target, &mut bound);
+            }
+            for name in inner_uses {
+                if !bound.contains(&name) && local_index.contains_key(&name) {
+                    cells.insert(name);
+                }
+            }
+        }
         Expr::DictComp { key, val, clauses } => {
             for clause in clauses {
                 lambda_captures_in_expr(&clause.iter, local_index, cells);
@@ -962,7 +998,9 @@ fn collect_free_var_reads_in_expr(expr: &Expr, uses: &mut HashSet<String>) {
                 }
             }
         }
-        Expr::ListComp { elt, clauses } | Expr::SetComp { elt, clauses } => {
+        Expr::ListComp { elt, clauses }
+        | Expr::SetComp { elt, clauses }
+        | Expr::GenExp { elt, clauses } => {
             for clause in clauses {
                 collect_free_var_reads_in_expr(&clause.iter, uses);
                 if let Some(c) = &clause.cond {
@@ -1301,7 +1339,9 @@ fn collect_transitive_free_vars_in_expr(expr: &Expr, uses: &mut HashSet<String>)
                 }
             }
         }
-        Expr::ListComp { elt, clauses } | Expr::SetComp { elt, clauses } => {
+        Expr::ListComp { elt, clauses }
+        | Expr::SetComp { elt, clauses }
+        | Expr::GenExp { elt, clauses } => {
             for clause in clauses {
                 collect_transitive_free_vars_in_expr(&clause.iter, uses);
                 if let Some(c) = &clause.cond {
@@ -2274,6 +2314,7 @@ fn expr_safe(expr: &Expr, i_name: &str, c_name: &str) -> bool {
         Expr::ListComp { .. }
         | Expr::DictComp { .. }
         | Expr::SetComp { .. }
+        | Expr::GenExp { .. }
         | Expr::Lambda { .. }
         | Expr::Named { .. }
         | Expr::Yield(_)
@@ -2480,7 +2521,9 @@ fn expr_reads_var(expr: &Expr, name: &str) -> bool {
             DictItem::Pair(k, v) => expr_reads_var(k, name) || expr_reads_var(v, name),
             DictItem::DoubleSplat(e) => expr_reads_var(e, name),
         }),
-        Expr::ListComp { elt, clauses } | Expr::SetComp { elt, clauses } => {
+        Expr::ListComp { elt, clauses }
+        | Expr::SetComp { elt, clauses }
+        | Expr::GenExp { elt, clauses } => {
             expr_reads_var(elt, name)
                 || clauses.iter().any(|c| {
                     expr_reads_var(&c.iter, name)
@@ -2704,6 +2747,7 @@ fn rewrite_c_at_i_in_expr(expr: &mut Expr, c_name: &str, i_name: &str) {
         Expr::ListComp { .. }
         | Expr::DictComp { .. }
         | Expr::SetComp { .. }
+        | Expr::GenExp { .. }
         | Expr::Lambda { .. }
         | Expr::Named { .. }
         | Expr::Yield(_)
@@ -5840,6 +5884,7 @@ impl Compiler {
             Expr::ListComp { elt, clauses } => self.compile_list_comp(elt, clauses),
             Expr::DictComp { key, val, clauses } => self.compile_dict_comp(key, val, clauses),
             Expr::SetComp { elt, clauses } => self.compile_set_comp(elt, clauses),
+            Expr::GenExp { elt, clauses } => self.compile_gen_exp(elt, clauses),
             Expr::Named { target, value } => {
                 let val_reg = self.compile_expr(value);
                 if let Some(reg) = self.local_reg(target) {
@@ -6224,6 +6269,182 @@ impl Compiler {
         });
 
         acc
+    }
+
+    /// Compile a generator expression `(elt for target in iter ...)`.
+    ///
+    /// Strategy (mirrors CPython):
+    ///   1. Evaluate the outermost iterable in the enclosing scope.
+    ///   2. Compile an anonymous generator function whose parameter receives
+    ///      that iterable and whose body iterates over it, handling nested
+    ///      clauses, and yields `elt` on each matching element.
+    ///   3. Emit `MakeFunction` directly into a temp register — no global
+    ///      store/reload — then call it immediately with the iterable.
+    fn compile_gen_exp(&mut self, elt: &Expr, clauses: &[CompClause]) -> Reg {
+        if clauses.is_empty() {
+            self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg =
+                    Some("generator expression requires at least one clause".to_string());
+            }
+            return 0;
+        }
+
+        // Evaluate the outermost iterable in the enclosing (current) scope
+        // before creating the nested function.
+        let iter_reg = self.compile_expr(&clauses[0].iter);
+
+        // Use ".0" as the implicit parameter name — matches CPython's internal
+        // convention and is not a valid Python identifier (cannot be lexed), so
+        // user code inside the genexp body cannot accidentally reference or
+        // shadow it.
+        const IT_PARAM: &str = ".0";
+
+        // Build the inner body working from the innermost clause outward.
+        // Start with: yield elt
+        let yield_stmt = Stmt::Expr(Expr::Yield(Some(Box::new(elt.clone()))));
+
+        // Wrap in if-cond guard for the first clause if present, then
+        // for each additional clause build a nested for-if structure.
+        //
+        // clauses[0]: for target in IT_PARAM (if cond0)?
+        // clauses[1..]: for target in iter (if cond)?
+        //
+        // Inner body (innermost clause to outermost inner clause):
+        let mut body = vec![yield_stmt];
+        for clause in clauses[1..].iter().rev() {
+            // Optional if-cond filter.
+            if let Some(cond) = &clause.cond {
+                body = vec![Stmt::If {
+                    branches: vec![(cond.clone(), body)],
+                    else_branch: None,
+                }];
+            }
+            body = vec![Stmt::For {
+                target: clause.target.clone(),
+                iter: clause.iter.clone(),
+                body,
+                else_branch: None,
+            }];
+        }
+        // Wrap the first clause's optional if-cond around the body.
+        if let Some(cond) = &clauses[0].cond {
+            body = vec![Stmt::If {
+                branches: vec![(cond.clone(), body)],
+                else_branch: None,
+            }];
+        }
+        // Outermost loop: iterate over the parameter.
+        body = vec![Stmt::For {
+            target: clauses[0].target.clone(),
+            iter: Expr::Var(IT_PARAM.to_string()),
+            body,
+            else_branch: None,
+        }];
+
+        // Parameter spec for the anonymous generator function.
+        let params = vec![FunctionParam {
+            name: IT_PARAM.to_string(),
+            default: None,
+            is_args: false,
+            is_kwargs: false,
+            is_keyword_only: false,
+            is_positional_only: false,
+        }];
+
+        // Inline the function-object construction (mirrors compile_def) but
+        // emit MakeFunction directly into a temp register instead of binding
+        // the function into the global/local environment.  This avoids the
+        // observable StoreGlobal("<genexp>") / LoadGlobal("<genexp>") pair.
+        let inner_global = crate::interpreter::collect_global_names(&body);
+        let inner_nonlocal = crate::interpreter::collect_nonlocal_names(&body);
+        let inner_local =
+            crate::interpreter::collect_local_names(&params, &body, &inner_global, &inner_nonlocal);
+
+        let mut inner_index: HashMap<String, Reg> = HashMap::new();
+        let mut slot: Reg = 0;
+        for param in &params {
+            if inner_local.contains(&param.name) {
+                inner_index.insert(param.name.clone(), slot);
+                slot += 1;
+            }
+        }
+        for loc in &inner_local {
+            if !inner_index.contains_key(loc) {
+                inner_index.insert(loc.clone(), slot);
+                slot += 1;
+            }
+        }
+        let inner_index_rc: Rc<HashMap<String, Reg>> = Rc::new(inner_index);
+        let def_bound = crate::interpreter::compute_def_bound_mask(&params, &inner_index_rc);
+        // Genexp bodies are never pure (they produce a generator object with
+        // side-effectful iteration).
+        let is_pure = false;
+        let inner_cell_vars = collect_cell_vars(&body, &inner_index_rc);
+        let inner_global_rc = Rc::new(inner_global);
+        let inner_nonlocal_rc = Rc::new(inner_nonlocal);
+
+        let mut sub = Compiler::new(Rc::clone(&inner_index_rc), def_bound, inner_cell_vars);
+        sub.compile_block(&body);
+        let inner_code = match sub.finish() {
+            Ok(c) => c,
+            Err(msg) => {
+                self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some(msg);
+                }
+                return 0;
+            }
+        };
+
+        if self.fn_protos.len() >= 256 {
+            self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg =
+                    Some("too many nested functions in one scope (max 256)".to_string());
+            }
+            return 0;
+        }
+        let proto_idx = self.fn_protos.len() as u8;
+        let local_names = Rc::new(inner_index_rc.keys().cloned().collect::<HashSet<_>>());
+        self.fn_protos.push(FnProto {
+            name: "<genexp>".to_string(),
+            param_spec: Rc::new(FnParamSpec {
+                names: params.iter().map(|p| p.name.clone()).collect(),
+                has_default: params.iter().map(|p| p.default.is_some()).collect(),
+                is_args: params.iter().map(|p| p.is_args).collect(),
+                is_kwargs: params.iter().map(|p| p.is_kwargs).collect(),
+                is_keyword_only: params.iter().map(|p| p.is_keyword_only).collect(),
+                is_positional_only: params.iter().map(|p| p.is_positional_only).collect(),
+            }),
+            code: Rc::new(inner_code),
+            local_index: inner_index_rc,
+            local_names,
+            global_names: inner_global_rc,
+            nonlocal_names: inner_nonlocal_rc,
+            is_pure,
+        });
+
+        // Allocate a temp for the function value, emit MakeFunction (no
+        // defaults — the single parameter has no default), then call it.
+        // Layout: fn_reg = function, fn_reg+1 = iterable arg.
+        let fn_reg = self.alloc_temp();
+        self.emit(Insn::MakeFunction(fn_reg, proto_idx, 0, 0));
+
+        let arg_reg = fn_reg + 1;
+        if arg_reg > self.max_reg {
+            self.max_reg = arg_reg;
+        }
+        if fn_reg + 2 > self.next_temp {
+            self.next_temp = fn_reg + 2;
+        }
+        self.emit(Insn::Move(arg_reg, iter_reg));
+        self.emit(Insn::Call(fn_reg, 1));
+        // Release the arg register slot; fn_reg stays live as the result.
+        self.next_temp = fn_reg + 1;
+        self.free_temp(iter_reg);
+
+        fn_reg
     }
 
     fn compile_call(&mut self, func: &Expr, args: &[crate::ast::CallArg]) -> Reg {
