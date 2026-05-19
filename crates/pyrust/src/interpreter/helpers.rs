@@ -729,7 +729,7 @@ pub(crate) fn is_exception_class(class: &Rc<RefCell<PyClass>>) -> bool {
 
 pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value>) -> Value {
     let mut attrs = IndexMap::new();
-    attrs.insert("args".to_string(), Value::list(args));
+    attrs.insert("args".to_string(), Value::tuple(args));
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 
