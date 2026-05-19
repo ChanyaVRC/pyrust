@@ -17,7 +17,7 @@ impl Interpreter {
                     // Extract exit code from args[0]; default to 0.
                     let code = match inst.borrow().attrs.get("args") {
                         Some(args_val) => match args_val.kind() {
-                            ValueKind::List(args) if !args.is_empty() => {
+                            ValueKind::Tuple(args) if !args.is_empty() => {
                                 match args[0].kind() {
                                     ValueKind::Int(n) => n as i32,
                                     ValueKind::Bool(b) => b as i32,

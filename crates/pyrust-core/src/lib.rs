@@ -2781,7 +2781,7 @@ pub fn class_chain_contains_exception(class: &Rc<RefCell<PyClass>>) -> bool {
 
 fn exception_args(instance: &Rc<RefCell<PyInstance>>) -> Vec<Value> {
     match instance.borrow().attrs.get("args").map(|v| v.kind()) {
-        Some(ValueKind::List(args)) => args.to_vec(),
+        Some(ValueKind::Tuple(args)) => args.to_vec(),
         _ => Vec::new(),
     }
 }
