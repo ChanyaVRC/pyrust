@@ -349,10 +349,28 @@ impl Interpreter {
                 ))
             }
             ValueKind::BuiltinFunction(func_name) => {
-                // __name__ is supported on all builtin type/function values so that
-                // `type(x).__name__` works for both builtin and user-defined types.
+                // __name__ / __qualname__ / __module__ on builtin functions.
+                //
+                // func_name is stored as the qualified form — e.g. "str.upper"
+                // for method-style builtins and "print" for top-level ones.
+                //
+                // __name__     → bare name after the last '.':
+                //                "str.upper" → "upper", "print" → "print"
+                // __qualname__ → func_name as-is (already the dotted form)
+                // __module__   → "builtins" for top-level (non-dotted) builtins
+                //                only; CPython's method_descriptor (e.g.
+                //                str.upper, list.append) raises AttributeError
+                //                for __module__, while builtin_function_or_method
+                //                (print, len) exposes it.
                 if name == "__name__" {
+                    let bare = func_name.rsplit('.').next().unwrap_or(func_name);
+                    return Ok(Value::string(bare));
+                }
+                if name == "__qualname__" {
                     return Ok(Value::string(func_name));
+                }
+                if name == "__module__" && !func_name.contains('.') {
+                    return Ok(Value::string("builtins"));
                 }
                 if func_name == "str" {
                     match name {
