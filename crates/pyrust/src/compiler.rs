@@ -3366,6 +3366,7 @@ impl Compiler {
             Stmt::Break => {
                 if self.loops.is_empty() {
                     self.failed = true;
+                    self.is_syntax_error = true;
                     if self.error_msg.is_none() {
                         self.error_msg = Some("'break' outside loop".to_string());
                     }
@@ -3384,8 +3385,9 @@ impl Compiler {
             Stmt::Continue => {
                 if self.loops.is_empty() {
                     self.failed = true;
+                    self.is_syntax_error = true;
                     if self.error_msg.is_none() {
-                        self.error_msg = Some("'continue' outside loop".to_string());
+                        self.error_msg = Some("'continue' not properly in loop".to_string());
                     }
                     return;
                 }
