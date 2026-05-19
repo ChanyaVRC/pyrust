@@ -2667,6 +2667,10 @@ fn complex_component(v: f64) -> String {
     }
     let abs = v.abs();
     if v == v.trunc() && abs < 1e16 {
+        // -0.0 as i64 yields 0, losing the sign.  Preserve it explicitly.
+        if v == 0.0 && v.is_sign_negative() {
+            return "-0".to_string();
+        }
         return format!("{}", v as i64);
     }
     if abs >= 1e16 || (abs != 0.0 && abs < 1e-4) {
