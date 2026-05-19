@@ -30,6 +30,8 @@ pub fn call(method: &str, receiver: &Value, args: &[Value]) -> Result<Value> {
                         (64 - abs_n.leading_zeros()) as i64
                     }
                 }
+                // bool is a subclass of int in CPython; True==1, False==0.
+                ValueKind::Bool(b) => b as i64,
                 ValueKind::BigInt(b) => {
                     // num_bigint::BigInt::bits() returns the number of bits in
                     // the magnitude (equivalent to CPython's abs(n).bit_length()).
@@ -58,6 +60,8 @@ pub fn call(method: &str, receiver: &Value, args: &[Value]) -> Result<Value> {
                 // CPython: bit_count counts 1-bits in abs(n).
                 // (-1).bit_count() == 1 because abs(-1) == 1 == 0b1.
                 ValueKind::Int(n) => n.unsigned_abs().count_ones() as i64,
+                // bool is a subclass of int; True.bit_count() == 1, False.bit_count() == 0.
+                ValueKind::Bool(b) => b as i64,
                 ValueKind::BigInt(b) => {
                     // magnitude() gives the absolute value as BigUint,
                     // which has count_ones() via num_bigint.
@@ -82,8 +86,8 @@ pub fn call(method: &str, receiver: &Value, args: &[Value]) -> Result<Value> {
                     format!("int.is_integer() takes no arguments ({} given)", args.len()),
                 ));
             }
-            // int is always an integer — this method exists for duck-typing
-            // parity with float.is_integer().
+            // int (and bool, which subclasses int) is always an integer.
+            // This method exists for duck-typing parity with float.is_integer().
             Ok(Value::bool_(true))
         }
         _ => Err(PyError::named(
