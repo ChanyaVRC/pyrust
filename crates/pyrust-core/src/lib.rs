@@ -3179,6 +3179,20 @@ pub fn class_chain_contains_exception(class: &Rc<RefCell<PyClass>>) -> bool {
     base.is_some_and(|base| class_chain_contains_exception(&base))
 }
 
+/// Walk the class base chain and return `true` if any class in the chain has
+/// the given `name`.  Used by `PyError::class_name_is` to handle subclasses
+/// of `StopIteration` / `GeneratorExit` carried as `PyError::Raised`.
+fn class_chain_has_name(class: &Rc<RefCell<PyClass>>, name: &str) -> bool {
+    let (class_name, base) = {
+        let borrowed = class.borrow();
+        (borrowed.name.clone(), borrowed.base.clone())
+    };
+    if class_name == name {
+        return true;
+    }
+    base.is_some_and(|base| class_chain_has_name(&base, name))
+}
+
 fn exception_args(instance: &Rc<RefCell<PyInstance>>) -> Vec<Value> {
     match instance.borrow().attrs.get("args").map(|v| v.kind()) {
         Some(ValueKind::Tuple(args)) => args.to_vec(),
@@ -3346,8 +3360,8 @@ impl PyError {
             PyError::Class(cls, _) => cls.borrow().name == name,
             PyError::KeyError(_) => name == "KeyError",
             PyError::Raised(exc) => match exc.kind() {
-                ValueKind::PyInstance(inst) => inst.borrow().class.borrow().name == name,
-                ValueKind::PyClass(cls) => cls.borrow().name == name,
+                ValueKind::PyInstance(inst) => class_chain_has_name(&inst.borrow().class, name),
+                ValueKind::PyClass(cls) => class_chain_has_name(cls, name),
                 _ => false,
             },
             _ => false,

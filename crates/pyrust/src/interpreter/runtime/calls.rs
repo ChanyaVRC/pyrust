@@ -686,14 +686,9 @@ impl Interpreter {
             loop {
                 match self.call_next(iterator.clone(), None) {
                     Ok(item) => items.push(item),
+                    // class_name_is now walks the hierarchy for Raised variants,
+                    // so StopIteration subclasses raised by __next__ are caught here.
                     Err(ref e) if e.class_name_is("StopIteration") => break,
-                    Err(PyError::Raised(ref exc)) => {
-                        let is_stop = matches!(exc.kind(),
-                            ValueKind::PyInstance(i) if i.borrow().class.borrow().name == "StopIteration"
-                        );
-                        if is_stop { break; }
-                        return Err(PyError::Raised(exc.clone()));
-                    }
                     Err(e) => return Err(e),
                 }
             }
@@ -857,13 +852,9 @@ impl Interpreter {
                 match invoke_class_method(self, method_val, Value::py_instance(inst_rc), &[]) {
                     Ok(v) => Ok(v),
                     Err(PyError::Raised(exc)) => {
-                        let is_stop = match exc.kind() {
-                            ValueKind::PyInstance(i) => {
-                                i.borrow().class.borrow().name == "StopIteration"
-                            }
-                            _ => false,
-                        };
-                        if is_stop {
+                        // Use class_name_is so StopIteration subclasses are
+                        // correctly detected (hierarchy walk, not exact name).
+                        if PyError::Raised(exc.clone()).class_name_is("StopIteration") {
                             if let Some(d) = default {
                                 Ok(d)
                             } else {

@@ -2145,24 +2145,8 @@ impl Interpreter {
                                 Some(Ok(val)) => {
                                     regs[*dst as usize] = val;
                                 }
-                                Some(Err(PyError::Raised(exc))) => {
-                                    // Check for StopIteration: covers both `raise StopIteration()`
-                                    // (PyInstance) and bare `raise StopIteration` (PyClass).
-                                    let is_stop = match exc.kind() {
-                                        ValueKind::PyInstance(inst) => {
-                                            inst.borrow().class.borrow().name == "StopIteration"
-                                        }
-                                        ValueKind::PyClass(cls) => {
-                                            cls.borrow().name == "StopIteration"
-                                        }
-                                        _ => false,
-                                    };
-                                    if is_stop {
-                                        pc = jump_pc!(*offset);
-                                    } else {
-                                        vm_try!(Err(PyError::Raised(exc)));
-                                    }
-                                }
+                                // class_name_is now walks the hierarchy for Raised,
+                                // so StopIteration subclasses terminate the for-loop.
                                 Some(Err(ref e)) if e.class_name_is("StopIteration") => {
                                     pc = jump_pc!(*offset);
                                 }
@@ -3115,22 +3099,12 @@ impl Interpreter {
                 ))
             }
             // Generator returned normally (StopIteration synthesised).
+            // class_name_is walks the hierarchy so StopIteration subclasses are
+            // also accepted as a normal termination.
             Err(ref e) if e.class_name_is("StopIteration") => Ok(Value::none()),
             // Generator re-raised GeneratorExit — that's the expected close
-            // behaviour, swallow it.
+            // behaviour, swallow it.  Subclasses are equally valid.
             Err(ref e) if e.class_name_is("GeneratorExit") => Ok(Value::none()),
-            Err(PyError::Raised(ref exc)) => {
-                let cls_name = match exc.kind() {
-                    ValueKind::PyInstance(inst) => inst.borrow().class.borrow().name.clone(),
-                    ValueKind::PyClass(cls) => cls.borrow().name.clone(),
-                    _ => String::new(),
-                };
-                if cls_name == "GeneratorExit" || cls_name == "StopIteration" {
-                    Ok(Value::none())
-                } else {
-                    Err(PyError::Raised(exc.clone()))
-                }
-            }
             Err(e) => Err(e),
         }
     }

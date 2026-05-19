@@ -2246,21 +2246,10 @@ impl Interpreter {
                             Err(ref e) if e.class_name_is("StopIteration") => {
                                 return Ok(Value::bool_(false));
                             }
-                            // When __next__ raises `StopIteration` as a real
-                            // PyInstance exception (e.g. `raise StopIteration()`
-                            // from user code), call_next returns
-                            // `PyError::Raised(exc)` rather than `Named`.
-                            // Catch it here so the `in` operator returns False
-                            // instead of propagating the exception.
-                            Err(PyError::Raised(exc)) => {
-                                let is_stop = matches!(exc.kind(),
-                                    ValueKind::PyInstance(i) if i.borrow().class.borrow().name == "StopIteration"
-                                );
-                                if is_stop {
-                                    return Ok(Value::bool_(false));
-                                }
-                                return Err(PyError::Raised(exc));
-                            }
+                            // class_name_is walks the hierarchy for Raised variants;
+                            // subclasses of StopIteration are caught by the arm above.
+                            // Any other Raised exception propagates.
+                            Err(PyError::Raised(exc)) => return Err(PyError::Raised(exc)),
                             Err(e) => return Err(e),
                         }
                     }
@@ -2284,15 +2273,9 @@ impl Interpreter {
                             Err(ref e) if e.class_name_is("StopIteration") => {
                                 return Ok(Value::bool_(false));
                             }
-                            Err(PyError::Raised(exc)) => {
-                                let is_stop = matches!(exc.kind(),
-                                    ValueKind::PyInstance(i) if i.borrow().class.borrow().name == "StopIteration"
-                                );
-                                if is_stop {
-                                    return Ok(Value::bool_(false));
-                                }
-                                return Err(PyError::Raised(exc));
-                            }
+                            // class_name_is walks the hierarchy; any remaining
+                            // Raised is not StopIteration or a subclass.
+                            Err(PyError::Raised(exc)) => return Err(PyError::Raised(exc)),
                             Err(e) => return Err(e),
                         }
                     }
