@@ -1317,32 +1317,12 @@ impl Interpreter {
                     _ => {
                         // When either operand is complex, use complex
                         // exponentiation: z^w = exp(w * ln(z)).
-                        // `both_as_complex` returns Some only when at least
-                        // one operand is already a Complex value, so pure
-                        // int/float paths continue to use `powf` below.
-                        // BigInt is not handled by `as_complex_pair`
-                        // (changing that would affect add/sub/mul/div too);
-                        // instead we promote BigInt to f64 here when the
-                        // other operand is Complex, matching CPython's
-                        // `int.__pow__(complex)` coercion behaviour.
-                        if let Some(((zr, zi), (wr, wi))) = both_as_complex(&left, &right) {
-                            return Ok(complex_pow(zr, zi, wr, wi)?);
-                        }
-                        let l_is_c = matches!(left.kind(), ValueKind::Complex(_, _));
-                        let r_is_c = matches!(right.kind(), ValueKind::Complex(_, _));
-                        if l_is_c || r_is_c {
-                            // At least one is Complex but `both_as_complex` returned
-                            // None — the other operand must be BigInt.
-                            let (zr, zi) = match left.kind() {
-                                ValueKind::Complex(re, im) => (re, im),
-                                ValueKind::BigInt(b) => (bigint_to_float_or_overflow(b)?, 0.0),
-                                _ => unreachable!(),
-                            };
-                            let (wr, wi) = match right.kind() {
-                                ValueKind::Complex(re, im) => (re, im),
-                                ValueKind::BigInt(b) => (bigint_to_float_or_overflow(b)?, 0.0),
-                                _ => unreachable!(),
-                            };
+                        // `both_as_complex` returns Ok(Some) only when at
+                        // least one operand is already a Complex value, so
+                        // pure int/float paths continue to use `powf` below.
+                        // The BigInt arm in `as_complex_pair` now handles
+                        // BigInt coercion (including OverflowError) uniformly.
+                        if let Some(((zr, zi), (wr, wi))) = both_as_complex(&left, &right)? {
                             return Ok(complex_pow(zr, zi, wr, wi)?);
                         }
                         let a = value_to_float(&left, "**")?;
