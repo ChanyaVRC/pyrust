@@ -463,13 +463,18 @@ impl Parser {
                 return Ok(vec![lhs_to_assign_stmt(&targets[0], rhs)?]);
             }
             // Bare annotation declaration without value.
-            // If the target is a simple name, emit AnnDeclare so the compiler
-            // can allocate a local slot for it (CPython UnboundLocalError parity)
-            // and check for global/nonlocal conflicts.
+            // For a simple name target, emit AnnAssign { value: None } so the
+            // annotation expression is preserved for storage in __annotations__
+            // (at module / class scope) and so the compiler can detect conflicts
+            // with global/nonlocal declarations (CPython SyntaxError).
             // For attribute/index targets (e.g. `self.x: int`) there is no local
             // slot to declare, so this remains a no-op.
             if let Expr::Var(name) = &targets[0] {
-                return Ok(vec![Stmt::AnnDeclare(name.clone())]);
+                return Ok(vec![Stmt::AnnAssign {
+                    name: name.clone(),
+                    annotation,
+                    value: None,
+                }]);
             }
             return Ok(vec![Stmt::Pass]);
         }

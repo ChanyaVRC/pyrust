@@ -1917,6 +1917,50 @@ result = fact(10)
     }
 
     #[test]
+    fn annotation_global_in_class_body_bare_is_syntax_error() {
+        // `class C: global x; x: int` must raise SyntaxError (issue #770).
+        let err = run_program_expect_error("x = 0\nclass C:\n    global x\n    x: int\n");
+        assert_eq!(
+            err.to_string(),
+            "SyntaxError: annotated name 'x' can't be global"
+        );
+    }
+
+    #[test]
+    fn annotation_global_in_class_body_assign_is_syntax_error() {
+        // `class C: global x; x: int = 99` must raise SyntaxError (issue #770).
+        let err = run_program_expect_error("x = 0\nclass C:\n    global x\n    x: int = 99\n");
+        assert_eq!(
+            err.to_string(),
+            "SyntaxError: annotated name 'x' can't be global"
+        );
+    }
+
+    #[test]
+    fn annotation_nonlocal_in_class_body_is_syntax_error() {
+        // `class C: nonlocal x; x: int = 5` inside a function must raise
+        // SyntaxError (issue #770).
+        let err = run_program_expect_error(
+            "def outer():\n    x = 1\n    class C:\n        nonlocal x\n        x: int = 5\n    C()\nouter()\n",
+        );
+        assert_eq!(
+            err.to_string(),
+            "SyntaxError: annotated name 'x' can't be nonlocal"
+        );
+    }
+
+    #[test]
+    fn annotation_global_in_class_body_order_independent() {
+        // Annotation before `global` must also be a SyntaxError — CPython
+        // checks the whole scope, not statement order (issue #770).
+        let err = run_program_expect_error("x = 0\nclass E:\n    x: int\n    global x\n");
+        assert_eq!(
+            err.to_string(),
+            "SyntaxError: annotated name 'x' can't be global"
+        );
+    }
+
+    #[test]
     fn collections_defaultdict_rejects_non_callable_factory() {
         // The eager check in `bodies/collections.rs` surfaces a clean
         // TypeError at construction time instead of letting the
