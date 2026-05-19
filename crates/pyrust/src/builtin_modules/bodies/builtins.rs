@@ -1516,6 +1516,21 @@ pyrust_module! {
             // latin-1) and reject the rest with `LookupError` for parity
             // with `LookupError: unknown encoding: <name>`. (#391)
             2 | 3 => {
+                // CPython checks the encoding argument before the source
+                // argument: if encoding is not a str, report the type; only
+                // once encoding is confirmed to be a str do we check whether
+                // source is also a str (and give "encoding without a string
+                // argument" if not).
+                let encoding: String = match args[1].value.kind() {
+                    ValueKind::Str(s) => s.to_string(),
+                    _ => return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "bytes() argument 'encoding' must be str, not {}",
+                            value_type_name_str(&args[1].value),
+                        ),
+                    )),
+                };
                 let source: String = match args[0].value.kind() {
                     ValueKind::Str(s) => s.to_string(),
                     _ => return Err(PyError::named(
@@ -1523,19 +1538,15 @@ pyrust_module! {
                         "encoding without a string argument".to_string(),
                     )),
                 };
-                let encoding: String = match args[1].value.kind() {
-                    ValueKind::Str(s) => s.to_string(),
-                    _ => return Err(PyError::named(
-                        "TypeError",
-                        "bytes() argument 2 must be str, not non-string".to_string(),
-                    )),
-                };
                 let errors: String = if args.len() == 3 {
                     match args[2].value.kind() {
                         ValueKind::Str(s) => s.to_string(),
                         _ => return Err(PyError::named(
                             "TypeError",
-                            "bytes() argument 3 must be str, not non-string".to_string(),
+                            format!(
+                                "bytes() argument 'errors' must be str, not {}",
+                                value_type_name_str(&args[2].value),
+                            ),
                         )),
                     }
                 } else {
