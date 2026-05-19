@@ -1021,8 +1021,7 @@ fn collect_class_method_outer_refs(
                     if !inner_locals.contains(&name)
                         && !inner_globals.contains(&name)
                         && !inner_nonlocals.contains(&name)
-                        && class_locals_opt
-                            .map_or(true, |cl| !cl.contains(&name))
+                        && class_locals_opt.map_or(true, |cl| !cl.contains(&name))
                         && local_index.contains_key(&name)
                     {
                         cells.insert(name);
