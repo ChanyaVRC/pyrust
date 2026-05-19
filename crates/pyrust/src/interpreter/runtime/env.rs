@@ -602,6 +602,85 @@ impl Interpreter {
                     )),
                 }
             }
+            ValueKind::BuiltinFunction(func_name) => {
+                // CPython distinguishes two cases:
+                //
+                // builtin_function_or_method (non-dotted, e.g. print, len):
+                //   - __module__ is the only writable attribute; CPython stores it in
+                //     PyCFunctionObject.m_module.  pyrust does not yet have mutable
+                //     per-instance storage for BuiltinFunction values, so we cannot
+                //     honour the write today — but we raise AttributeError (not
+                //     RuntimeError) and use the correct CPython message so the error
+                //     class is right.  Follow-up: add mutable __module__ storage.
+                //   - __name__, __qualname__, __doc__ are read-only:
+                //     AttributeError: attribute '__X__' of
+                //     'builtin_function_or_method' objects is not writable
+                //   - anything else:
+                //     AttributeError: 'builtin_function_or_method' object has no
+                //     attribute 'X'
+                //
+                // method_descriptor (dotted, e.g. str.upper, list.append):
+                //   - __module__ is absent:
+                //     AttributeError: 'method_descriptor' object has no attribute
+                //     '__module__'
+                //   - __name__ is read-only:
+                //     AttributeError: readonly attribute
+                //   - __qualname__, __doc__ are read-only:
+                //     AttributeError: attribute '__X__' of 'method_descriptor'
+                //     objects is not writable
+                //   - anything else:
+                //     AttributeError: 'method_descriptor' object has no attribute 'X'
+                if func_name.contains('.') {
+                    // method_descriptor path
+                    match name {
+                        "__module__" => Err(PyError::named(
+                            "AttributeError",
+                            format!("'method_descriptor' object has no attribute '__module__'"),
+                        )),
+                        "__name__" => Err(PyError::named(
+                            "AttributeError",
+                            "readonly attribute".to_string(),
+                        )),
+                        "__qualname__" | "__doc__" => Err(PyError::named(
+                            "AttributeError",
+                            format!(
+                                "attribute '{name}' of 'method_descriptor' objects is not writable"
+                            ),
+                        )),
+                        _ => Err(PyError::named(
+                            "AttributeError",
+                            format!("'method_descriptor' object has no attribute '{name}'"),
+                        )),
+                    }
+                } else {
+                    // builtin_function_or_method path
+                    match name {
+                        "__module__" => {
+                            // CPython allows this write; pyrust lacks per-instance storage.
+                            // Raise AttributeError so the error class is correct until
+                            // mutable __module__ storage is added to BuiltinFunction.
+                            Err(PyError::named(
+                                "AttributeError",
+                                format!(
+                                    "attribute '__module__' of 'builtin_function_or_method' \
+                                     objects is not writable"
+                                ),
+                            ))
+                        }
+                        "__name__" | "__qualname__" | "__doc__" => Err(PyError::named(
+                            "AttributeError",
+                            format!(
+                                "attribute '{name}' of 'builtin_function_or_method' \
+                                 objects is not writable"
+                            ),
+                        )),
+                        _ => Err(PyError::named(
+                            "AttributeError",
+                            format!("'builtin_function_or_method' object has no attribute '{name}'"),
+                        )),
+                    }
+                }
+            }
             ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. } => {
                 // CPython raises AttributeError (not a generic RuntimeError) when
                 // you try to set any attribute on a bound method object.
@@ -617,7 +696,7 @@ impl Interpreter {
         }
     }
 
-    fn delete_attr(&mut self, target: Value, name: &str) -> Result<()> {
+    pub(crate) fn delete_attr(&mut self, target: Value, name: &str) -> Result<()> {
         match target.kind() {
             ValueKind::PyInstance(instance) => {
                 let class = { Rc::clone(&instance.borrow().class) };
@@ -648,7 +727,14 @@ impl Interpreter {
                 // `shift_remove` keeps the remaining entries in their
                 // original insertion order so `vars(obj)` after `del obj.x`
                 // still matches CPython's stable ordering contract.
-                instance.borrow_mut().attrs.shift_remove(name);
+                // CPython raises AttributeError when the attribute is absent.
+                if instance.borrow_mut().attrs.shift_remove(name).is_none() {
+                    let class_name = instance.borrow().class.borrow().name.clone();
+                    return Err(PyError::named(
+                        "AttributeError",
+                        format!("'{class_name}' object has no attribute '{name}'"),
+                    ));
+                }
                 Ok(())
             }
             ValueKind::UserFunction(func) => {
@@ -686,8 +772,60 @@ impl Interpreter {
                         format!("cannot delete '__qualname__' attribute of immutable type '{n}'"),
                     ));
                 }
-                class.borrow_mut().attrs.shift_remove(name);
+                // CPython raises AttributeError when the attribute is absent.
+                if class.borrow_mut().attrs.shift_remove(name).is_none() {
+                    let class_name = class.borrow().name.clone();
+                    return Err(PyError::named(
+                        "AttributeError",
+                        format!("type object '{class_name}' has no attribute '{name}'"),
+                    ));
+                }
                 Ok(())
+            }
+            ValueKind::BuiltinFunction(func_name) => {
+                // Mirror the assign_attr logic: method_descriptors and
+                // builtin_function_or_method both raise AttributeError, matching
+                // CPython exactly.  (Mutable __module__ storage is a follow-up.)
+                if func_name.contains('.') {
+                    match name {
+                        "__module__" => Err(PyError::named(
+                            "AttributeError",
+                            format!("'method_descriptor' object has no attribute '__module__'"),
+                        )),
+                        "__name__" => Err(PyError::named(
+                            "AttributeError",
+                            "readonly attribute".to_string(),
+                        )),
+                        "__qualname__" | "__doc__" => Err(PyError::named(
+                            "AttributeError",
+                            format!(
+                                "attribute '{name}' of 'method_descriptor' objects is not writable"
+                            ),
+                        )),
+                        _ => Err(PyError::named(
+                            "AttributeError",
+                            format!("'method_descriptor' object has no attribute '{name}'"),
+                        )),
+                    }
+                } else {
+                    match name {
+                        "__module__" | "__name__" | "__qualname__" | "__doc__" => {
+                            Err(PyError::named(
+                                "AttributeError",
+                                format!(
+                                    "attribute '{name}' of 'builtin_function_or_method' \
+                                     objects is not writable"
+                                ),
+                            ))
+                        }
+                        _ => Err(PyError::named(
+                            "AttributeError",
+                            format!(
+                                "'builtin_function_or_method' object has no attribute '{name}'"
+                            ),
+                        )),
+                    }
+                }
             }
             ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. } => {
                 // CPython raises AttributeError when deleting any attribute on a

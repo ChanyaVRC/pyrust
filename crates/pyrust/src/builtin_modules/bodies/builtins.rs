@@ -855,42 +855,19 @@ pyrust_module! {
         }
         let name = match args[1].value.kind() {
             ValueKind::Str(s) => s.to_string(),
-            _ => return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}(): attribute name must be a string"),
-            )),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}(): attribute name must be a string"),
+                ));
+            }
         };
-        match args[0].value.kind() {
-            ValueKind::PyInstance(instance) => {
-                let instance = Rc::clone(instance);
-                // `shift_remove` preserves the insertion order of the
-                // surviving entries — matches CPython's `del obj.x`
-                // semantics on a dict that's known to be insertion-ordered.
-                if instance.borrow_mut().attrs.shift_remove(&name).is_none() {
-                    let class_name = instance.borrow().class.borrow().name.clone();
-                    return Err(PyError::named(
-                        "AttributeError",
-                        format!("'{class_name}' object has no attribute '{name}'"),
-                    ));
-                }
-                Ok(Value::none())
-            }
-            ValueKind::PyClass(class) => {
-                let class = Rc::clone(class);
-                if class.borrow_mut().attrs.shift_remove(&name).is_none() {
-                    let class_name = class.borrow().name.clone();
-                    return Err(PyError::named(
-                        "AttributeError",
-                        format!("type object '{class_name}' has no attribute '{name}'"),
-                    ));
-                }
-                Ok(Value::none())
-            }
-            _ => Err(PyError::named(
-                "AttributeError",
-                format!("{FN_NAME}() object has no writable attributes"),
-            )),
-        }
+        // Delegate to the canonical delete_attr path so that every value
+        // kind (BuiltinFunction, UserFunction, BoundMethod, PyClass, …)
+        // raises the correct error type and message instead of the old
+        // catch-all "delattr() object has no writable attributes".
+        _interp.delete_attr(args[0].value.clone(), &name)?;
+        Ok(Value::none())
     }
 
     /// CPython: isinstance(obj, classinfo) — type check.
