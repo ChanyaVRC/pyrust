@@ -2389,11 +2389,12 @@ impl Interpreter {
                     // so it writes through to the module env.  Push a child env
                     // that inherits the current scope but has the class body's
                     // global_names set, then restore after the body runs.
-                    // Issue #708: similarly, if the class body declares `nonlocal x`,
-                    // set `nonlocal_names` on the child env so `assign_name("x", ...)`
-                    // routes the store to the enclosing function's env cell rather than
-                    // the class namespace.  Class scope is transparent to `nonlocal` —
-                    // the store must reach the enclosing *function* binding.
+                    // Issue #735 / #708: similarly, if the class body declares
+                    // `nonlocal x`, set `nonlocal_names` on the child env so
+                    // `assign_name("x", ...)` routes the store to the enclosing
+                    // function's env cell rather than the class namespace.  Class
+                    // scope is transparent to `nonlocal` — the store must reach
+                    // the enclosing *function* binding.
                     let previous_env = if !proto_global_names.is_empty()
                         || !proto_nonlocal_names.is_empty()
                     {
