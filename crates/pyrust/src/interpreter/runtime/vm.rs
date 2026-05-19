@@ -2499,7 +2499,7 @@ impl Interpreter {
                     let template = regs[obj as usize]
                         .as_str()
                         .ok_or_else(|| PyError::Runtime("internal: expected str".to_string()))?;
-                    return format_str_template(template, &args, &[]);
+                    return self.format_str_template(template, &args, &[]);
                 }
                 let receiver = vm_read(regs, obj, num_locals)?;
                 self.call_str_method(method.as_str(), receiver, args)
@@ -2667,7 +2667,7 @@ impl Interpreter {
                     let template = regs[obj as usize]
                         .as_str()
                         .ok_or_else(|| PyError::Runtime("internal: expected str".to_string()))?;
-                    return format_str_template(template, &pos_items, &keyword);
+                    return self.format_str_template(template, &pos_items, &keyword);
                 }
                 let receiver = vm_read(regs, obj, num_locals)?;
                 self.call_str_method(method.as_str(), receiver, pos_items)
