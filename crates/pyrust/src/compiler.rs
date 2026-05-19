@@ -65,7 +65,7 @@ pub fn compile_script(
 fn collect_cell_vars(body: &[Stmt], local_index: &HashMap<String, Reg>) -> Vec<CellVar> {
     let mut cells: HashSet<String> = HashSet::new();
     collect_cell_vars_in(body, local_index, false, &mut cells);
-    collect_lambda_captures(body, local_index, &mut cells);
+    collect_lambda_captures(body, local_index, false, &mut cells);
     cells.into_iter().collect()
 }
 
@@ -79,7 +79,7 @@ fn collect_cell_vars_for_class_body(
 ) -> Vec<CellVar> {
     let mut cells: HashSet<String> = HashSet::new();
     collect_cell_vars_in(body, local_index, true, &mut cells);
-    collect_lambda_captures(body, local_index, &mut cells);
+    collect_lambda_captures(body, local_index, true, &mut cells);
     cells.into_iter().collect()
 }
 
@@ -439,36 +439,47 @@ fn collect_transitive_global_names(body: &[Stmt], out: &mut HashSet<String>) {
 /// Walk statements looking for `Expr::Lambda` at the current scope level
 /// (not crossing into nested `Def`/`Class` scopes) and promote any outer
 /// fastlocals that the lambda captures into cell vars so they live in the env.
+///
+/// `is_class_scope`: when true, the `local_index` belongs to a class body.
+/// A lambda inside a class body does NOT close over the class namespace — it
+/// closes over the enclosing function/module scope.  Free-var reads in the
+/// lambda that match class-attribute names must not promote those names to
+/// cell vars, or the class-body assignment (`x = 10`) emits `StoreGlobal`
+/// instead of `RecordClassStore` and strips the attribute (issue #699).
 fn collect_lambda_captures(
     stmts: &[Stmt],
     local_index: &HashMap<String, Reg>,
+    is_class_scope: bool,
     cells: &mut HashSet<String>,
 ) {
     for stmt in stmts {
-        lambda_captures_in_stmt(stmt, local_index, cells);
+        lambda_captures_in_stmt(stmt, local_index, is_class_scope, cells);
     }
 }
 
 fn lambda_captures_in_stmt(
     stmt: &Stmt,
     local_index: &HashMap<String, Reg>,
+    is_class_scope: bool,
     cells: &mut HashSet<String>,
 ) {
     match stmt {
         Stmt::Def { .. } | Stmt::Class { .. } => {}
-        Stmt::Assign(_, value) => lambda_captures_in_expr(value, local_index, cells),
+        Stmt::Assign(_, value) => {
+            lambda_captures_in_expr(value, local_index, is_class_scope, cells)
+        }
         Stmt::AttrAssign { target, expr, .. } => {
-            lambda_captures_in_expr(target, local_index, cells);
-            lambda_captures_in_expr(expr, local_index, cells);
+            lambda_captures_in_expr(target, local_index, is_class_scope, cells);
+            lambda_captures_in_expr(expr, local_index, is_class_scope, cells);
         }
         Stmt::IndexAssign {
             target,
             index,
             expr,
         } => {
-            lambda_captures_in_expr(target, local_index, cells);
-            lambda_captures_in_expr(index, local_index, cells);
-            lambda_captures_in_expr(expr, local_index, cells);
+            lambda_captures_in_expr(target, local_index, is_class_scope, cells);
+            lambda_captures_in_expr(index, local_index, is_class_scope, cells);
+            lambda_captures_in_expr(expr, local_index, is_class_scope, cells);
         }
         Stmt::SliceAssign {
             target,
@@ -477,26 +488,28 @@ fn lambda_captures_in_stmt(
             step,
             expr,
         } => {
-            lambda_captures_in_expr(target, local_index, cells);
+            lambda_captures_in_expr(target, local_index, is_class_scope, cells);
             for e in [lower, upper, step].iter().flat_map(|o| o.as_deref()) {
-                lambda_captures_in_expr(e, local_index, cells);
+                lambda_captures_in_expr(e, local_index, is_class_scope, cells);
             }
-            lambda_captures_in_expr(expr, local_index, cells);
+            lambda_captures_in_expr(expr, local_index, is_class_scope, cells);
         }
-        Stmt::AugAssign { expr, .. } => lambda_captures_in_expr(expr, local_index, cells),
-        Stmt::Return(Some(e)) => lambda_captures_in_expr(e, local_index, cells),
+        Stmt::AugAssign { expr, .. } => {
+            lambda_captures_in_expr(expr, local_index, is_class_scope, cells)
+        }
+        Stmt::Return(Some(e)) => lambda_captures_in_expr(e, local_index, is_class_scope, cells),
         Stmt::Return(None) => {}
-        Stmt::Expr(e) => lambda_captures_in_expr(e, local_index, cells),
+        Stmt::Expr(e) => lambda_captures_in_expr(e, local_index, is_class_scope, cells),
         Stmt::If {
             branches,
             else_branch,
         } => {
             for (cond, body) in branches {
-                lambda_captures_in_expr(cond, local_index, cells);
-                collect_lambda_captures(body, local_index, cells);
+                lambda_captures_in_expr(cond, local_index, is_class_scope, cells);
+                collect_lambda_captures(body, local_index, is_class_scope, cells);
             }
             if let Some(b) = else_branch {
-                collect_lambda_captures(b, local_index, cells);
+                collect_lambda_captures(b, local_index, is_class_scope, cells);
             }
         }
         Stmt::While {
@@ -504,10 +517,10 @@ fn lambda_captures_in_stmt(
             body,
             else_branch,
         } => {
-            lambda_captures_in_expr(cond, local_index, cells);
-            collect_lambda_captures(body, local_index, cells);
+            lambda_captures_in_expr(cond, local_index, is_class_scope, cells);
+            collect_lambda_captures(body, local_index, is_class_scope, cells);
             if let Some(b) = else_branch {
-                collect_lambda_captures(b, local_index, cells);
+                collect_lambda_captures(b, local_index, is_class_scope, cells);
             }
         }
         Stmt::For {
@@ -516,10 +529,10 @@ fn lambda_captures_in_stmt(
             else_branch,
             ..
         } => {
-            lambda_captures_in_expr(iter, local_index, cells);
-            collect_lambda_captures(body, local_index, cells);
+            lambda_captures_in_expr(iter, local_index, is_class_scope, cells);
+            collect_lambda_captures(body, local_index, is_class_scope, cells);
             if let Some(b) = else_branch {
-                collect_lambda_captures(b, local_index, cells);
+                collect_lambda_captures(b, local_index, is_class_scope, cells);
             }
         }
         Stmt::Try {
@@ -528,53 +541,53 @@ fn lambda_captures_in_stmt(
             else_branch,
             finally_branch,
         } => {
-            collect_lambda_captures(body, local_index, cells);
+            collect_lambda_captures(body, local_index, is_class_scope, cells);
             for h in handlers {
                 if let Some(e) = &h.kind {
-                    lambda_captures_in_expr(e, local_index, cells);
+                    lambda_captures_in_expr(e, local_index, is_class_scope, cells);
                 }
-                collect_lambda_captures(&h.body, local_index, cells);
+                collect_lambda_captures(&h.body, local_index, is_class_scope, cells);
             }
             if let Some(b) = else_branch {
-                collect_lambda_captures(b, local_index, cells);
+                collect_lambda_captures(b, local_index, is_class_scope, cells);
             }
             if let Some(b) = finally_branch {
-                collect_lambda_captures(b, local_index, cells);
+                collect_lambda_captures(b, local_index, is_class_scope, cells);
             }
         }
         Stmt::With { items, body } => {
             for (e, _) in items {
-                lambda_captures_in_expr(e, local_index, cells);
+                lambda_captures_in_expr(e, local_index, is_class_scope, cells);
             }
-            collect_lambda_captures(body, local_index, cells);
+            collect_lambda_captures(body, local_index, is_class_scope, cells);
         }
         Stmt::Raise {
             expr: Some(e),
             cause,
         } => {
-            lambda_captures_in_expr(e, local_index, cells);
+            lambda_captures_in_expr(e, local_index, is_class_scope, cells);
             if let Some(c) = cause {
-                lambda_captures_in_expr(c, local_index, cells);
+                lambda_captures_in_expr(c, local_index, is_class_scope, cells);
             }
         }
         Stmt::Assert { test, msg } => {
-            lambda_captures_in_expr(test, local_index, cells);
+            lambda_captures_in_expr(test, local_index, is_class_scope, cells);
             if let Some(m) = msg {
-                lambda_captures_in_expr(m, local_index, cells);
+                lambda_captures_in_expr(m, local_index, is_class_scope, cells);
             }
         }
         Stmt::Delete(exprs) => {
             for e in exprs {
-                lambda_captures_in_expr(e, local_index, cells);
+                lambda_captures_in_expr(e, local_index, is_class_scope, cells);
             }
         }
         Stmt::Match { subject, arms } => {
-            lambda_captures_in_expr(subject, local_index, cells);
+            lambda_captures_in_expr(subject, local_index, is_class_scope, cells);
             for arm in arms {
                 if let Some(guard) = &arm.guard {
-                    lambda_captures_in_expr(guard, local_index, cells);
+                    lambda_captures_in_expr(guard, local_index, is_class_scope, cells);
                 }
-                collect_lambda_captures(&arm.body, local_index, cells);
+                collect_lambda_captures(&arm.body, local_index, is_class_scope, cells);
             }
         }
         Stmt::AnnAssign {
@@ -665,42 +678,56 @@ fn all_fstring_exprs<F: FnMut(&Expr) -> bool>(parts: &[FStringPart], pred: &mut 
 fn lambda_captures_in_expr(
     expr: &Expr,
     local_index: &HashMap<String, Reg>,
+    is_class_scope: bool,
     cells: &mut HashSet<String>,
 ) {
     match expr {
         Expr::Lambda { params, body } => {
-            let mut uses = HashSet::new();
-            collect_free_var_reads_in_expr(body, &mut uses);
-            for param in params {
-                uses.remove(param);
-            }
-            for name in uses {
-                if local_index.contains_key(&name) {
-                    cells.insert(name);
+            // When the enclosing scope is a class body, a lambda does NOT close
+            // over the class namespace.  Free-var reads in the lambda that match
+            // class-attribute names in `local_index` must not promote those names
+            // to cell vars — doing so would make the class-body assignment emit
+            // `StoreGlobal` instead of `RecordClassStore` and strip the attribute
+            // (issue #699).  Skip promotion entirely for class scopes; the lambda
+            // will resolve these names through the outer function/module env.
+            if !is_class_scope {
+                let mut uses = HashSet::new();
+                collect_free_var_reads_in_expr(body, &mut uses);
+                for param in params {
+                    uses.remove(param);
+                }
+                for name in uses {
+                    if local_index.contains_key(&name) {
+                        cells.insert(name);
+                    }
                 }
             }
         }
         Expr::Binary { left, right, .. } => {
-            lambda_captures_in_expr(left, local_index, cells);
-            lambda_captures_in_expr(right, local_index, cells);
+            lambda_captures_in_expr(left, local_index, is_class_scope, cells);
+            lambda_captures_in_expr(right, local_index, is_class_scope, cells);
         }
-        Expr::Unary { expr: e, .. } => lambda_captures_in_expr(e, local_index, cells),
+        Expr::Unary { expr: e, .. } => {
+            lambda_captures_in_expr(e, local_index, is_class_scope, cells)
+        }
         Expr::Compare { left, ops } => {
-            lambda_captures_in_expr(left, local_index, cells);
+            lambda_captures_in_expr(left, local_index, is_class_scope, cells);
             for (_, e) in ops {
-                lambda_captures_in_expr(e, local_index, cells);
+                lambda_captures_in_expr(e, local_index, is_class_scope, cells);
             }
         }
         Expr::Call { func, args } => {
-            lambda_captures_in_expr(func, local_index, cells);
+            lambda_captures_in_expr(func, local_index, is_class_scope, cells);
             for a in args {
-                lambda_captures_in_expr(&a.value, local_index, cells);
+                lambda_captures_in_expr(&a.value, local_index, is_class_scope, cells);
             }
         }
-        Expr::Attr { target, .. } => lambda_captures_in_expr(target, local_index, cells),
+        Expr::Attr { target, .. } => {
+            lambda_captures_in_expr(target, local_index, is_class_scope, cells)
+        }
         Expr::Index { target, index } => {
-            lambda_captures_in_expr(target, local_index, cells);
-            lambda_captures_in_expr(index, local_index, cells);
+            lambda_captures_in_expr(target, local_index, is_class_scope, cells);
+            lambda_captures_in_expr(index, local_index, is_class_scope, cells);
         }
         Expr::Slice {
             target,
@@ -708,45 +735,45 @@ fn lambda_captures_in_expr(
             upper,
             step,
         } => {
-            lambda_captures_in_expr(target, local_index, cells);
+            lambda_captures_in_expr(target, local_index, is_class_scope, cells);
             for e in [lower, upper, step].iter().flat_map(|o| o.as_deref()) {
-                lambda_captures_in_expr(e, local_index, cells);
+                lambda_captures_in_expr(e, local_index, is_class_scope, cells);
             }
         }
         Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
             for e in items {
-                lambda_captures_in_expr(e, local_index, cells);
+                lambda_captures_in_expr(e, local_index, is_class_scope, cells);
             }
         }
         Expr::Starred(inner) => {
-            lambda_captures_in_expr(inner, local_index, cells);
+            lambda_captures_in_expr(inner, local_index, is_class_scope, cells);
         }
         Expr::Dict(items) => {
             for item in items {
                 match item {
                     DictItem::Pair(k, v) => {
-                        lambda_captures_in_expr(k, local_index, cells);
-                        lambda_captures_in_expr(v, local_index, cells);
+                        lambda_captures_in_expr(k, local_index, is_class_scope, cells);
+                        lambda_captures_in_expr(v, local_index, is_class_scope, cells);
                     }
                     DictItem::DoubleSplat(e) => {
-                        lambda_captures_in_expr(e, local_index, cells);
+                        lambda_captures_in_expr(e, local_index, is_class_scope, cells);
                     }
                 }
             }
         }
         Expr::ListComp { elt, clauses } | Expr::SetComp { elt, clauses } => {
             for clause in clauses {
-                lambda_captures_in_expr(&clause.iter, local_index, cells);
+                lambda_captures_in_expr(&clause.iter, local_index, is_class_scope, cells);
                 if let Some(c) = &clause.cond {
-                    lambda_captures_in_expr(c, local_index, cells);
+                    lambda_captures_in_expr(c, local_index, is_class_scope, cells);
                 }
             }
-            lambda_captures_in_expr(elt, local_index, cells);
+            lambda_captures_in_expr(elt, local_index, is_class_scope, cells);
         }
         Expr::GenExp { elt, clauses } => {
             // The outermost iterable is evaluated in the enclosing scope.
             if let Some(first) = clauses.first() {
-                lambda_captures_in_expr(&first.iter, local_index, cells);
+                lambda_captures_in_expr(&first.iter, local_index, is_class_scope, cells);
             }
             // Everything inside the genexp body (outermost cond, inner
             // iters/conds, and the element expression) runs in the genexp's
@@ -755,49 +782,53 @@ fn lambda_captures_in_expr(
             // itself, and promote any remaining names that live in the
             // enclosing local_index to cell vars so they're accessible via
             // the env chain when the generator body resumes.
-            let mut inner_uses: HashSet<String> = HashSet::new();
-            if let Some(first) = clauses.first() {
-                if let Some(c) = &first.cond {
-                    collect_free_var_reads_in_expr(c, &mut inner_uses);
+            if !is_class_scope {
+                let mut inner_uses: HashSet<String> = HashSet::new();
+                if let Some(first) = clauses.first() {
+                    if let Some(c) = &first.cond {
+                        collect_free_var_reads_in_expr(c, &mut inner_uses);
+                    }
                 }
-            }
-            for clause in clauses.iter().skip(1) {
-                collect_free_var_reads_in_expr(&clause.iter, &mut inner_uses);
-                if let Some(c) = &clause.cond {
-                    collect_free_var_reads_in_expr(c, &mut inner_uses);
+                for clause in clauses.iter().skip(1) {
+                    collect_free_var_reads_in_expr(&clause.iter, &mut inner_uses);
+                    if let Some(c) = &clause.cond {
+                        collect_free_var_reads_in_expr(c, &mut inner_uses);
+                    }
                 }
-            }
-            collect_free_var_reads_in_expr(elt, &mut inner_uses);
-            // Remove names bound by the genexp's own clause targets.
-            let mut bound: HashSet<String> = HashSet::new();
-            for clause in clauses {
-                collect_written_target(&clause.target, &mut bound);
-            }
-            for name in inner_uses {
-                if !bound.contains(&name) && local_index.contains_key(&name) {
-                    cells.insert(name);
+                collect_free_var_reads_in_expr(elt, &mut inner_uses);
+                // Remove names bound by the genexp's own clause targets.
+                let mut bound: HashSet<String> = HashSet::new();
+                for clause in clauses {
+                    collect_written_target(&clause.target, &mut bound);
+                }
+                for name in inner_uses {
+                    if !bound.contains(&name) && local_index.contains_key(&name) {
+                        cells.insert(name);
+                    }
                 }
             }
         }
         Expr::DictComp { key, val, clauses } => {
             for clause in clauses {
-                lambda_captures_in_expr(&clause.iter, local_index, cells);
+                lambda_captures_in_expr(&clause.iter, local_index, is_class_scope, cells);
                 if let Some(c) = &clause.cond {
-                    lambda_captures_in_expr(c, local_index, cells);
+                    lambda_captures_in_expr(c, local_index, is_class_scope, cells);
                 }
             }
-            lambda_captures_in_expr(key, local_index, cells);
-            lambda_captures_in_expr(val, local_index, cells);
+            lambda_captures_in_expr(key, local_index, is_class_scope, cells);
+            lambda_captures_in_expr(val, local_index, is_class_scope, cells);
         }
         Expr::Ternary { cond, then, else_ } => {
-            lambda_captures_in_expr(cond, local_index, cells);
-            lambda_captures_in_expr(then, local_index, cells);
-            lambda_captures_in_expr(else_, local_index, cells);
+            lambda_captures_in_expr(cond, local_index, is_class_scope, cells);
+            lambda_captures_in_expr(then, local_index, is_class_scope, cells);
+            lambda_captures_in_expr(else_, local_index, is_class_scope, cells);
         }
-        Expr::Named { value, .. } => lambda_captures_in_expr(value, local_index, cells),
+        Expr::Named { value, .. } => {
+            lambda_captures_in_expr(value, local_index, is_class_scope, cells)
+        }
         Expr::FString(parts) => {
             for_each_fstring_expr(parts, &mut |e| {
-                lambda_captures_in_expr(e, local_index, cells);
+                lambda_captures_in_expr(e, local_index, is_class_scope, cells);
             });
         }
         Expr::Var(_)
@@ -809,9 +840,9 @@ fn lambda_captures_in_expr(
         | Expr::Bytes(_)
         | Expr::Bool(_)
         | Expr::None => {}
-        Expr::Yield(Some(e)) => lambda_captures_in_expr(e, local_index, cells),
+        Expr::Yield(Some(e)) => lambda_captures_in_expr(e, local_index, is_class_scope, cells),
         Expr::Yield(None) => {}
-        Expr::YieldFrom(e) => lambda_captures_in_expr(e, local_index, cells),
+        Expr::YieldFrom(e) => lambda_captures_in_expr(e, local_index, is_class_scope, cells),
     }
 }
 
