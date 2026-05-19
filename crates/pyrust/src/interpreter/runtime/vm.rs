@@ -2207,13 +2207,14 @@ impl Interpreter {
                 }
                 Insn::MakeClass(dst, proto_idx, bases_base, bases_n, name_idx) => {
                     let class_name = pool_get!(code.names, *name_idx, "name").clone();
-                    let (class_code, local_index, proto_qualname, proto_global_names) = {
+                    let (class_code, local_index, proto_qualname, proto_global_names, proto_nonlocal_names) = {
                         let proto = pool_get!(code.fn_protos, *proto_idx, "fn_proto");
                         (
                             Rc::clone(&proto.code),
                             Rc::clone(&proto.local_index),
                             proto.qualname.clone(),
                             Rc::clone(&proto.global_names),
+                            Rc::clone(&proto.nonlocal_names),
                         )
                     };
                     let num_class_regs = class_code.num_regs as usize;
@@ -2296,10 +2297,21 @@ impl Interpreter {
                     // so it writes through to the module env.  Push a child env
                     // that inherits the current scope but has the class body's
                     // global_names set, then restore after the body runs.
-                    let previous_env = if !proto_global_names.is_empty() {
+                    // Issue #708: similarly, if the class body declares `nonlocal x`,
+                    // set `nonlocal_names` on the child env so `assign_name("x", ...)`
+                    // routes the store to the enclosing function's env cell rather than
+                    // the class namespace.  Class scope is transparent to `nonlocal` —
+                    // the store must reach the enclosing *function* binding.
+                    let previous_env = if !proto_global_names.is_empty()
+                        || !proto_nonlocal_names.is_empty()
+                    {
                         let parent = Rc::clone(&self.env);
                         let class_env = self.alloc_env(Some(parent));
-                        class_env.borrow_mut().global_names = proto_global_names;
+                        {
+                            let mut e = class_env.borrow_mut();
+                            e.global_names = proto_global_names;
+                            e.nonlocal_names = proto_nonlocal_names;
+                        }
                         Some(std::mem::replace(&mut self.env, class_env))
                     } else {
                         None
