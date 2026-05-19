@@ -25,6 +25,21 @@ try:
 except TypeError as e:
     print(e)  # can't multiply sequence by non-int of type 'float'
 
+try:
+    result = 1.5 * [1, 2]
+except TypeError as e:
+    print(e)  # can't multiply sequence by non-int of type 'float'
+
+try:
+    result = 1.5 * "ab"
+except TypeError as e:
+    print(e)  # can't multiply sequence by non-int of type 'float'
+
+try:
+    result = 1.5 * b"ab"
+except TypeError as e:
+    print(e)  # can't multiply sequence by non-int of type 'float'
+
 # Regression guards: valid sequence multiplication must still work
 print([1, 2] * 3)    # [1, 2, 1, 2, 1, 2]
 print("ab" * 4)      # abababab
