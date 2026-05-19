@@ -22,8 +22,24 @@ pub fn compile_script(
     // locals via nonlocal from a nested scope at this level.
     let cell_vars = collect_cell_vars(stmts, &local_index);
     let mut c = Compiler::new(local_index, 0, cell_vars);
+    // Issue #711: if the first statement is a bare string literal, it is the
+    // module docstring.  Emit a StoreGlobal for `__doc__` (CPython parity)
+    // before compiling the rest.  In repl_mode we also emit PrintExpr so the
+    // interactive session shows the value, matching CPython's REPL behaviour.
+    let body = match stmts {
+        [Stmt::Expr(Expr::Str(s)), rest @ ..] => {
+            let r = c.compile_literal(Value::string(s.clone()));
+            if repl_mode {
+                c.emit(Insn::PrintExpr(r));
+            }
+            c.compile_store_name("__doc__", r);
+            c.free_temp(r);
+            rest
+        }
+        _ => stmts,
+    };
     if repl_mode {
-        for stmt in stmts {
+        for stmt in body {
             if let Stmt::Expr(e) = stmt {
                 let r = c.compile_expr(e);
                 c.emit(Insn::PrintExpr(r));
@@ -33,7 +49,7 @@ pub fn compile_script(
             }
         }
     } else {
-        c.compile_block(stmts);
+        c.compile_block(body);
     }
     c.finish()
 }
