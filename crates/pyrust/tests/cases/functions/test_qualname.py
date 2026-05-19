@@ -1,4 +1,5 @@
-# Parity fixture for issue #606: __qualname__ and __name__ on user-defined functions.
+# Parity fixture for issue #606: __qualname__, __name__, __module__, and __doc__
+# on user-defined functions.
 
 # Top-level function: qualname equals name.
 def foo():
@@ -91,3 +92,54 @@ def level1():
     return level2
 
 print(level1()().__qualname__)  # level1.<locals>.level2.<locals>.level3
+
+# __module__: defaults to '__main__' for top-level scripts.
+def modtest():
+    pass
+
+print(modtest.__module__)    # __main__
+
+# __module__ is assignable to any value.
+modtest.__module__ = 'mypackage'
+print(modtest.__module__)   # mypackage
+
+# __module__ = None is allowed.
+modtest.__module__ = None
+print(modtest.__module__)   # None
+
+# del __module__ resets to None.
+modtest.__module__ = 'x'
+del modtest.__module__
+print(modtest.__module__)   # None
+
+# __doc__: defaults to None for functions without a docstring.
+def nodoc():
+    pass
+
+print(nodoc.__doc__)         # None
+
+# __doc__ is assignable to any value.
+nodoc.__doc__ = 'my docstring'
+print(nodoc.__doc__)        # my docstring
+
+# del __doc__ resets to None.
+del nodoc.__doc__
+print(nodoc.__doc__)        # None
+
+# Bound method: __module__ and __doc__ delegate to underlying function.
+class D:
+    def method(self):
+        pass
+
+d = D()
+print(d.method.__module__)   # __main__
+print(d.method.__doc__)      # None
+
+# hasattr confirms the attributes are present.
+def hfn():
+    pass
+
+print(hasattr(hfn, '__name__'))      # True
+print(hasattr(hfn, '__qualname__'))  # True
+print(hasattr(hfn, '__module__'))    # True
+print(hasattr(hfn, '__doc__'))       # True

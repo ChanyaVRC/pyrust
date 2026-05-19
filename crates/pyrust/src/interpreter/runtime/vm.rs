@@ -2105,6 +2105,15 @@ impl Interpreter {
                         qualname: proto_qualname,
                         user_name: std::cell::RefCell::new(None),
                         user_qualname: std::cell::RefCell::new(None),
+                        // Module-name tracking is not yet implemented; use "__main__"
+                        // for scripts run directly, matching CPython's default.
+                        module: std::cell::RefCell::new(Value::string(
+                            "__main__".to_string(),
+                        )),
+                        // Docstring extraction is not yet implemented at compile time;
+                        // initialise to None (matching CPython for functions without a
+                        // docstring).
+                        doc: std::cell::RefCell::new(Value::none()),
                         params,
                         local_names: proto_local_names,
                         local_index: proto_local_index,
