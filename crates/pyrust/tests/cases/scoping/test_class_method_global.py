@@ -1,8 +1,10 @@
 # Parity fixture for issue #624:
 # A `global x` declaration in a *method* must not affect how the *class body*
-# stores the same name.  The class body's `x = ...` should produce a class
-# attribute (RecordClassStore), while the method's `global x; x = ...` should
-# write directly to the module global.
+# stores the same name.  Even a bare `global x` (no assignment in the method)
+# must not prevent the class body's `x = ...` from producing a class attribute
+# (RecordClassStore).  The case where the method also assigns (`global x;
+# x = ...`) and thereby writes to the module global is exercised in the
+# `D.method` section below.
 
 # --- basic case: class attr vs method-level global ---
 x = 0
