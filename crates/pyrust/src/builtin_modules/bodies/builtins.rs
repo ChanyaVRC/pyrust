@@ -1557,6 +1557,17 @@ pyrust_module! {
                 ValueKind::Int(n) => Ok(n as f64),
                 ValueKind::Float(f) => Ok(f),
                 ValueKind::Bool(b) => Ok(if b { 1.0 } else { 0.0 }),
+                ValueKind::BigInt(b) => {
+                    let f = b.to_f64().unwrap_or(f64::INFINITY);
+                    if f.is_finite() {
+                        Ok(f)
+                    } else {
+                        Err(PyError::named(
+                            "OverflowError",
+                            "int too large to convert to float",
+                        ))
+                    }
+                }
                 _ => Err(PyError::named(
                     "TypeError",
                     format!("complex() {what} argument must be a number"),
