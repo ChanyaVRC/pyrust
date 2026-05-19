@@ -10,9 +10,10 @@ pub fn seq_index(items: &[Value], args: &[Value], type_name: &str) -> Result<Val
         Some(ValueKind::Int(i)) => normalise_index(i, items.len()).min(items.len()),
         Some(ValueKind::Bool(b)) => normalise_index(b as i64, items.len()).min(items.len()),
         Some(_) => {
-            return Err(PyError::Runtime(format!(
-                "{type_name}.index() slice indices must be integers"
-            )));
+            return Err(PyError::named(
+                "TypeError",
+                "slice indices must be integers or have an __index__ method",
+            ));
         }
         None => 0,
     };
@@ -20,9 +21,10 @@ pub fn seq_index(items: &[Value], args: &[Value], type_name: &str) -> Result<Val
         Some(ValueKind::Int(i)) => normalise_index(i, items.len()).min(items.len()),
         Some(ValueKind::Bool(b)) => normalise_index(b as i64, items.len()).min(items.len()),
         Some(_) => {
-            return Err(PyError::Runtime(format!(
-                "{type_name}.index() slice indices must be integers"
-            )));
+            return Err(PyError::named(
+                "TypeError",
+                "slice indices must be integers or have an __index__ method",
+            ));
         }
         None => items.len(),
     };
