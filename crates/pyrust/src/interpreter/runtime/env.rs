@@ -379,6 +379,12 @@ impl Interpreter {
                         let attrs_rc = func_attrs_rc(func);
                         return Ok(attrs_rc.borrow().clone());
                     }
+                    "__annotations__" => {
+                        // Return the stored dict Value directly (Rc-clone) so that
+                        // repeated reads yield the same object identity, matching
+                        // CPython: `f.__annotations__ is f.__annotations__` is True.
+                        return Ok(func.annotations.borrow().clone());
+                    }
                     _ => {}
                 }
                 // Fall through to arbitrary dynamic attrs.
@@ -750,6 +756,20 @@ impl Interpreter {
                             ))
                         }
                     }
+                    "__annotations__" => {
+                        // CPython allows replacing __annotations__ with any dict
+                        // (or raises TypeError if the value is not a dict).
+                        // Store the whole Value (Rc) so the new dict is identity-stable.
+                        if matches!(value.kind(), ValueKind::Dict(_)) {
+                            *func.annotations.borrow_mut() = value;
+                            Ok(())
+                        } else {
+                            Err(PyError::named(
+                                "TypeError",
+                                "__annotations__ must be set to a dict object".to_string(),
+                            ))
+                        }
+                    }
                     // CPython validates these slots and rejects arbitrary values.
                     // They are not yet implemented as real fields in pyrust, so
                     // validate the type and silently succeed for accepted values
@@ -778,17 +798,6 @@ impl Interpreter {
                             Err(PyError::named(
                                 "TypeError",
                                 "__kwdefaults__ must be set to a dict object".to_string(),
-                            ))
-                        }
-                    }
-                    "__annotations__" => {
-                        // CPython accepts None (stores as {}) or a dict; anything else → TypeError.
-                        if value.is_none() || matches!(value.kind(), ValueKind::Dict(_)) {
-                            Ok(())
-                        } else {
-                            Err(PyError::named(
-                                "TypeError",
-                                "__annotations__ must be set to a dict object".to_string(),
                             ))
                         }
                     }
@@ -961,6 +970,7 @@ impl Interpreter {
                 // `del f.__dict__` raises TypeError (CPython: "cannot delete __dict__").
                 // Arbitrary attrs are removed from the attrs dict; if absent,
                 // AttributeError (matching CPython).
+                // `del f.__annotations__` resets the dict to empty (matching CPython).
                 match name {
                     "__name__" | "__qualname__" => Err(PyError::named(
                         "TypeError",
@@ -978,6 +988,13 @@ impl Interpreter {
                         "TypeError",
                         "cannot delete __dict__".to_string(),
                     )),
+                    "__annotations__" => {
+                        // CPython allows `del f.__annotations__`; it resets the
+                        // dict to a fresh empty dict (new object).
+                        *func.annotations.borrow_mut() =
+                            Value::dict(indexmap::IndexMap::new());
+                        Ok(())
+                    }
                     // CPython-matched behaviour for validated-but-unimplemented slots.
                     "__code__" => Err(PyError::named(
                         "TypeError",
@@ -987,11 +1004,11 @@ impl Interpreter {
                         "AttributeError",
                         "readonly attribute".to_string(),
                     )),
-                    // CPython allows `del f.__defaults__` / `del f.__annotations__` /
-                    // `del f.__kwdefaults__` (they reset to None / {} / None).  Since
-                    // pyrust doesn't implement these slots yet, silently succeed — the
-                    // state the caller intended (unset) already matches pyrust's state.
-                    "__defaults__" | "__annotations__" | "__kwdefaults__" => Ok(()),
+                    // CPython allows `del f.__defaults__` / `del f.__kwdefaults__`
+                    // (they reset to None).  Since pyrust doesn't implement these slots
+                    // yet, silently succeed — the state the caller intended (unset)
+                    // already matches pyrust's state.
+                    "__defaults__" | "__kwdefaults__" => Ok(()),
                     _ => {
                         // Short-circuit: if attrs were never initialised, there
                         // is nothing to delete — raise AttributeError immediately.

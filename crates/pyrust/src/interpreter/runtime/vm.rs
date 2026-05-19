@@ -2223,7 +2223,7 @@ impl Interpreter {
                 }
 
                 // ── Function / Class creation ────────────────────────────
-                Insn::MakeFunction(dst, proto_idx, defs_base, _defs_n) => {
+                Insn::MakeFunction(dst, proto_idx, defs_base, _defs_n, annots_base, _annots_n) => {
                     let proto = pool_get!(code.fn_protos, *proto_idx, "fn_proto");
                     // Rc bumps only — no Vec clones for param metadata or local_names.
                     let proto_code = Rc::clone(&proto.code);
@@ -2234,6 +2234,7 @@ impl Interpreter {
                     let proto_global_names = Rc::clone(&proto.global_names);
                     let proto_nonlocal_names = Rc::clone(&proto.nonlocal_names);
                     let param_spec = Rc::clone(&proto.param_spec);
+                    let annotation_keys = proto.annotation_keys.clone();
                     let is_pure = proto.is_pure;
 
                     let mut params = Vec::with_capacity(param_spec.names.len());
@@ -2256,6 +2257,21 @@ impl Interpreter {
                             is_positional_only: param_spec.is_positional_only[i],
                         });
                     }
+                    // Build the __annotations__ dict from the annotation register window.
+                    // annotation_keys[i] is the key (param name or "return") for
+                    // R[annots_base + i].
+                    // Wrap in Value::dict so get_attr returns the same Rc each time,
+                    // preserving CPython identity: `f.__annotations__ is f.__annotations__`.
+                    let mut annotations_map = indexmap::IndexMap::new();
+                    for (i, key) in annotation_keys.iter().enumerate() {
+                        let val = vm_try!(vm_read(
+                            &regs,
+                            *annots_base + i as u32,
+                            num_locals
+                        ));
+                        annotations_map.insert(PyKey::Str(key.clone()), val);
+                    }
+                    let annotations = Value::dict(annotations_map);
                     // Validate that every nonlocal name resolves to an enclosing local scope.
                     for name in proto_nonlocal_names.iter() {
                         if !has_local_binding_in_current_or_ancestor(&self.env, name) {
@@ -2286,6 +2302,7 @@ impl Interpreter {
                         // or attribute assignment.  Avoids two heap allocations
                         // per function definition when no attrs are ever set.
                         attrs: std::cell::RefCell::new(None),
+                        annotations: std::cell::RefCell::new(annotations),
                         params,
                         local_names: proto_local_names,
                         local_index: proto_local_index,

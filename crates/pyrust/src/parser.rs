@@ -634,10 +634,12 @@ impl Parser {
         let params = self.parse_params()?;
         self.expect(&Token::RParen)?;
         // Optional return annotation
-        if self.is(&Token::Arrow) {
+        let return_annotation = if self.is(&Token::Arrow) {
             self.bump();
-            self.parse_expr()?; // consume but discard annotation
-        }
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
         self.expect(&Token::Colon)?;
         let body = self.parse_suite()?;
         Ok(Stmt::Def {
@@ -645,6 +647,7 @@ impl Parser {
             params,
             body,
             decorators,
+            return_annotation,
         })
     }
 
@@ -690,6 +693,14 @@ impl Parser {
             } else if self.is(&Token::StarStar) {
                 self.bump();
                 let name = self.expect_ident("kwargs parameter name")?;
+                // **kwargs can have an annotation in theory but it is very rare
+                // and CPython does include it in __annotations__; retain it.
+                let annotation = if self.is(&Token::Colon) {
+                    self.bump();
+                    Some(self.parse_expr()?)
+                } else {
+                    None
+                };
                 let default = if self.is(&Token::Assign) {
                     self.bump();
                     seen_default = true;
@@ -700,6 +711,7 @@ impl Parser {
                 params.push(FunctionParam {
                     name,
                     default,
+                    annotation,
                     is_args: false,
                     is_kwargs: true,
                     is_keyword_only: false,
@@ -713,9 +725,17 @@ impl Parser {
                     // bare * separator: keyword-only follows
                 } else {
                     let name = self.expect_ident("args parameter name")?;
+                    // *args can have an annotation; retain it.
+                    let annotation = if self.is(&Token::Colon) {
+                        self.bump();
+                        Some(self.parse_expr()?)
+                    } else {
+                        None
+                    };
                     params.push(FunctionParam {
                         name,
                         default: None,
+                        annotation,
                         is_args: true,
                         is_kwargs: false,
                         is_keyword_only: false,
@@ -728,10 +748,12 @@ impl Parser {
                     Some(Token::Ident(name)) => {
                         self.bump();
                         // Optional annotation
-                        if self.is(&Token::Colon) {
+                        let annotation = if self.is(&Token::Colon) {
                             self.bump();
-                            self.parse_expr()?; // discard
-                        }
+                            Some(self.parse_expr()?)
+                        } else {
+                            None
+                        };
                         let default = if self.is(&Token::Assign) {
                             self.bump();
                             seen_default = true;
@@ -747,6 +769,7 @@ impl Parser {
                         params.push(FunctionParam {
                             name,
                             default,
+                            annotation,
                             is_args: false,
                             is_kwargs: false,
                             is_keyword_only: seen_star,

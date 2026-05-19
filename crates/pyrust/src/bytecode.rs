@@ -45,6 +45,11 @@ pub struct FnProto {
     pub global_names: Rc<HashSet<String>>,
     pub nonlocal_names: Rc<HashSet<String>>,
     pub is_pure: bool,
+    /// Names for annotation registers passed to `MakeFunction`.  Parallel to
+    /// the `annots_base..+annots_n` register window: `annotation_keys[i]` is
+    /// the dict key (parameter name or `"return"`) for `R[annots_base + i]`.
+    /// Empty when the function has no annotations.
+    pub annotation_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -172,8 +177,12 @@ pub enum Insn {
     RaiseFrom(Reg, Reg),
     /// re-raise active exception (bare `raise`)
     RaiseReRaise,
-    /// R[dst] = new UserFunction(fn_protos[proto_idx], defaults R[defs_base..+defs_n], env=current)
-    MakeFunction(Reg, u8, Reg, u8),
+    /// R[dst] = new UserFunction(fn_protos[proto_idx], defaults R[defs_base..+defs_n],
+    ///          annotations R[annots_base..+annots_n], env=current).
+    /// `annots_n == 0` means no annotations; `annots_base` is ignored in that case.
+    /// The annotation names (parallel to the register values) are stored in
+    /// `FnProto::annotation_keys`.
+    MakeFunction(Reg, u8, Reg, u8, Reg, u8),
     /// R[dst] = load_module(names[name_idx])
     ImportModule(Reg, u16),
     /// Push an exception handler; if an exception is raised before PopExcept,

@@ -606,6 +606,16 @@ pub struct UserFunction {
     /// `get_attr("__dict__")` can initialize the dict through a shared
     /// `Rc<UserFunction>` without requiring `&mut self`.
     pub attrs: RefCell<Option<Rc<RefCell<Value>>>>,
+    /// `f.__annotations__` — dict mapping annotated parameter names (and
+    /// `'return'` for the return annotation) to their evaluated annotation
+    /// values.  Populated at function-definition time (matching CPython's
+    /// runtime evaluation semantics).  User code may replace the entire dict
+    /// via `f.__annotations__ = {...}`.
+    ///
+    /// Stored as a `Value` (always `Value::dict(...)`) so that repeated
+    /// attribute reads return the *same* dict object (Rc identity), matching
+    /// CPython: `f.__annotations__ is f.__annotations__` is `True`.
+    pub annotations: RefCell<Value>,
     pub params: Vec<UserFunctionParam>,
     pub local_names: NameSet,
     pub local_index: Rc<HashMap<String, u32>>,
@@ -1667,6 +1677,7 @@ impl Value {
                 module: RefCell::new(Value::none()),
                 doc: RefCell::new(Value::none()),
                 attrs: RefCell::new(None),
+                annotations: RefCell::new(Value::dict(IndexMap::new())),
                 params: Vec::new(),
                 local_names: Rc::new(HashSet::new()),
                 local_index: Rc::new(HashMap::new()),
@@ -1732,6 +1743,7 @@ impl Value {
             module: RefCell::new(f.module.borrow().clone()),
             doc: RefCell::new(f.doc.borrow().clone()),
             attrs: RefCell::new(f.attrs.borrow().as_ref().map(Rc::clone)),
+            annotations: RefCell::new(f.annotations.borrow().clone()),
             params: f.params.clone(),
             local_names: Rc::clone(&f.local_names),
             local_index: Rc::clone(&f.local_index),
@@ -3571,6 +3583,7 @@ mod tests {
             module: RefCell::new(Value::string("__main__".to_string())),
             doc: RefCell::new(Value::none()),
             attrs: RefCell::new(None),
+            annotations: RefCell::new(Value::dict(IndexMap::new())),
             params: Vec::new(),
             local_names: Rc::new(HashSet::new()),
             local_index: Rc::new(HashMap::new()),
