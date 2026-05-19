@@ -560,6 +560,14 @@ impl Interpreter {
                     )),
                 }
             }
+            ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. } => {
+                // CPython raises AttributeError (not a generic RuntimeError) when
+                // you try to set any attribute on a bound method object.
+                Err(PyError::named(
+                    "AttributeError",
+                    format!("'method' object has no attribute '{name}'"),
+                ))
+            }
             _ => Err(PyError::Runtime(format!(
                 "object has no writable attribute '{}'",
                 name
@@ -628,6 +636,14 @@ impl Interpreter {
                 }
                 class.borrow_mut().attrs.shift_remove(name);
                 Ok(())
+            }
+            ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. } => {
+                // CPython raises AttributeError when deleting any attribute on a
+                // bound method object.
+                Err(PyError::named(
+                    "AttributeError",
+                    format!("'method' object has no attribute '{name}'"),
+                ))
             }
             _ => Err(PyError::Runtime(
                 "can only delete attributes of class instances".to_string(),
