@@ -341,7 +341,22 @@ impl Interpreter {
                     }
                     "__module__" => return Ok(func.module.borrow().clone()),
                     "__doc__" => return Ok(func.doc.borrow().clone()),
+                    "__dict__" => {
+                        // Return the live dict object — CPython returns the same
+                        // object every time, so `d = f.__dict__; d['x'] = 1`
+                        // makes `f.x` visible.  Initialise lazily on first access.
+                        let attrs_rc = func_attrs_rc(func);
+                        return Ok(attrs_rc.borrow().clone());
+                    }
                     _ => {}
+                }
+                // Fall through to arbitrary dynamic attrs.
+                // Short-circuit without initialising if no attrs have been stored yet.
+                let key = PyKey::Str(name.to_string());
+                if let Some(rc) = func.attrs.borrow().as_ref().map(Rc::clone) {
+                    if let Some(v) = rc.borrow().as_dict().and_then(|d| d.get(&key).cloned()) {
+                        return Ok(v);
+                    }
                 }
                 Err(PyError::named(
                     "AttributeError",
@@ -409,8 +424,8 @@ impl Interpreter {
             }
             _ => {
                 // BoundMethod / ClassBoundMethod: delegate __name__ / __qualname__ /
-                // __module__ / __doc__ to the underlying function, matching CPython's
-                // method proxy semantics.
+                // __module__ / __doc__ / __dict__ and arbitrary dynamic attrs to the
+                // underlying function, matching CPython's method proxy semantics.
                 match target.kind() {
                     ValueKind::BoundMethod { function, .. }
                     | ValueKind::ClassBoundMethod { function, .. } => match name {
@@ -434,7 +449,23 @@ impl Interpreter {
                         }
                         "__module__" => return Ok(function.module.borrow().clone()),
                         "__doc__" => return Ok(function.doc.borrow().clone()),
-                        _ => {}
+                        "__dict__" => {
+                            // Live dict object — same semantics as UserFunction.
+                            let attrs_rc = func_attrs_rc(function);
+                            return Ok(attrs_rc.borrow().clone());
+                        }
+                        _ => {
+                            // Arbitrary dynamic attrs delegate to the underlying function.
+                            // Short-circuit without initialising if no attrs set yet.
+                            let key = PyKey::Str(name.to_string());
+                            if let Some(rc) = function.attrs.borrow().as_ref().map(Rc::clone) {
+                                if let Some(v) =
+                                    rc.borrow().as_dict().and_then(|d| d.get(&key).cloned())
+                                {
+                                    return Ok(v);
+                                }
+                            }
+                        }
                     },
                     _ => {}
                 }
@@ -557,6 +588,8 @@ impl Interpreter {
                 // functions — both must be set to a str, otherwise TypeError.
                 // __module__ and __doc__ accept any value (CPython imposes no
                 // type constraint on these).
+                // __dict__ must be set to a dict; any other name goes into
+                // the function's dynamic attrs dict.
                 match name {
                     "__name__" | "__qualname__" => {
                         let as_str: Option<String> = if let ValueKind::Str(s) = value.kind() {
@@ -587,10 +620,84 @@ impl Interpreter {
                         *func.doc.borrow_mut() = value;
                         Ok(())
                     }
-                    _ => Err(PyError::named(
-                        "AttributeError",
-                        format!("'function' object attribute '{name}' is read-only"),
+                    "__dict__" => {
+                        // CPython requires the replacement to be a dict.
+                        if matches!(value.kind(), ValueKind::Dict(_)) {
+                            // Replace the inner Value in place through the existing Rc so
+                            // that any Rc clones (bound methods, etc.) see the new dict.
+                            // If attrs was never initialised, just store a fresh Rc.
+                            let mut slot = func.attrs.borrow_mut();
+                            if let Some(rc) = slot.as_ref() {
+                                *rc.borrow_mut() = value;
+                            } else {
+                                *slot = Some(Rc::new(RefCell::new(value)));
+                            }
+                            Ok(())
+                        } else {
+                            let type_name = pyrust_core::builtin_type_name(&value);
+                            Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "__dict__ must be set to a dictionary, not a '{type_name}'"
+                                ),
+                            ))
+                        }
+                    }
+                    // CPython validates these slots and rejects arbitrary values.
+                    // They are not yet implemented as real fields in pyrust, so
+                    // validate the type and silently succeed for accepted values
+                    // (pyrust is already in the "unset" state CPython would be
+                    // in after the assignment).
+                    "__code__" => Err(PyError::named(
+                        "TypeError",
+                        "__code__ must be set to a code object".to_string(),
                     )),
+                    "__defaults__" => {
+                        // CPython accepts None or a tuple; anything else → TypeError.
+                        if value.is_none() || matches!(value.kind(), ValueKind::Tuple(_)) {
+                            Ok(())
+                        } else {
+                            Err(PyError::named(
+                                "TypeError",
+                                "__defaults__ must be set to a tuple object".to_string(),
+                            ))
+                        }
+                    }
+                    "__kwdefaults__" => {
+                        // CPython accepts None or a dict; anything else → TypeError.
+                        if value.is_none() || matches!(value.kind(), ValueKind::Dict(_)) {
+                            Ok(())
+                        } else {
+                            Err(PyError::named(
+                                "TypeError",
+                                "__kwdefaults__ must be set to a dict object".to_string(),
+                            ))
+                        }
+                    }
+                    "__annotations__" => {
+                        // CPython accepts None (stores as {}) or a dict; anything else → TypeError.
+                        if value.is_none() || matches!(value.kind(), ValueKind::Dict(_)) {
+                            Ok(())
+                        } else {
+                            Err(PyError::named(
+                                "TypeError",
+                                "__annotations__ must be set to a dict object".to_string(),
+                            ))
+                        }
+                    }
+                    "__globals__" | "__closure__" => Err(PyError::named(
+                        "AttributeError",
+                        "readonly attribute".to_string(),
+                    )),
+                    _ => {
+                        // Arbitrary dynamic attribute — insert into the live dict,
+                        // initialising attrs lazily if this is the first write.
+                        let attrs_rc = func_attrs_rc(func);
+                        attrs_rc
+                            .borrow()
+                            .dict_insert(PyKey::Str(name.to_string()), value)
+                            .map(|_| ())
+                    }
                 }
             }
             ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. } => {
@@ -599,6 +706,16 @@ impl Interpreter {
                 Err(PyError::named(
                     "AttributeError",
                     format!("'method' object has no attribute '{name}'"),
+                ))
+            }
+            ValueKind::BuiltinFunction(_) => {
+                // CPython: builtin_function_or_method objects have no __dict__
+                // and do not support arbitrary attribute assignment.
+                Err(PyError::named(
+                    "AttributeError",
+                    format!(
+                        "'builtin_function_or_method' object has no attribute '{name}'"
+                    ),
                 ))
             }
             _ => Err(PyError::Runtime(format!(
@@ -648,6 +765,9 @@ impl Interpreter {
                 // but cannot be deleted.
                 // `del f.__module__` and `del f.__doc__` are allowed; they reset
                 // the slot to None (matching CPython).
+                // `del f.__dict__` raises TypeError (CPython: "cannot delete __dict__").
+                // Arbitrary attrs are removed from the attrs dict; if absent,
+                // AttributeError (matching CPython).
                 match name {
                     "__name__" | "__qualname__" => Err(PyError::named(
                         "TypeError",
@@ -661,10 +781,42 @@ impl Interpreter {
                         *func.doc.borrow_mut() = Value::none();
                         Ok(())
                     }
-                    _ => Err(PyError::named(
-                        "AttributeError",
-                        format!("'function' object has no attribute '{name}'"),
+                    "__dict__" => Err(PyError::named(
+                        "TypeError",
+                        "cannot delete __dict__".to_string(),
                     )),
+                    // CPython-matched behaviour for validated-but-unimplemented slots.
+                    "__code__" => Err(PyError::named(
+                        "TypeError",
+                        "__code__ must be set to a code object".to_string(),
+                    )),
+                    "__globals__" | "__closure__" => Err(PyError::named(
+                        "AttributeError",
+                        "readonly attribute".to_string(),
+                    )),
+                    // CPython allows `del f.__defaults__` / `del f.__annotations__` /
+                    // `del f.__kwdefaults__` (they reset to None / {} / None).  Since
+                    // pyrust doesn't implement these slots yet, silently succeed — the
+                    // state the caller intended (unset) already matches pyrust's state.
+                    "__defaults__" | "__annotations__" | "__kwdefaults__" => Ok(()),
+                    _ => {
+                        // Short-circuit: if attrs were never initialised, there
+                        // is nothing to delete — raise AttributeError immediately.
+                        let key = PyKey::Str(name.to_string());
+                        let removed = func
+                            .attrs
+                            .borrow()
+                            .as_ref()
+                            .and_then(|rc| rc.borrow().dict_shift_remove(&key).ok().flatten());
+                        if removed.is_some() {
+                            Ok(())
+                        } else {
+                            Err(PyError::named(
+                                "AttributeError",
+                                format!("'function' object has no attribute '{name}'"),
+                            ))
+                        }
+                    }
                 }
             }
             ValueKind::PyClass(class) => {
@@ -941,6 +1093,19 @@ impl Interpreter {
         Ok(value.truthy())
     }
 
+}
+
+/// Returns the attrs `Rc` for `func`, initialising it lazily on first call.
+///
+/// Lazy init avoids two heap allocations per function definition for the common
+/// case where no attrs are ever set.  Interior mutability (`RefCell`) allows
+/// initialization through a shared `Rc<UserFunction>`.
+fn func_attrs_rc(func: &UserFunction) -> Rc<RefCell<Value>> {
+    let mut slot = func.attrs.borrow_mut();
+    if slot.is_none() {
+        *slot = Some(Rc::new(RefCell::new(Value::dict(IndexMap::new()))));
+    }
+    Rc::clone(slot.as_ref().unwrap())
 }
 
 /// Returns `true` if `name` is a built-in method on `target`'s type.

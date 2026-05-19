@@ -2169,6 +2169,10 @@ impl Interpreter {
                         // initialise to None (matching CPython for functions without a
                         // docstring).
                         doc: std::cell::RefCell::new(Value::none()),
+                        // Lazy: allocated only when first accessed via __dict__
+                        // or attribute assignment.  Avoids two heap allocations
+                        // per function definition when no attrs are ever set.
+                        attrs: std::cell::RefCell::new(None),
                         params,
                         local_names: proto_local_names,
                         local_index: proto_local_index,
