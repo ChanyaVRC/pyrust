@@ -1104,25 +1104,21 @@ pyrust_module! {
         }
     }
 
-    /// CPython: globals() — dict snapshot of the current module's namespace.
+    /// CPython: globals() — the live module namespace dict (issue #706).
     /// <https://docs.python.org/3/library/functions.html#globals>
     ///
-    /// Built via `snapshot_module_namespace`, which merges:
-    ///   * the module-level `Environment::values` (built-in exceptions,
-    ///     `NotImplemented`, plus any names that have been spilled out
-    ///     of registers by the script-end flush in `program.rs`), and
-    ///   * the active script frame's fastlocal registers (so a top-level
-    ///     `x = 5; print(globals())` actually shows `x`, even though `x`
-    ///     lives in a register until the script exits).
+    /// Returns `Interpreter::module_globals_dict`, a persistent `Value::dict`
+    /// kept in sync with the module env on every write:
+    ///   * `seed_module_dunders` pre-populates it with `__name__`, `__doc__`, etc.
+    ///   * `assign_name` mirrors every module-global write into it.
+    ///   * All module-level assignments use all-env mode (issue #706), so they
+    ///     route through `assign_name` rather than fastlocal registers.
     ///
-    /// When called from inside a function, this still returns the
-    /// *module* globals — never the calling frame's locals.  CPython
-    /// returns a live view of the module dict (mutations write through);
-    /// pyrust returns a snapshot for v1 because the env values map is a
-    /// `HashMap<String, Value>` plus a register slice, not a single
-    /// `Value::dict` we can hand back by reference.  Issue #389 calls
-    /// out the snapshot limitation as acceptable, and the common
-    /// read-only iteration use case is fully supported.
+    /// Because `Value::dict` wraps `Rc<RefCell<IndexMap<...>>>`, cloning the
+    /// value shares the same `Rc`.  So `globals() is globals()` is `True`
+    /// (both calls return a clone of the same `Rc`), and mutating the returned
+    /// dict directly updates the backing store — `LoadGlobal` checks this dict
+    /// first, making `globals()["x"] = 99; print(x)` work correctly.
     fn globals(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if !args.is_empty() {
@@ -1131,19 +1127,17 @@ pyrust_module! {
                 format!("{FN_NAME}() takes no arguments ({} given)", args.len()),
             ));
         }
-        Ok(Value::dict(snapshot_module_namespace(_interp)))
+        Ok(_interp.module_globals_dict.clone())
     }
 
     /// CPython: locals() — dict snapshot of the current local namespace.
     /// <https://docs.python.org/3/library/functions.html#locals>
     ///
-    /// At module scope, `locals()` returns the same dict as `globals()`
-    /// (CPython parity: at module level the two namespaces are the same
-    /// object).  Inside a function body it returns a snapshot of the
-    /// function's locals — CPython also snapshots and its docs warn that
-    /// mutations to the returned dict aren't guaranteed to propagate.
-    /// Both fastlocal-register and env-stored bindings are merged via
-    /// `snapshot_current_locals`.
+    /// At module scope, `locals()` returns the same live dict as `globals()`
+    /// (CPython parity: at module level the two namespaces are the same object).
+    /// Inside a function body it returns a snapshot of the function's locals —
+    /// CPython also snapshots and its docs warn that mutations to the returned
+    /// dict aren't guaranteed to propagate.
     fn locals(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if !args.is_empty() {
@@ -1151,6 +1145,18 @@ pyrust_module! {
                 "TypeError",
                 format!("{FN_NAME}() takes no arguments ({} given)", args.len()),
             ));
+        }
+        // At module scope (the innermost frame is the Script frame, or there are
+        // no function frames), return the persistent module_globals_dict — the
+        // same object as `globals()` (CPython parity: locals() is globals() at
+        // module level).
+        let is_module_scope = _interp
+            .vm_frame_views
+            .last()
+            .map(|v| v.kind == crate::interpreter::FrameKind::Script)
+            .unwrap_or(true);
+        if is_module_scope {
+            return Ok(_interp.module_globals_dict.clone());
         }
         Ok(Value::dict(snapshot_current_locals(_interp)))
     }

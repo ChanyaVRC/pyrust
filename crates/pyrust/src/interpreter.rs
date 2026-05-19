@@ -247,6 +247,16 @@ pub struct Interpreter {
     /// [`ExcClasses`] is a newtype that exposes a `get(&str)` method so
     /// callers stay legible and the HashMap detail stays local.
     pub(crate) exc_classes: ExcClasses,
+    /// The persistent module globals dict — the single `Value::dict` that
+    /// `globals()` returns on every call (issue #706).
+    ///
+    /// All writes to the module-level namespace (via `assign_name` and
+    /// `seed_module_dunders`) also write into this dict, so it stays live.
+    /// `globals()` returns `module_globals_dict.clone()`, which shares the
+    /// same `Rc<RefCell<IndexMap<...>>>` — callers that mutate the returned
+    /// dict are mutating this backing store directly, and `LoadGlobal`
+    /// checks this dict first so those mutations are visible as globals.
+    pub(crate) module_globals_dict: Value,
 }
 
 /// Discriminator for `VmFrameView`: script-level (module-scope) vs.
@@ -370,6 +380,7 @@ impl Default for Interpreter {
             vm_frame_views: Vec::new(),
             eq_in_progress: Vec::new(),
             exc_classes,
+            module_globals_dict: Value::dict(IndexMap::new()),
         }
     }
 }
