@@ -1567,6 +1567,18 @@ impl Interpreter {
                     out.extend_from_slice(b);
                     Ok(Value::tuple(out))
                 }
+                (ValueKind::Bytes(a), ValueKind::Bytes(b)) => {
+                    let mut out = a.as_ref().clone();
+                    out.extend_from_slice(b);
+                    Ok(Value::bytes(out))
+                }
+                (ValueKind::Bytes(_), _) => Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "can't concat {} to bytes",
+                        pyrust_core::builtin_type_name(&r)
+                    ),
+                )),
                 _ => Err(Self::unsupported_binary_operand("+")),
         }
     }
@@ -1641,6 +1653,14 @@ impl Interpreter {
                 let mut out = Vec::with_capacity(items.len() * n);
                 for _ in 0..n { out.extend_from_slice(&items[..]); }
                 Ok(Value::list(out))
+            }
+            (ValueKind::Bytes(data), ValueKind::Int(n)) => {
+                if n <= 0 { return Ok(Value::bytes(Vec::new())); }
+                Ok(Value::bytes(data.repeat(n as usize)))
+            }
+            (ValueKind::Int(n), ValueKind::Bytes(data)) => {
+                if n <= 0 { return Ok(Value::bytes(Vec::new())); }
+                Ok(Value::bytes(data.repeat(n as usize)))
             }
             _ => Err(Self::unsupported_binary_operand("*")),
         }
