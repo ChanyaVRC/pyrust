@@ -611,7 +611,11 @@ pub struct UserFunction {
     /// values.  Populated at function-definition time (matching CPython's
     /// runtime evaluation semantics).  User code may replace the entire dict
     /// via `f.__annotations__ = {...}`.
-    pub annotations: RefCell<IndexMap<PyKey, Value>>,
+    ///
+    /// Stored as a `Value` (always `Value::dict(...)`) so that repeated
+    /// attribute reads return the *same* dict object (Rc identity), matching
+    /// CPython: `f.__annotations__ is f.__annotations__` is `True`.
+    pub annotations: RefCell<Value>,
     pub params: Vec<UserFunctionParam>,
     pub local_names: NameSet,
     pub local_index: Rc<HashMap<String, u32>>,
@@ -1673,7 +1677,7 @@ impl Value {
                 module: RefCell::new(Value::none()),
                 doc: RefCell::new(Value::none()),
                 attrs: RefCell::new(None),
-                annotations: RefCell::new(IndexMap::new()),
+                annotations: RefCell::new(Value::dict(IndexMap::new())),
                 params: Vec::new(),
                 local_names: Rc::new(HashSet::new()),
                 local_index: Rc::new(HashMap::new()),
@@ -3579,7 +3583,7 @@ mod tests {
             module: RefCell::new(Value::string("__main__".to_string())),
             doc: RefCell::new(Value::none()),
             attrs: RefCell::new(None),
-            annotations: RefCell::new(IndexMap::new()),
+            annotations: RefCell::new(Value::dict(IndexMap::new())),
             params: Vec::new(),
             local_names: Rc::new(HashSet::new()),
             local_index: Rc::new(HashMap::new()),

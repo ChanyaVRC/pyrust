@@ -380,7 +380,10 @@ impl Interpreter {
                         return Ok(attrs_rc.borrow().clone());
                     }
                     "__annotations__" => {
-                        return Ok(Value::dict(func.annotations.borrow().clone()));
+                        // Return the stored dict Value directly (Rc-clone) so that
+                        // repeated reads yield the same object identity, matching
+                        // CPython: `f.__annotations__ is f.__annotations__` is True.
+                        return Ok(func.annotations.borrow().clone());
                     }
                     _ => {}
                 }
@@ -756,15 +759,15 @@ impl Interpreter {
                     "__annotations__" => {
                         // CPython allows replacing __annotations__ with any dict
                         // (or raises TypeError if the value is not a dict).
-                        match value.kind() {
-                            ValueKind::Dict(d) => {
-                                *func.annotations.borrow_mut() = d.clone();
-                                Ok(())
-                            }
-                            _ => Err(PyError::named(
+                        // Store the whole Value (Rc) so the new dict is identity-stable.
+                        if matches!(value.kind(), ValueKind::Dict(_)) {
+                            *func.annotations.borrow_mut() = value;
+                            Ok(())
+                        } else {
+                            Err(PyError::named(
                                 "TypeError",
                                 "__annotations__ must be set to a dict object".to_string(),
-                            )),
+                            ))
                         }
                     }
                     // CPython validates these slots and rejects arbitrary values.
@@ -775,6 +778,7 @@ impl Interpreter {
                     "__code__" => Err(PyError::named(
                         "TypeError",
                         "__code__ must be set to a code object".to_string(),
+                    )),
                     "__defaults__" => {
                         // CPython accepts None or a tuple; anything else → TypeError.
                         if value.is_none() || matches!(value.kind(), ValueKind::Tuple(_)) {
@@ -986,8 +990,9 @@ impl Interpreter {
                     )),
                     "__annotations__" => {
                         // CPython allows `del f.__annotations__`; it resets the
-                        // dict to empty rather than removing the attribute.
-                        *func.annotations.borrow_mut() = indexmap::IndexMap::new();
+                        // dict to a fresh empty dict (new object).
+                        *func.annotations.borrow_mut() =
+                            Value::dict(indexmap::IndexMap::new());
                         Ok(())
                     }
                     // CPython-matched behaviour for validated-but-unimplemented slots.

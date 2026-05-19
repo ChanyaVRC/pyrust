@@ -75,4 +75,13 @@ class C:
 
 print(C.method.__annotations__)  # {'n': <class 'int'>, 'return': <class 'str'>}
 
+# Identity: repeated reads of __annotations__ return the same dict object
+def p(x: int) -> str:
+    pass
+
+d = p.__annotations__
+print(d is p.__annotations__)  # True — same Rc each time
+d["z"] = list                  # mutation visible on next access
+print(p.__annotations__)       # {'x': <class 'int'>, 'return': <class 'str'>, 'z': <class 'list'>}
+
 print("function annotations OK")

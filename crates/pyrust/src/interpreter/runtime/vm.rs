@@ -2260,15 +2260,18 @@ impl Interpreter {
                     // Build the __annotations__ dict from the annotation register window.
                     // annotation_keys[i] is the key (param name or "return") for
                     // R[annots_base + i].
-                    let mut annotations = indexmap::IndexMap::new();
+                    // Wrap in Value::dict so get_attr returns the same Rc each time,
+                    // preserving CPython identity: `f.__annotations__ is f.__annotations__`.
+                    let mut annotations_map = indexmap::IndexMap::new();
                     for (i, key) in annotation_keys.iter().enumerate() {
                         let val = vm_try!(vm_read(
                             &regs,
                             *annots_base + i as u32,
                             num_locals
                         ));
-                        annotations.insert(PyKey::Str(key.clone()), val);
+                        annotations_map.insert(PyKey::Str(key.clone()), val);
                     }
+                    let annotations = Value::dict(annotations_map);
                     // Validate that every nonlocal name resolves to an enclosing local scope.
                     for name in proto_nonlocal_names.iter() {
                         if !has_local_binding_in_current_or_ancestor(&self.env, name) {
