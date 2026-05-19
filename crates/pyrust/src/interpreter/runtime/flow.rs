@@ -234,6 +234,26 @@ impl Interpreter {
         Ok(instantiate_exception(class, vec![Value::string(message)]))
     }
 
+    /// Like [`instantiate_named_exception`] but stores a raw `Value` as
+    /// `args[0]` instead of a `Value::string(message)`.  Used for `KeyError`
+    /// so that `e.args[0]` returns the original key object, matching CPython.
+    fn instantiate_named_exception_with_value(&self, name: &str, arg: Value) -> Result<Value> {
+        let class = match lookup_name_in_module(&self.env, name) {
+            Some(v) => match v.kind() {
+                ValueKind::PyClass(c) => Rc::clone(c),
+                _ => return Err(PyError::Runtime(format!(
+                    "built-in exception '{}' is not defined",
+                    name
+                ))),
+            },
+            None => return Err(PyError::Runtime(format!(
+                "built-in exception '{}' is not defined",
+                name
+            ))),
+        };
+        Ok(instantiate_exception(class, vec![arg]))
+    }
+
     fn exception_matches(&self, exception: &Value, kind: &Value) -> Result<bool> {
         let instance = match exception.kind() {
             ValueKind::PyInstance(i) => Rc::clone(i),

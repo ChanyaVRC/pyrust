@@ -169,7 +169,7 @@ impl Interpreter {
             let key = self.value_to_pykey(&index)?;
             return match self.dict_lookup(&target, &key)? {
                 Some((_, v)) => Ok(v),
-                None => Err(PyError::named("KeyError", index.repr())),
+                None => Err(PyError::key_error(index)),
             };
         }
         match target.kind() {
@@ -1013,7 +1013,7 @@ impl Interpreter {
                             if let Some(default) = iter.next() {
                                 Ok(default)
                             } else {
-                                Err(PyError::named("KeyError", key_val.repr()))
+                                Err(PyError::key_error(key_val.clone()))
                             }
                         }
                     },
@@ -1088,7 +1088,7 @@ impl Interpreter {
                                 })?;
                             Ok(Value::none())
                         }
-                        None => Err(PyError::named("KeyError", key_val.repr())),
+                        None => Err(PyError::key_error(key_val.clone())),
                     },
                     _ => unreachable!(),
                 }

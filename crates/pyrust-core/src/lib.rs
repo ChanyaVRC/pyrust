@@ -2826,7 +2826,11 @@ fn format_exception_args(args: &[Value], repr_mode: bool) -> String {
 
 fn exception_to_string(instance: &Rc<RefCell<PyInstance>>) -> String {
     let args = exception_args(instance);
-    format_exception_args(&args, false)
+    // CPython's `KeyError.__str__` always uses repr of the single arg, so
+    // `str(KeyError('x'))` returns `"'x'"` (one level of quoting).  All other
+    // exception classes use `str()` of the arg (no extra quoting).
+    let is_key_error = instance.borrow().class.borrow().name == "KeyError";
+    format_exception_args(&args, is_key_error)
 }
 
 fn exception_repr(instance: &Rc<RefCell<PyInstance>>) -> String {
@@ -2895,6 +2899,13 @@ pub enum PyError {
     /// `pyrust-builtins` that cannot reference a `PyClass` Rc should
     /// continue to use [`PyError::named`] / `PyError::Named`.
     Class(Rc<RefCell<PyClass>>, String), // (class, message)
+    /// A `KeyError` that carries the **raw key `Value`** as `args[0]`.
+    ///
+    /// CPython stores the key object itself in `args[0]`, not a stringified
+    /// repr.  This variant lets all raise sites (builtin and VM) pass the key
+    /// through without pre-rendering it as a string.  The VM materialises it
+    /// as `instantiate_exception(KeyError_class, vec![key])`.
+    KeyError(Value),
     Raised(Value),
 }
 
@@ -2919,6 +2930,17 @@ impl PyError {
         PyError::Class(cls, msg.into())
     }
 
+    /// Constructor for a `KeyError` that stores the raw key `Value`.
+    ///
+    /// CPython keeps the original key object as `args[0]` of the `KeyError`
+    /// instance, so `e.args[0]` returns the key itself (not a repr string).
+    /// Use this at every dict/set key-not-found raise site instead of
+    /// `PyError::named("KeyError", key.repr())`.
+    #[inline]
+    pub fn key_error(key: Value) -> Self {
+        PyError::KeyError(key)
+    }
+
     /// Returns `true` when `self` is a `Named` or `Class` error whose
     /// exception class name equals `name`.
     ///
@@ -2931,6 +2953,7 @@ impl PyError {
         match self {
             PyError::Named(cls, _) => cls.as_ref() == name,
             PyError::Class(cls, _) => cls.borrow().name == name,
+            PyError::KeyError(_) => name == "KeyError",
             _ => false,
         }
     }
@@ -2944,6 +2967,7 @@ impl fmt::Display for PyError {
             PyError::Runtime(s) => write!(f, "Runtime error: {s}"),
             PyError::Named(cls, s) => write!(f, "{cls}: {s}"),
             PyError::Class(cls, s) => write!(f, "{}: {s}", cls.borrow().name),
+            PyError::KeyError(key) => write!(f, "KeyError: {}", key.repr()),
             PyError::Raised(value) => write!(f, "Uncaught exception: {}", value.repr()),
         }
     }

@@ -507,6 +507,12 @@ impl Interpreter {
             PyError::Class(cls, msg) => {
                 instantiate_exception(cls, vec![Value::string(msg)])
             }
+            PyError::KeyError(key) => {
+                match self.instantiate_named_exception_with_value("KeyError", key) {
+                    Ok(v) => v,
+                    Err(e2) => return Err(e2),
+                }
+            }
             other => return Err(other),
         };
         self.attach_implicit_context(&exc_val);
@@ -891,7 +897,7 @@ impl Interpreter {
                                 let r = vm_try!(
                                     lookup
                                         .map(|(_, v)| v)
-                                        .ok_or_else(|| PyError::named("KeyError", idx_val.repr()))
+                                        .ok_or_else(|| PyError::key_error(idx_val.clone()))
                                 );
                                 regs[*dst as usize] = r;
                             }

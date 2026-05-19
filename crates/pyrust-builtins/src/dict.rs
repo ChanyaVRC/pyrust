@@ -181,7 +181,7 @@ fn popitem(dict: &mut IndexMap<PyKey, Value>) -> Result<Value> {
         Some((k, v)) => Ok(Value::tuple(vec![key_to_value(k), v])),
         None => Err(PyError::named(
             "KeyError",
-            "'popitem(): dictionary is empty'".to_string(),
+            "popitem(): dictionary is empty".to_string(),
         )),
     }
 }

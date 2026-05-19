@@ -251,7 +251,7 @@ fn remove(items: &mut IndexSet<PyKey>, args: &[Value]) -> Result<Value> {
     if items.shift_remove(&key) {
         Ok(Value::none())
     } else {
-        Err(PyError::named("KeyError", elem.repr()))
+        Err(PyError::key_error(elem.clone()))
     }
 }
 
