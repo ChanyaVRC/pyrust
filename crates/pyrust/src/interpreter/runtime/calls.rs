@@ -56,6 +56,9 @@ impl Interpreter {
             handled_exc_slice: Vec::new(),
             active_exception: None,
             local_index,
+            // Meaningless until the first yield; initialised to 0 as a safe
+            // default (the Yield opcode always overwrites this before resumption).
+            yield_dst: 0,
         };
         Value::generator(Box::new(frame))
     }
