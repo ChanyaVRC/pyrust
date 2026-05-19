@@ -1032,6 +1032,7 @@ fn install_singleton_builtins(env: &EnvRef) {
 fn key_to_value(key: PyKey) -> Value {
     match key {
         PyKey::Int(v) => Value::int(v),
+        PyKey::BigInt(v) => Value::bigint(*v),
         PyKey::Float(v) => Value::float(f64::from_bits(v)),
         PyKey::Str(v) => Value::string(v),
         PyKey::Bool(v) => Value::bool_(v),
