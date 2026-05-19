@@ -593,9 +593,9 @@ fn lambda_captures_in_stmt(
         Stmt::AnnAssign {
             annotation, value, ..
         } => {
-            lambda_captures_in_expr(annotation, local_index, cells);
+            lambda_captures_in_expr(annotation, local_index, is_class_scope, cells);
             if let Some(v) = value {
-                lambda_captures_in_expr(v, local_index, cells);
+                lambda_captures_in_expr(v, local_index, is_class_scope, cells);
             }
         }
         Stmt::Import { .. }
@@ -965,14 +965,18 @@ fn collect_class_method_outer_refs(
     // method reads a name that happens to be a class attribute.  The nested method
     // also skips the outer class scope, so promoting would incorrectly turn class
     // attribute assignments into StoreGlobal, stripping the attribute from the dict.
-    let class_locals_opt: Option<HashSet<String>> = if outer_is_class_scope {
-        let empty_set: HashSet<String> = HashSet::new();
-        Some(crate::interpreter::collect_local_names(
-            &[],
-            class_body,
-            &empty_set,
-            &empty_set,
-        ))
+    // Always compute class_locals for use in lambda handling: lambdas in a
+    // class body close over the enclosing function scope, not the class scope,
+    // so we need the class-body local names to avoid false promotions (issue #699).
+    let empty_set: HashSet<String> = HashSet::new();
+    let class_locals =
+        crate::interpreter::collect_local_names(&[], class_body, &empty_set, &empty_set);
+    // For method Def arms: only filter out class-body locals when the outer
+    // scope is itself a class scope (outer_is_class_scope=true).  When the
+    // outer scope is a function scope, methods may close over function locals
+    // even when the class body also defines a name with the same spelling.
+    let class_locals_opt: Option<&HashSet<String>> = if outer_is_class_scope {
+        Some(&class_locals)
     } else {
         None
     };
@@ -1017,13 +1021,27 @@ fn collect_class_method_outer_refs(
                         && !inner_globals.contains(&name)
                         && !inner_nonlocals.contains(&name)
                         && class_locals_opt
-                            .as_ref()
                             .map_or(true, |cl| !cl.contains(&name))
                         && local_index.contains_key(&name)
                     {
                         cells.insert(name);
                     }
                 }
+            }
+            // Lambdas assigned at class body level (e.g. `fn = lambda self: x`)
+            // also close over the *enclosing function* scope (not the class scope).
+            // The class body's own `collect_lambda_captures` correctly skips
+            // promoting their reads to class cell vars (issue #699), but we still
+            // need to promote those reads to cell vars in the *enclosing function*
+            // so the env chain carries them when the generator body resumes.
+            Stmt::Assign(_, value) => {
+                collect_class_lambda_outer_refs_in_expr(value, local_index, &class_locals, cells);
+            }
+            Stmt::Expr(e) => {
+                collect_class_lambda_outer_refs_in_expr(e, local_index, &class_locals, cells);
+            }
+            Stmt::AugAssign { expr, .. } => {
+                collect_class_lambda_outer_refs_in_expr(expr, local_index, &class_locals, cells);
             }
             // Recursively handle nested classes.  Methods nested inside a class
             // that is itself nested inside a class still skip all class scopes and
@@ -1105,6 +1123,181 @@ fn collect_class_method_outer_refs(
                 }
             }
             _ => {}
+        }
+    }
+}
+
+/// Walk `expr` in a class body context.  For each `Expr::Lambda` found,
+/// collect its free-var reads, subtract the lambda's own params and the
+/// class-body local names, then promote any remaining names that live in
+/// the enclosing function's `local_index` to cell vars.
+///
+/// This is the mirror of the `Expr::Lambda` arm in `lambda_captures_in_expr`
+/// for the class-body case: `collect_lambda_captures` (called on the class
+/// body) correctly *skips* promotion into the class cell-var set (issue #699),
+/// but when the class body is nested inside a function the enclosing function
+/// still needs those names promoted so the env chain carries them (issue #701).
+fn collect_class_lambda_outer_refs_in_expr(
+    expr: &Expr,
+    local_index: &HashMap<String, Reg>,
+    class_locals: &HashSet<String>,
+    cells: &mut HashSet<String>,
+) {
+    match expr {
+        Expr::Lambda { params, body } => {
+            let mut uses: HashSet<String> = HashSet::new();
+            collect_free_var_reads_in_expr(body, &mut uses);
+            collect_transitive_free_vars_in_expr(body, &mut uses);
+            for p in params {
+                uses.remove(p);
+            }
+            // Promote any name that the lambda reads from the enclosing function.
+            // Note: we do NOT filter out class-body locals here.  Python class
+            // scope is not a closure scope — a lambda in a class body that reads
+            // `x` always sees the enclosing function/module value even when the
+            // class body also has `x = ...`.  The class body's own emit path
+            // (`collect_cell_vars_for_class_body`) independently does not promote
+            // class-attribute names to cell vars (issue #699), so the class-body
+            // assignment correctly emits `RecordClassStore` regardless of what
+            // the enclosing function promotes.
+            for name in uses {
+                if local_index.contains_key(&name) {
+                    cells.insert(name);
+                }
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_class_lambda_outer_refs_in_expr(left, local_index, class_locals, cells);
+            collect_class_lambda_outer_refs_in_expr(right, local_index, class_locals, cells);
+        }
+        Expr::Unary { expr: e, .. } => {
+            collect_class_lambda_outer_refs_in_expr(e, local_index, class_locals, cells)
+        }
+        Expr::Compare { left, ops } => {
+            collect_class_lambda_outer_refs_in_expr(left, local_index, class_locals, cells);
+            for (_, e) in ops {
+                collect_class_lambda_outer_refs_in_expr(e, local_index, class_locals, cells);
+            }
+        }
+        Expr::Call { func, args } => {
+            collect_class_lambda_outer_refs_in_expr(func, local_index, class_locals, cells);
+            for a in args {
+                collect_class_lambda_outer_refs_in_expr(&a.value, local_index, class_locals, cells);
+            }
+        }
+        Expr::Attr { target, .. } => {
+            collect_class_lambda_outer_refs_in_expr(target, local_index, class_locals, cells)
+        }
+        Expr::Index { target, index } => {
+            collect_class_lambda_outer_refs_in_expr(target, local_index, class_locals, cells);
+            collect_class_lambda_outer_refs_in_expr(index, local_index, class_locals, cells);
+        }
+        Expr::Slice {
+            target,
+            lower,
+            upper,
+            step,
+        } => {
+            collect_class_lambda_outer_refs_in_expr(target, local_index, class_locals, cells);
+            for e in [lower, upper, step].iter().flat_map(|o| o.as_deref()) {
+                collect_class_lambda_outer_refs_in_expr(e, local_index, class_locals, cells);
+            }
+        }
+        Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
+            for e in items {
+                collect_class_lambda_outer_refs_in_expr(e, local_index, class_locals, cells);
+            }
+        }
+        Expr::Starred(inner) => {
+            collect_class_lambda_outer_refs_in_expr(inner, local_index, class_locals, cells)
+        }
+        Expr::Dict(items) => {
+            for item in items {
+                match item {
+                    DictItem::Pair(k, v) => {
+                        collect_class_lambda_outer_refs_in_expr(
+                            k,
+                            local_index,
+                            class_locals,
+                            cells,
+                        );
+                        collect_class_lambda_outer_refs_in_expr(
+                            v,
+                            local_index,
+                            class_locals,
+                            cells,
+                        );
+                    }
+                    DictItem::DoubleSplat(e) => {
+                        collect_class_lambda_outer_refs_in_expr(
+                            e,
+                            local_index,
+                            class_locals,
+                            cells,
+                        );
+                    }
+                }
+            }
+        }
+        Expr::ListComp { elt, clauses }
+        | Expr::SetComp { elt, clauses }
+        | Expr::GenExp { elt, clauses } => {
+            for clause in clauses {
+                collect_class_lambda_outer_refs_in_expr(
+                    &clause.iter,
+                    local_index,
+                    class_locals,
+                    cells,
+                );
+                if let Some(c) = &clause.cond {
+                    collect_class_lambda_outer_refs_in_expr(c, local_index, class_locals, cells);
+                }
+            }
+            collect_class_lambda_outer_refs_in_expr(elt, local_index, class_locals, cells);
+        }
+        Expr::DictComp { key, val, clauses } => {
+            for clause in clauses {
+                collect_class_lambda_outer_refs_in_expr(
+                    &clause.iter,
+                    local_index,
+                    class_locals,
+                    cells,
+                );
+                if let Some(c) = &clause.cond {
+                    collect_class_lambda_outer_refs_in_expr(c, local_index, class_locals, cells);
+                }
+            }
+            collect_class_lambda_outer_refs_in_expr(key, local_index, class_locals, cells);
+            collect_class_lambda_outer_refs_in_expr(val, local_index, class_locals, cells);
+        }
+        Expr::Ternary { cond, then, else_ } => {
+            collect_class_lambda_outer_refs_in_expr(cond, local_index, class_locals, cells);
+            collect_class_lambda_outer_refs_in_expr(then, local_index, class_locals, cells);
+            collect_class_lambda_outer_refs_in_expr(else_, local_index, class_locals, cells);
+        }
+        Expr::Named { value, .. } => {
+            collect_class_lambda_outer_refs_in_expr(value, local_index, class_locals, cells)
+        }
+        Expr::FString(parts) => {
+            for_each_fstring_expr(parts, &mut |e| {
+                collect_class_lambda_outer_refs_in_expr(e, local_index, class_locals, cells);
+            });
+        }
+        Expr::Var(_)
+        | Expr::Int(_)
+        | Expr::BigInt(_)
+        | Expr::Float(_)
+        | Expr::Complex(_, _)
+        | Expr::Str(_)
+        | Expr::Bytes(_)
+        | Expr::Bool(_)
+        | Expr::None => {}
+        Expr::Yield(Some(e)) => {
+            collect_class_lambda_outer_refs_in_expr(e, local_index, class_locals, cells)
+        }
+        Expr::Yield(None) => {}
+        Expr::YieldFrom(e) => {
+            collect_class_lambda_outer_refs_in_expr(e, local_index, class_locals, cells)
         }
     }
 }

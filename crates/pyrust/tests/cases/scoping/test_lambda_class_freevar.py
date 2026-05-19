@@ -58,3 +58,30 @@ class E:
         return fn()
 
 print(E().method())  # 77
+
+# ── Case 7: class inside a function — lambda reads enclosing function local ───
+def make_class():
+    x = 100
+    class F:
+        x = 10
+        fn = lambda self: x   # reads enclosing function's x, not class attr
+    return F
+
+F = make_class()
+print(F.x)       # 10  (class attribute must survive)
+print(F().fn())  # 100 (lambda reads enclosing function's x)
+
+# ── Case 8: class inside a function, multiple lambdas, some name collisions ───
+def make_class2():
+    a = 1
+    b = 2
+    class G:
+        a = 10
+        fn1 = lambda self: a       # collides with class attr 'a'
+        fn2 = lambda self: b       # no collision
+    return G
+
+G = make_class2()
+print(G.a)        # 10
+print(G().fn1())  # 1
+print(G().fn2())  # 2
