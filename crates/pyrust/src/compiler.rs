@@ -1772,6 +1772,7 @@ fn collect_transitive_free_vars_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>)
             params,
             body: nested_body,
             decorators,
+            return_annotation,
             ..
         } => {
             // Decorator expressions evaluate in the enclosing scope.
@@ -1785,6 +1786,15 @@ fn collect_transitive_free_vars_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>)
                     collect_transitive_free_vars_in_expr(d, uses);
                     collect_free_var_reads_in_expr(d, uses);
                 }
+                // Annotation expressions also evaluate in the enclosing scope.
+                if let Some(a) = &p.annotation {
+                    collect_transitive_free_vars_in_expr(a, uses);
+                    collect_free_var_reads_in_expr(a, uses);
+                }
+            }
+            if let Some(a) = return_annotation {
+                collect_transitive_free_vars_in_expr(a, uses);
+                collect_free_var_reads_in_expr(a, uses);
             }
             // Names locally bound inside the nested function — exclude them
             // when contributing to the enclosing scope's free-var set.
@@ -4282,8 +4292,9 @@ impl Compiler {
                 params,
                 body,
                 decorators,
+                return_annotation,
             } => {
-                self.compile_def(name, params, body, decorators);
+                self.compile_def(name, params, body, decorators, return_annotation.as_ref());
             }
             Stmt::Class {
                 name,
@@ -6026,6 +6037,7 @@ impl Compiler {
         params: &[FunctionParam],
         body: &[Stmt],
         decorators: &[Expr],
+        return_annotation: Option<&Expr>,
     ) {
         // Build inner function's scope metadata.
         let inner_global = crate::interpreter::collect_global_names(body);
@@ -6185,6 +6197,15 @@ impl Compiler {
         }
         let proto_idx = self.fn_protos.len() as u8;
         let local_names = Rc::new(inner_index_rc.keys().cloned().collect::<HashSet<_>>());
+        // Collect annotation keys: annotated param names (in declaration order) then
+        // "return" if there is a return annotation.  These are parallel to the
+        // annotation register window emitted just before MakeFunction.
+        let annotation_keys: Vec<String> = params
+            .iter()
+            .filter(|p| p.annotation.is_some())
+            .map(|p| p.name.clone())
+            .chain(return_annotation.map(|_| "return".to_string()))
+            .collect();
         self.fn_protos.push(FnProto {
             name: name.to_string(),
             qualname: fn_qualname,
@@ -6202,6 +6223,7 @@ impl Compiler {
             global_names: inner_global_rc,
             nonlocal_names: inner_nonlocal_rc,
             is_pure,
+            annotation_keys,
         });
 
         // Compile default values (right-to-left in declaration, left-to-right in slots).
@@ -6237,10 +6259,64 @@ impl Compiler {
             }
         }
 
+        // Compile annotation expressions (evaluated in enclosing scope, like defaults).
+        // Order: annotated params in declaration order, then return annotation.
+        let annotated_params: Vec<(usize, &Expr)> = params
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| p.annotation.as_ref().map(|a| (i, a)))
+            .collect();
+        let annots_n = annotated_params.len() as u8 + return_annotation.is_some() as u8;
+        let annots_base = self.next_temp;
+        if annots_n > 0 {
+            if self.next_temp.checked_add(Reg::from(annots_n)).is_none() {
+                self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some("too many annotation registers".to_string());
+                }
+                return;
+            }
+            self.next_temp += Reg::from(annots_n);
+            if self.next_temp - 1 > self.max_reg {
+                self.max_reg = self.next_temp - 1;
+            }
+            for (slot_i, (_, annot_expr)) in (0u32..).zip(annotated_params.iter()) {
+                let saved = self.next_temp;
+                let r = self.compile_expr(annot_expr);
+                if r != annots_base + slot_i {
+                    self.emit(Insn::Move(annots_base + slot_i, r));
+                }
+                self.next_temp = saved;
+            }
+            if let Some(ret_annot) = return_annotation {
+                let slot_i = annots_n as u32 - 1;
+                let saved = self.next_temp;
+                let r = self.compile_expr(ret_annot);
+                if r != annots_base + slot_i {
+                    self.emit(Insn::Move(annots_base + slot_i, r));
+                }
+                self.next_temp = saved;
+            }
+        }
+
         let dst = self.alloc_temp();
-        self.emit(Insn::MakeFunction(dst, proto_idx, defs_base, defs_n));
-        if defs_n > 0 {
-            self.next_temp = defs_base + 1;
+        self.emit(Insn::MakeFunction(
+            dst,
+            proto_idx,
+            defs_base,
+            defs_n,
+            annots_base,
+            annots_n,
+        ));
+        if defs_n > 0 || annots_n > 0 {
+            // Free the temp registers used by defaults and annotations; keep
+            // only the function value register (dst) alive from this point.
+            // The base of whichever block came first is the new watermark.
+            if defs_n > 0 {
+                self.next_temp = defs_base + 1;
+            } else {
+                self.next_temp = annots_base + 1;
+            }
         }
 
         // Apply decorators (outermost first in reverse declaration order).
@@ -6475,6 +6551,7 @@ impl Compiler {
             global_names: body_global,
             nonlocal_names: body_nonlocal_rc,
             is_pure: false,
+            annotation_keys: Vec::new(),
         });
 
         // Compile base class expressions.
@@ -7231,6 +7308,7 @@ impl Compiler {
                     .map(|n| FunctionParam {
                         name: n.clone(),
                         default: None,
+                        annotation: None,
                         is_args: false,
                         is_kwargs: false,
                         is_keyword_only: false,
@@ -7734,6 +7812,7 @@ impl Compiler {
         let params = vec![FunctionParam {
             name: IT_PARAM.to_string(),
             default: None,
+            annotation: None,
             is_args: false,
             is_kwargs: false,
             is_keyword_only: false,
@@ -7844,13 +7923,15 @@ impl Compiler {
             global_names: inner_global_rc,
             nonlocal_names: inner_nonlocal_rc,
             is_pure,
+            annotation_keys: Vec::new(),
         });
 
         // Allocate a temp for the function value, emit MakeFunction (no
-        // defaults — the single parameter has no default), then call it.
+        // defaults or annotations — the single parameter has no default and
+        // genexp params carry no annotations), then call it.
         // Layout: fn_reg = function, fn_reg+1 = iterable arg.
         let fn_reg = self.alloc_temp();
-        self.emit(Insn::MakeFunction(fn_reg, proto_idx, 0, 0));
+        self.emit(Insn::MakeFunction(fn_reg, proto_idx, 0, 0, 0, 0));
 
         let arg_reg = fn_reg + 1;
         if arg_reg > self.max_reg {
@@ -8237,7 +8318,7 @@ impl Compiler {
         // Convert lambda body into an implicit return statement.
         let body_stmts = vec![Stmt::Return(Some(body.clone()))];
         let temp_name = "<lambda>";
-        self.compile_def(temp_name, params, &body_stmts, &[]);
+        self.compile_def(temp_name, params, &body_stmts, &[], None);
         // compile_def stored the result in local or global named "<lambda>".
         // We need to return the register it's in.
         // Actually compile_def uses compile_store_name which may put it in a

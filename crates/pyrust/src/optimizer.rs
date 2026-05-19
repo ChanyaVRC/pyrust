@@ -488,7 +488,7 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | BuildList(r, _, _)
         | BuildTuple(r, _, _)
         | BuildDict(r, _, _)
-        | MakeFunction(r, _, _, _)
+        | MakeFunction(r, _, _, _, _, _)
         | ImportModule(r, _)
         | LoadExc(r)
         | MakeClass(r, _, _, _, _) => Some(*r),
@@ -1046,7 +1046,10 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
             ..
         } => *obj == r || *pos_list == r || *kw_dict == r,
 
-        MakeFunction(_, _, defs_base, defs_n) => r >= *defs_base && r < *defs_base + *defs_n as u32,
+        MakeFunction(_, _, defs_base, defs_n, annots_base, annots_n) => {
+            (r >= *defs_base && r < *defs_base + *defs_n as u32)
+                || (*annots_n > 0 && r >= *annots_base && r < *annots_base + *annots_n as u32)
+        }
         MakeClass(_, _, bases_base, bases_n, _) => {
             r >= *bases_base && r < *bases_base + *bases_n as u32
         }
@@ -1420,7 +1423,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | LoadNone(r)
         | LoadExc(r)
         | ImportModule(r, _)
-        | MakeFunction(r, _, _, _)
+        | MakeFunction(r, _, _, _, _, _)
         | MakeClass(r, _, _, _, _)
         | BuildList(r, _, _)
         | BuildTuple(r, _, _)
