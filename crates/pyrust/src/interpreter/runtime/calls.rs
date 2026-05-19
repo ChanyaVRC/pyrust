@@ -248,33 +248,57 @@ impl Interpreter {
             // in that arm is not applied here.
             ValueKind::BuiltinFunction("float.fromhex") => {
                 // Accept both `float.fromhex(s)` and `(1.0).fromhex(s)`.
-                // Filter out a leading float or class receiver if present.
-                let s_val = args
+                // Filter out a leading float or class receiver if present, then
+                // enforce exactly one remaining positional argument.
+                let positional_args: Vec<_> = args
                     .iter()
-                    .find(|a| {
+                    .filter(|a| {
                         a.name.is_none()
                             && !matches!(
                                 a.value.kind(),
                                 ValueKind::Float(_) | ValueKind::PyClass(_)
                             )
                     })
-                    .or_else(|| args.first())
-                    .map(|a| a.value.clone())
-                    .ok_or_else(|| {
-                        PyError::named(
-                            "TypeError",
-                            "float.fromhex() takes exactly one argument (0 given)",
-                        )
-                    })?;
+                    .collect();
+                // If every arg was a float/class receiver (e.g. pure class call
+                // with no string) fall back to requiring exactly one total arg.
+                let n_payload = if positional_args.is_empty() {
+                    args.len()
+                } else {
+                    positional_args.len()
+                };
+                if n_payload == 0 {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "float.fromhex() takes exactly one argument (0 given)",
+                    ));
+                }
+                if n_payload > 1 {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "float.fromhex() takes exactly one argument ({} given)",
+                            n_payload
+                        ),
+                    ));
+                }
+                let s_val = if positional_args.is_empty() {
+                    args.first().map(|a| a.value.clone())
+                } else {
+                    positional_args.first().map(|a| a.value.clone())
+                }
+                .ok_or_else(|| {
+                    PyError::named(
+                        "TypeError",
+                        "float.fromhex() takes exactly one argument (0 given)",
+                    )
+                })?;
                 let s = match s_val.kind() {
                     ValueKind::Str(s) => s.to_string(),
                     _ => {
                         return Err(PyError::named(
                             "TypeError",
-                            format!(
-                                "float.fromhex() argument must be a str, not '{}'",
-                                pyrust_core::builtin_type_name(&s_val)
-                            ),
+                            "bad argument type for built-in operation",
                         ))
                     }
                 };
