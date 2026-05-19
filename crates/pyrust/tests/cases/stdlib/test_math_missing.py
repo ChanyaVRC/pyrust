@@ -74,6 +74,7 @@ except ValueError as e:
 # ── perm ──────────────────────────────────────────────────────────────────────
 print(math.perm(5, 2))            # 20
 print(math.perm(5))               # 120
+print(math.perm(5, None))         # 120  (None treated as k=n)
 print(math.perm(5, 0))            # 1
 print(math.perm(5, 5))            # 120
 print(math.perm(3, 5))            # 0  (k > n → 0)

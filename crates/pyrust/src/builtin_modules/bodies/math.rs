@@ -355,7 +355,7 @@ pyrust_module! {
                 "factorial() not defined for negative values".to_string(),
             ));
         }
-        let k = if args.len() == 2 {
+        let k = if args.len() == 2 && !matches!(args[1].value.kind(), ValueKind::None) {
             let kv = value_to_bigint_int(FN_NAME, &args[1].value)?;
             if kv.is_negative() {
                 return Err(PyError::named(
@@ -365,7 +365,7 @@ pyrust_module! {
             }
             kv
         } else {
-            // perm(n) == factorial(n): k defaults to n
+            // perm(n) or perm(n, None): k defaults to n
             n.clone()
         };
         if k > n {
