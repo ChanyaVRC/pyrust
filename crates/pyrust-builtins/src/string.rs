@@ -1004,10 +1004,13 @@ fn str_replace(s: &str, args: &[Value]) -> Result<Value> {
 }
 
 fn str_startswith(s: &str, args: &[Value]) -> Result<Value> {
-    let slice = match str_slice_args(s, args)? {
-        Some((start, end)) => &s[start..end],
-        None => "",
+    // An inverted window (start > stop) is distinct from an empty zero-length
+    // window.  CPython returns False for any inverted window — even with an
+    // empty prefix — because there is no valid slice to check against.
+    let Some((start, end)) = str_slice_args(s, args)? else {
+        return Ok(Value::bool_(false));
     };
+    let slice = &s[start..end];
     match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(p)) => Ok(Value::bool_(slice.starts_with(p))),
         Some(ValueKind::Tuple(prefixes)) => Ok(Value::bool_(prefixes.iter().any(|pv| {
@@ -1024,10 +1027,11 @@ fn str_startswith(s: &str, args: &[Value]) -> Result<Value> {
 }
 
 fn str_endswith(s: &str, args: &[Value]) -> Result<Value> {
-    let slice = match str_slice_args(s, args)? {
-        Some((start, end)) => &s[start..end],
-        None => "",
+    // An inverted window (start > stop) always yields False — see str_startswith.
+    let Some((start, end)) = str_slice_args(s, args)? else {
+        return Ok(Value::bool_(false));
     };
+    let slice = &s[start..end];
     match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(p)) => Ok(Value::bool_(slice.ends_with(p))),
         Some(ValueKind::Tuple(suffixes)) => Ok(Value::bool_(suffixes.iter().any(|sv| {
