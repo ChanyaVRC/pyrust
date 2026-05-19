@@ -1868,4 +1868,66 @@ result = fact(10)
             "expected `must be callable` TypeError; got: {msg}"
         );
     }
+
+    // ── #748: annotated name can't be global / nonlocal ─────────────────────
+
+    fn expect_syntax_error(src: &str, expected_msg: &str) {
+        let tokens = Lexer::new(src).unwrap().into_tokens();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut interpreter = Interpreter::default();
+        let err = interpreter.exec_program(&program, false).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SyntaxError") && msg.contains(expected_msg),
+            "expected SyntaxError containing '{expected_msg}'; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn bare_annotation_after_global_is_syntax_error() {
+        expect_syntax_error(
+            "x = 0\ndef f():\n    global x\n    x: int\nf()\n",
+            "annotated name 'x' can't be global",
+        );
+    }
+
+    #[test]
+    fn bare_annotation_before_global_is_syntax_error() {
+        // Order must not matter: annotation before global declaration.
+        expect_syntax_error(
+            "x = 0\ndef f():\n    x: int\n    global x\nf()\n",
+            "annotated name 'x' can't be global",
+        );
+    }
+
+    #[test]
+    fn bare_annotation_after_nonlocal_is_syntax_error() {
+        expect_syntax_error(
+            "def f():\n    x = 1\n    def g():\n        nonlocal x\n        x: int\n    g()\nf()\n",
+            "annotated name 'x' can't be nonlocal",
+        );
+    }
+
+    #[test]
+    fn bare_annotation_before_nonlocal_is_syntax_error() {
+        // Order must not matter: annotation before nonlocal declaration.
+        expect_syntax_error(
+            "def f():\n    x = 1\n    def g():\n        x: int\n        nonlocal x\n    g()\nf()\n",
+            "annotated name 'x' can't be nonlocal",
+        );
+    }
+
+    #[test]
+    fn global_without_annotation_is_ok() {
+        let interp = run_program("g = 0\ndef h():\n    global g\n    g = 42\nh()\n");
+        assert_eq!(interp.lookup_name("g").unwrap(), Some(Value::int(42)));
+    }
+
+    #[test]
+    fn bare_annotation_without_global_or_nonlocal_is_ok() {
+        // A bare annotation inside a function with no global/nonlocal conflict
+        // must not raise any error.
+        let _ = run_program("def k():\n    z: int\nk()\n");
+    }
 }
