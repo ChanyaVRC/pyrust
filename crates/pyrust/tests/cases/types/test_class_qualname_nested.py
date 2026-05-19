@@ -58,6 +58,14 @@ class TopLevel:
 print(TopLevel.__qualname__)  # TopLevel
 print(TopLevel.__name__)      # TopLevel
 
+# --- Method inside a nested class ---
+class Outer3:
+    class Inner3:
+        def method(self):
+            pass
+
+print(Outer3.Inner3.method.__qualname__)  # Outer3.Inner3.method
+
 # --- Non-str __qualname__ raises TypeError ---
 try:
     class Bad:
