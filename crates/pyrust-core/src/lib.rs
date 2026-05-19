@@ -456,19 +456,40 @@ pub fn py_hash_pykey(key: &PyKey) -> i64 {
         PyKey::Bool(b) => *b as i64,
         PyKey::BigInt(n) => pykey_hash_bigint(n),
         PyKey::Float(bits) => {
-            if let Some(i) = float_bits_as_exact_i64(*bits) {
+            let f = f64::from_bits(*bits);
+            if f.is_nan() {
+                0
+            } else if f.is_infinite() {
+                if f > 0.0 { 314159 } else { -314159 }
+            } else if f == 0.0 {
+                0
+            } else if let Some(i) = float_bits_as_exact_i64(*bits) {
+                // Whole-number float: hash like the integer it equals.
                 hash_int(i)
             } else {
-                let f = f64::from_bits(*bits);
-                if f.is_nan() {
-                    0
-                } else if f.is_infinite() {
-                    if f > 0.0 { 314159 } else { -314159 }
+                // Fractional finite float: CPython Mersenne-prime algorithm.
+                // Mirrors interpreter::helpers::py_hash_float exactly so that
+                // hash(x) == hash(frozenset({x})) element contribution matches.
+                const P: u64 = (1u64 << 61) - 1;
+                let raw_bits = *bits;
+                let sign: i64 = if f < 0.0 { -1 } else { 1 };
+                let biased_exp = ((raw_bits >> 52) & 0x7ff) as i64;
+                let mantissa_bits = raw_bits & 0x000f_ffff_ffff_ffff;
+                let (m, e): (u64, i64) = if biased_exp == 0 {
+                    (mantissa_bits, -1074)
                 } else {
-                    // Fractional finite float: bit-cast approximation.
-                    let bits_val = *bits as i64;
-                    if bits_val == -1 { -2 } else { bits_val }
-                }
+                    (mantissa_bits | (1u64 << 52), biased_exp - 1023 - 52)
+                };
+                let h: u64 = if e >= 0 {
+                    let shift = (e as u64) % 61;
+                    ((m as u128 * (1u128 << shift)) % (P as u128)) as u64
+                } else {
+                    let neg_e_mod = ((-e) as u64) % 61;
+                    let inv_shift = if neg_e_mod == 0 { 0u64 } else { 61 - neg_e_mod };
+                    ((m as u128 * (1u128 << inv_shift)) % (P as u128)) as u64
+                };
+                let signed = h as i64 * sign;
+                if signed == -1 { -2 } else { signed }
             }
         }
         PyKey::Str(s) => {

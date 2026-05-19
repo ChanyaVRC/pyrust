@@ -52,3 +52,9 @@ except TypeError as e:
 
 # empty frozenset hash is stable
 print(hash(frozenset()) == hash(frozenset()))
+
+# float elements: exact values are deterministic (unlike str hashing)
+print(hash(frozenset({1.5})))
+print(hash(frozenset({0.5, 1.5})))
+# float and int with same numeric value hash to the same element hash
+print(hash(frozenset({1.0})) == hash(frozenset({1})))
