@@ -151,6 +151,27 @@ impl BuiltinTypeOps for FrozenSetOps {
     }
 }
 
+/// Dispatch a `frozenset` method call.  `receiver` must be a frozenset
+/// `BuiltinObject` value; `args` are the remaining positional arguments (the
+/// receiver itself is NOT in `args`).  Used by the unified `<type>.<method>`
+/// class-attr dispatcher in `calls.rs` so that `frozenset.copy(fs)` routes
+/// through the same implementation as `fs.copy()`.
+pub fn call(method: &str, receiver: &Value, args: Vec<Value>) -> Result<Value> {
+    let state = match receiver.kind() {
+        ValueKind::BuiltinObject { ops, state } if ops.type_name() == TYPE_NAME => state,
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "descriptor '{method}' for 'frozenset' objects doesn't apply to this object"
+                ),
+            ));
+        }
+    };
+    let empty_kw = IndexMap::new();
+    FROZENSET_OPS.call_method(state, method, args, &empty_kw)
+}
+
 /// Construct a frozenset Value from an `IndexSet`.
 pub fn frozenset(items: IndexSet<PyKey>) -> Value {
     frozenset_rc(Rc::new(items))

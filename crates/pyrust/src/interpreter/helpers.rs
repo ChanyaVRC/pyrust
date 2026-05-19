@@ -333,12 +333,16 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
     populate_primitive_methods(&tuple_class, "tuple", TUPLE_METHODS);
     populate_primitive_methods(&dict_class, "dict", DICT_METHODS);
     populate_primitive_methods(&set_class, "set", SET_METHODS);
+    let complex_class = make("complex", None);
+    let frozenset_class = make("frozenset", None);
+    populate_primitive_methods(&complex_class, "complex", COMPLEX_METHODS);
+    populate_primitive_methods(&frozenset_class, "frozenset", FROZENSET_METHODS);
     PrimitiveClasses {
         bytes_class: make("bytes", None),
-        complex_class: make("complex", None),
+        complex_class,
         dict_class,
         float_class: make("float", None),
-        frozenset_class: make("frozenset", None),
+        frozenset_class,
         list_class,
         set_class,
         str_class,
@@ -387,6 +391,13 @@ const DICT_METHODS: &[&str] = &[
 const SET_METHODS: &[&str] = &[
     "add", "remove", "discard", "pop", "clear",
     "update", "intersection_update", "difference_update", "symmetric_difference_update",
+    "copy", "union", "intersection", "difference", "symmetric_difference",
+    "issubset", "issuperset", "isdisjoint",
+];
+
+const COMPLEX_METHODS: &[&str] = &["conjugate"];
+
+const FROZENSET_METHODS: &[&str] = &[
     "copy", "union", "intersection", "difference", "symmetric_difference",
     "issubset", "issuperset", "isdisjoint",
 ];

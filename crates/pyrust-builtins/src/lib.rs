@@ -1,5 +1,6 @@
 pub mod bound_method;
 pub mod cached_property;
+pub mod complex;
 pub mod dict;
 pub mod dict_views;
 pub mod file;
@@ -110,6 +111,31 @@ mod method_table_drift_guard {
             let r = super::set::call(name, &receiver, vec![]);
             if let Err(ref e) = r {
                 assert!(!is_fallback(e), "set::call({name}) hit fallback: {e:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn complex_methods_dispatched() {
+        let receiver = Value::complex(0.0, 0.0);
+        for &name in super::complex::METHODS {
+            let r = super::complex::call(name, &receiver, vec![]);
+            if let Err(ref e) = r {
+                assert!(!is_fallback(e), "complex::call({name}) hit fallback: {e:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn frozenset_methods_dispatched() {
+        let receiver = super::frozenset::frozenset(IndexSet::<PyKey>::new());
+        for &name in super::frozenset::METHODS {
+            let r = super::frozenset::call(name, &receiver, vec![]);
+            if let Err(ref e) = r {
+                assert!(
+                    !is_fallback(e),
+                    "frozenset::call({name}) hit fallback: {e:?}"
+                );
             }
         }
     }
