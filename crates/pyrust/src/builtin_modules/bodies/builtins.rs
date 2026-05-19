@@ -1599,9 +1599,32 @@ pyrust_module! {
                         "complex() second arg can't be a string",
                     ));
                 }
-                let re = to_f64(&args[0].value, "real")?;
-                let im = to_f64(&args[1].value, "imag")?;
-                Ok(Value::complex(re, im))
+                // CPython decomposition formula (Objects/complexobject.c):
+                // When at least one arg is complex, apply:
+                //   result.real = cr - di
+                //   result.imag = ci + dr
+                // where cr/ci are the real/imag parts of the first arg,
+                // and dr/di are the real/imag parts of the second arg.
+                // When neither arg is complex, assign real and imag directly
+                // (preserving -0.0 sign, which the formula would lose via
+                // 0.0 + (-0.0) = 0.0 in IEEE 754).
+                let real_is_complex = matches!(args[0].value.kind(), ValueKind::Complex(_, _));
+                let imag_is_complex = matches!(args[1].value.kind(), ValueKind::Complex(_, _));
+                if real_is_complex || imag_is_complex {
+                    let (cr, ci) = match args[0].value.kind() {
+                        ValueKind::Complex(re, im) => (re, im),
+                        _ => (to_f64(&args[0].value, "real")?, 0.0),
+                    };
+                    let (dr, di) = match args[1].value.kind() {
+                        ValueKind::Complex(re, im) => (re, im),
+                        _ => (to_f64(&args[1].value, "imag")?, 0.0),
+                    };
+                    Ok(Value::complex(cr - di, ci + dr))
+                } else {
+                    let re = to_f64(&args[0].value, "real")?;
+                    let im = to_f64(&args[1].value, "imag")?;
+                    Ok(Value::complex(re, im))
+                }
             }
             _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most 2 arguments"))),
         }
