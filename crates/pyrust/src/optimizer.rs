@@ -50,7 +50,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_binopinplace_downgrade(insns, num_locals);
     let insns = pass_exit_inline(insns);
     let insns = pass_licm(insns, num_locals);
-    let insns = pass_cse(insns);
+    let insns = pass_cse(insns, num_locals);
     let insns = pass_dead_code(insns);
     let insns = pass_dead_store_elim(insns, num_locals);
     let insns = pass_copy_prop(insns);
@@ -1788,7 +1788,7 @@ fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
 ///
 /// Reference: Aho, Lam, Sethi, Ullman *Compilers* §9.1 (available expressions);
 /// Kennedy *A Survey of Data-Flow Analysis Techniques* §3 (CSE).
-fn pass_cse(insns: Vec<Insn>) -> Vec<Insn> {
+fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
     use std::collections::HashMap;
 
     /// Discriminator tag for a CSE key — keeps `LoadConst`, `BinOpConst`, and
@@ -1902,6 +1902,29 @@ fn pass_cse(insns: Vec<Insn>) -> Vec<Insn> {
                     CseKey::BinOpConst(src, _, _) => *src != w,
                     CseKey::UnaryOp(_, src) => *src != w,
                 }
+            });
+        }
+
+        // Call-boundary invalidation: any user-defined callee may update
+        // named-local registers (r < num_locals) via the `assign_name`
+        // write-through in `vm_frame_views`.  CSE entries whose source
+        // register is a named local must not survive across call boundaries.
+        //
+        // Temporaries (r >= num_locals) are safe to retain — no callee can
+        // reach them through `assign_name`.  This mirrors the same fix applied
+        // to `pass_const_fold` for issue #671.
+        if matches!(
+            insn,
+            Insn::Call(..)
+                | Insn::CallMemo(..)
+                | Insn::CallMethod { .. }
+                | Insn::CallMethodExpanded { .. }
+                | Insn::MakeClass(..)
+        ) {
+            table.retain(|k, _| match k {
+                CseKey::LoadConst(_) => true,
+                CseKey::BinOpConst(src, _, _) => *src >= num_locals,
+                CseKey::UnaryOp(_, src) => *src >= num_locals,
             });
         }
 
@@ -4329,7 +4352,7 @@ mod tests {
             Insn::LoadConst(3, 0), // duplicate
             Insn::Return(2),
         ];
-        let out = pass_cse(insns);
+        let out = pass_cse(insns, 0);
         assert_eq!(out.len(), 3, "instruction count unchanged");
         assert!(
             matches!(out[0], Insn::LoadConst(2, 0)),
@@ -4351,7 +4374,7 @@ mod tests {
             Insn::BinOpConst(5, 0, BinaryOp::Add, 1), // duplicate
             Insn::Return(4),
         ];
-        let out = pass_cse(insns);
+        let out = pass_cse(insns, 0); // num_locals=0: r0 is a temp, CSE valid
         assert_eq!(out.len(), 3);
         assert!(
             matches!(out[0], Insn::BinOpConst(4, 0, BinaryOp::Add, 1)),
@@ -4375,7 +4398,7 @@ mod tests {
             Insn::BinOpConst(5, 0, BinaryOp::Add, 1),
             Insn::Return(4),
         ];
-        let out = pass_cse(insns);
+        let out = pass_cse(insns, 0);
         assert_eq!(out.len(), 4, "no elimination when input clobbered");
         assert!(
             matches!(out[2], Insn::BinOpConst(5, 0, BinaryOp::Add, 1)),
@@ -4395,7 +4418,7 @@ mod tests {
             Insn::LoadConst(3, 0),   // idx 2 is a BB start (jump target)
             Insn::Return(2),
         ];
-        let out = pass_cse(insns);
+        let out = pass_cse(insns, 0);
         // The third instruction (idx 2) is a BB start, so the CSE table is cleared
         // before it is processed; the second LoadConst(r3, 0) must NOT be replaced.
         assert!(
@@ -4413,7 +4436,7 @@ mod tests {
             Insn::UnaryOp(5, UnaryOp::Neg, 0), // duplicate
             Insn::Return(4),
         ];
-        let out = pass_cse(insns);
+        let out = pass_cse(insns, 0); // num_locals=0: r0 is a temp, CSE valid
         assert_eq!(out.len(), 3);
         assert!(
             matches!(out[0], Insn::UnaryOp(4, UnaryOp::Neg, 0)),
@@ -4440,11 +4463,43 @@ mod tests {
             Insn::LoadConst(3, 0),
             Insn::Return(3),
         ];
-        let out = pass_cse(insns);
+        let out = pass_cse(insns, 0);
         assert_eq!(out.len(), 4, "no elimination when output clobbered");
         assert!(
             matches!(out[2], Insn::LoadConst(3, 0)),
             "LoadConst must not be replaced after its output register is clobbered"
+        );
+    }
+
+    #[test]
+    fn cse_does_not_match_binopconst_across_call_boundary() {
+        use crate::ast::BinaryOp;
+        // Simulates the pattern where a named-local register (r0) is used
+        // as a source in BinOpConst before and after a Call instruction that
+        // may update r0 via assign_name write-through.
+        //
+        // A Call writes to r9 (a temp, not r0 or r4).  The CSE table entry
+        // {BinOpConst(r0, Add, 1) -> r4} must NOT survive across the Call,
+        // because at runtime r0 may have been updated by the callee.
+        //
+        //   [0] BinOpConst(r4, r0, Add, 1)   <- first occurrence; r4 = r0 + c1
+        //   [1] Call(r9, r2)                  <- may update r0 via write-through
+        //   [2] BinOpConst(r5, r0, Add, 1)   <- second occurrence; must NOT be CopyReg(r5, r4)
+        //   [3] Return(r5)
+        // num_locals=1: r0 is a named local; r4, r5, r9 are temps.
+        let insns = vec![
+            Insn::BinOpConst(4, 0, BinaryOp::Add, 1), // r4 = r0 + c1
+            Insn::Call(9, 2),                         // call; writes r9 (temp), may clobber r0
+            Insn::BinOpConst(5, 0, BinaryOp::Add, 1), // r5 = r0 + c1 (same expr)
+            Insn::Return(5),
+        ];
+        let out = pass_cse(insns, 1); // r0 < num_locals: named local, must not be CSE'd across call
+        // The second BinOpConst MUST NOT be replaced by CopyReg(r5, r4)
+        // because r0 may have been mutated by the Call.
+        assert!(
+            matches!(out[2], Insn::BinOpConst(5, 0, BinaryOp::Add, 1)),
+            "BinOpConst after Call must not be CSE-replaced when src is a named local: {:?}",
+            out[2]
         );
     }
 
