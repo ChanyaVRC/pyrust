@@ -328,6 +328,7 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
     let tuple_class = make("tuple", None);
     let dict_class = make("dict", None);
     let set_class = make("set", None);
+    populate_primitive_methods(&int_class, "int", INT_METHODS);
     populate_primitive_methods(&str_class, "str", STR_METHODS);
     populate_primitive_methods(&list_class, "list", LIST_METHODS);
     populate_primitive_methods(&tuple_class, "tuple", TUPLE_METHODS);
@@ -360,6 +361,8 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
 /// (`list.append`) returns a `BuiltinFunction("list.append")` sentinel
 /// dispatched by the unified `<type>.<method>` arm in
 /// `call_function_expanded`.
+const INT_METHODS: &[&str] = &["bit_length", "bit_count", "is_integer"];
+
 const STR_METHODS: &[&str] = &[
     "index", "count",
     "split", "rsplit", "join", "splitlines", "partition", "rpartition",

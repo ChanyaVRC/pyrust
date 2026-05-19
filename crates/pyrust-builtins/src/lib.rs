@@ -5,6 +5,7 @@ pub mod dict;
 pub mod dict_views;
 pub mod file;
 pub mod frozenset;
+pub mod int;
 pub mod iter_helpers;
 pub mod list;
 pub mod mutable_sequence;
@@ -58,6 +59,17 @@ mod method_table_drift_guard {
 
     fn is_fallback(e: &PyError) -> bool {
         matches!(e, PyError::Runtime(msg) if msg.contains("has no attribute"))
+    }
+
+    #[test]
+    fn int_methods_dispatched() {
+        let receiver = Value::int(5);
+        for &name in super::int::METHODS {
+            let r = super::int::call(name, &receiver, &[]);
+            if let Err(ref e) = r {
+                assert!(!is_fallback(e), "int::call({name}) hit fallback: {e:?}");
+            }
+        }
     }
 
     #[test]
