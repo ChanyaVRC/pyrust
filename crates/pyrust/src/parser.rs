@@ -447,13 +447,27 @@ impl Parser {
             )
         {
             self.bump(); // consume :
-            self.parse_expr()?; // discard the annotation expression
+            let annotation = self.parse_expr()?;
             if self.is(&Token::Assign) {
                 self.bump(); // consume =
                 let rhs = self.parse_expr()?;
+                if let Expr::Var(name) = &targets[0] {
+                    return Ok(vec![Stmt::AnnAssign {
+                        name: name.clone(),
+                        annotation,
+                        value: Some(rhs),
+                    }]);
+                }
                 return Ok(vec![lhs_to_assign_stmt(&targets[0], rhs)?]);
             }
-            // Bare annotation declaration without value: no-op at runtime.
+            // Bare annotation — name target emits AnnAssign; non-name is no-op.
+            if let Expr::Var(name) = &targets[0] {
+                return Ok(vec![Stmt::AnnAssign {
+                    name: name.clone(),
+                    annotation,
+                    value: None,
+                }]);
+            }
             return Ok(vec![Stmt::Pass]);
         }
 

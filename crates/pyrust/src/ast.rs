@@ -38,6 +38,11 @@ pub enum AssignTarget {
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Assign(AssignTarget, Expr),
+    AnnAssign {
+        name: String,
+        annotation: Expr,
+        value: Option<Expr>,
+    },
     AttrAssign {
         target: Expr,
         name: String,

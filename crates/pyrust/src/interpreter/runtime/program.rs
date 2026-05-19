@@ -103,6 +103,16 @@ impl Interpreter {
         // referencing `regs` is held while the dispatch loop runs; RegSlice
         // (raw pointer + len) removes the LLVM noalias constraint (issue #547).
         let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
+        // Issue #712: seed __annotations__ = {} in the module env so that module-level
+        // annotated assignments can do LoadGlobal("__annotations__") and SetItem.
+        {
+            use indexmap::IndexMap;
+            self.env
+                .borrow_mut()
+                .values
+                .entry("__annotations__".to_string())
+                .or_insert_with(|| crate::value::Value::dict(IndexMap::new()));
+        }
         let vm_result = self.run_bytecode(&code, regs_slice);
         self.vm_frame_views.pop();
         // Write fastlocal registers back to the module env so that imported

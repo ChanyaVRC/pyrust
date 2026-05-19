@@ -1390,6 +1390,12 @@ fn collect_local_names_from_block(
                     }
                 }
             }
+            Stmt::AnnAssign { name, value: Some(_), .. } => {
+                if !global_names.contains(name) && !nonlocal_names.contains(name) {
+                    names.insert(name.clone());
+                }
+            }
+            Stmt::AnnAssign { value: None, .. } => {}
             Stmt::AugAssign { .. }
             | Stmt::IndexAssign { .. }
             | Stmt::SliceAssign { .. }
@@ -2063,6 +2069,8 @@ fn is_pure_stmt(stmt: &Stmt, pure_fns: &std::collections::HashSet<String>) -> bo
                     .is_none_or(|b| is_pure_body(b, pure_fns))
         }
 
+        // Annotated assignment modifies __annotations__ dict — impure at module/class scope.
+        Stmt::AnnAssign { .. } => false,
         // Nested definitions don't execute side effects at definition time.
         Stmt::Def { .. } | Stmt::Class { .. } => true,
         Stmt::Pass | Stmt::Break | Stmt::Continue => true,
