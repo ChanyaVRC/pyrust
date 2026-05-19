@@ -26,6 +26,8 @@ fn subslice_offset(parent: &str, sub: &str) -> usize {
 /// dispatch in `calls.rs` intercepts `"format"` before `call_str_method` to
 /// route kwargs through `format_str_template`; the arm in `call` below is a
 /// drift-guard stub that is never reached at runtime.
+/// `format_map` is also listed and intercepted in `call_str_method` before
+/// the fall-through to `pyrust_builtins::string::call`.
 pub const METHODS: &[&str] = &[
     "index",
     "count",
@@ -56,6 +58,7 @@ pub const METHODS: &[&str] = &[
     "rindex",
     "replace",
     "format",
+    "format_map",
     "startswith",
     "endswith",
     "isdigit",
@@ -157,6 +160,17 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
             "TypeError",
             format!(
                 "descriptor 'format' of 'str' object needs an argument ({} given)",
+                args.len()
+            ),
+        )),
+        // `format_map` is intercepted by `call_str_method` in the interpreter
+        // and routed through `format_str_template_map` (which needs `&mut Interpreter`).
+        // This arm exists solely to satisfy the drift-guard test that verifies every
+        // entry in METHODS has a dispatch arm; it will never be reached at runtime.
+        "format_map" => Err(PyError::named(
+            "TypeError",
+            format!(
+                "str.format_map() takes exactly one argument ({} given)",
                 args.len()
             ),
         )),

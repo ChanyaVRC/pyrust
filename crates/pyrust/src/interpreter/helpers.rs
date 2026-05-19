@@ -403,7 +403,7 @@ const STR_METHODS: &[&str] = &[
     "center", "ljust", "rjust", "zfill", "expandtabs",
     "upper", "lower", "casefold", "capitalize", "swapcase", "title",
     "find", "rfind", "rindex",
-    "replace", "format",
+    "replace", "format", "format_map",
     "startswith", "endswith",
     "isdigit", "isalpha", "isalnum", "isspace", "isdecimal", "isnumeric",
     "islower", "isupper", "istitle", "isascii", "isidentifier", "isprintable",

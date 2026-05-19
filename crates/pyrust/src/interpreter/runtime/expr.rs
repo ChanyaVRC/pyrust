@@ -1180,9 +1180,10 @@ impl Interpreter {
     }
 
     /// Dispatch any str method.  `join` is handled here to support generators
-    /// and any custom iterable via `collect_iterable`; `format` is intercepted
-    /// in the bound-method dispatch path in `calls.rs` (which has access to
-    /// kwargs) before reaching this function.  Everything else delegates to
+    /// and any custom iterable via `collect_iterable`; `format_map` is handled
+    /// here because it routes through `format_str_template_map`; `format` is
+    /// intercepted in the bound-method dispatch path in `calls.rs` (which has
+    /// access to kwargs) before reaching this function.  Everything else delegates to
     /// the interpreter-free `pyrust_builtins::string::call`.
     pub(crate) fn call_str_method(
         &mut self,
@@ -1190,6 +1191,28 @@ impl Interpreter {
         receiver: Value,
         args: Vec<Value>,
     ) -> Result<Value> {
+        if method == "format_map" {
+            if args.len() != 1 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "str.format_map() takes exactly one argument ({} given)",
+                        args.len()
+                    ),
+                ));
+            }
+            let template = match receiver.kind() {
+                ValueKind::Str(s) => s.to_string(),
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "descriptor 'format_map' requires a 'str' object".to_string(),
+                    ))
+                }
+            };
+            let mapping = args.into_iter().next().unwrap();
+            return self.format_str_template_map(&template, mapping);
+        }
         if method == "join" {
             if args.len() != 1 {
                 return Err(PyError::named(

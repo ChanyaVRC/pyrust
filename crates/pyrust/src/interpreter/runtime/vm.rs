@@ -2667,6 +2667,23 @@ impl Interpreter {
                         .ok_or_else(|| PyError::Runtime("internal: expected str".to_string()))?;
                     return self.format_str_template(template, &args, &[]);
                 }
+                if method == "format_map" {
+                    if args.len() != 1 {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "str.format_map() takes exactly one argument ({} given)",
+                                args.len()
+                            ),
+                        ));
+                    }
+                    let mapping = args.into_iter().next().unwrap();
+                    let template = regs[obj as usize]
+                        .as_str()
+                        .ok_or_else(|| PyError::Runtime("internal: expected str".to_string()))?
+                        .to_string();
+                    return self.format_str_template_map(&template, mapping);
+                }
                 let receiver = vm_read(regs, obj, num_locals)?;
                 self.call_str_method(method.as_str(), receiver, args)
             }
@@ -2834,6 +2851,23 @@ impl Interpreter {
                         .as_str()
                         .ok_or_else(|| PyError::Runtime("internal: expected str".to_string()))?;
                     return self.format_str_template(template, &pos_items, &keyword);
+                }
+                if method == "format_map" {
+                    if pos_items.len() != 1 || !kw_map.is_empty() {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "str.format_map() takes exactly one argument ({} given)",
+                                pos_items.len() + kw_map.len()
+                            ),
+                        ));
+                    }
+                    let mapping = pos_items.into_iter().next().unwrap();
+                    let template = regs[obj as usize]
+                        .as_str()
+                        .ok_or_else(|| PyError::Runtime("internal: expected str".to_string()))?
+                        .to_string();
+                    return self.format_str_template_map(&template, mapping);
                 }
                 let receiver = vm_read(regs, obj, num_locals)?;
                 self.call_str_method(method.as_str(), receiver, pos_items)
