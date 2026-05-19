@@ -377,10 +377,14 @@ impl Interpreter {
         };
         self.vm_frame_views.push(VmFrameView {
             kind: FrameKind::Function,
-            // SAFETY: `GeneratorFrame::regs` is heap-allocated (the SmallVec
-            // spills to the heap at generator creation to survive across
-            // yields), so the pointer is stable.  SmallVec / Vec allocations
-            // are always non-null.  Popped immediately after
+            // SAFETY: `GeneratorFrame` is heap-allocated inside a
+            // `Box<GeneratorFrame>` (owned by the generator `Value`).
+            // `regs` lives inside that boxed frame, so whether the
+            // SmallVec uses its inline storage (for <= VM_REGS_INLINE
+            // registers) or spills to a separate allocation, the
+            // pointer is stable across yields — the Box is not moved
+            // or dropped while the generator is alive.  SmallVec / Vec
+            // allocations are always non-null.  Popped immediately after
             // `run_bytecode_inner` returns (including on yield).
             regs_ptr: unsafe { std::ptr::NonNull::new_unchecked(frame.regs.as_mut_ptr()) },
             regs_len: frame.regs.len(),

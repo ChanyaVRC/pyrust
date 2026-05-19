@@ -1094,14 +1094,31 @@ fn merge_frame_view_into_dict(
         // rather than creating a full `from_raw_parts` slice, limiting the
         // alias surface to a single `Value` slot per iteration.
         //
-        // The frame being read is either:
-        //   (a) the current innermost frame — suspended inside
-        //       `call_function_expanded` while a builtin (`locals()` /
-        //       `globals()`) runs; the outer frame's `regs: &mut [Value]`
-        //       parameter is on the Rust stack but is not accessed by any
-        //       code on the current execution path, so no write races this
-        //       read.
-        //   (b) a suspended outer frame — same reasoning applies.
+        // Three cases arise for the frame being read:
+        //   (a) A suspended outer frame (e.g. the Script frame when
+        //       `locals()` / `globals()` fires from inside a nested
+        //       function or class body): the outer frame's `regs:
+        //       &mut [Value]` is on the outer dispatch-loop's stack but
+        //       is not accessed by any code on the *current* execution
+        //       path.  No write races this read.
+        //   (b) The current innermost function/class frame — suspended
+        //       inside `call_function_expanded` while the builtin runs;
+        //       the frame's `regs: &mut [Value]` is on the Rust stack
+        //       but is not accessed by any code running now.
+        //   (c) The current Script frame when `locals()` is called at
+        //       module scope.  Here the Script frame's `run_bytecode`
+        //       dispatch loop IS the current call-chain owner of
+        //       `regs: &mut [Value]`.  The read via this raw pointer
+        //       therefore constitutes a technical alias of an active
+        //       `&mut`.  In practice this is safe at the machine level
+        //       because (i) the interpreter is single-threaded, (ii) no
+        //       write through any other path races the read, and (iii)
+        //       LLVM treats the intervening function call boundary as a
+        //       memory barrier that prevents `noalias`-driven cache
+        //       hoisting across the call.  Fully eliminating this residual
+        //       alias requires changing `run_bytecode_inner_impl` to
+        //       accept `regs: *mut [Value]`; that is tracked in issue #547
+        //       as out-of-scope for this PR.
         //
         // The `&Value` from `as_ref()` lives only for the duration of the
         // `.clone()` call and does not escape this loop body.  See the
