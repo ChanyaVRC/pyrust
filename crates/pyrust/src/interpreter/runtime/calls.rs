@@ -1725,27 +1725,26 @@ impl Interpreter {
     /// Resolve a single start/stop argument for `list.index` / `tuple.index`
     /// through the `__index__` protocol, matching CPython 3.12 semantics.
     ///
-    /// - `Int` / `Bool`: returned unchanged.
+    /// - `Int` / `Bool` / `BigInt`: returned unchanged (`BigInt` is still `int`).
     /// - `PyInstance` with `__index__`: the method is called; its return value
-    ///   must be `Int` or `Bool` (a deprecation-level tolerance CPython applies
-    ///   to `bool` subclasses), and is returned.
+    ///   must be `Int`, `Bool`, or `BigInt`, and is returned.
     /// - Anything else: `TypeError: slice indices must be integers or have an
     ///   __index__ method`.
     fn resolve_index_arg(&mut self, val: Value) -> Result<Value> {
         // Probe the kind in a scoped block so the Ref guard drops before we
         // may need to move `val`.
         enum Tag {
-            IntOrBool,
+            Int,
             Instance(Rc<RefCell<PyInstance>>),
             Other,
         }
         let tag = match val.kind() {
-            ValueKind::Int(_) | ValueKind::Bool(_) => Tag::IntOrBool,
+            ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => Tag::Int,
             ValueKind::PyInstance(inst) => Tag::Instance(Rc::clone(inst)),
             _ => Tag::Other,
         };
         match tag {
-            Tag::IntOrBool => Ok(val),
+            Tag::Int => Ok(val),
             Tag::Instance(inst_rc) => {
                 let class = Rc::clone(&inst_rc.borrow().class);
                 if let Some(method_val) = lookup_class_attr(&class, "__index__") {
@@ -1756,8 +1755,11 @@ impl Interpreter {
                         &[],
                     )?;
                     // Check result kind in a scoped block to release the Ref.
-                    let result_ok =
-                        matches!(result.kind(), ValueKind::Int(_) | ValueKind::Bool(_));
+                    // BigInt is a valid int result (e.g. __index__ returning 2**100).
+                    let result_ok = matches!(
+                        result.kind(),
+                        ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+                    );
                     if result_ok {
                         Ok(result)
                     } else {
