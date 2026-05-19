@@ -112,6 +112,47 @@ mod tests {
     }
 
     #[test]
+    fn break_outside_loop_is_syntax_error() {
+        let tokens = Lexer::new("break\n").unwrap().into_tokens();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut interpreter = Interpreter::default();
+
+        let error = interpreter.exec_program(&program, false).unwrap_err();
+
+        assert_eq!(error.to_string(), "SyntaxError: 'break' outside loop");
+    }
+
+    #[test]
+    fn continue_outside_loop_is_syntax_error() {
+        let tokens = Lexer::new("continue\n").unwrap().into_tokens();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut interpreter = Interpreter::default();
+
+        let error = interpreter.exec_program(&program, false).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "SyntaxError: 'continue' not properly in loop"
+        );
+    }
+
+    #[test]
+    fn break_in_function_outside_loop_is_syntax_error() {
+        let tokens = Lexer::new("def f():\n    break\n")
+            .unwrap()
+            .into_tokens();
+        let mut parser = Parser::new(tokens);
+        let program = parser.parse_program().unwrap();
+        let mut interpreter = Interpreter::default();
+
+        let error = interpreter.exec_program(&program, false).unwrap_err();
+
+        assert_eq!(error.to_string(), "SyntaxError: 'break' outside loop");
+    }
+
+    #[test]
     fn class_instances_bind_methods_and_init() {
         let interpreter = run_program(
             "class Counter:\n    def __init__(self, start):\n        self.value = start\n    def inc(self, step=1):\n        self.value = self.value + step\n        return self.value\nc = Counter(10)\nresult = [c.value, c.inc(), c.inc(4), c.value]\n",
