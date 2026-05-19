@@ -3203,19 +3203,26 @@ impl PyError {
         PyError::KeyError(key)
     }
 
-    /// Returns `true` when `self` is a `Named` or `Class` error whose
-    /// exception class name equals `name`.
+    /// Returns `true` when `self` is a `Named`, `Class`, `KeyError`, or `Raised` error
+    /// whose exception class name equals `name`.
     ///
     /// Used by the generator/iterator machinery to cheaply detect
     /// `StopIteration` and `GeneratorExit` without materialising the error
-    /// into a full `PyInstance`.  Works for both the string-named (`Named`)
-    /// and class-identity (`Class`) variants.
+    /// into a full `PyInstance`.  Works for the string-named (`Named`),
+    /// class-identity (`Class`), and already-raised-instance (`Raised`)
+    /// variants so that `PyError::Raised(StopIteration(...))` produced by
+    /// `resume_generator` is treated the same as `PyError::Named`.
     #[inline]
     pub fn class_name_is(&self, name: &str) -> bool {
         match self {
             PyError::Named(cls, _) => cls.as_ref() == name,
             PyError::Class(cls, _) => cls.borrow().name == name,
             PyError::KeyError(_) => name == "KeyError",
+            PyError::Raised(exc) => match exc.kind() {
+                ValueKind::PyInstance(inst) => inst.borrow().class.borrow().name == name,
+                ValueKind::PyClass(cls) => cls.borrow().name == name,
+                _ => false,
+            },
             _ => false,
         }
     }
