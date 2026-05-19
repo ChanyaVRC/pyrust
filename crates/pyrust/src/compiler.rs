@@ -184,11 +184,13 @@ fn collect_cell_vars_in(
                 // `StoreGlobal`, which the optimizer does not constant-fold,
                 // so the post-class value is seen correctly (issue #618).
                 //
-                // Note: we use `collect_global_names` (non-recursive) here, NOT
-                // `collect_transitive_global_names`, so that a method's `global x`
-                // does not promote the enclosing scope's `x` — that is handled
-                // separately for the class body's own register map in
-                // `collect_cell_vars_for_class_body` (issue #624).
+                // We use `collect_global_names_via_class_chain` (which recurses
+                // through nested class bodies) so that a `global x` declaration
+                // inside a doubly-nested class body is visible when scanning the
+                // outer class body (issue #672).  We do NOT use
+                // `collect_transitive_global_names` (which also crosses Stmt::Def
+                // boundaries) to avoid the #624 regression where a method's
+                // `global x` would incorrectly promote the enclosing scope's `x`.
                 //
                 // Exception: when the current scope is itself a class body
                 // (`is_class_scope == true`), skip this promotion.  A `global x`
@@ -199,7 +201,7 @@ fn collect_cell_vars_in(
                 // `RecordClassStore`, leaving the attribute absent from the class
                 // dict and causing `AttributeError` on `Outer.x` (issue #679).
                 if !is_class_scope {
-                    let class_body_globals = crate::interpreter::collect_global_names(nested_body);
+                    let class_body_globals = collect_global_names_via_class_chain(nested_body);
                     for name in &class_body_globals {
                         if local_index.contains_key(name) {
                             cells.insert(name.clone());
@@ -433,6 +435,88 @@ fn collect_transitive_global_names(body: &[Stmt], out: &mut HashSet<String>) {
                     collect_transitive_global_names(&arm.body, out);
                 }
             }
+            _ => {}
+        }
+    }
+}
+
+/// Collect every name declared `global` in `body` or in any transitively-nested
+/// `Stmt::Class` body, at any depth.  Does NOT cross `Stmt::Def` boundaries —
+/// those declare their own function scope and their `global` declarations are
+/// handled separately.  Used by `collect_cell_vars_in`'s `Stmt::Class` arm so
+/// that `global x` inside a doubly-nested class body (e.g.
+/// `class Outer: class Inner: global x`) is visible when scanning the outer
+/// class body, without re-introducing the issue #624 regression where a
+/// method's `global x` would incorrectly promote the outer class-body name.
+fn collect_global_names_via_class_chain(body: &[Stmt]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    collect_global_names_via_class_chain_into(body, &mut out);
+    out
+}
+
+fn collect_global_names_via_class_chain_into(body: &[Stmt], out: &mut HashSet<String>) {
+    for stmt in body {
+        match stmt {
+            Stmt::Global(names) => {
+                out.extend(names.iter().cloned());
+            }
+            Stmt::Class { body: nested, .. } => {
+                collect_global_names_via_class_chain_into(nested, out);
+            }
+            // Control-flow compound statements: recurse but remain at class scope.
+            Stmt::If {
+                branches,
+                else_branch,
+            } => {
+                for (_, b) in branches {
+                    collect_global_names_via_class_chain_into(b, out);
+                }
+                if let Some(b) = else_branch {
+                    collect_global_names_via_class_chain_into(b, out);
+                }
+            }
+            Stmt::While {
+                body, else_branch, ..
+            } => {
+                collect_global_names_via_class_chain_into(body, out);
+                if let Some(b) = else_branch {
+                    collect_global_names_via_class_chain_into(b, out);
+                }
+            }
+            Stmt::For {
+                body, else_branch, ..
+            } => {
+                collect_global_names_via_class_chain_into(body, out);
+                if let Some(b) = else_branch {
+                    collect_global_names_via_class_chain_into(b, out);
+                }
+            }
+            Stmt::Try {
+                body,
+                handlers,
+                else_branch,
+                finally_branch,
+            } => {
+                collect_global_names_via_class_chain_into(body, out);
+                for h in handlers {
+                    collect_global_names_via_class_chain_into(&h.body, out);
+                }
+                if let Some(b) = else_branch {
+                    collect_global_names_via_class_chain_into(b, out);
+                }
+                if let Some(b) = finally_branch {
+                    collect_global_names_via_class_chain_into(b, out);
+                }
+            }
+            Stmt::With { body, .. } => {
+                collect_global_names_via_class_chain_into(body, out);
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    collect_global_names_via_class_chain_into(&arm.body, out);
+                }
+            }
+            // Stmt::Def: do NOT recurse — function bodies are their own scope.
             _ => {}
         }
     }
