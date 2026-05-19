@@ -1217,6 +1217,47 @@ fn collect_class_method_outer_refs(
                     );
                 }
             }
+            Stmt::While {
+                body, else_branch, ..
+            } => {
+                collect_class_method_outer_refs(body, local_index, cells);
+                if let Some(b) = else_branch {
+                    collect_class_method_outer_refs(b, local_index, cells);
+                }
+            }
+            Stmt::For {
+                body, else_branch, ..
+            } => {
+                collect_class_method_outer_refs(body, local_index, cells);
+                if let Some(b) = else_branch {
+                    collect_class_method_outer_refs(b, local_index, cells);
+                }
+            }
+            Stmt::Try {
+                body,
+                handlers,
+                else_branch,
+                finally_branch,
+            } => {
+                collect_class_method_outer_refs(body, local_index, cells);
+                for h in handlers {
+                    collect_class_method_outer_refs(&h.body, local_index, cells);
+                }
+                if let Some(b) = else_branch {
+                    collect_class_method_outer_refs(b, local_index, cells);
+                }
+                if let Some(b) = finally_branch {
+                    collect_class_method_outer_refs(b, local_index, cells);
+                }
+            }
+            Stmt::With { body, .. } => {
+                collect_class_method_outer_refs(body, local_index, cells);
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    collect_class_method_outer_refs(&arm.body, local_index, cells);
+                }
+            }
             _ => {}
         }
     }

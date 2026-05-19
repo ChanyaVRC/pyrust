@@ -177,3 +177,33 @@ def outer_global_method():
     return Inner.g, Inner().method()
 
 print(outer_global_method())  # (100, 999)
+
+
+# --- Method defined inside class-level try block ---
+
+def outer_try():
+    x = 10
+    class C:
+        x = 99
+        try:
+            def method(self):
+                return x  # must see outer's x=10, not class x=99
+        except Exception:
+            pass
+    return C.x, C().method()
+
+print(outer_try())  # (99, 10)
+
+
+# --- Method defined inside class-level for loop body ---
+
+def outer_for():
+    x = 10
+    class C:
+        x = 99
+        for _ in range(1):
+            def method(self):
+                return x  # must see outer's x=10
+    return C.x, C().method()
+
+print(outer_for())  # (99, 10)
