@@ -886,8 +886,16 @@ impl Interpreter {
                                 regs[*dst as usize] = r;
                             }
                             FastResult::DictLookup(dict_val) => {
-                                let key = vm_try!(self.value_to_pykey(&idx_val));
-                                let lookup = vm_try!(self.dict_lookup(&dict_val, &key));
+                                // Fast path for string keys (issue #506): use
+                                // `dict_str_lookup` so we probe the map with
+                                // `StrKey` and avoid allocating a
+                                // `PyKey::Str(String)`.
+                                let lookup = if let Some(s) = idx_val.as_str() {
+                                    vm_try!(self.dict_str_lookup(&dict_val, s))
+                                } else {
+                                    let key = vm_try!(self.value_to_pykey(&idx_val));
+                                    vm_try!(self.dict_lookup(&dict_val, &key))
+                                };
                                 let r = vm_try!(
                                     lookup
                                         .map(|(_, v)| v)
