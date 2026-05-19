@@ -124,6 +124,7 @@ impl ExcClasses {
             "UnicodeError",
             "UnicodeEncodeError",
             "UnicodeDecodeError",
+            "MemoryError",
             "OSError",
             "FileNotFoundError",
             "SystemExit",

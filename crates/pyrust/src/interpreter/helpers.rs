@@ -965,6 +965,9 @@ fn install_exception_builtins(env: &EnvRef) {
         attrs: IndexMap::new(),
     }));
 
+    // MemoryError is a direct child of Exception in CPython.
+    let memory_error = make_child("MemoryError");
+
     // OSError and FileNotFoundError (child of OSError, not Exception).
     let os_error = make_child("OSError");
     let file_not_found_error = Rc::new(RefCell::new(PyClass {
@@ -1074,6 +1077,9 @@ fn install_exception_builtins(env: &EnvRef) {
         "UnicodeDecodeError".to_string(),
         Value::py_class(unicode_decode_error),
     );
+    module
+        .values
+        .insert("MemoryError".to_string(), Value::py_class(memory_error));
     module
         .values
         .insert("OSError".to_string(), Value::py_class(os_error));

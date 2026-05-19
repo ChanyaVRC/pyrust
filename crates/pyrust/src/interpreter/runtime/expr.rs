@@ -15,6 +15,80 @@ fn bigint_to_float_or_overflow(b: &PyBigInt) -> Result<f64> {
         })
 }
 
+/// Sequence repeat helpers.  Each raises the appropriate Python error when
+/// the repeat count or resulting allocation exceeds platform limits, matching
+/// CPython 3.12 behaviour:
+///
+/// - `n <= 0`                                → empty result
+/// - `BigInt` (any)                          → `OverflowError: cannot fit 'int' into an index-sized integer`
+/// - `Int` and `char_count * n > isize::MAX` → `OverflowError: repeated string is too long`
+/// - allocation fails (OOM)                  → `MemoryError`
+fn seq_repeat_str(text: &str, n: i64) -> Result<Value> {
+    if n <= 0 {
+        return Ok(Value::string(String::new()));
+    }
+    let n = n as usize;
+    let char_count = text.chars().count();
+    // CPython checks char_count * n fits in Py_ssize_t before allocating.
+    if char_count.checked_mul(n).map_or(true, |t| t > isize::MAX as usize) {
+        return Err(PyError::named(
+            "OverflowError",
+            "repeated string is too long".to_string(),
+        ));
+    }
+    // Use try_reserve to catch OOM rather than letting the allocator abort.
+    let byte_total = match text.len().checked_mul(n) {
+        Some(b) => b,
+        None => return Err(PyError::named("MemoryError", String::new())),
+    };
+    let mut out = String::new();
+    if out.try_reserve(byte_total).is_err() {
+        return Err(PyError::named("MemoryError", String::new()));
+    }
+    for _ in 0..n {
+        out.push_str(text);
+    }
+    Ok(Value::string(out))
+}
+
+fn seq_repeat_list(items: &[Value], n: i64) -> Result<Value> {
+    if n <= 0 {
+        return Ok(Value::list(Vec::new()));
+    }
+    let n = n as usize;
+    let total = match items.len().checked_mul(n) {
+        Some(t) => t,
+        None => return Err(PyError::named("MemoryError", String::new())),
+    };
+    let mut out: Vec<Value> = Vec::new();
+    if out.try_reserve(total).is_err() {
+        return Err(PyError::named("MemoryError", String::new()));
+    }
+    for _ in 0..n {
+        out.extend_from_slice(items);
+    }
+    Ok(Value::list(out))
+}
+
+fn seq_repeat_bytes(data: &[u8], n: i64) -> Result<Value> {
+    if n <= 0 {
+        return Ok(Value::bytes(Vec::new()));
+    }
+    let n = n as usize;
+    let total = match data.len().checked_mul(n) {
+        Some(t) => t,
+        None => return Err(PyError::named("MemoryError", String::new())),
+    };
+    let mut out: Vec<u8> = Vec::new();
+    if out.try_reserve(total).is_err() {
+        return Err(PyError::named("MemoryError", String::new()));
+    }
+    for _ in 0..n {
+        out.extend_from_slice(data);
+    }
+    Ok(Value::bytes(out))
+}
+
 /// Outcome of the borrow-only sequence equality fast path used by
 /// `values_user_eq` for `List`/`Tuple` pairs.
 ///
@@ -1681,35 +1755,30 @@ impl Interpreter {
                 Ok(Value::float(a * bigint_to_float_or_overflow(&b)?))
             }
             (ValueKind::Str(text), ValueKind::Int(n)) => {
-                if n <= 0 { Ok(Value::string(String::new())) }
-                else { Ok(Value::string(text.repeat(n as usize))) }
+                seq_repeat_str(text, n)
             }
             (ValueKind::Int(n), ValueKind::Str(text)) => {
-                if n <= 0 { Ok(Value::string(String::new())) }
-                else { Ok(Value::string(text.repeat(n as usize))) }
+                seq_repeat_str(text, n)
             }
-            (ValueKind::List(items), ValueKind::Int(n)) => {
-                if n <= 0 { return Ok(Value::list(Vec::new())); }
-                let n = n as usize;
-                let mut out = Vec::with_capacity(items.len() * n);
-                for _ in 0..n { out.extend_from_slice(&items[..]); }
-                Ok(Value::list(out))
-            }
-            (ValueKind::Int(n), ValueKind::List(items)) => {
-                if n <= 0 { return Ok(Value::list(Vec::new())); }
-                let n = n as usize;
-                let mut out = Vec::with_capacity(items.len() * n);
-                for _ in 0..n { out.extend_from_slice(&items[..]); }
-                Ok(Value::list(out))
-            }
-            (ValueKind::Bytes(data), ValueKind::Int(n)) => {
-                if n <= 0 { return Ok(Value::bytes(Vec::new())); }
-                Ok(Value::bytes(data.repeat(n as usize)))
-            }
-            (ValueKind::Int(n), ValueKind::Bytes(data)) => {
-                if n <= 0 { return Ok(Value::bytes(Vec::new())); }
-                Ok(Value::bytes(data.repeat(n as usize)))
-            }
+            (ValueKind::Str(_), ValueKind::BigInt(_))
+            | (ValueKind::BigInt(_), ValueKind::Str(_)) => Err(PyError::named(
+                "OverflowError",
+                "cannot fit 'int' into an index-sized integer".to_string(),
+            )),
+            (ValueKind::List(items), ValueKind::Int(n)) => seq_repeat_list(&items, n),
+            (ValueKind::Int(n), ValueKind::List(items)) => seq_repeat_list(&items, n),
+            (ValueKind::List(_), ValueKind::BigInt(_))
+            | (ValueKind::BigInt(_), ValueKind::List(_)) => Err(PyError::named(
+                "OverflowError",
+                "cannot fit 'int' into an index-sized integer".to_string(),
+            )),
+            (ValueKind::Bytes(data), ValueKind::Int(n)) => seq_repeat_bytes(&data, n),
+            (ValueKind::Int(n), ValueKind::Bytes(data)) => seq_repeat_bytes(&data, n),
+            (ValueKind::Bytes(_), ValueKind::BigInt(_))
+            | (ValueKind::BigInt(_), ValueKind::Bytes(_)) => Err(PyError::named(
+                "OverflowError",
+                "cannot fit 'int' into an index-sized integer".to_string(),
+            )),
             _ => {
                 let l_is_seq = matches!(
                     l.kind(),
