@@ -224,7 +224,7 @@ impl Interpreter {
             ValueKind::BuiltinFunction(name)
                 if name
                     .split_once('.')
-                    .is_some_and(|(t, _)| matches!(t, "str" | "list" | "tuple" | "dict" | "set")) =>
+                    .is_some_and(|(t, _)| matches!(t, "str" | "list" | "tuple" | "dict" | "set" | "complex" | "frozenset")) =>
             {
                 let (type_name, method) = name.split_once('.').unwrap();
                 let self_val = args
@@ -253,6 +253,9 @@ impl Interpreter {
                     ("tuple", ValueKind::Tuple(_)) => true,
                     ("dict", ValueKind::Dict(_)) => true,
                     ("set", ValueKind::Set(_)) => true,
+                    ("complex", ValueKind::Complex(_, _)) => true,
+                    ("frozenset", ValueKind::BuiltinObject { ops, .. })
+                        if ops.type_name() == "frozenset" => true,
                     _ => false,
                 };
                 if !kind_ok {
@@ -273,6 +276,8 @@ impl Interpreter {
                     },
                     "dict" => self.call_dict_method(method, self_val, pos),
                     "set" => self.call_set_method(method, self_val, pos),
+                    "complex" => pyrust_builtins::complex::call(method, &self_val, pos),
+                    "frozenset" => pyrust_builtins::frozenset::call(method, &self_val, pos),
                     _ => unreachable!("guard matched type_name above"),
                 }
             }
