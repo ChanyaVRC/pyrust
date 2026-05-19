@@ -2309,6 +2309,16 @@ fn hash_value(value: &Value) -> Result<i64> {
             "TypeError",
             "unhashable type: 'set'".to_string(),
         )),
+        // BuiltinObject: probe the BuiltinTypeOps hash hook (added in PR #781).
+        // Types that override BuiltinTypeOps::hash (e.g. frozenset) return
+        // Some(u64); anything that leaves it at the default None is unhashable.
+        ValueKind::BuiltinObject { ops, state } => match ops.hash(state) {
+            Some(h) => Ok(h as i64),
+            None => Err(PyError::named(
+                "TypeError",
+                format!("unhashable type: '{}'", ops.type_name()),
+            )),
+        },
         // PyInstance arriving here means either the caller didn't intercept
         // it for __hash__ dispatch (e.g. a tuple element), or no __hash__
         // method exists.  Use the actual class name rather than the generic
