@@ -407,6 +407,38 @@ impl Interpreter {
                     ))
                 }
             }
+            ValueKind::BuiltinObject { .. } => {
+                // Builtin bound methods (BuiltinObject with BoundMethodState):
+                // expose __name__, __qualname__, __self__, __module__, __doc__
+                // to match CPython's builtin_function_or_method attributes.
+                // __module__ is always None for built-in bound methods (CPython
+                // does not set m_module on method_descriptor objects).
+                //
+                // Kept in its own arm so the as_bound_method check is only
+                // reached for BuiltinObject values — not for List/Dict/Set/etc.
+                // (which previously fell through to _ and paid the check cost
+                // on every method lookup like lst.append).
+                if let Some((method_name, receiver)) =
+                    pyrust_builtins::bound_method::as_bound_method(&target)
+                {
+                    match name {
+                        "__name__" => return Ok(Value::string(method_name.as_str())),
+                        "__qualname__" => {
+                            let type_name = pyrust_core::builtin_type_name(&receiver);
+                            return Ok(Value::string(format!("{type_name}.{method_name}")));
+                        }
+                        "__self__" => return Ok(receiver),
+                        "__module__" => return Ok(Value::none()),
+                        "__doc__" => return Ok(Value::none()),
+                        _ => {}
+                    }
+                }
+                let type_name = pyrust_core::builtin_type_name(&target);
+                Err(PyError::named(
+                    "AttributeError",
+                    format!("'{type_name}' object has no attribute '{name}'"),
+                ))
+            }
             _ => {
                 // BoundMethod / ClassBoundMethod: delegate __name__ / __qualname__ /
                 // __module__ / __doc__ to the underlying function, matching CPython's
@@ -437,26 +469,6 @@ impl Interpreter {
                         _ => {}
                     },
                     _ => {}
-                }
-                // Builtin bound methods (BuiltinObject with BoundMethodState):
-                // expose __name__, __qualname__, __self__, __module__, __doc__
-                // to match CPython's builtin_function_or_method attributes.
-                // __module__ is always None for built-in bound methods (CPython
-                // does not set m_module on method_descriptor objects).
-                if let Some((method_name, receiver)) =
-                    pyrust_builtins::bound_method::as_bound_method(&target)
-                {
-                    match name {
-                        "__name__" => return Ok(Value::string(method_name.as_str())),
-                        "__qualname__" => {
-                            let type_name = pyrust_core::builtin_type_name(&receiver);
-                            return Ok(Value::string(format!("{type_name}.{method_name}")));
-                        }
-                        "__self__" => return Ok(receiver),
-                        "__module__" => return Ok(Value::none()),
-                        "__doc__" => return Ok(Value::none()),
-                        _ => {}
-                    }
                 }
                 // Complex .real / .imag attribute access.
                 if let ValueKind::Complex(re, im) = target.kind() {
