@@ -54,3 +54,25 @@ try:
     _ = 0j ** (-0.5)
 except ZeroDivisionError as e:
     print(f"ZeroDivisionError: {e}")
+
+# Negative integer exponents (repeated squaring + inversion, not general path)
+print(repr((1+1j) ** -1))       # (0.5-0.5j)
+print(repr((1+1j) ** -2))       # -0.5j
+print(repr((1+1j) ** -3))       # (-0.25-0.25j)
+print(repr((2+3j) ** -1))       # (0.15384615384615385-0.23076923076923078j)
+print(repr((1+0j) ** -1))       # (1+0j)
+print(repr((2+0j) ** -2))       # (0.25+0j)
+
+# BigInt base ** complex exponent
+print(repr((10**20) ** (1+0j)))  # (1e+20+0j)
+
+# Overflow: exponent too large causes OverflowError
+try:
+    _ = (1+1j) ** 10000
+except OverflowError as e:
+    print(f"OverflowError: {e}")
+
+try:
+    _ = (2+2j) ** 1000
+except OverflowError as e:
+    print(f"OverflowError: {e}")
