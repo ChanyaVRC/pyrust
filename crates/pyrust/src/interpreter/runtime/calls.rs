@@ -984,7 +984,9 @@ impl Interpreter {
                 };
                 self.vm_frame_views.push(VmFrameView {
                     kind: FrameKind::Function,
-                    regs_ptr: regs.as_mut_ptr(),
+                    // SAFETY: SmallVec / Vec allocation is always non-null.
+                    // Popped before `regs` is dropped (see above).
+                    regs_ptr: unsafe { std::ptr::NonNull::new_unchecked(regs.as_mut_ptr()) },
                     regs_len: regs.len(),
                     local_index: Rc::clone(&function.local_index),
                     nonlocal_names: nonlocal_names_opt,
@@ -1208,7 +1210,9 @@ impl Interpreter {
             };
             self.vm_frame_views.push(VmFrameView {
                 kind: FrameKind::Function,
-                regs_ptr: regs.as_mut_ptr(),
+                // SAFETY: SmallVec / Vec allocation is always non-null.
+                // Popped before `regs` is dropped (see above).
+                regs_ptr: unsafe { std::ptr::NonNull::new_unchecked(regs.as_mut_ptr()) },
                 regs_len: regs.len(),
                 local_index: Rc::clone(&function.local_index),
                 nonlocal_names: nonlocal_names_opt,

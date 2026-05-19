@@ -827,10 +827,14 @@ impl Interpreter {
             // Also update the module-level fastlocal register if one exists
             // for this name.  Without this, `print(x)` at module scope reads
             // the stale register value and ignores the StoreGlobal write (#520).
-            // SAFETY: the Script frame view is pushed before `run_bytecode` and
-            // popped immediately after; while a nested function's StoreGlobal
-            // fires the outer script frame is suspended (the VM is not executing
-            // its dispatch loop), so this write does not race with anything.
+            // SAFETY: `script_view.regs_ptr` points to the script frame's
+            // register file.  `assign_name` with `is_global = true` fires
+            // from a nested *function* frame (StoreGlobal), so the script
+            // frame is suspended — its `regs: &mut [Value]` is on the outer
+            // dispatch-loop stack but not currently accessed by any running
+            // code.  Writing a single `Value` via `NonNull::add(slot).as_mut()`
+            // is valid; `slot < regs_len` is verified by the inner `if`.  See
+            // soundness discussion in `VmFrameView::regs_ptr` (issue #547).
             if let Some(script_view) = self
                 .vm_frame_views
                 .iter()
@@ -840,7 +844,7 @@ impl Interpreter {
                     let slot = slot as usize;
                     if slot < script_view.regs_len {
                         unsafe {
-                            *script_view.regs_ptr.add(slot) = value;
+                            *script_view.regs_ptr.add(slot).as_mut() = value;
                         }
                     }
                 }

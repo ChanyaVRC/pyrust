@@ -82,7 +82,10 @@ impl Interpreter {
         // afterwards so the raw pointer never outlives the local `regs`.
         self.vm_frame_views.push(VmFrameView {
             kind: FrameKind::Script,
-            regs_ptr: regs.as_mut_ptr(),
+            // SAFETY: SmallVec's inline storage / Vec allocation is always
+            // non-null.  The pointer is valid for the lifetime of `regs` on
+            // this stack frame; it is popped before `regs` is dropped.
+            regs_ptr: unsafe { std::ptr::NonNull::new_unchecked(regs.as_mut_ptr()) },
             regs_len: regs.len(),
             local_index: Rc::clone(&local_index),
             // Script frames have no enclosing function scope, so there

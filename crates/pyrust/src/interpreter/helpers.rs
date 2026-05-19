@@ -1084,11 +1084,30 @@ fn merge_frame_view_into_dict(
         .map(|(name, &slot)| (slot as usize, name))
         .collect();
     by_slot.sort_by_key(|(slot, _)| *slot);
-    let regs: &[Value] = unsafe { std::slice::from_raw_parts(view.regs_ptr, view.regs_len) };
     for (slot, name) in by_slot {
-        if let Some(val) = regs.get(slot)
-            && !val.is_unset()
-        {
+        if slot >= view.regs_len {
+            continue;
+        }
+        // SAFETY: `view.regs_ptr` is a NonNull pointer to the frame's
+        // register file; `slot < view.regs_len` is enforced above.
+        // We access one element at a time via `NonNull::add(slot).as_ref()`
+        // rather than creating a full `from_raw_parts` slice, limiting the
+        // alias surface to a single `Value` slot per iteration.
+        //
+        // The frame being read is either:
+        //   (a) the current innermost frame — suspended inside
+        //       `call_function_expanded` while a builtin (`locals()` /
+        //       `globals()`) runs; the outer frame's `regs: &mut [Value]`
+        //       parameter is on the Rust stack but is not accessed by any
+        //       code on the current execution path, so no write races this
+        //       read.
+        //   (b) a suspended outer frame — same reasoning applies.
+        //
+        // The `&Value` from `as_ref()` lives only for the duration of the
+        // `.clone()` call and does not escape this loop body.  See the
+        // soundness discussion in `VmFrameView::regs_ptr` (issue #547).
+        let val = unsafe { view.regs_ptr.add(slot).as_ref() };
+        if !val.is_unset() {
             dict.insert(PyKey::Str(name.clone()), val.clone());
         }
     }

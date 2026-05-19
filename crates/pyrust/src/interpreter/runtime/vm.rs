@@ -377,7 +377,12 @@ impl Interpreter {
         };
         self.vm_frame_views.push(VmFrameView {
             kind: FrameKind::Function,
-            regs_ptr: frame.regs.as_mut_ptr(),
+            // SAFETY: `GeneratorFrame::regs` is heap-allocated (the SmallVec
+            // spills to the heap at generator creation to survive across
+            // yields), so the pointer is stable.  SmallVec / Vec allocations
+            // are always non-null.  Popped immediately after
+            // `run_bytecode_inner` returns (including on yield).
+            regs_ptr: unsafe { std::ptr::NonNull::new_unchecked(frame.regs.as_mut_ptr()) },
             regs_len: frame.regs.len(),
             local_index: Rc::clone(&frame.local_index),
             nonlocal_names: gen_nonlocal_names,
@@ -685,12 +690,18 @@ impl Interpreter {
                             if slot >= script_view.regs_len {
                                 return None;
                             }
-                            // SAFETY: the Script frame view is pushed before
-                            // run_bytecode and popped immediately after; while
-                            // a nested class body or function executes, the
-                            // script frame is suspended so the pointer is
-                            // valid and uncontested.
-                            let v = unsafe { &*script_view.regs_ptr.add(slot) };
+                            // SAFETY: `script_view.regs_ptr` is a NonNull
+                            // pointer to the script frame's register file.
+                            // LoadGlobal executes from a nested frame (function
+                            // or class body), so the script frame is suspended
+                            // — its `regs: &mut [Value]` in the outer dispatch
+                            // loop is not accessed by any code running now.
+                            // `slot < regs_len` is checked above.  The `&Value`
+                            // returned by `as_ref()` is valid for the duration
+                            // of the `.clone()` call; it does not outlive this
+                            // closure.  See soundness discussion in
+                            // `VmFrameView::regs_ptr` (issue #547).
+                            let v = unsafe { script_view.regs_ptr.add(slot).as_ref() };
                             if v.is_unset() { None } else { Some(v.clone()) }
                         })
                     {
@@ -1192,10 +1203,15 @@ impl Interpreter {
                         // write-back loop in `program.rs` does not re-insert the
                         // stale value.  Mirrors the write-through that `assign_name`
                         // does for `StoreGlobal` (#520).
-                        // SAFETY: the Script frame view is pushed before
-                        // `run_bytecode` and popped immediately after; while
-                        // this nested function executes, the script frame is
-                        // suspended, so the pointer is valid and uncontested.
+                        // SAFETY: `script_view.regs_ptr` points to the script
+                        // frame's register file.  DeleteGlobal executes from a
+                        // nested *function* frame, so the script frame is
+                        // suspended — its `regs: &mut [Value]` is not accessed
+                        // by any code running now.  Writing a single `Value`
+                        // via `NonNull::add(slot).as_mut()` is valid; `slot <
+                        // regs_len` is verified by the inner `if`.  See
+                        // soundness discussion in `VmFrameView::regs_ptr`
+                        // (issue #547).
                         if let Some(script_view) = self
                             .vm_frame_views
                             .iter()
@@ -1205,7 +1221,7 @@ impl Interpreter {
                                 let slot = slot as usize;
                                 if slot < script_view.regs_len {
                                     unsafe {
-                                        *script_view.regs_ptr.add(slot) = Value::unset();
+                                        *script_view.regs_ptr.add(slot).as_mut() = Value::unset();
                                     }
                                 }
                             }
@@ -2236,7 +2252,13 @@ impl Interpreter {
                     // the call.  Popped below unconditionally (even on error).
                     self.vm_frame_views.push(VmFrameView {
                         kind: FrameKind::Class,
-                        regs_ptr: class_regs.as_mut_ptr(),
+                        // SAFETY: SmallVec / Vec allocation is always non-null.
+                        // `class_regs` lives on this stack frame for the full
+                        // duration of `run_bytecode`; the view is popped below
+                        // before `class_regs` is dropped.
+                        regs_ptr: unsafe {
+                            std::ptr::NonNull::new_unchecked(class_regs.as_mut_ptr())
+                        },
                         regs_len: class_regs.len(),
                         local_index: Rc::clone(&local_index),
                         nonlocal_names: None,

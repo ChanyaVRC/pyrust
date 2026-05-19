@@ -269,14 +269,35 @@ pub(crate) enum FrameKind {
 /// registers rather than `env.values` (issue #389).
 pub(crate) struct VmFrameView {
     pub(crate) kind: FrameKind,
-    /// Raw pointer to the active frame's mutable register slice. Valid only
-    /// while the corresponding `run_bytecode` invocation is on the
-    /// call stack — `Interpreter::vm_frame_views` is pushed/popped
-    /// in lock-step with that lifetime by the caller.  The pointer is
-    /// `*mut` so that `assign_name`'s global-write path can update the
-    /// corresponding fastlocal register when `StoreGlobal` fires from a
-    /// nested scope (#520).
-    pub(crate) regs_ptr: *mut Value,
+    /// Non-null raw pointer to the active frame's register file.  Valid only
+    /// while the corresponding `run_bytecode` invocation is on the call stack
+    /// — `Interpreter::vm_frame_views` is pushed/popped in lock-step with
+    /// that lifetime by the caller.
+    ///
+    /// # Soundness invariants (issue #547)
+    ///
+    /// All accesses through this pointer go through per-element raw-pointer
+    /// operations (`NonNull::add(slot).as_ref()` / `.as_mut()`), never through
+    /// a full `from_raw_parts` slice reference.  This limits the visible alias
+    /// scope to one `Value` slot at a time.
+    ///
+    /// * **Read accesses** (`merge_frame_view_into_dict`, `Insn::LoadGlobal`):
+    ///   occur while the corresponding frame's `run_bytecode_inner_impl` is
+    ///   suspended inside `call_function_expanded`.  The `regs: &mut [Value]`
+    ///   parameter of that suspended dispatch loop is on the Rust call stack
+    ///   but is not accessed or observed by any code running at that moment.
+    ///   The interpreter is single-threaded and synchronous, so no concurrent
+    ///   modifications are possible.
+    ///
+    /// * **Write accesses** (`assign_name`/`StoreGlobal`, `Insn::DeleteGlobal`):
+    ///   only ever target a **suspended** `Script` frame — the currently
+    ///   executing frame is always a nested `Function` or `Class` frame at
+    ///   those sites.
+    ///
+    /// The pointer is `NonNull` (never null by construction) to make the
+    /// non-null guarantee explicit and to catch any push-with-null bugs at
+    /// push time rather than at dereference time.
+    pub(crate) regs_ptr: std::ptr::NonNull<Value>,
     pub(crate) regs_len: usize,
     pub(crate) local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
     /// Names declared `nonlocal` in this function frame (absent for
