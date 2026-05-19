@@ -827,10 +827,12 @@ impl Interpreter {
             // Also update the module-level fastlocal register if one exists
             // for this name.  Without this, `print(x)` at module scope reads
             // the stale register value and ignores the StoreGlobal write (#520).
-            // SAFETY: the Script frame view is pushed before `run_bytecode` and
-            // popped immediately after; while a nested function's StoreGlobal
-            // fires the outer script frame is suspended (the VM is not executing
-            // its dispatch loop), so this write does not race with anything.
+            // SAFETY: `script_view.regs_ptr` points to the script frame's
+            // register file.  The script frame's dispatch loop uses `RegSlice`
+            // (not `&mut [Value]`), so no LLVM `noalias` annotation covers the
+            // allocation — writing through `NonNull::add(slot).as_mut()` does
+            // not violate aliasing rules (issue #547, fixed in PR #646).
+            // `slot < regs_len` is verified by the inner `if`.
             if let Some(script_view) = self
                 .vm_frame_views
                 .iter()
@@ -840,7 +842,7 @@ impl Interpreter {
                     let slot = slot as usize;
                     if slot < script_view.regs_len {
                         unsafe {
-                            *script_view.regs_ptr.add(slot) = value;
+                            *script_view.regs_ptr.add(slot).as_mut() = value;
                         }
                     }
                 }

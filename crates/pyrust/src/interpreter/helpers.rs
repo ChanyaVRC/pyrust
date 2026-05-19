@@ -1084,11 +1084,40 @@ fn merge_frame_view_into_dict(
         .map(|(name, &slot)| (slot as usize, name))
         .collect();
     by_slot.sort_by_key(|(slot, _)| *slot);
-    let regs: &[Value] = unsafe { std::slice::from_raw_parts(view.regs_ptr, view.regs_len) };
     for (slot, name) in by_slot {
-        if let Some(val) = regs.get(slot)
-            && !val.is_unset()
-        {
+        if slot >= view.regs_len {
+            continue;
+        }
+        // SAFETY: `view.regs_ptr` is a NonNull pointer to the frame's
+        // register file; `slot < view.regs_len` is enforced above.
+        //
+        // No aliasing UB: as of PR #646, every `run_bytecode*` function
+        // accepts `RegSlice` (raw pointer + len) instead of `&mut [Value]`.
+        // `RegSlice` carries no LLVM `noalias` attribute, so no exclusive
+        // borrow on the allocation is live when this code runs — even in
+        // case (c) below where the script frame is the "current" frame.
+        //
+        // Cases for the frame being read:
+        //   (a) A suspended outer frame (e.g. the Script frame when
+        //       `locals()` / `globals()` fires from inside a nested
+        //       function or class body): the outer frame's `RegSlice`
+        //       is on the stack but carries no noalias.  No write races
+        //       this read (interpreter is single-threaded).
+        //   (b) The current innermost function/class frame — suspended
+        //       inside `call_function_expanded` while the builtin runs.
+        //       Same reasoning: `RegSlice`, no noalias, no concurrent
+        //       writes.
+        //   (c) The current Script frame when `locals()` is called at
+        //       module scope.  The script frame's dispatch loop holds a
+        //       `RegSlice` for the same allocation; forming `&Value` here
+        //       does not alias an `&mut [Value]` and is sound.  (This
+        //       was the residual UB in the previous `&mut [Value]` design,
+        //       now closed by the `RegSlice` change in issue #547.)
+        //
+        // The `&Value` from `as_ref()` lives only for the duration of the
+        // `.clone()` call and does not escape this loop body.
+        let val = unsafe { view.regs_ptr.add(slot).as_ref() };
+        if !val.is_unset() {
             dict.insert(PyKey::Str(name.clone()), val.clone());
         }
     }

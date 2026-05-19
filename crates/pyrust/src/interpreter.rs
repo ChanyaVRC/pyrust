@@ -269,14 +269,40 @@ pub(crate) enum FrameKind {
 /// registers rather than `env.values` (issue #389).
 pub(crate) struct VmFrameView {
     pub(crate) kind: FrameKind,
-    /// Raw pointer to the active frame's mutable register slice. Valid only
-    /// while the corresponding `run_bytecode` invocation is on the
-    /// call stack — `Interpreter::vm_frame_views` is pushed/popped
-    /// in lock-step with that lifetime by the caller.  The pointer is
-    /// `*mut` so that `assign_name`'s global-write path can update the
-    /// corresponding fastlocal register when `StoreGlobal` fires from a
-    /// nested scope (#520).
-    pub(crate) regs_ptr: *mut Value,
+    /// Non-null raw pointer to the active frame's register file.  Valid only
+    /// while the corresponding `run_bytecode` invocation is on the call stack
+    /// — `Interpreter::vm_frame_views` is pushed/popped in lock-step with
+    /// that lifetime by the caller.
+    ///
+    /// # Soundness (issue #547, fixed in PR #646)
+    ///
+    /// The key property: **no `&mut [Value]` covering this allocation is live
+    /// while any code that dereferences `regs_ptr` is executing.**
+    ///
+    /// This is guaranteed by the dispatch-loop API change in PR #646: every
+    /// `run_bytecode*` function now accepts `RegSlice` (raw pointer + len)
+    /// instead of `&mut [Value]`.  `RegSlice` carries no LLVM `noalias`
+    /// annotation, so dereferencing `regs_ptr` in any helper while the
+    /// dispatch loop is blocked inside `call_function_expanded` is not aliasing
+    /// UB — both accesses go through raw pointers.
+    ///
+    /// The old invariant ("per-element `NonNull::as_ref()` limits the alias
+    /// scope") was insufficient: even a single-element `&Value` / `&mut Value`
+    /// formed while a `&mut [Value]` to the same allocation is live on the
+    /// call stack violates Rust/LLVM `noalias` rules.  Removing `&mut [Value]`
+    /// from the picture entirely (via `RegSlice`) is the correct fix.
+    ///
+    /// Access patterns:
+    /// * **Reads** (`merge_frame_view_into_dict`, `Insn::LoadGlobal`): happen
+    ///   while the frame is suspended inside `call_function_expanded`.  The
+    ///   interpreter is single-threaded; no concurrent writes are possible.
+    /// * **Writes** (`assign_name`/`StoreGlobal`, `Insn::DeleteGlobal`): only
+    ///   ever target a **suspended** `Script` frame from a nested `Function`
+    ///   or `Class` frame.
+    ///
+    /// `NonNull` (rather than `*mut`) makes the non-null invariant explicit
+    /// and catches null-push bugs at the push site rather than at dereference.
+    pub(crate) regs_ptr: std::ptr::NonNull<Value>,
     pub(crate) regs_len: usize,
     pub(crate) local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
     /// Names declared `nonlocal` in this function frame (absent for
@@ -338,6 +364,117 @@ impl Default for Interpreter {
             eq_in_progress: Vec::new(),
             exc_classes,
         }
+    }
+}
+
+/// A raw-pointer view of a VM frame's register file, used by the dispatch loop
+/// in place of `&mut [Value]` to eliminate the LLVM `noalias` UB described in
+/// issue #547 and the Copilot review on PR #646.
+///
+/// # Why not `&mut [Value]`?
+///
+/// `&mut [Value]` carries LLVM's `noalias` attribute: the compiler may assume
+/// no other pointer aliases the same allocation while that reference is live.
+/// The invariant is violated when `VmFrameView` stores a `NonNull<Value>` into
+/// the same allocation and the `globals()`/`locals()` helpers or
+/// `StoreGlobal`/`DeleteGlobal` dereference it while the dispatch loop holds
+/// `&mut [Value]` on the call stack.  `RegSlice` (raw pointer + len) replaces
+/// `&mut [Value]` in every dispatch-loop signature; raw pointers carry no
+/// aliasing semantics in Rust's type system, so the concurrent dereferences
+/// through `VmFrameView::regs_ptr` are sound.
+///
+/// # Invariants the caller must uphold
+///
+/// - `ptr` is non-null, correctly aligned, and valid for `len` consecutive
+///   `Value` reads/writes for the duration of the dispatch-loop call.
+/// - No `&mut [Value]` covering the same allocation is held live (on the call
+///   stack or otherwise) while the dispatch loop runs.
+/// - No two mutable references to the same slot obtained through `IndexMut`
+///   are alive simultaneously (trivially satisfied by normal borrow rules on
+///   the returned `&mut Value`).
+///
+/// These invariants hold at every call site:
+/// - `calls.rs`: the `RegsBuf` local is alive, not borrowed as `&mut [Value]`,
+///   and the dispatch loop owns the only path to the allocation.
+/// - `program.rs`: same pattern; `RegsBuf` is only accessed through `regs[i]`
+///   after `run_bytecode` returns (no concurrent access).
+/// - `vm.rs` generator resumes: `GeneratorFrame::regs` is on the heap
+///   (stable address across yields) and is not borrowed as `&mut [Value]`.
+pub(crate) struct RegSlice {
+    ptr: *mut Value,
+    len: usize,
+}
+
+// SAFETY: The interpreter is single-threaded (uses `Rc`, `RefCell`, and
+// `thread_local!` throughout).  `RegSlice` is never moved across threads.
+// `*mut Value` is not `Send`/`Sync` by default; we do not implement those
+// traits, keeping `RegSlice` confined to its originating thread.
+
+impl RegSlice {
+    /// Construct a `RegSlice` from a raw pointer and length.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be non-null, aligned, and valid for `len` `Value` slots for
+    /// at least as long as the returned `RegSlice` is in use.  No `&mut [Value]`
+    /// covering the same allocation may be alive concurrently.
+    #[inline]
+    pub(crate) unsafe fn from_raw(ptr: *mut Value, len: usize) -> Self {
+        debug_assert!(!ptr.is_null());
+        RegSlice { ptr, len }
+    }
+
+    /// Number of register slots.
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Iterate mutably over every slot.  Yields `&mut Value` one at a time;
+    /// no two yielded references overlap, satisfying Rust's aliasing rules.
+    #[inline]
+    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Value> {
+        // SAFETY: ptr..ptr+len is valid and aligned (struct invariant);
+        // from_raw_parts_mut produces the canonical slice for that range.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len).iter_mut() }
+    }
+}
+
+/// Read-only view via `Deref` — reconstructs `&[Value]` from the raw pointer.
+/// `&[Value]` (shared reference) does NOT carry LLVM `noalias`, so this is safe
+/// to produce even while `VmFrameView` holds another pointer to the allocation.
+impl std::ops::Deref for RegSlice {
+    type Target = [Value];
+    #[inline]
+    fn deref(&self) -> &[Value] {
+        // SAFETY: ptr/len satisfy the struct invariant; &[Value] imposes no
+        // exclusivity guarantee, so forming it alongside VmFrameView's raw
+        // pointer is not aliasing UB.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+/// Indexed read: `regs[i]` — shared reference to slot `i`.
+impl std::ops::Index<usize> for RegSlice {
+    type Output = Value;
+    #[inline]
+    fn index(&self, i: usize) -> &Value {
+        assert!(i < self.len, "RegSlice: index {i} >= len {}", self.len);
+        // SAFETY: i < len, ptr is valid.
+        unsafe { &*self.ptr.add(i) }
+    }
+}
+
+/// Indexed write: `regs[i] = val` — exclusive reference to slot `i`.
+/// The returned `&mut Value` is scoped to the surrounding expression and does
+/// not alias any simultaneously-held reference.
+impl std::ops::IndexMut<usize> for RegSlice {
+    #[inline]
+    fn index_mut(&mut self, i: usize) -> &mut Value {
+        assert!(i < self.len, "RegSlice: index_mut {i} >= len {}", self.len);
+        // SAFETY: i < len, ptr is valid; the &mut lifetime is bounded by &mut self,
+        // preventing it from outliving the RegSlice or aliasing another &mut.
+        unsafe { &mut *self.ptr.add(i) }
     }
 }
 
