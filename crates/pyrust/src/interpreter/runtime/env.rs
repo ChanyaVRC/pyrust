@@ -828,13 +828,11 @@ impl Interpreter {
             // for this name.  Without this, `print(x)` at module scope reads
             // the stale register value and ignores the StoreGlobal write (#520).
             // SAFETY: `script_view.regs_ptr` points to the script frame's
-            // register file.  `assign_name` with `is_global = true` fires
-            // from a nested *function* frame (StoreGlobal), so the script
-            // frame is suspended — its `regs: &mut [Value]` is on the outer
-            // dispatch-loop stack but not currently accessed by any running
-            // code.  Writing a single `Value` via `NonNull::add(slot).as_mut()`
-            // is valid; `slot < regs_len` is verified by the inner `if`.  See
-            // soundness discussion in `VmFrameView::regs_ptr` (issue #547).
+            // register file.  The script frame's dispatch loop uses `RegSlice`
+            // (not `&mut [Value]`), so no LLVM `noalias` annotation covers the
+            // allocation — writing through `NonNull::add(slot).as_mut()` does
+            // not violate aliasing rules (issue #547, fixed in PR #646).
+            // `slot < regs_len` is verified by the inner `if`.
             if let Some(script_view) = self
                 .vm_frame_views
                 .iter()

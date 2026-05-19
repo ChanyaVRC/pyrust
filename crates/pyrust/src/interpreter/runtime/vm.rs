@@ -8,9 +8,6 @@
 pub(crate) const VM_REGS_INLINE: usize = 16;
 
 /// Per-frame register file backing for the VM.
-///
-/// All VM internals operate on `&mut [Value]` (via `SmallVec`'s `DerefMut`
-/// blanket), so call sites that need a mutable slice work unchanged.
 pub(crate) type RegsBuf = smallvec::SmallVec<[Value; VM_REGS_INLINE]>;
 
 /// Heap-allocated state for a built-in iterable wrapped by `iter()`.
@@ -240,10 +237,13 @@ impl Interpreter {
     /// Execute compiled bytecode for a user function.
     ///
     /// `regs` must be pre-sized to `code.num_regs` with parameter slots already filled.
+    /// Takes `RegSlice` (raw pointer + len) rather than `&mut [Value]` so that the
+    /// `VmFrameView` raw pointer stored before this call does not alias an `&mut [Value]`
+    /// that carries LLVM `noalias` (issue #547, PR #646 Copilot review).
     fn run_bytecode(
         &mut self,
         code: &crate::bytecode::FnCode,
-        regs: &mut [Value],
+        regs: RegSlice,
     ) -> Result<Value> {
         match self.run_bytecode_inner(
             code,
@@ -265,10 +265,11 @@ impl Interpreter {
 
     /// Like `run_bytecode` but also passes the current function's id so that
     /// `TailCall` instructions can perform self-call detection.
+    /// Takes `RegSlice` for the same aliasing-soundness reason as `run_bytecode`.
     fn run_bytecode_for_fn(
         &mut self,
         code: &crate::bytecode::FnCode,
-        regs: &mut [Value],
+        regs: RegSlice,
         fn_id: u64,
     ) -> Result<Value> {
         match self.run_bytecode_inner(
@@ -375,6 +376,11 @@ impl Interpreter {
         } else {
             None
         };
+        // Capture the raw pointer and length BEFORE constructing RegSlice so
+        // both the VmFrameView and the dispatch loop share the same raw pointer
+        // with no &mut [Value] in scope (eliminating the noalias UB, issue #547).
+        let regs_ptr = unsafe { std::ptr::NonNull::new_unchecked(frame.regs.as_mut_ptr()) };
+        let regs_len = frame.regs.len();
         self.vm_frame_views.push(VmFrameView {
             kind: FrameKind::Function,
             // SAFETY: `GeneratorFrame` is heap-allocated inside a
@@ -386,15 +392,21 @@ impl Interpreter {
             // or dropped while the generator is alive.  SmallVec / Vec
             // allocations are always non-null.  Popped immediately after
             // `run_bytecode_inner` returns (including on yield).
-            regs_ptr: unsafe { std::ptr::NonNull::new_unchecked(frame.regs.as_mut_ptr()) },
-            regs_len: frame.regs.len(),
+            regs_ptr,
+            regs_len,
             local_index: Rc::clone(&frame.local_index),
             nonlocal_names: gen_nonlocal_names,
             env: gen_env_opt,
         });
+        // SAFETY: regs_ptr is valid for regs_len Values for the lifetime of
+        // frame.regs (which outlives this call).  No &mut [Value] referencing
+        // frame.regs is held while the dispatch loop runs; RegSlice (raw
+        // pointer + len) is used instead, removing the LLVM noalias constraint
+        // that made the VmFrameView dereferences UB (issue #547).
+        let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
         let result = self.run_bytecode_inner(
             &frame.code.clone(),
-            &mut frame.regs,
+            regs_slice,
             std::mem::take(&mut frame.iters),
             std::mem::take(&mut frame.exc_handlers),
             frame.pc,
@@ -441,7 +453,7 @@ impl Interpreter {
     fn run_bytecode_inner(
         &mut self,
         code: &crate::bytecode::FnCode,
-        regs: &mut [Value],
+        regs: RegSlice,
         iters_init: Vec<Option<IterState>>,
         exc_handlers_init: Vec<usize>,
         start_pc: usize,
@@ -566,7 +578,7 @@ impl Interpreter {
     fn run_bytecode_inner_impl(
         &mut self,
         code: &crate::bytecode::FnCode,
-        regs: &mut [Value],
+        mut regs: RegSlice,
         iters_init: Vec<Option<IterState>>,
         exc_handlers_init: Vec<usize>,
         start_pc: usize,
@@ -696,15 +708,13 @@ impl Interpreter {
                             }
                             // SAFETY: `script_view.regs_ptr` is a NonNull
                             // pointer to the script frame's register file.
-                            // LoadGlobal executes from a nested frame (function
-                            // or class body), so the script frame is suspended
-                            // — its `regs: &mut [Value]` in the outer dispatch
-                            // loop is not accessed by any code running now.
-                            // `slot < regs_len` is checked above.  The `&Value`
-                            // returned by `as_ref()` is valid for the duration
-                            // of the `.clone()` call; it does not outlive this
-                            // closure.  See soundness discussion in
-                            // `VmFrameView::regs_ptr` (issue #547).
+                            // The script frame's dispatch loop uses `RegSlice`
+                            // (not `&mut [Value]`), so no LLVM `noalias`
+                            // annotation is live on the allocation — forming
+                            // `&Value` here does not violate aliasing rules
+                            // (issue #547, fixed in PR #646).  `slot < regs_len`
+                            // is checked above; `as_ref()` yields `&Value` for
+                            // the duration of the `.clone()` call only.
                             let v = unsafe { script_view.regs_ptr.add(slot).as_ref() };
                             if v.is_unset() { None } else { Some(v.clone()) }
                         })
@@ -722,14 +732,14 @@ impl Interpreter {
                 }
                 Insn::StoreGlobal(name_idx, src) => {
                     let name = pool_get!(code.names, *name_idx, "name").clone();
-                    let val = vm_try!(vm_read(regs, *src, num_locals));
+                    let val = vm_try!(vm_read(&regs, *src, num_locals));
                     self.assign_name(name, val);
                 }
                 Insn::LoadNone(dst) => {
                     regs[*dst as usize] = Value::none();
                 }
                 Insn::Move(dst, src) | Insn::CopyReg(dst, src) => {
-                    let v = vm_try!(vm_read(regs, *src, num_locals));
+                    let v = vm_try!(vm_read(&regs, *src, num_locals));
                     regs[*dst as usize] = v;
                 }
 
@@ -750,8 +760,8 @@ impl Interpreter {
                         regs[*dst as usize] = result;
                         continue;
                     }
-                    let l = vm_try!(vm_read(regs, *lhs, num_locals));
-                    let r = vm_try!(vm_read(regs, *rhs, num_locals));
+                    let l = vm_try!(vm_read(&regs, *lhs, num_locals));
+                    let r = vm_try!(vm_read(&regs, *rhs, num_locals));
                     regs[*dst as usize] = vm_try!(self.eval_binary(l, *op, r));
                 }
                 Insn::BinOpInPlace(dst, lhs, op, rhs) => {
@@ -763,8 +773,8 @@ impl Interpreter {
                         regs[*dst as usize] = result;
                         continue;
                     }
-                    let l = vm_try!(vm_read(regs, *lhs, num_locals));
-                    let r = vm_try!(vm_read(regs, *rhs, num_locals));
+                    let l = vm_try!(vm_read(&regs, *lhs, num_locals));
+                    let r = vm_try!(vm_read(&regs, *rhs, num_locals));
                     let result = if let Some(v) = vm_try!(self.try_inplace_op(l.clone(), *op, r.clone())) {
                         v
                     } else {
@@ -782,7 +792,7 @@ impl Interpreter {
                         regs[*dst as usize] = result;
                         continue;
                     }
-                    let l = vm_try!(vm_read(regs, *lhs, num_locals));
+                    let l = vm_try!(vm_read(&regs, *lhs, num_locals));
                     let r = cv.clone();
                     let result = if let Some(v) = vm_try!(self.try_inplace_op(l.clone(), *op, r.clone())) {
                         v
@@ -792,7 +802,7 @@ impl Interpreter {
                     regs[*dst as usize] = result;
                 }
                 Insn::UnaryOp(dst, op, src) => {
-                    let val = vm_try!(vm_read(regs, *src, num_locals));
+                    let val = vm_try!(vm_read(&regs, *src, num_locals));
                     let result = if *op == UnaryOp::Not {
                         // Dispatch __bool__ for instances before falling back to truthy().
                         Value::bool_(!vm_try!(self.truthy_value(&val)))
@@ -819,19 +829,19 @@ impl Interpreter {
 
                 // ── Attribute / Index ────────────────────────────────────
                 Insn::GetAttr(dst, obj, name_idx) => {
-                    let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
+                    let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
                     let name = pool_get!(code.names, *name_idx, "name");
                     let result = vm_try!(self.get_attr(obj_val, name));
                     regs[*dst as usize] = result;
                 }
                 Insn::SetAttr(obj, name_idx, val) => {
-                    let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
-                    let val_val = vm_try!(vm_read(regs, *val, num_locals));
+                    let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
+                    let val_val = vm_try!(vm_read(&regs, *val, num_locals));
                     let name = pool_get!(code.names, *name_idx, "name");
                     vm_try!(self.assign_attr(obj_val, name, val_val));
                 }
                 Insn::DeleteAttr(obj, name_idx) => {
-                    let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
+                    let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
                     let name = pool_get!(code.names, *name_idx, "name");
                     vm_try!(self.delete_attr(obj_val, name));
                 }
@@ -895,10 +905,10 @@ impl Interpreter {
                         if handled { continue; }
                     }
 
-                    let idx_val = vm_try!(vm_read(regs, *idx, num_locals));
+                    let idx_val = vm_try!(vm_read(&regs, *idx, num_locals));
                     // Slice key: tuple of (lo, hi, step) produced by the compiler.
                     if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
-                        let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
+                        let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
                         let result = vm_try!(self.eval_slice(obj_val, lo, hi, st));
                         regs[*dst as usize] = result;
                     } else {
@@ -950,7 +960,7 @@ impl Interpreter {
                                 regs[*dst as usize] = r;
                             }
                             FastResult::Miss => {
-                                let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
+                                let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
                                 let r = vm_try!(self.eval_index(obj_val, idx_val));
                                 regs[*dst as usize] = r;
                             }
@@ -958,8 +968,8 @@ impl Interpreter {
                     }
                 }
                 Insn::SetItem(obj, idx, val) => {
-                    let idx_val = vm_try!(vm_read(regs, *idx, num_locals));
-                    let val_val = vm_try!(vm_read(regs, *val, num_locals));
+                    let idx_val = vm_try!(vm_read(&regs, *idx, num_locals));
+                    let val_val = vm_try!(vm_read(&regs, *val, num_locals));
                     // Slice assignment: tuple key on a list.
                     if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
                         // Drop the kind() Ref before the fallback path
@@ -1051,7 +1061,7 @@ impl Interpreter {
                                 }
                             }
                             3 => {
-                                let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
+                                let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
                                 if let ValueKind::PyInstance(inst) = obj_val.kind() {
                                     let inst_rc = Rc::clone(inst);
                                     let class = Rc::clone(&inst_rc.borrow().class);
@@ -1081,7 +1091,7 @@ impl Interpreter {
                                 // impl returns a TypeError shaped like the
                                 // dict-fallback message, so non-mutating
                                 // types don't need extra plumbing.
-                                let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
+                                let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
                                 if let ValueKind::BuiltinObject { ops, state } = obj_val.kind() {
                                     vm_try!(ops.set_item(state, &idx_val, val_val));
                                 } else {
@@ -1099,7 +1109,7 @@ impl Interpreter {
                     }
                 }
                 Insn::DeleteItem(obj, idx) => {
-                    let idx_val = vm_try!(vm_read(regs, *idx, num_locals));
+                    let idx_val = vm_try!(vm_read(&regs, *idx, num_locals));
                     if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
                         let updated = regs[*obj as usize].list_with_mut(|items| {
                             Self::slice_delitem(
@@ -1161,7 +1171,7 @@ impl Interpreter {
                         }
                         if !handled {
                             // Try __delitem__ on user-defined instances.
-                            let obj_val = vm_try!(vm_read(regs, *obj, num_locals));
+                            let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
                             if let ValueKind::PyInstance(inst) = obj_val.kind() {
                                 let inst_rc = Rc::clone(inst);
                                 let class = Rc::clone(&inst_rc.borrow().class);
@@ -1208,14 +1218,12 @@ impl Interpreter {
                         // stale value.  Mirrors the write-through that `assign_name`
                         // does for `StoreGlobal` (#520).
                         // SAFETY: `script_view.regs_ptr` points to the script
-                        // frame's register file.  DeleteGlobal executes from a
-                        // nested *function* frame, so the script frame is
-                        // suspended — its `regs: &mut [Value]` is not accessed
-                        // by any code running now.  Writing a single `Value`
-                        // via `NonNull::add(slot).as_mut()` is valid; `slot <
-                        // regs_len` is verified by the inner `if`.  See
-                        // soundness discussion in `VmFrameView::regs_ptr`
-                        // (issue #547).
+                        // frame's register file.  The script frame's dispatch
+                        // loop uses `RegSlice` (not `&mut [Value]`), so no LLVM
+                        // `noalias` annotation covers the allocation — writing
+                        // through `NonNull::add(slot).as_mut()` does not violate
+                        // aliasing rules (issue #547, fixed in PR #646).
+                        // `slot < regs_len` is verified by the inner `if`.
                         if let Some(script_view) = self
                             .vm_frame_views
                             .iter()
@@ -1258,7 +1266,7 @@ impl Interpreter {
                         }
                     } else { false };
                     if fast { continue; }
-                    let cond_val = vm_try!(vm_read(regs, *cond, num_locals));
+                    let cond_val = vm_try!(vm_read(&regs, *cond, num_locals));
                     if !vm_try!(self.truthy_value(&cond_val)) {
                         pc = jump_pc!(*offset);
                     }
@@ -1272,7 +1280,7 @@ impl Interpreter {
                         }
                     } else { false };
                     if fast { continue; }
-                    let cond_val = vm_try!(vm_read(regs, *cond, num_locals));
+                    let cond_val = vm_try!(vm_read(&regs, *cond, num_locals));
                     if vm_try!(self.truthy_value(&cond_val)) {
                         pc = jump_pc!(*offset);
                     }
@@ -1285,8 +1293,8 @@ impl Interpreter {
                                 if !cond { pc = jump_pc!(*offset); }
                                 continue;
                             }
-                    let l = vm_try!(vm_read(regs, *lhs, num_locals));
-                    let r = vm_try!(vm_read(regs, *rhs, num_locals));
+                    let l = vm_try!(vm_read(&regs, *lhs, num_locals));
+                    let r = vm_try!(vm_read(&regs, *rhs, num_locals));
                     if !vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = jump_pc!(*offset); }
                 }
                 Insn::CmpJumpIfTrue(lhs, op, rhs, offset) => {
@@ -1297,8 +1305,8 @@ impl Interpreter {
                                 if cond { pc = jump_pc!(*offset); }
                                 continue;
                             }
-                    let l = vm_try!(vm_read(regs, *lhs, num_locals));
-                    let r = vm_try!(vm_read(regs, *rhs, num_locals));
+                    let l = vm_try!(vm_read(&regs, *lhs, num_locals));
+                    let r = vm_try!(vm_read(&regs, *rhs, num_locals));
                     if vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = jump_pc!(*offset); }
                 }
                 Insn::CmpJumpIfFalseConst(lhs, op, const_idx, offset) => {
@@ -1309,7 +1317,7 @@ impl Interpreter {
                                 if !cond { pc = jump_pc!(*offset); }
                                 continue;
                             }
-                    let l = vm_try!(vm_read(regs, *lhs, num_locals));
+                    let l = vm_try!(vm_read(&regs, *lhs, num_locals));
                     let r = cv.clone();
                     if !vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = jump_pc!(*offset); }
                 }
@@ -1321,7 +1329,7 @@ impl Interpreter {
                                 if cond { pc = jump_pc!(*offset); }
                                 continue;
                             }
-                    let l = vm_try!(vm_read(regs, *lhs, num_locals));
+                    let l = vm_try!(vm_read(&regs, *lhs, num_locals));
                     let r = cv.clone();
                     if vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = jump_pc!(*offset); }
                 }
@@ -1340,7 +1348,7 @@ impl Interpreter {
                     regs[*dst as usize] = exc;
                 }
                 Insn::MatchExcept(type_reg, offset) => {
-                    let type_val = vm_try!(vm_read(regs, *type_reg, num_locals));
+                    let type_val = vm_try!(vm_read(&regs, *type_reg, num_locals));
                     let exc = vm_try!(self.active_exception.clone().ok_or_else(|| {
                         PyError::Runtime(
                             "internal error: MatchExcept with no active exception".to_string(),
@@ -1365,7 +1373,7 @@ impl Interpreter {
                     self.active_exception = self.handled_exc_stack.last().cloned();
                 }
                 Insn::RaiseAssert(msg_reg) => {
-                    let msg = vm_try!(vm_read(regs, *msg_reg, num_locals));
+                    let msg = vm_try!(vm_read(&regs, *msg_reg, num_locals));
                     let msg_str = if msg.is_none() {
                         String::new()
                     } else {
@@ -1380,14 +1388,14 @@ impl Interpreter {
                     vm_try!(Err::<(), _>(PyError::Raised(exc)));
                 }
                 Insn::RaiseValue(src) => {
-                    let val = vm_try!(vm_read(regs, *src, num_locals));
+                    let val = vm_try!(vm_read(&regs, *src, num_locals));
                     let exc = vm_try!(self.coerce_to_exception(val));
                     self.attach_implicit_context(&exc);
                     vm_try!(Err::<(), _>(PyError::Raised(exc)));
                 }
                 Insn::RaiseFrom(src, cause_reg) => {
-                    let val = vm_try!(vm_read(regs, *src, num_locals));
-                    let cause = vm_try!(vm_read(regs, *cause_reg, num_locals));
+                    let val = vm_try!(vm_read(&regs, *src, num_locals));
+                    let cause = vm_try!(vm_read(&regs, *cause_reg, num_locals));
                     let exc = vm_try!(self.coerce_to_exception(val));
                     // PEP 3134: `raise X from Y` sets `__cause__` AND
                     // `__suppress_context__`, but `__context__` is still
@@ -1420,7 +1428,7 @@ impl Interpreter {
 
                 // ── Calls ────────────────────────────────────────────────
                 Insn::Call(func_reg, argc) => {
-                    let func_val = vm_try!(vm_read(regs, *func_reg, num_locals));
+                    let func_val = vm_try!(vm_read(&regs, *func_reg, num_locals));
                     // Fast path for id(x): read the pool pointer directly from the
                     // register without cloning.  Cloning a list/tuple/str creates a
                     // new allocation, so the pointer seen inside call_function_expanded
@@ -1442,7 +1450,7 @@ impl Interpreter {
                     for i in 0..crate::bytecode::Reg::from(*argc) {
                         buf.push(ExpandedCallArg {
                             name: None,
-                            value: vm_try!(vm_read(regs, *func_reg + 1 + i, num_locals)),
+                            value: vm_try!(vm_read(&regs, *func_reg + 1 + i, num_locals)),
                         });
                     }
                     let call_result = self.call_function_expanded(func_val, &buf);
@@ -1502,13 +1510,13 @@ impl Interpreter {
                     }
                     // Cache miss or unhashable args: normal call (call_function_expanded
                     // will store the result in fn_cache on the way back).
-                    let func_val = vm_try!(vm_read(regs, *func_reg, num_locals));
+                    let func_val = vm_try!(vm_read(&regs, *func_reg, num_locals));
                     let mut buf = std::mem::take(&mut self.call_arg_buf);
                     buf.clear();
                     for i in 0..crate::bytecode::Reg::from(*argc) {
                         buf.push(ExpandedCallArg {
                             name: None,
-                            value: vm_try!(vm_read(regs, *func_reg + 1 + i, num_locals)),
+                            value: vm_try!(vm_read(&regs, *func_reg + 1 + i, num_locals)),
                         });
                     }
                     let call_result = self.call_function_expanded(func_val, &buf);
@@ -1517,18 +1525,18 @@ impl Interpreter {
                 }
 
                 Insn::CallMethod { dst, obj, name_idx, args_base, nargs } => {
-                    let r = self.exec_call_method(regs, num_locals, *dst, *obj, *name_idx, *args_base, *nargs, code);
+                    let r = self.exec_call_method(&mut regs, num_locals, *dst, *obj, *name_idx, *args_base, *nargs, code);
                     regs[*dst as usize] = vm_try!(r);
                 }
 
                 Insn::CallMethodExpanded { dst, obj, name_idx, pos_list, kw_dict } => {
-                    let r = self.exec_call_method_expanded(regs, num_locals, *dst, *obj, *name_idx, *pos_list, *kw_dict, code);
+                    let r = self.exec_call_method_expanded(&mut regs, num_locals, *dst, *obj, *name_idx, *pos_list, *kw_dict, code);
                     regs[*dst as usize] = vm_try!(r);
                 }
 
                 // ── Returns ──────────────────────────────────────────────
                 Insn::Return(src) => {
-                    return Ok(FrameOutcome::Returned(vm_try!(vm_read(regs, *src, num_locals))));
+                    return Ok(FrameOutcome::Returned(vm_try!(vm_read(&regs, *src, num_locals))));
                 }
                 Insn::ReturnNone => {
                     return Ok(FrameOutcome::Returned(Value::none()));
@@ -1538,7 +1546,7 @@ impl Interpreter {
                 Insn::TailCall { args_base, nargs } => {
                     // The function to call lives at func_reg = args_base - 1.
                     let func_reg = args_base - 1;
-                    let callee_val = vm_try!(vm_read(regs, func_reg, num_locals));
+                    let callee_val = vm_try!(vm_read(&regs, func_reg, num_locals));
 
                     // Self-call check: if the callee is the same user function as
                     // the one currently executing, and we are not inside a try
@@ -1577,7 +1585,7 @@ impl Interpreter {
                         let mut new_args: Vec<Value> =
                             Vec::with_capacity(*nargs as usize);
                         for i in 0..*nargs as u32 {
-                            new_args.push(vm_try!(vm_read(regs, args_base + i, num_locals)));
+                            new_args.push(vm_try!(vm_read(&regs, args_base + i, num_locals)));
                         }
                         // Reset all registers to unset.
                         for slot in regs.iter_mut() {
@@ -1605,7 +1613,7 @@ impl Interpreter {
                         for i in 0..*nargs as u32 {
                             buf.push(ExpandedCallArg {
                                 name: None,
-                                value: vm_try!(vm_read(regs, args_base + i, num_locals)),
+                                value: vm_try!(vm_read(&regs, args_base + i, num_locals)),
                             });
                         }
                         let call_result = self.call_function_expanded(callee_val, &buf);
@@ -1618,29 +1626,29 @@ impl Interpreter {
                 Insn::BuildList(dst, base, n) => {
                     let mut items: Vec<Value> = Vec::with_capacity(*n as usize);
                     for i in 0..crate::bytecode::Reg::from(*n) {
-                        items.push(vm_try!(vm_read(regs, *base + i, num_locals)));
+                        items.push(vm_try!(vm_read(&regs, *base + i, num_locals)));
                     }
                     regs[*dst as usize] = Value::list(items);
                 }
                 Insn::BuildTuple(dst, base, n) => {
                     let mut items = Vec::with_capacity(*n as usize);
                     for i in 0..crate::bytecode::Reg::from(*n) {
-                        items.push(vm_try!(vm_read(regs, *base + i, num_locals)));
+                        items.push(vm_try!(vm_read(&regs, *base + i, num_locals)));
                     }
                     regs[*dst as usize] = Value::tuple(items);
                 }
                 Insn::BuildDict(dst, base, n) => {
                     let mut dict = indexmap::IndexMap::new();
                     for i in 0..crate::bytecode::Reg::from(*n) {
-                        let k_val = vm_try!(vm_read(regs, *base + i * 2, num_locals));
-                        let v_val = vm_try!(vm_read(regs, *base + i * 2 + 1, num_locals));
+                        let k_val = vm_try!(vm_read(&regs, *base + i * 2, num_locals));
+                        let v_val = vm_try!(vm_read(&regs, *base + i * 2 + 1, num_locals));
                         let key = vm_try!(self.value_to_pykey(&k_val));
                         vm_try!(self.dict_insert(&mut dict, key, v_val));
                     }
                     regs[*dst as usize] = Value::dict(dict);
                 }
                 Insn::SetAdd(set_reg, val_reg) => {
-                    let val = vm_try!(vm_read(regs, *val_reg, num_locals));
+                    let val = vm_try!(vm_read(&regs, *val_reg, num_locals));
                     let key = vm_try!(self.value_to_pykey(&val));
                     if let PyKey::Object { .. } = &key {
                         // Object keys need `__eq__` dispatch for dedup.
@@ -1659,11 +1667,11 @@ impl Interpreter {
                     }
                 }
                 Insn::ListAppend(list_reg, val_reg) => {
-                    let val = vm_try!(vm_read(regs, *val_reg, num_locals));
+                    let val = vm_try!(vm_read(&regs, *val_reg, num_locals));
                     vm_try!(regs[*list_reg as usize].list_push(val));
                 }
                 Insn::ListExtend(list_reg, src_reg) => {
-                    let src_val = vm_try!(vm_read(regs, *src_reg, num_locals));
+                    let src_val = vm_try!(vm_read(&regs, *src_reg, num_locals));
                     // #446: route through `collect_iterable` so user
                     // `__iter__` / `__getitem__` classes are honoured.
                     // #448: write back via the scoped `list_extend`
@@ -1673,7 +1681,7 @@ impl Interpreter {
                     vm_try!(regs[*list_reg as usize].list_extend(items_to_add));
                 }
                 Insn::DictUpdate(dict_reg, src_reg) => {
-                    let src_val = vm_try!(vm_read(regs, *src_reg, num_locals));
+                    let src_val = vm_try!(vm_read(&regs, *src_reg, num_locals));
                     let src_dict = match src_val.kind() {
                         ValueKind::Dict(d) => d.clone(),
                         _ => vm_try!(Err(PyError::named(
@@ -1693,7 +1701,7 @@ impl Interpreter {
                 Insn::Yield { src, dst } => {
                     // Suspend the generator.  pc has already been incremented
                     // past this instruction, so resumption continues at pc.
-                    let yielded = vm_try!(vm_read(regs, *src, num_locals));
+                    let yielded = vm_try!(vm_read(&regs, *src, num_locals));
                     // Pre-fill dst with None so the register holds a valid
                     // value while the frame is suspended.  resume_generator_with_exc
                     // overwrites this with the sent value (None for next(),
@@ -1732,7 +1740,7 @@ impl Interpreter {
 
                 // ── Unpack ───────────────────────────────────────────────
                 Insn::Unpack(base, src, n) => {
-                    let src_val = vm_try!(vm_read(regs, *src, num_locals));
+                    let src_val = vm_try!(vm_read(&regs, *src, num_locals));
                     let items = vm_try!(self.collect_iterable(src_val));
                     if items.len() < *n as usize {
                         vm_try!(Err::<(), _>(PyError::Runtime(format!(
@@ -1758,7 +1766,7 @@ impl Interpreter {
                 }
 
                 Insn::UnpackEx { src, before, after, dst_base } => {
-                    let src_val = vm_try!(vm_read(regs, *src, num_locals));
+                    let src_val = vm_try!(vm_read(&regs, *src, num_locals));
                     let items = vm_try!(self.collect_iterable(src_val));
                     let before = *before as usize;
                     let after = *after as usize;
@@ -1822,7 +1830,7 @@ impl Interpreter {
                     let state = if is_list_or_tuple_local {
                         IterState::Indexed { reg: *src, pos: 0 }
                     } else {
-                        let src_val = vm_try!(vm_read(regs, *src, num_locals));
+                        let src_val = vm_try!(vm_read(&regs, *src, num_locals));
                         // Detect the kind tag in a scoped block so the
                         // kind() Ref drops before we may move src_val
                         // into IterState / iter_values / make_getitem_iter
@@ -2120,7 +2128,7 @@ impl Interpreter {
                     for i in 0..param_spec.names.len() {
                         let default = if param_spec.has_default[i] {
                             let v =
-                                vm_try!(vm_read(regs, *defs_base + def_slot, num_locals));
+                                vm_try!(vm_read(&regs, *defs_base + def_slot, num_locals));
                             def_slot += 1;
                             Some(v)
                         } else {
@@ -2250,25 +2258,34 @@ impl Interpreter {
                     // Issue #487: publish a FrameKind::Class view so that
                     // `locals()` called inside the class body returns the
                     // partially-built class attrs dict (the fastlocal register
-                    // file) rather than the module globals.  The raw pointer is
-                    // valid for the lifetime of `run_bytecode` — `class_regs`
-                    // is pinned on this stack frame for the entire duration of
-                    // the call.  Popped below unconditionally (even on error).
+                    // file) rather than the module globals.  Capture the raw
+                    // pointer before constructing RegSlice so both the
+                    // VmFrameView and the dispatch loop use raw pointers only
+                    // (no &mut [Value] on the allocation; issue #547).
+                    let class_regs_ptr = unsafe {
+                        std::ptr::NonNull::new_unchecked(class_regs.as_mut_ptr())
+                    };
+                    let class_regs_len = class_regs.len();
                     self.vm_frame_views.push(VmFrameView {
                         kind: FrameKind::Class,
                         // SAFETY: SmallVec / Vec allocation is always non-null.
                         // `class_regs` lives on this stack frame for the full
                         // duration of `run_bytecode`; the view is popped below
                         // before `class_regs` is dropped.
-                        regs_ptr: unsafe {
-                            std::ptr::NonNull::new_unchecked(class_regs.as_mut_ptr())
-                        },
-                        regs_len: class_regs.len(),
+                        regs_ptr: class_regs_ptr,
+                        regs_len: class_regs_len,
                         local_index: Rc::clone(&local_index),
                         nonlocal_names: None,
                         env: None,
                     });
-                    let body_result = self.run_bytecode(&class_code, &mut class_regs);
+                    // SAFETY: class_regs_ptr is valid for class_regs_len Values
+                    // for the lifetime of class_regs (a local on this stack
+                    // frame).  No &mut [Value] referencing class_regs is held
+                    // while the dispatch loop runs (issue #547, PR #646).
+                    let class_regs_slice = unsafe {
+                        RegSlice::from_raw(class_regs_ptr.as_ptr(), class_regs_len)
+                    };
+                    let body_result = self.run_bytecode(&class_code, class_regs_slice);
                     // Always pop both stacks, even on error, to keep them balanced.
                     self.vm_frame_views.pop();
                     if let Some(prev) = previous_env {
@@ -2351,7 +2368,7 @@ impl Interpreter {
                         attrs.insert("__hash__".to_string(), Value::none());
                     }
                     let base = if *bases_n > 0 {
-                        let base_val = vm_try!(vm_read(regs, *bases_base, num_locals));
+                        let base_val = vm_try!(vm_read(&regs, *bases_base, num_locals));
                         match base_val.kind() {
                             ValueKind::PyClass(c) => Some(Rc::clone(c)),
                             _ => {
@@ -2382,7 +2399,7 @@ impl Interpreter {
 
                 // ── REPL output ──────────────────────────────────────────
                 Insn::PrintExpr(src) => {
-                    let val = vm_try!(vm_read(regs, *src, num_locals));
+                    let val = vm_try!(vm_read(&regs, *src, num_locals));
                     if !val.is_none() {
                         println!("{}", val.repr());
                     }
@@ -2414,7 +2431,7 @@ impl Interpreter {
     #[allow(clippy::too_many_arguments)]
     fn exec_call_method(
         &mut self,
-        regs: &mut [Value],
+        regs: &mut RegSlice,
         num_locals: crate::bytecode::Reg,
         _dst: crate::bytecode::Reg,
         obj: crate::bytecode::Reg,
@@ -2520,7 +2537,7 @@ impl Interpreter {
     #[allow(clippy::too_many_arguments)]
     fn exec_call_method_expanded(
         &mut self,
-        regs: &mut [Value],
+        regs: &mut RegSlice,
         num_locals: crate::bytecode::Reg,
         _dst: crate::bytecode::Reg,
         obj: crate::bytecode::Reg,
@@ -3223,7 +3240,10 @@ mod vm_tests {
         code.insns.push(Insn::ReturnNone);
         let mut interp = Interpreter::default();
         let mut regs: Vec<Value> = vec![Value::unset(); 1];
-        let result = interp.run_bytecode(&code, &mut regs);
+        // SAFETY (test): regs is alive for the duration of run_bytecode;
+        // no VmFrameView is active, so there is no concurrent access.
+        let regs_slice = unsafe { RegSlice::from_raw(regs.as_mut_ptr(), regs.len()) };
+        let result = interp.run_bytecode(&code, regs_slice);
         assert!(result.is_err(), "expected Err, got {:?}", result);
         assert!(
             result.unwrap_err().to_string().contains("no active exception"),
@@ -3237,7 +3257,8 @@ mod vm_tests {
         let code = empty_code(vec![Insn::Jump(100)]);
         let mut interp = Interpreter::default();
         let mut regs: Vec<Value> = vec![];
-        let result = interp.run_bytecode(&code, &mut regs);
+        let regs_slice = unsafe { RegSlice::from_raw(regs.as_mut_ptr(), regs.len()) };
+        let result = interp.run_bytecode(&code, regs_slice);
         assert!(result.is_err(), "expected Err for OOB jump, got {:?}", result);
         assert!(result.unwrap_err().to_string().contains("internal error"));
     }
@@ -3248,7 +3269,8 @@ mod vm_tests {
         let code = empty_code(vec![Insn::Jump(-100)]);
         let mut interp = Interpreter::default();
         let mut regs: Vec<Value> = vec![];
-        let result = interp.run_bytecode(&code, &mut regs);
+        let regs_slice = unsafe { RegSlice::from_raw(regs.as_mut_ptr(), regs.len()) };
+        let result = interp.run_bytecode(&code, regs_slice);
         assert!(result.is_err(), "expected Err for negative jump, got {:?}", result);
         assert!(result.unwrap_err().to_string().contains("internal error"));
     }
@@ -3258,7 +3280,8 @@ mod vm_tests {
         let code = empty_code(vec![Insn::ReturnNone]);
         let mut interp = Interpreter::default();
         let mut regs: Vec<Value> = vec![];
-        assert_eq!(interp.run_bytecode(&code, &mut regs).unwrap(), Value::none());
+        let regs_slice = unsafe { RegSlice::from_raw(regs.as_mut_ptr(), regs.len()) };
+        assert_eq!(interp.run_bytecode(&code, regs_slice).unwrap(), Value::none());
     }
 
     #[test]
@@ -3267,7 +3290,8 @@ mod vm_tests {
         let code = empty_code(vec![Insn::SetupExcept(-100), Insn::ReturnNone]);
         let mut interp = Interpreter::default();
         let mut regs: Vec<Value> = vec![];
-        let result = interp.run_bytecode(&code, &mut regs);
+        let regs_slice = unsafe { RegSlice::from_raw(regs.as_mut_ptr(), regs.len()) };
+        let result = interp.run_bytecode(&code, regs_slice);
         assert!(result.is_err(), "expected Err for SetupExcept with OOB offset, got {:?}", result);
     }
 }

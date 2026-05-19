@@ -80,20 +80,30 @@ impl Interpreter {
         // sees `env.values`; unifying it with `snapshot_current_locals`
         // is a separate cleanup.  Push before `run_bytecode`, pop
         // afterwards so the raw pointer never outlives the local `regs`.
+        // Capture the raw pointer and length BEFORE constructing RegSlice so
+        // both the VmFrameView and the dispatch loop share the same raw pointer
+        // with no &mut [Value] alive (eliminates noalias UB, issue #547).
+        let regs_ptr = unsafe { std::ptr::NonNull::new_unchecked(regs.as_mut_ptr()) };
+        let regs_len = regs.len();
         self.vm_frame_views.push(VmFrameView {
             kind: FrameKind::Script,
             // SAFETY: SmallVec's inline storage / Vec allocation is always
             // non-null.  The pointer is valid for the lifetime of `regs` on
             // this stack frame; it is popped before `regs` is dropped.
-            regs_ptr: unsafe { std::ptr::NonNull::new_unchecked(regs.as_mut_ptr()) },
-            regs_len: regs.len(),
+            regs_ptr,
+            regs_len,
             local_index: Rc::clone(&local_index),
             // Script frames have no enclosing function scope, so there
             // are no nonlocal bindings to resolve.
             nonlocal_names: None,
             env: None,
         });
-        let vm_result = self.run_bytecode(&code, &mut regs);
+        // SAFETY: regs_ptr is valid for regs_len Values for the lifetime of
+        // `regs` (a local RegsBuf that outlives this call).  No &mut [Value]
+        // referencing `regs` is held while the dispatch loop runs; RegSlice
+        // (raw pointer + len) removes the LLVM noalias constraint (issue #547).
+        let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
+        let vm_result = self.run_bytecode(&code, regs_slice);
         self.vm_frame_views.pop();
         // Write fastlocal registers back to the module env so that imported
         // modules and post-run inspection can find all names.

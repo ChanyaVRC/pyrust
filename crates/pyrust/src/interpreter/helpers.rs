@@ -1090,39 +1090,32 @@ fn merge_frame_view_into_dict(
         }
         // SAFETY: `view.regs_ptr` is a NonNull pointer to the frame's
         // register file; `slot < view.regs_len` is enforced above.
-        // We access one element at a time via `NonNull::add(slot).as_ref()`
-        // rather than creating a full `from_raw_parts` slice, limiting the
-        // alias surface to a single `Value` slot per iteration.
         //
-        // Three cases arise for the frame being read:
+        // No aliasing UB: as of PR #646, every `run_bytecode*` function
+        // accepts `RegSlice` (raw pointer + len) instead of `&mut [Value]`.
+        // `RegSlice` carries no LLVM `noalias` attribute, so no exclusive
+        // borrow on the allocation is live when this code runs — even in
+        // case (c) below where the script frame is the "current" frame.
+        //
+        // Cases for the frame being read:
         //   (a) A suspended outer frame (e.g. the Script frame when
         //       `locals()` / `globals()` fires from inside a nested
-        //       function or class body): the outer frame's `regs:
-        //       &mut [Value]` is on the outer dispatch-loop's stack but
-        //       is not accessed by any code on the *current* execution
-        //       path.  No write races this read.
+        //       function or class body): the outer frame's `RegSlice`
+        //       is on the stack but carries no noalias.  No write races
+        //       this read (interpreter is single-threaded).
         //   (b) The current innermost function/class frame — suspended
-        //       inside `call_function_expanded` while the builtin runs;
-        //       the frame's `regs: &mut [Value]` is on the Rust stack
-        //       but is not accessed by any code running now.
+        //       inside `call_function_expanded` while the builtin runs.
+        //       Same reasoning: `RegSlice`, no noalias, no concurrent
+        //       writes.
         //   (c) The current Script frame when `locals()` is called at
-        //       module scope.  Here the Script frame's `run_bytecode`
-        //       dispatch loop IS the current call-chain owner of
-        //       `regs: &mut [Value]`.  The read via this raw pointer
-        //       therefore constitutes a technical alias of an active
-        //       `&mut`.  In practice this is safe at the machine level
-        //       because (i) the interpreter is single-threaded, (ii) no
-        //       write through any other path races the read, and (iii)
-        //       LLVM treats the intervening function call boundary as a
-        //       memory barrier that prevents `noalias`-driven cache
-        //       hoisting across the call.  Fully eliminating this residual
-        //       alias requires changing `run_bytecode_inner_impl` to
-        //       accept `regs: *mut [Value]`; that is tracked in issue #547
-        //       as out-of-scope for this PR.
+        //       module scope.  The script frame's dispatch loop holds a
+        //       `RegSlice` for the same allocation; forming `&Value` here
+        //       does not alias an `&mut [Value]` and is sound.  (This
+        //       was the residual UB in the previous `&mut [Value]` design,
+        //       now closed by the `RegSlice` change in issue #547.)
         //
         // The `&Value` from `as_ref()` lives only for the duration of the
-        // `.clone()` call and does not escape this loop body.  See the
-        // soundness discussion in `VmFrameView::regs_ptr` (issue #547).
+        // `.clone()` call and does not escape this loop body.
         let val = unsafe { view.regs_ptr.add(slot).as_ref() };
         if !val.is_unset() {
             dict.insert(PyKey::Str(name.clone()), val.clone());
