@@ -86,12 +86,19 @@ fn bytes_hex(bytes: &[u8], args: &[Value]) -> Result<Value> {
         }
     };
 
-    // Validate separator length: CPython requires exactly one character.
+    // Validate separator: CPython requires exactly one ASCII character.
     let sep_chars = sep.chars().count();
     if sep_chars != 1 {
         return Err(PyError::named(
             "ValueError",
             "sep must be length 1.".to_string(),
+        ));
+    }
+    // CPython 3.12 also requires the separator to be ASCII.
+    if !sep.is_ascii() {
+        return Err(PyError::named(
+            "ValueError",
+            "sep must be ASCII.".to_string(),
         ));
     }
 
@@ -108,10 +115,13 @@ fn bytes_hex(bytes: &[u8], args: &[Value]) -> Result<Value> {
     };
 
     if bytes_per_sep == 0 {
-        return Err(PyError::named(
-            "ValueError",
-            "bytes_per_sep must be non-zero".to_string(),
-        ));
+        // CPython 3.12: bytes_per_sep=0 means "no separator" — returns plain hex.
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            use std::fmt::Write as _;
+            let _ = write!(out, "{b:02x}");
+        }
+        return Ok(Value::string(out));
     }
 
     // Group the hex nibbles according to bytes_per_sep.
@@ -320,7 +330,10 @@ fn bytes_startswith(bytes: &[u8], args: &[Value]) -> Result<Value> {
             "bytes.startswith() requires at least 1 argument".to_string(),
         )
     })?;
-    let (start, end) = bytes_slice_args(bytes.len(), args)?;
+    let range = bytes_slice_args(bytes.len(), args)?;
+    let Some((start, end)) = range else {
+        return Ok(Value::bool_(false));
+    };
     let haystack = &bytes[start..end];
     match prefix_val.kind() {
         ValueKind::Bytes(rc) => Ok(Value::bool_(haystack.starts_with(rc.as_slice()))),
@@ -359,7 +372,10 @@ fn bytes_endswith(bytes: &[u8], args: &[Value]) -> Result<Value> {
             "bytes.endswith() requires at least 1 argument".to_string(),
         )
     })?;
-    let (start, end) = bytes_slice_args(bytes.len(), args)?;
+    let range = bytes_slice_args(bytes.len(), args)?;
+    let Some((start, end)) = range else {
+        return Ok(Value::bool_(false));
+    };
     let haystack = &bytes[start..end];
     match suffix_val.kind() {
         ValueKind::Bytes(rc) => Ok(Value::bool_(haystack.ends_with(rc.as_slice()))),
@@ -403,11 +419,15 @@ fn bytes_find(bytes: &[u8], args: &[Value]) -> Result<Value> {
         )
     })?;
     let sub = extract_bytes_arg(sub_val)?;
-    let (start, end) = bytes_slice_args(bytes.len(), args)?;
+    let range = bytes_slice_args(bytes.len(), args)?;
+    let Some((start, end)) = range else {
+        // Inverted range: CPython returns -1 even for empty sub.
+        return Ok(Value::int(-1));
+    };
     let haystack = &bytes[start..end];
 
     if sub.is_empty() {
-        // CPython: empty sub returns start (or 0).
+        // CPython: empty sub in a valid (possibly empty) range returns start.
         return Ok(Value::int(start as i64));
     }
 
@@ -429,7 +449,11 @@ fn bytes_count(bytes: &[u8], args: &[Value]) -> Result<Value> {
         )
     })?;
     let sub = extract_bytes_arg(sub_val)?;
-    let (start, end) = bytes_slice_args(bytes.len(), args)?;
+    let range = bytes_slice_args(bytes.len(), args)?;
+    let Some((start, end)) = range else {
+        // Inverted range: CPython returns 0 even for empty sub.
+        return Ok(Value::int(0));
+    };
     let haystack = &bytes[start..end];
 
     if sub.is_empty() {
@@ -455,8 +479,11 @@ fn bytes_count(bytes: &[u8], args: &[Value]) -> Result<Value> {
 // ---------------------------------------------------------------------------
 
 /// Parse start/end slice args (args[1], args[2]) into byte offsets, clamped to
-/// `[0, len]`.  Returns `(start, end)`.
-fn bytes_slice_args(len: usize, args: &[Value]) -> Result<(usize, usize)> {
+/// `[0, len]`.  Returns `Ok(Some((start, end)))` for a valid (possibly empty)
+/// range, or `Ok(None)` when `end < start` after clamping — an inverted range
+/// that CPython treats as "empty with no match" (find → -1, count → 0,
+/// startswith/endswith → False).
+fn bytes_slice_args(len: usize, args: &[Value]) -> Result<Option<(usize, usize)>> {
     let start: usize = match args.get(1).map(|v| v.kind()) {
         None => 0,
         Some(ValueKind::Int(i)) => normalise_idx(i, len),
@@ -480,8 +507,15 @@ fn bytes_slice_args(len: usize, args: &[Value]) -> Result<(usize, usize)> {
         }
     };
     let start = start.min(len);
-    let end = end.max(start);
-    Ok((start, end))
+    // Don't clamp end up to start: an inverted range (end < start) must be
+    // distinguished from a genuinely empty range (end == start) because
+    // CPython returns -1/0/False for inverted ranges but a valid index for
+    // empty ranges at the boundary.
+    if end < start {
+        Ok(None)
+    } else {
+        Ok(Some((start, end)))
+    }
 }
 
 fn normalise_idx(idx: i64, len: usize) -> usize {

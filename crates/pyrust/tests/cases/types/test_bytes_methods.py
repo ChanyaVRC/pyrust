@@ -62,3 +62,24 @@ try:
     b'hello'.endswith('lo')
 except TypeError as e:
     print("TypeError caught")
+
+# hex: bytes_per_sep=0 returns plain hex (CPython treats 0 as no separator)
+print(b'hello'.hex(':', 0))         # 68656c6c6f
+
+# hex: non-ASCII sep raises ValueError
+try:
+    b'hello'.hex('’')
+except ValueError as e:
+    print("ValueError caught")
+
+# find/count/startswith/endswith with inverted range (end < start after clamping)
+print(b'hello'.find(b'', 4, 2))    # -1
+print(b'hello'.count(b'', 4, 2))   # 0
+print(b'hello'.startswith(b'hel', 5, 3))  # False
+print(b'hello'.endswith(b'lo', 5, 3))     # False
+
+# find empty sub in valid range at end
+print(b'hello'.find(b'', 5))       # 5
+
+# count empty sub in empty bytes
+print(b''.count(b''))              # 1
