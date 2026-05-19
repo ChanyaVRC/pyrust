@@ -35,6 +35,10 @@ try:
 except OverflowError:
     print("OverflowError: both overflow")
 
+# Mixed bool + BigInt
+print(complex(True, 10**20))    # (1+1e+20j)
+print(complex(10**20, True))    # (1e+20+1j)
+
 # Regression: existing int/float/bool/complex args still work
 print(complex(1, 2))            # (1+2j)
 print(complex(1.5, 2.5))       # (1.5+2.5j)
