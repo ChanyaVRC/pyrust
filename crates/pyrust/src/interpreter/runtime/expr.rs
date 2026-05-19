@@ -1288,6 +1288,14 @@ impl Interpreter {
                         }
                     }
                     _ => {
+                        // When either operand is complex, use complex
+                        // exponentiation: z^w = exp(w * ln(z)).
+                        // `both_as_complex` returns Some only when at least
+                        // one operand is already a Complex value, so pure
+                        // int/float paths continue to use `powf` below.
+                        if let Some(((zr, zi), (wr, wi))) = both_as_complex(&left, &right) {
+                            return Ok(complex_pow(zr, zi, wr, wi)?);
+                        }
                         let a = value_to_float(&left, "**")?;
                         let b = value_to_float(&right, "**")?;
                         Ok(Value::float(a.powf(b)))
@@ -2282,4 +2290,81 @@ fn both_as_complex(left: &Value, right: &Value) -> Option<((f64, f64), (f64, f64
     let a = as_complex_pair(left)?;
     let b = as_complex_pair(right)?;
     Some((a, b))
+}
+
+/// Compute complex exponentiation `(zr + zi*j) ** (wr + wi*j)` with
+/// CPython 3.12 parity.
+///
+/// Mirrors CPython's `_Py_c_pow` from `Objects/complexobject.c`:
+///   - For small non-negative integer exponents (`wi == 0`, `wr` is an
+///     integer in `0..=100`), use repeated squaring so that results like
+///     `(1+1j)**2 == 2j` are exact (no floating-point rounding in the
+///     imaginary part).
+///   - General case uses `r = |z|` (hypot), `ln_r = ln(r)`, `t = arg(z)`:
+///     `len = pow(r, wr) * exp(-wi * t)`,  `at = wr*t + wi*ln_r`,
+///     `result = len * (cos(at) + i*sin(at))`.
+///     Using `pow(r, wr)` rather than `exp(wr*ln_r)` matches CPython's
+///     rounding for cases like `(2+0j)**0.5`.
+///
+/// Special cases (CPython parity):
+///   - `w == 0+0j` → `(1+0j)` for any `z` (including `0j ** 0`).
+///   - `z == 0+0j`, `wi != 0` or `wr < 0` → `ZeroDivisionError`.
+///   - `z == 0+0j`, `wr > 0`, `wi == 0` → `0j`.
+fn complex_pow(zr: f64, zi: f64, wr: f64, wi: f64) -> Result<Value> {
+    // z^0 = 1 for any z (including 0j ** 0).
+    if wr == 0.0 && wi == 0.0 {
+        return Ok(Value::complex(1.0, 0.0));
+    }
+
+    let abs_r = zr.hypot(zi); // |z| = sqrt(zr² + zi²)
+    if abs_r == 0.0 {
+        // 0j ** w where w != 0.
+        // CPython raises ZeroDivisionError when the exponent has a nonzero
+        // imaginary part or a negative real part.
+        if wi != 0.0 || wr < 0.0 {
+            return Err(PyError::named(
+                "ZeroDivisionError",
+                "0.0 to a negative or complex power".to_string(),
+            ));
+        }
+        // wr > 0, wi == 0: 0j ** positive_real = 0j.
+        return Ok(Value::complex(0.0, 0.0));
+    }
+
+    // CPython optimisation: use repeated squaring for small non-negative
+    // integer exponents (wi==0, 0 <= wr <= 100, wr == floor(wr)).
+    // This avoids rounding error in the exp/log path so that, e.g.,
+    // `(1+1j)**2` returns exactly `2j` rather than `(1.22e-16+2j)`.
+    if wi == 0.0 {
+        let n = wr as i64;
+        if n as f64 == wr && (0..=100).contains(&n) {
+            let (mut re, mut im) = (1.0_f64, 0.0_f64);
+            let (mut br, mut bi) = (zr, zi);
+            let mut exp = n as u64;
+            while exp > 0 {
+                if exp & 1 == 1 {
+                    let new_re = re * br - im * bi;
+                    let new_im = re * bi + im * br;
+                    re = new_re;
+                    im = new_im;
+                }
+                let new_br = br * br - bi * bi;
+                let new_bi = 2.0 * br * bi;
+                br = new_br;
+                bi = new_bi;
+                exp >>= 1;
+            }
+            return Ok(Value::complex(re, im));
+        }
+    }
+
+    // General case: matches CPython's `_Py_c_pow` from complexobject.c.
+    // Using pow(r, wr) rather than exp(wr * ln_r) is deliberate:
+    // `exp(0.5 * ln(2))` and `pow(2.0, 0.5)` differ by 1 ULP; CPython
+    // uses the `pow` path, so we must match it for parity.
+    let ln_r = abs_r.ln();
+    let t = zi.atan2(zr);
+    let len = abs_r.powf(wr) * (-wi * t).exp();
+    let at = wr * t + wi * ln_r;
+    Ok(Value::complex(len * at.cos(), len * at.sin()))
 }
