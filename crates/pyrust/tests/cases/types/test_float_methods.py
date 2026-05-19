@@ -64,8 +64,26 @@ for x in [1.0, 1.5, -1.0, 1e100, 1e-100]:
     y = float.fromhex(h)
     print(x == y)  # True
 
-# fromhex error
+# fromhex error: invalid string
 try:
     float.fromhex('not-a-float')
 except ValueError as e:
     print(e)
+
+# fromhex overflow: exponent too large -> OverflowError, not inf
+try:
+    float.fromhex('0x1.0p+10000')
+except OverflowError as e:
+    print(e)
+
+# fromhex negative overflow
+try:
+    float.fromhex('-0x1.0p+10000')
+except OverflowError as e:
+    print(e)
+
+# fromhex underflow is NOT an error: returns 0.0
+print(float.fromhex('0x1.0p-10000'))
+
+# fromhex with only fractional part (no integer digits before dot)
+print(float.fromhex('.8p0'))    # 0.5

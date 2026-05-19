@@ -73,14 +73,25 @@ pub fn call(method: &str, receiver: &Value, args: &[Value]) -> Result<Value> {
 
 /// Implements `float.fromhex(s)` — a class method, dispatched separately.
 pub fn from_hex(s: &str) -> Result<Value> {
-    parse_float_hex(s.trim())
-        .ok_or_else(|| {
-            PyError::named(
-                "ValueError",
-                "invalid hexadecimal floating-point string".to_string(),
-            )
-        })
-        .map(Value::float)
+    match parse_float_hex(s.trim()) {
+        ParseHexResult::Ok(f) => Ok(Value::float(f)),
+        ParseHexResult::Invalid => Err(PyError::named(
+            "ValueError",
+            "invalid hexadecimal floating-point string".to_string(),
+        )),
+        ParseHexResult::Overflow => Err(PyError::named(
+            "OverflowError",
+            "hexadecimal value too large to represent as a float".to_string(),
+        )),
+    }
+}
+
+/// Result type for `parse_float_hex`, distinguishing parse errors from
+/// overflow (which CPython surfaces as `OverflowError`, not `ValueError`).
+enum ParseHexResult {
+    Ok(f64),
+    Invalid,
+    Overflow,
 }
 
 // ---------------------------------------------------------------------------
@@ -198,10 +209,13 @@ fn float_hex(f: f64) -> String {
 ///   hexfloat = ('0x'|'0X')? hexdigits ('.' hexdigits?)? exponent?
 ///   exponent = ('p'|'P') sign? decimaldigits
 ///
-/// Returns `None` if the string is not valid.
-fn parse_float_hex(s: &str) -> Option<f64> {
+/// Returns `ParseHexResult::Invalid` if the string is not valid,
+/// `ParseHexResult::Overflow` if the value would be infinite (and the
+/// input was not literally `inf`/`infinity`), or `ParseHexResult::Ok(f)`
+/// otherwise.
+fn parse_float_hex(s: &str) -> ParseHexResult {
     if s.is_empty() {
-        return None;
+        return ParseHexResult::Invalid;
     }
 
     // Parse optional sign.
@@ -218,11 +232,11 @@ fn parse_float_hex(s: &str) -> Option<f64> {
     // Special values (case-insensitive).
     let lower = s.to_ascii_lowercase();
     if lower == "inf" || lower == "infinity" {
-        return Some(sign * f64::INFINITY);
+        return ParseHexResult::Ok(sign * f64::INFINITY);
     }
     if lower == "nan" {
         // Sign is ignored for NaN in CPython.
-        return Some(f64::NAN);
+        return ParseHexResult::Ok(f64::NAN);
     }
 
     // Strip optional 0x / 0X prefix.
@@ -232,14 +246,16 @@ fn parse_float_hex(s: &str) -> Option<f64> {
         .unwrap_or(s);
 
     if s.is_empty() {
-        return None;
+        return ParseHexResult::Invalid;
     }
 
     // Split on 'p' or 'P' to separate mantissa from binary exponent.
     let (mantissa_str, bin_exp): (&str, i32) = if let Some(p_pos) = s.find(|c| c == 'p' || c == 'P')
     {
         let exp_part = &s[p_pos + 1..];
-        let bin_exp: i32 = exp_part.parse().ok()?;
+        let Ok(bin_exp) = exp_part.parse::<i32>() else {
+            return ParseHexResult::Invalid;
+        };
         (&s[..p_pos], bin_exp)
     } else {
         // No exponent means 2^0 = 1.
@@ -255,15 +271,15 @@ fn parse_float_hex(s: &str) -> Option<f64> {
 
     // Reject if both integer and fractional parts are empty.
     if int_str.is_empty() && frac_str.is_empty() {
-        return None;
+        return ParseHexResult::Invalid;
     }
 
     // Validate hex digits.
     if !int_str.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
+        return ParseHexResult::Invalid;
     }
     if !frac_str.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
+        return ParseHexResult::Invalid;
     }
 
     // Concatenate int and frac digits to form a big integer.  This integer
@@ -272,21 +288,36 @@ fn parse_float_hex(s: &str) -> Option<f64> {
     let frac_bits = (frac_str.len() as i32) * 4;
 
     // total_exp: value = combined_int * 2^total_exp.
-    let total_exp = bin_exp.checked_sub(frac_bits)?;
+    let Some(total_exp) = bin_exp.checked_sub(frac_bits) else {
+        return ParseHexResult::Invalid;
+    };
 
     // Parse combined hex string as a BigInt (handles any length).
     if combined.is_empty() {
-        return None;
+        return ParseHexResult::Invalid;
     }
-    let mantissa_bigint = BigInt::parse_bytes(combined.as_bytes(), 16)?;
+    let Some(mantissa_bigint) = BigInt::parse_bytes(combined.as_bytes(), 16) else {
+        return ParseHexResult::Invalid;
+    };
 
     if mantissa_bigint.is_zero() {
-        return Some(0.0);
+        return ParseHexResult::Ok(0.0);
     }
 
     // Convert to f64 via ldexp: value = sign * mantissa_bigint * 2^total_exp.
-    let m_f64 = mantissa_bigint.to_f64()?;
-    Some(sign * ldexp_f64(m_f64, total_exp))
+    let Some(m_f64) = mantissa_bigint.to_f64() else {
+        return ParseHexResult::Invalid;
+    };
+    let result = sign * ldexp_f64(m_f64, total_exp);
+
+    // If the result is infinite but the input was not literally inf/infinity,
+    // that means the value overflowed — CPython raises OverflowError in this
+    // case.
+    if result.is_infinite() {
+        return ParseHexResult::Overflow;
+    }
+
+    ParseHexResult::Ok(result)
 }
 
 /// Compute `x * 2^exp` for an f64, clamping to ±infinity on overflow
