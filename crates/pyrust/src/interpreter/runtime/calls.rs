@@ -3235,7 +3235,10 @@ fn render_instance_repr(interp: &mut Interpreter, value: &Value) -> Result<Strin
             ValueKind::Str(s) => Ok(s.to_string()),
             _ => Err(PyError::named(
                 "TypeError",
-                "__repr__ returned non-string".to_string(),
+                format!(
+                    "__repr__ returned non-string (type {})",
+                    pyrust_core::builtin_type_name(&result)
+                ),
             )),
         };
     }
