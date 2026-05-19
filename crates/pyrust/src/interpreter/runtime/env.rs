@@ -369,7 +369,16 @@ impl Interpreter {
                 if name == "__qualname__" {
                     return Ok(Value::string(func_name));
                 }
-                if name == "__module__" && !func_name.contains('.') {
+                if name == "__module__" {
+                    if func_name.contains('.') {
+                        // Method descriptors (str.upper, list.append, …) do not
+                        // expose __module__; CPython raises AttributeError with
+                        // "'method_descriptor' object has no attribute '__module__'"
+                        return Err(PyError::named(
+                            "AttributeError",
+                            format!("'method_descriptor' object has no attribute '__module__'"),
+                        ));
+                    }
                     return Ok(Value::string("builtins"));
                 }
                 if func_name == "str" {
