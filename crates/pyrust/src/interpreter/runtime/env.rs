@@ -639,6 +639,30 @@ impl Interpreter {
                             ))
                         }
                     }
+                    // CPython validates these slots and rejects arbitrary values.
+                    // They are not yet implemented as real fields in pyrust, so
+                    // fall back to the CPython error rather than silently storing
+                    // the value in the dynamic attrs dict.
+                    "__code__" => Err(PyError::named(
+                        "TypeError",
+                        "__code__ must be set to a code object".to_string(),
+                    )),
+                    "__defaults__" => Err(PyError::named(
+                        "TypeError",
+                        "__defaults__ must be set to a tuple object".to_string(),
+                    )),
+                    "__kwdefaults__" => Err(PyError::named(
+                        "TypeError",
+                        "__kwdefaults__ must be set to a dict object".to_string(),
+                    )),
+                    "__annotations__" => Err(PyError::named(
+                        "TypeError",
+                        "__annotations__ must be set to a dict object".to_string(),
+                    )),
+                    "__globals__" | "__closure__" => Err(PyError::named(
+                        "AttributeError",
+                        "readonly attribute".to_string(),
+                    )),
                     _ => {
                         // Arbitrary dynamic attribute.
                         func.attrs.borrow_mut().insert(name.to_string(), value);
@@ -720,6 +744,15 @@ impl Interpreter {
                     "__dict__" => Err(PyError::named(
                         "TypeError",
                         "cannot delete __dict__".to_string(),
+                    )),
+                    // CPython-matched behaviour for validated-but-unimplemented slots.
+                    "__code__" => Err(PyError::named(
+                        "TypeError",
+                        "__code__ must be set to a code object".to_string(),
+                    )),
+                    "__globals__" | "__closure__" => Err(PyError::named(
+                        "AttributeError",
+                        "readonly attribute".to_string(),
                     )),
                     _ => {
                         if func.attrs.borrow_mut().shift_remove(name).is_some() {
