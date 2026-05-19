@@ -767,12 +767,28 @@ fn lex_string(chars: &[char], start: usize) -> Result<(Token, usize)> {
                         .ok_or_else(|| PyError::Lex("unterminated escape".to_string()))?;
                     // \<newline> inside a triple-quoted string: skip both
                     // (line continuation within the string literal, same as CPython).
+                    // Also handle CRLF (\r\n): \<CR><LF> drops all three characters.
                     if escaped == '\n' {
                         pos += 1;
+                    } else if escaped == '\r' {
+                        pos += 1;
+                        // If \r is followed by \n (CRLF), skip the \n too.
+                        if chars.get(pos) == Some(&'\n') {
+                            pos += 1;
+                        }
                     } else {
                         out.push(map_escape(escaped)?);
                         pos += 1;
                     }
+                }
+                Some(&'\r') => {
+                    // Normalize CR and CRLF to LF inside triple-quoted strings,
+                    // matching CPython's universal-newline handling (tokenize.c).
+                    pos += 1;
+                    if chars.get(pos) == Some(&'\n') {
+                        pos += 1;
+                    }
+                    out.push('\n');
                 }
                 Some(&c) => {
                     out.push(c);
