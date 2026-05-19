@@ -1586,10 +1586,20 @@ impl Value {
     // ── Public accessors ─────────────────────────────────────────────────────
 
     pub fn as_bool(&self) -> bool {
+        debug_assert!(
+            !self.is_unset(),
+            "Value::as_bool() called on an uninitialised register slot (Value::unset()). \
+             A CheckLocal instruction is missing for this read."
+        );
         (self.0 & 1) != 0
     }
 
     pub fn as_int_raw(&self) -> i64 {
+        debug_assert!(
+            !self.is_unset(),
+            "Value::as_int_raw() called on an uninitialised register slot (Value::unset()). \
+             A CheckLocal instruction is missing for this read."
+        );
         let raw = (self.0 & PAYLOAD_MASK) as i64;
         if self.0 & INT_SIGN_BIT != 0 {
             raw | !PAYLOAD_MASK as i64
@@ -1599,10 +1609,20 @@ impl Value {
     }
 
     pub fn as_float_raw(&self) -> f64 {
+        debug_assert!(
+            !self.is_unset(),
+            "Value::as_float_raw() called on an uninitialised register slot (Value::unset()). \
+             A CheckLocal instruction is missing for this read."
+        );
         f64::from_bits(self.0)
     }
 
     pub fn as_str(&self) -> Option<&str> {
+        debug_assert!(
+            !self.is_unset(),
+            "Value::as_str() called on an uninitialised register slot (Value::unset()). \
+             A CheckLocal instruction is missing for this read."
+        );
         if self.is_str() {
             Some(unsafe { self.str_as_str() })
         } else {
@@ -1637,6 +1657,11 @@ impl Value {
     /// See `unalias_args_for_mutation` for the helper used at builtin
     /// dispatch sites to make this safe automatically.
     pub fn as_list(&self) -> Option<&[Value]> {
+        debug_assert!(
+            !self.is_unset(),
+            "Value::as_list() called on an uninitialised register slot (Value::unset()). \
+             A CheckLocal instruction is missing for this read."
+        );
         if self.is_list() {
             let inner = unsafe { self.list_inner() };
             Some(unsafe { &*inner.items.as_ptr() })
@@ -1656,6 +1681,11 @@ impl Value {
     /// path (`TAG_TUPLE`) and the inline small-tuple path
     /// (`Opaque::SmallTuple2/3`); see #281.
     pub fn as_tuple(&self) -> Option<&[Value]> {
+        debug_assert!(
+            !self.is_unset(),
+            "Value::as_tuple() called on an uninitialised register slot (Value::unset()). \
+             A CheckLocal instruction is missing for this read."
+        );
         if top16(self.0) == TAG_TUPLE {
             return Some(unsafe { &*self.tuple_ptr() });
         }
@@ -1670,6 +1700,11 @@ impl Value {
     }
 
     pub fn as_opaque(&self) -> Option<&Opaque> {
+        debug_assert!(
+            !self.is_unset(),
+            "Value::as_opaque() called on an uninitialised register slot (Value::unset()). \
+             A CheckLocal instruction is missing for this read."
+        );
         if top16(self.0) == TAG_OPAQUE {
             Some(unsafe { &*self.opaque_ptr() })
         } else {
@@ -2002,6 +2037,11 @@ impl Value {
 
     /// Unified int accessor (handles inline i48 and PyBigInt that fits in i64)
     pub fn as_int(&self) -> Option<i64> {
+        debug_assert!(
+            !self.is_unset(),
+            "Value::as_int() called on an uninitialised register slot (Value::unset()). \
+             A CheckLocal instruction is missing for this read."
+        );
         match top16(self.0) {
             TAG_INT => Some(self.as_int_raw()),
             TAG_OPAQUE => {
@@ -3024,6 +3064,105 @@ mod tests {
     fn unset_truthy_panics_in_debug() {
         let v = Value::unset();
         let _ = v.truthy();
+    }
+
+    // The direct NaN-box accessors bypass kind(), so they each need their own
+    // tripwire.  The following tests confirm that each one panics (rather than
+    // silently returning None / a garbage bit pattern) when called on an unset
+    // Value in a debug build.
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "uninitialised register slot")]
+    fn unset_as_int_panics_in_debug() {
+        let v = Value::unset();
+        let _ = v.as_int();
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "uninitialised register slot")]
+    fn unset_as_str_panics_in_debug() {
+        let v = Value::unset();
+        let _ = v.as_str();
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "uninitialised register slot")]
+    fn unset_as_bool_panics_in_debug() {
+        let v = Value::unset();
+        let _ = v.as_bool();
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "uninitialised register slot")]
+    fn unset_as_int_raw_panics_in_debug() {
+        let v = Value::unset();
+        let _ = v.as_int_raw();
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "uninitialised register slot")]
+    fn unset_as_float_raw_panics_in_debug() {
+        let v = Value::unset();
+        let _ = v.as_float_raw();
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "uninitialised register slot")]
+    fn unset_as_list_panics_in_debug() {
+        let v = Value::unset();
+        let _ = v.as_list();
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "uninitialised register slot")]
+    fn unset_as_tuple_panics_in_debug() {
+        let v = Value::unset();
+        let _ = v.as_tuple();
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "uninitialised register slot")]
+    fn unset_as_opaque_panics_in_debug() {
+        let v = Value::unset();
+        let _ = v.as_opaque();
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "uninitialised register slot")]
+    fn unset_as_dict_panics_in_debug() {
+        let v = Value::unset();
+        let _ = v.as_dict();
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "uninitialised register slot")]
+    fn unset_as_set_panics_in_debug() {
+        let v = Value::unset();
+        let _ = v.as_set();
+    }
+
+    // Regression: non-unset values must not be affected by the new guards.
+
+    #[test]
+    fn as_int_on_int_value_still_works() {
+        assert_eq!(Value::int(42).as_int(), Some(42));
+        assert_eq!(Value::none().as_int(), None);
+    }
+
+    #[test]
+    fn as_str_on_str_value_still_works() {
+        assert_eq!(Value::string("hello").as_str(), Some("hello"));
+        assert_eq!(Value::none().as_str(), None);
     }
 
     /// Helper: build a minimal `UserFunction` for kind-wrapping tests.
