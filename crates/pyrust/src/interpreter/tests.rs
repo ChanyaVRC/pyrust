@@ -58,7 +58,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "Runtime error: cannot access local variable 'x' where it is not associated with a value"
+            "UnboundLocalError: cannot access local variable 'x' where it is not associated with a value"
         );
     }
 

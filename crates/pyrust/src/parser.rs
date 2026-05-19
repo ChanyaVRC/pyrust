@@ -460,13 +460,13 @@ impl Parser {
                 }
                 return Ok(vec![lhs_to_assign_stmt(&targets[0], rhs)?]);
             }
-            // Bare annotation — name target emits AnnAssign; non-name is no-op.
+            // Bare annotation declaration without value.
+            // If the target is a simple name, emit AnnDeclare so the compiler
+            // can allocate a local slot for it (CPython UnboundLocalError parity).
+            // For attribute/index targets (e.g. `self.x: int`) there is no local
+            // slot to declare, so this remains a no-op.
             if let Expr::Var(name) = &targets[0] {
-                return Ok(vec![Stmt::AnnAssign {
-                    name: name.clone(),
-                    annotation,
-                    value: None,
-                }]);
+                return Ok(vec![Stmt::AnnDeclare(name.clone())]);
             }
             return Ok(vec![Stmt::Pass]);
         }

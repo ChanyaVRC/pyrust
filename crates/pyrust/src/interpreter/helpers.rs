@@ -928,6 +928,13 @@ fn install_exception_builtins(env: &EnvRef) {
     let type_error = make_child("TypeError");
     let value_error = make_child("ValueError");
     let name_error = make_child("NameError");
+    // UnboundLocalError is a direct child of NameError in CPython 3.12.
+    let unbound_local_error = Rc::new(RefCell::new(PyClass {
+        name: "UnboundLocalError".to_string(),
+        qualname: "UnboundLocalError".to_string(),
+        base: Some(Rc::clone(&name_error)),
+        attrs: IndexMap::new(),
+    }));
     let assertion_error = make_child("AssertionError");
     let stop_iteration = make_child("StopIteration");
     let attribute_error = make_child("AttributeError");
@@ -1047,6 +1054,9 @@ fn install_exception_builtins(env: &EnvRef) {
     module
         .values
         .insert("NameError".to_string(), Value::py_class(name_error));
+    module
+        .values
+        .insert("UnboundLocalError".to_string(), Value::py_class(unbound_local_error));
     module
         .values
         .insert("AssertionError".to_string(), Value::py_class(assertion_error));
@@ -1394,10 +1404,13 @@ fn lookup_name_in_env(env: &EnvRef, name: &str) -> Result<Option<Value>> {
         return Ok(value);
     }
     if is_local_name {
-        return Err(PyError::Runtime(format!(
-            "cannot access local variable '{}' where it is not associated with a value",
-            name
-        )));
+        return Err(PyError::named(
+            "UnboundLocalError",
+            format!(
+                "cannot access local variable '{}' where it is not associated with a value",
+                name
+            ),
+        ));
     }
     match parent {
         Some(parent) => lookup_name_in_env(&parent, name),
@@ -1465,12 +1478,16 @@ fn collect_local_names_from_block(
                     }
                 }
             }
+            Stmt::AnnDeclare(name) => {
+                if !global_names.contains(name) && !nonlocal_names.contains(name) {
+                    names.insert(name.clone());
+                }
+            }
             Stmt::AnnAssign { name, value: Some(_), .. } => {
                 if !global_names.contains(name) && !nonlocal_names.contains(name) {
                     names.insert(name.clone());
                 }
             }
-            Stmt::AnnAssign { value: None, .. } => {}
             Stmt::AugAssign { .. }
             | Stmt::IndexAssign { .. }
             | Stmt::SliceAssign { .. }
@@ -2158,7 +2175,7 @@ fn is_pure_stmt(stmt: &Stmt, pure_fns: &std::collections::HashSet<String>) -> bo
         // PyClass), so any function that defines and returns one is non-pure: successive
         // calls with identical arguments produce values with distinct identities.
         Stmt::Def { .. } | Stmt::Class { .. } => false,
-        Stmt::Pass | Stmt::Break | Stmt::Continue => true,
+        Stmt::Pass | Stmt::AnnDeclare(_) | Stmt::Break | Stmt::Continue => true,
         Stmt::Match { subject, arms } => {
             is_pure_expr(subject, pure_fns)
                 && arms

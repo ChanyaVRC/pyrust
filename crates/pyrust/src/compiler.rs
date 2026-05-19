@@ -716,6 +716,7 @@ fn lambda_captures_in_stmt(
         | Stmt::Global(_)
         | Stmt::Nonlocal(_)
         | Stmt::Pass
+        | Stmt::AnnDeclare(_)
         | Stmt::Break
         | Stmt::Continue
         | Stmt::Raise { expr: None, .. } => {}
@@ -1617,6 +1618,7 @@ fn collect_free_var_reads_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>) {
         | Stmt::Global(_)
         | Stmt::Nonlocal(_)
         | Stmt::Pass
+        | Stmt::AnnDeclare(_)
         | Stmt::Break
         | Stmt::Continue
         | Stmt::Raise { expr: None, .. } => {}
@@ -1958,6 +1960,7 @@ fn collect_transitive_free_vars_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>)
         | Stmt::Global(_)
         | Stmt::Nonlocal(_)
         | Stmt::Pass
+        | Stmt::AnnDeclare(_)
         | Stmt::Break
         | Stmt::Continue
         | Stmt::Raise { expr: None, .. } => {}
@@ -2873,7 +2876,7 @@ fn stmt_safe_for_index_rewrite(stmt: &Stmt, i_name: &str, c_name: &str) -> bool 
                     .as_deref()
                     .is_none_or(|b| body_index_pattern_is_safe(b, i_name, c_name))
         }
-        Stmt::Pass | Stmt::Global(_) | Stmt::Nonlocal(_) => true,
+        Stmt::Pass | Stmt::AnnDeclare(_) | Stmt::Global(_) | Stmt::Nonlocal(_) => true,
         Stmt::Delete(exprs) => {
             // `del c[i]` is unsafe; any other delete is OK as long as it
             // doesn't reference i in a bare way.
@@ -3162,6 +3165,7 @@ fn stmt_reads_var(stmt: &Stmt, name: &str) -> bool {
         | Stmt::Break
         | Stmt::Continue
         | Stmt::Pass
+        | Stmt::AnnDeclare(_)
         | Stmt::Import { .. }
         | Stmt::ImportFrom { .. } => false,
     }
@@ -4026,7 +4030,7 @@ impl Compiler {
             return;
         }
         match stmt {
-            Stmt::Pass => {}
+            Stmt::Pass | Stmt::AnnDeclare(_) => {}
             Stmt::Break => {
                 if self.loops.is_empty() {
                     self.failed = true;

@@ -2212,10 +2212,13 @@ impl Interpreter {
                     // mis-fire on legitimate `x = None` followed by a read.
                     if regs[*reg as usize].is_unset() {
                         let name = pool_get!(code.names, *name_idx, "name");
-                        vm_try!(Err::<(), _>(crate::error::PyError::Runtime(format!(
-                            "cannot access local variable '{}' where it is not associated with a value",
-                            name
-                        ))));
+                        vm_try!(Err::<(), _>(crate::error::PyError::named(
+                            "UnboundLocalError",
+                            format!(
+                                "cannot access local variable '{}' where it is not associated with a value",
+                                name
+                            ),
+                        )));
                     }
                 }
 
