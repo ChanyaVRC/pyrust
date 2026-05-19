@@ -7,8 +7,8 @@ pub fn seq_index(items: &[Value], args: &[Value], type_name: &str) -> Result<Val
         PyError::Runtime(format!("{type_name}.index() requires at least 1 argument"))
     })?;
     let start = match args.get(1).map(|v| v.kind()) {
-        Some(ValueKind::Int(i)) => normalise_index(i, items.len()),
-        Some(ValueKind::Bool(b)) => normalise_index(b as i64, items.len()),
+        Some(ValueKind::Int(i)) => normalise_index(i, items.len()).min(items.len()),
+        Some(ValueKind::Bool(b)) => normalise_index(b as i64, items.len()).min(items.len()),
         Some(_) => {
             return Err(PyError::Runtime(format!(
                 "{type_name}.index() slice indices must be integers"
