@@ -3544,7 +3544,10 @@ impl Compiler {
                 "function uses too many registers ({num_regs}); max is {MAX_REGS}"
             )));
         }
-        let is_generator = self.insns.iter().any(|i| matches!(i, Insn::Yield { .. }));
+        let is_generator = self
+            .insns
+            .iter()
+            .any(|i| matches!(i, Insn::Yield { .. } | Insn::YieldFrom { .. }));
         Ok(FnCode {
             insns: self.insns,
             consts: self.consts,
@@ -6656,44 +6659,58 @@ impl Compiler {
             }
 
             Expr::YieldFrom(iter_expr) => {
-                // yield from iter_expr:
-                // 1. Evaluate the iterable
-                // 2. Call iter() on it (GetIter)
-                // 3. Loop: next item = ForIter; yield each item; loop back
-                // 4. Result of yield from is None (we don't propagate StopIteration value)
-                let iter_slot = self.alloc_iter();
+                // PEP 380 `yield from` delegation via the single YieldFrom instruction.
+                //
+                // The VM handles the send/yield/StopIteration loop internally:
+                // - Calls sub_iter.send(sent_reg) on each execution.
+                // - Yields the produced value to the outer caller, suspending at this
+                //   instruction; on resume, writes the received sent value into sent_reg.
+                // - On StopIteration, writes the sub-iterator's return value into
+                //   result_reg and falls through to the next instruction.
+                //
+                // Unlike the old ForIter/Yield/Jump loop, YieldFrom forwards the outer
+                // caller's sent value (and throw) into the sub-iterator (PEP 380).
+
+                // Evaluate the iterable and call iter() on it to get the iterator
+                // object.  For generators, iter(gen) == gen; for lists, tuples, etc.,
+                // iter() returns the appropriate iterator.
+                // Call convention: Call(func_reg, argc) reads args from
+                // func_reg+1 .. func_reg+argc; alloc_temp() is sequential so
+                // iter_arg_reg == iter_fn_reg + 1.
                 let iter_src = self.compile_expr(iter_expr);
-                self.emit(Insn::GetIter(iter_slot, iter_src));
+                let iter_fn_reg = self.alloc_temp();
+                let iter_name_idx = self.intern_name("iter");
+                self.emit(Insn::LoadGlobal(iter_fn_reg, iter_name_idx));
+                let iter_arg_reg = self.alloc_temp(); // == iter_fn_reg + 1
+                self.emit(Insn::Move(iter_arg_reg, iter_src));
                 self.free_temp(iter_src);
+                self.emit(Insn::Call(iter_fn_reg, 1)); // result lands in iter_fn_reg
+                self.free_temp(iter_arg_reg);
+                let iter_reg = iter_fn_reg; // iter_reg holds the iterator object
 
-                // item register
-                let item_reg = self.alloc_temp();
-                let loop_start = self.pc();
-                // ForIter: if exhausted jump forward by offset (to be patched)
-                let exit_patch = self.emit(Insn::ForIter(item_reg, iter_slot, 0));
-
-                // yield item_reg; ignore sent value
+                // sent_reg: value to send on each iteration.  Initialized to None
+                // (first call is always next()-equivalent); on resumption the VM
+                // writes the caller's sent value here (like Yield.dst).
                 let sent_reg = self.alloc_temp();
-                self.emit(Insn::Yield {
-                    src: item_reg,
-                    dst: sent_reg,
+                self.emit(Insn::LoadNone(sent_reg));
+
+                // result_reg: receives StopIteration.value when sub-iterator exhausts.
+                // This is the value of the `yield from` expression in the outer generator.
+                let result_reg = self.alloc_temp();
+                self.emit(Insn::LoadNone(result_reg));
+
+                self.emit(Insn::YieldFrom {
+                    iter_reg,
+                    sent_reg,
+                    result_reg,
                 });
+
+                // iter_reg and sent_reg are only live during YieldFrom.
                 self.free_temp(sent_reg);
+                self.free_temp(iter_reg);
 
-                // jump back to ForIter
-                let back_from = self.pc() as i32 + 1;
-                let back_offset = loop_start as i32 - back_from;
-                self.emit(Insn::Jump(back_offset));
-
-                // Patch the ForIter exit
-                self.patch_jump(exit_patch);
-                self.free_temp(item_reg);
-                self.free_iter();
-
-                // Result of `yield from` is None
-                let result = self.alloc_temp();
-                self.emit(Insn::LoadNone(result));
-                result
+                // result_reg is the value of the `yield from` expression.
+                result_reg
             }
         }
     }

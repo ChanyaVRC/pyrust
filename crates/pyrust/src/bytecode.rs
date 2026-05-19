@@ -202,6 +202,24 @@ pub enum Insn {
     /// Suspend the generator and yield R[src] to the caller.
     /// The result of the yield expression (sent value) is placed in R[dst].
     Yield { src: Reg, dst: Reg },
+    /// PEP 380 `yield from` delegation.
+    ///
+    /// On each execution:
+    /// 1. Reads sent value from `R[sent_reg]` (None on first call).
+    /// 2. Calls `R[iter_reg].send(sent_val)` on the sub-iterator.
+    /// 3. If the sub-iterator yields V: yields V to the outer caller, suspends
+    ///    (pc rewinds to this instruction), and on next resume the caller's
+    ///    sent value is written into `R[sent_reg]`.
+    /// 4. If StopIteration with value R: writes R into `R[result_reg]`, continues.
+    /// 5. Any other exception from the sub-iterator propagates outward.
+    ///
+    /// Throw forwarding: when the outer generator is thrown at while suspended
+    /// here, the exception is forwarded to the sub-iterator via `.throw()`.
+    YieldFrom {
+        iter_reg: Reg,
+        sent_reg: Reg,
+        result_reg: Reg,
+    },
     /// Self-tail-call: reuse current frame by resetting params from R[args_base..args_base+nargs]
     /// and jumping back to pc=0.  Emitted by the optimizer when Call(r,n)+Return(r) is detected
     /// and the callee is the same function as the one being executed.  Falls back to a normal

@@ -59,6 +59,10 @@ impl Interpreter {
             // Meaningless until the first yield; initialised to 0 as a safe
             // default (the Yield opcode always overwrites this before resumption).
             yield_dst: 0,
+            // Set by resume_generator_with_exc when FrameOutcome::Returned(val)
+            // is received; read by Insn::YieldFrom to retrieve the sub-iterator's
+            // StopIteration.value (PEP 380).
+            last_return_value: None,
         };
         Value::generator(Box::new(frame))
     }

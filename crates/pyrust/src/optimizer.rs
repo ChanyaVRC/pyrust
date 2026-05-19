@@ -407,7 +407,8 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -
                     out.push(Insn::BinOpConst(dst, lhs, op, c));
                 }
             }
-            // Branch/loop/raise: clear the map — values may differ per path.
+            // Branch/loop/raise/suspend: clear the map — values may differ per
+            // path or may be written by external resume machinery.
             insn @ (Insn::Jump(_)
             | Insn::JumpIfFalse(..)
             | Insn::JumpIfTrue(..)
@@ -428,7 +429,9 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -
             | Insn::RaiseReRaise
             | Insn::RaiseAssert(_)
             | Insn::Unpack(..)
-            | Insn::UnpackEx { .. }) => {
+            | Insn::UnpackEx { .. }
+            | Insn::Yield { .. }
+            | Insn::YieldFrom { .. }) => {
                 known.clear();
                 out.push(insn);
             }
@@ -1051,6 +1054,13 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         // Yield reads src and writes dst.
         Yield { src, dst: _ } => *src == r,
 
+        // YieldFrom reads iter_reg and sent_reg; writes result_reg and sent_reg.
+        YieldFrom {
+            iter_reg,
+            sent_reg,
+            result_reg: _,
+        } => *iter_reg == r || *sent_reg == r,
+
         // UnpackEx reads src.
         UnpackEx { src, .. } => *src == r,
     }
@@ -1430,6 +1440,17 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         }
         CallMethod { dst, .. } | CallMethodExpanded { dst, .. } | Yield { dst, .. } => {
             written.insert(*dst);
+        }
+        YieldFrom {
+            result_reg,
+            sent_reg,
+            ..
+        } => {
+            written.insert(*result_reg);
+            // sent_reg is also written (to None before suspension and to the
+            // sent value on each resume), so the optimizer must not assume it
+            // retains its pre-YieldFrom value after this instruction.
+            written.insert(*sent_reg);
         }
         ForIter(dst, _, _) => {
             written.insert(*dst);

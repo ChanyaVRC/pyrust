@@ -85,6 +85,11 @@ pub(crate) struct GeneratorFrame {
     /// (`Value::none()` for `next()`, the caller's argument for `send()`).
     /// Meaningless until the generator has yielded at least once (`pc != 0`).
     pub(crate) yield_dst: crate::bytecode::Reg,
+    /// The value from an explicit `return val` inside this generator.
+    /// Set by `resume_generator_with_exc` when `FrameOutcome::Returned(val)`
+    /// is received, so that `YieldFrom` can capture `StopIteration.value`
+    /// from the sub-iterator's frame.
+    pub(crate) last_return_value: Option<Value>,
 }
 
 /// Explicit suspension state for a generator frame.
@@ -337,6 +342,56 @@ impl Interpreter {
             return Err(exc);
         }
 
+        // PEP 380 throw forwarding: if we are suspended at a YieldFrom instruction
+        // and an exception is being injected (generator.throw() / generator.close()),
+        // forward the exception to the sub-iterator rather than injecting it into our
+        // own body.  This matches CPython's implementation of the PEP 380 algorithm.
+        if let Some(ref exc) = inject_exc {
+            if let Some(crate::bytecode::Insn::YieldFrom { iter_reg, sent_reg, result_reg }) =
+                frame.code.insns.get(frame.pc)
+            {
+                let iter_reg = *iter_reg;
+                let sent_reg = *sent_reg;
+                let result_reg = *result_reg;
+                let iter_val = frame.regs[iter_reg as usize].clone();
+                let forward_result =
+                    self.yield_from_throw_forward(&iter_val, exc.clone());
+                match forward_result {
+                    Ok(yielded) => {
+                        // Sub-iterator caught the exception and yielded: yield this value
+                        // to the outer caller, remaining suspended at YieldFrom.
+                        frame.regs[sent_reg as usize] = Value::none();
+                        return Ok(yielded);
+                    }
+                    Err(ref e) if is_stop_iteration_error(e) => {
+                        // Sub-iterator returned after handling the throw.
+                        // Extract the return value and store in result_reg, then let
+                        // the generator body continue after the YieldFrom.
+                        let stop_val = extract_stop_iteration_value(e);
+                        frame.regs[result_reg as usize] =
+                            stop_val.unwrap_or_else(Value::none);
+                        // Advance past the YieldFrom instruction so the VM resumes
+                        // at the instruction after it.
+                        frame.pc += 1;
+                        // Fall through to the normal resume path with no injection
+                        // and None sent value (the result is already in result_reg).
+                        // We drop inject_exc by reconstructing as None below.
+                        return self.resume_generator_with_exc(frame, None, Value::none());
+                    }
+                    Err(e) => {
+                        // Sub-iterator did not handle the exception (or raised a new
+                        // one): inject into our own body via the normal path.
+                        // Fall through to the regular VM run with this exception.
+                        // We need to inject the exception into the generator body.
+                        // Use the normal pending_inject path: advance past YieldFrom
+                        // and inject the exception as if it was raised there.
+                        frame.pc += 1;
+                        return self.resume_generator_with_exc(frame, Some(e), Value::none());
+                    }
+                }
+            }
+        }
+
         // Write the sent value into the yield destination register.
         // Skipped for fresh generators (pc == 0) because yield_dst is not
         // yet initialised and the generator body hasn't reached its first yield.
@@ -436,9 +491,9 @@ impl Interpreter {
             }
             Ok(FrameOutcome::Returned(ret_val)) => {
                 // Generator returned normally (fell off end or hit explicit `return`).
-                // CPython 3.12 sets StopIteration.value to the returned value (PEP 380).
-                // Construct the exception with `ret_val` as the arg so that
-                // `instantiate_exception` can set `.value = args[0]`.
+                // Stash the return value so Insn::YieldFrom can extract it as
+                // StopIteration.value (PEP 380 §3 step 4).
+                frame.last_return_value = Some(ret_val);
                 frame.done = true;
                 let exc = if let Some(cls) = self.exc_classes.get("StopIteration") {
                     PyError::Raised(instantiate_exception(cls, vec![ret_val]))
@@ -1757,6 +1812,56 @@ impl Interpreter {
                             yield_dst: *dst,
                         },
                     });
+                }
+
+                // ── YieldFrom (PEP 380) ──────────────────────────────────
+                Insn::YieldFrom { iter_reg, sent_reg, result_reg } => {
+                    let iter_val = vm_try!(vm_read(&regs, *iter_reg, num_locals));
+                    let sent_val = vm_try!(vm_read(&regs, *sent_reg, num_locals));
+
+                    // Call next()/send() on the sub-iterator.
+                    let sub_result = self.yield_from_advance(&iter_val, sent_val);
+
+                    match sub_result {
+                        Ok(yielded) => {
+                            // Sub-iterator yielded a value: forward to our caller,
+                            // suspending at this YieldFrom instruction so the next
+                            // resume re-executes it with the caller's sent value.
+                            // Set yield_dst = *sent_reg so resume_generator_with_exc
+                            // writes the next sent value there.
+                            regs[*sent_reg as usize] = Value::none();
+                            let saved_handled_slice: Vec<Value> =
+                                self.handled_exc_stack.split_off(exc_ctx_frame_base);
+                            let saved_active = self.active_exception.take();
+                            return Ok(FrameOutcome::Yielded {
+                                value: yielded,
+                                saved: GenSaveState {
+                                    iters: std::mem::take(&mut iters),
+                                    exc_handlers: std::mem::take(&mut exc_handlers),
+                                    // Rewind pc to point at the YieldFrom instruction
+                                    // (pc was already incremented past it).
+                                    pc: pc - 1,
+                                    handled_exc_slice: saved_handled_slice,
+                                    active_exception: saved_active,
+                                    // The sent value for the next iteration goes into
+                                    // sent_reg so the sub-iterator receives it.
+                                    yield_dst: *sent_reg,
+                                },
+                            });
+                        }
+                        Err(ref e) if is_stop_iteration_error(e) => {
+                            // Sub-iterator exhausted.  Extract the StopIteration.value
+                            // (the return value from a generator sub-iterator, or the
+                            // first arg to `raise StopIteration(val)`).
+                            let stop_val = extract_stop_iteration_value(e);
+                            regs[*result_reg as usize] = stop_val.unwrap_or_else(Value::none);
+                            // Continue executing after the YieldFrom instruction.
+                        }
+                        Err(e) => {
+                            // Other exception: propagate through our own handler stack.
+                            vm_try!(Err(e));
+                        }
+                    }
                 }
 
                 // ── Unpack ───────────────────────────────────────────────
@@ -3152,6 +3257,208 @@ impl Interpreter {
             Err(e) => Err(e),
         }
     }
+
+    /// Advance a `yield from` sub-iterator by one step, forwarding `sent_val`
+    /// to the sub-iterator's `send()` method if it is a generator.
+    ///
+    /// Returns:
+    /// - `Ok(v)` — sub-iterator yielded `v`
+    /// - `Err(StopIteration)` — sub-iterator exhausted; caller reads `.value`
+    ///   from the error to obtain the sub-iterator's return value
+    /// - `Err(other)` — exception from the sub-iterator
+    fn yield_from_advance(&mut self, iter_val: &Value, sent_val: Value) -> Result<Value> {
+        match iter_val.kind() {
+            ValueKind::Generator(state_rc) => {
+                let state_rc = Rc::clone(state_rc);
+
+                // Check for GetItemIter (lazy __getitem__ iterator).
+                let is_getitem = state_rc.borrow().downcast_ref::<GetItemIter>().is_some();
+                if is_getitem {
+                    // GetItemIter doesn't support send; treat as next().
+                    return match self.step_getitem_iter(&state_rc) {
+                        Ok(Some(v)) => Ok(v),
+                        Ok(None) => Err(PyError::named("StopIteration", String::new())),
+                        Err(e) => Err(e),
+                    };
+                }
+
+                let mut borrow = state_rc.try_borrow_mut().map_err(|_| {
+                    PyError::named("ValueError", "generator already executing".to_string())
+                })?;
+
+                if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
+                    // Built-in iterator: no send support, just advance.
+                    if native.pos >= native.items.len() {
+                        return Err(PyError::named("StopIteration", String::new()));
+                    }
+                    let item = native.items[native.pos].clone();
+                    native.pos += 1;
+                    return Ok(item);
+                }
+
+                if let Some(frame) = borrow.downcast_mut::<GeneratorFrame>() {
+                    if frame.done {
+                        return Err(PyError::named("StopIteration", String::new()));
+                    }
+                    // `yield from` bypasses CPython's "can't send non-None to a
+                    // just-started generator" check — the compiler initialises
+                    // sent_reg to None so the first call is always next()-equivalent.
+                    match self.resume_generator_with_exc(frame, None, sent_val) {
+                        Ok(v) => return Ok(v),
+                        Err(e) if is_stop_iteration_error(&e) => {
+                            // Generator exhausted.  If it returned a non-None value
+                            // (stashed by resume_generator_with_exc in
+                            // frame.last_return_value), materialise a StopIteration
+                            // instance with that value as args[0] so that
+                            // extract_stop_iteration_value() can retrieve it in the
+                            // YieldFrom handler.  self.env is restored at this point
+                            // (resume_generator_with_exc swaps it back on return).
+                            if let Some(rv) = frame.last_return_value.clone() {
+                                if !rv.is_none() {
+                                    if let Some(cls) =
+                                        lookup_name_in_module(&self.env, "StopIteration")
+                                            .and_then(|v| match v.kind() {
+                                                ValueKind::PyClass(c) => Some(Rc::clone(c)),
+                                                _ => None,
+                                            })
+                                    {
+                                        let exc = instantiate_exception(cls, vec![rv]);
+                                        return Err(PyError::Raised(exc));
+                                    }
+                                }
+                            }
+                            return Err(e);
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+
+                Err(PyError::Runtime("invalid generator state in yield from".to_string()))
+            }
+            ValueKind::PyInstance(inst_rc) => {
+                let inst_rc = Rc::clone(inst_rc);
+                let class = Rc::clone(&inst_rc.borrow().class);
+                // Try send() first (PEP 342 compliant generators).
+                if !sent_val.is_none() {
+                    if let Some(send_method) = lookup_class_attr(&class, "send") {
+                        return invoke_class_method(
+                            self,
+                            send_method,
+                            Value::py_instance(inst_rc),
+                            &[ExpandedCallArg { name: None, value: sent_val }],
+                        );
+                    }
+                }
+                // Fall back to __next__().
+                if let Some(next_method) = lookup_class_attr(&class, "__next__") {
+                    invoke_class_method(self, next_method, Value::py_instance(inst_rc), &[])
+                } else {
+                    Err(PyError::named(
+                        "TypeError",
+                        "object is not an iterator".to_string(),
+                    ))
+                }
+            }
+            ValueKind::BuiltinObject { ops, state } => {
+                let state = state.clone();
+                ops.iter_next(&state).and_then(|opt| {
+                    opt.ok_or_else(|| PyError::named("StopIteration", String::new()))
+                })
+            }
+            _ => Err(PyError::named(
+                "TypeError",
+                "object is not iterable".to_string(),
+            )),
+        }
+    }
+
+    /// Forward a thrown exception to a `yield from` sub-iterator (PEP 380 §3).
+    ///
+    /// Returns:
+    /// - `Ok(v)` — sub-iterator caught the exception and yielded `v`
+    /// - `Err(StopIteration)` — sub-iterator returned after handling the throw
+    /// - `Err(other)` — sub-iterator did not handle it (or raised a new exception)
+    fn yield_from_throw_forward(&mut self, iter_val: &Value, exc: PyError) -> Result<Value> {
+        match iter_val.kind() {
+            ValueKind::Generator(state_rc) => {
+                let state_rc = Rc::clone(state_rc);
+
+                // GetItemIter and NativeIterFrame have no Python frame; propagate.
+                if state_rc.borrow().downcast_ref::<GetItemIter>().is_some() {
+                    return Err(exc);
+                }
+
+                let mut borrow = state_rc.try_borrow_mut().map_err(|_| {
+                    PyError::named("ValueError", "generator already executing".to_string())
+                })?;
+
+                if borrow.downcast_mut::<NativeIterFrame>().is_some() {
+                    return Err(exc);
+                }
+
+                if let Some(frame) = borrow.downcast_mut::<GeneratorFrame>() {
+                    if frame.done {
+                        return Err(exc);
+                    }
+                    match self.resume_generator_with_exc(frame, Some(exc), Value::none()) {
+                        Ok(v) => return Ok(v),
+                        Err(e) if is_stop_iteration_error(&e) => {
+                            // Inner generator returned after handling the throw.
+                            // Encode the return value in the StopIteration error.
+                            if let Some(rv) = frame.last_return_value.clone() {
+                                if !rv.is_none() {
+                                    if let Some(cls) =
+                                        lookup_name_in_module(&self.env, "StopIteration")
+                                            .and_then(|v| match v.kind() {
+                                                ValueKind::PyClass(c) => Some(Rc::clone(c)),
+                                                _ => None,
+                                            })
+                                    {
+                                        let exc_with_val =
+                                            instantiate_exception(cls, vec![rv]);
+                                        return Err(PyError::Raised(exc_with_val));
+                                    }
+                                }
+                            }
+                            return Err(e);
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+
+                Err(exc)
+            }
+            ValueKind::PyInstance(inst_rc) => {
+                let inst_rc = Rc::clone(inst_rc);
+                let class = Rc::clone(&inst_rc.borrow().class);
+                // Try throw() method first.
+                if let Some(throw_method) = lookup_class_attr(&class, "throw") {
+                    // Materialise the exception into a Value for the throw() call.
+                    let exc_val = match exc {
+                        PyError::Raised(v) => v,
+                        PyError::Named(name, msg) => {
+                            match self.instantiate_named_exception(name.as_ref(), msg) {
+                                Ok(v) => v,
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        other => return Err(other),
+                    };
+                    invoke_class_method(
+                        self,
+                        throw_method,
+                        Value::py_instance(inst_rc),
+                        &[ExpandedCallArg { name: None, value: exc_val }],
+                    )
+                } else {
+                    // No throw() method: propagate the exception.
+                    Err(exc)
+                }
+            }
+            // Other iterator types don't have throw() support.
+            _ => Err(exc),
+        }
+    }
 }
 
 #[inline]
@@ -3222,6 +3529,68 @@ fn vm_eval_unary(op: UnaryOp, val: Value) -> Result<Value> {
 /// `__cause__` on the new `RuntimeError`, and `__suppress_context__` is set
 /// to `True`.  This mirrors `Insn::RaiseFrom` which implements the same
 /// `__cause__` / `__suppress_context__` assignment for `raise X from Y`.
+/// Returns `true` for any `PyError` variant that represents a `StopIteration`
+/// (or a subclass thereof expressed as `PyError::Raised`).  Used in `yield from`
+/// to detect sub-iterator exhaustion regardless of how the error was constructed.
+fn is_stop_iteration_error(err: &PyError) -> bool {
+    match err {
+        PyError::Named(cls, _) => cls.as_ref() == "StopIteration",
+        PyError::Class(cls, _) => cls.borrow().name == "StopIteration",
+        PyError::Raised(exc) => match exc.kind() {
+            ValueKind::PyInstance(inst) => inst.borrow().class.borrow().name == "StopIteration",
+            ValueKind::PyClass(cls) => cls.borrow().name == "StopIteration",
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// Extract the `value` attribute from a `StopIteration` error (PEP 380 §3).
+///
+/// In CPython, `StopIteration.value` is the first positional argument: when
+/// a generator does `return x`, the VM raises `StopIteration(x)` and `x` is
+/// accessible as `e.value` and `e.args[0]`.
+///
+/// We mirror this by extracting `args[0]` from the materialized exception
+/// instance, or by using the message string for `PyError::Named` variants.
+/// Returns `None` when no value was provided (bare `return` / `return None`).
+fn extract_stop_iteration_value(err: &PyError) -> Option<Value> {
+    match err {
+        PyError::Raised(exc) => match exc.kind() {
+            ValueKind::PyInstance(inst) => {
+                // Check for a `value` attribute first (set by our exception
+                // machinery), then fall back to args[0].
+                let borrow = inst.borrow();
+                if let Some(v) = borrow.attrs.get("value") {
+                    if !v.is_none() {
+                        return Some(v.clone());
+                    }
+                }
+                // Try args[0].
+                if let Some(args_val) = borrow.attrs.get("args") {
+                    if let Some(args) = args_val.as_tuple().or_else(|| args_val.as_list()) {
+                        if let Some(first) = args.first() {
+                            if !first.is_none() {
+                                return Some(first.clone());
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        },
+        PyError::Named(name, msg) if name.as_ref() == "StopIteration" => {
+            if msg.is_empty() {
+                None
+            } else {
+                Some(Value::string(msg.clone()))
+            }
+        }
+        _ => None,
+    }
+}
+
 fn pep479_wrap_stop_iteration(env: &crate::interpreter::EnvRef, err: PyError) -> PyError {
     let built_in_stop = lookup_name_in_module(env, "StopIteration").and_then(|v| match v.kind() {
         ValueKind::PyClass(c) => Some(Rc::clone(c)),
