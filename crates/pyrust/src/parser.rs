@@ -1190,7 +1190,7 @@ impl Parser {
     /// also produces a tuple (single-element when only one item precedes it).
     /// This matches CPython's grammar for `return` and `yield` value positions.
     fn parse_expr_or_tuple(&mut self) -> Result<Expr> {
-        let first = self.parse_expr()?;
+        let first = self.parse_seq_item()?;
         if !self.is(&Token::Comma) {
             return Ok(first);
         }
@@ -1201,7 +1201,7 @@ impl Parser {
             if self.at_stmt_end() {
                 break; // trailing comma — stop here, still produce a tuple
             }
-            items.push(self.parse_expr()?);
+            items.push(self.parse_seq_item()?);
         }
         Ok(Expr::Tuple(items))
     }
