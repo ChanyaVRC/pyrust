@@ -1870,6 +1870,31 @@ fn values_are_identical(a: &Value, b: &Value) -> bool {
         },
         (ValueKind::Bytes(x), ValueKind::Bytes(y)) => Rc::ptr_eq(x, y),
         (ValueKind::PyModule(x), ValueKind::PyModule(y)) => Rc::ptr_eq(x, y),
+        // BoundMethod / ClassBoundMethod / SuperProxy / SuperProxyClass: each
+        // allocation gets a unique monotonic obj_id (stored in the Opaque
+        // struct and surfaced by value_id()).  Two clones of the same value
+        // share the same obj_id so `a is a` is True, while a second attribute
+        // access produces a new obj_id so `obj.method is obj.method` is
+        // False, matching CPython identity semantics (#722).
+        (ValueKind::BoundMethod { .. }, ValueKind::BoundMethod { .. })
+        | (ValueKind::ClassBoundMethod { .. }, ValueKind::ClassBoundMethod { .. })
+        | (ValueKind::SuperProxy { .. }, ValueKind::SuperProxy { .. })
+        | (ValueKind::SuperProxyClass { .. }, ValueKind::SuperProxyClass { .. }) => {
+            match (a.value_id(), b.value_id()) {
+                (Some(x), Some(y)) => x == y,
+                _ => false,
+            }
+        }
+        // BuiltinObject covers built-in bound methods (list.append, dict.get,
+        // etc.) and other host-created objects (frozenset, property, …).
+        // Clones share the same Rc<RefCell<...>> state, so Rc pointer equality
+        // is the correct identity test.  `a = lst.append; a is a` → True;
+        // `lst.append is lst.append` → False (fresh BoundMethodState each
+        // time) — matching CPython builtin_function_or_method identity (#722).
+        (
+            ValueKind::BuiltinObject { state: sa, .. },
+            ValueKind::BuiltinObject { state: sb, .. },
+        ) => Rc::ptr_eq(sa, sb),
         _ => false,
     }
 }
