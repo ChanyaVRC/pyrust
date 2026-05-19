@@ -150,7 +150,30 @@ impl Interpreter {
                         pyrust_builtins::int::call(method, &receiver, &pos)
                     }
                     Kind::Bytes => pyrust_builtins::bytes::call(method, &receiver, &pos, &kw),
-                    Kind::Str => self.call_str_method(method, receiver, pos),
+                    Kind::Str => {
+                        // `format` needs kwargs threaded into the template.
+                        // Intercept before `call_str_method`, which only receives
+                        // positional args and would silently drop keyword arguments.
+                        if method == "format" {
+                            let template = match receiver.kind() {
+                                ValueKind::Str(s) => s.to_string(),
+                                _ => {
+                                    return Err(PyError::named(
+                                        "TypeError",
+                                        "descriptor 'format' requires a 'str' object".to_string(),
+                                    ))
+                                }
+                            };
+                            let keyword: Vec<(String, Value)> = kw
+                                .into_iter()
+                                .filter_map(|(k, v)| {
+                                    if let PyKey::Str(name) = k { Some((name, v)) } else { None }
+                                })
+                                .collect();
+                            return format_str_template(&template, &pos, &keyword);
+                        }
+                        self.call_str_method(method, receiver, pos)
+                    }
                     Kind::List => pyrust_builtins::list::call(method, &receiver, pos, &kw),
                     Kind::Dict => self.call_dict_method(method, receiver, pos),
                     Kind::Set => self.call_set_method(method, receiver, pos),
@@ -2353,11 +2376,6 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
 /// `pyrust_builtins`, so adding a new method there automatically surfaces
 /// it via `dir()` without a parallel table to maintain.
 ///
-/// `str.format` is appended explicitly because it is dispatched at the VM
-/// level rather than through `string::call` (see the comment on
-/// `pyrust_builtins::string::METHODS`).  This is the one method-name source
-/// of truth that lives outside `METHODS`.
-///
 /// TODO: also include the dunder methods CPython exposes via `dir([])` /
 /// `dir("")` etc. (`__iter__`, `__len__`, `__getitem__`, `__contains__`,
 /// `__add__`, …). Programs that introspect protocol support via `dir()`
@@ -2374,11 +2392,7 @@ fn builtin_method_names(type_name: &str) -> Vec<String> {
         "frozenset" => pyrust_builtins::frozenset::METHODS,
         _ => &[],
     };
-    let mut out: Vec<String> = names.iter().map(|s| (*s).to_string()).collect();
-    if type_name == "str" {
-        out.push("format".to_string());
-    }
-    out
+    names.iter().map(|s| (*s).to_string()).collect()
 }
 
 /// Implements `str.format()`.  Parses `{...}` replacement fields in `template`
