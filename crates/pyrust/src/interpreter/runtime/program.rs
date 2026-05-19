@@ -138,6 +138,7 @@ impl Interpreter {
             // are no nonlocal bindings to resolve.
             nonlocal_names: None,
             env: None,
+            is_class_method: false,
         });
         // SAFETY: regs_ptr is valid for regs_len Values for the lifetime of
         // `regs` (a local RegsBuf that outlives this call).  No &mut [Value]

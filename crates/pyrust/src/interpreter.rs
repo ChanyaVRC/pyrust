@@ -320,6 +320,11 @@ pub(crate) struct VmFrameView {
     /// `find_enclosing_local_env_for_name` to resolve nonlocal names.
     /// `None` for `Script` frames (which use the module env directly).
     pub(crate) env: Option<EnvRef>,
+    /// True when this function was compiled as a direct method inside a class
+    /// body (`FnCode::is_class_method`).  Used by `resolve_zero_arg_super` to
+    /// identify the frame whose register 0 (`self`/`cls`) should be used.
+    /// Script and Class frames always have this `false`.
+    pub(crate) is_class_method: bool,
 }
 
 /// Thin wrapper around `iter_values` matching pyrust-core's `IterValuesFn`

@@ -69,6 +69,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         fn_protos,
         cell_vars: code.cell_vars,
         is_generator: code.is_generator,
+        is_class_method: code.is_class_method,
     }
 }
 

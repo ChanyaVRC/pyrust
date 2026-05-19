@@ -3627,6 +3627,12 @@ struct Compiler {
     /// CPython guarantees class-namespace order follows the order names
     /// are first bound at runtime — not source-walk / slot-allocation order.
     is_class_body: bool,
+    /// True when this Compiler is producing a function that was defined directly
+    /// inside a class body.  Set by `compile_def` using `self.is_class_body` of
+    /// the enclosing compiler.  Only direct class methods get this flag — nested
+    /// functions inside methods do not, which mirrors CPython's `__class__` cell
+    /// propagation rule: only the directly-defining function gets the cell.
+    is_class_method: bool,
     /// The qualname prefix for classes/functions defined in this scope.
     /// Empty for the top-level scope.  When entering a class `Foo`, the child
     /// compiler's prefix becomes `"Foo"` (or `"Outer.Foo"` if nested).  When
@@ -3710,6 +3716,7 @@ impl Compiler {
             fn_protos: Vec::new(),
             pure_locals: HashSet::new(),
             is_class_body: false,
+            is_class_method: false,
             qualname_prefix: String::new(),
             outer_locals: Vec::new(),
             is_function_scope: false,
@@ -4057,6 +4064,7 @@ impl Compiler {
             fn_protos: self.fn_protos,
             cell_vars: self.cell_vars.into_iter().collect(),
             is_generator,
+            is_class_method: self.is_class_method,
         })
     }
 
@@ -6200,6 +6208,11 @@ impl Compiler {
             sub.outer_locals.push(Rc::clone(&self.local_index));
         }
         sub.is_function_scope = true;
+        // A function compiled directly inside a class body is a class method and
+        // gets access to zero-arg super().  Functions compiled inside other
+        // functions (nested) do not — they get is_class_method = false (the
+        // default from Compiler::new) because self.is_class_body is false there.
+        sub.is_class_method = self.is_class_body;
         // Compute the qualname for this function and its `<locals>` prefix.
         // Classes defined inside this function inherit `"fn_name.<locals>"` as
         // their qualname prefix — matching CPython's `"fn_name.<locals>.ClassName"`.

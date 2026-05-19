@@ -455,6 +455,7 @@ impl Interpreter {
             local_index: Rc::clone(&frame.local_index),
             nonlocal_names: gen_nonlocal_names,
             env: gen_env_opt,
+            is_class_method: frame.code.is_class_method,
         });
         // SAFETY: regs_ptr is valid for regs_len Values for the lifetime of
         // frame.regs (which outlives this call).  No &mut [Value] referencing
@@ -2412,20 +2413,26 @@ impl Interpreter {
                     // function's env cell rather than the class namespace.  Class
                     // scope is transparent to `nonlocal` — the store must reach
                     // the enclosing *function* binding.
-                    let previous_env = if !proto_global_names.is_empty()
-                        || !proto_nonlocal_names.is_empty()
+                    //
+                    // Issue #733: zero-arg super() requires that methods defined
+                    // inside a class body can reach `__class__` through their
+                    // captured env chain.  We always create a class_env here (even
+                    // when neither global nor nonlocal names are used) so that
+                    // methods always capture it at MakeFunction time.  After the
+                    // class is constructed we write `__class__` into this env.
+                    // `free_env` only recycles when Rc::strong_count == 1; methods
+                    // holding an Rc clone keep it alive after MakeClass returns.
+                    let parent = Rc::clone(&self.env);
+                    let class_env = self.alloc_env(Some(parent));
                     {
-                        let parent = Rc::clone(&self.env);
-                        let class_env = self.alloc_env(Some(parent));
-                        {
-                            let mut e = class_env.borrow_mut();
-                            e.global_names = proto_global_names;
-                            e.nonlocal_names = proto_nonlocal_names;
-                        }
-                        Some(std::mem::replace(&mut self.env, class_env))
-                    } else {
-                        None
-                    };
+                        let mut e = class_env.borrow_mut();
+                        e.global_names = proto_global_names;
+                        e.nonlocal_names = proto_nonlocal_names;
+                    }
+                    // Keep a second Rc so we can write __class__ into the env
+                    // after the class is constructed, even after restore.
+                    let class_env_rc = Rc::clone(&class_env);
+                    let previous_env = Some(std::mem::replace(&mut self.env, class_env));
                     // Issue #487: publish a FrameKind::Class view so that
                     // `locals()` called inside the class body returns the
                     // partially-built class attrs dict (the fastlocal register
@@ -2448,6 +2455,7 @@ impl Interpreter {
                         local_index: Rc::clone(&local_index),
                         nonlocal_names: None,
                         env: None,
+                        is_class_method: false,
                     });
                     // SAFETY: class_regs_ptr is valid for class_regs_len Values
                     // for the lifetime of class_regs (a local on this stack
@@ -2459,9 +2467,12 @@ impl Interpreter {
                     let body_result = self.run_bytecode(&class_code, class_regs_slice);
                     // Always pop both stacks, even on error, to keep them balanced.
                     self.vm_frame_views.pop();
-                    if let Some(prev) = previous_env {
-                        let class_env = std::mem::replace(&mut self.env, prev);
-                        self.free_env(class_env);
+                    // Restore the env that was active before MakeClass.
+                    // previous_env is always Some (we always push a class_env above).
+                    {
+                        let used_class_env =
+                            std::mem::replace(&mut self.env, previous_env.expect("class_env always pushed"));
+                        self.free_env(used_class_env);
                     }
                     let mut store_order = self
                         .class_store_order
@@ -2558,6 +2569,16 @@ impl Interpreter {
                         base,
                         attrs,
                     }));
+                    // Issue #733: write __class__ into the class env so methods
+                    // that captured it (at MakeFunction time during the class body)
+                    // can reach it through their env chain.  This is how CPython's
+                    // `__class__` cell mechanism works: the cell is seeded after the
+                    // class is fully constructed, then each method closure holds a
+                    // reference to the same cell object.
+                    class_env_rc
+                        .borrow_mut()
+                        .values
+                        .insert("__class__".to_string(), Value::py_class(Rc::clone(&class)));
                     regs[*dst as usize] = Value::py_class(class);
                 }
 
@@ -3770,6 +3791,7 @@ mod vm_tests {
             fn_protos: vec![],
             cell_vars: vec![],
             is_generator: false,
+            is_class_method: false,
         }
     }
 

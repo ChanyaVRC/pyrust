@@ -25,8 +25,8 @@ use crate::interpreter::{
     int_pow_promoting, invoke_class_method,
     is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_hash_bigint, py_hash_float,
     py_hash_int, py_mod_i64, py_round_half_even, py_round_half_even_f64,
-    reject_keyword_args_expanded, snapshot_current_locals, snapshot_module_namespace,
-    value_to_bigint, value_to_float, value_type_name_str,
+    reject_keyword_args_expanded, resolve_zero_arg_super, snapshot_current_locals,
+    snapshot_module_namespace, value_to_bigint, value_to_float, value_type_name_str,
 };
 use crate::value::{PyClass, PyKey, PyToPrimitive, PyZero, Value, ValueKind, range_len};
 use pyrust_derive::pyrust_module;
@@ -2097,13 +2097,17 @@ pyrust_module! {
     #[py_name = "super"]
     fn super_fn(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 2 {
+        let (cls_val, inst_val) = if args.is_empty() {
+            // Zero-argument super() — resolve __class__ cell and first param.
+            resolve_zero_arg_super(_interp)?
+        } else if args.len() == 2 {
+            (args[0].value.clone(), args[1].value.clone())
+        } else {
             return Err(PyError::Runtime(format!(
-                "{FN_NAME}() requires exactly 2 arguments: super(CurrentClass, self)",
+                "{FN_NAME}() takes at most 2 arguments ({} given)",
+                args.len()
             )));
-        }
-        let cls_val = args[0].value.clone();
-        let inst_val = args[1].value.clone();
+        };
         let class = match cls_val.kind() {
             ValueKind::PyClass(c) => Rc::clone(c),
             _ => return Err(PyError::Runtime(format!(
