@@ -31,7 +31,10 @@ pub fn seq_index(items: &[Value], args: &[Value], type_name: &str) -> Result<Val
             return Ok(Value::int((start + i) as i64));
         }
     }
-    Err(PyError::Runtime(format!("{target} is not in {type_name}")))
+    Err(PyError::named(
+        "ValueError",
+        format!("{target} is not in {type_name}"),
+    ))
 }
 
 pub fn seq_count(items: &[Value], args: &[Value], type_name: &str) -> Result<Value> {
