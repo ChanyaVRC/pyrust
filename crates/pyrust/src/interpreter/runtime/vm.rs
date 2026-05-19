@@ -1651,11 +1651,17 @@ impl Interpreter {
                     let saved_active = self.active_exception.take();
                     // Return an explicit FrameOutcome::Yielded rather than
                     // using the old GEN_SAVE thread-local side-channel.
+                    // Use mem::take to move iters and exc_handlers into the
+                    // saved state rather than cloning them.  The local
+                    // variables are left as empty Vecs, which are then
+                    // dropped for free when the function returns.  On resume,
+                    // resume_generator_with_exc moves them back via
+                    // std::mem::take on frame.iters / frame.exc_handlers.
                     return Ok(FrameOutcome::Yielded {
                         value: yielded,
                         saved: GenSaveState {
-                            iters: iters.clone(),
-                            exc_handlers: exc_handlers.clone(),
+                            iters: std::mem::take(&mut iters),
+                            exc_handlers: std::mem::take(&mut exc_handlers),
                             pc, // already past the Yield instruction
                             handled_exc_slice: saved_handled_slice,
                             active_exception: saved_active,
