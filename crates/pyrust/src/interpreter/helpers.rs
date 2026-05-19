@@ -1959,7 +1959,9 @@ fn is_pure_expr(expr: &Expr, pure_fns: &std::collections::HashSet<String>) -> bo
                 && is_pure_expr(then, pure_fns)
                 && is_pure_expr(else_, pure_fns)
         }
-        Expr::Lambda { .. } => true,
+        // A lambda expression allocates a fresh Rc<UserFunction> on every evaluation,
+        // so any enclosing function that returns one is not pure in the identity sense.
+        Expr::Lambda { .. } => false,
         Expr::Call { func, args } => {
             // Only direct calls to named callees can be pure.  Two shapes
             // qualify:
@@ -2125,8 +2127,10 @@ fn is_pure_stmt(stmt: &Stmt, pure_fns: &std::collections::HashSet<String>) -> bo
 
         // Annotated assignment modifies __annotations__ dict — impure at module/class scope.
         Stmt::AnnAssign { .. } => false,
-        // Nested definitions don't execute side effects at definition time.
-        Stmt::Def { .. } | Stmt::Class { .. } => true,
+        // Nested definitions always allocate a fresh heap object (Rc<UserFunction> /
+        // PyClass), so any function that defines and returns one is non-pure: successive
+        // calls with identical arguments produce values with distinct identities.
+        Stmt::Def { .. } | Stmt::Class { .. } => false,
         Stmt::Pass | Stmt::Break | Stmt::Continue => true,
         Stmt::Match { subject, arms } => {
             is_pure_expr(subject, pure_fns)
