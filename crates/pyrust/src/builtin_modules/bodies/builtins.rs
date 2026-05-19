@@ -349,15 +349,26 @@ pyrust_module! {
 
     /// CPython: sum(iterable, /, start=0) — sum elements of an iterable.
     /// <https://docs.python.org/3/library/functions.html#sum>
+    ///
+    /// Migrated to the typed-signature dialect (#400).  `iterable` is
+    /// `PyValue` so user-defined iterables reach `collect_iterable`.
+    /// `start` is `Option<PyValue>` with `#[default(None)]`; the body
+    /// uses 0 when absent.  Known divergence: `sum([], None)` is 0
+    /// (not CPython's `None`) because `Option<PyValue>` maps both
+    /// "absent" and "Python None" to Rust `None`.  Tracked as a
+    /// follow-up fixture under #400.
     #[pure]
-    fn sum(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.is_empty() || args.len() > 2 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes 1 or 2 arguments")));
-        }
-        let items = _interp.collect_iterable(args[0].value.clone())?;
-        let start = if args.len() == 2 { args[1].value.clone() } else { Value::int(0) };
-        let mut acc = start;
+    fn sum(
+        #[positional_only] iterable: PyValue,
+        #[positional_only]
+        #[default(None)]
+        start: Option<PyValue>,
+    ) -> Result<Value> {
+        let items = _interp.collect_iterable(iterable.0)?;
+        let mut acc = match start {
+            None => Value::int(0),
+            Some(v) => v.0,
+        };
         for item in items {
             acc = _interp.eval_binary(acc, BinaryOp::Add, item)?;
         }
@@ -366,13 +377,13 @@ pyrust_module! {
 
     /// CPython: any(iterable) — true if any element is truthy.
     /// <https://docs.python.org/3/library/functions.html#any>
+    ///
+    /// Migrated to the typed-signature dialect (#400).  `PyValue` as
+    /// `iterable` so user-defined iterables (PyInstance with `__iter__`)
+    /// reach `collect_iterable` rather than the registry-only path.
     #[pure]
-    fn any(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
-        }
-        let items = _interp.collect_iterable(args[0].value.clone())?;
+    fn any(#[positional_only] iterable: PyValue) -> Result<Value> {
+        let items = _interp.collect_iterable(iterable.0)?;
         for item in items {
             if _interp.truthy_value(&item)? {
                 return Ok(Value::bool_(true));
@@ -383,13 +394,12 @@ pyrust_module! {
 
     /// CPython: all(iterable) — true if every element is truthy (or empty).
     /// <https://docs.python.org/3/library/functions.html#all>
+    ///
+    /// Migrated to the typed-signature dialect (#400).  `PyValue` as
+    /// `iterable` — same rationale as `any`.
     #[pure]
-    fn all(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
-        }
-        let items = _interp.collect_iterable(args[0].value.clone())?;
+    fn all(#[positional_only] iterable: PyValue) -> Result<Value> {
+        let items = _interp.collect_iterable(iterable.0)?;
         for item in items {
             if !_interp.truthy_value(&item)? {
                 return Ok(Value::bool_(false));
@@ -592,60 +602,30 @@ pyrust_module! {
 
     /// CPython: enumerate(iterable, start=0) — enumerate iterator.
     /// <https://docs.python.org/3/library/functions.html#enumerate>
+    ///
+    /// Migrated to the typed-signature dialect (#400).  `iterable` is
+    /// `PyValue` (not `PyIterable`) so that user-defined `PyInstance`
+    /// iterables reach `materialize_user_iter` — the registry-only path
+    /// cannot dispatch `__iter__` dunders.  `start` is `Option<PyValue>`
+    /// so the body can handle both `int` and `bool` inputs (CPython
+    /// accepts both; `bool ⊆ int` in CPython) and produce the
+    /// exact CPython `TypeError` wording for non-integer `start`.
     #[pure]
-    fn enumerate(args) -> Result<Value> {
-        // Parse `iterable` and `start` (positional or keyword). CPython's
-        // signature is `enumerate(iterable, start=0)`.
-        let mut iterable: Option<Value> = None;
-        let mut start_val: Option<Value> = None;
-        for (i, arg) in args.iter().enumerate() {
-            match arg.name.as_deref() {
-                None => match i {
-                    0 => iterable = Some(arg.value.clone()),
-                    1 => start_val = Some(arg.value.clone()),
-                    _ => return Err(PyError::named(
-                        "TypeError",
-                        format!("{FN_NAME}() takes at most 2 arguments ({} given)", args.len()),
-                    )),
-                },
-                Some("iterable") => {
-                    if iterable.is_some() {
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!("{FN_NAME}() got multiple values for argument 'iterable'"),
-                        ));
-                    }
-                    iterable = Some(arg.value.clone());
-                }
-                Some("start") => {
-                    if start_val.is_some() {
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!("{FN_NAME}() got multiple values for argument 'start'"),
-                        ));
-                    }
-                    start_val = Some(arg.value.clone());
-                }
-                Some(k) => return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() got an unexpected keyword argument '{k}'"),
-                )),
-            }
-        }
-        let iterable = iterable.ok_or_else(|| PyError::named(
-            "TypeError",
-            format!("{FN_NAME}() missing required argument: 'iterable'"),
-        ))?;
-        let start = match start_val {
-            None => 0i64,
-            Some(v) => match v.kind() {
+    fn enumerate(
+        #[positional_only] iterable: PyValue,
+        #[default(None)]
+        start: Option<PyValue>,
+    ) -> Result<Value> {
+        let start_val: i64 = match start {
+            None => 0,
+            Some(v) => match v.0.kind() {
                 ValueKind::Int(n) => n,
                 ValueKind::Bool(b) => b as i64,
                 _ => return Err(PyError::named(
                     "TypeError",
                     format!(
                         "'{}' object cannot be interpreted as an integer",
-                        value_type_name_str(&v),
+                        value_type_name_str(&v.0),
                     ),
                 )),
             },
@@ -657,11 +637,8 @@ pyrust_module! {
         // generators.  For other sources we still pass the raw value
         // so side effects (e.g. `open()`) defer to iteration start
         // (#446).
-        let iterable = materialize_user_iter(_interp, iterable)?;
-        Ok(pyrust_builtins::iter_helpers::enumerate(
-            iterable,
-            start,
-        ))
+        let source = materialize_user_iter(_interp, iterable.0)?;
+        Ok(pyrust_builtins::iter_helpers::enumerate(source, start_val))
     }
 
     /// CPython: zip(*iterables, strict=False) — parallel iterator.
@@ -699,30 +676,32 @@ pyrust_module! {
 
     /// CPython: reversed(seq) — reverse iterator.
     /// <https://docs.python.org/3/library/functions.html#reversed>
+    ///
+    /// Migrated to the typed-signature dialect (#400).  `PyValue` accepts
+    /// any object so that PyInstance / generator sources reach
+    /// `materialize_user_iter` before handing off to the helper.
     #[pure]
-    fn reversed(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
-        }
+    fn reversed(#[positional_only] seq: PyValue) -> Result<Value> {
         // Pre-materialise PyInstance sources (see `enumerate` for rationale).
-        let source = materialize_user_iter(_interp, args[0].value.clone())?;
+        let source = materialize_user_iter(_interp, seq.0)?;
         Ok(pyrust_builtins::iter_helpers::reversed(source))
     }
 
     /// CPython: map(func, iterable) — apply func to each element.
     /// <https://docs.python.org/3/library/functions.html#map>
-    fn map(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 2 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly 2 arguments")));
-        }
-        let func = args[0].value.clone();
-        let items = _interp.collect_iterable(args[1].value.clone())?;
+    ///
+    /// Migrated to the typed-signature dialect (#400).  Both parameters
+    /// use `PyValue`: `func` is a callable (any value), `iterable` is any
+    /// iterable including user-defined PyInstance.
+    fn map(
+        #[positional_only] func: PyValue,
+        #[positional_only] iterable: PyValue,
+    ) -> Result<Value> {
+        let items = _interp.collect_iterable(iterable.0)?;
         let mut result = Vec::with_capacity(items.len());
         for item in items {
             let mapped = _interp.call_function_expanded(
-                func.clone(),
+                func.0.clone(),
                 &[ExpandedCallArg { name: None, value: item }],
             )?;
             result.push(mapped);
@@ -732,21 +711,24 @@ pyrust_module! {
 
     /// CPython: filter(func, iterable) — keep elements where func is truthy.
     /// <https://docs.python.org/3/library/functions.html#filter>
-    fn filter(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 2 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly 2 arguments")));
-        }
-        let func = args[0].value.clone();
-        let items = _interp.collect_iterable(args[1].value.clone())?;
-        let use_identity = func.is_none();
+    ///
+    /// Migrated to the typed-signature dialect (#400).  `func` and
+    /// `iterable` are both `PyValue`: `func` may be `None` (identity
+    /// truthiness test) or any callable; `iterable` may be any iterable
+    /// including user-defined PyInstance.
+    fn filter(
+        #[positional_only] func: PyValue,
+        #[positional_only] iterable: PyValue,
+    ) -> Result<Value> {
+        let items = _interp.collect_iterable(iterable.0)?;
+        let use_identity = func.0.is_none();
         let mut result = Vec::new();
         for item in items {
             let keep = if use_identity {
                 _interp.truthy_value(&item)?
             } else {
                 let test = _interp.call_function_expanded(
-                    func.clone(),
+                    func.0.clone(),
                     &[ExpandedCallArg { name: None, value: item.clone() }],
                 )?;
                 _interp.truthy_value(&test)?
@@ -850,25 +832,19 @@ pyrust_module! {
 
     /// CPython: delattr(obj, name) — delete an attribute.
     /// <https://docs.python.org/3/library/functions.html#delattr>
-    fn delattr(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 2 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly 2 arguments")));
-        }
-        let name = match args[1].value.kind() {
-            ValueKind::Str(s) => s.to_string(),
-            _ => {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}(): attribute name must be a string"),
-                ));
-            }
-        };
+    ///
+    /// Migrated to the typed-signature dialect (#400).  `PyStr` for
+    /// `name` enforces CPython's requirement that the attribute name be a
+    /// string; `PyValue` for `obj` accepts any Python object.
+    fn delattr(
+        #[positional_only] obj: PyValue,
+        #[positional_only] name: PyStr,
+    ) -> Result<Value> {
         // Delegate to the canonical delete_attr path so that every value
         // kind (BuiltinFunction, UserFunction, BoundMethod, PyClass, …)
         // raises the correct error type and message instead of the old
         // catch-all "delattr() object has no writable attributes".
-        _interp.delete_attr(args[0].value.clone(), &name)?;
+        _interp.delete_attr(obj.0, &*name)?;
         Ok(Value::none())
     }
 
@@ -1049,19 +1025,16 @@ pyrust_module! {
 
     /// CPython: setattr(obj, name, value) — attribute assignment by name.
     /// <https://docs.python.org/3/library/functions.html#setattr>
-    fn setattr(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 3 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly 3 arguments")));
-        }
-        let name = match args[1].value.kind() {
-            ValueKind::Str(s) => s.to_string(),
-            _ => return Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}(): attribute name must be a string"),
-            )),
-        };
-        _interp.assign_attr(args[0].value.clone(), &name, args[2].value.clone())?;
+    ///
+    /// Migrated to the typed-signature dialect (#400).  `PyStr` for
+    /// `name` enforces CPython's requirement that the attribute name be a
+    /// string; `PyValue` for `obj` and `value` accept any Python object.
+    fn setattr(
+        #[positional_only] obj: PyValue,
+        #[positional_only] name: PyStr,
+        #[positional_only] value: PyValue,
+    ) -> Result<Value> {
+        _interp.assign_attr(obj.0, &*name, value.0)?;
         Ok(Value::none())
     }
 
@@ -1371,42 +1344,67 @@ pyrust_module! {
 
     /// CPython: round(number[, ndigits]) — banker's rounding.
     /// <https://docs.python.org/3/library/functions.html#round>
+    ///
+    /// Migrated to the typed-signature dialect (#400).  A single
+    /// `#[positional_only]` signature is used (not an overload set) so
+    /// that `#[default(None)]` on `ndigits` is legal — the macro forbids
+    /// defaults in overload sets.  `PyValue` is used for both `x` and
+    /// `ndigits` so the body can dispatch on `ValueKind` for full CPython
+    /// parity: `bool ⊆ int` (both round unchanged), `float` uses
+    /// half-even rounding, and everything else raises `TypeError`.
     #[pure]
-    fn round(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.is_empty() || args.len() > 2 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes 1 or 2 arguments")));
-        }
-        let ndigits: Option<i32> = if args.len() == 2 {
-            match args[1].value.kind() {
+    fn round(
+        #[positional_only] x: PyValue,
+        #[positional_only]
+        #[default(None)]
+        ndigits: Option<PyValue>,
+    ) -> Result<Value> {
+        let ndigits_i32: Option<i32> = match ndigits {
+            None => None,
+            Some(ref v) => match v.0.kind() {
                 ValueKind::Int(n) => Some(n as i32),
+                ValueKind::Bool(b) => Some(b as i32),
                 ValueKind::None => None,
                 _ => return Err(PyError::named(
                     "TypeError",
                     format!("{FN_NAME}() ndigits must be an integer or None"),
                 )),
-            }
-        } else {
-            None
+            },
         };
-        match args[0].value.kind() {
-            ValueKind::Int(v) => Ok(Value::int(v)),
-            ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
-            ValueKind::Float(v) => {
-                match ndigits {
-                    None => Ok(Value::int(py_round_half_even(v))),
-                    Some(n) => {
-                        if n >= 0 {
-                            let factor = 10f64.powi(n);
-                            Ok(Value::float(py_round_half_even_f64(v * factor) / factor))
-                        } else {
-                            let factor = 10f64.powi(-n);
-                            Ok(Value::float(py_round_half_even_f64(v / factor) * factor))
-                        }
-                    }
+        // Extract in a scoped block to avoid holding the kind() borrow
+        // across any Rc-cloning below.
+        enum NumKind { Int(i64), Bool(bool), BigInt, Float(f64), Other }
+        let num = match x.0.kind() {
+            ValueKind::Int(v) => NumKind::Int(v),
+            ValueKind::Bool(b) => NumKind::Bool(b),
+            ValueKind::BigInt(_) => NumKind::BigInt,
+            ValueKind::Float(v) => NumKind::Float(v),
+            _ => NumKind::Other,
+        };
+        match num {
+            NumKind::Int(v) => Ok(Value::int(v)),
+            NumKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
+            NumKind::BigInt => {
+                // BigInt: return unchanged (any ndigits; int arithmetic exact).
+                if let ValueKind::BigInt(b) = x.0.kind() {
+                    Ok(Value::bigint(b.clone()))
+                } else {
+                    unreachable!()
                 }
             }
-            _ => Err(PyError::named(
+            NumKind::Float(v) => match ndigits_i32 {
+                None => Ok(Value::int(py_round_half_even(v))),
+                Some(n) => {
+                    if n >= 0 {
+                        let factor = 10f64.powi(n);
+                        Ok(Value::float(py_round_half_even_f64(v * factor) / factor))
+                    } else {
+                        let factor = 10f64.powi(-n);
+                        Ok(Value::float(py_round_half_even_f64(v / factor) * factor))
+                    }
+                }
+            },
+            NumKind::Other => Err(PyError::named(
                 "TypeError",
                 format!("{FN_NAME}() argument must be a number"),
             )),
@@ -1415,6 +1413,15 @@ pyrust_module! {
 
     /// CPython: list([iterable]) — list constructor.
     /// <https://docs.python.org/3/library/functions.html#list>
+    ///
+    /// Not migrated to the typed-signature dialect in this batch: the
+    /// macro's overload set requires all overloads to share the same arity,
+    /// so the 0-arg / 1-arg split can't be expressed as two typed overloads.
+    /// `Option<PyValue>` would conflate "absent" with "Python None",
+    /// turning `list(None)` into `[]` instead of the correct `TypeError`.
+    /// Remaining as `(args)` until the macro supports variable-arity
+    /// overloads (tracked under #400).
+    ///
     /// Not marked `#[pure]` because it dispatches user `__iter__` and
     /// `__next__` when consuming a user-defined iterable.
     fn list(args) -> Result<Value> {
@@ -1428,6 +1435,9 @@ pyrust_module! {
 
     /// CPython: tuple([iterable]) — tuple constructor.
     /// <https://docs.python.org/3/library/functions.html#tuple>
+    ///
+    /// Not migrated in this batch — same arity-split constraint as `list`.
+    ///
     /// Not marked `#[pure]` because it dispatches user `__iter__` and
     /// `__next__` when consuming a user-defined iterable.
     fn tuple(args) -> Result<Value> {
@@ -1716,6 +1726,9 @@ pyrust_module! {
 
     /// CPython: set([iterable]) — set constructor.
     /// <https://docs.python.org/3/library/functions.html#func-set>
+    ///
+    /// Not migrated in this batch — same arity-split constraint as `list`.
+    ///
     /// Not marked `#[pure]` because it dispatches user `__hash__` via
     /// `value_to_pykey` when building the set, and `__eq__` via `set_insert`.
     fn set(args) -> Result<Value> {
@@ -1737,6 +1750,9 @@ pyrust_module! {
 
     /// CPython: frozenset([iterable]) — frozenset constructor.
     /// <https://docs.python.org/3/library/functions.html#func-frozenset>
+    ///
+    /// Not migrated in this batch — same arity-split constraint as `list`.
+    ///
     /// Not marked `#[pure]` because it dispatches user `__hash__` via
     /// `value_to_pykey` when building the set, and `__eq__` via `set_insert`.
     fn frozenset(args) -> Result<Value> {
