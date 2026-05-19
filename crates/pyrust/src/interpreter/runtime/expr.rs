@@ -206,6 +206,37 @@ impl Interpreter {
                 // don't need per-type plumbing.
                 ops.get_item(state, &index)
             }
+            ValueKind::PyClass(class_rc) => {
+                let class = Rc::clone(class_rc);
+                // Check for `__class_getitem__` in the class's own attrs (not
+                // the MRO).  Built-in collection types have a
+                // `BuiltinFunction("<type>.__class_getitem__")` registered by
+                // `build_primitive_classes`; user-defined classes that don't
+                // define it raise TypeError here (matching CPython 3.12, which
+                // does not expose `type.__class_getitem__`).
+                let has_cgitem = class.borrow().attrs.contains_key("__class_getitem__");
+                if has_cgitem {
+                    // Normalise the subscript into a tuple for
+                    // `GenericAlias.__args__`:
+                    //   `list[int]`       → args = (int,)
+                    //   `dict[str, int]`  → args = (str, int) [tuple index]
+                    let is_tuple = matches!(index.kind(), ValueKind::Tuple(_));
+                    let type_args = if is_tuple {
+                        index
+                    } else {
+                        Value::tuple(vec![index])
+                    };
+                    Ok(pyrust_builtins::generic_alias::generic_alias(
+                        Value::py_class(class),
+                        type_args,
+                    ))
+                } else {
+                    Err(PyError::named(
+                        "TypeError",
+                        format!("type '{}' is not subscriptable", class.borrow().name),
+                    ))
+                }
+            }
             ValueKind::PyInstance(inst) => {
                 let inst_rc = Rc::clone(inst);
                 let class = Rc::clone(&inst_rc.borrow().class);

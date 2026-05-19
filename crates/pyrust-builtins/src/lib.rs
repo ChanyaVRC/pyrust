@@ -7,6 +7,7 @@ pub mod dict_views;
 pub mod file;
 pub mod float;
 pub mod frozenset;
+pub mod generic_alias;
 pub mod int;
 pub mod iter_helpers;
 pub mod list;
@@ -25,6 +26,7 @@ pub fn lookup_ops(type_name: &str) -> Option<&'static dyn pyrust_core::BuiltinTy
     match type_name {
         file::TYPE_NAME => Some(file::FILE_OPS),
         frozenset::TYPE_NAME => Some(frozenset::FROZENSET_OPS),
+        generic_alias::TYPE_NAME => Some(generic_alias::GENERIC_ALIAS_OPS),
         iter_helpers::ENUMERATE_TYPE_NAME => Some(iter_helpers::ENUMERATE_OPS),
         iter_helpers::ZIP_TYPE_NAME => Some(iter_helpers::ZIP_OPS),
         iter_helpers::REVERSED_TYPE_NAME => Some(iter_helpers::REVERSED_OPS),

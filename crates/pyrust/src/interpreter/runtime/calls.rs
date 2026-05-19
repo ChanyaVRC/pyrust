@@ -362,6 +362,52 @@ impl Interpreter {
                     .collect();
                 pyrust_builtins::float::call(method, f, &pos)
             }
+            // PEP 585: `__class_getitem__` classmethods on built-in collection
+            // types.  Sentinel names follow the pattern
+            // `"<type>.__class_getitem__"` (registered by
+            // `build_primitive_classes` in `helpers.rs`).
+            // This arm handles the direct-call path:
+            //   `list.__class_getitem__(int)` → GenericAlias(list, (int,))
+            // The `list[int]` subscript path is handled directly in
+            // `eval_index` without passing through here.
+            // This arm must come before the instance-method arm below because
+            // `"list.__class_getitem__"` would otherwise match that arm's
+            // `"list"` prefix guard and raise a spurious descriptor TypeError.
+            ValueKind::BuiltinFunction(name)
+                if name
+                    .split_once('.')
+                    .is_some_and(|(_, m)| m == "__class_getitem__") =>
+            {
+                let type_name = name.split_once('.').unwrap().0;
+                // Recover the origin class value from the per-thread singleton.
+                let origin_class = primitive_class_by_name(type_name).ok_or_else(|| {
+                    PyError::Runtime(format!(
+                        "internal: unknown primitive class for __class_getitem__: {type_name}"
+                    ))
+                })?;
+                // Accept one positional argument: the type parameter(s).
+                //   `list.__class_getitem__(int)`       → args[0] = int
+                //   `list.__class_getitem__((str, int))` → args[0] = (str, int)
+                let index = args
+                    .iter()
+                    .find(|a| a.name.is_none())
+                    .map(|a| a.value.clone())
+                    .ok_or_else(|| {
+                        PyError::named(
+                            "TypeError",
+                            format!(
+                                "descriptor '__class_getitem__' of '{type_name}' object \
+                                 needs an argument"
+                            ),
+                        )
+                    })?;
+                let is_tuple = matches!(index.kind(), ValueKind::Tuple(_));
+                let type_args = if is_tuple { index } else { Value::tuple(vec![index]) };
+                Ok(pyrust_builtins::generic_alias::generic_alias(
+                    Value::py_class(origin_class),
+                    type_args,
+                ))
+            }
             // #462: class-method-of-primitive dispatch.  When a primitive
             // class's attr is `BuiltinFunction("<type>.<method>")` — populated
             // by `populate_*_methods` in `helpers.rs` — calling it dispatches
