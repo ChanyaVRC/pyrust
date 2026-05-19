@@ -269,4 +269,10 @@ pub struct FnCode {
     /// True if this function body contains at least one `Yield` instruction.
     /// The VM creates a generator object instead of executing immediately.
     pub(crate) is_generator: bool,
+    /// True when this function was compiled as a direct method inside a class
+    /// body (i.e., the enclosing `Compiler` had `is_class_body = true`).
+    /// Zero-argument `super()` is valid only in such functions — not in plain
+    /// functions or in functions nested inside methods.  Used by
+    /// `resolve_zero_arg_super` to identify the correct enclosing frame.
+    pub(crate) is_class_method: bool,
 }

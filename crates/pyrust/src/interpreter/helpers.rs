@@ -2472,6 +2472,83 @@ pub(crate) fn py_hash_float(v: f64) -> i64 {
     if signed == -1 { -2 } else { signed }
 }
 
+/// Resolve zero-argument `super()` as CPython 3.12 does.
+///
+/// CPython synthesises a `__class__` cell variable for every function compiled
+/// directly inside a class body and implicitly passes `__class__` and the first
+/// positional argument (typically `self` or `cls`) to zero-arg `super()`.
+///
+/// pyrust mirrors this by:
+/// - Writing `__class__` into the class env after the class body runs
+///   (`Insn::MakeClass` in vm.rs).  Methods capture the same env at
+///   `MakeFunction` time, so `__class__` is always reachable through the
+///   method's env chain.
+/// - `FnCode::is_class_method` — set to `true` only for functions compiled
+///   directly inside a class body (`compile_def` when `self.is_class_body`).
+///   Nested functions inside methods get `false`.
+///
+/// Returns `(class_value, self_or_cls_value)` on success.
+///
+/// Returns `Err(RuntimeError("super(): no arguments"))` when:
+/// - Called at module/script scope (no Function frame on the stack).
+/// - Called from a plain function or a nested function inside a method
+///   (innermost Function frame has `is_class_method == false`).
+/// - `__class__` is not reachable in the env chain (should not happen for
+///   valid class methods — defensive guard).
+/// - Register 0 (first positional arg) is unset.
+pub(crate) fn resolve_zero_arg_super(
+    interp: &Interpreter,
+) -> crate::error::Result<(Value, Value)> {
+    // The INNERMOST Function frame must itself be a direct class method.
+    // CPython's zero-arg super() uses a magic `__class__` cell that is only
+    // synthesised for functions compiled directly inside a class body; nested
+    // functions (`def inner(): super()` inside a method) do not get that cell
+    // and therefore zero-arg super() must raise RuntimeError.
+    //
+    // We find the innermost Function frame (the one currently executing) and
+    // check `is_class_method`.  If it is false we immediately fail — even if
+    // some outer frame IS a class method.
+    let innermost_fn_frame = interp
+        .vm_frame_views
+        .iter()
+        .rev()
+        .find(|v| v.kind == FrameKind::Function);
+
+    let Some(view) = innermost_fn_frame else {
+        // Called at module/script scope — no function frame at all.
+        return Err(PyError::Runtime("super(): no arguments".to_string()));
+    };
+
+    if !view.is_class_method {
+        // Innermost function is not a direct class method (e.g. nested inner
+        // function, standalone function).
+        return Err(PyError::Runtime("super(): no arguments".to_string()));
+    }
+
+    // Verify that __class__ is reachable through the env chain.  It is written
+    // by MakeClass into the class env after the class body finishes; the method
+    // captured the same Rc<RefCell<Environment>> at MakeFunction time.
+    let class_val = lookup_name_in_env(&interp.env, "__class__")?;
+    let Some(class_val) = class_val else {
+        return Err(PyError::Runtime("super(): no arguments".to_string()));
+    };
+
+    // Read register 0 — the first positional parameter (`self` or `cls`).
+    if view.regs_len == 0 {
+        return Err(PyError::Runtime("super(): no arguments".to_string()));
+    }
+    // SAFETY: view.regs_ptr is a NonNull<Value> pointing at the frame's
+    // register file; the frame is suspended inside call_user_function_expanded
+    // (which pushed the VmFrameView) and has not been freed.  The single-
+    // element read does not alias any &mut [Value] (PR #646 removed those).
+    let first_arg = unsafe { view.regs_ptr.as_ref() };
+    if first_arg.is_unset() {
+        return Err(PyError::Runtime("super(): no arguments".to_string()));
+    }
+
+    Ok((class_val, first_arg.clone()))
+}
+
 #[cfg(test)]
 mod purity_tests {
     use super::is_pure_body;

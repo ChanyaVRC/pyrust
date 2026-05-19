@@ -1240,6 +1240,7 @@ impl Interpreter {
                     local_index: Rc::clone(&function.local_index),
                     nonlocal_names: nonlocal_names_opt,
                     env: env_opt,
+                    is_class_method: code.is_class_method,
                 });
                 // SAFETY: regs_ptr is valid for regs_len Values for the lifetime
                 // of `regs` (a local RegsBuf that outlives this call).  No
@@ -1479,6 +1480,7 @@ impl Interpreter {
                 local_index: Rc::clone(&function.local_index),
                 nonlocal_names: nonlocal_names_opt,
                 env: env_opt,
+                is_class_method: code.is_class_method,
             });
             // SAFETY: regs_ptr is valid for regs_len Values for the lifetime
             // of `regs` (a local RegsBuf that outlives this call).  No
