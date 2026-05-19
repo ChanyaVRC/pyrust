@@ -1161,9 +1161,9 @@ fn str_slice_args(s: &str, args: &[Value]) -> Result<Option<(usize, usize)>> {
             Some(ValueKind::Bool(b)) => normalise_char_idx(b as i64, byte_len).min(byte_len),
             Some(ValueKind::None) | None => 0,
             _ => {
-                return Err(PyError::Runtime(
-                    "slice indices must be integers or None or have an __index__ method"
-                        .to_string(),
+                return Err(PyError::named(
+                    "TypeError",
+                    "slice indices must be integers or None or have an __index__ method",
                 ));
             }
         };
@@ -1172,9 +1172,9 @@ fn str_slice_args(s: &str, args: &[Value]) -> Result<Option<(usize, usize)>> {
             Some(ValueKind::Bool(b)) => normalise_char_idx(b as i64, byte_len).min(byte_len),
             Some(ValueKind::None) | None => byte_len,
             _ => {
-                return Err(PyError::Runtime(
-                    "slice indices must be integers or None or have an __index__ method"
-                        .to_string(),
+                return Err(PyError::named(
+                    "TypeError",
+                    "slice indices must be integers or None or have an __index__ method",
                 ));
             }
         };
@@ -1191,8 +1191,9 @@ fn str_slice_args(s: &str, args: &[Value]) -> Result<Option<(usize, usize)>> {
         Some(ValueKind::Bool(b)) => normalise_char_idx(b as i64, char_len),
         Some(ValueKind::None) | None => 0,
         _ => {
-            return Err(PyError::Runtime(
-                "slice indices must be integers or None or have an __index__ method".to_string(),
+            return Err(PyError::named(
+                "TypeError",
+                "slice indices must be integers or None or have an __index__ method",
             ));
         }
     };
@@ -1201,8 +1202,9 @@ fn str_slice_args(s: &str, args: &[Value]) -> Result<Option<(usize, usize)>> {
         Some(ValueKind::Bool(b)) => normalise_char_idx(b as i64, char_len).min(char_len),
         Some(ValueKind::None) | None => char_len,
         _ => {
-            return Err(PyError::Runtime(
-                "slice indices must be integers or None or have an __index__ method".to_string(),
+            return Err(PyError::named(
+                "TypeError",
+                "slice indices must be integers or None or have an __index__ method",
             ));
         }
     };
