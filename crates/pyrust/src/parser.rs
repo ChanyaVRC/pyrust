@@ -451,6 +451,8 @@ impl Parser {
             if self.is(&Token::Assign) {
                 self.bump(); // consume =
                 let rhs = self.parse_expr()?;
+                // For a simple name target, emit AnnAssign so the compiler can
+                // detect conflicts with global/nonlocal (CPython SyntaxError).
                 if let Expr::Var(name) = &targets[0] {
                     return Ok(vec![Stmt::AnnAssign {
                         name: name.clone(),
