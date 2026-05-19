@@ -1625,6 +1625,10 @@ fn values_are_identical(a: &Value, b: &Value) -> bool {
         // BuiltinFunction values are singletons by name (static str identity).
         // This makes `type(5) is type(5)` True since both return the same name tag.
         (ValueKind::BuiltinFunction(x), ValueKind::BuiltinFunction(y)) => x == y,
+        // Generators share an Rc<RefCell<...>> across clones (iter(g) returns
+        // a clone of g).  Use Rc pointer equality so `g is iter(g)` is True,
+        // matching CPython object identity semantics (#714).
+        (ValueKind::Generator(x), ValueKind::Generator(y)) => Rc::ptr_eq(x, y),
         // For heap-backed values, identity is the shared backing-storage id
         // surfaced by `value_id()` — `b = a; a is b` is True after Rc-sharing
         // storage on clone (#305/#523).  Two distinct literals of the same
