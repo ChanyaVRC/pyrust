@@ -4,12 +4,21 @@ class Foo:
 
 d = Foo.__dict__
 
+# type(Foo.__dict__) must be mappingproxy (issue #726)
+print(type(d).__name__)
+
 # Key existence
 print('x' in d)
 print('bar' in d)
 
 # Value access
 print(d['x'])
+
+# Mutation via subscript raises TypeError (not just silently ignored)
+try:
+    d['z'] = 3
+except TypeError as e:
+    print('TypeError:', 'mappingproxy' in str(e))
 
 # Assigning the whole __dict__ attribute raises AttributeError
 try:
@@ -36,3 +45,9 @@ class Empty:
     pass
 
 print('__module__' in Empty.__dict__)
+
+# Instance __dict__ is still a plain dict (not broken by this change)
+obj = Foo()
+obj.a = 42
+print(type(obj.__dict__).__name__)
+print(obj.__dict__['a'])

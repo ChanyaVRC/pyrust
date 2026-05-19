@@ -153,17 +153,13 @@ impl Interpreter {
                     return Ok(Value::string(class.borrow().qualname.clone()));
                 }
                 if name == "__dict__" {
-                    // TODO #661: return a mappingproxy wrapping the live attrs dict.
-                    // For now return a snapshot copy so that `Foo.__dict__['x']`
-                    // works and `AttributeError` is no longer raised.  Mutations
-                    // on the returned dict do not propagate back to the class —
-                    // which is acceptable because CPython's mappingproxy also
-                    // rejects item assignment.
-                    let mut dict: IndexMap<PyKey, Value> = IndexMap::new();
-                    for (k, v) in class.borrow().attrs.iter() {
-                        dict.insert(PyKey::Str(k.clone()), v.clone());
-                    }
-                    return Ok(Value::dict(dict));
+                    // Return a live mappingproxy wrapping the class's attrs dict —
+                    // matching CPython 3.12's `type.__dict__` descriptor, which
+                    // returns `types.MappingProxyType`.  Reads see the current
+                    // attrs (live reference); mutation raises TypeError (issue #726).
+                    return Ok(pyrust_builtins::mapping_proxy::mapping_proxy(
+                        Rc::clone(&class),
+                    ));
                 }
                 if name == "__bases__" {
                     // `__bases__` reports the immediate parents — a 1-tuple
