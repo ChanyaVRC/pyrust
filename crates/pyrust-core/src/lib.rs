@@ -419,6 +419,96 @@ impl indexmap::Equivalent<PyKey> for StrKey<'_> {
     }
 }
 
+/// Compute the CPython-compatible hash for a `PyKey`.
+///
+/// This replicates the hash semantics that CPython applies at the C level for
+/// each primitive type.  It is used by `FrozenSetOps::hash` so that
+/// `hash(frozenset({1, 2}))` in pyrust produces the same value as CPython.
+///
+/// - `Int` / `Bool`: Mersenne-prime reduction (`v % (2^61-1)`), -1 mapped to -2.
+/// - `Float`: integer-valued floats hash identically to the corresponding `Int`.
+/// - `Str`: FNV-1a (matches pyrust's `hash_value` str arm; CPython uses SipHash
+///   with a random seed so str-element frozenset hashes differ from CPython).
+/// - `None`: 0.
+/// - `Tuple`: CPython's multiply-add fold (`h = h*1000003 + elem_hash`), seeded
+///   at 3527539.
+/// - `FrozenSet`: CPython's XOR-shuffle accumulation with length mixing and
+///   final scramble (Objects/setobject.c `frozenset_hash`).
+/// - `Object { hash, .. }`: the precomputed hash cast to `i64`.
+pub fn py_hash_pykey(key: &PyKey) -> i64 {
+    const PY_HASH_MODULUS: i64 = (1i64 << 61) - 1;
+
+    #[inline]
+    fn hash_int(v: i64) -> i64 {
+        let raw = v % PY_HASH_MODULUS;
+        if raw == -1 { -2 } else { raw }
+    }
+
+    // CPython frozenset shuffle: ((h ^ 89869747) ^ (h << 16)) * 3644798167
+    #[inline]
+    fn cpython_shuffle(h: u64) -> u64 {
+        let s = (h ^ 89869747u64) ^ (h << 16);
+        s.wrapping_mul(3644798167u64)
+    }
+
+    match key {
+        PyKey::Int(v) => hash_int(*v),
+        PyKey::Bool(b) => *b as i64,
+        PyKey::BigInt(n) => pykey_hash_bigint(n),
+        PyKey::Float(bits) => {
+            if let Some(i) = float_bits_as_exact_i64(*bits) {
+                hash_int(i)
+            } else {
+                let f = f64::from_bits(*bits);
+                if f.is_nan() {
+                    0
+                } else if f.is_infinite() {
+                    if f > 0.0 { 314159 } else { -314159 }
+                } else {
+                    // Fractional finite float: bit-cast approximation.
+                    let bits_val = *bits as i64;
+                    if bits_val == -1 { -2 } else { bits_val }
+                }
+            }
+        }
+        PyKey::Str(s) => {
+            // FNV-1a: matches pyrust's hash_value str arm.
+            let mut h: u64 = 14695981039346656037u64;
+            for b in s.bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(1099511628211u64);
+            }
+            h as i64
+        }
+        PyKey::None => 0,
+        PyKey::Tuple(items) => {
+            let mut h: i64 = 3527539;
+            for item in items {
+                let item_hash = py_hash_pykey(item);
+                h = h.wrapping_mul(1000003).wrapping_add(item_hash);
+            }
+            h
+        }
+        PyKey::FrozenSet(items) => {
+            // CPython Objects/setobject.c frozenset_hash algorithm.
+            let mut h: u64 = 0;
+            for item in items {
+                h ^= cpython_shuffle(py_hash_pykey(item) as u64);
+            }
+            // Length mixing
+            let n = items.len() as u64;
+            h ^= (n + 1).wrapping_mul(1927868237u64);
+            // Secondary mix
+            h ^= (h >> 11) ^ (h >> 25);
+            // Final scramble
+            h = h.wrapping_mul(69069u64).wrapping_add(907133923u64);
+            let result = h as i64;
+            if result == -1 { 590923713 } else { result }
+        }
+        PyKey::Object { hash, .. } => *hash as i64,
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared types
 // ─────────────────────────────────────────────────────────────────────────────

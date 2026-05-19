@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use indexmap::{IndexMap, IndexSet};
 use pyrust_core::{
-    BuiltinState, BuiltinTypeOps, PyError, PyKey, Result, Value, ValueKind, key_repr,
+    BuiltinState, BuiltinTypeOps, PyError, PyKey, Result, Value, ValueKind, key_repr, py_hash_pykey,
 };
 
 /// Internal frozenset state.  `Rc` so that clones are cheap and so that
@@ -122,6 +122,30 @@ impl BuiltinTypeOps for FrozenSetOps {
         let mut keys: Vec<PyKey> = items.iter().cloned().collect();
         keys.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
         Some(PyKey::FrozenSet(keys))
+    }
+
+    fn hash(&self, state: &BuiltinState) -> Option<u64> {
+        let items = borrow_items(state)?;
+        // CPython Objects/setobject.c frozenset_hash algorithm.
+        // For each element: h ^= shuffle_bits(element_hash)
+        // Then length mixing and final scramble.
+        let mut h: u64 = 0;
+        for key in items.iter() {
+            let eh = py_hash_pykey(key) as u64;
+            // shuffle_bits: ((eh ^ 89869747) ^ (eh << 16)) * 3644798167
+            let shuffled = ((eh ^ 89869747u64) ^ (eh << 16)).wrapping_mul(3644798167u64);
+            h ^= shuffled;
+        }
+        // Length mixing: h ^= (len + 1) * 1927868237
+        let n = items.len() as u64;
+        h ^= (n + 1).wrapping_mul(1927868237u64);
+        // Secondary mix
+        h ^= (h >> 11) ^ (h >> 25);
+        // Final multiply-add
+        h = h.wrapping_mul(69069u64).wrapping_add(907133923u64);
+        let result = h as i64;
+        // CPython maps -1 to 590923713 (avoids the C-level error sentinel).
+        Some(if result == -1 { 590923713u64 } else { h })
     }
 
     fn call_method(
