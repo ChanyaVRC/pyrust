@@ -4946,7 +4946,9 @@ impl Compiler {
         // `self.outer_locals` is the chain of enclosing function scope
         // `local_index` maps (outermost first).  If `self.is_function_scope`,
         // `self.local_index` is also an enclosing function scope.
-        for nonlocal_name in inner_nonlocal_rc.iter() {
+        let mut sorted_nonlocals: Vec<&String> = inner_nonlocal_rc.iter().collect();
+        sorted_nonlocals.sort();
+        for nonlocal_name in sorted_nonlocals {
             let found = self
                 .outer_locals
                 .iter()
@@ -6497,7 +6499,9 @@ impl Compiler {
         let inner_nonlocal_rc = Rc::new(inner_nonlocal);
 
         // Validate nonlocal declarations in comprehension bodies (same as compile_def).
-        for nonlocal_name in inner_nonlocal_rc.iter() {
+        let mut sorted_nonlocals: Vec<&String> = inner_nonlocal_rc.iter().collect();
+        sorted_nonlocals.sort();
+        for nonlocal_name in sorted_nonlocals {
             let found = self
                 .outer_locals
                 .iter()

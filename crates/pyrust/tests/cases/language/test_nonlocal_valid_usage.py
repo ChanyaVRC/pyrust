@@ -1,11 +1,10 @@
-# Regression fixture for issue #639: nonlocal with no enclosing function binding
-# must raise SyntaxError at compile time, not a runtime error.
+# Parity fixture for issue #639: valid nonlocal usage in various patterns.
 #
-# This fixture only tests *valid* nonlocal usage (where a binding exists in an
-# enclosing function scope), so that both CPython and pyrust exit with code 0
-# and the parity harness can diff the output.  The SyntaxError case itself is
-# tested manually (both processes exit with code 1 and produce different
-# traceback formats which the parity harness cannot compare cleanly).
+# Tests nonlocal where a binding exists in an enclosing function scope; both
+# CPython and pyrust should exit with code 0 so the parity harness can diff
+# the output.  The invalid case (nonlocal with no enclosing binding, which must
+# raise SyntaxError at compile time) is tested manually because CPython and
+# pyrust produce different traceback formats that the harness cannot diff.
 
 # Single-level: inner reads and mutates outer's variable.
 def outer():
