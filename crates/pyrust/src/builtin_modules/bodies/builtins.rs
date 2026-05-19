@@ -2054,12 +2054,14 @@ pyrust_module! {
             | ValueKind::BoundMethod { .. }
             | ValueKind::ClassBoundMethod { .. }
             | ValueKind::PyClass(_) => true,
-            // Only accessor partials (intermediate results of
-            // prop.setter / prop.getter / prop.deleter) are callable —
-            // a plain property descriptor isn't.
+            // Builtin bound methods (e.g. `"".upper`, `[].append`) are
+            // callable.  Accessor partials (intermediate results of
+            // prop.setter / prop.getter / prop.deleter) are callable too —
+            // but a plain property descriptor isn't.
             ValueKind::BuiltinObject { .. } => {
-                pyrust_builtins::property::property_partial_slot(value)
-                    .is_some_and(|slot| slot.is_some())
+                pyrust_builtins::bound_method::is_bound_method(value)
+                    || pyrust_builtins::property::property_partial_slot(value)
+                        .is_some_and(|slot| slot.is_some())
             }
             ValueKind::PyInstance(inst) => {
                 let class = Rc::clone(&inst.borrow().class);
