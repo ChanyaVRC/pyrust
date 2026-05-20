@@ -2171,8 +2171,46 @@ impl Interpreter {
         }
     }
 
+    /// Resolve one slice bound through the `__index__` protocol if needed.
+    ///
+    /// Used for the built-in sequence path (List/Tuple/Str/Bytes) where the
+    /// caller needs a concrete integer from each bound.  `PyInstance` and
+    /// `BuiltinObject` targets receive the raw (unresolved) bound values so
+    /// that user `__getitem__` implementations see the original objects — the
+    /// same as CPython: `a[Index(2):]` calls `list.__getitem__` which then
+    /// applies `__index__`; `my_obj[Index(2):]` delivers `slice(Index(2),
+    /// None, None)` unchanged to `my_obj.__getitem__`.
+    ///
+    /// `None` (a missing bound, e.g. `a[:]`) and Python `None` are passed
+    /// through as-is.  `Int`, `Bool`, and `BigInt` are returned unchanged.
+    /// `PyInstance` values that define `__index__` are called and the integer
+    /// result is returned.  Anything else is left to `slice_index_from_value`
+    /// to reject with a proper TypeError.
+    fn resolve_slice_bound_val(&mut self, val: Option<Value>) -> Result<Option<Value>> {
+        let v = match val {
+            None => return Ok(None),
+            Some(v) => v,
+        };
+        // Fast path: already an integer type or Python None — no protocol call needed.
+        if v.is_none()
+            || matches!(
+                v.kind(),
+                ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+            )
+        {
+            return Ok(Some(v));
+        }
+        // Slow path: try __index__.
+        let resolved = self.resolve_index_arg(v)?;
+        Ok(Some(resolved))
+    }
+
     fn eval_slice(&mut self, target: Value, lo: Option<Value>, hi: Option<Value>, st: Option<Value>) -> Result<Value> {
-        // PyInstance: dispatch __getitem__ with a slice object.
+        // PyInstance: dispatch __getitem__ with a slice object built from the
+        // raw (unresolved) bounds.  CPython passes the bound objects as-is so
+        // that the user's __getitem__ sees them; resolution via __index__ is
+        // the caller's responsibility (e.g. when the user delegates back to a
+        // built-in sequence).
         if let ValueKind::PyInstance(inst) = target.kind() {
             let inst_rc = Rc::clone(inst);
             let class = Rc::clone(&inst_rc.borrow().class);
@@ -2193,6 +2231,22 @@ impl Interpreter {
                 format!("'{}' object is not subscriptable", class.borrow().name),
             ));
         }
+
+        // BuiltinObject: delegate to ops.get_item with a slice value (issue #847).
+        // This mirrors what eval_index does when a runtime slice object is used
+        // as a subscript, and lets BuiltinObject types opt into slice subscripting
+        // via BuiltinTypeOps::get_item.  Pass raw bounds — ops.get_item receives
+        // the constructed slice Value and handles resolution internally.
+        if let ValueKind::BuiltinObject { ops, state } = target.kind() {
+            let slice_val = pyrust_builtins::slice::make_slice(lo, hi, st);
+            return ops.get_item(state, &slice_val);
+        }
+
+        // Built-in sequences: resolve bounds through __index__ before applying
+        // the integer arithmetic in resolve_slice_bounds (issue #849).
+        let lo = self.resolve_slice_bound_val(lo)?;
+        let hi = self.resolve_slice_bound_val(hi)?;
+        let st = self.resolve_slice_bound_val(st)?;
 
         let len = match target.kind() {
             ValueKind::List(items) => items.len() as i64,

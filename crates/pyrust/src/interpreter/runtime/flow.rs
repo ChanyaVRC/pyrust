@@ -3,6 +3,16 @@ impl Interpreter {
         match value.kind() {
             ValueKind::Int(i) => Ok(i),
             ValueKind::Bool(b) => Ok(if b { 1 } else { 0 }),
+            // BigInt slice bounds: clamp to i64 range, matching CPython's behaviour
+            // of clamping to sys.maxsize / -sys.maxsize-1 (which on 64-bit platforms
+            // equals i64::MAX / i64::MIN).
+            ValueKind::BigInt(big) => Ok(match big.to_i64() {
+                Some(i) => i,
+                None => match big.sign() {
+                    PyBigIntSign::Minus => i64::MIN,
+                    _ => i64::MAX,
+                },
+            }),
             _ => Err(PyError::named(
                 "TypeError",
                 "slice indices must be integers or None or have an __index__ method".to_string(),
