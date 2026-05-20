@@ -177,6 +177,11 @@ pub struct Interpreter {
     /// Reusable argument buffer for VM Call instructions — avoids a per-call
     /// heap allocation in the common (non-recursive) case.
     call_arg_buf: Vec<ExpandedCallArg>,
+    /// Reusable positional-args buffer for the builtin bound-method dispatch
+    /// path — avoids a per-call heap allocation on the hot path (issue #276).
+    /// Pattern: `std::mem::take`, clear, fill, use (borrow or drain), then
+    /// restore so subsequent calls reuse the grown capacity.
+    bound_method_pos_buf: Vec<Value>,
     /// Reusable scratch buffer for building fn_cache probe keys — avoids a
     /// per-probe heap allocation in CallMemo's cache-hit path.
     key_scratch: Vec<MemoKey>,
@@ -381,6 +386,7 @@ impl Default for Interpreter {
             env_pool: Vec::new(),
             fn_cache: HashMap::new(),
             call_arg_buf: Vec::new(),
+            bound_method_pos_buf: Vec::new(),
             key_scratch: Vec::new(),
             class_store_order: Vec::new(),
             vm_frame_views: Vec::new(),
