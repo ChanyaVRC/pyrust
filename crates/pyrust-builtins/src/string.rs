@@ -1,4 +1,7 @@
-use pyrust_core::{PyError, PyKey, Result, Value, ValueKind, builtin_type_name};
+use pyrust_core::{
+    PyError, PyKey, Result, Value, ValueKind, builtin_type_name, expect_arg_count,
+    extract_fill_char, extract_int, extract_optional_int,
+};
 use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
 /// Compute the byte offset of a subslice `sub` within its parent `parent`.
@@ -94,21 +97,113 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
         "rsplit" => rsplit(src, s, args),
         "join" => join(s, args),
         "splitlines" => str_splitlines(s, args),
-        "partition" => str_partition(s, args),
-        "rpartition" => str_rpartition(s, args),
+        "partition" => {
+            expect_arg_count(args, 1, 1, "partition")?;
+            // CPython: "must be str, not <T>" (no param name in the message)
+            let sep = match args[0].kind() {
+                ValueKind::Str(s) => s,
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("must be str, not {}", builtin_type_name(&args[0])),
+                    ));
+                }
+            };
+            str_partition(s, sep)
+        }
+        "rpartition" => {
+            expect_arg_count(args, 1, 1, "rpartition")?;
+            let sep = match args[0].kind() {
+                ValueKind::Str(s) => s,
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("must be str, not {}", builtin_type_name(&args[0])),
+                    ));
+                }
+            };
+            str_rpartition(s, sep)
+        }
         // Stripping
         "strip" => Ok(Value::string(strip_chars(s, args, true, true))),
         "lstrip" => Ok(Value::string(strip_chars(s, args, true, false))),
         "rstrip" => Ok(Value::string(strip_chars(s, args, false, true))),
         // Prefix/suffix removal
-        "removeprefix" => str_removeprefix(s, args),
-        "removesuffix" => str_removesuffix(s, args),
+        "removeprefix" => {
+            expect_arg_count(args, 1, 1, "removeprefix")?;
+            // CPython: "removeprefix() argument must be str, not <type>"
+            let prefix = match args[0].kind() {
+                ValueKind::Str(p) => p,
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "removeprefix() argument must be str, not {}",
+                            builtin_type_name(&args[0])
+                        ),
+                    ));
+                }
+            };
+            Ok(str_removeprefix(s, prefix))
+        }
+        "removesuffix" => {
+            expect_arg_count(args, 1, 1, "removesuffix")?;
+            // CPython: "removesuffix() argument must be str, not <type>"
+            let suffix = match args[0].kind() {
+                ValueKind::Str(p) => p,
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "removesuffix() argument must be str, not {}",
+                            builtin_type_name(&args[0])
+                        ),
+                    ));
+                }
+            };
+            Ok(str_removesuffix(s, suffix))
+        }
         // Justification / padding
-        "center" => str_center(s, args),
-        "ljust" => str_ljust(s, args),
-        "rjust" => str_rjust(s, args),
-        "zfill" => str_zfill(s, args),
-        "expandtabs" => str_expandtabs(s, args),
+        "center" => {
+            expect_arg_count(args, 1, 2, "center")?;
+            let width = extract_int(&args[0], "center", "width")?;
+            let fill = extract_fill_char(args)?;
+            Ok(str_center(s, width, fill))
+        }
+        "ljust" => {
+            expect_arg_count(args, 1, 2, "ljust")?;
+            let width = extract_int(&args[0], "ljust", "width")?;
+            let fill = extract_fill_char(args)?;
+            Ok(str_ljust(s, width, fill))
+        }
+        "rjust" => {
+            expect_arg_count(args, 1, 2, "rjust")?;
+            let width = extract_int(&args[0], "rjust", "width")?;
+            let fill = extract_fill_char(args)?;
+            Ok(str_rjust(s, width, fill))
+        }
+        "zfill" => {
+            expect_arg_count(args, 1, 1, "zfill")?;
+            let width = extract_int(&args[0], "zfill", "width")?;
+            Ok(str_zfill(s, width))
+        }
+        "expandtabs" => {
+            // expandtabs() takes at most 1 argument (<got> given)
+            if args.len() > 1 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "expandtabs() takes at most 1 argument ({} given)",
+                        args.len()
+                    ),
+                ));
+            }
+            let tabsize = match extract_optional_int(args, 0)? {
+                Some(n) => n,
+                None => 8,
+            };
+            Ok(str_expandtabs(s, tabsize))
+        }
         // Case
         "upper" => Ok(Value::string(s.to_uppercase())),
         "lower" => Ok(Value::string(s.to_lowercase())),
@@ -180,53 +275,13 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
     }
 }
 
-// ─── New method implementations ──────────────────────────────────────────────
+// ─── Method implementations ───────────────────────────────────────────────────
 
-fn str_require_str_arg<'a>(args: &'a [Value], method: &str) -> Result<&'a str> {
-    match args.first().map(|v| v.kind()) {
-        Some(ValueKind::Str(s)) => Ok(s),
-        _ => Err(PyError::Runtime(format!(
-            "str.{method}() requires a str argument"
-        ))),
-    }
-}
-
-fn str_require_int_arg(args: &[Value], method: &str) -> Result<i64> {
-    match args.first().map(|v| v.kind()) {
-        Some(ValueKind::Int(n)) => Ok(n),
-        Some(ValueKind::Bool(b)) => Ok(b as i64),
-        _ => Err(PyError::Runtime(format!(
-            "str.{method}() requires an integer argument"
-        ))),
-    }
-}
-
-fn fill_char_arg(args: &[Value]) -> Result<char> {
-    match args.get(1).map(|v| v.kind()) {
-        None => Ok(' '),
-        Some(ValueKind::Str(s)) => {
-            let mut chars = s.chars();
-            match (chars.next(), chars.next()) {
-                (Some(c), None) => Ok(c),
-                _ => Err(PyError::named(
-                    "TypeError",
-                    "The fill character must be exactly one character long".to_string(),
-                )),
-            }
-        }
-        _ => Err(PyError::named(
-            "TypeError",
-            "The fill character must be a str".to_string(),
-        )),
-    }
-}
-
-fn str_center(s: &str, args: &[Value]) -> Result<Value> {
-    let width = str_require_int_arg(args, "center")?.max(0) as usize;
-    let fill = fill_char_arg(args)?;
+fn str_center(s: &str, width: i64, fill: char) -> Value {
+    let width = width.max(0) as usize;
     let char_len = s.chars().count();
     if char_len >= width {
-        return Ok(Value::string(s));
+        return Value::string(s);
     }
     let marg = width - char_len;
     // CPython formula: left = marg//2 + (marg & width & 1)
@@ -240,15 +295,14 @@ fn str_center(s: &str, args: &[Value]) -> Result<Value> {
     for _ in 0..right_pad {
         out.push(fill);
     }
-    Ok(Value::string(out))
+    Value::string(out)
 }
 
-fn str_ljust(s: &str, args: &[Value]) -> Result<Value> {
-    let width = str_require_int_arg(args, "ljust")?.max(0) as usize;
-    let fill = fill_char_arg(args)?;
+fn str_ljust(s: &str, width: i64, fill: char) -> Value {
+    let width = width.max(0) as usize;
     let char_len = s.chars().count();
     if char_len >= width {
-        return Ok(Value::string(s));
+        return Value::string(s);
     }
     let pad = width - char_len;
     let mut out = String::with_capacity(s.len() + pad * fill.len_utf8());
@@ -256,15 +310,14 @@ fn str_ljust(s: &str, args: &[Value]) -> Result<Value> {
     for _ in 0..pad {
         out.push(fill);
     }
-    Ok(Value::string(out))
+    Value::string(out)
 }
 
-fn str_rjust(s: &str, args: &[Value]) -> Result<Value> {
-    let width = str_require_int_arg(args, "rjust")?.max(0) as usize;
-    let fill = fill_char_arg(args)?;
+fn str_rjust(s: &str, width: i64, fill: char) -> Value {
+    let width = width.max(0) as usize;
     let char_len = s.chars().count();
     if char_len >= width {
-        return Ok(Value::string(s));
+        return Value::string(s);
     }
     let pad = width - char_len;
     let mut out = String::with_capacity(s.len() + pad * fill.len_utf8());
@@ -272,14 +325,14 @@ fn str_rjust(s: &str, args: &[Value]) -> Result<Value> {
         out.push(fill);
     }
     out.push_str(s);
-    Ok(Value::string(out))
+    Value::string(out)
 }
 
-fn str_zfill(s: &str, args: &[Value]) -> Result<Value> {
-    let width = str_require_int_arg(args, "zfill")?.max(0) as usize;
+fn str_zfill(s: &str, width: i64) -> Value {
+    let width = width.max(0) as usize;
     let char_len = s.chars().count();
     if char_len >= width {
-        return Ok(Value::string(s));
+        return Value::string(s);
     }
     let pad = width - char_len;
     let mut out = String::with_capacity(s.len() + pad);
@@ -306,20 +359,10 @@ fn str_zfill(s: &str, args: &[Value]) -> Result<Value> {
             }
         }
     }
-    Ok(Value::string(out))
+    Value::string(out)
 }
 
-fn str_expandtabs(s: &str, args: &[Value]) -> Result<Value> {
-    let tabsize = match args.first().map(|v| v.kind()) {
-        None => 8i64,
-        Some(ValueKind::Int(n)) => n,
-        Some(ValueKind::Bool(b)) => b as i64,
-        _ => {
-            return Err(PyError::Runtime(
-                "str.expandtabs() tabsize must be an integer".to_string(),
-            ));
-        }
-    };
+fn str_expandtabs(s: &str, tabsize: i64) -> Value {
     let tabsize = tabsize.max(0) as usize;
     let mut out = String::with_capacity(s.len());
     let mut col: usize = 0;
@@ -346,11 +389,10 @@ fn str_expandtabs(s: &str, args: &[Value]) -> Result<Value> {
             }
         }
     }
-    Ok(Value::string(out))
+    Value::string(out)
 }
 
-fn str_partition(s: &str, args: &[Value]) -> Result<Value> {
-    let sep = str_require_str_arg(args, "partition")?;
+fn str_partition(s: &str, sep: &str) -> Result<Value> {
     if sep.is_empty() {
         return Err(PyError::named("ValueError", "empty separator".to_string()));
     }
@@ -365,8 +407,7 @@ fn str_partition(s: &str, args: &[Value]) -> Result<Value> {
     ]))
 }
 
-fn str_rpartition(s: &str, args: &[Value]) -> Result<Value> {
-    let sep = str_require_str_arg(args, "rpartition")?;
+fn str_rpartition(s: &str, sep: &str) -> Result<Value> {
     if sep.is_empty() {
         return Err(PyError::named("ValueError", "empty separator".to_string()));
     }
@@ -448,21 +489,19 @@ fn str_splitlines(s: &str, args: &[Value]) -> Result<Value> {
     Ok(Value::list(lines))
 }
 
-fn str_removeprefix(s: &str, args: &[Value]) -> Result<Value> {
-    let prefix = str_require_str_arg(args, "removeprefix")?;
+fn str_removeprefix(s: &str, prefix: &str) -> Value {
     if let Some(stripped) = s.strip_prefix(prefix) {
-        Ok(Value::string(stripped))
+        Value::string(stripped)
     } else {
-        Ok(Value::string(s))
+        Value::string(s)
     }
 }
 
-fn str_removesuffix(s: &str, args: &[Value]) -> Result<Value> {
-    let suffix = str_require_str_arg(args, "removesuffix")?;
+fn str_removesuffix(s: &str, suffix: &str) -> Value {
     if let Some(stripped) = s.strip_suffix(suffix) {
-        Ok(Value::string(stripped))
+        Value::string(stripped)
     } else {
-        Ok(Value::string(s))
+        Value::string(s)
     }
 }
 
