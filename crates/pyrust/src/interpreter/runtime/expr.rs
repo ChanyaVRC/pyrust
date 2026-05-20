@@ -2610,6 +2610,47 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
     if name == "NotImplemented" {
         return Some(Value::not_implemented());
     }
+    // Built-in exception classes — resolved lazily via `EXC_CLASS_CACHE`
+    // (built once per thread on first access).  Exception classes are no
+    // longer pre-inserted into the module env at startup; scripts that
+    // never reference an exception class name pay zero class-build cost.
+    if matches!(
+        name,
+        "ArithmeticError"
+            | "AssertionError"
+            | "AttributeError"
+            | "BaseException"
+            | "Exception"
+            | "FileNotFoundError"
+            | "FloatingPointError"
+            | "GeneratorExit"
+            | "ImportError"
+            | "IndexError"
+            | "KeyError"
+            | "KeyboardInterrupt"
+            | "LookupError"
+            | "MemoryError"
+            | "ModuleNotFoundError"
+            | "NameError"
+            | "NotImplementedError"
+            | "OSError"
+            | "OverflowError"
+            | "RecursionError"
+            | "RuntimeError"
+            | "StopIteration"
+            | "SyntaxError"
+            | "SystemExit"
+            | "TypeError"
+            | "UnboundLocalError"
+            | "UnicodeDecodeError"
+            | "UnicodeEncodeError"
+            | "UnicodeError"
+            | "ValueError"
+            | "ZeroDivisionError"
+    ) {
+        return lookup_exc_class(name)
+            .map(pyrust_core::Value::py_class);
+    }
     // All registered flat-namespace builtins (`print`, `len`, `abs`, …).
     // lookup_name returns the interned &'static str already stored in the
     // registry entry, so Value::builtin_function needs no extra allocation.
