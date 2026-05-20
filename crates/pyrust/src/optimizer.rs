@@ -60,6 +60,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_cross_jump(insns);
     let insns = pass_copy_prop(insns, num_locals);
     let insns = pass_switch_hoist(insns, num_locals, &consts);
+    let insns = pass_loop_inversion(insns);
     let insns = pass_trivial_nop(insns);
     let insns = pass_self_tail_call(insns);
     let insns = pass_forcount_const_inline(insns, &consts);
@@ -3689,6 +3690,135 @@ fn pass_switch_hoist(insns: Vec<Insn>, num_locals: u32, consts: &[Value]) -> Vec
     }
 
     compact(insns, &keep)
+}
+
+// ─── Loop inversion ────────────────────────────────────────────────────────────
+
+/// Eliminate the unconditional back-edge `Jump` from `while COND: body` loops.
+///
+/// ## Pattern (VM offset semantics: `jump_pc!(k) = current_pc + 1 + k`)
+///
+/// A while-loop compiled to:
+/// ```text
+/// [j]   CmpJumpIfFalse*(r, op, b_or_c, k)   ; exit to [j+k+1] if cond false
+/// [j+1] body_insn_1
+/// …
+/// [j+k] Jump(-(k+1))                         ; back-edge to [j]
+/// ```
+///
+/// is transformed to:
+/// ```text
+/// [j]   CmpJumpIfFalse*(r, op, b_or_c, k)   ; initial guard — unchanged
+/// [j+1] body_insn_1
+/// …
+/// [j+k] CmpJumpIfTrue*(r, op, b_or_c, -k)   ; re-check; if true, jump to [j+1]
+/// ```
+///
+/// The back-edge `Jump` is replaced by a conditional jump that re-checks the
+/// loop condition and either loops back to `[j+1]` (body start) or falls through
+/// to `[j+k+1]` (exit).  This saves one full VM dispatch per iteration on the
+/// hot path.
+///
+/// ## Correctness notes
+///
+/// - **`continue`**: generates `Jump(-(m+1))` targeting `[j]` (the initial guard).
+///   After inversion the initial guard at `[j]` still exists, so `continue` works
+///   correctly — the guard re-checks the condition and falls through to `[j+1]`.
+/// - **`break`**: generates a forward jump to `[j+k+1]`.  Unchanged.
+/// - **0-iteration loops**: the initial guard at `[j]` exits to `[j+k+1]` immediately.
+/// - **Nested loops**: each is handled independently, innermost first.
+///
+/// ## Guards
+///
+/// - `k >= 2`: at least one real body instruction before the back-edge Jump.
+///   (`k == 1` would mean the body is just the Jump itself, which pass_dead_code
+///   would already have removed or which is a degenerate loop with no real body.)
+/// - `j + k < n`: the back-edge index must be in bounds.
+fn pass_loop_inversion(insns: Vec<Insn>) -> Vec<Insn> {
+    let mut out = insns;
+    let n = out.len();
+    for j in 0..n {
+        // Match the loop header: CmpJumpIfFalseConst, CmpJumpIfFalse,
+        // CmpJumpIfTrueConst, or CmpJumpIfTrue.
+        // Extract (register, op, rhs-operand, forward-offset k).
+        match out[j].clone() {
+            Insn::CmpJumpIfFalseConst(r, op, c, k) => {
+                if k < 2 {
+                    continue;
+                }
+                let back = j + k as usize;
+                if back >= n {
+                    continue;
+                }
+                // Verify the back-edge: Jump(-(k+1)) at [j+k] targets [j].
+                // Proof: (j+k) + 1 + (-(k+1)) = j. ✓
+                match out[back] {
+                    Insn::Jump(bk) if bk == -(k + 1) => {}
+                    _ => continue,
+                }
+                // Replace unconditional back-edge with CmpJumpIfTrueConst targeting [j+1].
+                // new_offset = -k  because  (j+k) + 1 + (-k) = j+1. ✓
+                out[back] = Insn::CmpJumpIfTrueConst(r, op, c, -(k as i32));
+            }
+            Insn::CmpJumpIfFalse(r, op, b, k) => {
+                if k < 2 {
+                    continue;
+                }
+                let back = j + k as usize;
+                if back >= n {
+                    continue;
+                }
+                match out[back] {
+                    Insn::Jump(bk) if bk == -(k + 1) => {}
+                    _ => continue,
+                }
+                out[back] = Insn::CmpJumpIfTrue(r, op, b, -(k as i32));
+            }
+            // Case: `while True: if cond: break; body` shape.
+            //
+            // The header CmpJumpIfTrueConst(r, op, c, k) exits to [j+k+1] when
+            // the break condition is TRUE.  The back-edge Jump(-(k+1)) at [j+k]
+            // unconditionally returns to [j].  We replace the Jump with
+            // CmpJumpIfFalseConst(r, op, c, -k): when the condition is FALSE
+            // (not yet time to break), jump to (j+k+1)+(-k) = j+1 (body start);
+            // when the condition is TRUE (time to break), fall through to [j+k+1]
+            // (the exit).  No operator negation needed — just swap True↔False
+            // variant with the same (r, op, c).
+            Insn::CmpJumpIfTrueConst(r, op, c, k) => {
+                if k < 2 {
+                    continue;
+                }
+                let back = j + k as usize;
+                if back >= n {
+                    continue;
+                }
+                // Verify the back-edge: Jump(-(k+1)) at [j+k] targets [j].
+                match out[back] {
+                    Insn::Jump(bk) if bk == -(k + 1) => {}
+                    _ => continue,
+                }
+                // Replace with CmpJumpIfFalseConst targeting [j+1].
+                // new_offset = -k  because  (j+k) + 1 + (-k) = j+1. ✓
+                out[back] = Insn::CmpJumpIfFalseConst(r, op, c, -(k as i32));
+            }
+            Insn::CmpJumpIfTrue(r, op, b, k) => {
+                if k < 2 {
+                    continue;
+                }
+                let back = j + k as usize;
+                if back >= n {
+                    continue;
+                }
+                match out[back] {
+                    Insn::Jump(bk) if bk == -(k + 1) => {}
+                    _ => continue,
+                }
+                out[back] = Insn::CmpJumpIfFalse(r, op, b, -(k as i32));
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 fn pass_trivial_nop(insns: Vec<Insn>) -> Vec<Insn> {
@@ -8176,6 +8306,268 @@ elif x == 2:
         assert!(
             has_concat,
             "optimizer should fuse a+b+c+d into a single Concat instruction"
+        );
+    }
+
+    // ── pass_loop_inversion ───────────────────────────────────────────────────
+
+    #[test]
+    fn loop_inversion_const_variant_basic() {
+        use crate::ast::BinaryOp;
+        // Minimal while-loop (CmpJumpIfFalseConst variant):
+        //   [0] CmpJumpIfFalseConst(0, Lt, 0, 2)   ; k=2, exit to [3] if false
+        //   [1] BinOpImm(0, 0, Add, 1)              ; body: i += 1
+        //   [2] Jump(-3)                             ; back-edge to [0]
+        //   [3] Return(0)
+        //
+        // jump_pc!(-(2+1)) at i=2: 2 + 1 + (-3) = 0. ✓ targets [0].
+        let insns = vec![
+            Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 2),
+            Insn::BinOpImm(0, 0, BinaryOp::Add, 1),
+            Insn::Jump(-3),
+            Insn::Return(0),
+        ];
+        let out = pass_loop_inversion(insns);
+        // Length unchanged: we replace Jump in-place, no removal.
+        assert_eq!(out.len(), 4);
+        // [0] must remain the initial guard.
+        assert!(
+            matches!(out[0], Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 2)),
+            "[0] header must be unchanged"
+        );
+        // [2] must become CmpJumpIfTrueConst(0, Lt, 0, -2).
+        // new_offset = -k = -2;  2+1+(-2) = 1 = j+1. ✓
+        assert!(
+            matches!(out[2], Insn::CmpJumpIfTrueConst(0, BinaryOp::Lt, 0, -2)),
+            "[2] back-edge should be CmpJumpIfTrueConst with offset -2, got {:?}",
+            out[2]
+        );
+    }
+
+    #[test]
+    fn loop_inversion_reg_variant_basic() {
+        use crate::ast::BinaryOp;
+        // CmpJumpIfFalse (register-register) variant:
+        //   [0] CmpJumpIfFalse(0, Lt, 1, 2)
+        //   [1] BinOpImm(0, 0, BinaryOp::Add, 1)
+        //   [2] Jump(-3)
+        //   [3] Return(0)
+        let insns = vec![
+            Insn::CmpJumpIfFalse(0, BinaryOp::Lt, 1, 2),
+            Insn::BinOpImm(0, 0, BinaryOp::Add, 1),
+            Insn::Jump(-3),
+            Insn::Return(0),
+        ];
+        let out = pass_loop_inversion(insns);
+        assert_eq!(out.len(), 4);
+        assert!(
+            matches!(out[0], Insn::CmpJumpIfFalse(0, BinaryOp::Lt, 1, 2)),
+            "[0] header must be unchanged"
+        );
+        assert!(
+            matches!(out[2], Insn::CmpJumpIfTrue(0, BinaryOp::Lt, 1, -2)),
+            "[2] back-edge should be CmpJumpIfTrue with offset -2, got {:?}",
+            out[2]
+        );
+    }
+
+    #[test]
+    fn loop_inversion_guard_k_too_small() {
+        use crate::ast::BinaryOp;
+        // k=1: only one instruction between header and Jump, which IS the Jump.
+        // The guard `k < 2` must prevent transformation.
+        //   [0] CmpJumpIfFalseConst(0, Lt, 0, 1)   ; k=1, exit to [2]
+        //   [1] Jump(-2)                             ; back-edge to [0]
+        //   [2] Return(0)
+        let insns = vec![
+            Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 1),
+            Insn::Jump(-2),
+            Insn::Return(0),
+        ];
+        let out = pass_loop_inversion(insns.clone());
+        // Nothing should change.
+        assert_eq!(out, insns, "k=1 must not be transformed");
+    }
+
+    #[test]
+    fn loop_inversion_guard_not_a_back_edge() {
+        use crate::ast::BinaryOp;
+        // The Jump at [j+k] targets somewhere other than [j] — must not transform.
+        //   [0] CmpJumpIfFalseConst(0, Lt, 0, 2)   ; k=2, exit to [3]
+        //   [1] BinOpImm(0, 0, BinaryOp::Add, 1)
+        //   [2] Jump(0)                              ; NOT a back-edge (targets [3])
+        //   [3] Return(0)
+        let insns = vec![
+            Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 2),
+            Insn::BinOpImm(0, 0, BinaryOp::Add, 1),
+            Insn::Jump(0), // forward jump, not -(k+1) = -3
+            Insn::Return(0),
+        ];
+        let out = pass_loop_inversion(insns.clone());
+        assert_eq!(out, insns, "forward jump must not be transformed");
+    }
+
+    #[test]
+    fn loop_inversion_does_not_touch_non_jump_at_back() {
+        use crate::ast::BinaryOp;
+        // If [j+k] is not a Jump at all, leave it alone.
+        //   [0] CmpJumpIfFalseConst(0, Lt, 0, 2)
+        //   [1] BinOpImm(0, 0, BinaryOp::Add, 1)
+        //   [2] Return(0)                           ; not a Jump
+        //   [3] Return(0)
+        let insns = vec![
+            Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 2),
+            Insn::BinOpImm(0, 0, BinaryOp::Add, 1),
+            Insn::Return(0),
+            Insn::Return(0),
+        ];
+        let out = pass_loop_inversion(insns.clone());
+        assert_eq!(
+            out, insns,
+            "non-Jump at back-edge position must not be transformed"
+        );
+    }
+
+    #[test]
+    fn loop_inversion_full_pipeline_while_loop() {
+        // End-to-end: compile a while loop whose back-edge survives the pipeline
+        // as a raw Jump (not a ForCountReg/ForCount structure).
+        //
+        // `while a != b: a += 1` — the Ne operator is not recognised by the
+        // ForCount promotion pass, so the loop remains as CmpJumpIfFalse + Jump.
+        // pass_loop_inversion should replace the back-edge Jump with CmpJumpIfTrue.
+        let code = compile_fn("def f(a, b):\n    while a != b:\n        a += 1\n    return a\n");
+        let optimized = optimize(code);
+        let inner = &optimized.fn_protos[0].code;
+        // The optimized code must not contain an unconditional back-edge Jump.
+        let has_back_edge_jump = inner
+            .insns
+            .iter()
+            .any(|i| matches!(i, Insn::Jump(k) if *k < 0));
+        assert!(
+            !has_back_edge_jump,
+            "optimizer should eliminate back-edge Jump in while-ne loop; insns: {:?}",
+            inner.insns
+        );
+        // The optimized code must contain CmpJumpIfTrue* at the loop tail.
+        let has_cmpjump_true = inner
+            .insns
+            .iter()
+            .any(|i| matches!(i, Insn::CmpJumpIfTrue(..) | Insn::CmpJumpIfTrueConst(..)));
+        assert!(
+            has_cmpjump_true,
+            "optimizer should introduce CmpJumpIfTrue* at loop tail; insns: {:?}",
+            inner.insns
+        );
+    }
+
+    #[test]
+    fn loop_inversion_true_const_variant_basic() {
+        use crate::ast::BinaryOp;
+        // `while True: if n == 0: break; body` shape (CmpJumpIfTrueConst header):
+        //   [0] CmpJumpIfTrueConst(0, Eq, 0, 2)   ; k=2, exit to [3] if n==0 (TRUE)
+        //   [1] BinOpImm(0, 0, BinaryOp::Sub, 1)  ; body: n -= 1
+        //   [2] Jump(-3)                            ; back-edge to [0]
+        //   [3] Return(0)
+        //
+        // Arithmetic check: jump_pc!(-(2+1)) at i=2: 2+1+(-3) = 0. ✓ targets [0].
+        let insns = vec![
+            Insn::CmpJumpIfTrueConst(0, BinaryOp::Eq, 0, 2),
+            Insn::BinOpImm(0, 0, BinaryOp::Sub, 1),
+            Insn::Jump(-3),
+            Insn::Return(0),
+        ];
+        let out = pass_loop_inversion(insns);
+        assert_eq!(out.len(), 4);
+        // [0] must remain the initial guard.
+        assert!(
+            matches!(out[0], Insn::CmpJumpIfTrueConst(0, BinaryOp::Eq, 0, 2)),
+            "[0] header must be unchanged"
+        );
+        // [2] must become CmpJumpIfFalseConst(0, Eq, 0, -2).
+        // new_offset = -k = -2;  2+1+(-2) = 1 = j+1. ✓
+        assert!(
+            matches!(out[2], Insn::CmpJumpIfFalseConst(0, BinaryOp::Eq, 0, -2)),
+            "[2] back-edge should be CmpJumpIfFalseConst with offset -2, got {:?}",
+            out[2]
+        );
+    }
+
+    #[test]
+    fn loop_inversion_true_reg_variant_basic() {
+        use crate::ast::BinaryOp;
+        // CmpJumpIfTrue (register-register) header variant:
+        //   [0] CmpJumpIfTrue(0, Eq, 1, 2)
+        //   [1] BinOpImm(0, 0, BinaryOp::Sub, 1)
+        //   [2] Jump(-3)
+        //   [3] Return(0)
+        let insns = vec![
+            Insn::CmpJumpIfTrue(0, BinaryOp::Eq, 1, 2),
+            Insn::BinOpImm(0, 0, BinaryOp::Sub, 1),
+            Insn::Jump(-3),
+            Insn::Return(0),
+        ];
+        let out = pass_loop_inversion(insns);
+        assert_eq!(out.len(), 4);
+        assert!(
+            matches!(out[0], Insn::CmpJumpIfTrue(0, BinaryOp::Eq, 1, 2)),
+            "[0] header must be unchanged"
+        );
+        assert!(
+            matches!(out[2], Insn::CmpJumpIfFalse(0, BinaryOp::Eq, 1, -2)),
+            "[2] back-edge should be CmpJumpIfFalse with offset -2, got {:?}",
+            out[2]
+        );
+    }
+
+    #[test]
+    fn loop_inversion_true_const_guard_k_too_small() {
+        use crate::ast::BinaryOp;
+        // k=1: guard must prevent transformation for CmpJumpIfTrueConst header.
+        //   [0] CmpJumpIfTrueConst(0, Eq, 0, 1)   ; k=1, exit to [2]
+        //   [1] Jump(-2)                             ; back-edge to [0]
+        //   [2] Return(0)
+        let insns = vec![
+            Insn::CmpJumpIfTrueConst(0, BinaryOp::Eq, 0, 1),
+            Insn::Jump(-2),
+            Insn::Return(0),
+        ];
+        let out = pass_loop_inversion(insns.clone());
+        assert_eq!(
+            out, insns,
+            "k=1 must not be transformed for CmpJumpIfTrueConst header"
+        );
+    }
+
+    #[test]
+    fn loop_inversion_full_pipeline_while_true_break() {
+        // End-to-end: compile `while True: if n == 0: break; acc += n; n -= 1`.
+        // The CmpJumpIfTrueConst header (break condition) + Jump back-edge should
+        // be inverted so the back-edge becomes CmpJumpIfFalseConst.
+        let code = compile_fn(
+            "def f(n):\n    acc = 0\n    while True:\n        if n == 0:\n            break\n        acc += n\n        n -= 1\n    return acc\n",
+        );
+        let optimized = optimize(code);
+        let inner = &optimized.fn_protos[0].code;
+        // No unconditional back-edge Jump should survive.
+        let has_back_edge_jump = inner
+            .insns
+            .iter()
+            .any(|i| matches!(i, Insn::Jump(k) if *k < 0));
+        assert!(
+            !has_back_edge_jump,
+            "optimizer should eliminate back-edge Jump in while-true-break loop; insns: {:?}",
+            inner.insns
+        );
+        // A CmpJumpIfFalseConst (the inverted back-edge) must be present.
+        let has_cmpjump_false_const = inner
+            .insns
+            .iter()
+            .any(|i| matches!(i, Insn::CmpJumpIfFalseConst(..)));
+        assert!(
+            has_cmpjump_false_const,
+            "optimizer should introduce CmpJumpIfFalseConst at loop tail; insns: {:?}",
+            inner.insns
         );
     }
 }
