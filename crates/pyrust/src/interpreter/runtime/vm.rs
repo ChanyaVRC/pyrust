@@ -1109,6 +1109,28 @@ impl Interpreter {
                     }
                 }
                 Insn::SetItem(obj, idx, val) => {
+                    // Fast path: List indexed by Int — avoid vm_read clones on the hot
+                    // path, analogous to the GetItem fast path (#450 / #868).
+                    // `as_int()` is a single tag check (no Ref machinery).
+                    // `list_len()` returns None for non-list Values (dict, user instance,
+                    // tuple, …), so the fast path is entered only for real lists.
+                    if let Some(raw_i) = regs[*idx as usize].as_int() {
+                        if let Some(len) = regs[*obj as usize].list_len() {
+                            let j = if raw_i < 0 { raw_i + len as i64 } else { raw_i };
+                            if j >= 0 && (j as usize) < len {
+                                let v = regs[*val as usize].clone();
+                                regs[*obj as usize].list_with_mut(|items| {
+                                    items[j as usize] = v;
+                                });
+                            } else {
+                                vm_try!(Err(PyError::named(
+                                    "IndexError",
+                                    "list assignment index out of range",
+                                )));
+                            }
+                            continue;
+                        }
+                    }
                     let idx_val = vm_try!(vm_read(&regs, *idx, num_locals));
                     let val_val = vm_try!(vm_read(&regs, *val, num_locals));
                     // Slice assignment: tuple key on a list.
