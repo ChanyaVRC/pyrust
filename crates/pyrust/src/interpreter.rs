@@ -14,7 +14,7 @@ use crate::parser::Parser;
 use crate::value::{
     EnvRef, Environment, PyBigInt, PyBigIntSign, PyClass, PyInstance, PyKey, PyModule, PyPow,
     PyToPrimitive, PyZero, StrKey, UserFunction, UserFunctionKind, UserFunctionParam, Value,
-    ValueKind,
+    ValueKind, intern_string,
 };
 
 type ModuleCache = Rc<RefCell<HashMap<String, Value>>>;

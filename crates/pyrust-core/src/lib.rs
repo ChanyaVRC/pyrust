@@ -40,6 +40,54 @@ fn next_obj_id() -> u64 {
     })
 }
 
+/// Maximum byte length of a string eligible for interning.
+///
+/// Covers all identifier strings, most dict keys, and all dunder names
+/// while excluding long user-visible strings that are unlikely to repeat.
+/// Mirrors Lua 5.4's short-string threshold.
+const INTERN_MAX_BYTES: usize = 40;
+
+/// Maximum number of entries in the per-thread intern table.
+///
+/// Caps memory usage for programs that use many unique short strings
+/// (e.g. programs that generate lots of distinct short keys).
+const INTERN_MAX_ENTRIES: usize = 1024;
+
+thread_local! {
+    /// Per-thread cache mapping short string byte slices to their `Value`.
+    ///
+    /// Holding a strong `Value` reference is safe: `Value` is NaN-boxed, and
+    /// string Values carry an Rc-like refcount in their heap header.  The intern
+    /// table keeps exactly one extra reference alive per cached string.  Each
+    /// `intern_string` call returns a clone of the cached value (a cheap
+    /// refcount bump).
+    static INTERN: RefCell<HashMap<Box<str>, Value>> = RefCell::new(HashMap::new());
+}
+
+/// Return a `Value::string` for `s`, reusing a cached allocation when `s`
+/// is short (≤ [`INTERN_MAX_BYTES`] bytes) and the table has not yet hit
+/// [`INTERN_MAX_ENTRIES`].
+///
+/// **Only call this for immutable, constant-pool strings.**  Never intern
+/// strings produced by concatenation, `input()`, or user code — those are
+/// not reused and polluting the table wastes memory.
+pub fn intern_string(s: &str) -> Value {
+    if s.len() > INTERN_MAX_BYTES {
+        return Value::string(s);
+    }
+    INTERN.with(|cache| {
+        let mut map = cache.borrow_mut();
+        if let Some(v) = map.get(s) {
+            return v.clone();
+        }
+        let v = Value::string(s);
+        if map.len() < INTERN_MAX_ENTRIES {
+            map.insert(s.into(), v.clone());
+        }
+        v
+    })
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Cycle-detection guards for `repr` and `==`
 //

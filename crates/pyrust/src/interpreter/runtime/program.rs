@@ -73,7 +73,7 @@ impl Interpreter {
                 me.values.entry($name.to_string()).or_insert_with(|| $val)
             };
         }
-        seed_env!("__name__", Value::string("__main__"));
+        seed_env!("__name__", intern_string("__main__"));
         seed_env!("__doc__", Value::none());
         seed_env!("__package__", Value::none());
         seed_env!("__spec__", Value::none());
