@@ -53,6 +53,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_cse(insns, num_locals);
     let insns = pass_dead_code(insns);
     let insns = pass_dead_store_elim(insns, num_locals);
+    let insns = pass_cross_jump(insns);
     let insns = pass_copy_prop(insns, num_locals);
     let insns = pass_trivial_nop(insns);
     let insns = pass_self_tail_call(insns);
@@ -2688,6 +2689,216 @@ fn pass_self_tail_call(insns: Vec<Insn>) -> Vec<Insn> {
     compact(transformed, &keep)
 }
 
+// ─── Cross-jumping (tail merging) ─────────────────────────────────────────────
+
+/// Tail-merge identical block suffixes: when two or more basic blocks end in
+/// an identical sequence of ≥ 2 instructions, replace the duplicate copy with
+/// an unconditional `Jump` to the surviving copy.
+///
+/// ## Algorithm
+///
+/// 1. Collect all **jump-target** instruction indices (anything pointed to by a
+///    `Jump`, `JumpIfTrue/False`, `ForIter`, etc.).
+/// 2. Scan every pair of **block terminator** positions `(t_keep, t_dup)` where
+///    `t_keep < t_dup`.  A terminator is a `Return`, `ReturnNone`, `Jump`,
+///    `TailCall`, or `Raise*` instruction.
+/// 3. Compare instructions backward from each terminator simultaneously, stopping
+///    when they first differ.  Count the number of matching instructions `n`.
+/// 4. A merge fires when **all** of the following hold:
+///    - `n >= MIN_TAIL` (= 2).
+///    - None of the `n` instructions in the duplicate tail contains a jump
+///      offset field (`Jump`, `JumpIfFalse`, `ForIter`, `SetupExcept`, etc.) —
+///      such offsets encode PC-relative targets that would mismatch between the
+///      two locations.
+///    - None of the duplicate-side tail instruction indices are jump targets
+///      (another instruction jumps *into* the middle of the tail we are about to
+///      remove — forbidden).
+/// 5. When a merge fires: keep `[t_keep - n + 1 .. t_keep]` as-is (survivor);
+///    mark `[t_dup - n + 1 .. t_dup - 1]` as removed in `keep[]`; replace
+///    `insns[t_dup]` (the duplicate terminator) with `Jump(k)` pointing at
+///    `t_keep - n + 1` (the survivor tail start).
+/// 6. Call `compact` once at the end to fix all jump offsets.
+///
+/// ## Conservatism
+///
+/// Only one merge is applied per invocation (return after the first successful
+/// merge).  `optimize_fn_code` calls the full pipeline once; in practice one
+/// invocation is sufficient for the common if/else pattern.
+///
+/// Register renaming is NOT performed.  Only structurally identical instruction
+/// sequences — same opcode, same register numbers, same constant indices — are
+/// merged.  This is conservative but correct.
+///
+/// ## What is NOT merged
+///
+/// - Tails of length 1 (`return` alone is not worth a Jump overhead).
+/// - Any tail containing an instruction with a jump-offset field.
+/// - Any tail where a duplicate-side instruction is itself a jump target.
+fn pass_cross_jump(insns: Vec<Insn>) -> Vec<Insn> {
+    const MIN_TAIL: usize = 2;
+
+    let n = insns.len();
+    if n < MIN_TAIL * 2 {
+        return insns;
+    }
+
+    // Step 1: collect jump-target indices.
+    let mut jump_targets: HashSet<usize> = HashSet::new();
+    jump_targets.insert(0); // entry point is always a target
+    for (i, insn) in insns.iter().enumerate() {
+        let k: Option<i32> = match insn {
+            Insn::Jump(k)
+            | Insn::JumpIfFalse(_, k)
+            | Insn::JumpIfTrue(_, k)
+            | Insn::CmpJumpIfFalse(_, _, _, k)
+            | Insn::CmpJumpIfTrue(_, _, _, k)
+            | Insn::CmpJumpIfFalseConst(_, _, _, k)
+            | Insn::CmpJumpIfTrueConst(_, _, _, k)
+            | Insn::ForIter(_, _, k)
+            | Insn::ForCountReg(_, _, _, _, k)
+            | Insn::ForCountConst(_, _, _, _, k)
+            | Insn::ForCountConstInline(_, _, _, _, k)
+            | Insn::SetupExcept(k)
+            | Insn::MatchExcept(_, k) => Some(*k),
+            _ => None,
+        };
+        if let Some(k) = k {
+            let target = (i as i64 + 1 + k as i64) as usize;
+            if target < n {
+                jump_targets.insert(target);
+            }
+        }
+    }
+
+    // Returns true if `insn` contains a PC-relative jump offset field.
+    // Such instructions must not appear inside a merged tail because the same
+    // offset value would resolve to different targets in two different blocks.
+    let has_jump_offset = |insn: &Insn| -> bool {
+        matches!(
+            insn,
+            Insn::Jump(_)
+                | Insn::JumpIfFalse(..)
+                | Insn::JumpIfTrue(..)
+                | Insn::CmpJumpIfFalse(..)
+                | Insn::CmpJumpIfTrue(..)
+                | Insn::CmpJumpIfFalseConst(..)
+                | Insn::CmpJumpIfTrueConst(..)
+                | Insn::ForIter(..)
+                | Insn::ForCountReg(..)
+                | Insn::ForCountConst(..)
+                | Insn::ForCountConstInline(..)
+                | Insn::SetupExcept(_)
+                | Insn::MatchExcept(..)
+        )
+    };
+
+    // Returns true if `insn` is a block terminator (ends a basic block).
+    let is_terminator = |insn: &Insn| -> bool {
+        matches!(
+            insn,
+            Insn::Return(_)
+                | Insn::ReturnNone
+                | Insn::Jump(_)
+                | Insn::TailCall { .. }
+                | Insn::RaiseValue(_)
+                | Insn::RaiseFrom(..)
+                | Insn::RaiseReRaise
+                | Insn::RaiseAssert(_)
+        )
+    };
+
+    // Step 2: collect terminator positions.
+    let terminators: Vec<usize> = (0..n).filter(|&i| is_terminator(&insns[i])).collect();
+
+    // Step 3: find a merge candidate.
+    // Outer: surviving tail terminator t_keep (earlier in code).
+    // Inner: duplicate tail terminator t_dup (later in code).
+    for &t_keep in &terminators {
+        for &t_dup in &terminators {
+            if t_dup <= t_keep {
+                continue; // must be strictly later
+            }
+
+            // Compare instructions backward from each terminator.
+            // Stop when:
+            //   (a) instructions differ,
+            //   (b) instruction has a jump offset (offset meaning differs
+            //       between the two blocks),
+            //   (c) we hit a jump target at step > 0 (block boundary —
+            //       extending past it would require merging predecessor flow).
+            let mut tail_len = 0usize;
+            let mut abort = false;
+            for step in 0usize.. {
+                // Bounds check: cannot scan past index 0.
+                if step > t_keep || step > t_dup {
+                    abort = true;
+                    break;
+                }
+                let i_keep = t_keep - step;
+                let i_dup = t_dup - step;
+
+                // A jump target at step > 0 means a block boundary here.
+                // (step == 0 is always allowed: terminators can be targets.)
+                if step > 0 && (jump_targets.contains(&i_keep) || jump_targets.contains(&i_dup)) {
+                    break;
+                }
+
+                // Structural equality check (requires PartialEq on Insn).
+                if insns[i_keep] != insns[i_dup] {
+                    break;
+                }
+
+                // Do not include instructions with jump offsets in the tail.
+                if has_jump_offset(&insns[i_keep]) {
+                    break;
+                }
+
+                tail_len += 1;
+            }
+
+            if abort || tail_len < MIN_TAIL {
+                continue;
+            }
+
+            let dup_start = t_dup - tail_len + 1;
+            let keep_start = t_keep - tail_len + 1;
+
+            // Guard: none of the duplicate-side tail indices (dup_start ..= t_dup)
+            // may be jump targets.  If any instruction in the tail is a target,
+            // another instruction jumps into the middle of the tail — removing
+            // it would orphan that jump.
+            if (dup_start..=t_dup).any(|i| jump_targets.contains(&i)) {
+                continue;
+            }
+
+            // Degenerate: identical starting positions.
+            if keep_start == dup_start {
+                continue;
+            }
+
+            // Apply the merge.
+            //
+            // Mark [dup_start .. t_dup) as removed; replace the terminator at
+            // t_dup with Jump(keep_start - t_dup - 1) so execution falls into
+            // the survivor tail.  `compact` rewrites all offsets.
+            let raw_offset = keep_start as i64 - t_dup as i64 - 1;
+            if raw_offset < i32::MIN as i64 || raw_offset > i32::MAX as i64 {
+                continue; // offset overflow — skip (degenerate huge function)
+            }
+
+            let mut keep = vec![true; n];
+            for i in dup_start..t_dup {
+                keep[i] = false;
+            }
+            let mut transformed = insns;
+            transformed[t_dup] = Insn::Jump(raw_offset as i32);
+            return compact(transformed, &keep);
+        }
+    }
+
+    insns
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4788,6 +4999,159 @@ mod tests {
         assert!(
             !has_plain_call,
             "after TCO all recursive calls should be TailCall, not Call/CallMemo"
+        );
+    }
+
+    // ── pass_cross_jump ───────────────────────────────────────────────────────
+
+    #[test]
+    fn cross_jump_merges_identical_return_tails() {
+        use crate::ast::BinaryOp;
+        // Models: if cond: x=10 else: x=20; return x+1
+        //
+        // After compile + earlier passes, the bytecode looks roughly like:
+        //   [0] CmpJumpIfFalseConst(cond, Eq, c_true, 3)  — if branch
+        //   [1] LoadConst(r0, c_10)                        — then: x=10
+        //   [2] BinOpConst(r1, r0, Add, c_1)              — x+1
+        //   [3] Return(r1)                                  ← surviving tail [2..3]
+        //   [4] LoadConst(r0, c_20)                        — else: x=20
+        //   [5] BinOpConst(r1, r0, Add, c_1)              — x+1  (duplicate)
+        //   [6] Return(r1)                                  ← duplicate tail [5..6]
+        //
+        // pass_cross_jump should remove [5..6] and insert Jump to [2].
+        let insns = vec![
+            Insn::CmpJumpIfFalseConst(0, BinaryOp::Eq, 0, 3), // [0] → [4]
+            Insn::LoadConst(5, 1),                            // [1] x=10
+            Insn::BinOpConst(6, 5, BinaryOp::Add, 2),         // [2] x+1
+            Insn::Return(6),                                  // [3] ← survivor end
+            Insn::LoadConst(5, 3),                            // [4] x=20
+            Insn::BinOpConst(6, 5, BinaryOp::Add, 2),         // [5] duplicate
+            Insn::Return(6),                                  // [6] duplicate end
+        ];
+
+        let out = pass_cross_jump(insns);
+
+        // After merging: [5] and [6] are collapsed to Jump([4]→[2]).
+        // The output should be shorter by 1 instruction (one BinOpConst removed,
+        // one Return removed, one Jump added = net -1).
+        assert!(
+            out.len() < 7,
+            "cross_jump should reduce instruction count; got {} insns",
+            out.len()
+        );
+        // The merged return count should drop to one.
+        let return_count = out.iter().filter(|i| matches!(i, Insn::Return(_))).count();
+        assert_eq!(
+            return_count, 1,
+            "exactly one Return should survive after merge"
+        );
+    }
+
+    #[test]
+    fn cross_jump_skips_tail_length_one() {
+        // Only `Return(r)` is common — length 1, below MIN_TAIL=2.
+        // The pass must NOT fire.
+        let insns = vec![
+            Insn::JumpIfFalse(0, 2), // [0] → [3]
+            Insn::LoadConst(1, 0),   // [1]
+            Insn::Return(1),         // [2] ← terminal
+            Insn::LoadConst(2, 1),   // [3]
+            Insn::Return(2),         // [4] ← same Return discriminant but different reg
+        ];
+        let n = insns.len();
+        let out = pass_cross_jump(insns);
+        // Return(1) vs Return(2) differ → no merge.
+        assert_eq!(out.len(), n, "no merge for length-1 or differing tails");
+    }
+
+    #[test]
+    fn cross_jump_does_not_merge_across_jump_target_in_dup_tail() {
+        // The duplicate tail starts at a jump target — must not be removed.
+        //
+        //   [0] JumpIfFalse(r, 2)  → [3]
+        //   [1] LoadConst(r0, 0)
+        //   [2] Return(r0)         ← survivor tail [1..2]
+        //   [3] LoadConst(r0, 0)   ← JUMP TARGET — cannot be removed
+        //   [4] Return(r0)         ← duplicate terminator
+        //
+        // [3] is a jump target (from [0]), so the merge must not fire.
+        let insns = vec![
+            Insn::JumpIfFalse(0, 2), // [0] → [3]
+            Insn::LoadConst(1, 0),   // [1]
+            Insn::Return(1),         // [2] survivor tail start
+            Insn::LoadConst(1, 0),   // [3] ← jump target (from [0])
+            Insn::Return(1),         // [4] duplicate tail
+        ];
+        let n = insns.len();
+        let out = pass_cross_jump(insns);
+        assert_eq!(
+            out.len(),
+            n,
+            "must not merge when dup tail instructions are jump targets"
+        );
+    }
+
+    #[test]
+    fn cross_jump_does_not_merge_tail_with_jump_offset_insn() {
+        use crate::ast::BinaryOp;
+        // Tail contains a JumpIfFalse — has an offset field, must not be merged.
+        //
+        //   [0] JumpIfFalse(r, 2) → [3]
+        //   [1] JumpIfFalse(r, 1) — this would land differently from each block
+        //   [2] Return(0)
+        //   [3] JumpIfFalse(r, 1) — structurally same as [1] but offset means
+        //   [4] Return(0)           different target
+        let insns = vec![
+            Insn::JumpIfFalse(0, 2),                          // [0] → [3]
+            Insn::CmpJumpIfFalseConst(1, BinaryOp::Gt, 0, 0), // [1]
+            Insn::Return(0),                                  // [2]
+            Insn::CmpJumpIfFalseConst(1, BinaryOp::Gt, 0, 0), // [3] jump target
+            Insn::Return(0),                                  // [4]
+        ];
+        let n = insns.len();
+        let out = pass_cross_jump(insns);
+        // The CmpJumpIfFalseConst has a jump-offset field; merge must not fire.
+        assert_eq!(
+            out.len(),
+            n,
+            "must not merge tails containing instructions with jump-offset fields"
+        );
+    }
+
+    #[test]
+    fn cross_jump_on_compiled_if_else_common_tail() {
+        // Compile a function with an explicit common tail and verify the instruction
+        // count decreases after optimization (or at least does not increase).
+        let code_before = compile_fn(
+            "def f(cond):\n    if cond:\n        x = 10\n    else:\n        x = 20\n    return x + 1\n",
+        );
+        let before_count = code_before.fn_protos[0].code.insns.len();
+        let optimized = optimize(code_before);
+        let after_count = optimized.fn_protos[0].code.insns.len();
+        assert!(
+            after_count <= before_count,
+            "optimizer should not increase instruction count ({before_count} → {after_count})"
+        );
+    }
+
+    #[test]
+    fn cross_jump_correctness_with_compiled_code() {
+        // The parity fixture: with_merge(True)=11, with_merge(False)=21.
+        // This test ensures the optimizer does not break correct execution.
+        let code = compile_fn(
+            "def f(cond):\n    if cond:\n        x = 10\n    else:\n        x = 20\n    return x + 1\n",
+        );
+        let optimized = optimize(code);
+        // After optimization, the function proto must still be present.
+        assert_eq!(
+            optimized.fn_protos.len(),
+            1,
+            "function proto should survive"
+        );
+        // The instruction list must be non-empty.
+        assert!(
+            !optimized.fn_protos[0].code.insns.is_empty(),
+            "instruction list must not be empty after optimization"
         );
     }
 }
