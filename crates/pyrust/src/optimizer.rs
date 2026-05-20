@@ -59,7 +59,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_syncmod_sink(insns);
     let insns = pass_cross_jump(insns);
     let insns = pass_copy_prop(insns, num_locals);
-    let insns = pass_switch_hoist(insns, num_locals);
+    let insns = pass_switch_hoist(insns, num_locals, &consts);
     let insns = pass_trivial_nop(insns);
     let insns = pass_self_tail_call(insns);
     let insns = pass_forcount_const_inline(insns, &consts);
@@ -374,7 +374,8 @@ fn pass_reassoc(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -> V
             | Insn::ForCountReg(_, _, _, _, k)
             | Insn::ForCountConst(_, _, _, _, k)
             | Insn::ForCountConstInline(_, _, _, _, k)
-            | Insn::SetupExcept(k) => Some(*k),
+            | Insn::SetupExcept(k)
+            | Insn::MatchExcept(_, k) => Some(*k),
             _ => None,
         };
         if let Some(k) = k {
@@ -659,7 +660,8 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -
             | Insn::ForCountReg(_, _, _, _, k)
             | Insn::ForCountConst(_, _, _, _, k)
             | Insn::ForCountConstInline(_, _, _, _, k)
-            | Insn::SetupExcept(k) => Some(*k),
+            | Insn::SetupExcept(k)
+            | Insn::MatchExcept(_, k) => Some(*k),
             _ => None,
         };
         if let Some(k) = k {
@@ -975,7 +977,8 @@ fn pass_algebraic_simplify(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Ins
             | Insn::ForCountReg(_, _, _, _, k)
             | Insn::ForCountConst(_, _, _, _, k)
             | Insn::ForCountConstInline(_, _, _, _, k)
-            | Insn::SetupExcept(k) => Some(*k),
+            | Insn::SetupExcept(k)
+            | Insn::MatchExcept(_, k) => Some(*k),
             _ => None,
         };
         if let Some(k) = k {
@@ -3440,6 +3443,11 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
 /// 4. `t2` is not read in the true-branch body `[i+2, target)`.  This is
 ///    structurally true for compiler-generated code (each branch uses its own
 ///    fresh temp), but checked explicitly for correctness.
+/// 5. Both `CmpJumpIfFalseConst` / `CmpJumpIfTrueConst` instructions compare
+///    against a statically known primitive constant (int, str, None, bool, float,
+///    bigint).  Comparisons against user-defined objects can invoke `__eq__`,
+///    which may mutate or delete the global between the two loads.  Primitives
+///    never dispatch user `__eq__`, so the global cannot change on the false path.
 ///
 /// ## Interaction with subsequent passes
 ///
@@ -3447,7 +3455,7 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
 /// offsets.  `pass_compact_consts` (which runs later) will drop the global-name
 /// pool entry if it becomes unreferenced.  `pass_dead_store_elim` cannot remove
 /// `LoadGlobal` (it may raise `NameError`), so the removal must happen here.
-fn pass_switch_hoist(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
+fn pass_switch_hoist(insns: Vec<Insn>, num_locals: u32, consts: &[Value]) -> Vec<Insn> {
     let n = insns.len();
     if n < 4 {
         return insns;
@@ -3513,6 +3521,24 @@ fn pass_switch_hoist(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         }
     }
 
+    // Safety condition 5: the constant being compared must be a primitive type
+    // (int, str, None, bool, float, bigint).  Comparing against a user-defined
+    // object can invoke `__eq__`, which might mutate or delete the global between
+    // the two loads.  Primitives never dispatch user `__eq__`.
+    let is_primitive_const = |idx: u16| -> bool {
+        matches!(
+            consts.get(idx as usize).map(|v| v.kind()),
+            Some(
+                ValueKind::Int(_)
+                    | ValueKind::BigInt(_)
+                    | ValueKind::Str(_)
+                    | ValueKind::None
+                    | ValueKind::Bool(_)
+                    | ValueKind::Float(_)
+            )
+        )
+    };
+
     let mut insns = insns;
     let mut keep = vec![true; n];
 
@@ -3527,11 +3553,12 @@ fn pass_switch_hoist(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             }
         };
 
-        // Pattern step 2: CmpJumpIfFalseConst(t, _, _, k) or
-        // CmpJumpIfTrueConst(t, _, _, k) at i+1, with a forward jump (k > 0).
+        // Pattern step 2: CmpJumpIfFalseConst(t, _, c, k) or
+        // CmpJumpIfTrueConst(t, _, c, k) at i+1, with a forward jump (k > 0).
+        // Safety condition 5: the constant c must be a primitive.
         let k0 = match insns[i + 1] {
-            Insn::CmpJumpIfFalseConst(r, _, _, k) | Insn::CmpJumpIfTrueConst(r, _, _, k)
-                if r == t && k > 0 =>
+            Insn::CmpJumpIfFalseConst(r, _, c, k) | Insn::CmpJumpIfTrueConst(r, _, c, k)
+                if r == t && k > 0 && is_primitive_const(c) =>
             {
                 k
             }
@@ -3566,10 +3593,10 @@ fn pass_switch_hoist(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         };
 
         // Pattern step 4: CmpJumpIfFalseConst(t2, ...) or CmpJumpIfTrueConst(t2, ...)
-        // at target+1.
+        // at target+1.  Safety condition 5 also applies to this constant.
         match insns[target + 1] {
-            Insn::CmpJumpIfFalseConst(r, _, _, _) | Insn::CmpJumpIfTrueConst(r, _, _, _)
-                if r == t2 => {}
+            Insn::CmpJumpIfFalseConst(r, _, c, _) | Insn::CmpJumpIfTrueConst(r, _, c, _)
+                if r == t2 && is_primitive_const(c) => {}
             _ => {
                 i += 1;
                 continue;
@@ -7052,6 +7079,9 @@ mod tests {
         //   i=7: CmpJumpIfFalseConst(6, Eq, c=1, k=1)  → false target = 9
         //   i=8: Return(5)           // elif-2 true branch
         //   i=9: Return(5)           // else / default
+        // consts pool: indices 0 and 1 are integers (primitives), so
+        // safety condition 5 passes and the hoist fires.
+        let consts = vec![Value::int(1), Value::int(2)];
         let insns = vec![
             Insn::LoadGlobal(5, 0),
             Insn::CmpJumpIfFalseConst(5, BinaryOp::Eq, 0, 4),
@@ -7065,7 +7095,7 @@ mod tests {
             Insn::Return(5),
         ];
         // pred_count[6] should be 1 (only from CmpJump at i=1).
-        let out = pass_switch_hoist(insns, 5);
+        let out = pass_switch_hoist(insns, 5, &consts);
         // LoadGlobal(6, 0) at old index 6 should be gone.
         let has_second_load = out
             .iter()
@@ -7096,6 +7126,8 @@ mod tests {
         //   i=5: CmpJumpIfFalseConst(6, Eq, 1, 1)   → false target = 5+1+1 = 7
         //   i=6: Return(1)                            // elif-2 true branch
         //   i=7: Return(1)                            // else
+        // consts pool: primitive integers at indices 0 and 1.
+        let consts = vec![Value::int(1), Value::int(2)];
         let insns = vec![
             Insn::LoadGlobal(5, 0),
             Insn::CmpJumpIfFalseConst(5, BinaryOp::Eq, 0, 2),
@@ -7106,7 +7138,7 @@ mod tests {
             Insn::Return(1),
             Insn::Return(1),
         ];
-        let out = pass_switch_hoist(insns, 5);
+        let out = pass_switch_hoist(insns, 5, &consts);
         let second_load_present = out
             .iter()
             .any(|insn| matches!(insn, Insn::LoadGlobal(6, 0)));
