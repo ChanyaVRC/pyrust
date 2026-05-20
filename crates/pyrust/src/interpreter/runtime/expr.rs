@@ -2420,73 +2420,45 @@ pub(crate) fn iter_values(value: Value) -> Result<Vec<Value>> {
     }
 }
 
-/// Resolve a built-in name to its `Value::builtin_function` variant.
-/// Single source of truth for both the tree-walker (`eval_expr`) and the register VM
-/// (`LoadGlobal` fallback).  Any new built-in must be added here only.
+/// Resolve a built-in name to its `Value` for use as a `LoadGlobal` fallback.
 ///
 /// The 11 primitive type names (`int`, `str`, `list`, …) resolve to the
 /// per-thread `PyClass` singletons from `primitive_class_by_name` — see
 /// issue #462.  `bool` resolves to a class whose `base` chains to `int`,
-/// so `bool.__bases__ == (int,)` matches CPython.
+/// so `bool.__bases__ == (int,)` matches CPython.  These cannot go through
+/// the generic registry path because `isinstance`/`issubclass` require a
+/// `ValueKind::PyClass`, not a `ValueKind::BuiltinFunction`.
+///
+/// `NotImplemented` is a singleton constant, not a callable; it is
+/// returned directly without a registry lookup.
+///
+/// All other names are resolved through `builtin_registry::lookup_name`,
+/// which returns the interned `&'static str` stored in the registry entry
+/// so `Value::builtin_function` never needs to heap-allocate a new name.
+/// Adding a `fn foo(…)` to a `pyrust_module!` body automatically makes
+/// `foo()` reachable via bare-name `LoadGlobal` with no edits here.
 pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
-    // One combined match so non-primitive names (`range`, `print`, …) skip
-    // the `PRIMITIVE_CLASSES` thread_local entirely.  Primitive names
-    // (#462) trigger the TLS access lazily and wrap the singleton `Rc` in
-    // a `Value::py_class`.
-    match name {
-        "bool" | "bytes" | "complex" | "dict" | "float" | "frozenset" | "int" | "list" | "set"
-        | "str" | "tuple" => primitive_class_by_name(name).map(Value::py_class),
-        "print" => Some(Value::builtin_function("print")),
-        "len" => Some(Value::builtin_function("len")),
-        "range" => Some(Value::builtin_function("range")),
-        "enumerate" => Some(Value::builtin_function("enumerate")),
-        "zip" => Some(Value::builtin_function("zip")),
-        "reversed" => Some(Value::builtin_function("reversed")),
-        "sorted" => Some(Value::builtin_function("sorted")),
-        "abs" => Some(Value::builtin_function("abs")),
-        "min" => Some(Value::builtin_function("min")),
-        "max" => Some(Value::builtin_function("max")),
-        "sum" => Some(Value::builtin_function("sum")),
-        "isinstance" => Some(Value::builtin_function("isinstance")),
-        "type" => Some(Value::builtin_function("type")),
-        "id" => Some(Value::builtin_function("id")),
-        "hasattr" => Some(Value::builtin_function("hasattr")),
-        "getattr" => Some(Value::builtin_function("getattr")),
-        "setattr" => Some(Value::builtin_function("setattr")),
-        "__vcall__" => Some(Value::builtin_function("__vcall__")),
-        "repr" => Some(Value::builtin_function("repr")),
-        "ascii" => Some(Value::builtin_function("ascii")),
-        "format" => Some(Value::builtin_function("format")),
-        "any" => Some(Value::builtin_function("any")),
-        "all" => Some(Value::builtin_function("all")),
-        "map" => Some(Value::builtin_function("map")),
-        "filter" => Some(Value::builtin_function("filter")),
-        "callable" => Some(Value::builtin_function("callable")),
-        "round" => Some(Value::builtin_function("round")),
-        "divmod" => Some(Value::builtin_function("divmod")),
-        "pow" => Some(Value::builtin_function("pow")),
-        "hash" => Some(Value::builtin_function("hash")),
-        "chr" => Some(Value::builtin_function("chr")),
-        "ord" => Some(Value::builtin_function("ord")),
-        "bin" => Some(Value::builtin_function("bin")),
-        "oct" => Some(Value::builtin_function("oct")),
-        "hex" => Some(Value::builtin_function("hex")),
-        "issubclass" => Some(Value::builtin_function("issubclass")),
-        "delattr" => Some(Value::builtin_function("delattr")),
-        "classmethod" => Some(Value::builtin_function("classmethod")),
-        "staticmethod" => Some(Value::builtin_function("staticmethod")),
-        "property" => Some(Value::builtin_function("property")),
-        "super" => Some(Value::builtin_function("super")),
-        "next" => Some(Value::builtin_function("next")),
-        "iter" => Some(Value::builtin_function("iter")),
-        "vars" => Some(Value::builtin_function("vars")),
-        "dir" => Some(Value::builtin_function("dir")),
-        "globals" => Some(Value::builtin_function("globals")),
-        "locals" => Some(Value::builtin_function("locals")),
-        "open" => Some(Value::builtin_function("open")),
-        "NotImplemented" => Some(Value::not_implemented()),
-        _ => None,
+    // Primitive types: must remain `Value::py_class` so that
+    // `isinstance(x, int)` and `type(x) is int` work correctly (#462).
+    if matches!(
+        name,
+        "bool" | "bytes" | "complex" | "dict" | "float" | "frozenset"
+            | "int"
+            | "list"
+            | "set"
+            | "str"
+            | "tuple"
+    ) {
+        return primitive_class_by_name(name).map(Value::py_class);
     }
+    // NotImplemented is a singleton constant, not a callable.
+    if name == "NotImplemented" {
+        return Some(Value::not_implemented());
+    }
+    // All registered flat-namespace builtins (`print`, `len`, `abs`, …).
+    // lookup_name returns the interned &'static str already stored in the
+    // registry entry, so Value::builtin_function needs no extra allocation.
+    crate::builtin_registry::lookup_name(name).map(Value::builtin_function)
 }
 
 /// Operation tag for set/frozenset binary operators.
