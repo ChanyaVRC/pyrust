@@ -3177,11 +3177,11 @@ fn pass_cross_jump(insns: Vec<Insn>) -> Vec<Insn> {
             //   (c) we hit a jump target at step > 0 (block boundary —
             //       extending past it would require merging predecessor flow).
             let mut tail_len = 0usize;
-            let mut abort = false;
             for step in 0usize.. {
-                // Bounds check: cannot scan past index 0.
+                // Bounds check: the tail reached the start of one block; stop
+                // scanning but do NOT abort — tail_len already counts the
+                // matching instructions up to this point.
                 if step > t_keep || step > t_dup {
-                    abort = true;
                     break;
                 }
                 let i_keep = t_keep - step;
@@ -3206,18 +3206,20 @@ fn pass_cross_jump(insns: Vec<Insn>) -> Vec<Insn> {
                 tail_len += 1;
             }
 
-            if abort || tail_len < MIN_TAIL {
+            if tail_len < MIN_TAIL {
                 continue;
             }
 
             let dup_start = t_dup - tail_len + 1;
             let keep_start = t_keep - tail_len + 1;
 
-            // Guard: none of the duplicate-side tail indices (dup_start ..= t_dup)
-            // may be jump targets.  If any instruction in the tail is a target,
-            // another instruction jumps into the middle of the tail — removing
-            // it would orphan that jump.
-            if (dup_start..=t_dup).any(|i| jump_targets.contains(&i)) {
+            // Guard: none of the *interior* duplicate-side tail indices
+            // [dup_start .. t_dup) may be jump targets — removing those
+            // instructions would orphan the incoming jump.  t_dup itself is
+            // rewritten to Jump(keep_start), not removed, so it is safe for
+            // t_dup to be a target (the jump threads straight to the survivor
+            // tail on the next pass_thread_jumps invocation).
+            if (dup_start..t_dup).any(|i| jump_targets.contains(&i)) {
                 continue;
             }
 
