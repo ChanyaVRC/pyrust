@@ -3607,8 +3607,7 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         | ForCountConst(..)
         | ForCountConstInline(..) => {}
 
-        BinOpImm(_, a, _, _) => vec![*a],
-        SyncModuleGlobal(r, _) => vec![*r],
+        BinOpImm(_, a, _, _) | SyncModuleGlobal(a, _) => f(*a),
 
         StoreGlobal(_, s)
         | Move(_, s)
