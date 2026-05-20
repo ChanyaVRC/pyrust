@@ -220,6 +220,21 @@ print(repr(deque([1, 2, 3])))          # deque([1, 2, 3])
 print(repr(deque([1, 2, 3], maxlen=5)))  # deque([1, 2, 3], maxlen=5)
 print(repr(deque(maxlen=3)))             # deque([], maxlen=3)
 
+# Nested deques must use their __repr__, not the fallback object repr.
+print(repr(deque([deque([1, 2]), 3])))  # deque([deque([1, 2]), 3])
+
+# ── __setattr__ — maxlen is read-only, no instance __dict__ ──────────────────
+
+try:
+    deque().maxlen = 5
+except AttributeError as e:
+    print(e)                             # attribute 'maxlen' of '...' is not writable
+
+try:
+    deque().custom = 5
+except AttributeError as e:
+    print(e)                             # 'collections.deque' object has no attribute 'custom'
+
 # ── __eq__ ───────────────────────────────────────────────────────────────────
 
 print(deque([1, 2, 3]) == deque([1, 2, 3]))   # True

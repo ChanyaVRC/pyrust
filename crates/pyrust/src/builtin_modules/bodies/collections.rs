@@ -1178,10 +1178,38 @@ pyrust_module! {
         }
 
         /// `repr(d)` — `deque([1, 2, 3])` or `deque([1, 2, 3], maxlen=5)`.
+        ///
+        /// Each element's repr goes through the interpreter so that
+        /// user-defined `__repr__` methods (and nested deques) render
+        /// correctly, matching CPython's behaviour.
         fn __repr__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let items = deque_items_snapshot(&inst)?;
-            let inner: Vec<String> = items.iter().map(|v| v.repr()).collect();
+            let mut inner: Vec<String> = Vec::with_capacity(items.len());
+            for v in &items {
+                let r = match v.kind() {
+                    ValueKind::PyInstance(inst_rc) => {
+                        let inst_rc = Rc::clone(inst_rc);
+                        let class = Rc::clone(&inst_rc.borrow().class);
+                        if let Some(method_val) = lookup_class_attr(&class, "__repr__") {
+                            let result = invoke_class_method(
+                                _interp,
+                                method_val,
+                                Value::py_instance(Rc::clone(&inst_rc)),
+                                &[],
+                            )?;
+                            match result.kind() {
+                                ValueKind::Str(s) => s.to_string(),
+                                _ => v.repr(),
+                            }
+                        } else {
+                            v.repr()
+                        }
+                    }
+                    _ => v.repr(),
+                };
+                inner.push(r);
+            }
             let items_repr = format!("[{}]", inner.join(", "));
             let maxlen = deque_maxlen(&inst);
             let s = match maxlen {
@@ -1189,6 +1217,43 @@ pyrust_module! {
                 Some(ml) => format!("deque({items_repr}, maxlen={ml})"),
             };
             Ok(Value::string(s))
+        }
+
+        /// `__setattr__` — CPython's deque is a C extension type with no
+        /// `__dict__`, so attribute assignment is blocked for *all* names.
+        /// CPython uses two distinct error messages:
+        ///   - `maxlen`: "attribute 'maxlen' of 'collections.deque' objects is not writable"
+        ///   - anything else: "'collections.deque' object has no attribute '<name>'"
+        /// Internal attrs (`_items`, `maxlen`) are only written by `__init__`
+        /// and `copy`, which bypass `__setattr__` via direct `attrs.insert`.
+        fn __setattr__(args) -> Result<Value> {
+            let _inst = expect_self(args, FN_NAME)?;
+            if args.len() != 3 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() takes exactly 2 arguments"),
+                ));
+            }
+            let attr_name = match args[1].value.kind() {
+                ValueKind::Str(s) => s.to_string(),
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "attribute name must be string".to_string(),
+                    ));
+                }
+            };
+            if attr_name == "maxlen" {
+                return Err(PyError::named(
+                    "AttributeError",
+                    "attribute 'maxlen' of 'collections.deque' objects is not writable"
+                        .to_string(),
+                ));
+            }
+            Err(PyError::named(
+                "AttributeError",
+                format!("'collections.deque' object has no attribute '{attr_name}'"),
+            ))
         }
 
         /// `d == other` — equal iff `other` is a deque with the same
