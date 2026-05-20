@@ -34,3 +34,8 @@ print(p + q)           # abcd
 # Chain where result is assigned and printed (not just discarded).
 result = "one" + " " + "two" + " " + "three"
 print(result)          # one two three
+
+# Nested chain: ensure result of a 3-part chain can be concatenated further.
+prefix = "pre"
+inner = prefix + "-" + "mid"
+print(inner + "-" + "suf")   # pre-mid-suf
