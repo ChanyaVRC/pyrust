@@ -986,7 +986,7 @@ fn collect_class_body_names_textual(
     body: &[Stmt],
     ordered: &mut Vec<String>,
     seen: &mut HashSet<String>,
-    body_local: &HashSet<String>,
+    body_local: &indexmap::IndexSet<String>,
 ) {
     for stmt in body {
         match stmt {
@@ -1056,7 +1056,7 @@ fn collect_assign_target_textual(
     target: &AssignTarget,
     ordered: &mut Vec<String>,
     seen: &mut HashSet<String>,
-    body_local: &HashSet<String>,
+    body_local: &indexmap::IndexSet<String>,
 ) {
     match target {
         AssignTarget::Name(name) => {
@@ -1107,7 +1107,7 @@ fn collect_class_method_outer_refs(
     // scope is itself a class scope (outer_is_class_scope=true).  When the
     // outer scope is a function scope, methods may close over function locals
     // even when the class body also defines a name with the same spelling.
-    let class_locals_opt: Option<&HashSet<String>> = if outer_is_class_scope {
+    let class_locals_opt: Option<&indexmap::IndexSet<String>> = if outer_is_class_scope {
         Some(&class_locals)
     } else {
         None
@@ -1328,7 +1328,7 @@ fn collect_class_method_outer_refs(
 fn collect_class_lambda_outer_refs_in_expr(
     expr: &Expr,
     local_index: &HashMap<String, Reg>,
-    class_locals: &HashSet<String>,
+    class_locals: &indexmap::IndexSet<String>,
     cells: &mut HashSet<String>,
 ) {
     match expr {

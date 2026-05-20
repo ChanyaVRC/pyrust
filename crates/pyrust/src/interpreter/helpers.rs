@@ -1439,15 +1439,16 @@ pub(crate) fn collect_local_names(
     body: &[Stmt],
     global_names: &HashSet<String>,
     nonlocal_names: &HashSet<String>,
-) -> HashSet<String> {
-    let mut names = params.iter().map(|param| param.name.clone()).collect();
+) -> indexmap::IndexSet<String> {
+    let mut names: indexmap::IndexSet<String> =
+        params.iter().map(|param| param.name.clone()).collect();
     collect_local_names_from_block(body, &mut names, global_names, nonlocal_names);
     names
 }
 
 fn collect_local_names_from_block(
     body: &[Stmt],
-    names: &mut HashSet<String>,
+    names: &mut indexmap::IndexSet<String>,
     global_names: &HashSet<String>,
     nonlocal_names: &HashSet<String>,
 ) {
@@ -1619,7 +1620,7 @@ fn collect_local_names_from_block(
 /// and `**rest` in mappings).
 fn collect_pattern_names(
     pattern: &crate::ast::Pattern,
-    names: &mut std::collections::HashSet<String>,
+    names: &mut indexmap::IndexSet<String>,
     global_names: &std::collections::HashSet<String>,
     nonlocal_names: &std::collections::HashSet<String>,
 ) {
@@ -1919,7 +1920,7 @@ fn values_are_identical(a: &Value, b: &Value) -> bool {
 /// Walk an expression tree and collect names bound by walrus operators (`:=`).
 fn collect_walrus_targets_in_expr(
     expr: &Expr,
-    names: &mut std::collections::HashSet<String>,
+    names: &mut indexmap::IndexSet<String>,
     global_names: &std::collections::HashSet<String>,
     nonlocal_names: &std::collections::HashSet<String>,
 ) {
@@ -1995,7 +1996,7 @@ fn collect_walrus_targets_in_expr(
             use crate::ast::FStringPart;
             fn walk(
                 parts: &[FStringPart],
-                names: &mut std::collections::HashSet<String>,
+                names: &mut indexmap::IndexSet<String>,
                 global_names: &std::collections::HashSet<String>,
                 nonlocal_names: &std::collections::HashSet<String>,
             ) {
@@ -2016,7 +2017,7 @@ fn collect_walrus_targets_in_expr(
 
 fn collect_assign_target_names(
     target: &AssignTarget,
-    names: &mut std::collections::HashSet<String>,
+    names: &mut indexmap::IndexSet<String>,
     global_names: &std::collections::HashSet<String>,
     nonlocal_names: &std::collections::HashSet<String>,
 ) {
