@@ -56,6 +56,9 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_cse(insns, num_locals);
     let insns = pass_dead_code(insns);
     let insns = pass_dead_store_elim(insns, num_locals);
+    // Second run catches argument-prep moves that became dead after the first
+    // pass removed their consuming CallMemo (pure-call DCE cascade).
+    let insns = pass_dead_store_elim(insns, num_locals);
     let insns = pass_syncmod_sink(insns);
     let insns = pass_cross_jump(insns);
     let insns = pass_copy_prop(insns, num_locals);
@@ -2372,21 +2375,29 @@ fn pass_not_invert(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
 ///
 /// ## Control-flow caveat
 ///
-/// The scan walks `insns` linearly.  Any control-flow instruction (jump,
-/// branch, raise, return, exception setup, yield, tail-call) is treated as
-/// "read" — i.e. conservatively keep the candidate store.  This is required
-/// for correctness when the candidate store sits inside one arm of a
-/// branch (e.g. a ternary's `then`-arm): the unconditional jump that ends
-/// the arm skips the other arm's write, so the "next write" found by a
-/// linear scan does not actually kill the candidate value along the taken
-/// execution path.  Reads further down (after the branch merge) would
-/// otherwise see an unset register.
+/// The scan walks `insns` linearly.  Branching control-flow instructions
+/// (Jump, JumpIf*, ForIter, SetupExcept, Yield, etc.) are treated as "read"
+/// — i.e. conservatively keep the candidate store.  This is required for
+/// correctness when the candidate store sits inside one arm of a branch
+/// (e.g. a ternary's `then`-arm): the unconditional Jump that ends the arm
+/// skips the other arm's write, so the "next write" found by a linear scan
+/// does not actually kill the candidate value along the taken execution path.
+/// Reads further down (after the branch merge) would otherwise see an unset
+/// register.
+///
+/// *Terminating* instructions (Return, ReturnNone, Raise*, TailCall) have no
+/// fallthrough; after `insn_reads_reg` confirms they do not read `r`, we can
+/// safely conclude `r` is dead and return `false`.
 fn reg_is_read_before_next_write(insns: &[Insn], r: u32) -> bool {
     for insn in insns {
         if insn_reads_reg(insn, r) {
             return true;
         }
-        // Any control-flow disruption invalidates the linear "next write
+        // Terminating instructions: no fallthrough path can read r.
+        if is_terminator(insn) {
+            return false;
+        }
+        // Any other control-flow disruption invalidates the linear "next write
         // kills the value" reasoning — conservatively report a read so the
         // candidate store is preserved.
         if is_control_flow(insn) {
@@ -2408,6 +2419,24 @@ fn reg_is_read_before_next_write(insns: &[Insn], r: u32) -> bool {
         }
     }
     false
+}
+
+/// Returns `true` for instructions that unconditionally terminate the current
+/// execution path with no fallthrough: `Return`, `ReturnNone`, `Raise*`, and
+/// `TailCall`.  After checking `insn_reads_reg`, a terminator guarantees that
+/// no later instruction in the linear sequence can read the candidate register.
+fn is_terminator(insn: &Insn) -> bool {
+    use Insn::*;
+    matches!(
+        insn,
+        Return(..)
+            | ReturnNone
+            | RaiseAssert(..)
+            | RaiseValue(..)
+            | RaiseFrom(..)
+            | RaiseReRaise
+            | TailCall { .. }
+    )
 }
 
 /// Does `insn` change control flow non-trivially?  Used by
@@ -2451,11 +2480,14 @@ fn is_control_flow(insn: &Insn) -> bool {
 /// - Only temp registers (`>= num_locals`) are considered; named locals may
 ///   escape via closures.
 /// - Only *unconditionally pure* instructions are removed: `LoadConst`,
-///   `LoadNone`, `Move`, `CopyReg`.  Instructions that can raise exceptions
-///   (`LoadGlobal` → NameError; `BinOp`/`BinOpConst` → ValueError /
-///   ZeroDivisionError / etc.; `UnaryOp` → TypeError) are always preserved
-///   so that expression statements like `a << b` or `undefined_name` still
-///   propagate their errors instead of being silently dropped.
+///   `LoadNone`, `Move`, `CopyReg`, and `CallMemo`.  Instructions that can
+///   raise exceptions (`LoadGlobal` → NameError; `BinOp`/`BinOpConst` →
+///   ValueError / ZeroDivisionError / etc.; `UnaryOp` → TypeError) are always
+///   preserved so that expression statements like `a << b` or
+///   `undefined_name` still propagate their errors instead of being silently
+///   dropped.  `CallMemo` is emitted only for callees declared `#[pure]`
+///   (no observable side effects) in `pyrust_module!`, so dropping a dead
+///   `CallMemo` result is safe.
 /// - A back-edge guard (`slice_has_back_edge`) prevents removing a store that
 ///   is the initial value consumed by a later loop iteration.
 fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
@@ -2490,6 +2522,9 @@ fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             {
                 *r
             }
+            // Pure-callee calls: the compiler emits CallMemo only for #[pure]
+            // functions, so a dead result has no observable side effect.
+            Insn::CallMemo(r, _) if *r >= num_locals => *r,
             _ => continue,
         };
 
@@ -6167,6 +6202,73 @@ mod tests {
             "Return must survive: {:?}",
             out[2]
         );
+    }
+
+    #[test]
+    fn dse_drops_dead_call_memo() {
+        // CallMemo(r2, 0) — result r2 never read.  CallMemo is pure so it is safe
+        // to drop.
+        let insns = vec![
+            Insn::LoadGlobal(2, 0), // r2 = some_pure_fn (kept: LoadGlobal can raise)
+            Insn::CallMemo(2, 0),   // r2 = some_pure_fn() — result dead
+            Insn::ReturnNone,
+        ];
+        let out = pass_dead_store_elim(insns, 2);
+        // CallMemo dropped; LoadGlobal and ReturnNone kept.
+        assert_eq!(out.len(), 2, "dead CallMemo should be removed");
+        assert!(matches!(out[0], Insn::LoadGlobal(2, 0)));
+        assert!(matches!(out[1], Insn::ReturnNone));
+    }
+
+    #[test]
+    fn dse_drops_dead_call_memo_two_pass_cascade() {
+        // Two-pass test: CallMemo(r2, 1) is dead; after dropping it, the
+        // LoadConst(r3, 0) that was the argument also becomes dead.
+        // The second invocation of pass_dead_store_elim cleans it up.
+        let insns = vec![
+            Insn::LoadGlobal(2, 0), // r2 = abs (kept)
+            Insn::LoadConst(3, 0),  // r3 = 5 — arg for abs; dead after CallMemo dropped
+            Insn::CallMemo(2, 1),   // r2 = abs(5) — result dead
+            Insn::ReturnNone,
+        ];
+        // First pass drops CallMemo; second pass drops LoadConst.
+        let after_first = pass_dead_store_elim(insns, 2);
+        assert!(
+            !after_first.iter().any(|i| matches!(i, Insn::CallMemo(..))),
+            "first pass must drop CallMemo"
+        );
+        let after_second = pass_dead_store_elim(after_first, 2);
+        assert!(
+            !after_second
+                .iter()
+                .any(|i| matches!(i, Insn::LoadConst(..))),
+            "second pass must drop the now-dead LoadConst arg"
+        );
+    }
+
+    #[test]
+    fn dse_keeps_call_memo_whose_result_is_used() {
+        // CallMemo(r2, 0) whose result is returned — must NOT be dropped.
+        let insns = vec![
+            Insn::LoadGlobal(2, 0), // r2 = some_fn
+            Insn::CallMemo(2, 0),   // r2 = some_fn() — result used by Return
+            Insn::Return(2),
+        ];
+        let out = pass_dead_store_elim(insns, 2);
+        assert_eq!(out.len(), 3, "live CallMemo must not be removed");
+        assert!(matches!(out[1], Insn::CallMemo(2, 0)));
+    }
+
+    #[test]
+    fn dse_keeps_call_memo_local_reg() {
+        // CallMemo targeting a local register (r1 < num_locals=2) — must be kept.
+        let insns = vec![
+            Insn::LoadGlobal(1, 0), // r1 = fn
+            Insn::CallMemo(1, 0),   // r1 = fn() — local, must not be removed
+            Insn::ReturnNone,
+        ];
+        let out = pass_dead_store_elim(insns, 2);
+        assert_eq!(out.len(), 3, "CallMemo to local must not be removed");
     }
 
     // ── pass_exit_inline ─────────────────────────────────────────────────────
