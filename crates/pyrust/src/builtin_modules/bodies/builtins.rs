@@ -2209,6 +2209,15 @@ pyrust_module! {
     /// object.  Used as both a callable constructor and an `isinstance` target.
     /// <https://docs.python.org/3/library/functions.html#slice>
     fn slice(args) -> Result<Value> {
+        // CPython 3.12: slice() is positional-only; any keyword argument
+        // raises TypeError with the message "slice() takes no keyword
+        // arguments" regardless of which keyword was supplied (issue #848).
+        if args.iter().any(|a| a.name.is_some()) {
+            return Err(PyError::named(
+                "TypeError",
+                "slice() takes no keyword arguments".to_string(),
+            ));
+        }
         let (start, stop, step) = match args.len() {
             0 => {
                 return Err(PyError::named(
@@ -2555,7 +2564,7 @@ fn tuple_needs_interp(items: &[Value]) -> bool {
     })
 }
 
-fn hash_value_with_interp(interp: &mut crate::Interpreter, value: &Value) -> Result<i64> {
+pub(crate) fn hash_value_with_interp(interp: &mut crate::Interpreter, value: &Value) -> Result<i64> {
     match value.kind() {
         ValueKind::Tuple(items) => {
             // Fast path: if no element at any depth is a PyInstance, delegate
@@ -2571,6 +2580,44 @@ fn hash_value_with_interp(interp: &mut crate::Interpreter, value: &Value) -> Res
             for item in &items {
                 let item_hash = hash_value_with_interp(interp, item)?;
                 h = h.wrapping_mul(1000003).wrapping_add(item_hash);
+            }
+            Ok(h)
+        }
+        // Slices: CPython 3.12 makes slice hashable when all components are
+        // hashable.  `pyrust-builtins::component_hash` uses `Value::to_key()`
+        // which returns `None` for `PyInstance` (no interpreter access), so
+        // `hash(slice(inst, 2))` fails even though CPython 3.12 succeeds via
+        // identity hash.  Handle slices here with full interpreter dispatch so
+        // that each component can dispatch `__hash__` and produce the precise
+        // per-component "unhashable type: 'X'" message (issue #850).
+        ValueKind::BuiltinObject { ops, state }
+            if ops.type_name() == pyrust_builtins::slice::TYPE_NAME =>
+        {
+            let borrow = state.borrow();
+            let s = borrow
+                .downcast_ref::<pyrust_builtins::slice::SliceState>()
+                .expect("SliceOps: bad state");
+            let needs_interp = matches!(s.start.kind(), ValueKind::PyInstance(_))
+                || matches!(s.stop.kind(), ValueKind::PyInstance(_))
+                || matches!(s.step.kind(), ValueKind::PyInstance(_));
+            if !needs_interp {
+                // Fast path: delegate to the pure path (SliceOps::hash via
+                // hash_value) to keep dict-key hashes consistent with the
+                // SliceOps::to_key path used in value_to_pykey.
+                drop(borrow);
+                return hash_value(value);
+            }
+            // Clone components to release the borrow before mutable interp calls.
+            let (start, stop, step) = (s.start.clone(), s.stop.clone(), s.step.clone());
+            drop(borrow);
+            let hstart = hash_value_with_interp(interp, &start)?;
+            let hstop = hash_value_with_interp(interp, &stop)?;
+            let hstep = hash_value_with_interp(interp, &step)?;
+            // Mix the three component hashes using the same multiply-add
+            // accumulator as the Tuple arm.
+            let mut h: i64 = 3527539;
+            for &c in &[hstart, hstop, hstep] {
+                h = h.wrapping_mul(1000003).wrapping_add(c);
             }
             Ok(h)
         }
