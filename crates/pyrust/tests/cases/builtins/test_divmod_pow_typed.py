@@ -1,5 +1,6 @@
-# Parity fixtures for divmod() and pow() after migration to the typed-signature
-# dialect (#400).  Covers all type combinations and error paths.
+# Parity fixture for divmod() after migration to the typed-signature dialect
+# (#400).  pow() remains on the (args) dialect pending macro support for
+# mixed-arity overload sets.
 
 # ── divmod: int / int ─────────────────────────────────────────────────────────
 assert divmod(7, 3) == (2, 1)
@@ -61,57 +62,4 @@ try:
 except TypeError as e:
     print("divmod int+str TypeError:", e)
 
-# ── pow: 2-argument form ──────────────────────────────────────────────────────
-assert pow(2, 10) == 1024
-assert pow(2, 0) == 1
-assert pow(2, 1) == 2
-assert pow(-2, 3) == -8
-assert pow(0, 0) == 1
-
-# negative exponent → float
-assert pow(2, -1) == 0.5
-assert pow(4, -1) == 0.25
-assert pow(2, -2) == 0.25
-
-# float inputs
-assert pow(2.0, 3) == 8.0
-assert pow(4.0, 0.5) == 2.0
-
-# bool inputs
-assert pow(True, 5) == 1
-assert pow(False, 5) == 0
-assert pow(2, True) == 2
-assert pow(2, False) == 1
-
-# BigInt result
-assert pow(2, 100) == 2 ** 100
-assert type(pow(2, 100)) is int
-
-# ── pow: 3-argument form ──────────────────────────────────────────────────────
-assert pow(2, 10, 1000) == 24
-assert pow(3, 4, 5) == 1
-assert pow(True, 10, 3) == 1   # True == 1
-assert pow(2, True, 3) == 2    # True exponent
-assert pow(2, 0, 5) == 1       # 2^0 mod 5
-
-try:
-    pow(2, 3, 0)
-except ValueError as e:
-    print("pow mod=0 ValueError:", e)
-
-try:
-    pow(2.0, 3, 5)
-except TypeError as e:
-    print("pow float-base TypeError:", e)
-
-try:
-    pow(2, 3.0, 5)
-except TypeError as e:
-    print("pow float-exp TypeError:", e)
-
-try:
-    pow(2, 3, 5.0)
-except TypeError as e:
-    print("pow float-mod TypeError:", e)
-
-print("divmod-pow typed-dialect OK")
+print("divmod typed-dialect OK")

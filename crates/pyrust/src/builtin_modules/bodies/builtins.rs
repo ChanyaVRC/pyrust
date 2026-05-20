@@ -544,52 +544,53 @@ pyrust_module! {
 
     /// CPython: pow(base, exp[, mod]) — exponentiation, optionally modular.
     /// <https://docs.python.org/3/library/functions.html#pow>
-    ///
-    /// Migrated to the typed-signature dialect (#400) using a single-body
-    /// `Option<PyValue>` form for the optional third argument.  The body
-    /// dispatches on the actual value types, matching the logic that was
-    /// previously encoded in the `(args)` form but with the manual arity
-    /// check and arg extraction replaced by the macro's prelude.
-    ///
-    /// Two-arg form:
-    ///  - `int ** int` with non-negative exp → integer result (promoting to
-    ///    BigInt on overflow via `int_pow_promoting`).
-    ///  - `int ** int` with negative exp → `0.5` style float (CPython parity).
-    ///  - `bool ** int` → same as int (bool ⊆ int).
-    ///  - Everything else (including float inputs) → float.
-    ///
-    /// Three-arg form:
-    ///  - All three must be `int` or `bool`; `float` raises `TypeError`.
-    ///  - Modulus `0` raises `ValueError`.
-    ///  - Negative `exp` raises `ValueError`.
     #[pure]
-    fn pow(
-        #[positional_only] base: PyValue,
-        #[positional_only] exp: PyValue,
-        #[positional_only] #[default(None)] mod_: Option<PyValue>,
-    ) -> Result<Value> {
-        if let Some(mod_val) = mod_ {
-            // Three-argument form — all must be int or bool.
-            let base_i = extract_pow_int_arg(&base.0, "pow() 3rd argument not allowed unless all arguments are integers")?;
-            let exp_i  = extract_pow_int_arg(&exp.0,  "pow() 3rd argument not allowed unless all arguments are integers")?;
-            let mod_i  = extract_pow_int_arg(&mod_val.0, "pow() 3rd argument not allowed unless all arguments are integers")?;
-            if mod_i == 0 {
+    fn pow(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() < 2 || args.len() > 3 {
+            return Err(PyError::Runtime(format!("{FN_NAME}() takes 2 or 3 arguments")));
+        }
+        if args.len() == 3 {
+            let base = match args[0].value.kind() {
+                ValueKind::Int(v) => v,
+                ValueKind::Bool(b) => b as i64,
+                _ => return Err(PyError::named(
+                    "TypeError",
+                    "pow() 3-argument form requires integers".to_string(),
+                )),
+            };
+            let exp = match args[1].value.kind() {
+                ValueKind::Int(v) => v,
+                ValueKind::Bool(b) => b as i64,
+                _ => return Err(PyError::named(
+                    "TypeError",
+                    "pow() 3-argument form requires integers".to_string(),
+                )),
+            };
+            let modulus = match args[2].value.kind() {
+                ValueKind::Int(v) => v,
+                ValueKind::Bool(b) => b as i64,
+                _ => return Err(PyError::named(
+                    "TypeError",
+                    "pow() 3-argument form requires integers".to_string(),
+                )),
+            };
+            if modulus == 0 {
                 return Err(PyError::named(
                     "ValueError",
                     "pow() 3rd argument cannot be 0".to_string(),
                 ));
             }
-            if exp_i < 0 {
+            if exp < 0 {
                 return Err(PyError::named(
                     "ValueError",
                     "pow() 2nd argument cannot be negative when 3rd argument specified".to_string(),
                 ));
             }
-            let result = modpow_i64(base_i, exp_i as u64, mod_i);
+            let result = modpow_i64(base, exp as u64, modulus);
             Ok(Value::int(result))
         } else {
-            // Two-argument form.
-            match (base.0.kind(), exp.0.kind()) {
+            match (args[0].value.kind(), args[1].value.kind()) {
                 (ValueKind::Int(a), ValueKind::Int(b)) if b >= 0 => {
                     Ok(int_pow_promoting(a, b))
                 }
@@ -597,8 +598,8 @@ pyrust_module! {
                     Ok(int_pow_promoting(a as i64, b))
                 }
                 _ => {
-                    let a = value_to_float(&base.0, FN_NAME)?;
-                    let b = value_to_float(&exp.0, FN_NAME)?;
+                    let a = value_to_float(&args[0].value, FN_NAME)?;
+                    let b = value_to_float(&args[1].value, FN_NAME)?;
                     Ok(Value::float(a.powf(b)))
                 }
             }
@@ -2260,16 +2261,6 @@ fn pyint_to_f64(v: &crate::interpreter::builtin_args::PyInt<'_>) -> crate::error
                 )),
             }
         }
-    }
-}
-
-/// Extract an `i64` from an `int` or `bool` value for the `pow()` 3-argument
-/// form.  Any other type raises `TypeError` with the supplied `msg`.
-fn extract_pow_int_arg(v: &Value, msg: &str) -> crate::error::Result<i64> {
-    match v.kind() {
-        ValueKind::Int(n) => Ok(n),
-        ValueKind::Bool(b) => Ok(b as i64),
-        _ => Err(PyError::named("TypeError", msg.to_string())),
     }
 }
 
