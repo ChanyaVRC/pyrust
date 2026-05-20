@@ -219,7 +219,13 @@ impl Interpreter {
                     Kind::List => {
                         let args_vec: Vec<Value> = pos.drain(..).collect();
                         let args_vec = if method == "index" {
-                            self.resolve_seq_index_pos(args_vec)?
+                            match self.resolve_seq_index_pos(args_vec) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    self.bound_method_pos_buf = pos;
+                                    return Err(e);
+                                }
+                            }
                         } else {
                             args_vec
                         };
@@ -237,7 +243,13 @@ impl Interpreter {
                     ValueKind::Tuple(items) => {
                         let args_vec: Vec<Value> = pos.drain(..).collect();
                         let args_vec = if method == "index" {
-                            self.resolve_seq_index_pos(args_vec)?
+                            match self.resolve_seq_index_pos(args_vec) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    self.bound_method_pos_buf = pos;
+                                    return Err(e);
+                                }
+                            }
                         } else {
                             args_vec
                         };
@@ -261,14 +273,19 @@ impl Interpreter {
                         // class and dispatch with `self` prepended through the
                         // unified helper.
                         let class = Rc::clone(&inst.borrow().class);
-                        let method_val = lookup_class_attr(&class, method)
-                            .ok_or_else(|| PyError::named(
-                                "AttributeError",
-                                format!(
-                                    "'{}' object has no attribute '{method}'",
-                                    class.borrow().name,
-                                ),
-                            ))?;
+                        let method_val = match lookup_class_attr(&class, method) {
+                            Some(v) => v,
+                            None => {
+                                self.bound_method_pos_buf = pos;
+                                return Err(PyError::named(
+                                    "AttributeError",
+                                    format!(
+                                        "'{}' object has no attribute '{method}'",
+                                        class.borrow().name,
+                                    ),
+                                ));
+                            }
+                        };
                         // Reconstitute kwargs as ExpandedCallArgs (the
                         // bound_method dispatch split them into pos+kw maps).
                         // Drain pos so its capacity is preserved in the buf.
