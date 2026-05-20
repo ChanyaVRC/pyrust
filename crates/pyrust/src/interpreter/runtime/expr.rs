@@ -264,6 +264,23 @@ impl Interpreter {
         PyError::named("TypeError", format!("unsupported operand type(s) for {op}"))
     }
     fn eval_index(&mut self, target: Value, index: Value) -> Result<Value> {
+        // If the index is a `slice` object (built by `eval_slice` and passed
+        // into a `__getitem__` call, which then subscripts a built-in sequence
+        // with it), extract the bounds and delegate to `eval_slice` so that
+        // `self.data[slice_arg]` inside a `__getitem__` works correctly.
+        if let ValueKind::BuiltinObject { ops, state } = index.kind()
+            && ops.type_name() == pyrust_builtins::slice::TYPE_NAME
+        {
+            let borrow = state.borrow();
+            let s = borrow
+                .downcast_ref::<pyrust_builtins::slice::SliceState>()
+                .expect("SliceOps: bad state");
+            let lo = if s.start.is_none() { None } else { Some(s.start.clone()) };
+            let hi = if s.stop.is_none() { None } else { Some(s.stop.clone()) };
+            let st = if s.step.is_none() { None } else { Some(s.step.clone()) };
+            drop(borrow);
+            return self.eval_slice(target, lo, hi, st);
+        }
         // Handle Dict separately so the temporary `&IndexMap` from
         // `target.kind()` doesn't outlive the call into `dict_lookup`
         // (which may run user `__eq__` that mutates the dict — see the
@@ -2110,16 +2127,49 @@ impl Interpreter {
     }
 
     fn eval_slice(&mut self, target: Value, lo: Option<Value>, hi: Option<Value>, st: Option<Value>) -> Result<Value> {
+        // PyInstance: dispatch __getitem__ with a slice object.
+        if let ValueKind::PyInstance(inst) = target.kind() {
+            let inst_rc = Rc::clone(inst);
+            let class = Rc::clone(&inst_rc.borrow().class);
+            if let Some(method_val) = lookup_class_attr(&class, "__getitem__") {
+                let slice_val = pyrust_builtins::slice::make_slice(lo, hi, st);
+                return invoke_class_method(
+                    self,
+                    method_val,
+                    Value::py_instance(inst_rc),
+                    &[ExpandedCallArg {
+                        name: None,
+                        value: slice_val,
+                    }],
+                );
+            }
+            return Err(PyError::named(
+                "TypeError",
+                format!("'{}' object is not subscriptable", class.borrow().name),
+            ));
+        }
+
         let len = match target.kind() {
             ValueKind::List(items) => items.len() as i64,
+            ValueKind::Tuple(items) => items.len() as i64,
             ValueKind::Str(s) => s.chars().count() as i64,
-            _ => return Err(PyError::Runtime("object is not sliceable".to_string())),
+            ValueKind::Bytes(rc) => rc.len() as i64,
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "'{}' object is not subscriptable",
+                        pyrust_core::builtin_type_name(&target)
+                    ),
+                ));
+            }
         };
         let (start, end, step) = Self::resolve_slice_bounds(len, lo.as_ref(), hi.as_ref(), st.as_ref())?;
         let indices = Self::slice_target_indices(len, start, end, step);
 
         match target.kind() {
             ValueKind::List(items) => Ok(Value::list(indices.into_iter().map(|ix| items[ix].clone()).collect::<Vec<Value>>())),
+            ValueKind::Tuple(items) => Ok(Value::tuple(indices.into_iter().map(|ix| items[ix].clone()).collect::<Vec<Value>>())),
             ValueKind::Str(s) => {
                 let chars: Vec<char> = s.chars().collect();
                 let mut out = String::new();
@@ -2127,6 +2177,9 @@ impl Interpreter {
                     out.push(chars[ix]);
                 }
                 Ok(Value::string(out))
+            }
+            ValueKind::Bytes(rc) => {
+                Ok(Value::bytes(indices.into_iter().map(|ix| rc[ix]).collect()))
             }
             _ => unreachable!(),
         }

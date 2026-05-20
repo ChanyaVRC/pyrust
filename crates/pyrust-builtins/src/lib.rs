@@ -16,6 +16,7 @@ pub mod mutable_sequence;
 pub mod property;
 pub mod sequence;
 pub mod set;
+pub mod slice;
 pub mod string;
 pub mod tuple;
 
@@ -38,6 +39,7 @@ pub fn lookup_ops(type_name: &str) -> Option<&'static dyn pyrust_core::BuiltinTy
         cached_property::TYPE_NAME => Some(cached_property::CACHED_PROPERTY_OPS),
         bound_method::TYPE_NAME => Some(bound_method::BOUND_METHOD_OPS),
         mapping_proxy::TYPE_NAME => Some(mapping_proxy::MAPPING_PROXY_OPS),
+        slice::TYPE_NAME => Some(slice::SLICE_OPS),
         _ => None,
     }
 }

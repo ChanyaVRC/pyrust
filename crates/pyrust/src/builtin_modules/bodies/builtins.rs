@@ -2204,6 +2204,34 @@ pyrust_module! {
         };
         Ok(Value::bool_(is_callable))
     }
+
+    /// CPython: slice(stop) / slice(start, stop[, step]) — construct a slice
+    /// object.  Used as both a callable constructor and an `isinstance` target.
+    /// <https://docs.python.org/3/library/functions.html#slice>
+    fn slice(args) -> Result<Value> {
+        let (start, stop, step) = match args.len() {
+            0 => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "slice expected at least 1 argument, got 0".to_string(),
+                ));
+            }
+            1 => (None, Some(args[0].value.clone()), None),
+            2 => (Some(args[0].value.clone()), Some(args[1].value.clone()), None),
+            3 => (
+                Some(args[0].value.clone()),
+                Some(args[1].value.clone()),
+                if args[2].value.is_none() { None } else { Some(args[2].value.clone()) },
+            ),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("slice expected at most 3 arguments, got {}", args.len()),
+                ));
+            }
+        };
+        Ok(pyrust_builtins::slice::make_slice(start, stop, step))
+    }
 }
 
 /// Integer divmod shared by all `int`/`bool` overload combinations.

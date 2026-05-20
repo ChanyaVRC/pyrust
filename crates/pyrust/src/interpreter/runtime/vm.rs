@@ -1024,7 +1024,19 @@ impl Interpreter {
                             DictLookup(Value),
                             Miss,
                         }
-                        let fast = if let Some(ov) = regs[*obj as usize].as_some() {
+                        // If the index is a runtime `slice` object (produced
+                        // by `eval_slice` and passed into a user `__getitem__`
+                        // that then subscripts a built-in sequence), fall
+                        // through to `eval_index` which handles slice-object
+                        // detection and dispatches back to `eval_slice`.
+                        let is_runtime_slice = matches!(
+                            idx_val.kind(),
+                            ValueKind::BuiltinObject { ops, .. }
+                                if ops.type_name() == pyrust_builtins::slice::TYPE_NAME
+                        );
+                        let fast = if is_runtime_slice {
+                            FastResult::Miss
+                        } else if let Some(ov) = regs[*obj as usize].as_some() {
                             match ov.kind() {
                                 ValueKind::List(items) => {
                                     let i = vm_try!(normalize_index(&idx_val, items.len(), "list"));
