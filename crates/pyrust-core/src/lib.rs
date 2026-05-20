@@ -71,8 +71,15 @@ thread_local! {
 /// **Only call this for immutable, constant-pool strings.**  Never intern
 /// strings produced by concatenation, `input()`, or user code — those are
 /// not reused and polluting the table wastes memory.
+///
+/// Strings longer than `INTERN_MAX_BYTES` are not interned (identity is not
+/// preserved across loads of the same long constant).  Use
+/// [`intern_string_value`] when a pre-built `Value::string` is already
+/// available to avoid a redundant allocation on the long-string path.
 pub fn intern_string(s: &str) -> Value {
     if s.len() > INTERN_MAX_BYTES {
+        // Long string: interning would bloat the table without meaningful
+        // reuse.  Caller must allocate a fresh Value here.
         return Value::string(s);
     }
     INTERN.with(|cache| {
@@ -81,6 +88,39 @@ pub fn intern_string(s: &str) -> Value {
             return v.clone();
         }
         let v = Value::string(s);
+        if map.len() < INTERN_MAX_ENTRIES {
+            map.insert(s.into(), v.clone());
+        }
+        v
+    })
+}
+
+/// Like [`intern_string`] but takes a pre-built `Value::string` to avoid
+/// a redundant allocation on the long-string fast-exit path.
+///
+/// - Short strings (≤ [`INTERN_MAX_BYTES`]): looked up / inserted in the
+///   intern table; the pre-built value is used as the initial allocation
+///   if the string is not yet cached.
+/// - Long strings (> `INTERN_MAX_BYTES`): `val` is returned as-is — no
+///   new `Value::string` allocation is needed (issue #845).
+///
+/// **Call site contract**: `val` must already be a `Value::string` whose
+/// content equals `s`.  The const-pool `LoadConst` path satisfies this
+/// by passing both the borrowed `&str` from `cv.kind()` and `cv` itself.
+pub fn intern_string_value(s: &str, val: &Value) -> Value {
+    if s.len() > INTERN_MAX_BYTES {
+        // Long string: not interned; return a cheap clone of the existing
+        // const-pool Value rather than allocating a second copy.
+        return val.clone();
+    }
+    INTERN.with(|cache| {
+        let mut map = cache.borrow_mut();
+        if let Some(v) = map.get(s) {
+            return v.clone();
+        }
+        // Use the caller's pre-built Value as the canonical copy so the
+        // const-pool allocation doubles as the intern-table entry.
+        let v = val.clone();
         if map.len() < INTERN_MAX_ENTRIES {
             map.insert(s.into(), v.clone());
         }

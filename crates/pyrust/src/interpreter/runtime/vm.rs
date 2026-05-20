@@ -754,7 +754,10 @@ impl Interpreter {
                     let cv = pool_get!(code.consts, *idx, "const");
                     regs[*dst as usize] = match cv.kind() {
                         ValueKind::Int(n) => Value::int(n),
-                        ValueKind::Str(s) => intern_string(s),
+                        // Use intern_string_value so that long strings (> INTERN_MAX_BYTES)
+                        // are returned as a cheap clone of the const-pool Value rather
+                        // than allocating a second copy via Value::string(s) (issue #845).
+                        ValueKind::Str(s) => intern_string_value(s, cv),
                         _ => cv.clone(),
                     };
                 }
@@ -1424,7 +1427,30 @@ impl Interpreter {
                         }
                     }
                 }
-                Insn::DeleteLocal(reg) => {
+                Insn::DeleteLocal(reg, name_idx) => {
+                    // Raise NameError / UnboundLocalError when deleting an
+                    // unbound fastlocal, matching CPython semantics (issue #846).
+                    // Skip the check (name_idx == u16::MAX) for compiler-
+                    // guaranteed-bound deletions such as PEP 3110
+                    // `except E as var:` cleanup.
+                    if *name_idx != u16::MAX && regs[*reg as usize].is_unset() {
+                        let name = pool_get!(code.names, *name_idx, "name");
+                        let is_module_scope = self.env.borrow().parent.is_none();
+                        if is_module_scope {
+                            vm_try!(Err(PyError::named(
+                                "NameError",
+                                format!("name '{}' is not defined", name),
+                            )));
+                        } else {
+                            vm_try!(Err(PyError::named(
+                                "UnboundLocalError",
+                                format!(
+                                    "cannot access local variable '{}' where it is not associated with a value",
+                                    name
+                                ),
+                            )));
+                        }
+                    }
                     regs[*reg as usize] = Value::unset();
                 }
                 Insn::SyncModuleGlobal(reg, name_idx) => {
@@ -1442,10 +1468,13 @@ impl Interpreter {
                 Insn::DeleteModuleGlobal(name_idx) => {
                     let name = pool_get!(code.names, *name_idx, "name");
                     module_env(&self.env).borrow_mut().values.remove(name);
-                    if self.globals_accessed {
-                        let _ = self.module_globals_dict
-                            .dict_shift_remove(&PyKey::Str(name.to_string()));
-                    }
+                    // Always remove from module_globals_dict regardless of
+                    // globals_accessed: pre-seeded dunders (__name__, __doc__,
+                    // __builtins__) live in the dict unconditionally and must
+                    // be cleared when deleted, otherwise they can resurface
+                    // through a subsequent globals() lookup (issue #846).
+                    let _ = self.module_globals_dict
+                        .dict_shift_remove(&PyKey::Str(name.to_string()));
                 }
 
                 // ── Control flow ─────────────────────────────────────────
