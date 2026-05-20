@@ -2738,18 +2738,23 @@ fn pass_syncmod_sink(insns: Vec<Insn>) -> Vec<Insn> {
         return insns;
     }
 
-    // Collect back-edges: (header, latch).
-    let mut back_edges: Vec<(usize, usize)> = Vec::new();
+    // Collect back-edges: (header, latch).  Group by header and use the maximum
+    // latch so that `continue` statements (which compile to Jump back to the same
+    // header) don't truncate the loop body we analyse.
+    let mut header_to_latch: HashMap<usize, usize> = HashMap::new();
     for (i, insn) in insns.iter().enumerate() {
         if let Insn::Jump(k) = insn {
             let target = (i as i64 + 1 + *k as i64) as usize;
             if target <= i {
-                back_edges.push((target, i));
+                let entry = header_to_latch.entry(target).or_insert(i);
+                if i > *entry {
+                    *entry = i;
+                }
             }
         }
     }
 
-    if back_edges.is_empty() {
+    if header_to_latch.is_empty() {
         return insns;
     }
 
@@ -2758,7 +2763,7 @@ fn pass_syncmod_sink(insns: Vec<Insn>) -> Vec<Insn> {
     // Map: exit_label → Vec of SyncModuleGlobal insns to insert before it.
     let mut sink_at: HashMap<usize, Vec<Insn>> = HashMap::new();
 
-    'outer: for (header, latch) in back_edges {
+    'outer: for (header, latch) in header_to_latch {
         // Skip loops with exception handling or any call-like instruction — these
         // could change globals_accessed or read the globals dict.
         let has_blocker = insns[header..=latch].iter().any(|i| {
@@ -2774,6 +2779,23 @@ fn pass_syncmod_sink(insns: Vec<Insn>) -> Vec<Insn> {
             )
         });
         if has_blocker {
+            continue;
+        }
+
+        // Skip if any call-like instruction appears BEFORE the loop header.  A
+        // pre-loop call (e.g. `globals()`) could have already set globals_accessed
+        // to true, which would make the sunk SyncModuleGlobal produce stale dict
+        // values inside the loop body.
+        let has_pre_loop_call = insns[..header].iter().any(|i| {
+            matches!(
+                i,
+                Insn::Call(_, _)
+                    | Insn::CallMemo(_, _)
+                    | Insn::CallMethod { .. }
+                    | Insn::CallMethodExpanded { .. }
+            )
+        });
+        if has_pre_loop_call {
             continue;
         }
 
@@ -6664,6 +6686,89 @@ mod tests {
         assert_eq!(
             total_syncs, 2,
             "SyncModuleGlobal should appear at both exits: {:?}",
+            out
+        );
+    }
+
+    #[test]
+    fn syncmod_sink_not_applied_with_pre_loop_call() {
+        use crate::ast::BinaryOp;
+        // A Call before the loop header means globals_accessed may already be true.
+        // The sink must NOT be applied in this case.
+        //
+        //  [0] Call(1, 0)                              ← pre-loop call (e.g. globals())
+        //  [1] CmpJumpIfFalseConst(r0, Lt, 0, k=3)    ← header, exit at 5
+        //  [2] BinOpImm(r0, r0, Add, 1)
+        //  [3] SyncModuleGlobal(r0, 0)
+        //  [4] Jump(-4)                                ← back-edge to 1
+        let insns = vec![
+            Insn::Call(1, 0),
+            Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 3),
+            Insn::BinOpImm(0, 0, BinaryOp::Add, 1),
+            Insn::SyncModuleGlobal(0, 0),
+            Insn::Jump(-4),
+        ];
+        let out = pass_syncmod_sink(insns);
+        assert_eq!(
+            out.len(),
+            5,
+            "should not change when Call precedes loop header"
+        );
+        assert!(
+            matches!(out[3], Insn::SyncModuleGlobal(0, 0)),
+            "SyncModuleGlobal should remain in loop body"
+        );
+    }
+
+    #[test]
+    fn syncmod_sink_continue_loop_uses_max_latch() {
+        use crate::ast::BinaryOp;
+        // A loop with a `continue` compiles to two Jump-back edges to the same
+        // header.  The pass must analyse the full range [header..=max_latch].
+        //
+        //  [0] CmpJumpIfFalseConst(r0, Lt, 0, k=6)    ← header, exit at 7
+        //  [1] BinOpImm(r0, r0, Add, 1)
+        //  [2] SyncModuleGlobal(r0, 0)
+        //  [3] CmpJumpIfFalseConst(r0, Lt, 1, k=1)    ← inner-if: continue (jump to 0)
+        //  [4] Jump(-5)                                ← continue: 4+1-5=0 ✓ latch=4
+        //  [5] BinOpImm(r0, r0, Add, 1)
+        //  [6] Jump(-7)                                ← main latch: 6+1-7=0 ✓ latch=6
+        //  [7] ReturnNone
+        //
+        // Two back-edges: (0, 4) and (0, 6).  max_latch = 6.
+        // The body [0..=6] has no blocker and no pre-loop call → sink is safe.
+        // SyncModuleGlobal at pos 2 should be removed and sunk to exit at 7.
+        let insns = vec![
+            Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 6),
+            Insn::BinOpImm(0, 0, BinaryOp::Add, 1),
+            Insn::SyncModuleGlobal(0, 0),
+            Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 1, 1),
+            Insn::Jump(-5),
+            Insn::BinOpImm(0, 0, BinaryOp::Add, 1),
+            Insn::Jump(-7),
+            Insn::ReturnNone,
+        ];
+        let out = pass_syncmod_sink(insns);
+        // SyncModuleGlobal should appear exactly once (at the exit before ReturnNone).
+        let total_syncs = out
+            .iter()
+            .filter(|i| matches!(i, Insn::SyncModuleGlobal(_, _)))
+            .count();
+        assert_eq!(
+            total_syncs, 1,
+            "exactly one SyncModuleGlobal after sink: {:?}",
+            out
+        );
+        // It must appear in the last two instructions (sunk before ReturnNone).
+        let sync_in_exit_region: usize = out
+            .iter()
+            .rev()
+            .take(2)
+            .filter(|i| matches!(i, Insn::SyncModuleGlobal(_, _)))
+            .count();
+        assert_eq!(
+            sync_in_exit_region, 1,
+            "SyncModuleGlobal should be sunk to exit region: {:?}",
             out
         );
     }
