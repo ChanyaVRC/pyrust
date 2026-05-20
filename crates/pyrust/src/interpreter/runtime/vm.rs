@@ -205,6 +205,19 @@ fn int_cmp(a: i64, b: i64, op: BinaryOp) -> Option<bool> {
     }
 }
 
+#[inline(always)]
+fn str_cmp(a: &str, b: &str, op: BinaryOp) -> Option<bool> {
+    match op {
+        BinaryOp::Eq => Some(a == b),
+        BinaryOp::Ne => Some(a != b),
+        BinaryOp::Lt => Some(a < b),
+        BinaryOp::Le => Some(a <= b),
+        BinaryOp::Gt => Some(a > b),
+        BinaryOp::Ge => Some(a >= b),
+        _ => None,
+    }
+}
+
 /// One iteration step for `ForCount*` opcodes — dedupes the three
 /// near-identical opcode arms (`ForCountReg`, `ForCountConst`,
 /// `ForCountConstInline`) which differ only in where their `stop` /
@@ -663,6 +676,7 @@ impl Interpreter {
         let num_locals = code.num_locals;
 
         let mut iters: Vec<Option<IterState>> = iters_init;
+        let mut iter_next_cache: Vec<Option<Value>> = vec![None; iters.len()];
         let mut exc_handlers: Vec<usize> = exc_handlers_init;
         let mut pc: usize = start_pc;
         // Counts self-tail-call iterations so that infinite tail recursion
@@ -1559,10 +1573,16 @@ impl Interpreter {
                 }
                 Insn::CmpJumpIfFalseConst(lhs, op, const_idx, offset) => {
                     let cv = pool_get!(code.consts, *const_idx, "const");
-                    if let (Some(a), Some(b)) = (
-                        regs[*lhs as usize].as_int(),
-                        cv.as_int(),
-                    ) && let Some(cond) = int_cmp(a, b, *op) {
+                    if let (Some(a), Some(b)) = (regs[*lhs as usize].as_int(), cv.as_int())
+                        && let Some(cond) = int_cmp(a, b, *op)
+                    {
+                        if !cond { pc = jump_pc!(*offset); }
+                        continue;
+                    }
+                    let lv = &regs[*lhs as usize];
+                    if let (ValueKind::Str(ls), ValueKind::Str(rs)) = (lv.kind(), cv.kind())
+                        && let Some(cond) = str_cmp(ls, rs, *op)
+                    {
                         if !cond { pc = jump_pc!(*offset); }
                         continue;
                     }
@@ -1572,10 +1592,16 @@ impl Interpreter {
                 }
                 Insn::CmpJumpIfTrueConst(lhs, op, const_idx, offset) => {
                     let cv = pool_get!(code.consts, *const_idx, "const");
-                    if let (Some(a), Some(b)) = (
-                        regs[*lhs as usize].as_int(),
-                        cv.as_int(),
-                    ) && let Some(cond) = int_cmp(a, b, *op) {
+                    if let (Some(a), Some(b)) = (regs[*lhs as usize].as_int(), cv.as_int())
+                        && let Some(cond) = int_cmp(a, b, *op)
+                    {
+                        if cond { pc = jump_pc!(*offset); }
+                        continue;
+                    }
+                    let lv = &regs[*lhs as usize];
+                    if let (ValueKind::Str(ls), ValueKind::Str(rs)) = (lv.kind(), cv.kind())
+                        && let Some(cond) = str_cmp(ls, rs, *op)
+                    {
                         if cond { pc = jump_pc!(*offset); }
                         continue;
                     }
@@ -2187,6 +2213,7 @@ impl Interpreter {
                         }
                     };
                     iters[*slot as usize] = Some(state);
+                    iter_next_cache[*slot as usize] = None;
                 }
                 Insn::ForIter(dst, slot, offset) => {
                     #[allow(clippy::collapsible_match)]
@@ -2291,10 +2318,16 @@ impl Interpreter {
                                     }
                                 } else if let ValueKind::PyInstance(inst) = iter_val.kind() {
                                     let inst_rc = Rc::clone(inst);
-                                    let class = Rc::clone(&inst_rc.borrow().class);
-                                    if let Some(method_val) =
-                                        lookup_class_attr(&class, "__next__")
-                                    {
+                                    let cached = &iter_next_cache[*slot as usize];
+                                    let method_val = if let Some(mv) = cached {
+                                        Some(mv.clone())
+                                    } else {
+                                        let class = Rc::clone(&inst_rc.borrow().class);
+                                        let mv = lookup_class_attr(&class, "__next__");
+                                        iter_next_cache[*slot as usize] = mv.clone();
+                                        mv
+                                    };
+                                    if let Some(method_val) = method_val {
                                         Some(invoke_class_method(
                                             self,
                                             method_val,
