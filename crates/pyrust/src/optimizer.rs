@@ -4242,7 +4242,15 @@ fn pass_linear_loop_fold(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn>
         return insns;
     }
 
-    let mut jump_targets: HashSet<usize> = HashSet::new();
+    // All jump targets — used for the backward acc-init scan to detect
+    // multiple incoming edges to any instruction in the scan range.
+    let mut all_jump_targets: HashSet<usize> = HashSet::new();
+    // Forward-only jump targets — used for the loop-pattern guard.
+    // The loop's own back-edge Jump at [h+2] → [h] is a *backward* jump;
+    // excluding it prevents the guard from incorrectly blocking the fold
+    // because [h] (the ForCountConstInline header) is always targeted by
+    // the back-edge and would otherwise fail the `contains(&h)` check.
+    let mut fwd_jump_targets: HashSet<usize> = HashSet::new();
     for (i, insn) in insns.iter().enumerate() {
         let k: Option<i32> = match insn {
             Insn::Jump(k) => Some(*k),
@@ -4263,7 +4271,11 @@ fn pass_linear_loop_fold(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn>
         if let Some(k) = k {
             let t = i as i64 + 1 + k as i64;
             if t >= 0 && (t as usize) < n {
-                jump_targets.insert(t as usize);
+                let t = t as usize;
+                all_jump_targets.insert(t);
+                if t > i {
+                    fwd_jump_targets.insert(t);
+                }
             }
         }
     }
@@ -4302,11 +4314,13 @@ fn pass_linear_loop_fold(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn>
             continue;
         }
 
-        // None of h-1, h, h+1, h+2 may be jump targets.
-        if jump_targets.contains(&(h - 1))
-            || jump_targets.contains(&h)
-            || jump_targets.contains(&(h + 1))
-            || jump_targets.contains(&(h + 2))
+        // None of h-1, h, h+1, h+2 may be forward-jump targets.
+        // (Backward jumps are excluded because the loop's own back-edge
+        // is a backward Jump at [h+2] → [h]; that is expected and allowed.)
+        if fwd_jump_targets.contains(&(h - 1))
+            || fwd_jump_targets.contains(&h)
+            || fwd_jump_targets.contains(&(h + 1))
+            || fwd_jump_targets.contains(&(h + 2))
         {
             continue;
         }
@@ -4331,7 +4345,7 @@ fn pass_linear_loop_fold(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn>
         // means the folding is unsafe.
         let mut acc_init: Option<i64> = None;
         for scan in (0..h - 1).rev() {
-            if jump_targets.contains(&scan) {
+            if all_jump_targets.contains(&scan) {
                 continue 'outer; // can't guarantee single entry path
             }
             written_tmp.clear();
