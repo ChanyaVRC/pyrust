@@ -52,7 +52,7 @@ pub struct FnProto {
     pub annotation_keys: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Insn {
     /// R[dst] = consts[idx]
     LoadConst(Reg, u16),
