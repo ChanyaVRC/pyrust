@@ -60,6 +60,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_trivial_nop(insns);
     let insns = pass_self_tail_call(insns);
     let insns = pass_forcount_const_inline(insns, &consts);
+    let insns = pass_loadnone_merge(insns);
     let (insns, consts) = pass_compact_consts(insns, consts);
 
     FnCode {
@@ -1309,6 +1310,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         LoadConst(..)
         | LoadGlobal(..)
         | LoadNone(..)
+        | LoadNoneRange { .. }
         | LoadExc(..)
         | ImportModule(..)
         | DeleteName(..)
@@ -1797,6 +1799,11 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | DeleteLocal(r) => {
             written.insert(*r);
         }
+        LoadNoneRange { start, count } => {
+            for i in 0..*count as u32 {
+                written.insert(start + i);
+            }
+        }
         CallMethod { dst, .. } | CallMethodExpanded { dst, .. } | Yield { dst, .. } => {
             written.insert(*dst);
         }
@@ -2049,6 +2056,11 @@ fn reg_is_read_before_next_write(insns: &[Insn], r: u32) -> bool {
         {
             return false;
         }
+        if let Insn::LoadNoneRange { start, count } = insn {
+            if r >= *start && r < start + *count as u32 {
+                return false;
+            }
+        }
     }
     false
 }
@@ -2257,6 +2269,10 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 let _ = (base, n);
                 None
             }
+            Insn::LoadNoneRange { .. } => {
+                // Handled separately below (range eviction); use sentinel None here.
+                None
+            }
             _ => writable_dst(&insn),
         };
 
@@ -2265,7 +2281,20 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         // register is being overwritten (their computed value is now stale).
         // We do this BEFORE the CSE match check so the new entry (if any) is
         // not immediately invalidated by its own write.
-        if let Insn::Unpack(base, _, n) = &insn {
+        if let Insn::LoadNoneRange { start, count } = &insn {
+            let lo = *start;
+            let hi = start + *count as u32;
+            table.retain(|k, prev_dst| {
+                if *prev_dst >= lo && *prev_dst < hi {
+                    return false;
+                }
+                match k {
+                    CseKey::LoadConst(_) => true,
+                    CseKey::BinOpConst(src, _, _) => *src < lo || *src >= hi,
+                    CseKey::UnaryOp(_, src) => *src < lo || *src >= hi,
+                }
+            });
+        } else if let Insn::Unpack(base, _, n) = &insn {
             let lo = *base;
             let hi = base + n;
             table.retain(|k, prev_dst| {
@@ -2747,6 +2776,12 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         if let Insn::LoadConst(dst, _) = &insn {
             copies.retain(|k, v| *k != *dst && *v != *dst);
         }
+        // LoadNoneRange writes start..start+count; kill the entire range.
+        if let Insn::LoadNoneRange { start, count } = &insn {
+            let lo = *start;
+            let hi = start + *count as u32;
+            copies.retain(|k, v| (*k < lo || *k >= hi) && (*v < lo || *v >= hi));
+        }
         // Unpack writes dst..dst+n; kill the entire range.
         if let Insn::Unpack(dst, _, n) = &insn {
             let lo = *dst;
@@ -3017,6 +3052,124 @@ fn pass_forcount_const_inline(insns: Vec<Insn>, consts: &[Value]) -> Vec<Insn> {
             other => other,
         })
         .collect()
+}
+
+// ─── LoadNone merging ──────────────────────────────────────────────────────────
+
+/// Merge runs of consecutive `LoadNone(r), LoadNone(r+1), ..., LoadNone(r+N-1)` into
+/// a single `LoadNoneRange { start: r, count: N }` instruction.
+///
+/// Only contiguous ascending register sequences are merged, AND the run must be
+/// free of any jump targets in its interior — a jump to the middle of a run
+/// cannot be redirected to the first instruction without changing semantics.
+/// A run of 1 is left as a bare `LoadNone` (no gain from wrapping).  If a run
+/// exceeds 255 registers, it is split into multiple `LoadNoneRange` instructions.
+///
+/// ## Why this helps
+///
+/// Function entry emits one `LoadNone` per local variable.  A function with N
+/// locals emits N separate VM dispatches through the giant `match insn`.
+/// `LoadNoneRange` collapses those N dispatches into one tight `for` loop that
+/// Rust/LLVM can lower to a memset-style fill.
+///
+/// ## Jump-offset correctness
+///
+/// When the pass merges a run of K instructions into one, it uses the `compact`
+/// helper to rewrite all subsequent jump offsets automatically.  The `keep`
+/// vector marks which instructions to retain: the first instruction in a run is
+/// replaced with a `LoadNoneRange`; the rest are marked `keep = false`.
+fn pass_loadnone_merge(insns: Vec<Insn>) -> Vec<Insn> {
+    let n = insns.len();
+    if n == 0 {
+        return insns;
+    }
+
+    // Pre-pass: collect all instruction indices that are jump targets.
+    // An instruction that is a jump target cannot be swallowed into the middle of
+    // a LoadNoneRange (the range would be misinterpreted as starting earlier).
+    let mut jump_targets: HashSet<usize> = HashSet::new();
+    for (i, insn) in insns.iter().enumerate() {
+        let k: Option<i32> = match insn {
+            Insn::Jump(k) => Some(*k),
+            Insn::JumpIfFalse(_, k)
+            | Insn::JumpIfTrue(_, k)
+            | Insn::CmpJumpIfFalse(_, _, _, k)
+            | Insn::CmpJumpIfTrue(_, _, _, k)
+            | Insn::CmpJumpIfFalseConst(_, _, _, k)
+            | Insn::CmpJumpIfTrueConst(_, _, _, k)
+            | Insn::ForIter(_, _, k)
+            | Insn::ForCountReg(_, _, _, _, k)
+            | Insn::ForCountConst(_, _, _, _, k)
+            | Insn::ForCountConstInline(_, _, _, _, k)
+            | Insn::SetupExcept(k)
+            | Insn::MatchExcept(_, k) => Some(*k),
+            _ => None,
+        };
+        if let Some(k) = k {
+            let target = (i as i64 + 1 + k as i64) as usize;
+            if target < n {
+                jump_targets.insert(target);
+            }
+        }
+    }
+
+    let mut transformed = insns;
+    let mut keep = vec![true; n];
+
+    let mut i = 0;
+    while i < n {
+        if let Insn::LoadNone(start) = transformed[i] {
+            // Extend the run as long as:
+            // 1. The next instruction is LoadNone(run_end + 1) (contiguous ascending).
+            // 2. The next instruction is NOT a jump target (cannot be subsumed).
+            let mut run_end = start;
+            let mut j = i + 1;
+            while j < n && !jump_targets.contains(&j) {
+                if let Insn::LoadNone(r) = transformed[j] {
+                    if r == run_end + 1 {
+                        run_end = r;
+                        j += 1;
+                        continue;
+                    }
+                }
+                break;
+            }
+
+            let count = (run_end - start + 1) as usize; // >= 1
+            if count == 1 {
+                // Single LoadNone — no merge beneficial; leave as-is.
+                i += 1;
+                continue;
+            }
+
+            // Replace the first instruction with LoadNoneRange(s) and mark the
+            // rest of the run for removal via `compact`.
+            // If count > 255, split into batches; each batch occupies one slot
+            // from the run (the first, then second, …).
+            let mut base = start;
+            let mut remaining = count;
+            let mut slot = i; // which position in the run gets the next instruction
+            while remaining > 0 {
+                let batch = remaining.min(u8::MAX as usize) as u8;
+                transformed[slot] = Insn::LoadNoneRange {
+                    start: base,
+                    count: batch,
+                };
+                base += batch as u32;
+                remaining -= batch as usize;
+                slot += 1;
+            }
+            // Mark the tail of the run (slot..j) as dead.
+            for dead in slot..j {
+                keep[dead] = false;
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+
+    compact(transformed, &keep)
 }
 
 /// 3. **Compact**: rebuild `consts` retaining only referenced values.
@@ -5727,6 +5880,28 @@ elif x == 2:
         assert!(
             matches!(consts[ci as usize].kind(), crate::value::ValueKind::Int(10)),
             "combined constant should be 10"
+    // ── pass_loadnone_merge ───────────────────────────────────────────────────
+
+    #[test]
+    fn loadnone_merge_fuses_consecutive_run() {
+        // LoadNone(0), LoadNone(1), LoadNone(2), Return(0)
+        // → LoadNoneRange { start: 0, count: 3 }, Return(0)
+        let insns = vec![
+            Insn::LoadNone(0),
+            Insn::LoadNone(1),
+            Insn::LoadNone(2),
+            Insn::ReturnNone,
+        ];
+        let out = pass_loadnone_merge(insns);
+        assert_eq!(
+            out.len(),
+            2,
+            "three consecutive LoadNone should become one LoadNoneRange"
+        );
+        assert!(
+            matches!(out[0], Insn::LoadNoneRange { start: 0, count: 3 }),
+            "should produce LoadNoneRange {{ start:0, count:3 }}, got {:?}",
+            out[0]
         );
     }
 
@@ -5994,6 +6169,71 @@ elif x == 2:
             matches!(out[1], Insn::BinOpConst(2, 1, BinaryOp::Add, 1)),
             "pass_reassoc must not fire when inner_src (x) is of unknown type: {:?}",
             out[1]
+    fn loadnone_merge_single_unchanged() {
+        // A lone LoadNone should not be wrapped in a LoadNoneRange.
+        let insns = vec![Insn::LoadNone(5), Insn::ReturnNone];
+        let out = pass_loadnone_merge(insns);
+        assert_eq!(out.len(), 2);
+        assert!(matches!(out[0], Insn::LoadNone(5)));
+    }
+
+    #[test]
+    fn loadnone_merge_non_consecutive_not_merged() {
+        // LoadNone(0), LoadNone(2) — gap at reg 1 — must NOT be merged.
+        let insns = vec![Insn::LoadNone(0), Insn::LoadNone(2), Insn::ReturnNone];
+        let out = pass_loadnone_merge(insns);
+        assert_eq!(out.len(), 3, "non-consecutive LoadNones must not merge");
+        assert!(matches!(out[0], Insn::LoadNone(0)));
+        assert!(matches!(out[1], Insn::LoadNone(2)));
+    }
+
+    #[test]
+    fn loadnone_merge_interrupted_by_other_insn() {
+        // LoadNone(0), Move(1,0), LoadNone(1) — interrupted by Move.
+        let insns = vec![
+            Insn::LoadNone(0),
+            Insn::Move(1, 0),
+            Insn::LoadNone(1),
+            Insn::ReturnNone,
+        ];
+        let out = pass_loadnone_merge(insns);
+        // LoadNone(0) is alone → stays as LoadNone(0).
+        // Move(1,0) stays.
+        // LoadNone(1) is alone → stays.
+        assert_eq!(out.len(), 4);
+        assert!(matches!(out[0], Insn::LoadNone(0)));
+        assert!(matches!(out[1], Insn::Move(1, 0)));
+        assert!(matches!(out[2], Insn::LoadNone(1)));
+    }
+
+    #[test]
+    fn loadnone_merge_on_compiled_function_with_many_locals() {
+        // A function with several local variables that are all read should emit
+        // a LoadNoneRange for the prologue after optimization.
+        // The variables are conditionally assigned so dead-store elim cannot remove
+        // the initial LoadNone(s) (the optimizer must preserve them for the False branch).
+        let code = compile_fn(concat!(
+            "def f(x):\n",
+            "    a = None\n",
+            "    b = None\n",
+            "    c = None\n",
+            "    d = None\n",
+            "    if x:\n",
+            "        a = 1\n",
+            "        b = 2\n",
+            "        c = 3\n",
+            "        d = 4\n",
+            "    return a, b, c, d\n",
+        ));
+        let optimized = optimize(code);
+        let inner = &optimized.fn_protos[0].code;
+        let has_range = inner
+            .insns
+            .iter()
+            .any(|i| matches!(i, Insn::LoadNoneRange { count, .. } if *count >= 2));
+        assert!(
+            has_range,
+            "function with multiple None-initialized locals should produce LoadNoneRange"
         );
     }
 

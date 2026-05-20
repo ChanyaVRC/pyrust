@@ -822,6 +822,13 @@ impl Interpreter {
                 Insn::LoadNone(dst) => {
                     regs[*dst as usize] = Value::none();
                 }
+                Insn::LoadNoneRange { start, count } => {
+                    let s = *start as usize;
+                    let e = s + *count as usize;
+                    for idx in s..e {
+                        regs[idx] = Value::none();
+                    }
+                }
                 Insn::Move(dst, src) | Insn::CopyReg(dst, src) => {
                     let v = vm_try!(vm_read(&regs, *src, num_locals));
                     regs[*dst as usize] = v;
