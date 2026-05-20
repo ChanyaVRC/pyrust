@@ -1338,6 +1338,23 @@ pub(crate) fn lookup_name_in_module(env: &EnvRef, name: &str) -> Option<Value> {
     module_env(env).borrow().values.get(name).cloned()
 }
 
+/// Sync all module-env values into `module_globals_dict` and set
+/// `globals_accessed = true`.  Called by `globals()` and `locals()` at
+/// module scope so the returned live dict is fully up to date.
+///
+/// After this call, `assign_name` will also mirror every new assignment
+/// into the dict, keeping it live for the rest of execution.
+pub(crate) fn sync_module_env_to_globals_dict(interp: &mut Interpreter) {
+    interp.globals_accessed = true;
+    let me = module_env(&interp.env);
+    let pairs: Vec<(String, Value)> = me.borrow().values.iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    for (k, v) in pairs {
+        let _ = interp.module_globals_dict.dict_insert(PyKey::Str(k), v);
+    }
+}
+
 fn has_local_binding_in_current_or_ancestor(env: &EnvRef, name: &str) -> bool {
     let mut current = Some(Rc::clone(env));
     while let Some(candidate) = current {

@@ -773,11 +773,12 @@ impl Interpreter {
                         v
                     } else if let Some(v) = self
                         .module_globals_dict
-                        .dict_with(|d| d.get(&PyKey::Str(name.to_string())).cloned())
+                        .dict_with(|d| d.get(&StrKey(name)).cloned())
                         .flatten()
                     {
                         // Fallback: pick up globals()["x"] = val mutations that
                         // write to the dict without going through assign_name.
+                        // StrKey avoids a String allocation on every miss.
                         v
                     } else if let Some(v) = self
                         .vm_frame_views

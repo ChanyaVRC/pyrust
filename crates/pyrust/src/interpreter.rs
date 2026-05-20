@@ -250,13 +250,19 @@ pub struct Interpreter {
     /// The persistent module globals dict — the single `Value::dict` that
     /// `globals()` returns on every call (issue #706).
     ///
-    /// All writes to the module-level namespace (via `assign_name` and
-    /// `seed_module_dunders`) also write into this dict, so it stays live.
     /// `globals()` returns `module_globals_dict.clone()`, which shares the
     /// same `Rc<RefCell<IndexMap<...>>>` — callers that mutate the returned
     /// dict are mutating this backing store directly, and `LoadGlobal`
-    /// checks this dict first so those mutations are visible as globals.
+    /// checks this dict as a fallback so `globals()["x"] = val` mutations
+    /// are visible as the global `x` immediately.
     pub(crate) module_globals_dict: Value,
+    /// Set to `true` the first time `globals()` (or `locals()` at module
+    /// scope) is called.  While `false`, `assign_name` skips the eager
+    /// `module_globals_dict` write — this is the common case for scripts
+    /// that never call `globals()`, and the main source of the regression
+    /// introduced by PR #810.  Once `true`, `assign_name` resumes writing
+    /// to the dict so the returned live view stays in sync (issue #810).
+    pub(crate) globals_accessed: bool,
 }
 
 /// Discriminator for `VmFrameView`: script-level (module-scope) vs.
@@ -381,6 +387,7 @@ impl Default for Interpreter {
             eq_in_progress: Vec::new(),
             exc_classes,
             module_globals_dict: Value::dict(IndexMap::new()),
+            globals_accessed: false,
         }
     }
 }
