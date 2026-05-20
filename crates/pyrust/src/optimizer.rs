@@ -2839,11 +2839,9 @@ fn pass_cross_jump_once(insns: Vec<Insn>) -> (Vec<Insn>, bool) {
             //   (c) we hit a jump target at step > 0 (block boundary —
             //       extending past it would require merging predecessor flow).
             let mut tail_len = 0usize;
-            let mut abort = false;
             for step in 0usize.. {
                 // Bounds check: cannot scan past index 0.
                 if step > t_keep || step > t_dup {
-                    abort = true;
                     break;
                 }
                 let i_keep = t_keep - step;
@@ -2868,18 +2866,19 @@ fn pass_cross_jump_once(insns: Vec<Insn>) -> (Vec<Insn>, bool) {
                 tail_len += 1;
             }
 
-            if abort || tail_len < MIN_TAIL {
+            if tail_len < MIN_TAIL {
                 continue;
             }
 
             let dup_start = t_dup - tail_len + 1;
             let keep_start = t_keep - tail_len + 1;
 
-            // Guard: none of the duplicate-side tail indices (dup_start ..= t_dup)
-            // may be jump targets.  If any instruction in the tail is a target,
+            // Guard: none of the duplicate-side tail indices (dup_start .. t_dup)
+            // may be jump targets.  If any instruction in the tail body is a target,
             // another instruction jumps into the middle of the tail — removing
-            // it would orphan that jump.
-            if (dup_start..=t_dup).any(|i| jump_targets.contains(&i)) {
+            // it would orphan that jump.  t_dup itself is rewritten to Jump (not
+            // removed), so it is safe for t_dup to be a jump target.
+            if (dup_start..t_dup).any(|i| jump_targets.contains(&i)) {
                 continue;
             }
 
