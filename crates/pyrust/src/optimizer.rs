@@ -3373,12 +3373,32 @@ pub(crate) fn rewrite_offsets_with(
 /// rewriting (mirrors `pass_ivsr`), growing by 2 for the first chain found.
 ///
 /// The type guard (string vs non-string) is deferred to the VM's Concat handler.
-fn pass_concat_merge(insns: Vec<Insn>, num_locals: u32, num_regs: &mut u32) -> Vec<Insn> {
+/// Run [`pass_concat_merge_once`] to fixed-point: keep merging until no new
+/// chain can be fused.  A single pass handles only the first eligible chain;
+/// iterating ensures all chains in a function are folded.
+fn pass_concat_merge(mut insns: Vec<Insn>, num_locals: u32, num_regs: &mut u32) -> Vec<Insn> {
+    loop {
+        let (next, changed) = pass_concat_merge_once(insns, num_locals, num_regs);
+        insns = next;
+        if !changed {
+            return insns;
+        }
+    }
+}
+
+/// Single-pass helper for [`pass_concat_merge`].  Finds the first eligible
+/// `BinOp(Add)` chain and fuses it into a `Concat` instruction, then returns
+/// `(new_insns, true)`.  Returns `(insns, false)` when no chain exists.
+fn pass_concat_merge_once(
+    insns: Vec<Insn>,
+    num_locals: u32,
+    num_regs: &mut u32,
+) -> (Vec<Insn>, bool) {
     use crate::ast::BinaryOp;
 
     let n = insns.len();
     if n < 2 {
-        return insns;
+        return (insns, false);
     }
 
     // Mark BB starts (jump targets): we must not merge across them.
@@ -3410,9 +3430,9 @@ fn pass_concat_merge(insns: Vec<Insn>, num_locals: u32, num_regs: &mut u32) -> V
     // Compute use-count per register (number of instruction sites that read it).
     let mut use_count: HashMap<u32, usize> = HashMap::new();
     for insn in &insns {
-        for r in insn_read_regs(insn) {
+        visit_read_regs(insn, |r| {
             *use_count.entry(r).or_insert(0) += 1;
-        }
+        });
     }
 
     // Scan for the first mergeable chain.
@@ -3556,15 +3576,16 @@ fn pass_concat_merge(insns: Vec<Insn>, num_locals: u32, num_regs: &mut u32) -> V
             }
         }
 
-        return new_vec;
+        return (new_vec, true);
     }
 
-    insns
+    (insns, false)
 }
 
-/// Returns all registers *read* by `insn`.
-/// Used by `pass_concat_merge` to compute per-register use counts.
-fn insn_read_regs(insn: &Insn) -> Vec<u32> {
+/// Visits every register *read* by `insn`, calling `f` once per register.
+/// Used by `pass_concat_merge` to accumulate per-register use counts without
+/// allocating a temporary `Vec`.
+fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
     use Insn::*;
     match insn {
         LoadConst(..)
@@ -3584,7 +3605,7 @@ fn insn_read_regs(insn: &Insn) -> Vec<u32> {
         | RaiseReRaise
         | ForIter(..)
         | ForCountConst(..)
-        | ForCountConstInline(..) => vec![],
+        | ForCountConstInline(..) => {}
 
         BinOpImm(_, a, _, _) => vec![*a],
         SyncModuleGlobal(r, _) => vec![*r],
@@ -3609,7 +3630,7 @@ fn insn_read_regs(insn: &Insn) -> Vec<u32> {
         | CmpJumpIfTrueConst(s, _, _, _)
         | MatchExcept(s, _)
         | RecordClassStore(s)
-        | RecordClassDel(s) => vec![*s],
+        | RecordClassDel(s) => f(*s),
 
         BinOp(_, a, _, b)
         | BinOpInPlace(_, a, _, b)
@@ -3621,48 +3642,92 @@ fn insn_read_regs(insn: &Insn) -> Vec<u32> {
         | ListExtend(a, b)
         | DictUpdate(a, b)
         | GetItem(_, a, b)
-        | DeleteItem(a, b) => vec![*a, *b],
+        | DeleteItem(a, b) => {
+            f(*a);
+            f(*b);
+        }
 
-        SetAttr(obj, _, val) => vec![*obj, *val],
-        ForCountReg(_, _, stop, _, _) => vec![*stop],
-        SetItem(a, b, c) => vec![*a, *b, *c],
+        SetAttr(obj, _, val) => {
+            f(*obj);
+            f(*val);
+        }
+        ForCountReg(_, _, stop, _, _) => f(*stop),
+        SetItem(a, b, c) => {
+            f(*a);
+            f(*b);
+            f(*c);
+        }
 
-        Call(base, argc) | CallMemo(base, argc) => (*base..=(*base + *argc as u32)).collect(),
-        TailCall { args_base, nargs } => std::iter::once(args_base - 1)
-            .chain(*args_base..*args_base + *nargs as u32)
-            .collect(),
-        BuildList(_, base, n) | BuildTuple(_, base, n) => (*base..*base + *n as u32).collect(),
-        BuildDict(_, base, n) => (*base..*base + 2 * *n as u32).collect(),
+        Call(base, argc) | CallMemo(base, argc) => {
+            for r in *base..=(*base + *argc as u32) {
+                f(r);
+            }
+        }
+        TailCall { args_base, nargs } => {
+            f(args_base - 1);
+            for r in *args_base..*args_base + *nargs as u32 {
+                f(r);
+            }
+        }
+        BuildList(_, base, n) | BuildTuple(_, base, n) => {
+            for r in *base..*base + *n as u32 {
+                f(r);
+            }
+        }
+        BuildDict(_, base, n) => {
+            for r in *base..*base + 2 * *n as u32 {
+                f(r);
+            }
+        }
         CallMethod {
             obj,
             args_base,
             nargs,
             ..
-        } => std::iter::once(*obj)
-            .chain(*args_base..*args_base + *nargs as u32)
-            .collect(),
+        } => {
+            f(*obj);
+            for r in *args_base..*args_base + *nargs as u32 {
+                f(r);
+            }
+        }
         CallMethodExpanded {
             obj,
             pos_list,
             kw_dict,
             ..
-        } => vec![*obj, *pos_list, *kw_dict],
+        } => {
+            f(*obj);
+            f(*pos_list);
+            f(*kw_dict);
+        }
         MakeFunction(_, _, defs_base, defs_n, annots_base, annots_n) => {
-            let mut v: Vec<u32> = (*defs_base..*defs_base + *defs_n as u32).collect();
-            if *annots_n > 0 {
-                v.extend(*annots_base..*annots_base + *annots_n as u32);
+            for r in *defs_base..*defs_base + *defs_n as u32 {
+                f(r);
             }
-            v
+            if *annots_n > 0 {
+                for r in *annots_base..*annots_base + *annots_n as u32 {
+                    f(r);
+                }
+            }
         }
         MakeClass(_, _, bases_base, bases_n, _) => {
-            (*bases_base..*bases_base + *bases_n as u32).collect()
+            for r in *bases_base..*bases_base + *bases_n as u32 {
+                f(r);
+            }
         }
-        Yield { src, .. } => vec![*src],
+        Yield { src, .. } => f(*src),
         YieldFrom {
             iter_reg, sent_reg, ..
-        } => vec![*iter_reg, *sent_reg],
-        UnpackEx { src, .. } => vec![*src],
-        Concat { base, count, .. } => (*base..*base + *count as u32).collect(),
+        } => {
+            f(*iter_reg);
+            f(*sent_reg);
+        }
+        UnpackEx { src, .. } => f(*src),
+        Concat { base, count, .. } => {
+            for r in *base..*base + *count as u32 {
+                f(r);
+            }
+        }
     }
 }
 
@@ -6931,32 +6996,22 @@ elif x == 2:
     #[test]
     fn concat_merge_does_not_cross_bb_boundary() {
         use crate::ast::BinaryOp;
-        // A jump targets index 1 (the second BinOp), so index 1 is a BB start.
-        // The chain [0, 1] straddles a BB boundary and must NOT be merged.
-        let insns = vec![
-            Insn::BinOp(2, 0, BinaryOp::Add, 1), // i=0: chain start candidate
-            Insn::BinOp(4, 2, BinaryOp::Add, 3), // i=1: BB start (target of Jump below)
-            Insn::Return(4),
-            Insn::Jump(-3), // targets i=0? No: offset=-3, pc=4 → target=4+1-3=2. Let's fix.
-        ];
-        // Rebuild: Jump at index 2 targeting index 1 (BB boundary at 1).
-        let insns = vec![
-            Insn::BinOp(2, 0, BinaryOp::Add, 1), // i=0
-            Insn::BinOp(4, 2, BinaryOp::Add, 3), // i=1 ← BB start (Jump(i=2) targets here)
-            Insn::Return(4),                     // i=2
-            Insn::Jump(-2),                      // i=3: target = 3+1-2 = 2 ← oops
-        ];
-        // Rewrite to make index 1 a BB start: Jump at index 3 with offset -3 →
-        // target = 3+1+(-3) = 1. Correct.
+        // Layout (indices 0-3):
+        //   i=0: BinOp(t1, r0, Add, r1)   ← chain start candidate
+        //   i=1: BinOp(t2, t1, Add, r2)   ← BB start: target of Jump at i=3
+        //   i=2: Return(t2)
+        //   i=3: Jump(-3)                  ← target = 3+1+(-3) = 1
+        //
+        // Because i=1 is a BB start the chain [0,1] straddles a BB boundary
+        // and must NOT be fused.
         let insns = vec![
             Insn::BinOp(2, 0, BinaryOp::Add, 1), // i=0
-            Insn::BinOp(4, 2, BinaryOp::Add, 3), // i=1 ← target of Jump below
+            Insn::BinOp(4, 2, BinaryOp::Add, 3), // i=1 ← BB start
             Insn::Return(4),                     // i=2
-            Insn::Jump(-3),                      // i=3: target = 3+1+(-3) = 1
+            Insn::Jump(-3),                      // i=3: target = 1
         ];
         let mut num_regs = 5u32;
         let out = pass_concat_merge(insns, 2, &mut num_regs);
-        // Index 1 is a BB start, so the chain [0,1] must not be merged.
         assert_eq!(out.len(), 4, "no merge across BB boundary");
         assert!(matches!(out[0], Insn::BinOp(..)));
         assert_eq!(num_regs, 5, "num_regs unchanged");
