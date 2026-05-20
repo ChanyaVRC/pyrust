@@ -24,3 +24,20 @@ def multi_tail(n):
 print(multi_tail(1))  # one\n3
 print(multi_tail(2))  # two\n3
 print(multi_tail(3))  # 0
+
+# Three-arm if/elif/else: all arms share the same 2-instruction tail.
+# Fixed-point iteration merges both duplicate tails; output must still be correct.
+def three_arms(n):
+    if n == 1:
+        x = 1
+        return x + 100
+    elif n == 2:
+        x = 2
+        return x + 100
+    else:
+        x = 3
+        return x + 100
+
+print(three_arms(1))  # 101
+print(three_arms(2))  # 102
+print(three_arms(3))  # 103

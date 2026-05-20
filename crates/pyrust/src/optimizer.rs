@@ -2693,7 +2693,9 @@ fn pass_self_tail_call(insns: Vec<Insn>) -> Vec<Insn> {
 
 /// Tail-merge identical block suffixes: when two or more basic blocks end in
 /// an identical sequence of ≥ 2 instructions, replace the duplicate copy with
-/// an unconditional `Jump` to the surviving copy.
+/// an unconditional `Jump` to the surviving copy.  Runs to a fixed point so
+/// that N-arm `if/elif/else` chains have all duplicate tails merged in a single
+/// `optimize_fn_code` call.
 ///
 /// ## Algorithm
 ///
@@ -2718,12 +2720,9 @@ fn pass_self_tail_call(insns: Vec<Insn>) -> Vec<Insn> {
 ///    `insns[t_dup]` (the duplicate terminator) with `Jump(k)` pointing at
 ///    `t_keep - n + 1` (the survivor tail start).
 /// 6. Call `compact` once at the end to fix all jump offsets.
+/// 7. Repeat from step 1 until no merge fires (fixed-point).
 ///
 /// ## Conservatism
-///
-/// Only one merge is applied per invocation (return after the first successful
-/// merge).  `optimize_fn_code` calls the full pipeline once; in practice one
-/// invocation is sufficient for the common if/else pattern.
 ///
 /// Register renaming is NOT performed.  Only structurally identical instruction
 /// sequences — same opcode, same register numbers, same constant indices — are
@@ -2734,12 +2733,25 @@ fn pass_self_tail_call(insns: Vec<Insn>) -> Vec<Insn> {
 /// - Tails of length 1 (`return` alone is not worth a Jump overhead).
 /// - Any tail containing an instruction with a jump-offset field.
 /// - Any tail where a duplicate-side instruction is itself a jump target.
-fn pass_cross_jump(insns: Vec<Insn>) -> Vec<Insn> {
+fn pass_cross_jump(mut insns: Vec<Insn>) -> Vec<Insn> {
+    loop {
+        let (next, changed) = pass_cross_jump_once(insns);
+        insns = next;
+        if !changed {
+            return insns;
+        }
+    }
+}
+
+/// Single-pass helper for [`pass_cross_jump`].  Finds the first mergeable tail
+/// pair, applies the merge, and returns `(new_insns, true)`.  Returns
+/// `(insns, false)` when no merge candidate exists (fixed-point reached).
+fn pass_cross_jump_once(insns: Vec<Insn>) -> (Vec<Insn>, bool) {
     const MIN_TAIL: usize = 2;
 
     let n = insns.len();
     if n < MIN_TAIL * 2 {
-        return insns;
+        return (insns, false);
     }
 
     // Step 1: collect jump-target indices.
@@ -2892,11 +2904,11 @@ fn pass_cross_jump(insns: Vec<Insn>) -> Vec<Insn> {
             }
             let mut transformed = insns;
             transformed[t_dup] = Insn::Jump(raw_offset as i32);
-            return compact(transformed, &keep);
+            return (compact(transformed, &keep), true);
         }
     }
 
-    insns
+    (insns, false)
 }
 
 #[cfg(test)]
@@ -5152,6 +5164,79 @@ mod tests {
         assert!(
             !optimized.fn_protos[0].code.insns.is_empty(),
             "instruction list must not be empty after optimization"
+        );
+    }
+
+    #[test]
+    fn cross_jump_three_arms_fixed_point() {
+        // 3-arm chain where each arm ends with a 3-instruction common tail
+        // (BinOp, BinOpConst, Return).  Each arm's unique prefix is a single
+        // LoadConst with a different constant, so the prefix is NOT merged.
+        //
+        // A single-pass implementation only merges the first pair.  The fixed-point
+        // loop must also detect and apply the second merge opportunity.
+        //
+        // Shape (14 instructions):
+        //   [0]  CmpJumpIfFalseConst  -- if n!=1 jump to [5] (arm2 cond)
+        //   [1]  LoadConst(r0, c_a1)  -- arm1 unique prefix
+        //   [2]  BinOp(r1,r0,Add,r0)          \
+        //   [3]  BinOpConst(r2,r1,Mul,c_k)     } survivor tail (3 insns)
+        //   [4]  Return(r2)                    /
+        //   [5]  CmpJumpIfFalseConst  -- if n!=2 jump to [10] (arm3 start)
+        //   [6]  LoadConst(r0, c_a2)  -- arm2 unique prefix
+        //   [7]  BinOp(r1,r0,Add,r0)          \
+        //   [8]  BinOpConst(r2,r1,Mul,c_k)     } dup1 tail (same 3 insns)
+        //   [9]  Return(r2)                    /
+        //   [10] LoadConst(r0, c_a3)  -- arm3 unique prefix  (jump target from [5])
+        //   [11] BinOp(r1,r0,Add,r0)          \
+        //   [12] BinOpConst(r2,r1,Mul,c_k)     } dup2 tail (same 3 insns)
+        //   [13] Return(r2)                    /
+        //
+        // jump_targets = {0, 5, 10}.  Dup terminators [9] and [13] are NOT targets.
+        //
+        // First merge (pass 1): dup1 [7..9] -> Jump([2]).
+        //   [2] becomes a jump target (from the new Jump at new-[7]).
+        // Second merge (pass 2): dup2 tail scanned from [11]:
+        //   step=0 Return match; step=1 BinOpConst(new-[10]) match, not a target;
+        //   step=2 BinOp(new-[9]) match but [2] IS a target -> scan stops.
+        //   tail_len=2 >= MIN_TAIL -> second merge fires!
+        //
+        // Net: 2 merges applied; instruction count drops by 2.
+        // Only one Return survives.
+        use crate::ast::BinaryOp;
+        let insns = vec![
+            Insn::CmpJumpIfFalseConst(0, BinaryOp::Eq, 0, 4), // [0] -> [5]
+            Insn::LoadConst(5, 1),                            // [1]  arm1 unique
+            Insn::BinOp(6, 5, BinaryOp::Add, 5),              // [2] \
+            Insn::BinOpConst(7, 6, BinaryOp::Mul, 2),         // [3]  survivor tail
+            Insn::Return(7),                                  // [4] /
+            Insn::CmpJumpIfFalseConst(0, BinaryOp::Eq, 3, 4), // [5] -> [10]
+            Insn::LoadConst(5, 10),                           // [6]  arm2 unique
+            Insn::BinOp(6, 5, BinaryOp::Add, 5),              // [7] \
+            Insn::BinOpConst(7, 6, BinaryOp::Mul, 2),         // [8]  dup1 tail
+            Insn::Return(7),                                  // [9] /
+            Insn::LoadConst(5, 20),                           // [10] arm3 unique (jump target)
+            Insn::BinOp(6, 5, BinaryOp::Add, 5),              // [11] \
+            Insn::BinOpConst(7, 6, BinaryOp::Mul, 2),         // [12]  dup2 tail
+            Insn::Return(7),                                  // [13] /
+        ];
+        let before_count = insns.len();
+        let out = pass_cross_jump(insns);
+
+        // Two merges must fire -> instruction count drops by at least 2.
+        assert!(
+            out.len() <= before_count - 2,
+            "fixed-point cross_jump must apply at least 2 merges for 3-arm 3-insn-tail \
+             chain (before={before_count}, after={})",
+            out.len()
+        );
+
+        // Exactly one Return must survive (the survivor tail's Return).
+        let return_count = out.iter().filter(|i| matches!(i, Insn::Return(_))).count();
+        assert_eq!(
+            return_count, 1,
+            "exactly one Return should survive after fixed-point merge of 3 arms \
+             with 3-instruction common tails"
         );
     }
 }
