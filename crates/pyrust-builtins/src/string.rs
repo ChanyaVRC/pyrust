@@ -224,28 +224,58 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
             !s.is_empty() && s.chars().all(is_python_digit),
         )),
         "isalpha" => Ok(Value::bool_(
-            !s.is_empty() && s.chars().all(is_python_alpha),
+            !s.is_empty()
+                && if s.is_ascii() {
+                    s.bytes().all(|b| b.is_ascii_alphabetic())
+                } else {
+                    s.chars().all(is_python_alpha)
+                },
         )),
         "isalnum" => Ok(Value::bool_(
-            !s.is_empty() && s.chars().all(|c| c.is_alphanumeric()),
+            !s.is_empty()
+                && if s.is_ascii() {
+                    s.bytes().all(|b| b.is_ascii_alphanumeric())
+                } else {
+                    s.chars().all(|c| c.is_alphanumeric())
+                },
         )),
         "isspace" => Ok(Value::bool_(
-            !s.is_empty() && s.chars().all(|c| c.is_whitespace()),
+            !s.is_empty()
+                && if s.is_ascii() {
+                    s.bytes()
+                        .all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c))
+                } else {
+                    s.chars().all(|c| c.is_whitespace())
+                },
         )),
         "isdecimal" => Ok(Value::bool_(
             !s.is_empty()
-                && s.chars()
-                    .all(|c| c.general_category() == GeneralCategory::DecimalNumber),
+                && if s.is_ascii() {
+                    s.bytes().all(|b| b.is_ascii_digit())
+                } else {
+                    s.chars()
+                        .all(|c| c.general_category() == GeneralCategory::DecimalNumber)
+                },
         )),
         "isnumeric" => Ok(Value::bool_(
-            !s.is_empty() && s.chars().all(is_python_numeric),
+            !s.is_empty()
+                && if s.is_ascii() {
+                    s.bytes().all(|b| b.is_ascii_digit())
+                } else {
+                    s.chars().all(is_python_numeric)
+                },
         )),
         "islower" => Ok(Value::bool_(str_islower(s))),
         "isupper" => Ok(Value::bool_(str_isupper(s))),
         "istitle" => Ok(Value::bool_(str_istitle(s))),
         "isascii" => Ok(Value::bool_(s.is_ascii())),
         "isidentifier" => Ok(Value::bool_(str_isidentifier(s))),
-        "isprintable" => Ok(Value::bool_(s.chars().all(is_printable))),
+        "isprintable" => Ok(Value::bool_(if s.is_ascii() {
+            // Printable ASCII: 0x20 (space) through 0x7e (~). DEL (0x7f) is not printable.
+            s.bytes().all(|b| b >= 0x20 && b < 0x7f)
+        } else {
+            s.chars().all(is_printable)
+        })),
         // `format` is intercepted by the bound-method dispatch in `calls.rs`
         // and routed through `format_str_template` (which handles kwargs).
         // This arm exists solely to satisfy the drift-guard test that verifies
@@ -527,6 +557,9 @@ fn is_printable(c: char) -> bool {
 /// Unicode full case-folding (CaseFolding.txt status F and S).
 /// Handles multi-char expansions (ß→ss, ligatures) that Rust's `to_lowercase` misses.
 fn unicode_casefold(s: &str) -> String {
+    if s.is_ascii() {
+        return s.to_ascii_lowercase();
+    }
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -549,6 +582,20 @@ fn unicode_casefold(s: &str) -> String {
 }
 
 fn swapcase(s: &str) -> String {
+    if s.is_ascii() {
+        return s
+            .chars()
+            .map(|c| {
+                if c.is_ascii_uppercase() {
+                    c.to_ascii_lowercase()
+                } else if c.is_ascii_lowercase() {
+                    c.to_ascii_uppercase()
+                } else {
+                    c
+                }
+            })
+            .collect();
+    }
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         if c.is_uppercase() {
@@ -563,6 +610,24 @@ fn swapcase(s: &str) -> String {
 }
 
 fn titlecase(s: &str) -> String {
+    if s.is_ascii() {
+        let mut out = String::with_capacity(s.len());
+        let mut prev_cased = false;
+        for c in s.chars() {
+            if c.is_ascii_alphabetic() {
+                if prev_cased {
+                    out.push(c.to_ascii_lowercase());
+                } else {
+                    out.push(c.to_ascii_uppercase());
+                }
+                prev_cased = true;
+            } else {
+                out.push(c);
+                prev_cased = false;
+            }
+        }
+        return out;
+    }
     let mut out = String::with_capacity(s.len());
     let mut prev_cased = false;
     for c in s.chars() {
@@ -582,6 +647,18 @@ fn titlecase(s: &str) -> String {
 }
 
 fn str_islower(s: &str) -> bool {
+    if s.is_ascii() {
+        let mut has_cased = false;
+        for b in s.bytes() {
+            if b.is_ascii_uppercase() {
+                return false;
+            }
+            if b.is_ascii_lowercase() {
+                has_cased = true;
+            }
+        }
+        return has_cased;
+    }
     let mut has_cased = false;
     for c in s.chars() {
         if c.is_uppercase() {
@@ -595,6 +672,18 @@ fn str_islower(s: &str) -> bool {
 }
 
 fn str_isupper(s: &str) -> bool {
+    if s.is_ascii() {
+        let mut has_cased = false;
+        for b in s.bytes() {
+            if b.is_ascii_lowercase() {
+                return false;
+            }
+            if b.is_ascii_uppercase() {
+                has_cased = true;
+            }
+        }
+        return has_cased;
+    }
     let mut has_cased = false;
     for c in s.chars() {
         if c.is_lowercase() {
@@ -608,6 +697,28 @@ fn str_isupper(s: &str) -> bool {
 }
 
 fn str_istitle(s: &str) -> bool {
+    if s.is_ascii() {
+        let mut prev_cased = false;
+        let mut has_cased = false;
+        for b in s.bytes() {
+            if b.is_ascii_uppercase() {
+                if prev_cased {
+                    return false;
+                }
+                prev_cased = true;
+                has_cased = true;
+            } else if b.is_ascii_lowercase() {
+                if !prev_cased {
+                    return false;
+                }
+                prev_cased = true;
+                has_cased = true;
+            } else {
+                prev_cased = false;
+            }
+        }
+        return has_cased;
+    }
     let mut prev_cased = false;
     let mut has_cased = false;
     for c in s.chars() {
@@ -633,6 +744,14 @@ fn str_istitle(s: &str) -> bool {
 fn str_isidentifier(s: &str) -> bool {
     if s.is_empty() {
         return false;
+    }
+    if s.is_ascii() {
+        let mut bytes = s.bytes();
+        let first = bytes.next().unwrap();
+        if !first.is_ascii_alphabetic() && first != b'_' {
+            return false;
+        }
+        return bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_');
     }
     let mut chars = s.chars();
     let first = chars.next().unwrap();
