@@ -48,7 +48,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     // `CmpJumpIfTrue`).  This matters for `if not (...): ...` patterns,
     // including the inversion emitted by the issue #287 trampoline rewrite.
     let insns = pass_cmpjump_fusion(insns, num_locals);
-    let insns = pass_const_reg_prop(insns, num_locals);
+    let insns = pass_const_reg_prop(insns, num_locals, &consts);
     let insns = pass_binopinplace_downgrade(insns, num_locals);
     let insns = pass_concat_merge(insns, num_locals, &mut num_regs);
     let insns = pass_exit_inline(insns);
@@ -1583,15 +1583,17 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
 
 // ─── Constant-register propagation into CmpJump/BinOp ────────────────────────
 
-/// Convert `BinOp` and `CmpJump*` instructions that use a write-once
-/// `LoadConst` register on the RHS to their `*Const` variants.
+/// Convert `BinOp`, `BinOpInPlace`, and `CmpJump*` instructions that use a
+/// write-once `LoadConst` register on the RHS to their `*Const`/`*Imm` variants.
 ///
 /// ## Pattern
 ///
 /// ```text
 /// LoadConst(r_n, idx)          ← written exactly once
 /// ...
-/// BinOp(dst, lhs, op, r_n)    → BinOpConst(dst, lhs, op, idx)
+/// BinOp(dst, lhs, op, r_n)       → BinOpConst(dst, lhs, op, idx)
+/// BinOpInPlace(dst, lhs, op, r_n) → BinOpImm(dst, lhs, op, imm)   (if const fits i16)
+///                                 → BinOpConst(dst, lhs, op, idx)  (if lhs is temp)
 /// CmpJumpIfFalse(lhs, op, r_n, k) → CmpJumpIfFalseConst(lhs, op, idx, k)
 /// CmpJumpIfTrue(lhs, op, r_n, k)  → CmpJumpIfTrueConst(lhs, op, idx, k)
 /// ```
@@ -1603,13 +1605,23 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
 /// read.  More importantly, `CmpJumpIfFalseConst` is eligible for further
 /// constant-folding and algebraic-simplify rewrites that `CmpJumpIfFalse` is not.
 ///
+/// For `BinOpInPlace`, when the constant fits in `i16`, `BinOpImm` embeds the
+/// value directly in the instruction word — eliminating both the register read
+/// and the const-pool indirection.  `BinOpImm`'s slow path still calls
+/// `try_inplace_op`, so `__iadd__` / `__imul__` semantics are preserved for
+/// user-defined types on the LHS.
+///
+/// When the constant does not fit in `i16` but `lhs` is a temp register
+/// (compiler-generated, never a user object with `__iadd__`), we emit
+/// `BinOpConst` instead, still saving the register-file read.
+///
 /// ## Guard
 ///
 /// Only registers that are written exactly once by a `LoadConst` across the
 /// entire function body are considered.  Write-once guarantees the register
 /// holds that constant on every path that reaches the use, without the cost
 /// of a full dataflow analysis.
-fn pass_const_reg_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
+fn pass_const_reg_prop(insns: Vec<Insn>, num_locals: u32, consts: &[Value]) -> Vec<Insn> {
     // Pre-scan: count writes and record LoadConst targets.
     //
     // Use collect_writes (not writable_dst) to capture ALL write destinations,
@@ -1680,6 +1692,31 @@ fn pass_const_reg_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 } else {
                     Insn::CmpJumpIfTrue(lhs, op, rhs, k)
                 }
+            }
+            Insn::BinOpInPlace(dst, lhs, op, rhs) => {
+                if let Some(&idx) = immutable_const.get(&rhs) {
+                    // The constant value fits in i16: embed it directly as BinOpImm.
+                    // BinOpImm's slow path still invokes try_inplace_op, so __iadd__
+                    // and friends are preserved for user-defined types on the LHS.
+                    if let Some(int_val) = consts[idx as usize].as_int() {
+                        if let Ok(imm) = i16::try_from(int_val) {
+                            if rhs >= num_locals {
+                                converted_regs.insert(rhs);
+                            }
+                            return Insn::BinOpImm(dst, lhs, op, imm);
+                        }
+                    }
+                    // Constant does not fit in i16.  Only safe to use BinOpConst
+                    // when lhs is a temp register — temps are compiler-generated and
+                    // never hold user objects that could have custom __iadd__.
+                    if lhs >= num_locals {
+                        if rhs >= num_locals {
+                            converted_regs.insert(rhs);
+                        }
+                        return Insn::BinOpConst(dst, lhs, op, idx);
+                    }
+                }
+                Insn::BinOpInPlace(dst, lhs, op, rhs)
             }
             other => other,
         })
@@ -2422,6 +2459,27 @@ fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
     let n = insns.len();
     let mut keep = vec![true; n];
 
+    // Pre-scan: count global reads for every temp register (>= num_locals).
+    // A temp with a zero global read count is provably dead everywhere in the
+    // function — it cannot be live on a loop back-edge because temps are
+    // single-assignment (by the compiler) and are never shared across
+    // iterations or external frames.  This lets us remove dead LoadConst /
+    // Move / CopyReg / LoadNone stores that are hoisted before a loop by
+    // pass_licm but still have a back-edge visible after them.
+    let mut global_read_count: HashMap<u32, usize> = HashMap::new();
+    {
+        let mut reads_buf: HashSet<u32> = HashSet::new();
+        for insn in &insns {
+            reads_buf.clear();
+            collect_reads(insn, &mut reads_buf);
+            for &r in &reads_buf {
+                if r >= num_locals {
+                    *global_read_count.entry(r).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+
     for i in 0..n {
         let dst = match &insns[i] {
             Insn::LoadConst(r, _) | Insn::LoadNone(r) | Insn::Move(r, _) | Insn::CopyReg(r, _)
@@ -2431,6 +2489,13 @@ fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             }
             _ => continue,
         };
+
+        // Fast path: if the register has zero reads anywhere in the function,
+        // the store is provably dead regardless of back-edges.
+        if global_read_count.get(&dst).copied().unwrap_or(0) == 0 {
+            keep[i] = false;
+            continue;
+        }
 
         // Conservative: skip if a back-edge could carry the value into the
         // next loop iteration (the forward scan below would miss that use).
@@ -5961,17 +6026,23 @@ mod tests {
     }
 
     #[test]
-    fn dse_skips_when_back_edge_present() {
-        // LoadConst(r2, 0) followed by a loop back-edge — conservatively kept.
+    fn dse_skips_when_back_edge_present_and_register_is_read() {
+        // LoadConst(r2, 0) followed by a loop back-edge, and r2 IS read (by
+        // Return(r2) after the loop) — must be kept because it is live.
+        //
+        //   [0] LoadConst(r2, 0)   ← r2 read by [2]
+        //   [1] Jump(-2)           ← back-edge (target = 1+1-2 = 0)
+        //   [2] Return(r2)
         let insns = vec![
-            Insn::LoadConst(2, 0), // candidate, but back-edge below
-            Insn::Jump(-1),        // back-edge (negative offset)
+            Insn::LoadConst(2, 0), // r2 is live (read by Return)
+            Insn::Jump(-2),        // back-edge
+            Insn::Return(2),
         ];
         let out = pass_dead_store_elim(insns, 2);
         assert_eq!(
             out.len(),
-            2,
-            "must not remove store when back-edge is present"
+            3,
+            "must not remove store when register is read globally and back-edge is present"
         );
     }
 
@@ -6019,6 +6090,56 @@ mod tests {
             "the then-arm's LoadConst must survive — its value is read on the taken path",
         );
         assert!(matches!(out[1], Insn::LoadConst(2, 0)));
+    }
+
+    #[test]
+    fn dse_global_read_count_removes_zero_read_temp_inside_loop() {
+        // A LoadConst for a temp register that is never read anywhere in the
+        // function body — not even inside the loop — should be removed even
+        // though there is a back-edge after it.
+        //
+        // Before this change, pass_dead_store_elim would see the back-edge
+        // (Jump(-N)) after the LoadConst and conservatively keep it.  With
+        // the global-read-count pre-scan, it detects that r5 has 0 global
+        // reads and removes the instruction unconditionally.
+        //
+        //   [0] LoadConst(r2, 0)   ← live — used by Return at [2]
+        //   [1] LoadConst(r5, 0)   ← dead temp, r5 never read
+        //   [2] Jump(-3)           ← back-edge (target = 2+1-3 = 0)
+        //   [3] Return(r2)
+        //
+        // Expected: LoadConst(r5) removed; other instructions kept; Jump offset
+        //           updated by compact to reflect the removed slot.
+        let insns = vec![
+            Insn::LoadConst(2, 0), // r2 — live (read by Return)
+            Insn::LoadConst(5, 0), // r5 — dead temp, r5 never read globally
+            Insn::Jump(-3),        // back-edge: target = 2+1-3 = 0
+            Insn::Return(2),
+        ];
+        let out = pass_dead_store_elim(insns, 2);
+        assert_eq!(
+            out.len(),
+            3,
+            "LoadConst for zero-global-read temp should be removed even with back-edge present"
+        );
+        // The remaining instructions are: LoadConst(r2), Jump(updated), Return(r2).
+        assert!(
+            matches!(out[0], Insn::LoadConst(2, 0)),
+            "live LoadConst must survive: {:?}",
+            out[0]
+        );
+        // compact rewrites the jump offset: old target was index 0; in the new
+        // array that is still index 0, so new_offset = 0 - (1 + 1) = -2.
+        assert!(
+            matches!(out[1], Insn::Jump(-2)),
+            "back-edge Jump must survive with updated offset: {:?}",
+            out[1]
+        );
+        assert!(
+            matches!(out[2], Insn::Return(2)),
+            "Return must survive: {:?}",
+            out[2]
+        );
     }
 
     // ── pass_exit_inline ─────────────────────────────────────────────────────
@@ -6701,7 +6822,7 @@ mod tests {
             Insn::CmpJumpIfFalse(0, BinaryOp::Lt, 4, 1),
             Insn::Return(0),
         ];
-        let out = pass_const_reg_prop(insns, 2);
+        let out = pass_const_reg_prop(insns, 2, &[]);
         assert_eq!(out.len(), 2, "dead LoadConst should be removed");
         assert!(
             matches!(out[0], Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 1)),
@@ -6721,7 +6842,7 @@ mod tests {
             Insn::BinOp(2, 0, BinaryOp::Add, 5),
             Insn::Return(2),
         ];
-        let out = pass_const_reg_prop(insns, 2);
+        let out = pass_const_reg_prop(insns, 2, &[]);
         assert_eq!(out.len(), 2, "dead LoadConst should be removed");
         assert!(
             matches!(out[0], Insn::BinOpConst(2, 0, BinaryOp::Add, 0)),
@@ -6740,7 +6861,7 @@ mod tests {
             Insn::CmpJumpIfFalse(0, BinaryOp::Lt, 5, 0),
             Insn::Return(0),
         ];
-        let out = pass_const_reg_prop(insns, 2);
+        let out = pass_const_reg_prop(insns, 2, &[]);
         assert!(
             matches!(out[2], Insn::CmpJumpIfFalse(0, BinaryOp::Lt, 5, 0)),
             "should not convert when rhs register is written multiple times"
@@ -6757,7 +6878,7 @@ mod tests {
             Insn::CmpJumpIfFalse(0, BinaryOp::Lt, 1, 1),
             Insn::Return(0),
         ];
-        let out = pass_const_reg_prop(insns, 3);
+        let out = pass_const_reg_prop(insns, 3, &[]);
         assert_eq!(out.len(), 3, "LoadConst for named local must not be pruned");
         assert!(
             matches!(out[0], Insn::LoadConst(1, 0)),
@@ -6779,7 +6900,7 @@ mod tests {
             Insn::CmpJumpIfFalse(0, BinaryOp::Lt, 5, 1),
             Insn::Return(5), // r5 is still live here
         ];
-        let out = pass_const_reg_prop(insns, 2);
+        let out = pass_const_reg_prop(insns, 2, &[]);
         assert_eq!(
             out.len(),
             3,
@@ -6789,6 +6910,68 @@ mod tests {
             matches!(out[0], Insn::LoadConst(5, 0)),
             "LoadConst should remain: {:?}",
             out[0]
+        );
+    }
+
+    #[test]
+    fn const_reg_prop_binopinplace_i16_const_becomes_binopimm() {
+        use crate::ast::BinaryOp;
+        // LoadConst(r5, idx=0) where consts[0] = 42 (fits in i16).
+        // BinOpInPlace(r0, r0, Add, r5) → BinOpImm(r0, r0, Add, 42).
+        // r5 is a temp (>= num_locals=2) and has no other readers → LoadConst pruned.
+        let insns = vec![
+            Insn::LoadConst(5, 0),
+            Insn::BinOpInPlace(0, 0, BinaryOp::Add, 5),
+            Insn::Return(0),
+        ];
+        let consts = vec![Value::int(42)];
+        let out = pass_const_reg_prop(insns, 2, &consts);
+        assert_eq!(out.len(), 2, "dead LoadConst should be removed");
+        assert!(
+            matches!(out[0], Insn::BinOpImm(0, 0, BinaryOp::Add, 42)),
+            "BinOpInPlace with i16-range const should become BinOpImm: {:?}",
+            out[0]
+        );
+    }
+
+    #[test]
+    fn const_reg_prop_binopinplace_large_const_temp_lhs_becomes_binopconst() {
+        use crate::ast::BinaryOp;
+        // consts[0] = 100000 which does NOT fit in i16 (> 32767).
+        // lhs=r3 is a temp (>= num_locals=2), so BinOpConst is safe.
+        // BinOpInPlace(r2, r3, Add, r5) → BinOpConst(r2, r3, Add, 0).
+        let insns = vec![
+            Insn::LoadConst(5, 0),
+            Insn::BinOpInPlace(2, 3, BinaryOp::Add, 5),
+            Insn::Return(2),
+        ];
+        let consts = vec![Value::int(100_000)];
+        let out = pass_const_reg_prop(insns, 2, &consts);
+        assert_eq!(out.len(), 2, "dead LoadConst should be removed");
+        assert!(
+            matches!(out[0], Insn::BinOpConst(2, 3, BinaryOp::Add, 0)),
+            "BinOpInPlace with large const and temp lhs should become BinOpConst: {:?}",
+            out[0]
+        );
+    }
+
+    #[test]
+    fn const_reg_prop_binopinplace_large_const_local_lhs_unchanged() {
+        use crate::ast::BinaryOp;
+        // consts[0] = 100000 — does not fit in i16.
+        // lhs=r1 is a named local (r1 < num_locals=2), so we must not convert
+        // to BinOpConst (user object might have __iadd__).
+        let insns = vec![
+            Insn::LoadConst(5, 0),
+            Insn::BinOpInPlace(1, 1, BinaryOp::Add, 5),
+            Insn::Return(1),
+        ];
+        let consts = vec![Value::int(100_000)];
+        let out = pass_const_reg_prop(insns, 2, &consts);
+        assert!(
+            matches!(out[1], Insn::BinOpInPlace(1, 1, BinaryOp::Add, 5)),
+            "BinOpInPlace with large const and local lhs must remain unchanged: {:?}",
+            out[1]
         );
     }
 
