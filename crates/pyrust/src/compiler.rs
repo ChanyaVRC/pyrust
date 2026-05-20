@@ -978,8 +978,8 @@ fn lambda_captures_in_expr(
 /// the class-body sub-compiler.  Slot order has **no** influence on
 /// class-namespace insertion order any more (`vars(C)` follows runtime
 /// stores via `Insn::RecordClassStore`); we keep this textual walk so
-/// register assignments remain deterministic across runs (HashSet
-/// iteration order is randomised).  Names not in `body_local` are
+/// register assignments match declaration order even for names that only
+/// appear inside nested control-flow.  Names not in `body_local` are
 /// skipped (they're declared `global` / `nonlocal` and don't get a
 /// class-body slot).
 fn collect_class_body_names_textual(
@@ -6495,9 +6495,11 @@ impl Compiler {
         // order stores actually executed at runtime, not source-walk order.
         // Each store now emits `Insn::RecordClassStore(slot)` and the VM
         // builds the attrs dict from that runtime trace inside `MakeClass`.
-        // We still walk the body textually here so register numbers stay
-        // stable across runs (HashSet iteration order is randomised, which
-        // would otherwise cause spurious bytecode diffs).
+        // We still walk the body textually here so register numbers follow
+        // declaration order for names that only appear inside control-flow
+        // blocks (where the IndexSet insertion order and textual order agree,
+        // but names inside nested blocks need the explicit walk to be seen
+        // before the catch-all pass at the end).
         //
         // Issue #546: CPython pre-injects `__qualname__` and `__module__`
         // into the class namespace before the body runs.  Give them fixed
