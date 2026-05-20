@@ -399,6 +399,33 @@ fn pass_reassoc(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -> V
         }
     }
 
+    // `int_regs` — registers statically known to hold an integer value
+    // (plain `Int` or `BigInt`).  Reassociation is only safe when
+    // `inner_src` (the non-constant operand at the root of the chain) is in
+    // this set, because the rewrite skips one dunder call (`t1.__add__`) and
+    // replaces two `__add__` dispatches with one.  If `inner_src` holds a
+    // user-defined type with a custom `__add__`, the merged call would
+    // produce a different result (the intermediate value's `__add__` is never
+    // invoked), matching PR #438's algebraic-simplify bug.
+    //
+    // Tracking rules:
+    //   `LoadConst(dst, c)` where `consts[c]` is Int/BigInt → add `dst`.
+    //   `BinOpConst(dst, lhs, _, c)` where `lhs ∈ int_regs`, `consts[c]`
+    //     is Int, and op ∈ {Add,Sub,Mul,FloorDiv,Mod,BitAnd,BitOr,BitXor,
+    //     LShift,RShift} → add `dst` (these preserve Int-ness).
+    //   `BinOp(dst, lhs, op, rhs)` where `lhs ∈ int_regs` AND
+    //     `rhs ∈ int_regs` and op is int-preserving → add `dst`.
+    //   `ForCountReg/Const/ConstInline(var, …)` → add `var` (loop counter).
+    //   Any other write to `dst` → remove `dst`.
+    //   Clear at every basic-block boundary.
+    let int_preserving_op = |op: BinaryOp| -> bool {
+        use BinaryOp::*;
+        matches!(
+            op,
+            Add | Sub | Mul | FloorDiv | Mod | BitAnd | BitOr | BitXor | LShift | RShift
+        )
+    };
+
     // `binop_const_out[reg]` = `(non_const_src, op, const_value_i64)` meaning:
     //   reg = non_const_src op const_value
     // for instructions in the current basic block where the rhs is a known integer
@@ -409,20 +436,24 @@ fn pass_reassoc(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -> V
     // via `LoadConst`.  Used to recognise the rhs of `BinOp` as a constant operand.
     let mut binop_const_out: HashMap<u32, (u32, BinaryOp, i64)> = HashMap::new();
     let mut load_const_val: HashMap<u32, i64> = HashMap::new();
+    let mut int_regs: HashSet<u32> = HashSet::new();
     let mut out: Vec<Insn> = Vec::with_capacity(insns.len());
 
     for (i, insn) in insns.into_iter().enumerate() {
         if bb_starts.contains(&i) {
             binop_const_out.clear();
             load_const_val.clear();
+            int_regs.clear();
         }
 
         match insn {
             Insn::LoadConst(dst, c_idx) => {
                 if let Some(v) = consts[c_idx as usize].as_int() {
                     load_const_val.insert(dst, v);
+                    int_regs.insert(dst);
                 } else {
                     load_const_val.remove(&dst);
+                    int_regs.remove(&dst);
                 }
                 binop_const_out.remove(&dst);
                 out.push(Insn::LoadConst(dst, c_idx));
@@ -431,6 +462,11 @@ fn pass_reassoc(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -> V
             Insn::BinOpConst(dst, lhs, op, c_idx) => {
                 // Try to reassociate: if `lhs` was produced by "lhs = inner_src op c2"
                 // (same op, lhs is a temp), rewrite to `dst = inner_src op (c2 op c1)`.
+                //
+                // Safety gate: `inner_src` must be in `int_regs` — i.e., statically
+                // known to be an integer.  Without this check, if `inner_src` is a
+                // user-defined type with a custom `__add__`, the rewrite would skip the
+                // intermediate dunder call and produce a wrong result.
                 let mut rewritten = false;
                 if is_integer_associative(op) {
                     if let Some(c1) = consts[c_idx as usize].as_int() {
@@ -442,13 +478,22 @@ fn pass_reassoc(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -> V
                             //   tracked as `binop_const_out[r] = (r, op, c)`).  Rewriting to
                             //   `BinOpConst(dst, dst, op, combined)` would read the already-updated
                             //   `dst`, producing a wrong result.
-                            if inner_op == op && lhs >= num_locals && inner_src != dst {
+                            // `inner_src ∈ int_regs`: `inner_src` must be a known integer so
+                            //   that skipping the intermediate `lhs.__add__` call is safe
+                            //   (user-defined `__add__` would change semantics).
+                            if inner_op == op
+                                && lhs >= num_locals
+                                && inner_src != dst
+                                && int_regs.contains(&inner_src)
+                            {
                                 if let Some(combined) = fold_int_pair(c2, op, c1) {
                                     if let Some(ci) =
                                         intern_const_in_pool(consts, Value::int(combined))
                                     {
                                         binop_const_out.insert(dst, (inner_src, op, combined));
                                         load_const_val.remove(&dst);
+                                        // dst is Int since inner_src is Int and op is int-preserving.
+                                        int_regs.insert(dst);
                                         out.push(Insn::BinOpConst(dst, inner_src, op, ci));
                                         rewritten = true;
                                     }
@@ -459,15 +504,23 @@ fn pass_reassoc(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -> V
                             // No reassociation — record this instruction for future chains.
                             binop_const_out.insert(dst, (lhs, op, c1));
                             load_const_val.remove(&dst);
+                            // Track int-ness: lhs ∈ int_regs and op is int-preserving → dst is Int.
+                            if int_regs.contains(&lhs) && int_preserving_op(op) {
+                                int_regs.insert(dst);
+                            } else {
+                                int_regs.remove(&dst);
+                            }
                         }
                     } else {
                         // BigInt constant — don't track.
                         binop_const_out.remove(&dst);
                         load_const_val.remove(&dst);
+                        int_regs.remove(&dst);
                     }
                 } else {
                     binop_const_out.remove(&dst);
                     load_const_val.remove(&dst);
+                    int_regs.remove(&dst);
                 }
                 if !rewritten {
                     out.push(Insn::BinOpConst(dst, lhs, op, c_idx));
@@ -499,6 +552,12 @@ fn pass_reassoc(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -> V
                     binop_const_out.remove(&dst);
                 }
                 load_const_val.remove(&dst);
+                // Propagate Int-ness through type-preserving BinOp.
+                if int_regs.contains(&lhs) && int_regs.contains(&rhs) && int_preserving_op(op) {
+                    int_regs.insert(dst);
+                } else {
+                    int_regs.remove(&dst);
+                }
                 out.push(Insn::BinOp(dst, lhs, op, rhs));
             }
 
@@ -530,11 +589,23 @@ fn pass_reassoc(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -> V
                     | Insn::YieldFrom { .. } => {
                         binop_const_out.clear();
                         load_const_val.clear();
+                        int_regs.clear();
                     }
                     _ => {
                         if let Some(dst) = writable_dst(&insn) {
                             binop_const_out.remove(&dst);
                             load_const_val.remove(&dst);
+                            int_regs.remove(&dst);
+                        }
+                        // ForCount* instructions write the loop counter register,
+                        // which is always an integer.  Record it in int_regs.
+                        match &insn {
+                            Insn::ForCountReg(var, _, _, _, _)
+                            | Insn::ForCountConst(var, _, _, _, _)
+                            | Insn::ForCountConstInline(var, _, _, _, _) => {
+                                int_regs.insert(*var);
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -5033,53 +5104,52 @@ mod tests {
     fn reassoc_add_chain() {
         use crate::ast::BinaryOp;
         use crate::value::Value;
-        // Models: def f(a): return (a + 1) + 2
-        // After pass_binop_const_fusion:
-        //   BinOpConst(t1, a, Add, idx_1)   consts[0]=1
-        //   BinOpConst(t2, t1, Add, idx_2)  consts[1]=2
-        // pass_reassoc should rewrite t2 = BinOpConst(a, Add, idx_3) consts[2]=3.
-        let mut consts = vec![Value::int(1), Value::int(2)];
-        let num_locals = 1u32; // r0 = `a` (local); t1=r1, t2=r2 are temps
+        // Models reassoc for a known-integer source loaded via LoadConst.
+        // r0 = 5 (LoadConst → int_regs)
+        // t1 = r0 + 1
+        // t2 = t1 + 2  → reassoc to t2 = r0 + 3
+        let mut consts = vec![Value::int(5), Value::int(1), Value::int(2)];
+        let num_locals = 0u32; // no named locals; r0/t1/t2 are all temps
         let insns = vec![
-            Insn::BinOpConst(1, 0, BinaryOp::Add, 0), // t1 = a + 1
-            Insn::BinOpConst(2, 1, BinaryOp::Add, 1), // t2 = t1 + 2
+            Insn::LoadConst(0, 0),                    // r0 = 5  → int_regs
+            Insn::BinOpConst(1, 0, BinaryOp::Add, 1), // t1 = r0 + 1
+            Insn::BinOpConst(2, 1, BinaryOp::Add, 2), // t2 = t1 + 2
             Insn::Return(2),
         ];
         let out = pass_reassoc(insns, &mut consts, num_locals);
-        // t2 should now use `a` (reg 0) directly instead of t1 (reg 1).
+        // t2 should now use r0 (reg 0) directly instead of t1 (reg 1).
         assert!(
-            matches!(out[1], Insn::BinOpConst(2, 0, BinaryOp::Add, _)),
-            "reassoc should rewrite t2's lhs from t1 to a: {:?}",
-            out[1]
+            matches!(out[2], Insn::BinOpConst(2, 0, BinaryOp::Add, _)),
+            "reassoc should rewrite t2's lhs from t1 to r0 when r0 is a known int: {:?}",
+            out[2]
         );
         // The combined constant (1+2=3) must be in the pool.
         let has_3 = consts
             .iter()
             .any(|v| matches!(v.kind(), crate::value::ValueKind::Int(3)));
         assert!(has_3, "combined constant 3 should be interned in the pool");
-        // Correctness: pass_const_fold will later fold t1 = a + 1 (if a is known);
-        // the instruction count is the same, but t1's lhs changed from `t1` to `a`.
-        assert_eq!(out.len(), 3, "instruction count unchanged by reassoc alone");
+        assert_eq!(out.len(), 4, "instruction count unchanged by reassoc alone");
     }
 
     #[test]
     fn reassoc_mul_chain() {
         use crate::ast::BinaryOp;
         use crate::value::Value;
-        // def f(x): return (x * 2) * 5  →  x * 10
-        let mut consts = vec![Value::int(2), Value::int(5)];
-        let num_locals = 1u32;
+        // (5 * 2) * 5 where 5 is a known-int constant → 5 * 10
+        let mut consts = vec![Value::int(5), Value::int(2), Value::int(5)];
+        let num_locals = 0u32;
         let insns = vec![
-            Insn::BinOpConst(1, 0, BinaryOp::Mul, 0), // t1 = x * 2
-            Insn::BinOpConst(2, 1, BinaryOp::Mul, 1), // t2 = t1 * 5
+            Insn::LoadConst(0, 0),                    // r0 = 5  → int_regs
+            Insn::BinOpConst(1, 0, BinaryOp::Mul, 1), // t1 = r0 * 2
+            Insn::BinOpConst(2, 1, BinaryOp::Mul, 2), // t2 = t1 * 5
             Insn::Return(2),
         ];
         let out = pass_reassoc(insns, &mut consts, num_locals);
         assert!(
-            matches!(out[1], Insn::BinOpConst(2, 0, BinaryOp::Mul, _)),
-            "reassoc should rewrite t2 to use x (reg 0) directly"
+            matches!(out[2], Insn::BinOpConst(2, 0, BinaryOp::Mul, _)),
+            "reassoc should rewrite t2 to use r0 (reg 0) directly"
         );
-        let ci = match out[1] {
+        let ci = match out[2] {
             Insn::BinOpConst(_, _, _, ci) => ci,
             _ => panic!(),
         };
@@ -5093,20 +5163,21 @@ mod tests {
     fn reassoc_bitor_chain() {
         use crate::ast::BinaryOp;
         use crate::value::Value;
-        // (x | 1) | 2 → x | 3
-        let mut consts = vec![Value::int(1), Value::int(2)];
-        let num_locals = 1u32;
+        // (r0 | 1) | 2 where r0 is a known-int constant → r0 | 3
+        let mut consts = vec![Value::int(0b1010), Value::int(1), Value::int(2)];
+        let num_locals = 0u32;
         let insns = vec![
-            Insn::BinOpConst(1, 0, BinaryOp::BitOr, 0), // t1 = x | 1
-            Insn::BinOpConst(2, 1, BinaryOp::BitOr, 1), // t2 = t1 | 2
+            Insn::LoadConst(0, 0),                      // r0 = 0b1010  → int_regs
+            Insn::BinOpConst(1, 0, BinaryOp::BitOr, 1), // t1 = r0 | 1
+            Insn::BinOpConst(2, 1, BinaryOp::BitOr, 2), // t2 = t1 | 2
             Insn::Return(2),
         ];
         let out = pass_reassoc(insns, &mut consts, num_locals);
         assert!(
-            matches!(out[1], Insn::BinOpConst(2, 0, BinaryOp::BitOr, _)),
-            "BitOr chain should be reassociated"
+            matches!(out[2], Insn::BinOpConst(2, 0, BinaryOp::BitOr, _)),
+            "BitOr chain should be reassociated when source is known-int"
         );
-        let ci = match out[1] {
+        let ci = match out[2] {
             Insn::BinOpConst(_, _, _, ci) => ci,
             _ => panic!(),
         };
@@ -5234,30 +5305,124 @@ mod tests {
     }
 
     #[test]
-    fn reassoc_end_to_end_compiled() {
-        // Full-pipeline test: def f(a): return (a + 1) + 2
-        // After optimize(), the function body should have at most one BinOpConst
-        // (the optimised t2 = a + 3) and no BinOp.
-        let code = compile_fn("def f(a):\n    return (a + 1) + 2\n");
+    fn reassoc_end_to_end_compiled_const_source() {
+        // Full-pipeline test: def f(): return (5 + 1) + 2
+        // `5` is a literal constant → int_regs tracks r_5.
+        // pass_reassoc can fold to `5 + 3`, then pass_const_fold collapses to 8.
+        // The whole expression should reduce to a single LoadConst(8).
+        let code = compile_fn("def f():\n    return (5 + 1) + 2\n");
         let optimized = optimize(code);
         let inner = &optimized.fn_protos[0].code;
+        // After full optimization the result should be a single LoadConst(8) + Return.
+        let has_8 = inner
+            .consts
+            .iter()
+            .any(|v| matches!(v.kind(), crate::value::ValueKind::Int(8)));
+        assert!(
+            has_8,
+            "fully constant expression (5+1)+2 should fold to 8 in const pool"
+        );
         let binopconst_count = inner
             .insns
             .iter()
             .filter(|i| matches!(i, Insn::BinOpConst(..)))
             .count();
-        assert!(
-            binopconst_count <= 1,
-            "reassoc + dead-store-elim should reduce (a+1)+2 to at most one BinOpConst, got {binopconst_count}"
+        assert_eq!(
+            binopconst_count, 0,
+            "all ops should be eliminated by const_fold after reassoc; got {binopconst_count}"
         );
-        // The folded constant 3 (= 1 + 2) must be in the function's const pool.
-        let has_3 = inner
-            .consts
-            .iter()
-            .any(|v| matches!(v.kind(), crate::value::ValueKind::Int(3)));
+    }
+
+    #[test]
+    fn reassoc_skips_unknown_type_lhs() {
+        use crate::ast::BinaryOp;
+        use crate::value::Value;
+        // When `inner_src` (r0) is NOT in int_regs (e.g. it's a function parameter
+        // of unknown type), reassociation must be suppressed — the intermediate
+        // value's `__add__` must still be called at runtime.
+        //
+        // Model: t1 = r0 + 1, t2 = t1 + 2
+        // r0 is NOT known to be an integer (no LoadConst), so reassoc must not fire.
+        let mut consts = vec![Value::int(1), Value::int(2)];
+        let num_locals = 1u32; // r0 is a local of unknown type
+        let insns = vec![
+            Insn::BinOpConst(1, 0, BinaryOp::Add, 0), // t1 = r0 + 1
+            Insn::BinOpConst(2, 1, BinaryOp::Add, 1), // t2 = t1 + 2
+            Insn::Return(2),
+        ];
+        let out = pass_reassoc(insns, &mut consts, num_locals);
+        // t2 must still use t1 (reg 1), not r0 (reg 0) — r0 is unknown type.
         assert!(
-            has_3,
-            "constant 3 must appear in the pool after reassoc of (a+1)+2"
+            matches!(out[1], Insn::BinOpConst(2, 1, BinaryOp::Add, 1)),
+            "reassoc must not fire when inner_src is of unknown type: {:?}",
+            out[1]
+        );
+    }
+
+    #[test]
+    fn reassoc_fires_for_known_int_lhs() {
+        use crate::ast::BinaryOp;
+        use crate::value::Value;
+        // When `inner_src` IS in int_regs (loaded from a known-int constant),
+        // reassociation should fire.
+        //
+        // r0 = LoadConst(5)  → int_regs = {r0}
+        // t1 = r0 + 1
+        // t2 = t1 + 2   → reassoc to t2 = r0 + 3 (because r0 ∈ int_regs)
+        let mut consts = vec![Value::int(5), Value::int(1), Value::int(2)];
+        let num_locals = 0u32; // no named locals; r0/t1/t2 are all temps
+        let insns = vec![
+            Insn::LoadConst(0, 0),                    // r0 = 5
+            Insn::BinOpConst(1, 0, BinaryOp::Add, 1), // t1 = r0 + 1
+            Insn::BinOpConst(2, 1, BinaryOp::Add, 2), // t2 = t1 + 2
+            Insn::Return(2),
+        ];
+        let out = pass_reassoc(insns, &mut consts, num_locals);
+        // t2 should be rewritten to use r0 directly with combined constant 3.
+        assert!(
+            matches!(out[2], Insn::BinOpConst(2, 0, BinaryOp::Add, _)),
+            "reassoc must fire when inner_src (r0) is a known-int register: {:?}",
+            out[2]
+        );
+        let ci = match out[2] {
+            Insn::BinOpConst(_, _, _, ci) => ci,
+            _ => panic!(),
+        };
+        assert!(
+            matches!(consts[ci as usize].kind(), crate::value::ValueKind::Int(3)),
+            "combined constant must be 3 (1+2)"
+        );
+    }
+
+    #[test]
+    fn reassoc_end_to_end_user_dunder_not_reassociated() {
+        // Full-pipeline test: def f(x): return (x + 1) + 2
+        // `x` is a parameter of unknown type — pass_reassoc must NOT fire because
+        // it cannot prove that `x` is an integer.  The pass would otherwise skip
+        // the intermediate dunder call `(x+1).__add__(2)`.
+        //
+        // We verify this at the pass level (before the full optimize() pipeline
+        // runs, since later passes such as pass_algebraic_simplify may further
+        // reduce the IR in their own safe ways).
+        use crate::ast::BinaryOp;
+        use crate::value::Value;
+        // Simulate: x is r0 (local of unknown type, num_locals=1).
+        // BinOpConst(1, 0, Add, 0): t1 = x + 1
+        // BinOpConst(2, 1, Add, 1): t2 = t1 + 2
+        let mut consts = vec![Value::int(1), Value::int(2)];
+        let num_locals = 1u32;
+        let insns = vec![
+            Insn::BinOpConst(1, 0, BinaryOp::Add, 0), // t1 = x + 1  (x unknown type)
+            Insn::BinOpConst(2, 1, BinaryOp::Add, 1), // t2 = t1 + 2
+            Insn::Return(2),
+        ];
+        let out = pass_reassoc(insns, &mut consts, num_locals);
+        // pass_reassoc must NOT have rewritten t2 to use x (reg 0) directly,
+        // because x is of unknown type and the intermediate __add__ must fire.
+        assert!(
+            matches!(out[1], Insn::BinOpConst(2, 1, BinaryOp::Add, 1)),
+            "pass_reassoc must not fire when inner_src (x) is of unknown type: {:?}",
+            out[1]
         );
     }
 }

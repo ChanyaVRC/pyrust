@@ -79,4 +79,22 @@ def overflow_add(x):
 result = overflow_add(0)
 assert result == 9223372036854775808, result
 
+# ── User-defined __add__: must produce correct result ─────────────────────────
+#
+# class C whose __add__ returns other * 10 (NOT self + other).
+# (obj + 1) + 2:
+#   step 1: obj.__add__(1)  → 10   (1 * 10)
+#   step 2: (10).__add__(2) → 12   (plain int add)
+# If reassoc incorrectly fires: obj.__add__(3) → 30, which is wrong.
+
+class MultiplierAdd:
+    def __add__(self, other):
+        return other * 10
+
+def user_add_chain(obj):
+    return (obj + 1) + 2
+
+result = user_add_chain(MultiplierAdd())
+assert result == 12, f"expected 12, got {result}"
+
 print("reassoc OK")
