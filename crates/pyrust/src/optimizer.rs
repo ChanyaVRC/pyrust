@@ -55,6 +55,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_dead_code(insns);
     let insns = pass_dead_store_elim(insns, num_locals);
     let insns = pass_copy_prop(insns, num_locals);
+    let insns = pass_switch_hoist(insns, num_locals);
     let insns = pass_trivial_nop(insns);
     let insns = pass_self_tail_call(insns);
     let insns = pass_forcount_const_inline(insns, &consts);
@@ -2772,6 +2773,195 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
     result
 }
 
+// ─── Switch-head hoisting ──────────────────────────────────────────────────────
+
+/// Eliminate redundant global-variable loads in if/elif chains that compare the
+/// same global to different constants.
+///
+/// ## Pattern
+///
+/// ```text
+/// i:        LoadGlobal(t, g_idx)                    // t >= num_locals (temp)
+/// i+1:      CmpJumpIfFalseConst(t, op, c, k)         // k > 0: false-branch jumps forward
+/// i+2..:    <true-branch body>
+/// target:   LoadGlobal(t2, g_idx)                    // same global — redundant!
+/// target+1: CmpJumpIfFalseConst(t2, op2, c2, k2)     // (or CmpJumpIfTrueConst)
+/// ```
+///
+/// The second `LoadGlobal` is redundant because on the false-branch path from
+/// `i+1` to `target`, no code runs (the forward jump bypasses the body entirely).
+/// The global cannot have changed between the two loads on this path.
+///
+/// ## Safety conditions
+///
+/// 1. Both `t` and `t2` are temp registers (`>= num_locals`).
+/// 2. The false-branch jump is forward (`k > 0`), meaning the true-branch body
+///    sits between `i+1` and `target` and is unreachable on the false path.
+/// 3. `target` has exactly one predecessor — the branch of `i+1` — so every
+///    execution that reaches `target` guarantees `t` holds the global value
+///    loaded at `i`.  Verified by a pre-pass that counts jump predecessors.
+/// 4. `t2` is not read in the true-branch body `[i+2, target)`.  This is
+///    structurally true for compiler-generated code (each branch uses its own
+///    fresh temp), but checked explicitly for correctness.
+///
+/// ## Interaction with subsequent passes
+///
+/// After removal of `LoadGlobal(t2, g_idx)`, `compact` rewrites all jump
+/// offsets.  `pass_compact_consts` (which runs later) will drop the global-name
+/// pool entry if it becomes unreferenced.  `pass_dead_store_elim` cannot remove
+/// `LoadGlobal` (it may raise `NameError`), so the removal must happen here.
+fn pass_switch_hoist(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
+    let n = insns.len();
+    if n < 4 {
+        return insns;
+    }
+
+    // Pre-pass: for each instruction index, count how many edges from other
+    // instructions reach it (predecessor count).  We only care whether the count
+    // is exactly 1 (sole predecessor) or more.
+    //
+    // Counting rules:
+    //   - Index 0 is the entry point: treated as having one implicit predecessor.
+    //   - Unconditional Jump: adds 1 to its target; no fall-through successor.
+    //   - Conditional branches + ForIter + SetupExcept: add 1 to both the branch
+    //     target AND the fall-through (i+1).
+    //   - Return/Raise/TailCall: no fall-through.
+    //   - All other instructions: fall-through only (+1 to i+1).
+    let mut pred_count: Vec<u32> = vec![0u32; n + 1];
+    pred_count[0] = 1; // entry point
+    for (i, insn) in insns.iter().enumerate() {
+        let jt = |k: i32| -> usize { (i as i64 + 1 + k as i64) as usize };
+        match insn {
+            Insn::Jump(k) => {
+                let t = jt(*k);
+                if t < n {
+                    pred_count[t] += 1;
+                }
+                // Unconditional jump: no fall-through.
+            }
+            Insn::JumpIfFalse(_, k)
+            | Insn::JumpIfTrue(_, k)
+            | Insn::CmpJumpIfFalse(_, _, _, k)
+            | Insn::CmpJumpIfTrue(_, _, _, k)
+            | Insn::CmpJumpIfFalseConst(_, _, _, k)
+            | Insn::CmpJumpIfTrueConst(_, _, _, k)
+            | Insn::ForIter(_, _, k)
+            | Insn::ForCountReg(_, _, _, _, k)
+            | Insn::ForCountConst(_, _, _, _, k)
+            | Insn::ForCountConstInline(_, _, _, _, k)
+            | Insn::MatchExcept(_, k)
+            | Insn::SetupExcept(k) => {
+                let t = jt(*k);
+                if t < n {
+                    pred_count[t] += 1;
+                }
+                if i + 1 < n {
+                    pred_count[i + 1] += 1;
+                }
+            }
+            Insn::Return(_)
+            | Insn::ReturnNone
+            | Insn::RaiseValue(_)
+            | Insn::RaiseFrom(_, _)
+            | Insn::RaiseReRaise
+            | Insn::RaiseAssert(_)
+            | Insn::TailCall { .. } => {
+                // No fall-through.
+            }
+            _ => {
+                if i + 1 < n {
+                    pred_count[i + 1] += 1;
+                }
+            }
+        }
+    }
+
+    let mut insns = insns;
+    let mut keep = vec![true; n];
+
+    let mut i = 0;
+    while i + 3 < n {
+        // Pattern step 1: LoadGlobal(t, g_idx) at i, where t is a temp.
+        let (t, g_idx) = match insns[i] {
+            Insn::LoadGlobal(t, g) if t >= num_locals && keep[i] => (t, g),
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+
+        // Pattern step 2: CmpJumpIfFalseConst(t, _, _, k) or
+        // CmpJumpIfTrueConst(t, _, _, k) at i+1, with a forward jump (k > 0).
+        let k0 = match insns[i + 1] {
+            Insn::CmpJumpIfFalseConst(r, _, _, k) | Insn::CmpJumpIfTrueConst(r, _, _, k)
+                if r == t && k > 0 =>
+            {
+                k
+            }
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+
+        // The branch target is at `target`.  We need target+1 to also exist.
+        // target = (i+1) + 1 + k0 = i + 2 + k0
+        let target = (i as i64 + 2 + k0 as i64) as usize;
+        if target + 1 >= n {
+            i += 1;
+            continue;
+        }
+
+        // Safety condition 3: `target` has exactly one predecessor (the branch
+        // at i+1), so `t` is guaranteed to hold the global's value there.
+        if pred_count[target] != 1 {
+            i += 1;
+            continue;
+        }
+
+        // Pattern step 3: LoadGlobal(t2, g_idx) at `target` — same global.
+        let t2 = match insns[target] {
+            Insn::LoadGlobal(t2, g) if t2 >= num_locals && g == g_idx && keep[target] => t2,
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+
+        // Pattern step 4: CmpJumpIfFalseConst(t2, ...) or CmpJumpIfTrueConst(t2, ...)
+        // at target+1.
+        match insns[target + 1] {
+            Insn::CmpJumpIfFalseConst(r, _, _, _) | Insn::CmpJumpIfTrueConst(r, _, _, _)
+                if r == t2 => {}
+            _ => {
+                i += 1;
+                continue;
+            }
+        }
+
+        // Safety condition 4: t2 is not read in the true-branch body [i+2, target).
+        if reg_is_read_in(&insns[i + 2..target], t2) {
+            i += 1;
+            continue;
+        }
+
+        // All conditions met.  Remove LoadGlobal(t2, g_idx) and rewrite the
+        // following CmpJump to use t (which holds the same global value).
+        keep[target] = false;
+        match &mut insns[target + 1] {
+            Insn::CmpJumpIfFalseConst(r, _, _, _) | Insn::CmpJumpIfTrueConst(r, _, _, _) => {
+                *r = t;
+            }
+            _ => unreachable!(),
+        }
+
+        // Advance past the LoadGlobal + CmpJump we just processed.
+        i += 2;
+    }
+
+    compact(insns, &keep)
+}
+
 fn pass_trivial_nop(insns: Vec<Insn>) -> Vec<Insn> {
     let keep: Vec<bool> = insns
         .iter()
@@ -5110,6 +5300,124 @@ mod tests {
                 nargs: 0
             }
         ));
+    }
+
+    // ── pass_switch_hoist ─────────────────────────────────────────────────────
+
+    #[test]
+    fn switch_hoist_removes_redundant_global_load() {
+        use crate::ast::BinaryOp;
+        // Simulates the if/elif pattern for module-level "x":
+        //   g_idx = 0 is the global name index for "x", num_locals = 5.
+        //   t=5 and t=6 are temp registers (>= num_locals).
+        //
+        //   i=0: LoadGlobal(5, 0)
+        //   i=1: CmpJumpIfFalseConst(5, Eq, c=0, k=4)  → false target = 1+1+4 = 6
+        //   i=2: LoadConst(3, 0)     // body0 true branch
+        //   i=3: Return(3)           // body0 exit
+        //   i=4: Jump(4)             // unreachable fall-through after Return
+        //   i=5: Return(3)           // unreachable
+        //   i=6: LoadGlobal(6, 0)   // elif-2 test — redundant!
+        //   i=7: CmpJumpIfFalseConst(6, Eq, c=1, k=1)  → false target = 9
+        //   i=8: Return(5)           // elif-2 true branch
+        //   i=9: Return(5)           // else / default
+        let insns = vec![
+            Insn::LoadGlobal(5, 0),
+            Insn::CmpJumpIfFalseConst(5, BinaryOp::Eq, 0, 4),
+            Insn::LoadConst(3, 0),
+            Insn::Return(3),
+            Insn::Jump(4), // unreachable; target=i+1+4=9 (valid index)
+            Insn::Return(3),
+            Insn::LoadGlobal(6, 0), // i=6: target — should be removed
+            Insn::CmpJumpIfFalseConst(6, BinaryOp::Eq, 1, 1), // false → i=9
+            Insn::Return(5),
+            Insn::Return(5),
+        ];
+        // pred_count[6] should be 1 (only from CmpJump at i=1).
+        let out = pass_switch_hoist(insns, 5);
+        // LoadGlobal(6, 0) at old index 6 should be gone.
+        let has_second_load = out
+            .iter()
+            .any(|insn| matches!(insn, Insn::LoadGlobal(6, 0)));
+        assert!(
+            !has_second_load,
+            "redundant LoadGlobal for t=6 should be removed"
+        );
+        // CmpJumpIfFalseConst should now use t=5 (not t=6).
+        let cmpjump_uses_t0 = out
+            .iter()
+            .any(|insn| matches!(insn, Insn::CmpJumpIfFalseConst(5, BinaryOp::Eq, 1, _)));
+        assert!(
+            cmpjump_uses_t0,
+            "rewritten CmpJumpIfFalseConst should use t=5"
+        );
+    }
+
+    #[test]
+    fn switch_hoist_skips_when_multiple_predecessors() {
+        use crate::ast::BinaryOp;
+        // If the target has two predecessors (jump from elsewhere), do not hoist.
+        //   i=0: LoadGlobal(5, 0)
+        //   i=1: CmpJumpIfFalseConst(5, Eq, 0, k=2) → false target = 1+1+2 = 4
+        //   i=2: Return(0)                            // true branch
+        //   i=3: Jump(0)                              → target = 3+1+0 = 4 (second predecessor!)
+        //   i=4: LoadGlobal(6, 0)                    // two predecessors → must NOT hoist
+        //   i=5: CmpJumpIfFalseConst(6, Eq, 1, 1)   → false target = 5+1+1 = 7
+        //   i=6: Return(1)                            // elif-2 true branch
+        //   i=7: Return(1)                            // else
+        let insns = vec![
+            Insn::LoadGlobal(5, 0),
+            Insn::CmpJumpIfFalseConst(5, BinaryOp::Eq, 0, 2),
+            Insn::Return(0),
+            Insn::Jump(0),          // targets i=4: adds a second predecessor
+            Insn::LoadGlobal(6, 0), // i=4: two predecessors — should NOT be removed
+            Insn::CmpJumpIfFalseConst(6, BinaryOp::Eq, 1, 1),
+            Insn::Return(1),
+            Insn::Return(1),
+        ];
+        let out = pass_switch_hoist(insns, 5);
+        let second_load_present = out
+            .iter()
+            .any(|insn| matches!(insn, Insn::LoadGlobal(6, 0)));
+        assert!(
+            second_load_present,
+            "LoadGlobal should be kept when target has 2 predecessors"
+        );
+    }
+
+    #[test]
+    fn switch_hoist_on_compiled_elif_chain() {
+        // Verify via compile_fn that a global if/elif chain optimises correctly.
+        let code = compile_fn(
+            "x = 99
+if x == 1:
+    print(1)
+elif x == 2:
+    print(2)
+",
+        );
+        let before_count = code
+            .insns
+            .iter()
+            .filter(|i| matches!(i, Insn::LoadGlobal(..)))
+            .count();
+        let optimized = optimize(code);
+        let after_count = optimized
+            .insns
+            .iter()
+            .filter(|i| matches!(i, Insn::LoadGlobal(..)))
+            .count();
+        assert!(
+            after_count <= before_count,
+            "optimised code should have no more LoadGlobal than unoptimised"
+        );
+        // The optimised code should have fewer LoadGlobal for the same global.
+        // (The assignment x=99 stays, but the elif test should reuse the first load.)
+        assert!(
+            after_count < before_count,
+            "switch-hoist should have reduced LoadGlobal count from {} to less",
+            before_count
+        );
     }
 
     #[test]
