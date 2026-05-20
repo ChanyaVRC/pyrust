@@ -1,3 +1,10 @@
 [workspace]
 members = ["crates/pyrust", "crates/pyrust-core", "crates/pyrust-builtins", "crates/pyrust-derive"]
 resolver = "2"
+
+[profile.release]
+# thin LTO + single codegen unit: lets LLVM see across crate boundaries and
+# inline Value::int/as_int, int_int_fast, and other hot-path helpers from
+# pyrust-core / pyrust-builtins into the VM's main dispatch loop.
+lto = "thin"
+codegen-units = 1
