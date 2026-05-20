@@ -48,6 +48,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     // `CmpJumpIfTrue`).  This matters for `if not (...): ...` patterns,
     // including the inversion emitted by the issue #287 trampoline rewrite.
     let insns = pass_cmpjump_fusion(insns, num_locals);
+    let insns = pass_const_reg_prop(insns, num_locals);
     let insns = pass_binopinplace_downgrade(insns, num_locals);
     let insns = pass_concat_merge(insns, num_locals, &mut num_regs);
     let insns = pass_exit_inline(insns);
@@ -55,6 +56,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_cse(insns, num_locals);
     let insns = pass_dead_code(insns);
     let insns = pass_dead_store_elim(insns, num_locals);
+    let insns = pass_syncmod_sink(insns);
     let insns = pass_cross_jump(insns);
     let insns = pass_copy_prop(insns, num_locals);
     let insns = pass_switch_hoist(insns, num_locals);
@@ -1422,6 +1424,302 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
     }
 }
 
+/// Collect every register read by `insn` into `reads`.  O(1) per instruction
+/// (amortised O(ranges) for range-based instructions).  Use this instead of
+/// calling `insn_reads_reg` in a loop to avoid the O(n × k) inner loop.
+fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
+    use Insn::*;
+    match insn {
+        LoadConst(..)
+        | LoadGlobal(..)
+        | LoadNone(..)
+        | LoadExc(..)
+        | ImportModule(..)
+        | DeleteName(..)
+        | DeleteLocal(..)
+        | Jump(..)
+        | SetupExcept(..)
+        | PopExcept
+        | EndExcept
+        | ReturnNone
+        | RaiseReRaise
+        | ForIter(..)
+        | ForCountConst(..)
+        | ForCountConstInline(..)
+        | DeleteModuleGlobal(..) => {}
+
+        StoreGlobal(_, s)
+        | Move(_, s)
+        | CopyReg(_, s)
+        | UnaryOp(_, _, s)
+        | Return(s)
+        | PrintExpr(s)
+        | RaiseValue(s)
+        | RaiseAssert(s)
+        | JumpIfFalse(s, _)
+        | JumpIfTrue(s, _)
+        | GetIter(_, s)
+        | Unpack(_, s, _)
+        | CheckLocal(s, _)
+        | GetAttr(_, s, _)
+        | DeleteAttr(s, _)
+        | BinOpConst(_, s, _, _)
+        | BinOpImm(_, s, _, _)
+        | CmpJumpIfFalseConst(s, _, _, _)
+        | CmpJumpIfTrueConst(s, _, _, _)
+        | MatchExcept(s, _)
+        | RecordClassStore(s)
+        | RecordClassDel(s)
+        | SyncModuleGlobal(s, _) => {
+            reads.insert(*s);
+        }
+
+        BinOp(_, a, _, b)
+        | BinOpInPlace(_, a, _, b)
+        | CmpJumpIfFalse(a, _, b, _)
+        | CmpJumpIfTrue(a, _, b, _)
+        | RaiseFrom(a, b)
+        | SetAdd(a, b)
+        | ListAppend(a, b)
+        | ListExtend(a, b)
+        | DictUpdate(a, b)
+        | GetItem(_, a, b)
+        | DeleteItem(a, b) => {
+            reads.insert(*a);
+            reads.insert(*b);
+        }
+
+        SetAttr(obj, _, val) => {
+            reads.insert(*obj);
+            reads.insert(*val);
+        }
+        ForCountReg(_, _, stop, _, _) => {
+            reads.insert(*stop);
+        }
+
+        SetItem(a, b, c) => {
+            reads.insert(*a);
+            reads.insert(*b);
+            reads.insert(*c);
+        }
+
+        Call(base, argc) | CallMemo(base, argc) => {
+            for r in *base..=(*base + *argc as u32) {
+                reads.insert(r);
+            }
+        }
+        TailCall { args_base, nargs } => {
+            reads.insert(*args_base - 1);
+            for r in *args_base..*args_base + *nargs as u32 {
+                reads.insert(r);
+            }
+        }
+        BuildList(_, base, n) | BuildTuple(_, base, n) => {
+            for r in *base..*base + *n as u32 {
+                reads.insert(r);
+            }
+        }
+        BuildDict(_, base, n) => {
+            for r in *base..*base + 2 * *n as u32 {
+                reads.insert(r);
+            }
+        }
+        CallMethod {
+            obj,
+            args_base,
+            nargs,
+            ..
+        } => {
+            reads.insert(*obj);
+            for r in *args_base..*args_base + *nargs as u32 {
+                reads.insert(r);
+            }
+        }
+        CallMethodExpanded {
+            obj,
+            pos_list,
+            kw_dict,
+            ..
+        } => {
+            reads.insert(*obj);
+            reads.insert(*pos_list);
+            reads.insert(*kw_dict);
+        }
+        MakeFunction(_, _, defs_base, defs_n, annots_base, annots_n) => {
+            for r in *defs_base..*defs_base + *defs_n as u32 {
+                reads.insert(r);
+            }
+            if *annots_n > 0 {
+                for r in *annots_base..*annots_base + *annots_n as u32 {
+                    reads.insert(r);
+                }
+            }
+        }
+        MakeClass(_, _, bases_base, bases_n, _) => {
+            for r in *bases_base..*bases_base + *bases_n as u32 {
+                reads.insert(r);
+            }
+        }
+        Yield { src, .. } => {
+            reads.insert(*src);
+        }
+        YieldFrom {
+            iter_reg, sent_reg, ..
+        } => {
+            reads.insert(*iter_reg);
+            reads.insert(*sent_reg);
+        }
+        UnpackEx { src, .. } => {
+            reads.insert(*src);
+        }
+        LoadNoneRange { .. } => {}
+        Concat { base, count, .. } => {
+            for r in *base..*base + *count as u32 {
+                reads.insert(r);
+            }
+        }
+    }
+}
+
+// ─── Constant-register propagation into CmpJump/BinOp ────────────────────────
+
+/// Convert `BinOp` and `CmpJump*` instructions that use a write-once
+/// `LoadConst` register on the RHS to their `*Const` variants.
+///
+/// ## Pattern
+///
+/// ```text
+/// LoadConst(r_n, idx)          ← written exactly once
+/// ...
+/// BinOp(dst, lhs, op, r_n)    → BinOpConst(dst, lhs, op, idx)
+/// CmpJumpIfFalse(lhs, op, r_n, k) → CmpJumpIfFalseConst(lhs, op, idx, k)
+/// CmpJumpIfTrue(lhs, op, r_n, k)  → CmpJumpIfTrueConst(lhs, op, idx, k)
+/// ```
+///
+/// ## Why this helps
+///
+/// `BinOp` looks up the RHS from the register file; `BinOpConst` indexes the
+/// const pool directly.  The `*Const` VM dispatch paths also avoid one register
+/// read.  More importantly, `CmpJumpIfFalseConst` is eligible for further
+/// constant-folding and algebraic-simplify rewrites that `CmpJumpIfFalse` is not.
+///
+/// ## Guard
+///
+/// Only registers that are written exactly once by a `LoadConst` across the
+/// entire function body are considered.  Write-once guarantees the register
+/// holds that constant on every path that reaches the use, without the cost
+/// of a full dataflow analysis.
+fn pass_const_reg_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
+    // Pre-scan: count writes and record LoadConst targets.
+    //
+    // Use collect_writes (not writable_dst) to capture ALL write destinations,
+    // including Move(r, _) and Unpack which writable_dst omits.
+    //
+    // IMPORTANT: reuse a single HashSet across iterations (clear instead of
+    // new) to avoid N heap allocations — one per instruction.  For files with
+    // hundreds of assertions this cut ~600 allocations to 1, removing the
+    // compile-time overhead that caused an 88% regression on assertion-heavy
+    // benchmarks.
+    let mut write_count: HashMap<u32, u32> = HashMap::new();
+    let mut load_const_idx: HashMap<u32, u16> = HashMap::new();
+    let mut written: HashSet<u32> = HashSet::new();
+    for insn in &insns {
+        written.clear();
+        collect_writes(insn, &mut written);
+        for &dst in &written {
+            *write_count.entry(dst).or_insert(0) += 1;
+        }
+        if let Insn::LoadConst(dst, idx) = insn {
+            load_const_idx.insert(*dst, *idx);
+        }
+    }
+    // Registers written exactly once, and that single write was a LoadConst.
+    let immutable_const: HashMap<u32, u16> = load_const_idx
+        .into_iter()
+        .filter(|(r, _)| write_count.get(r).copied() == Some(1))
+        .collect();
+
+    if immutable_const.is_empty() {
+        return insns;
+    }
+
+    // Convert BinOp/CmpJump that use immutable_const registers.  Track which
+    // *temp* registers (>= num_locals) were actually substituted — their
+    // LoadConst becomes a dead store and must be pruned below.  Named locals
+    // (< num_locals) may be captured by closures, so keep their LoadConst.
+    let mut converted_regs: HashSet<u32> = HashSet::new();
+    let mut out: Vec<Insn> = insns
+        .into_iter()
+        .map(|insn| match insn {
+            Insn::BinOp(dst, lhs, op, rhs) => {
+                if let Some(&idx) = immutable_const.get(&rhs) {
+                    if rhs >= num_locals {
+                        converted_regs.insert(rhs);
+                    }
+                    Insn::BinOpConst(dst, lhs, op, idx)
+                } else {
+                    Insn::BinOp(dst, lhs, op, rhs)
+                }
+            }
+            Insn::CmpJumpIfFalse(lhs, op, rhs, k) => {
+                if let Some(&idx) = immutable_const.get(&rhs) {
+                    if rhs >= num_locals {
+                        converted_regs.insert(rhs);
+                    }
+                    Insn::CmpJumpIfFalseConst(lhs, op, idx, k)
+                } else {
+                    Insn::CmpJumpIfFalse(lhs, op, rhs, k)
+                }
+            }
+            Insn::CmpJumpIfTrue(lhs, op, rhs, k) => {
+                if let Some(&idx) = immutable_const.get(&rhs) {
+                    if rhs >= num_locals {
+                        converted_regs.insert(rhs);
+                    }
+                    Insn::CmpJumpIfTrueConst(lhs, op, idx, k)
+                } else {
+                    Insn::CmpJumpIfTrue(lhs, op, rhs, k)
+                }
+            }
+            other => other,
+        })
+        .collect();
+
+    // Prune the LoadConst instructions that are now dead.
+    //
+    // `pass_dead_store_elim` cannot remove them because it conservatively bails
+    // when it hits a CmpJumpConst (which is control flow) before seeing a
+    // subsequent write.  Since we know exactly which registers were substituted,
+    // we collect the set of ALL registers still read in `out` in a single O(n)
+    // pass, then subtract to find the dead ones.
+    //
+    // IMPORTANT: use `compact` (not `retain`) so that all jump offsets are
+    // rewritten to account for the removed instructions.  A raw `retain` would
+    // leave stale offsets and produce wrong loop targets.
+    if !converted_regs.is_empty() {
+        // True O(n) pass: collect every register read by any instruction, then
+        // filter converted_regs.  Avoids the O(n × k) loop from calling
+        // insn_reads_reg once per converted_reg per instruction.
+        let mut all_reads: HashSet<u32> = HashSet::new();
+        for insn in &out {
+            collect_reads(insn, &mut all_reads);
+        }
+        let dead_regs: HashSet<u32> = converted_regs
+            .into_iter()
+            .filter(|r| !all_reads.contains(r))
+            .collect();
+        if !dead_regs.is_empty() {
+            let keep: Vec<bool> = out
+                .iter()
+                .map(|insn| !matches!(insn, Insn::LoadConst(r, _) if dead_regs.contains(r)))
+                .collect();
+            out = compact(out, &keep);
+        }
+    }
+
+    out
+}
+
 // ─── BinOpInPlace → BinOp downgrade ───────────────────────────────────────────
 
 /// Replace `BinOpInPlace(dst, lhs, op, rhs)` with `BinOp(dst, lhs, op, rhs)`
@@ -2609,6 +2907,293 @@ fn pass_ivsr(insns: Vec<Insn>, consts: &mut Vec<Value>, num_regs: &mut u32) -> V
 }
 
 // ─── Trivial no-op removal ─────────────────────────────────────────────────────
+
+// ─── SyncModuleGlobal sinking ─────────────────────────────────────────────────
+
+/// Sink `SyncModuleGlobal` instructions out of call-free loop bodies to the
+/// loop exit(s).
+///
+/// ## Correctness
+///
+/// `SyncModuleGlobal(reg, name_idx)` is a NOP when `globals_accessed == false`
+/// (the common case).  Even when `globals_accessed == true`, the dict is only
+/// consulted by `globals()` / `locals()`, which are invoked via `Call` /
+/// `CallMemo` instructions.  If the loop body contains no `Call`, `CallMemo`,
+/// `CallMethod`, `CallMethodExpanded`, or `ForIter` instructions, then:
+///
+/// - `globals_accessed` cannot change during the loop.
+/// - No code in the loop body reads the module globals dict for the synced names.
+///
+/// Therefore the dict write can be deferred to every loop exit without changing
+/// observable behaviour.  The dict values are temporarily stale during the loop
+/// body, but always correct at every exit point.
+///
+/// ## Back-edge detection
+///
+/// A `Jump(k)` at position `i` is a back-edge when `i + 1 + k <= i`, i.e. `k < 0`.
+/// The back-edge's target is the loop header; the back-edge itself is the latch.
+///
+/// ## Exit-label computation
+///
+/// - The loop header's conditional jump (if any) that exits the loop.
+/// - Any conditional/unconditional jump from within `[header+1 .. latch]` that
+///   targets a position `> latch` (a `break`).
+///
+/// ## Placement map
+///
+/// Each `SyncModuleGlobal` removed from the body is instead emitted at each
+/// exit label, before the original instruction at that label.  Jump offsets are
+/// rewritten so that loop exits land at the sunk syncs rather than the original
+/// exit instruction.
+fn pass_syncmod_sink(insns: Vec<Insn>) -> Vec<Insn> {
+    let n = insns.len();
+    if n == 0 {
+        return insns;
+    }
+
+    // Collect back-edges: (header, latch).  Group by header and use the maximum
+    // latch so that `continue` statements (which compile to Jump back to the same
+    // header) don't truncate the loop body we analyse.
+    let mut header_to_latch: HashMap<usize, usize> = HashMap::new();
+    for (i, insn) in insns.iter().enumerate() {
+        if let Insn::Jump(k) = insn {
+            let target = (i as i64 + 1 + *k as i64) as usize;
+            if target <= i {
+                let entry = header_to_latch.entry(target).or_insert(i);
+                if i > *entry {
+                    *entry = i;
+                }
+            }
+        }
+    }
+
+    if header_to_latch.is_empty() {
+        return insns;
+    }
+
+    // Sets built across all loops.
+    let mut remove: HashSet<usize> = HashSet::new();
+    // Map: exit_label → Vec of SyncModuleGlobal insns to insert before it.
+    let mut sink_at: HashMap<usize, Vec<Insn>> = HashMap::new();
+
+    'outer: for (header, latch) in header_to_latch {
+        // Skip loops with exception handling or any call-like instruction — these
+        // could change globals_accessed or read the globals dict.
+        let has_blocker = insns[header..=latch].iter().any(|i| {
+            matches!(
+                i,
+                Insn::SetupExcept(_)
+                    | Insn::PopExcept
+                    | Insn::Call(_, _)
+                    | Insn::CallMemo(_, _)
+                    | Insn::CallMethod { .. }
+                    | Insn::CallMethodExpanded { .. }
+                    | Insn::ForIter(_, _, _)
+            )
+        });
+        if has_blocker {
+            continue;
+        }
+
+        // Skip if any call-like instruction appears BEFORE the loop header.  A
+        // pre-loop call (e.g. `globals()`) could have already set globals_accessed
+        // to true, which would make the sunk SyncModuleGlobal produce stale dict
+        // values inside the loop body.
+        let has_pre_loop_call = insns[..header].iter().any(|i| {
+            matches!(
+                i,
+                Insn::Call(_, _)
+                    | Insn::CallMemo(_, _)
+                    | Insn::CallMethod { .. }
+                    | Insn::CallMethodExpanded { .. }
+            )
+        });
+        if has_pre_loop_call {
+            continue;
+        }
+
+        // Collect SyncModuleGlobal instructions in the loop body (exclude header
+        // for exit-label detection: header is the conditional-branch guard).
+        // Use last-writer semantics: track the last reg seen for each name_idx.
+        let mut sync_last_reg: HashMap<u16, u32> = HashMap::new();
+        let mut sync_positions: Vec<usize> = Vec::new();
+        for pos in (header + 1)..=latch {
+            if let Insn::SyncModuleGlobal(reg, name_idx) = &insns[pos] {
+                sync_last_reg.insert(*name_idx, *reg);
+                sync_positions.push(pos);
+            }
+        }
+
+        if sync_positions.is_empty() {
+            continue;
+        }
+
+        // Skip if any synced name is read via LoadGlobal in the loop body.
+        // (That would mean the loop observes stale dict values, which is not safe.)
+        let synced_names: HashSet<u16> = sync_last_reg.keys().copied().collect();
+        let has_load_conflict = insns[header..=latch].iter().any(|i| {
+            if let Insn::LoadGlobal(_, name_idx) = i {
+                synced_names.contains(name_idx)
+            } else {
+                false
+            }
+        });
+        if has_load_conflict {
+            continue;
+        }
+
+        // Find exit labels — positions outside the loop that are jump targets of
+        // instructions within [header..=latch].
+        //
+        // From header: the conditional jump whose false/true branch exits the loop.
+        // From body [header+1 .. latch]: any branch/jump targeting > latch (break).
+        let mut exits: Vec<usize> = Vec::new();
+
+        // Check header for an exit branch.
+        let header_exit: Option<usize> = match &insns[header] {
+            Insn::CmpJumpIfFalse(_, _, _, k)
+            | Insn::CmpJumpIfTrue(_, _, _, k)
+            | Insn::CmpJumpIfFalseConst(_, _, _, k)
+            | Insn::CmpJumpIfTrueConst(_, _, _, k)
+            | Insn::JumpIfFalse(_, k)
+            | Insn::JumpIfTrue(_, k)
+            | Insn::ForCountConstInline(_, _, _, _, k)
+            | Insn::ForCountConst(_, _, _, _, k)
+            | Insn::ForCountReg(_, _, _, _, k) => {
+                let target = (header as i64 + 1 + *k as i64) as usize;
+                if target > latch { Some(target) } else { None }
+            }
+            _ => None,
+        };
+        if let Some(exit) = header_exit {
+            exits.push(exit);
+        }
+
+        // Check body for breaks (jumps targeting > latch).
+        for pos in (header + 1)..latch {
+            let exit_target: Option<usize> = match &insns[pos] {
+                Insn::Jump(k) => {
+                    let t = (pos as i64 + 1 + *k as i64) as usize;
+                    if t > latch { Some(t) } else { None }
+                }
+                Insn::JumpIfFalse(_, k) | Insn::JumpIfTrue(_, k) => {
+                    let t = (pos as i64 + 1 + *k as i64) as usize;
+                    if t > latch { Some(t) } else { None }
+                }
+                Insn::CmpJumpIfFalse(_, _, _, k)
+                | Insn::CmpJumpIfTrue(_, _, _, k)
+                | Insn::CmpJumpIfFalseConst(_, _, _, k)
+                | Insn::CmpJumpIfTrueConst(_, _, _, k) => {
+                    let t = (pos as i64 + 1 + *k as i64) as usize;
+                    if t > latch { Some(t) } else { None }
+                }
+                _ => None,
+            };
+            if let Some(exit) = exit_target {
+                exits.push(exit);
+            }
+        }
+
+        if exits.is_empty() {
+            // No exit found — loop might be infinite or the header jump is inside
+            // the body.  Skip conservatively.
+            continue 'outer;
+        }
+
+        // Deduplicate exits (multiple breaks may target the same label).
+        exits.sort_unstable();
+        exits.dedup();
+
+        // Validate: every exit must be either at n (past-the-end) or < n.
+        // Exit at n means "fall through after the last instruction" — valid.
+        for &exit in &exits {
+            if exit > n {
+                continue 'outer;
+            }
+        }
+
+        // Build the deduped list of SyncModuleGlobal instructions to sink
+        // (one per name_idx, using the last reg seen).
+        let mut sink_insns: Vec<Insn> = sync_last_reg
+            .iter()
+            .map(|(&name_idx, &reg)| Insn::SyncModuleGlobal(reg, name_idx))
+            .collect();
+        // Sort by name_idx for deterministic output.
+        sink_insns.sort_by_key(|i| {
+            if let Insn::SyncModuleGlobal(_, idx) = i {
+                *idx
+            } else {
+                0
+            }
+        });
+
+        // Mark the original positions for removal.
+        for pos in sync_positions {
+            remove.insert(pos);
+        }
+
+        // Add sunk instructions at each exit label.
+        for exit in exits {
+            sink_at
+                .entry(exit)
+                .or_insert_with(Vec::new)
+                .extend(sink_insns.iter().cloned());
+        }
+    }
+
+    if remove.is_empty() && sink_at.is_empty() {
+        return insns;
+    }
+
+    // Build placement_map and jump_target_map.
+    //
+    // jump_target_map[i]: where jumps targeting old position i land in the new
+    //   sequence.  This is BEFORE any instructions sunk at i, so that a loop
+    //   exit jump lands at the sunk SyncModuleGlobal (which precedes the original
+    //   exit instruction).
+    //
+    // placement_map[i]: where the old instruction i lands in the new sequence
+    //   (AFTER any sunk instructions at i, if i is not removed).
+    let mut placement_map = vec![0usize; n + 1];
+    let mut jump_target_map = vec![0usize; n + 1];
+    let mut new_pos: usize = 0;
+    for i in 0..=n {
+        // Jumps to i land BEFORE the sunk instructions at i.
+        jump_target_map[i] = new_pos;
+        if let Some(extra) = sink_at.get(&i) {
+            new_pos += extra.len();
+        }
+        // Old instruction i (if kept) lands AFTER the sunk instructions.
+        placement_map[i] = new_pos;
+        if i < n && !remove.contains(&i) {
+            new_pos += 1;
+        }
+    }
+
+    // Emit the result.
+    let mut out: Vec<Insn> = Vec::with_capacity(new_pos);
+    for i in 0..n {
+        // Emit sunk instructions before position i.
+        if let Some(extra) = sink_at.get(&i) {
+            out.extend(extra.iter().cloned());
+        }
+        // Emit the original instruction (if not removed), with rewritten offsets.
+        if !remove.contains(&i) {
+            out.push(rewrite_offsets_with(
+                insns[i].clone(),
+                i,
+                &placement_map,
+                &jump_target_map,
+            ));
+        }
+    }
+    // Emit any sunk instructions after the last original instruction.
+    if let Some(extra) = sink_at.get(&n) {
+        out.extend(extra.iter().cloned());
+    }
+
+    out
+}
 
 // ─── Copy propagation ─────────────────────────────────────────────────────────
 
@@ -6101,6 +6686,351 @@ mod tests {
                 nargs: 0
             }
         ));
+    }
+
+    // ── pass_const_reg_prop ────────────────────────────────────────────────────
+
+    #[test]
+    fn const_reg_prop_converts_cmpjump() {
+        use crate::ast::BinaryOp;
+        // LoadConst(r4, idx=0) — write-once temp register (r4 >= num_locals=2)
+        // CmpJumpIfFalse(r0, Lt, r4, k=1) → CmpJumpIfFalseConst(r0, Lt, 0, k=1)
+        // LoadConst(r4) becomes dead and is pruned.
+        let insns = vec![
+            Insn::LoadConst(4, 0),
+            Insn::CmpJumpIfFalse(0, BinaryOp::Lt, 4, 1),
+            Insn::Return(0),
+        ];
+        let out = pass_const_reg_prop(insns, 2);
+        assert_eq!(out.len(), 2, "dead LoadConst should be removed");
+        assert!(
+            matches!(out[0], Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 1)),
+            "CmpJumpIfFalse with write-once const rhs should become CmpJumpIfFalseConst: {:?}",
+            out[0]
+        );
+    }
+
+    #[test]
+    fn const_reg_prop_converts_binop() {
+        use crate::ast::BinaryOp;
+        // LoadConst(r5, idx=0) — write-once temp register (r5 >= num_locals=2)
+        // BinOp(r2, r0, Add, r5) → BinOpConst(r2, r0, Add, 0)
+        // LoadConst(r5) becomes dead and is pruned.
+        let insns = vec![
+            Insn::LoadConst(5, 0),
+            Insn::BinOp(2, 0, BinaryOp::Add, 5),
+            Insn::Return(2),
+        ];
+        let out = pass_const_reg_prop(insns, 2);
+        assert_eq!(out.len(), 2, "dead LoadConst should be removed");
+        assert!(
+            matches!(out[0], Insn::BinOpConst(2, 0, BinaryOp::Add, 0)),
+            "BinOp with write-once const rhs should become BinOpConst: {:?}",
+            out[0]
+        );
+    }
+
+    #[test]
+    fn const_reg_prop_skips_multi_write_reg() {
+        use crate::ast::BinaryOp;
+        // r5 is written twice — not a safe immutable const, must not convert.
+        let insns = vec![
+            Insn::LoadConst(5, 0),
+            Insn::LoadConst(5, 1), // second write to r5
+            Insn::CmpJumpIfFalse(0, BinaryOp::Lt, 5, 0),
+            Insn::Return(0),
+        ];
+        let out = pass_const_reg_prop(insns, 2);
+        assert!(
+            matches!(out[2], Insn::CmpJumpIfFalse(0, BinaryOp::Lt, 5, 0)),
+            "should not convert when rhs register is written multiple times"
+        );
+    }
+
+    #[test]
+    fn const_reg_prop_keeps_loadconst_for_named_local() {
+        use crate::ast::BinaryOp;
+        // r1 is a named local (r1 < num_locals=3): LoadConst should NOT be pruned
+        // even though CmpJumpIfFalse is converted to CmpJumpIfFalseConst.
+        let insns = vec![
+            Insn::LoadConst(1, 0), // r1 is a named local
+            Insn::CmpJumpIfFalse(0, BinaryOp::Lt, 1, 1),
+            Insn::Return(0),
+        ];
+        let out = pass_const_reg_prop(insns, 3);
+        assert_eq!(out.len(), 3, "LoadConst for named local must not be pruned");
+        assert!(
+            matches!(out[0], Insn::LoadConst(1, 0)),
+            "named-local LoadConst must survive"
+        );
+        assert!(
+            matches!(out[1], Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 1)),
+            "CmpJump should still be converted: {:?}",
+            out[1]
+        );
+    }
+
+    #[test]
+    fn const_reg_prop_keeps_loadconst_when_reg_has_other_readers() {
+        use crate::ast::BinaryOp;
+        // r5 is converted in CmpJump but also read by Return — LoadConst must stay.
+        let insns = vec![
+            Insn::LoadConst(5, 0),
+            Insn::CmpJumpIfFalse(0, BinaryOp::Lt, 5, 1),
+            Insn::Return(5), // r5 is still live here
+        ];
+        let out = pass_const_reg_prop(insns, 2);
+        assert_eq!(
+            out.len(),
+            3,
+            "LoadConst must survive when reg has other readers"
+        );
+        assert!(
+            matches!(out[0], Insn::LoadConst(5, 0)),
+            "LoadConst should remain: {:?}",
+            out[0]
+        );
+    }
+
+    // ── pass_syncmod_sink ──────────────────────────────────────────────────────
+
+    #[test]
+    fn syncmod_sink_removes_from_while_loop() {
+        use crate::ast::BinaryOp;
+        // Simulate:  while i < n:  i += 1
+        //
+        //  [0] CmpJumpIfFalseConst(r0, Lt, 0, k=3)  ← header, exit at 0+1+3=4
+        //  [1] BinOpImm(r0, r0, Add, 1)
+        //  [2] SyncModuleGlobal(r0, 0)               ← should be removed
+        //  [3] Jump(-4)                              ← back-edge to 0, offset=-4: 3+1-4=0 ✓
+        // (k=3 means: target = 0+1+3 = 4, which is past latch=3 → exit=4)
+        let insns = vec![
+            Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 3),
+            Insn::BinOpImm(0, 0, BinaryOp::Add, 1),
+            Insn::SyncModuleGlobal(0, 0),
+            Insn::Jump(-4),
+        ];
+        let out = pass_syncmod_sink(insns);
+        // After sink: SyncModuleGlobal removed from body (pos 2 gone),
+        // SyncModuleGlobal added at exit=4 (which is pos 3 in the new sequence = after Jump).
+        // Result: [CmpJumpIfFalseConst, BinOpImm, Jump, SyncModuleGlobal]
+        assert_eq!(
+            out.len(),
+            4,
+            "length stays same after sink (removed+added 1): {:?}",
+            out
+        );
+        // No SyncModuleGlobal before the Jump.
+        let sync_count_before_jump = out[..out.len() - 1]
+            .iter()
+            .filter(|i| matches!(i, Insn::SyncModuleGlobal(_, _)))
+            .count();
+        assert_eq!(
+            sync_count_before_jump, 0,
+            "SyncModuleGlobal should be removed from loop body"
+        );
+        // SyncModuleGlobal at the end (after the loop).
+        assert!(
+            matches!(out[out.len() - 1], Insn::SyncModuleGlobal(0, 0)),
+            "SyncModuleGlobal should be sunk to loop exit: {:?}",
+            out[out.len() - 1]
+        );
+    }
+
+    #[test]
+    fn syncmod_sink_not_applied_with_call() {
+        use crate::ast::BinaryOp;
+        // Loop with a Call — must not sink.
+        //
+        //  [0] CmpJumpIfFalseConst(r0, Lt, 0, k=4)
+        //  [1] Call(r1, 0)
+        //  [2] BinOpImm(r0, r0, Add, 1)
+        //  [3] SyncModuleGlobal(r0, 0)
+        //  [4] Jump(-5)
+        let insns = vec![
+            Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 4),
+            Insn::Call(1, 0),
+            Insn::BinOpImm(0, 0, BinaryOp::Add, 1),
+            Insn::SyncModuleGlobal(0, 0),
+            Insn::Jump(-5),
+        ];
+        let out = pass_syncmod_sink(insns);
+        // Must be unchanged: same length, no SyncModuleGlobal at the end.
+        assert_eq!(
+            out.len(),
+            5,
+            "should not change when loop body contains a Call"
+        );
+        assert!(
+            matches!(out[3], Insn::SyncModuleGlobal(0, 0)),
+            "SyncModuleGlobal should remain in loop body when Call is present"
+        );
+    }
+
+    #[test]
+    fn syncmod_sink_not_applied_with_loadglobal_conflict() {
+        use crate::ast::BinaryOp;
+        // Loop body contains LoadGlobal for the same name_idx as the SyncModuleGlobal.
+        //
+        //  [0] CmpJumpIfFalseConst(r0, Lt, 0, k=4)
+        //  [1] LoadGlobal(r2, 0)          ← name_idx=0 conflicts with SyncModuleGlobal(r0, 0)
+        //  [2] BinOpImm(r0, r0, Add, 1)
+        //  [3] SyncModuleGlobal(r0, 0)
+        //  [4] Jump(-5)
+        let insns = vec![
+            Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 4),
+            Insn::LoadGlobal(2, 0),
+            Insn::BinOpImm(0, 0, BinaryOp::Add, 1),
+            Insn::SyncModuleGlobal(0, 0),
+            Insn::Jump(-5),
+        ];
+        let out = pass_syncmod_sink(insns);
+        assert_eq!(out.len(), 5, "should not change when LoadGlobal conflicts");
+        assert!(
+            matches!(out[3], Insn::SyncModuleGlobal(0, 0)),
+            "SyncModuleGlobal should remain in loop body when LoadGlobal conflicts"
+        );
+    }
+
+    #[test]
+    fn syncmod_sink_multiple_exits() {
+        use crate::ast::BinaryOp;
+        // Loop with a break (two exit labels).
+        //
+        //  [0] CmpJumpIfFalseConst(r0, Lt, 0, k=4) ← exit at 5
+        //  [1] CmpJumpIfFalseConst(r0, Lt, 1, k=2) ← break-exit at 4
+        //  [2] BinOpImm(r0, r0, Add, 1)
+        //  [3] SyncModuleGlobal(r0, 0)
+        //  [4] Jump(-5)                             ← back-edge → 0
+        //  [5] ReturnNone                           ← normal exit
+        //
+        // header=0, latch=4.
+        // header exit: 0+1+4=5.
+        // break exit: 1+1+2=4, which is == latch — not > latch, so not a break.
+        // Let's use k=3 for break so target=1+1+3=5 (same as header exit).
+        // Let's instead use a body jump that really breaks out:
+        //
+        //  [0] CmpJumpIfFalseConst(r0, Lt, 0, k=5) ← exit at 6
+        //  [1] CmpJumpIfFalseConst(r0, Lt, 1, k=3) ← break at 1+1+3=5, > latch=4 → exit at 5
+        //  [2] BinOpImm(r0, r0, Add, 1)
+        //  [3] SyncModuleGlobal(r0, 0)
+        //  [4] Jump(-5)                             ← back-edge → 0
+        //  [5] ReturnNone
+        //  [6] ReturnNone
+        let insns = vec![
+            Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 5),
+            Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 1, 3),
+            Insn::BinOpImm(0, 0, BinaryOp::Add, 1),
+            Insn::SyncModuleGlobal(0, 0),
+            Insn::Jump(-5),
+            Insn::ReturnNone,
+            Insn::ReturnNone,
+        ];
+        let out = pass_syncmod_sink(insns);
+        // SyncModuleGlobal should be removed from body (was at old pos 3).
+        let sync_in_loop = out
+            .iter()
+            .take(4) // header, branch, binopimm, jump (after removal)
+            .filter(|i| matches!(i, Insn::SyncModuleGlobal(_, _)))
+            .count();
+        assert_eq!(
+            sync_in_loop, 0,
+            "no SyncModuleGlobal in loop body after sink: {:?}",
+            &out
+        );
+        // SyncModuleGlobal should appear at BOTH exit points.
+        let total_syncs = out
+            .iter()
+            .filter(|i| matches!(i, Insn::SyncModuleGlobal(_, _)))
+            .count();
+        assert_eq!(
+            total_syncs, 2,
+            "SyncModuleGlobal should appear at both exits: {:?}",
+            out
+        );
+    }
+
+    #[test]
+    fn syncmod_sink_not_applied_with_pre_loop_call() {
+        use crate::ast::BinaryOp;
+        // A Call before the loop header means globals_accessed may already be true.
+        // The sink must NOT be applied in this case.
+        //
+        //  [0] Call(1, 0)                              ← pre-loop call (e.g. globals())
+        //  [1] CmpJumpIfFalseConst(r0, Lt, 0, k=3)    ← header, exit at 5
+        //  [2] BinOpImm(r0, r0, Add, 1)
+        //  [3] SyncModuleGlobal(r0, 0)
+        //  [4] Jump(-4)                                ← back-edge to 1
+        let insns = vec![
+            Insn::Call(1, 0),
+            Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 3),
+            Insn::BinOpImm(0, 0, BinaryOp::Add, 1),
+            Insn::SyncModuleGlobal(0, 0),
+            Insn::Jump(-4),
+        ];
+        let out = pass_syncmod_sink(insns);
+        assert_eq!(
+            out.len(),
+            5,
+            "should not change when Call precedes loop header"
+        );
+        assert!(
+            matches!(out[3], Insn::SyncModuleGlobal(0, 0)),
+            "SyncModuleGlobal should remain in loop body"
+        );
+    }
+
+    #[test]
+    fn syncmod_sink_continue_loop_uses_max_latch() {
+        use crate::ast::BinaryOp;
+        // A loop with a `continue` compiles to two Jump-back edges to the same
+        // header.  The pass must analyse the full range [header..=max_latch].
+        //
+        //  [0] CmpJumpIfFalseConst(r0, Lt, 0, k=6)    ← header, exit at 7
+        //  [1] BinOpImm(r0, r0, Add, 1)
+        //  [2] SyncModuleGlobal(r0, 0)
+        //  [3] CmpJumpIfFalseConst(r0, Lt, 1, k=1)    ← inner-if: continue (jump to 0)
+        //  [4] Jump(-5)                                ← continue: 4+1-5=0 ✓ latch=4
+        //  [5] BinOpImm(r0, r0, Add, 1)
+        //  [6] Jump(-7)                                ← main latch: 6+1-7=0 ✓ latch=6
+        //  [7] ReturnNone
+        //
+        // Two back-edges: (0, 4) and (0, 6).  max_latch = 6.
+        // The body [0..=6] has no blocker and no pre-loop call → sink is safe.
+        // SyncModuleGlobal at pos 2 should be removed and sunk to exit at 7.
+        let insns = vec![
+            Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 6),
+            Insn::BinOpImm(0, 0, BinaryOp::Add, 1),
+            Insn::SyncModuleGlobal(0, 0),
+            Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 1, 1),
+            Insn::Jump(-5),
+            Insn::BinOpImm(0, 0, BinaryOp::Add, 1),
+            Insn::Jump(-7),
+            Insn::ReturnNone,
+        ];
+        let out = pass_syncmod_sink(insns);
+        // SyncModuleGlobal should appear exactly once (at the exit before ReturnNone).
+        let total_syncs = out
+            .iter()
+            .filter(|i| matches!(i, Insn::SyncModuleGlobal(_, _)))
+            .count();
+        assert_eq!(
+            total_syncs, 1,
+            "exactly one SyncModuleGlobal after sink: {:?}",
+            out
+        );
+        // It must appear in the last two instructions (sunk before ReturnNone).
+        let sync_in_exit_region: usize = out
+            .iter()
+            .rev()
+            .take(2)
+            .filter(|i| matches!(i, Insn::SyncModuleGlobal(_, _)))
+            .count();
+        assert_eq!(
+            sync_in_exit_region, 1,
+            "SyncModuleGlobal should be sunk to exit region: {:?}",
+            out
+        );
     }
 
     // ── pass_switch_hoist ─────────────────────────────────────────────────────
