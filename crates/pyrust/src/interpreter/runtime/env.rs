@@ -641,6 +641,27 @@ impl Interpreter {
                         Ok(())
                     };
                 }
+                // Check for a `__setattr__` on the class chain.  CPython calls
+                // it for every attribute assignment on instances that define it.
+                // We skip this for property descriptors (handled above) and
+                // only check when the class has an explicit `__setattr__`
+                // (not `object.__setattr__`, which we don't model as a class
+                // method).
+                if let Some(setattr_val) = lookup_class_attr(&class, "__setattr__") {
+                    return invoke_class_method(
+                        self,
+                        setattr_val,
+                        Value::py_instance(Rc::clone(instance)),
+                        &[
+                            ExpandedCallArg {
+                                name: None,
+                                value: Value::string(name.to_string()),
+                            },
+                            ExpandedCallArg { name: None, value },
+                        ],
+                    )
+                    .map(|_| ());
+                }
                 instance.borrow_mut().attrs.insert(name.to_string(), value);
                 Ok(())
             }
