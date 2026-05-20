@@ -389,9 +389,8 @@ impl Interpreter {
                 }
                 // Fall through to arbitrary dynamic attrs.
                 // Short-circuit without initialising if no attrs have been stored yet.
-                let key = PyKey::Str(name.to_string());
                 if let Some(rc) = func.attrs.borrow().as_ref().map(Rc::clone) {
-                    if let Some(v) = rc.borrow().as_dict().and_then(|d| d.get(&key).cloned()) {
+                    if let Some(v) = rc.borrow().as_dict().and_then(|d| d.get(&StrKey(name)).cloned()) {
                         return Ok(v);
                     }
                 }
@@ -553,10 +552,9 @@ impl Interpreter {
                         _ => {
                             // Arbitrary dynamic attrs delegate to the underlying function.
                             // Short-circuit without initialising if no attrs set yet.
-                            let key = PyKey::Str(name.to_string());
                             if let Some(rc) = function.attrs.borrow().as_ref().map(Rc::clone) {
                                 if let Some(v) =
-                                    rc.borrow().as_dict().and_then(|d| d.get(&key).cloned())
+                                    rc.borrow().as_dict().and_then(|d| d.get(&StrKey(name)).cloned())
                                 {
                                     return Ok(v);
                                 }
