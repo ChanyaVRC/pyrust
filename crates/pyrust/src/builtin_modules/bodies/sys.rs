@@ -72,8 +72,8 @@ const fn sys_platform() -> &'static str {
 
 // The `sys.version_info` class singleton — a minimal named-tuple-like class
 // whose instances expose `.major`, `.minor`, `.micro`, `.releaselevel`, and
-// `.serial` as read-only attributes.  Built once per thread; the singleton
-// PyInstance is constructed from it in `make_version_info()`.
+// `.serial` as attributes.  Built once per thread; the singleton PyInstance
+// is constructed from it in `make_version_info()`.
 thread_local! {
     static VERSION_INFO_CLASS: Rc<RefCell<PyClass>> = Rc::new(RefCell::new(PyClass {
         name: "version_info".to_string(),

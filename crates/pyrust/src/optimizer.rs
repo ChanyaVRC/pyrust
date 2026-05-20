@@ -3416,7 +3416,8 @@ fn pass_concat_merge_once(
             | Insn::ForCountReg(_, _, _, _, k)
             | Insn::ForCountConst(_, _, _, _, k)
             | Insn::ForCountConstInline(_, _, _, _, k)
-            | Insn::SetupExcept(k) => Some(*k),
+            | Insn::SetupExcept(k)
+            | Insn::MatchExcept(_, k) => Some(*k),
             _ => None,
         };
         if let Some(k) = k {
@@ -3603,9 +3604,13 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         | EndExcept
         | ReturnNone
         | RaiseReRaise
-        | ForIter(..)
-        | ForCountConst(..)
-        | ForCountConstInline(..) => {}
+        | ForIter(..) => {}
+
+        ForCountConst(var, _, _, _, _) | ForCountConstInline(var, _, _, _, _) => f(*var),
+        ForCountReg(var, _, stop, _, _) => {
+            f(*var);
+            f(*stop);
+        }
 
         BinOpImm(_, a, _, _) | SyncModuleGlobal(a, _) => f(*a),
 
@@ -3650,7 +3655,6 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
             f(*obj);
             f(*val);
         }
-        ForCountReg(_, _, stop, _, _) => f(*stop),
         SetItem(a, b, c) => {
             f(*a);
             f(*b);
