@@ -96,8 +96,15 @@ pub enum Insn {
     DeleteItem(Reg, Reg),
     /// del names[name_idx] from current env
     DeleteName(u16),
-    /// Clear local register (del for a fastlocal — sets slot to None so further reads raise)
-    DeleteLocal(Reg),
+    /// Clear local register (del for a fastlocal).
+    ///
+    /// If `name_idx` is not `u16::MAX`, the VM checks whether the register
+    /// was already unset before the delete and raises `NameError` (module
+    /// scope) or `UnboundLocalError` (function scope) with the variable name
+    /// `names[name_idx]`.  Pass `u16::MAX` for compiler-guaranteed-bound
+    /// deletions (e.g. PEP 3110 `except E as var:` cleanup) where the check
+    /// is unnecessary and should be skipped.
+    DeleteLocal(Reg, u16),
     /// pc += offset  (offset 0 = next instruction)
     Jump(i32),
     /// if !R[cond].truthy(): pc += offset

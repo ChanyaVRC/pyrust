@@ -6032,13 +6032,15 @@ impl Compiler {
         match expr {
             Expr::Var(name) => {
                 if let Some(reg) = self.local_reg(name) {
-                    self.emit(Insn::DeleteLocal(reg));
+                    // Pass the name index so the VM can raise NameError /
+                    // UnboundLocalError when the register was never assigned.
+                    let name_idx = self.intern_name(name);
+                    self.emit(Insn::DeleteLocal(reg, name_idx));
                     self.maybe_record_class_del(reg);
                     // Issue #820: at module scope, also remove the name from
                     // env.values and module_globals_dict so that LoadGlobal
                     // from nested functions / after globals() cannot resurrect it.
                     if self.is_module_scope {
-                        let name_idx = self.intern_name(name);
                         self.emit(Insn::DeleteModuleGlobal(name_idx));
                     }
                 } else {
@@ -6994,9 +6996,12 @@ impl Compiler {
                 }
                 // PEP 3110: delete the `as VAR` binding when the handler exits
                 // (breaks reference cycles and matches CPython behaviour).
+                // Use u16::MAX as the name_idx sentinel: the variable is
+                // always bound at this point (the except clause only runs
+                // when the exception matched), so no NameError check needed.
                 if let Some(var_name) = &handler.name {
                     if let Some(reg) = self.local_reg(var_name) {
-                        self.emit(Insn::DeleteLocal(reg));
+                        self.emit(Insn::DeleteLocal(reg, u16::MAX));
                     } else {
                         let name_idx = self.intern_name(var_name);
                         self.emit(Insn::DeleteName(name_idx));

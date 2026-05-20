@@ -804,7 +804,7 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
     match insn {
         LoadGlobal(r, _)
         | LoadNone(r)
-        | DeleteLocal(r)
+        | DeleteLocal(r, _)
         | BinOp(r, _, _, _)
         | BinOpConst(r, _, _, _)
         | BinOpImm(r, _, _, _)
@@ -2098,7 +2098,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | CallMemo(r, _)
         | Move(r, _)
         | CopyReg(r, _)
-        | DeleteLocal(r) => {
+        | DeleteLocal(r, _) => {
             written.insert(*r);
         }
         LoadNoneRange { start, count } => {
