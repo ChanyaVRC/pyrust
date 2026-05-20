@@ -5989,41 +5989,43 @@ impl Compiler {
         upper: Option<&Expr>,
         step: Option<&Expr>,
     ) -> Reg {
-        let none_reg = |this: &mut Self| {
-            let r = this.alloc_temp();
-            this.emit(Insn::LoadNone(r));
-            r
+        // Allocate three *contiguous* slots upfront so that compaction moves cannot
+        // alias a later slot with one that was just written. The previous approach
+        // compiled each bound into whatever register compile_expr or alloc_temp
+        // returned, then slid them into contiguous positions — but the slide could
+        // overwrite a "step" register that had been allocated at the same position
+        // as the upper slot, causing the step value to hold the upper bound instead
+        // of None. (Repro: `a[:x]` where x is a local variable.)
+        let lo_slot = self.alloc_temp(); // base
+        let hi_slot = self.alloc_temp(); // base + 1
+        let st_slot = self.alloc_temp(); // base + 2
+
+        // Fill each slot: compile the expression into whatever register the
+        // sub-expression naturally lands in, then Move it into the reserved slot
+        // and release the source. If the expression already landed in the right
+        // slot (e.g. a nested alloc_temp gave us exactly that register), skip the
+        // move to avoid a redundant copy. When the bound is absent, emit LoadNone
+        // directly into the slot — no temp needed.
+        let mut fill_slot = |this: &mut Self, slot: Reg, expr: Option<&Expr>| {
+            if let Some(e) = expr {
+                let src = this.compile_expr(e);
+                if src != slot {
+                    this.emit(Insn::Move(slot, src));
+                    this.free_temp(src);
+                }
+            } else {
+                this.emit(Insn::LoadNone(slot));
+            }
         };
-        let lower_r = lower
-            .map(|e| self.compile_expr(e))
-            .unwrap_or_else(|| none_reg(self));
-        let upper_r = upper
-            .map(|e| self.compile_expr(e))
-            .unwrap_or_else(|| none_reg(self));
-        let step_r = step
-            .map(|e| self.compile_expr(e))
-            .unwrap_or_else(|| none_reg(self));
-        // Arrange contiguously for BuildTuple(base, 3)
-        let base_r = lower_r;
-        if upper_r != base_r + 1 {
-            let t = base_r + 1;
-            if t > self.max_reg {
-                self.max_reg = t;
-            }
-            self.emit(Insn::Move(t, upper_r));
-            self.free_temp(upper_r);
-        }
-        let upper_slot = base_r + 1;
-        if step_r != upper_slot + 1 {
-            let t = upper_slot + 1;
-            if t > self.max_reg {
-                self.max_reg = t;
-            }
-            self.emit(Insn::Move(t, step_r));
-            self.free_temp(step_r);
-        }
+
+        fill_slot(self, lo_slot, lower);
+        fill_slot(self, hi_slot, upper);
+        fill_slot(self, st_slot, step);
+
+        // The three slots are already contiguous; BuildTuple reads [lo_slot .. lo_slot+3).
         let slice_r = self.alloc_temp();
-        self.emit(Insn::BuildTuple(slice_r, base_r, 3));
+        self.emit(Insn::BuildTuple(slice_r, lo_slot, 3));
+        // Release the three component slots — they are consumed by BuildTuple.
         self.next_temp = slice_r + 1;
         slice_r
     }
