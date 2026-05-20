@@ -2436,6 +2436,7 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
     match name {
         "bool" | "bytes" | "complex" | "dict" | "float" | "frozenset" | "int" | "list" | "set"
         | "str" | "tuple" => primitive_class_by_name(name).map(Value::py_class),
+        "object" => Some(Value::py_class(object_class_singleton())),
         "print" => Some(Value::builtin_function("print")),
         "len" => Some(Value::builtin_function("len")),
         "range" => Some(Value::builtin_function("range")),

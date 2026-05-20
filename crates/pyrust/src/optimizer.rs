@@ -48,6 +48,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     // including the inversion emitted by the issue #287 trampoline rewrite.
     let insns = pass_cmpjump_fusion(insns, num_locals);
     let insns = pass_binopinplace_downgrade(insns, num_locals);
+    let insns = pass_concat_merge(insns, num_locals, &mut num_regs);
     let insns = pass_exit_inline(insns);
     let insns = pass_licm(insns, num_locals);
     let insns = pass_cse(insns, num_locals);
@@ -493,7 +494,7 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | ImportModule(r, _)
         | LoadExc(r)
         | MakeClass(r, _, _, _, _) => Some(*r),
-        CallMethod { dst, .. } | CallMethodExpanded { dst, .. } => Some(*dst),
+        CallMethod { dst, .. } | CallMethodExpanded { dst, .. } | Concat { dst, .. } => Some(*dst),
         // Loop instructions write to their first register on each iteration.
         // Without these arms, pass_const_fold would fail to invalidate the
         // known-constant map entry for the destination, producing stale folds
@@ -1067,6 +1068,9 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
 
         // UnpackEx reads src.
         UnpackEx { src, .. } => *src == r,
+
+        // Concat reads base..base+count registers.
+        Concat { base, count, .. } => r >= *base && r < *base + *count as u32,
     }
 }
 
@@ -1486,6 +1490,9 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
             for i in 0..(*before as u32 + 1 + *after as u32) {
                 written.insert(dst_base + i);
             }
+        }
+        Concat { dst, .. } => {
+            written.insert(*dst);
         }
         // Instructions that don't write to any register.
         StoreGlobal(..)
@@ -2614,6 +2621,339 @@ pub(crate) fn rewrite_offsets_with(
         SetupExcept(k) => SetupExcept(fix(k)),
         MatchExcept(r, k) => MatchExcept(r, fix(k)),
         other => other,
+    }
+}
+
+// ─── String concat chain merging ──────────────────────────────────────────────
+
+/// Merge a chain of `BinOp(Add)` instructions into a single `Concat` instruction
+/// that performs the concatenation in one allocation.
+///
+/// ## Pattern detected (minimum 3 operands, i.e. 2 BinOps in chain)
+///
+/// ```text
+/// BinOp(t1, r0, Add, r1)          ← t1 is a temp; used only once (next BinOp)
+/// BinOp(t2, t1, Add, r2)          ← t2 is a temp; used only once (next BinOp)
+/// ...
+/// BinOp(dst, t_{n-2}, Add, r_{n-1})
+/// ```
+///
+/// is replaced by:
+///
+/// ```text
+/// Move(base+0, r0)
+/// Move(base+1, r1)
+/// ...
+/// Move(base+n-1, r_{n-1})
+/// Concat { dst, base, count: n }
+/// ```
+///
+/// The intermediate `BinOp` instructions are removed.  `pass_dead_store_elim`
+/// (which runs after this pass in a second pipeline run, or directly afterward)
+/// cleans up any now-unused Move instructions.
+///
+/// ## Guards
+///
+/// - Chain must be ≥ 2 BinOps (≥ 3 operands): a 2-operand Concat saves no
+///   allocation over a plain `BinOp`.
+/// - Each intermediate result register must be a temp (`>= num_locals`).
+/// - The intermediate result register must be read exactly once (by the
+///   immediately following BinOp).
+/// - No BB boundary (jump target) between any two BinOps in the chain.
+/// - `count ≤ u8::MAX`.
+///
+/// ## Register window
+///
+/// Fresh consecutive registers `[num_regs, num_regs+count)` are allocated for
+/// the operand window.  The instruction vector is rebuilt with jump-offset
+/// rewriting (mirrors `pass_ivsr`), growing by 2 for the first chain found.
+///
+/// The type guard (string vs non-string) is deferred to the VM's Concat handler.
+fn pass_concat_merge(insns: Vec<Insn>, num_locals: u32, num_regs: &mut u32) -> Vec<Insn> {
+    use crate::ast::BinaryOp;
+
+    let n = insns.len();
+    if n < 2 {
+        return insns;
+    }
+
+    // Mark BB starts (jump targets): we must not merge across them.
+    let mut bb_starts: HashSet<usize> = HashSet::new();
+    for (i, insn) in insns.iter().enumerate() {
+        let k: Option<i32> = match insn {
+            Insn::Jump(k) => Some(*k),
+            Insn::JumpIfFalse(_, k)
+            | Insn::JumpIfTrue(_, k)
+            | Insn::CmpJumpIfFalse(_, _, _, k)
+            | Insn::CmpJumpIfTrue(_, _, _, k)
+            | Insn::CmpJumpIfFalseConst(_, _, _, k)
+            | Insn::CmpJumpIfTrueConst(_, _, _, k)
+            | Insn::ForIter(_, _, k)
+            | Insn::ForCountReg(_, _, _, _, k)
+            | Insn::ForCountConst(_, _, _, _, k)
+            | Insn::ForCountConstInline(_, _, _, _, k)
+            | Insn::SetupExcept(k) => Some(*k),
+            _ => None,
+        };
+        if let Some(k) = k {
+            let target = (i as i64 + 1 + k as i64) as usize;
+            if target < n {
+                bb_starts.insert(target);
+            }
+        }
+    }
+
+    // Compute use-count per register (number of instruction sites that read it).
+    let mut use_count: HashMap<u32, usize> = HashMap::new();
+    for insn in &insns {
+        for r in insn_read_regs(insn) {
+            *use_count.entry(r).or_insert(0) += 1;
+        }
+    }
+
+    // Scan for the first mergeable chain.
+    let mut i = 0;
+    while i < n {
+        // First BinOp(Add) with a temp destination.
+        let (t0, lhs0, rhs0) = match &insns[i] {
+            Insn::BinOp(dst, lhs, BinaryOp::Add, rhs) if *dst >= num_locals => (*dst, *lhs, *rhs),
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+
+        // Extend the chain: BinOp(t_{k+1}, t_k, Add, rhs_{k+1}).
+        let mut chain_positions: Vec<usize> = vec![i];
+        let mut leaf_operands: Vec<u32> = vec![lhs0, rhs0];
+        let mut intermediate_dsts: Vec<u32> = vec![t0];
+
+        let mut j = i + 1;
+        loop {
+            if j >= n || bb_starts.contains(&j) {
+                break;
+            }
+            let prev_dst = *intermediate_dsts.last().unwrap();
+            match &insns[j] {
+                Insn::BinOp(dst, lhs, BinaryOp::Add, rhs)
+                    if *lhs == prev_dst && *dst >= num_locals =>
+                {
+                    // Guard: the intermediate `prev_dst` must not be read outside
+                    // the chain.  Two sub-cases:
+                    //
+                    // (A) Fresh-dst (prev_dst != dst): `prev_dst` is a distinct
+                    //     temp used exactly once — as this BinOp's LHS.  Check
+                    //     use_count == 1 to rule out external reads.
+                    //
+                    // (B) In-place accumulation (prev_dst == dst): the compiler
+                    //     reuses the same temp register (`t = t + x`).  Here
+                    //     use_count > 1 because the same register is the LHS of
+                    //     multiple chain BinOps, but all those reads happen within
+                    //     the chain itself and are being removed by the merge.
+                    //     Skip the use_count check; correctness is guaranteed by
+                    //     the consecutive-chain structure.
+                    let safe = if *dst != prev_dst {
+                        // Pattern A: distinct fresh temp — must be single-use.
+                        use_count.get(&prev_dst).copied().unwrap_or(0) == 1
+                    } else {
+                        // Pattern B: in-place accumulation — always safe structurally.
+                        true
+                    };
+                    if !safe {
+                        break;
+                    }
+                    chain_positions.push(j);
+                    leaf_operands.push(*rhs);
+                    intermediate_dsts.push(*dst);
+                    j += 1;
+                }
+                _ => break,
+            }
+        }
+
+        // Need at least 2 BinOps (3 operands) to be worth merging.
+        if chain_positions.len() < 2 {
+            i += 1;
+            continue;
+        }
+
+        let count = leaf_operands.len();
+        if count > u8::MAX as usize {
+            i += 1;
+            continue;
+        }
+
+        let final_dst = *intermediate_dsts.last().unwrap();
+
+        // Sanity: no leaf operand may be an intermediate result register
+        // (would create a use-after-free in the chain removal).
+        let intermediates_set: HashSet<u32> = intermediate_dsts[..intermediate_dsts.len() - 1]
+            .iter()
+            .copied()
+            .collect();
+        if leaf_operands.iter().any(|r| intermediates_set.contains(r)) {
+            i += 1;
+            continue;
+        }
+
+        // Allocate fresh consecutive registers for the operand window.
+        let base = *num_regs;
+        *num_regs += count as u32;
+
+        // Rebuild the instruction list, inserting count Moves + 1 Concat in
+        // place of the chain, growing the vector by 2 (same strategy as pass_ivsr).
+        //
+        // Slots consumed: chain_positions.len() = count-1.
+        // Slots emitted:  count Moves + 1 Concat = count+1.
+        // Delta: +2 instructions.
+        //
+        // Instructions before first_pos: unchanged position.
+        // Instructions in [first_pos, last_pos]: replaced by new_insn_count slots.
+        // Instructions after last_pos: shifted by +2.
+
+        let first_pos = chain_positions[0];
+        let last_pos = *chain_positions.last().unwrap();
+        let chain_len = chain_positions.len(); // count - 1
+        let new_insn_count = count + 1; // count Moves + 1 Concat
+        // delta = new_insn_count - chain_len = (count+1) - (count-1) = +2
+        let delta: i64 = new_insn_count as i64 - chain_len as i64;
+
+        let mut old_to_new = vec![0usize; n + 1];
+        for k in 0..=first_pos {
+            old_to_new[k] = k;
+        }
+        // Chain positions [first_pos, last_pos] all redirect to first_pos
+        // (jump targets that aimed at any chain instruction land at the first Move).
+        for k in first_pos..=last_pos {
+            old_to_new[k] = first_pos;
+        }
+        for k in (last_pos + 1)..=n {
+            old_to_new[k] = (k as i64 + delta) as usize;
+        }
+
+        let mut new_vec: Vec<Insn> = Vec::with_capacity(n + 2);
+        for (k, insn) in insns.iter().enumerate() {
+            if k == first_pos {
+                // Emit count Moves into the fresh register window.
+                for (m, &operand_reg) in leaf_operands.iter().enumerate() {
+                    new_vec.push(Insn::Move(base + m as u32, operand_reg));
+                }
+                // Emit the Concat.
+                new_vec.push(Insn::Concat {
+                    dst: final_dst,
+                    base,
+                    count: count as u8,
+                });
+            } else if k > first_pos && k <= last_pos {
+                // Skip the remaining chain BinOps (already replaced above).
+            } else {
+                // Rewrite jump offsets for non-chain instructions.
+                new_vec.push(rewrite_offsets(insn.clone(), k, &old_to_new));
+            }
+        }
+
+        return new_vec;
+    }
+
+    insns
+}
+
+/// Returns all registers *read* by `insn`.
+/// Used by `pass_concat_merge` to compute per-register use counts.
+fn insn_read_regs(insn: &Insn) -> Vec<u32> {
+    use Insn::*;
+    match insn {
+        LoadConst(..)
+        | LoadGlobal(..)
+        | LoadNone(..)
+        | LoadExc(..)
+        | ImportModule(..)
+        | DeleteName(..)
+        | DeleteLocal(..)
+        | Jump(..)
+        | SetupExcept(..)
+        | PopExcept
+        | EndExcept
+        | ReturnNone
+        | RaiseReRaise
+        | ForIter(..)
+        | ForCountConst(..)
+        | ForCountConstInline(..) => vec![],
+
+        StoreGlobal(_, s)
+        | Move(_, s)
+        | CopyReg(_, s)
+        | UnaryOp(_, _, s)
+        | Return(s)
+        | PrintExpr(s)
+        | RaiseValue(s)
+        | RaiseAssert(s)
+        | JumpIfFalse(s, _)
+        | JumpIfTrue(s, _)
+        | GetIter(_, s)
+        | Unpack(_, s, _)
+        | CheckLocal(s, _)
+        | GetAttr(_, s, _)
+        | DeleteAttr(s, _)
+        | BinOpConst(_, s, _, _)
+        | CmpJumpIfFalseConst(s, _, _, _)
+        | CmpJumpIfTrueConst(s, _, _, _)
+        | MatchExcept(s, _)
+        | RecordClassStore(s)
+        | RecordClassDel(s) => vec![*s],
+
+        BinOp(_, a, _, b)
+        | BinOpInPlace(_, a, _, b)
+        | CmpJumpIfFalse(a, _, b, _)
+        | CmpJumpIfTrue(a, _, b, _)
+        | RaiseFrom(a, b)
+        | SetAdd(a, b)
+        | ListAppend(a, b)
+        | ListExtend(a, b)
+        | DictUpdate(a, b)
+        | GetItem(_, a, b)
+        | DeleteItem(a, b) => vec![*a, *b],
+
+        SetAttr(obj, _, val) => vec![*obj, *val],
+        ForCountReg(_, _, stop, _, _) => vec![*stop],
+        SetItem(a, b, c) => vec![*a, *b, *c],
+
+        Call(base, argc) | CallMemo(base, argc) => (*base..=(*base + *argc as u32)).collect(),
+        TailCall { args_base, nargs } => std::iter::once(args_base - 1)
+            .chain(*args_base..*args_base + *nargs as u32)
+            .collect(),
+        BuildList(_, base, n) | BuildTuple(_, base, n) => (*base..*base + *n as u32).collect(),
+        BuildDict(_, base, n) => (*base..*base + 2 * *n as u32).collect(),
+        CallMethod {
+            obj,
+            args_base,
+            nargs,
+            ..
+        } => std::iter::once(*obj)
+            .chain(*args_base..*args_base + *nargs as u32)
+            .collect(),
+        CallMethodExpanded {
+            obj,
+            pos_list,
+            kw_dict,
+            ..
+        } => vec![*obj, *pos_list, *kw_dict],
+        MakeFunction(_, _, defs_base, defs_n, annots_base, annots_n) => {
+            let mut v: Vec<u32> = (*defs_base..*defs_base + *defs_n as u32).collect();
+            if *annots_n > 0 {
+                v.extend(*annots_base..*annots_base + *annots_n as u32);
+            }
+            v
+        }
+        MakeClass(_, _, bases_base, bases_n, _) => {
+            (*bases_base..*bases_base + *bases_n as u32).collect()
+        }
+        Yield { src, .. } => vec![*src],
+        YieldFrom {
+            iter_reg, sent_reg, ..
+        } => vec![*iter_reg, *sent_reg],
+        UnpackEx { src, .. } => vec![*src],
+        Concat { base, count, .. } => (*base..*base + *count as u32).collect(),
     }
 }
 
@@ -4788,6 +5128,122 @@ mod tests {
         assert!(
             !has_plain_call,
             "after TCO all recursive calls should be TailCall, not Call/CallMemo"
+        );
+    }
+
+    // ── pass_concat_merge ─────────────────────────────────────────────────────
+
+    #[test]
+    fn concat_merge_fuses_three_binop_chain() {
+        use crate::ast::BinaryOp;
+        // BinOp(t1, r0, Add, r1)   ← t1 is temp (>= num_locals=2), single-use
+        // BinOp(t2, t1, Add, r2)   ← t2 is temp, single-use
+        // Return(t2)
+        // num_locals = 2, r0=0, r1=1 (locals), t1=2, r2=3, t2=4
+        let insns = vec![
+            Insn::BinOp(2, 0, BinaryOp::Add, 1),
+            Insn::BinOp(4, 2, BinaryOp::Add, 3),
+            Insn::Return(4),
+        ];
+        let mut num_regs = 5u32;
+        let out = pass_concat_merge(insns, 2, &mut num_regs);
+
+        // Should have: 3 Moves + 1 Concat + 1 Return = 5 instructions.
+        assert_eq!(out.len(), 5, "3 Moves + Concat + Return");
+        // The first three instructions should be Moves loading the operands.
+        assert!(matches!(out[0], Insn::Move(_, 0)), "Move(base+0, r0)");
+        assert!(matches!(out[1], Insn::Move(_, 1)), "Move(base+1, r1)");
+        assert!(matches!(out[2], Insn::Move(_, 3)), "Move(base+2, r2)");
+        // The fourth instruction should be Concat with count=3.
+        assert!(
+            matches!(
+                out[3],
+                Insn::Concat {
+                    dst: 4,
+                    count: 3,
+                    ..
+                }
+            ),
+            "Concat {{ dst: t2, count: 3 }}"
+        );
+        // num_regs should have grown by 3 (one per operand).
+        assert_eq!(num_regs, 8, "num_regs grew by count=3");
+    }
+
+    #[test]
+    fn concat_merge_requires_two_binops_minimum() {
+        use crate::ast::BinaryOp;
+        // Single BinOp(Add): only 2 operands, should NOT be merged.
+        let insns = vec![Insn::BinOp(2, 0, BinaryOp::Add, 1), Insn::Return(2)];
+        let mut num_regs = 3u32;
+        let out = pass_concat_merge(insns, 2, &mut num_regs);
+        assert_eq!(out.len(), 2, "no merge for 2-operand chain");
+        assert!(matches!(out[0], Insn::BinOp(..)), "BinOp unchanged");
+        assert_eq!(num_regs, 3, "num_regs unchanged");
+    }
+
+    #[test]
+    fn concat_merge_skips_when_intermediate_multi_use() {
+        use crate::ast::BinaryOp;
+        // t1 is read twice (by BinOp and by Return), so it cannot be removed.
+        let insns = vec![
+            Insn::BinOp(2, 0, BinaryOp::Add, 1),
+            Insn::BinOp(4, 2, BinaryOp::Add, 3), // reads t1=2
+            Insn::Return(2),                     // also reads t1=2 → use_count=2
+        ];
+        let mut num_regs = 5u32;
+        let out = pass_concat_merge(insns, 2, &mut num_regs);
+        // Must NOT merge because t1 has use_count=2.
+        assert_eq!(out.len(), 3, "no merge when intermediate is multi-use");
+        assert!(matches!(out[0], Insn::BinOp(..)));
+        assert_eq!(num_regs, 5, "num_regs unchanged");
+    }
+
+    #[test]
+    fn concat_merge_does_not_cross_bb_boundary() {
+        use crate::ast::BinaryOp;
+        // A jump targets index 1 (the second BinOp), so index 1 is a BB start.
+        // The chain [0, 1] straddles a BB boundary and must NOT be merged.
+        let insns = vec![
+            Insn::BinOp(2, 0, BinaryOp::Add, 1), // i=0: chain start candidate
+            Insn::BinOp(4, 2, BinaryOp::Add, 3), // i=1: BB start (target of Jump below)
+            Insn::Return(4),
+            Insn::Jump(-3), // targets i=0? No: offset=-3, pc=4 → target=4+1-3=2. Let's fix.
+        ];
+        // Rebuild: Jump at index 2 targeting index 1 (BB boundary at 1).
+        let insns = vec![
+            Insn::BinOp(2, 0, BinaryOp::Add, 1), // i=0
+            Insn::BinOp(4, 2, BinaryOp::Add, 3), // i=1 ← BB start (Jump(i=2) targets here)
+            Insn::Return(4),                     // i=2
+            Insn::Jump(-2),                      // i=3: target = 3+1-2 = 2 ← oops
+        ];
+        // Rewrite to make index 1 a BB start: Jump at index 3 with offset -3 →
+        // target = 3+1+(-3) = 1. Correct.
+        let insns = vec![
+            Insn::BinOp(2, 0, BinaryOp::Add, 1), // i=0
+            Insn::BinOp(4, 2, BinaryOp::Add, 3), // i=1 ← target of Jump below
+            Insn::Return(4),                     // i=2
+            Insn::Jump(-3),                      // i=3: target = 3+1+(-3) = 1
+        ];
+        let mut num_regs = 5u32;
+        let out = pass_concat_merge(insns, 2, &mut num_regs);
+        // Index 1 is a BB start, so the chain [0,1] must not be merged.
+        assert_eq!(out.len(), 4, "no merge across BB boundary");
+        assert!(matches!(out[0], Insn::BinOp(..)));
+        assert_eq!(num_regs, 5, "num_regs unchanged");
+    }
+
+    #[test]
+    fn concat_merge_on_compiled_four_string_add() {
+        // Full pipeline: compile `def f(a,b,c,d): return a+b+c+d` and verify
+        // the optimized code contains Concat but no chain of 3+ BinOp(Add).
+        let code = compile_fn("def f(a, b, c, d):\n    return a + b + c + d\n");
+        let optimized = optimize(code);
+        let inner = &optimized.fn_protos[0].code;
+        let has_concat = inner.insns.iter().any(|i| matches!(i, Insn::Concat { .. }));
+        assert!(
+            has_concat,
+            "optimizer should fuse a+b+c+d into a single Concat instruction"
         );
     }
 }
