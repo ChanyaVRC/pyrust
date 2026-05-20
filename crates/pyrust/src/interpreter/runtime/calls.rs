@@ -100,13 +100,29 @@ impl Interpreter {
                 // below all accept `&str`. See issue #276 item #1.
                 let method: &str = name_rc.as_str();
                 let receiver = receiver_owned;
-                // Separate positional and keyword args.
-                let mut pos: Vec<Value> = Vec::with_capacity(args.len());
+                // Reuse the interpreter-level positional-args buffer so that
+                // tight loops calling a bound method pay zero allocation once
+                // the buffer has grown to the high-watermark arg count (issue
+                // #276 item #3).  The buffer is taken with `std::mem::take` so
+                // no borrow-checker split is needed; it is restored at the end
+                // of this arm (via `bound_method_pos_buf = pos` after the match).
+                let mut pos = std::mem::take(&mut self.bound_method_pos_buf);
+                pos.clear();
+                // Keyword-args fast path (issue #276 item #4): skip IndexMap
+                // construction entirely when all arguments are positional —
+                // the common case for builtin bound methods.
+                let has_kw = args.iter().any(|a| a.name.is_some());
                 let mut kw: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
-                for a in args {
-                    match &a.name {
-                        Some(n) => { kw.insert(PyKey::Str(n.clone()), a.value.clone()); }
-                        None => pos.push(a.value.clone()),
+                if has_kw {
+                    for a in args {
+                        match &a.name {
+                            Some(n) => { kw.insert(PyKey::Str(n.clone()), a.value.clone()); }
+                            None => pos.push(a.value.clone()),
+                        }
+                    }
+                } else {
+                    for a in args {
+                        pos.push(a.value.clone());
                     }
                 }
                 // Bound-method dispatch: each builtin takes `&Value`
@@ -145,9 +161,16 @@ impl Interpreter {
                     ValueKind::Set(_) => Kind::Set,
                     _ => Kind::Other,
                 };
-                match kind_tag {
+                // Arms that accept `&[Value]` (Int, Float, Bytes) borrow `pos`
+                // directly — the buf's capacity is fully preserved on return.
+                // Arms that need `Vec<Value>` ownership drain `pos` into a
+                // fresh allocation so the (now-empty) buf can be returned to
+                // `bound_method_pos_buf` below, retaining its capacity for the
+                // next call.  Early-return error paths also restore the buf.
+                let result = match kind_tag {
                     Kind::Int => {
                         if !kw.is_empty() {
+                            self.bound_method_pos_buf = pos;
                             return Err(PyError::named(
                                 "TypeError",
                                 format!("int.{method}() takes no keyword arguments"),
@@ -171,10 +194,11 @@ impl Interpreter {
                             let template = match receiver.kind() {
                                 ValueKind::Str(s) => s.to_string(),
                                 _ => {
+                                    self.bound_method_pos_buf = pos;
                                     return Err(PyError::named(
                                         "TypeError",
                                         "descriptor 'format' requires a 'str' object".to_string(),
-                                    ))
+                                    ));
                                 }
                             };
                             let keyword: Vec<(String, Value)> = kw
@@ -183,36 +207,63 @@ impl Interpreter {
                                     if let PyKey::Str(name) = k { Some((name, v)) } else { None }
                                 })
                                 .collect();
-                            return self.format_str_template(&template, &pos, &keyword);
+                            // Borrow pos; capacity retained in the buf below.
+                            self.format_str_template(&template, &pos, &keyword)
+                        } else {
+                            // call_str_method takes Vec<Value> by value; drain
+                            // so pos retains its capacity for the next call.
+                            let args_vec: Vec<Value> = pos.drain(..).collect();
+                            self.call_str_method(method, receiver, args_vec)
                         }
-                        self.call_str_method(method, receiver, pos)
                     }
                     Kind::List => {
-                        let pos = if method == "index" {
-                            self.resolve_seq_index_pos(pos)?
+                        let args_vec: Vec<Value> = pos.drain(..).collect();
+                        let args_vec = if method == "index" {
+                            match self.resolve_seq_index_pos(args_vec) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    self.bound_method_pos_buf = pos;
+                                    return Err(e);
+                                }
+                            }
                         } else {
-                            pos
+                            args_vec
                         };
-                        pyrust_builtins::list::call(method, &receiver, pos, &kw)
+                        pyrust_builtins::list::call(method, &receiver, args_vec, &kw)
                     }
-                    Kind::Dict => self.call_dict_method(method, receiver, pos),
-                    Kind::Set => self.call_set_method(method, receiver, pos),
+                    Kind::Dict => {
+                        let args_vec: Vec<Value> = pos.drain(..).collect();
+                        self.call_dict_method(method, receiver, args_vec)
+                    }
+                    Kind::Set => {
+                        let args_vec: Vec<Value> = pos.drain(..).collect();
+                        self.call_set_method(method, receiver, args_vec)
+                    }
                     Kind::Other => match receiver.kind() {
                     ValueKind::Tuple(items) => {
-                        let pos = if method == "index" {
-                            self.resolve_seq_index_pos(pos)?
+                        let args_vec: Vec<Value> = pos.drain(..).collect();
+                        let args_vec = if method == "index" {
+                            match self.resolve_seq_index_pos(args_vec) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    self.bound_method_pos_buf = pos;
+                                    return Err(e);
+                                }
+                            }
                         } else {
-                            pos
+                            args_vec
                         };
-                        pyrust_builtins::tuple::call(method, items, pos)
+                        pyrust_builtins::tuple::call(method, items, args_vec)
                     }
                     ValueKind::Complex(_, _) => {
-                        pyrust_builtins::complex::call(method, &receiver, pos)
+                        let args_vec: Vec<Value> = pos.drain(..).collect();
+                        pyrust_builtins::complex::call(method, &receiver, args_vec)
                     }
                     ValueKind::BuiltinObject { ops, state } => {
+                        let args_vec: Vec<Value> = pos.drain(..).collect();
                         let empty_kw: indexmap::IndexMap<String, Value> =
                             indexmap::IndexMap::new();
-                        ops.call_method(state, method, pos, &empty_kw)
+                        ops.call_method(state, method, args_vec, &empty_kw)
                     }
                     ValueKind::PyInstance(inst) => {
                         // Class method backed by a `BuiltinFunction` — emitted
@@ -222,19 +273,25 @@ impl Interpreter {
                         // class and dispatch with `self` prepended through the
                         // unified helper.
                         let class = Rc::clone(&inst.borrow().class);
-                        let method_val = lookup_class_attr(&class, method)
-                            .ok_or_else(|| PyError::named(
-                                "AttributeError",
-                                format!(
-                                    "'{}' object has no attribute '{method}'",
-                                    class.borrow().name,
-                                ),
-                            ))?;
+                        let method_val = match lookup_class_attr(&class, method) {
+                            Some(v) => v,
+                            None => {
+                                self.bound_method_pos_buf = pos;
+                                return Err(PyError::named(
+                                    "AttributeError",
+                                    format!(
+                                        "'{}' object has no attribute '{method}'",
+                                        class.borrow().name,
+                                    ),
+                                ));
+                            }
+                        };
                         // Reconstitute kwargs as ExpandedCallArgs (the
                         // bound_method dispatch split them into pos+kw maps).
+                        // Drain pos so its capacity is preserved in the buf.
                         let mut combined: Vec<ExpandedCallArg> =
                             Vec::with_capacity(pos.len() + kw.len());
-                        for v in pos {
+                        for v in pos.drain(..) {
                             combined.push(ExpandedCallArg { name: None, value: v });
                         }
                         for (k, v) in kw {
@@ -254,7 +311,13 @@ impl Interpreter {
                         format!("'{}' object has no method '{method}'", pyrust_core::builtin_type_name(&receiver)),
                     )),
                     },
-                }
+                };
+                // Restore the positional-args buffer.  For borrow arms (Int,
+                // Float, Bytes, Str::format) pos still holds all elements with
+                // full capacity.  For drain arms pos is empty but retains the
+                // grown capacity, avoiding a re-allocation on the next call.
+                self.bound_method_pos_buf = pos;
+                result
             }
             ValueKind::BuiltinFunction("str.format") => {
                 let self_val = args
