@@ -74,6 +74,9 @@ pub enum Insn {
     BinOpInPlace(Reg, Reg, BinaryOp, Reg),
     /// R[dst] = R[lhs] op consts[const_idx]  (fuses LoadConst + BinOp)
     BinOpConst(Reg, Reg, BinaryOp, u16),
+    /// R[dst] = R[lhs] op imm  (carries a small signed integer directly, no const-pool lookup)
+    /// Emitted instead of BinOpConst when the constant fits in i16::MIN..=i16::MAX.
+    BinOpImm(Reg, Reg, BinaryOp, i16),
     /// R[dst] = unary_op(R[src])
     UnaryOp(Reg, UnaryOp, Reg),
     /// R[dst] = R[obj].names[name_idx]
