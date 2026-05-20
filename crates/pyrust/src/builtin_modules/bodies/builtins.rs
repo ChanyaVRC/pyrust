@@ -802,6 +802,11 @@ pyrust_module! {
 
     /// CPython: next(iterator[, default]) — fetch the next element.
     /// <https://docs.python.org/3/library/functions.html#next>
+    ///
+    /// Must stay in `(args)` dialect: `next(it, None)` is semantically
+    /// distinct from `next(it)` — the former returns Python None when
+    /// exhausted; the latter raises StopIteration.  `Option<PyValue>`
+    /// collapses both into Rust None, which breaks the default=None case.
     fn next(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.is_empty() || args.len() > 2 {
