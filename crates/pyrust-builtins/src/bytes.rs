@@ -15,6 +15,30 @@ pub const METHODS: &[&str] = &[
     "count",
     "upper",
     "lower",
+    // Added in #829
+    "replace",
+    "strip",
+    "lstrip",
+    "rstrip",
+    "removeprefix",
+    "removesuffix",
+    "split",
+    "rsplit",
+    "splitlines",
+    "join",
+    "title",
+    "capitalize",
+    "isdigit",
+    "isalpha",
+    "isalnum",
+    "isupper",
+    "islower",
+    "isspace",
+    "center",
+    "ljust",
+    "rjust",
+    "zfill",
+    "translate",
 ];
 
 /// Returns `true` if `method` is the name of a built-in `bytes` method.
@@ -58,6 +82,38 @@ pub fn call(
         "lower" => Ok(Value::bytes(
             bytes.iter().map(|b| b.to_ascii_lowercase()).collect(),
         )),
+        // Added in #829
+        "replace" => bytes_replace(bytes, args),
+        "strip" => bytes_strip(bytes, args, true, true),
+        "lstrip" => bytes_strip(bytes, args, true, false),
+        "rstrip" => bytes_strip(bytes, args, false, true),
+        "removeprefix" => bytes_removeprefix(bytes, args),
+        "removesuffix" => bytes_removesuffix(bytes, args),
+        "split" => bytes_split(bytes, args),
+        "rsplit" => bytes_rsplit(bytes, args),
+        "splitlines" => bytes_splitlines(bytes, args),
+        "join" => bytes_join(bytes, args),
+        "title" => Ok(Value::bytes(bytes_title(bytes))),
+        "capitalize" => Ok(Value::bytes(bytes_capitalize(bytes))),
+        "isdigit" => Ok(Value::bool_(
+            !bytes.is_empty() && bytes.iter().all(|b| b.is_ascii_digit()),
+        )),
+        "isalpha" => Ok(Value::bool_(
+            !bytes.is_empty() && bytes.iter().all(|b| b.is_ascii_alphabetic()),
+        )),
+        "isalnum" => Ok(Value::bool_(
+            !bytes.is_empty() && bytes.iter().all(|b| b.is_ascii_alphanumeric()),
+        )),
+        "isupper" => Ok(Value::bool_(bytes_isupper(bytes))),
+        "islower" => Ok(Value::bool_(bytes_islower(bytes))),
+        "isspace" => Ok(Value::bool_(
+            !bytes.is_empty() && bytes.iter().all(|b| b.is_ascii_whitespace()),
+        )),
+        "center" => bytes_center(bytes, args),
+        "ljust" => bytes_ljust(bytes, args),
+        "rjust" => bytes_rjust(bytes, args),
+        "zfill" => bytes_zfill(bytes, args),
+        "translate" => bytes_translate(bytes, args),
         _ => Err(PyError::named(
             "AttributeError",
             format!("'bytes' object has no attribute '{method}'"),
@@ -708,4 +764,713 @@ fn rfind_subsequence(haystack: &[u8], sub: &[u8]) -> Option<usize> {
         return None;
     }
     haystack.windows(sub.len()).rposition(|w| w == sub)
+}
+
+// ---------------------------------------------------------------------------
+// replace
+// ---------------------------------------------------------------------------
+
+fn bytes_replace(bytes: &[u8], args: &[Value]) -> Result<Value> {
+    if args.len() < 2 {
+        return Err(PyError::named(
+            "TypeError",
+            "bytes.replace() requires at least 2 arguments".to_string(),
+        ));
+    }
+    let old: &[u8] = match args[0].kind() {
+        ValueKind::Bytes(rc) => rc.as_slice(),
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "a bytes-like object is required, not '{}'",
+                    pyrust_core::builtin_type_name(&args[0])
+                ),
+            ));
+        }
+    };
+    let new: &[u8] = match args[1].kind() {
+        ValueKind::Bytes(rc) => rc.as_slice(),
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "a bytes-like object is required, not '{}'",
+                    pyrust_core::builtin_type_name(&args[1])
+                ),
+            ));
+        }
+    };
+    let count: i64 = match args.get(2).map(|v| v.kind()) {
+        None => -1,
+        Some(ValueKind::Int(n)) => n,
+        Some(ValueKind::Bool(b)) => b as i64,
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                "bytes.replace() count must be an integer".to_string(),
+            ));
+        }
+    };
+
+    if count == 0 {
+        return Ok(Value::bytes(bytes.to_vec()));
+    }
+
+    let max_replacements: usize = if count < 0 {
+        usize::MAX
+    } else {
+        count as usize
+    };
+
+    if old.is_empty() {
+        // CPython inserts `new` between every byte and at start/end when old is empty.
+        let mut out: Vec<u8> = Vec::with_capacity(bytes.len() + new.len() * (bytes.len() + 1));
+        let mut replacements = 0usize;
+        if replacements < max_replacements {
+            out.extend_from_slice(new);
+            replacements += 1;
+        }
+        for &b in bytes {
+            out.push(b);
+            if replacements < max_replacements {
+                out.extend_from_slice(new);
+                replacements += 1;
+            }
+        }
+        return Ok(Value::bytes(out));
+    }
+
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    let mut replacements = 0usize;
+    while i + old.len() <= bytes.len() {
+        if replacements >= max_replacements {
+            break;
+        }
+        if bytes[i..].starts_with(old) {
+            out.extend_from_slice(new);
+            i += old.len();
+            replacements += 1;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    // Append the remaining bytes.
+    out.extend_from_slice(&bytes[i..]);
+    Ok(Value::bytes(out))
+}
+
+// ---------------------------------------------------------------------------
+// strip / lstrip / rstrip
+// ---------------------------------------------------------------------------
+
+/// ASCII whitespace bytes: space, tab, newline, carriage return, vertical tab, form feed.
+fn is_ascii_whitespace(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
+}
+
+fn bytes_strip(bytes: &[u8], args: &[Value], left: bool, right: bool) -> Result<Value> {
+    let chars_arg: Option<&[u8]> = match args.first().map(|v| v.kind()) {
+        Some(ValueKind::Bytes(rc)) => Some(rc.as_slice()),
+        Some(ValueKind::None) | None => None,
+        Some(_) => {
+            return Err(PyError::named(
+                "TypeError",
+                "strip argument must be a bytes or None".to_string(),
+            ));
+        }
+    };
+    let mut start = 0;
+    let mut end = bytes.len();
+    match chars_arg {
+        None => {
+            if left {
+                while start < end && is_ascii_whitespace(bytes[start]) {
+                    start += 1;
+                }
+            }
+            if right {
+                while end > start && is_ascii_whitespace(bytes[end - 1]) {
+                    end -= 1;
+                }
+            }
+        }
+        Some(chars) => {
+            if left {
+                while start < end && chars.contains(&bytes[start]) {
+                    start += 1;
+                }
+            }
+            if right {
+                while end > start && chars.contains(&bytes[end - 1]) {
+                    end -= 1;
+                }
+            }
+        }
+    }
+    Ok(Value::bytes(bytes[start..end].to_vec()))
+}
+
+// ---------------------------------------------------------------------------
+// removeprefix / removesuffix
+// ---------------------------------------------------------------------------
+
+fn bytes_removeprefix(bytes: &[u8], args: &[Value]) -> Result<Value> {
+    let prefix: &[u8] = match args.first().map(|v| v.kind()) {
+        Some(ValueKind::Bytes(rc)) => rc.as_slice(),
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                "removeprefix argument must be bytes".to_string(),
+            ));
+        }
+    };
+    if bytes.starts_with(prefix) {
+        Ok(Value::bytes(bytes[prefix.len()..].to_vec()))
+    } else {
+        Ok(Value::bytes(bytes.to_vec()))
+    }
+}
+
+fn bytes_removesuffix(bytes: &[u8], args: &[Value]) -> Result<Value> {
+    let suffix: &[u8] = match args.first().map(|v| v.kind()) {
+        Some(ValueKind::Bytes(rc)) => rc.as_slice(),
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                "removesuffix argument must be bytes".to_string(),
+            ));
+        }
+    };
+    if bytes.ends_with(suffix) {
+        Ok(Value::bytes(bytes[..bytes.len() - suffix.len()].to_vec()))
+    } else {
+        Ok(Value::bytes(bytes.to_vec()))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// split / rsplit
+// ---------------------------------------------------------------------------
+
+fn bytes_split(bytes: &[u8], args: &[Value]) -> Result<Value> {
+    let (sep_opt, maxsplit) = bytes_split_args(args)?;
+    let parts = match sep_opt {
+        None => bytes_split_whitespace(bytes, maxsplit, false),
+        Some(sep) => {
+            if sep.is_empty() {
+                return Err(PyError::named("ValueError", "empty separator".to_string()));
+            }
+            bytes_split_by_sep(bytes, sep, maxsplit, false)
+        }
+    };
+    Ok(Value::list(
+        parts
+            .into_iter()
+            .map(|b| Value::bytes(b.to_vec()))
+            .collect(),
+    ))
+}
+
+fn bytes_rsplit(bytes: &[u8], args: &[Value]) -> Result<Value> {
+    let (sep_opt, maxsplit) = bytes_split_args(args)?;
+    let parts = match sep_opt {
+        None => bytes_split_whitespace(bytes, maxsplit, true),
+        Some(sep) => {
+            if sep.is_empty() {
+                return Err(PyError::named("ValueError", "empty separator".to_string()));
+            }
+            bytes_split_by_sep(bytes, sep, maxsplit, true)
+        }
+    };
+    Ok(Value::list(
+        parts
+            .into_iter()
+            .map(|b| Value::bytes(b.to_vec()))
+            .collect(),
+    ))
+}
+
+/// Parse (sep, maxsplit) from bytes split/rsplit args.
+fn bytes_split_args(args: &[Value]) -> Result<(Option<&[u8]>, i64)> {
+    let sep = match args.first().map(|v| v.kind()) {
+        Some(ValueKind::Bytes(rc)) => Some(rc.as_slice()),
+        Some(ValueKind::None) | None => None,
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                "bytes.split() argument 1 must be a bytes-like object or None".to_string(),
+            ));
+        }
+    };
+    let maxsplit: i64 = match args.get(1).map(|v| v.kind()) {
+        None => -1,
+        Some(ValueKind::Int(n)) => n,
+        Some(ValueKind::Bool(b)) => b as i64,
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                "bytes.split() maxsplit must be an integer".to_string(),
+            ));
+        }
+    };
+    Ok((sep, maxsplit))
+}
+
+/// Split on ASCII whitespace (consecutive whitespace is a single separator).
+/// Mirrors CPython's `bytes.split()` with no sep argument.
+fn bytes_split_whitespace<'a>(bytes: &'a [u8], maxsplit: i64, reverse: bool) -> Vec<&'a [u8]> {
+    if reverse {
+        let max = if maxsplit < 0 {
+            usize::MAX
+        } else {
+            maxsplit as usize
+        };
+        let mut parts: Vec<&'a [u8]> = Vec::new();
+        let mut end = bytes.len();
+        let mut splits = 0;
+        // Trim trailing whitespace.
+        while end > 0 && is_ascii_whitespace(bytes[end - 1]) {
+            end -= 1;
+        }
+        while end > 0 && splits < max {
+            // Scan backwards to find start of the token.
+            let token_end = end;
+            let mut start = token_end;
+            while start > 0 && !is_ascii_whitespace(bytes[start - 1]) {
+                start -= 1;
+            }
+            parts.push(&bytes[start..token_end]);
+            splits += 1;
+            // Skip whitespace.
+            end = start;
+            while end > 0 && is_ascii_whitespace(bytes[end - 1]) {
+                end -= 1;
+            }
+        }
+        // Any remaining bytes before end go into the last (leftmost) chunk.
+        if end > 0 {
+            parts.push(&bytes[..end]);
+        }
+        parts.reverse();
+        parts
+    } else {
+        let max = if maxsplit < 0 {
+            usize::MAX
+        } else {
+            maxsplit as usize
+        };
+        let mut parts: Vec<&'a [u8]> = Vec::new();
+        let mut i = 0;
+        let len = bytes.len();
+        // Skip leading whitespace.
+        while i < len && is_ascii_whitespace(bytes[i]) {
+            i += 1;
+        }
+        let mut splits = 0;
+        while i < len {
+            if splits >= max {
+                // Remaining bytes as the last element.
+                parts.push(&bytes[i..]);
+                break;
+            }
+            // Collect non-whitespace token.
+            let start = i;
+            while i < len && !is_ascii_whitespace(bytes[i]) {
+                i += 1;
+            }
+            parts.push(&bytes[start..i]);
+            splits += 1;
+            // Skip whitespace.
+            while i < len && is_ascii_whitespace(bytes[i]) {
+                i += 1;
+            }
+        }
+        parts
+    }
+}
+
+/// Split by a literal separator.
+fn bytes_split_by_sep<'a>(
+    bytes: &'a [u8],
+    sep: &[u8],
+    maxsplit: i64,
+    reverse: bool,
+) -> Vec<&'a [u8]> {
+    let max = if maxsplit < 0 {
+        usize::MAX
+    } else {
+        maxsplit as usize
+    };
+    if reverse {
+        let mut parts: Vec<&'a [u8]> = Vec::new();
+        let mut end = bytes.len();
+        let mut splits = 0;
+        while splits < max {
+            match rfind_subsequence(&bytes[..end], sep) {
+                Some(pos) => {
+                    parts.push(&bytes[pos + sep.len()..end]);
+                    end = pos;
+                    splits += 1;
+                }
+                None => break,
+            }
+        }
+        parts.push(&bytes[..end]);
+        parts.reverse();
+        parts
+    } else {
+        let mut parts: Vec<&'a [u8]> = Vec::new();
+        let mut start = 0;
+        let mut splits = 0;
+        while splits < max {
+            match find_subsequence(&bytes[start..], sep) {
+                Some(pos) => {
+                    parts.push(&bytes[start..start + pos]);
+                    start += pos + sep.len();
+                    splits += 1;
+                }
+                None => break,
+            }
+        }
+        parts.push(&bytes[start..]);
+        parts
+    }
+}
+
+// ---------------------------------------------------------------------------
+// splitlines
+// ---------------------------------------------------------------------------
+
+fn bytes_splitlines(bytes: &[u8], args: &[Value]) -> Result<Value> {
+    let keepends = match args.first().map(|v| v.kind()) {
+        None => false,
+        Some(ValueKind::Bool(b)) => b,
+        Some(ValueKind::Int(n)) => n != 0,
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                "bytes.splitlines() keepends must be bool or int".to_string(),
+            ));
+        }
+    };
+    // bytes.splitlines() only recognises \r\n, \r, \n.
+    let len = bytes.len();
+    let mut lines: Vec<Value> = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i < len {
+        let eol_len = match bytes[i] {
+            b'\n' => 1,
+            b'\r' => {
+                if i + 1 < len && bytes[i + 1] == b'\n' {
+                    2
+                } else {
+                    1
+                }
+            }
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        let end = if keepends { i + eol_len } else { i };
+        lines.push(Value::bytes(bytes[start..end].to_vec()));
+        i += eol_len;
+        start = i;
+    }
+    // Trailing non-empty segment (no trailing newline).
+    if start < len {
+        lines.push(Value::bytes(bytes[start..].to_vec()));
+    }
+    Ok(Value::list(lines))
+}
+
+// ---------------------------------------------------------------------------
+// join
+// ---------------------------------------------------------------------------
+
+fn bytes_join(sep: &[u8], args: &[Value]) -> Result<Value> {
+    let iterable = args.first().ok_or_else(|| {
+        PyError::named("TypeError", "bytes.join() requires 1 argument".to_string())
+    })?;
+
+    /// Extract byte items from a slice of Values, all must be bytes-like.
+    fn collect_items(vals: &[Value]) -> Result<Vec<Vec<u8>>> {
+        vals.iter()
+            .enumerate()
+            .map(|(i, v)| match v.kind() {
+                ValueKind::Bytes(rc) => Ok(rc.as_slice().to_vec()),
+                _ => Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "sequence item {i}: expected a bytes-like object, {} found",
+                        pyrust_core::builtin_type_name(v),
+                    ),
+                )),
+            })
+            .collect()
+    }
+
+    let items: Vec<Vec<u8>> = match iterable.kind() {
+        ValueKind::List(list_items) => collect_items(&list_items)?,
+        ValueKind::Tuple(tuple_items) => collect_items(&tuple_items)?,
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                "can only join an iterable of bytes-like objects".to_string(),
+            ));
+        }
+    };
+
+    if items.is_empty() {
+        return Ok(Value::bytes(vec![]));
+    }
+    let total_len =
+        items.iter().map(|b| b.len()).sum::<usize>() + sep.len() * (items.len().saturating_sub(1));
+    let mut out: Vec<u8> = Vec::with_capacity(total_len);
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            out.extend_from_slice(sep);
+        }
+        out.extend_from_slice(item);
+    }
+    Ok(Value::bytes(out))
+}
+
+// ---------------------------------------------------------------------------
+// title / capitalize
+// ---------------------------------------------------------------------------
+
+fn bytes_title(bytes: &[u8]) -> Vec<u8> {
+    // A byte is a word character if it is ASCII alphabetic.
+    // Non-alphabetic bytes act as word separators.
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut prev_was_alpha = false;
+    for &b in bytes {
+        if b.is_ascii_alphabetic() {
+            if prev_was_alpha {
+                out.push(b.to_ascii_lowercase());
+            } else {
+                out.push(b.to_ascii_uppercase());
+            }
+            prev_was_alpha = true;
+        } else {
+            out.push(b);
+            prev_was_alpha = false;
+        }
+    }
+    out
+}
+
+fn bytes_capitalize(bytes: &[u8]) -> Vec<u8> {
+    // First byte upper-cased (if alphabetic), rest lower-cased.
+    let mut out: Vec<u8> = bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
+    if let Some(first) = out.first_mut() {
+        *first = first.to_ascii_uppercase();
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// isupper / islower
+// ---------------------------------------------------------------------------
+
+fn bytes_isupper(bytes: &[u8]) -> bool {
+    // Must have at least one uppercase letter and no lowercase letters.
+    let has_upper = bytes.iter().any(|b| b.is_ascii_uppercase());
+    let has_lower = bytes.iter().any(|b| b.is_ascii_lowercase());
+    has_upper && !has_lower
+}
+
+fn bytes_islower(bytes: &[u8]) -> bool {
+    // Must have at least one lowercase letter and no uppercase letters.
+    let has_lower = bytes.iter().any(|b| b.is_ascii_lowercase());
+    let has_upper = bytes.iter().any(|b| b.is_ascii_uppercase());
+    has_lower && !has_upper
+}
+
+// ---------------------------------------------------------------------------
+// center / ljust / rjust
+// ---------------------------------------------------------------------------
+
+fn extract_fill_byte(args: &[Value], arg_idx: usize, method: &str) -> Result<u8> {
+    match args.get(arg_idx).map(|v| v.kind()) {
+        None => Ok(b' '),
+        Some(ValueKind::Bytes(rc)) => {
+            let s = rc.as_slice();
+            if s.len() == 1 {
+                Ok(s[0])
+            } else {
+                Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "{method} fillchar must be a byte string of length 1, not {}",
+                        s.len()
+                    ),
+                ))
+            }
+        }
+        _ => Err(PyError::named(
+            "TypeError",
+            format!("{method} fillchar must be a bytes object of length 1"),
+        )),
+    }
+}
+
+fn extract_width(args: &[Value], method: &str) -> Result<i64> {
+    match args.first().map(|v| v.kind()) {
+        Some(ValueKind::Int(n)) => Ok(n),
+        Some(ValueKind::Bool(b)) => Ok(b as i64),
+        _ => Err(PyError::named(
+            "TypeError",
+            format!("{method} width must be an integer"),
+        )),
+    }
+}
+
+fn bytes_center(bytes: &[u8], args: &[Value]) -> Result<Value> {
+    let width = extract_width(args, "center")?;
+    let fill = extract_fill_byte(args, 1, "center")?;
+    let len = bytes.len();
+    if width <= len as i64 {
+        return Ok(Value::bytes(bytes.to_vec()));
+    }
+    let width = width as usize;
+    let marg = width - len;
+    // CPython formula: left = marg/2 + (marg & width & 1)
+    let left = marg / 2 + (marg & width & 1);
+    let right = marg - left;
+    let mut out = Vec::with_capacity(width);
+    out.extend(std::iter::repeat(fill).take(left));
+    out.extend_from_slice(bytes);
+    out.extend(std::iter::repeat(fill).take(right));
+    Ok(Value::bytes(out))
+}
+
+fn bytes_ljust(bytes: &[u8], args: &[Value]) -> Result<Value> {
+    let width = extract_width(args, "ljust")?;
+    let fill = extract_fill_byte(args, 1, "ljust")?;
+    let len = bytes.len();
+    if width <= len as i64 {
+        return Ok(Value::bytes(bytes.to_vec()));
+    }
+    let width = width as usize;
+    let mut out = Vec::with_capacity(width);
+    out.extend_from_slice(bytes);
+    out.extend(std::iter::repeat(fill).take(width - len));
+    Ok(Value::bytes(out))
+}
+
+fn bytes_rjust(bytes: &[u8], args: &[Value]) -> Result<Value> {
+    let width = extract_width(args, "rjust")?;
+    let fill = extract_fill_byte(args, 1, "rjust")?;
+    let len = bytes.len();
+    if width <= len as i64 {
+        return Ok(Value::bytes(bytes.to_vec()));
+    }
+    let width = width as usize;
+    let mut out = Vec::with_capacity(width);
+    out.extend(std::iter::repeat(fill).take(width - len));
+    out.extend_from_slice(bytes);
+    Ok(Value::bytes(out))
+}
+
+// ---------------------------------------------------------------------------
+// zfill
+// ---------------------------------------------------------------------------
+
+fn bytes_zfill(bytes: &[u8], args: &[Value]) -> Result<Value> {
+    let width: i64 = match args.first().map(|v| v.kind()) {
+        Some(ValueKind::Int(n)) => n,
+        Some(ValueKind::Bool(b)) => b as i64,
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                "zfill width must be an integer".to_string(),
+            ));
+        }
+    };
+    let len = bytes.len();
+    if width <= len as i64 {
+        return Ok(Value::bytes(bytes.to_vec()));
+    }
+    let width = width as usize;
+    let pad = width - len;
+    let mut out = Vec::with_capacity(width);
+    // If the first byte is '+' or '-', keep it at the front and pad after it.
+    if len > 0 && (bytes[0] == b'+' || bytes[0] == b'-') {
+        out.push(bytes[0]);
+        out.extend(std::iter::repeat(b'0').take(pad));
+        out.extend_from_slice(&bytes[1..]);
+    } else {
+        out.extend(std::iter::repeat(b'0').take(pad));
+        out.extend_from_slice(bytes);
+    }
+    Ok(Value::bytes(out))
+}
+
+// ---------------------------------------------------------------------------
+// translate
+// ---------------------------------------------------------------------------
+
+fn bytes_translate(bytes: &[u8], args: &[Value]) -> Result<Value> {
+    // CPython signature: bytes.translate(table, /, delete=b'')
+    // table may be None or a 256-byte mapping (bytes).
+    // When table is None: just delete bytes in the delete set.
+    // When table is provided: map each byte through the table, then delete.
+    let table_val = args.first().ok_or_else(|| {
+        PyError::named(
+            "TypeError",
+            "bytes.translate() requires at least 1 argument".to_string(),
+        )
+    })?;
+    let table: Option<&[u8]> = match table_val.kind() {
+        ValueKind::None => None,
+        ValueKind::Bytes(rc) => {
+            let s = rc.as_slice();
+            if s.len() != 256 {
+                return Err(PyError::named(
+                    "ValueError",
+                    format!(
+                        "bytes.translate() table must be None or a 256-byte object, got {} bytes",
+                        s.len()
+                    ),
+                ));
+            }
+            Some(s)
+        }
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                "bytes.translate() table must be None or a bytes object of length 256".to_string(),
+            ));
+        }
+    };
+
+    let delete: &[u8] = match args.get(1).map(|v| v.kind()) {
+        None => &[],
+        Some(ValueKind::Bytes(rc)) => rc.as_slice(),
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                "bytes.translate() delete must be a bytes-like object".to_string(),
+            ));
+        }
+    };
+
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    for &b in bytes {
+        if delete.contains(&b) {
+            continue;
+        }
+        let mapped = match table {
+            None => b,
+            Some(t) => t[b as usize],
+        };
+        out.push(mapped);
+    }
+    Ok(Value::bytes(out))
 }
