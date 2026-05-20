@@ -1454,15 +1454,23 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
 /// of a full dataflow analysis.
 fn pass_const_reg_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
     // Pre-scan: count writes and record LoadConst targets.
+    //
     // Use collect_writes (not writable_dst) to capture ALL write destinations,
     // including Move(r, _) and Unpack which writable_dst omits.
+    //
+    // IMPORTANT: reuse a single HashSet across iterations (clear instead of
+    // new) to avoid N heap allocations — one per instruction.  For files with
+    // hundreds of assertions this cut ~600 allocations to 1, removing the
+    // compile-time overhead that caused an 88% regression on assertion-heavy
+    // benchmarks.
     let mut write_count: HashMap<u32, u32> = HashMap::new();
     let mut load_const_idx: HashMap<u32, u16> = HashMap::new();
+    let mut written: HashSet<u32> = HashSet::new();
     for insn in &insns {
-        let mut written: HashSet<u32> = HashSet::new();
+        written.clear();
         collect_writes(insn, &mut written);
-        for dst in &written {
-            *write_count.entry(*dst).or_insert(0) += 1;
+        for &dst in &written {
+            *write_count.entry(dst).or_insert(0) += 1;
         }
         if let Insn::LoadConst(dst, idx) = insn {
             load_const_idx.insert(*dst, *idx);
@@ -1525,16 +1533,25 @@ fn pass_const_reg_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
     // `pass_dead_store_elim` cannot remove them because it conservatively bails
     // when it hits a CmpJumpConst (which is control flow) before seeing a
     // subsequent write.  Since we know exactly which registers were substituted,
-    // we do a full-list read-scan here instead: if no instruction in `out` reads
-    // the register anymore, the LoadConst is safe to drop.
+    // we collect the set of ALL registers still read in `out` in a single O(n)
+    // pass, then subtract to find the dead ones.
     //
     // IMPORTANT: use `compact` (not `retain`) so that all jump offsets are
     // rewritten to account for the removed instructions.  A raw `retain` would
     // leave stale offsets and produce wrong loop targets.
     if !converted_regs.is_empty() {
+        // Single O(n) pass: collect every register read by any remaining instruction.
+        let mut all_reads: HashSet<u32> = HashSet::new();
+        for insn in &out {
+            for &r in converted_regs.iter() {
+                if insn_reads_reg(insn, r) {
+                    all_reads.insert(r);
+                }
+            }
+        }
         let dead_regs: HashSet<u32> = converted_regs
             .into_iter()
-            .filter(|&r| !reg_is_read_in(&out, r))
+            .filter(|r| !all_reads.contains(r))
             .collect();
         if !dead_regs.is_empty() {
             let keep: Vec<bool> = out
