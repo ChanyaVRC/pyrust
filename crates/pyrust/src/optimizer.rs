@@ -2290,7 +2290,9 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 }
                 match k {
                     CseKey::LoadConst(_) => true,
-                    CseKey::BinOpConst(src, _, _) => *src < lo || *src >= hi,
+                    CseKey::BinOpConst(src, _, _) | CseKey::BinOpImm(src, _, _) => {
+                        *src < lo || *src >= hi
+                    }
                     CseKey::UnaryOp(_, src) => *src < lo || *src >= hi,
                 }
             });
@@ -5881,6 +5883,9 @@ elif x == 2:
         assert!(
             matches!(consts[ci as usize].kind(), crate::value::ValueKind::Int(10)),
             "combined constant should be 10"
+        );
+    }
+
     // ── pass_loadnone_merge ───────────────────────────────────────────────────
 
     #[test]
@@ -6170,6 +6175,10 @@ elif x == 2:
             matches!(out[1], Insn::BinOpConst(2, 1, BinaryOp::Add, 1)),
             "pass_reassoc must not fire when inner_src (x) is of unknown type: {:?}",
             out[1]
+        );
+    }
+
+    #[test]
     fn loadnone_merge_single_unchanged() {
         // A lone LoadNone should not be wrapped in a LoadNoneRange.
         let insns = vec![Insn::LoadNone(5), Insn::ReturnNone];
