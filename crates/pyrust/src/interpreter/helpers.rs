@@ -1346,12 +1346,43 @@ pub(crate) fn lookup_name_in_module(env: &EnvRef, name: &str) -> Option<Value> {
 /// into the dict, keeping it live for the rest of execution.
 pub(crate) fn sync_module_env_to_globals_dict(interp: &mut Interpreter) {
     interp.globals_accessed = true;
+    // Sync env.values (dunders, names stored via StoreGlobal or assign_name).
     let me = module_env(&interp.env);
     let pairs: Vec<(String, Value)> = me.borrow().values.iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     for (k, v) in pairs {
         let _ = interp.module_globals_dict.dict_insert(PyKey::Str(k), v);
+    }
+    // Also sync fastlocal registers from the active script frame (issue #820).
+    // With fastlocal mode restored, module-scope assignments write only to the
+    // register, not to env.values — so the dict would be stale without this.
+    // SAFETY: `script_view.regs_ptr` points to the script frame's register
+    // file (a SmallVec/Vec on the stack of `try_exec_vm_script_with_index`).
+    // The pointer is valid because that function pushes the VmFrameView before
+    // calling `run_bytecode` and pops it afterwards; we are called from within
+    // `run_bytecode` (via globals()/locals()), so the stack frame is still live.
+    // We read each slot as a shared reference (no &mut) and clone the Value.
+    if let Some(script_view) = interp
+        .vm_frame_views
+        .iter()
+        .find(|v| v.kind == FrameKind::Script)
+    {
+        let slots: Vec<(String, usize)> = script_view
+            .local_index
+            .iter()
+            .map(|(name, &slot)| (name.clone(), slot as usize))
+            .collect();
+        for (name, slot) in slots {
+            if slot < script_view.regs_len {
+                // SAFETY: slot < regs_len, and the register file lives for the
+                // duration of the script dispatch loop (see above comment).
+                let val = unsafe { script_view.regs_ptr.add(slot).as_ref() }.clone();
+                if !val.is_unset() {
+                    let _ = interp.module_globals_dict.dict_insert(PyKey::Str(name), val);
+                }
+            }
+        }
     }
 }
 

@@ -978,7 +978,8 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | RaiseReRaise
         | ForIter(..)
         | ForCountConst(..)
-        | ForCountConstInline(..) => false,
+        | ForCountConstInline(..)
+        | DeleteModuleGlobal(..) => false,
 
         // One source register.
         StoreGlobal(_, s)
@@ -1001,7 +1002,8 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | CmpJumpIfTrueConst(s, _, _, _)
         | MatchExcept(s, _)
         | RecordClassStore(s)
-        | RecordClassDel(s) => *s == r,
+        | RecordClassDel(s)
+        | SyncModuleGlobal(s, _) => *s == r,
 
         // Two source registers.
         BinOp(_, a, _, b)
@@ -1520,6 +1522,8 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | DictUpdate(..)
         | RecordClassStore(..)
         | RecordClassDel(..)
+        | SyncModuleGlobal(..)
+        | DeleteModuleGlobal(..)
         | TailCall { .. } => {}
     }
 }
@@ -2348,6 +2352,9 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 Insn::ForCountReg(var, op, s(&copies, stop), step_idx, k)
             }
             Insn::StoreGlobal(n, src) => Insn::StoreGlobal(n, s(&copies, src)),
+            Insn::SyncModuleGlobal(reg, name_idx) => {
+                Insn::SyncModuleGlobal(s(&copies, reg), name_idx)
+            }
             // Call/BuildList/BuildTuple/etc. use a base register for a range of args;
             // do not substitute the base register as that would misalign the arg block.
             other => other,

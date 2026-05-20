@@ -247,6 +247,17 @@ pub enum Insn {
     /// dict produced by MakeClass drops the entry while preserving the order
     /// of the remaining entries.
     RecordClassDel(Reg),
+    /// Write the value of R[reg] into module_globals_dict[names[name_idx]] only
+    /// when globals_accessed == true.  Emitted immediately after Move(reg, src)
+    /// for every module-scope store so that globals() stays live without paying
+    /// the dict-write cost in the common case (no globals() call in the script).
+    /// When globals_accessed == false this instruction is a NOP.
+    SyncModuleGlobal(Reg, u16),
+    /// Remove names[name_idx] from both module env.values and module_globals_dict.
+    /// Emitted at module scope for `del varname` when the name has a fastlocal
+    /// register (in addition to DeleteLocal which clears the register).
+    /// Does NOT raise NameError — the caller must detect unset register state.
+    DeleteModuleGlobal(u16),
 }
 
 #[derive(Debug, Clone)]
