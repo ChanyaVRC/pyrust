@@ -3108,9 +3108,9 @@ fn pass_loadnone_merge(insns: Vec<Insn>) -> Vec<Insn> {
             _ => None,
         };
         if let Some(k) = k {
-            let target = (i as i64 + 1 + k as i64) as usize;
-            if target < n {
-                jump_targets.insert(target);
+            let target_signed = i as i64 + 1 + k as i64;
+            if target_signed >= 0 && (target_signed as usize) < n {
+                jump_targets.insert(target_signed as usize);
             }
         }
     }
