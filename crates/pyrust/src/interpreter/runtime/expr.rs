@@ -268,18 +268,33 @@ impl Interpreter {
         // into a `__getitem__` call, which then subscripts a built-in sequence
         // with it), extract the bounds and delegate to `eval_slice` so that
         // `self.data[slice_arg]` inside a `__getitem__` works correctly.
-        if let ValueKind::BuiltinObject { ops, state } = index.kind()
-            && ops.type_name() == pyrust_builtins::slice::TYPE_NAME
-        {
-            let borrow = state.borrow();
-            let s = borrow
-                .downcast_ref::<pyrust_builtins::slice::SliceState>()
-                .expect("SliceOps: bad state");
-            let lo = if s.start.is_none() { None } else { Some(s.start.clone()) };
-            let hi = if s.stop.is_none() { None } else { Some(s.stop.clone()) };
-            let st = if s.step.is_none() { None } else { Some(s.step.clone()) };
-            drop(borrow);
-            return self.eval_slice(target, lo, hi, st);
+        //
+        // Dicts and BuiltinObjects are excluded: they may accept slice objects
+        // as legitimate hashable keys (e.g. `d = {}; d[slice(1,3)] = "a"`).
+        // Only sequence-like targets (List, Tuple, Str, Bytes, PyInstance) need
+        // the redirect.
+        let target_is_sequence_like = matches!(
+            target.kind(),
+            ValueKind::List(_)
+                | ValueKind::Tuple(_)
+                | ValueKind::Str(_)
+                | ValueKind::Bytes(_)
+                | ValueKind::PyInstance(_)
+        );
+        if target_is_sequence_like {
+            if let ValueKind::BuiltinObject { ops, state } = index.kind()
+                && ops.type_name() == pyrust_builtins::slice::TYPE_NAME
+            {
+                let borrow = state.borrow();
+                let s = borrow
+                    .downcast_ref::<pyrust_builtins::slice::SliceState>()
+                    .expect("SliceOps: bad state");
+                let lo = if s.start.is_none() { None } else { Some(s.start.clone()) };
+                let hi = if s.stop.is_none() { None } else { Some(s.stop.clone()) };
+                let st = if s.step.is_none() { None } else { Some(s.step.clone()) };
+                drop(borrow);
+                return self.eval_slice(target, lo, hi, st);
+            }
         }
         // Handle Dict separately so the temporary `&IndexMap` from
         // `target.kind()` doesn't outlive the call into `dict_lookup`

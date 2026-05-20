@@ -7,8 +7,10 @@
 //! and `.step` and print/repr the slice value correctly.
 
 use std::any::Any;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
-use pyrust_core::{BuiltinState, BuiltinTypeOps, PyError, Value};
+use pyrust_core::{BuiltinState, BuiltinTypeOps, PyError, PyKey, Value};
 
 pub const TYPE_NAME: &str = "slice";
 pub const SLICE_OPS: &SliceOps = &SliceOps;
@@ -80,12 +82,28 @@ impl BuiltinTypeOps for SliceOps {
         }
     }
 
-    /// `slice` objects are hashable in CPython only when all their components
-    /// are hashable.  We return `None` here (unhashable) to match CPython's
-    /// common behaviour: `hash(slice(1, 3))` raises `TypeError: unhashable type:
-    /// 'slice'`.
-    fn hash(&self, _state: &BuiltinState) -> Option<u64> {
-        None
+    /// `slice` objects are hashable in CPython 3.12 when all their components
+    /// are hashable (CPython changed slice to be hashable in 3.12; the common
+    /// case of `slice(int_or_None, int_or_None, int_or_None)` is always
+    /// hashable).  We combine the component hashes to produce a stable value.
+    fn hash(&self, state: &BuiltinState) -> Option<u64> {
+        let borrow = state.borrow();
+        let s = borrow.downcast_ref::<SliceState>()?;
+        let hstart = component_hash(&s.start)?;
+        let hstop = component_hash(&s.stop)?;
+        let hstep = component_hash(&s.step)?;
+        let mut h = DefaultHasher::new();
+        hstart.hash(&mut h);
+        hstop.hash(&mut h);
+        hstep.hash(&mut h);
+        Some(h.finish())
+    }
+
+    /// Expose `slice` as a hashable key so it can be used in sets/dicts.
+    fn to_key(&self, state: &BuiltinState) -> Option<PyKey> {
+        let hash = self.hash(state)?;
+        let value = Value::builtin_object_shared(SLICE_OPS, state.clone());
+        Some(PyKey::Object { hash, value })
     }
 
     fn setattr(&self, _state: &BuiltinState, name: &str, _value: Value) -> Result<(), PyError> {
@@ -106,4 +124,16 @@ pub fn make_slice(start: Option<Value>, stop: Option<Value>, step: Option<Value>
     let step = step.unwrap_or_else(Value::none);
     let state: Box<dyn Any> = Box::new(SliceState { start, stop, step });
     Value::builtin_object(SLICE_OPS, state)
+}
+
+/// Hash a single slice component (`None` or an integer value).
+///
+/// Returns `None` if the component is unhashable (e.g. a list), making the
+/// whole slice unhashable — matching CPython's "hashable if components are
+/// hashable" contract.
+fn component_hash(v: &Value) -> Option<u64> {
+    let key = v.to_key()?;
+    let mut h = DefaultHasher::new();
+    key.hash(&mut h);
+    Some(h.finish())
 }
