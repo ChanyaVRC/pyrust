@@ -64,6 +64,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_syncmod_sink(insns);
     let insns = pass_cross_jump(insns);
     let insns = pass_copy_prop(insns, num_locals);
+    let insns = pass_forcount_reg_upgrade(insns);
     let insns = pass_switch_hoist(insns, num_locals, &consts);
     let insns = pass_loop_inversion(insns);
     let insns = pass_trivial_nop(insns);
@@ -4097,6 +4098,60 @@ fn pass_trivial_nop(insns: Vec<Insn>) -> Vec<Insn> {
 // ─── ForCountConst → ForCountConstInline ──────────────────────────────────────
 
 /// Convert `ForCountConst(var, op, stop_idx, step_idx, off)` to
+/// Promote `ForCountReg` → `ForCountConst` when the stop register is known to
+/// hold an immutable constant (written exactly once by a `LoadConst`).
+///
+/// `pass_copy_prop` (which runs just before this pass) substitutes copied
+/// registers, so a `ForCountReg(var, op, t, step, off)` where `t` was
+/// `Move(t, n_reg)` becomes `ForCountReg(var, op, n_reg, step, off)`.  If
+/// `n_reg` was set by a single `LoadConst`, this pass replaces the
+/// per-iteration register read with a direct const-pool reference.
+///
+/// `pass_forcount_const_inline` (which runs after this pass) will further
+/// promote `ForCountConst` → `ForCountConstInline` when both stop and step fit
+/// in `i32`, eliminating the remaining per-iteration pool lookups entirely.
+///
+/// Example: `n = 2_000_000; while i < n: … i += 1` originally compiles to
+/// `ForCountReg(i, Lt, n_reg, step_idx, off)`.  After this pass + inline:
+/// `ForCountConstInline(i, Lt, 2_000_000, 1, off)` — zero indirections.
+fn pass_forcount_reg_upgrade(insns: Vec<Insn>) -> Vec<Insn> {
+    let mut write_count: HashMap<u32, u32> = HashMap::new();
+    let mut load_const_idx: HashMap<u32, u16> = HashMap::new();
+    let mut written: HashSet<u32> = HashSet::new();
+    for insn in &insns {
+        written.clear();
+        collect_writes(insn, &mut written);
+        for &dst in &written {
+            *write_count.entry(dst).or_insert(0) += 1;
+        }
+        if let Insn::LoadConst(dst, idx) = insn {
+            load_const_idx.insert(*dst, *idx);
+        }
+    }
+    let immutable_const: HashMap<u32, u16> = load_const_idx
+        .into_iter()
+        .filter(|(r, _)| write_count.get(r).copied() == Some(1))
+        .collect();
+
+    if immutable_const.is_empty() {
+        return insns;
+    }
+
+    insns
+        .into_iter()
+        .map(|insn| match insn {
+            Insn::ForCountReg(var, op, stop_reg, step_idx, off) => {
+                if let Some(&stop_const_idx) = immutable_const.get(&stop_reg) {
+                    Insn::ForCountConst(var, op, stop_const_idx, step_idx, off)
+                } else {
+                    Insn::ForCountReg(var, op, stop_reg, step_idx, off)
+                }
+            }
+            other => other,
+        })
+        .collect()
+}
+
 /// `ForCountConstInline(var, op, stop, step, off)` when both `consts[stop_idx]`
 /// and `consts[step_idx]` are integers that fit in `i32`.
 ///
