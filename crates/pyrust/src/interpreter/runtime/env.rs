@@ -1271,11 +1271,19 @@ impl Interpreter {
             // Write to the module env HashMap so LoadGlobal / post-run
             // inspection can find the new value.
             module_env(&self.env).borrow_mut().values.insert(name.clone(), value.clone());
-            // Mirror into the live module globals dict (issue #706).
-            let _ = self.module_globals_dict.dict_insert(
-                PyKey::Str(name.clone()),
-                value.clone(),
-            );
+            // Mirror into the live module globals dict only when globals() has
+            // been called (globals_accessed == true).  Without this guard,
+            // every StoreGlobal pays an extra IndexMap write even for scripts
+            // that never use globals() — the primary cause of the ~15x
+            // regression introduced by PR #810.  globals() sets the flag and
+            // does a one-time sync before returning, so subsequent writes keep
+            // the dict live from that point on.
+            if self.globals_accessed {
+                let _ = self.module_globals_dict.dict_insert(
+                    PyKey::Str(name.clone()),
+                    value.clone(),
+                );
+            }
             // Also update the module-level fastlocal register if one exists
             // for this name.  Without this, `print(x)` at module scope reads
             // the stale register value and ignores the StoreGlobal write (#520).
@@ -1310,9 +1318,10 @@ impl Interpreter {
                 return;
             }
         // Module scope: `self.env` is the root env (no parent).  Mirror into
-        // module_globals_dict so that `globals()` reflects the assignment (issue #706).
+        // module_globals_dict only when globals() has already been called so
+        // the live view stays in sync — see globals_accessed above.
         let is_module_scope = self.env.borrow().parent.is_none();
-        if is_module_scope {
+        if is_module_scope && self.globals_accessed {
             let _ = self.module_globals_dict.dict_insert(
                 PyKey::Str(name.clone()),
                 value.clone(),

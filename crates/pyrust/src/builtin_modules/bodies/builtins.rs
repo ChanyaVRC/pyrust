@@ -26,6 +26,7 @@ use crate::interpreter::{
     is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_hash_bigint, py_hash_float,
     py_hash_int, py_mod_i64, py_round_half_even, py_round_half_even_f64,
     reject_keyword_args_expanded, resolve_zero_arg_super, snapshot_current_locals,
+    sync_module_env_to_globals_dict,
     value_to_float, value_type_name_str,
 };
 use crate::value::{PyClass, PyKey, PyToPrimitive, PyZero, Value, ValueKind, range_len};
@@ -1086,18 +1087,11 @@ pyrust_module! {
     /// CPython: globals() — the live module namespace dict (issue #706).
     /// <https://docs.python.org/3/library/functions.html#globals>
     ///
-    /// Returns `Interpreter::module_globals_dict`, a persistent `Value::dict`
-    /// kept in sync with the module env on every write:
-    ///   * `seed_module_dunders` pre-populates it with `__name__`, `__doc__`, etc.
-    ///   * `assign_name` mirrors every module-global write into it.
-    ///   * All module-level assignments use all-env mode (issue #706), so they
-    ///     route through `assign_name` rather than fastlocal registers.
-    ///
-    /// Because `Value::dict` wraps `Rc<RefCell<IndexMap<...>>>`, cloning the
-    /// value shares the same `Rc`.  So `globals() is globals()` is `True`
-    /// (both calls return a clone of the same `Rc`), and mutating the returned
-    /// dict directly updates the backing store — `LoadGlobal` checks this dict
-    /// first, making `globals()["x"] = 99; print(x)` work correctly.
+    /// Returns `Interpreter::module_globals_dict`, a persistent `Value::dict`.
+    /// On the first call (globals_accessed was false), syncs all current
+    /// module env values into the dict so the snapshot is complete; sets
+    /// `globals_accessed = true` so subsequent `assign_name` calls keep the
+    /// dict live.  `globals() is globals()` is always `True` (same Rc).
     fn globals(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if !args.is_empty() {
@@ -1106,6 +1100,7 @@ pyrust_module! {
                 format!("{FN_NAME}() takes no arguments ({} given)", args.len()),
             ));
         }
+        sync_module_env_to_globals_dict(_interp);
         Ok(_interp.module_globals_dict.clone())
     }
 
@@ -1135,6 +1130,7 @@ pyrust_module! {
             .map(|v| v.kind == crate::interpreter::FrameKind::Script)
             .unwrap_or(true);
         if is_module_scope {
+            sync_module_env_to_globals_dict(_interp);
             return Ok(_interp.module_globals_dict.clone());
         }
         Ok(Value::dict(snapshot_current_locals(_interp)))
