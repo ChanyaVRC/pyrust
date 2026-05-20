@@ -153,7 +153,7 @@ pub enum PyKey {
     /// `{1e20: 'a', 10**20: 'b'}` has length 1).
     ///
     /// Uses `Box` rather than `Rc` so that `PyKey` stays `Send + Sync`
-    /// (needed for `LazyLock<PyKey>` statics in `pyrust-builtins`).
+    /// and to make the recursive type representable with a fixed-size enum.
     BigInt(Box<BigInt>),
     Float(u64),
     Str(String),

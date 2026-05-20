@@ -1,5 +1,5 @@
 use indexmap::IndexMap;
-use pyrust_core::{PyError, PyKey, Result, Value, ValueKind, compare_values_via_registry};
+use pyrust_core::{PyError, PyKey, Result, StrKey, Value, ValueKind, compare_values_via_registry};
 
 use crate::mutable_sequence as ms;
 use crate::sequence;
@@ -57,14 +57,12 @@ fn sort(receiver: &Value, args: &[Value], kwargs: &IndexMap<PyKey, Value>) -> Re
 }
 
 fn extract_reverse(args: &[Value], kwargs: &IndexMap<PyKey, Value>) -> Result<bool> {
-    // Cache the kwarg PyKey once to avoid a `String` allocation on every
-    // list.sort() call. See issue #277.
-    static REVERSE_KW: std::sync::LazyLock<PyKey> =
-        std::sync::LazyLock::new(|| PyKey::Str("reverse".to_string()));
+    // StrKey probe (issue #506): zero-alloc borrowed-str lookup — no heap
+    // allocation on every list.sort() call.
     Ok(
         match (
             args.first().map(|v| v.kind()),
-            kwargs.get(&*REVERSE_KW).map(|v| v.kind()),
+            kwargs.get(&StrKey("reverse")).map(|v| v.kind()),
         ) {
             (_, Some(ValueKind::Bool(b))) => b,
             (_, Some(ValueKind::Int(0))) => false,

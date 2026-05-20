@@ -89,13 +89,16 @@ impl Interpreter {
             "__file__", "__cached__", "__annotations__", "__builtins__",
         ];
         for name in dunders {
-            let key = PyKey::Str((*name).to_string());
+            // StrKey probe (issue #506): read check is zero-alloc; owned key
+            // is constructed only when an entry is actually missing and must be
+            // inserted (the rare path on first execution of a module).
             let has_key = self
                 .module_globals_dict
-                .dict_with(|d| d.contains_key(&key))
+                .dict_with(|d| d.contains_key(&StrKey(*name)))
                 .unwrap_or(false);
             if !has_key {
                 if let Some(v) = me.values.get(*name).cloned() {
+                    let key = PyKey::Str((*name).to_string());
                     let _ = self.module_globals_dict.dict_insert(key, v);
                 }
             }
