@@ -1527,13 +1527,21 @@ fn pass_const_reg_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
     // subsequent write.  Since we know exactly which registers were substituted,
     // we do a full-list read-scan here instead: if no instruction in `out` reads
     // the register anymore, the LoadConst is safe to drop.
+    //
+    // IMPORTANT: use `compact` (not `retain`) so that all jump offsets are
+    // rewritten to account for the removed instructions.  A raw `retain` would
+    // leave stale offsets and produce wrong loop targets.
     if !converted_regs.is_empty() {
         let dead_regs: HashSet<u32> = converted_regs
             .into_iter()
             .filter(|&r| !reg_is_read_in(&out, r))
             .collect();
         if !dead_regs.is_empty() {
-            out.retain(|insn| !matches!(insn, Insn::LoadConst(r, _) if dead_regs.contains(r)));
+            let keep: Vec<bool> = out
+                .iter()
+                .map(|insn| !matches!(insn, Insn::LoadConst(r, _) if dead_regs.contains(r)))
+                .collect();
+            out = compact(out, &keep);
         }
     }
 
