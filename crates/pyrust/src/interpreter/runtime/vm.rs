@@ -140,6 +140,7 @@ pub(crate) enum IterState {
     UserDefined(Value),
 }
 
+#[inline(always)]
 fn int_int_fast(a: i64, b: i64, op: BinaryOp) -> Option<Value> {
     match op {
         BinaryOp::Add    => a.checked_add(b).map(Value::int),
@@ -191,6 +192,7 @@ fn int_int_fast(a: i64, b: i64, op: BinaryOp) -> Option<Value> {
     }
 }
 
+#[inline(always)]
 fn int_cmp(a: i64, b: i64, op: BinaryOp) -> Option<bool> {
     match op {
         BinaryOp::Eq => Some(a == b),
@@ -1481,49 +1483,51 @@ impl Interpreter {
                     }
                 }
                 Insn::CmpJumpIfFalse(lhs, op, rhs, offset) => {
-                    let lv = &regs[*lhs as usize];
-                    let rv = &regs[*rhs as usize];
-                    if let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), rv.kind())
-                        && let Some(cond) = int_cmp(a, b, *op) {
-                                if !cond { pc = jump_pc!(*offset); }
-                                continue;
-                            }
+                    if let (Some(a), Some(b)) = (
+                        regs[*lhs as usize].as_int(),
+                        regs[*rhs as usize].as_int(),
+                    ) && let Some(cond) = int_cmp(a, b, *op) {
+                        if !cond { pc = jump_pc!(*offset); }
+                        continue;
+                    }
                     let l = vm_try!(vm_read(&regs, *lhs, num_locals));
                     let r = vm_try!(vm_read(&regs, *rhs, num_locals));
                     if !vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = jump_pc!(*offset); }
                 }
                 Insn::CmpJumpIfTrue(lhs, op, rhs, offset) => {
-                    let lv = &regs[*lhs as usize];
-                    let rv = &regs[*rhs as usize];
-                    if let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), rv.kind())
-                        && let Some(cond) = int_cmp(a, b, *op) {
-                                if cond { pc = jump_pc!(*offset); }
-                                continue;
-                            }
+                    if let (Some(a), Some(b)) = (
+                        regs[*lhs as usize].as_int(),
+                        regs[*rhs as usize].as_int(),
+                    ) && let Some(cond) = int_cmp(a, b, *op) {
+                        if cond { pc = jump_pc!(*offset); }
+                        continue;
+                    }
                     let l = vm_try!(vm_read(&regs, *lhs, num_locals));
                     let r = vm_try!(vm_read(&regs, *rhs, num_locals));
                     if vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = jump_pc!(*offset); }
                 }
                 Insn::CmpJumpIfFalseConst(lhs, op, const_idx, offset) => {
                     let cv = pool_get!(code.consts, *const_idx, "const");
-                    let lv = &regs[*lhs as usize];
-                    if let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), cv.kind())
-                        && let Some(cond) = int_cmp(a, b, *op) {
-                            if !cond { pc = jump_pc!(*offset); }
-                            continue;
-                        }
+                    if let (Some(a), Some(b)) = (
+                        regs[*lhs as usize].as_int(),
+                        cv.as_int(),
+                    ) && let Some(cond) = int_cmp(a, b, *op) {
+                        if !cond { pc = jump_pc!(*offset); }
+                        continue;
+                    }
                     let l = vm_try!(vm_read(&regs, *lhs, num_locals));
                     let r = cv.clone();
                     if !vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = jump_pc!(*offset); }
                 }
                 Insn::CmpJumpIfTrueConst(lhs, op, const_idx, offset) => {
                     let cv = pool_get!(code.consts, *const_idx, "const");
-                    let lv = &regs[*lhs as usize];
-                    if let (ValueKind::Int(a), ValueKind::Int(b)) = (lv.kind(), cv.kind())
-                        && let Some(cond) = int_cmp(a, b, *op) {
-                            if cond { pc = jump_pc!(*offset); }
-                            continue;
-                        }
+                    if let (Some(a), Some(b)) = (
+                        regs[*lhs as usize].as_int(),
+                        cv.as_int(),
+                    ) && let Some(cond) = int_cmp(a, b, *op) {
+                        if cond { pc = jump_pc!(*offset); }
+                        continue;
+                    }
                     let l = vm_try!(vm_read(&regs, *lhs, num_locals));
                     let r = cv.clone();
                     if vm_try!(self.eval_binary(l, *op, r)).truthy() { pc = jump_pc!(*offset); }
