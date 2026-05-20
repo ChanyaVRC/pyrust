@@ -981,15 +981,15 @@ fn lambda_captures_in_expr(
 /// the class-body sub-compiler.  Slot order has **no** influence on
 /// class-namespace insertion order any more (`vars(C)` follows runtime
 /// stores via `Insn::RecordClassStore`); we keep this textual walk so
-/// register assignments remain deterministic across runs (HashSet
-/// iteration order is randomised).  Names not in `body_local` are
+/// register assignments match declaration order even for names that only
+/// appear inside nested control-flow.  Names not in `body_local` are
 /// skipped (they're declared `global` / `nonlocal` and don't get a
 /// class-body slot).
 fn collect_class_body_names_textual(
     body: &[Stmt],
     ordered: &mut Vec<String>,
     seen: &mut HashSet<String>,
-    body_local: &HashSet<String>,
+    body_local: &indexmap::IndexSet<String>,
 ) {
     for stmt in body {
         match stmt {
@@ -1059,7 +1059,7 @@ fn collect_assign_target_textual(
     target: &AssignTarget,
     ordered: &mut Vec<String>,
     seen: &mut HashSet<String>,
-    body_local: &HashSet<String>,
+    body_local: &indexmap::IndexSet<String>,
 ) {
     match target {
         AssignTarget::Name(name) => {
@@ -1110,7 +1110,7 @@ fn collect_class_method_outer_refs(
     // scope is itself a class scope (outer_is_class_scope=true).  When the
     // outer scope is a function scope, methods may close over function locals
     // even when the class body also defines a name with the same spelling.
-    let class_locals_opt: Option<&HashSet<String>> = if outer_is_class_scope {
+    let class_locals_opt: Option<&indexmap::IndexSet<String>> = if outer_is_class_scope {
         Some(&class_locals)
     } else {
         None
@@ -1331,7 +1331,7 @@ fn collect_class_method_outer_refs(
 fn collect_class_lambda_outer_refs_in_expr(
     expr: &Expr,
     local_index: &HashMap<String, Reg>,
-    class_locals: &HashSet<String>,
+    class_locals: &indexmap::IndexSet<String>,
     cells: &mut HashSet<String>,
 ) {
     match expr {
@@ -6576,9 +6576,11 @@ impl Compiler {
         // order stores actually executed at runtime, not source-walk order.
         // Each store now emits `Insn::RecordClassStore(slot)` and the VM
         // builds the attrs dict from that runtime trace inside `MakeClass`.
-        // We still walk the body textually here so register numbers stay
-        // stable across runs (HashSet iteration order is randomised, which
-        // would otherwise cause spurious bytecode diffs).
+        // We still walk the body textually here so register numbers follow
+        // declaration order for names that only appear inside control-flow
+        // blocks (where the IndexSet insertion order and textual order agree,
+        // but names inside nested blocks need the explicit walk to be seen
+        // before the catch-all pass at the end).
         //
         // Issue #546: CPython pre-injects `__qualname__` and `__module__`
         // into the class namespace before the body runs.  Give them fixed
