@@ -2838,13 +2838,10 @@ impl Interpreter {
                 let receiver = regs[obj as usize].clone();
                 // Intercept list.sort here to support key= (needs interpreter access).
                 if method == "sort" {
-                    // Cache the kwarg PyKeys once so each list.sort() call avoids
-                    // the two `String` allocations the literal lookups would
-                    // otherwise incur. See issue #277.
-                    static KEY_KW: std::sync::LazyLock<PyKey> =
-                        std::sync::LazyLock::new(|| PyKey::Str("key".to_string()));
-                    static REVERSE_KW: std::sync::LazyLock<PyKey> =
-                        std::sync::LazyLock::new(|| PyKey::Str("reverse".to_string()));
+                    // StrKey probes (issue #506): zero-alloc borrowed-str lookup
+                    // — no PyKey::Str(String) heap allocation on every sort call,
+                    // superseding the prior LazyLock approach (which still paid
+                    // a one-time String allocation per static).
                     for k in kw_map.keys() {
                         if let PyKey::Str(s) = k
                             && s != "key" && s != "reverse"
@@ -2855,9 +2852,9 @@ impl Interpreter {
                             ));
                         }
                     }
-                    let key_fn = kw_map.get(&*KEY_KW).cloned();
+                    let key_fn = kw_map.get(&StrKey("key")).cloned();
                     let reverse = kw_map
-                        .get(&*REVERSE_KW)
+                        .get(&StrKey("reverse"))
                         .map(|v| v.truthy())
                         .unwrap_or(false);
                     if let Some(key_fn_val) = key_fn {

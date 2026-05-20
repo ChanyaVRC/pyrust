@@ -3117,7 +3117,7 @@ fn apply_field_accessors(mut value: Value, mut rest: &str) -> Result<Value> {
             } else {
                 match value.kind() {
                     ValueKind::Dict(map) => map
-                        .get(&PyKey::Str(key_str.to_string()))
+                        .get(&StrKey(key_str))
                         .cloned()
                         .ok_or_else(|| PyError::key_error(Value::string(key_str.to_string())))?,
                     ValueKind::List(_) | ValueKind::Tuple(_) => {
