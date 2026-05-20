@@ -253,6 +253,11 @@ pub enum Insn {
     /// dict produced by MakeClass drops the entry while preserving the order
     /// of the remaining entries.
     RecordClassDel(Reg),
+    /// R[dst] = R[base] + R[base+1] + ... + R[base+count-1]  (string concat, one allocation)
+    ///
+    /// All operands must be strings; if any is not, the VM falls back to
+    /// sequential `BinOp(Add)`.  `count` must be ≥ 2.
+    Concat { dst: Reg, base: Reg, count: u8 },
     /// Write the value of R[reg] into module_globals_dict[names[name_idx]] only
     /// when globals_accessed == true.  Emitted immediately after Move(reg, src)
     /// for every module-scope store so that globals() stays live without paying

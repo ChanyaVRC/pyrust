@@ -935,6 +935,32 @@ impl Interpreter {
                     regs[*dst as usize] = result;
                 }
 
+                // ── String concat (single allocation) ────────────────────
+                Insn::Concat { dst, base, count } => {
+                    let base_idx = *base as usize;
+                    let n = *count as usize;
+                    // Deref RegSlice → &[Value] so range-indexing returns &[Value].
+                    let slice = &(&*regs)[base_idx..base_idx + n];
+                    // Fast path: all operands are strings — concatenate in one allocation.
+                    if slice.iter().all(|v| v.as_str().is_some()) {
+                        let total_len: usize =
+                            slice.iter().map(|v| v.as_str().unwrap().len()).sum();
+                        let mut result = String::with_capacity(total_len);
+                        for v in slice {
+                            result.push_str(v.as_str().unwrap());
+                        }
+                        regs[*dst as usize] = Value::string(result);
+                    } else {
+                        // Fallback: sequential BinOp(Add) — correct but allocates intermediates.
+                        let mut acc = vm_try!(vm_read(&*regs, *base, num_locals));
+                        for k in 1..n {
+                            let next = vm_try!(vm_read(&*regs, *base + k as u32, num_locals));
+                            acc = vm_try!(self.eval_binary(acc, crate::ast::BinaryOp::Add, next));
+                        }
+                        regs[*dst as usize] = acc;
+                    }
+                }
+
                 // ── Attribute / Index ────────────────────────────────────
                 Insn::GetAttr(dst, obj, name_idx) => {
                     let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));

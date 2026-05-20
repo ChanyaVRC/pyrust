@@ -2519,6 +2519,9 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
     ) {
         return primitive_class_by_name(name).map(Value::py_class);
     }
+    if name == "object" {
+        return Some(Value::py_class(object_class_singleton()));
+    }
     // NotImplemented is a singleton constant, not a callable.
     if name == "NotImplemented" {
         return Some(Value::not_implemented());
