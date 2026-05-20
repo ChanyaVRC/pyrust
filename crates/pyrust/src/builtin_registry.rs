@@ -65,6 +65,22 @@ pub fn lookup(name: &str) -> Option<BuiltinDispatchFn> {
         .map(|i| REGISTRY[i].dispatch)
 }
 
+/// Look up the interned `&'static str` name for a registered built-in.
+///
+/// The registry stores the canonical `&'static str` for each built-in (see
+/// [`BuiltinReg::name`]).  This function returns that pointer so callers can
+/// construct a `Value::builtin_function(name)` without allocating a new
+/// `&'static str` from a heap-leaked `Box<str>`.
+///
+/// Returns `None` if no built-in by that name is registered.
+#[inline]
+pub fn lookup_name(name: &str) -> Option<&'static str> {
+    REGISTRY
+        .binary_search_by_key(&name, |r| r.name)
+        .ok()
+        .map(|i| REGISTRY[i].name)
+}
+
 /// Returns `true` if the built-in by this name is registered and is
 /// declared pure (no observable side effects, deterministic given the
 /// same inputs).  Returns `false` for unknown names or for known
@@ -247,5 +263,53 @@ mod tests {
         // in the static initialiser; a duplicate would have panicked
         // before any other test could reach `lookup()`.
         assert!(lookup("abs").is_some());
+    }
+
+    #[test]
+    fn lookup_name_returns_interned_static_str() {
+        // `lookup_name` must return the exact `&'static str` pointer stored
+        // in the registry, not a freshly allocated copy.  This pins the
+        // contract that `Value::builtin_function(lookup_name(n).unwrap())`
+        // reuses the single interned string rather than leaking a new Box.
+        let name = lookup_name("abs").expect("abs must be registered");
+        assert_eq!(name, "abs");
+        // The returned pointer must be the one stored in the registry entry.
+        let reg_name = REGISTRY
+            .iter()
+            .find(|r| r.name == "abs")
+            .expect("abs in registry")
+            .name;
+        assert!(
+            std::ptr::eq(name, reg_name),
+            "lookup_name must return the registry's own &'static str pointer"
+        );
+    }
+
+    #[test]
+    fn every_flat_namespace_registry_entry_has_a_name() {
+        // Acceptance criterion from issue #440: every flat-namespace builtin
+        // registered in REGISTRY must be reachable via `lookup_name`.  Since
+        // `resolve_builtin` in `expr.rs` delegates the non-primitive, non-
+        // NotImplemented path entirely to `lookup_name`, this test guarantees
+        // that a new `fn foo(…)` added to a `@flat pyrust_module!` body
+        // becomes accessible as a bare global with no edits to `expr.rs`.
+        for reg in REGISTRY.iter() {
+            // Module-namespaced names (`math.sqrt`, …) are not bare-global
+            // candidates; skip them.
+            if reg.name.contains('.') {
+                continue;
+            }
+            let found = lookup_name(reg.name);
+            assert!(
+                found.is_some(),
+                "registered flat builtin {:?} must be found by lookup_name",
+                reg.name
+            );
+            assert_eq!(
+                found.unwrap(),
+                reg.name,
+                "lookup_name must return the same string it was queried with"
+            );
+        }
     }
 }
