@@ -1572,6 +1572,12 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         UnpackEx { src, .. } => {
             reads.insert(*src);
         }
+        LoadNoneRange { .. } => {}
+        Concat { base, count, .. } => {
+            for r in *base..*base + *count as u32 {
+                reads.insert(r);
+            }
+        }
     }
 }
 
