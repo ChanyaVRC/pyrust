@@ -3,7 +3,10 @@ impl Interpreter {
         match value.kind() {
             ValueKind::Int(i) => Ok(i),
             ValueKind::Bool(b) => Ok(if b { 1 } else { 0 }),
-            _ => Err(PyError::Runtime("slice indices must be integers".to_string())),
+            _ => Err(PyError::named(
+                "TypeError",
+                "slice indices must be integers or None or have an __index__ method".to_string(),
+            )),
         }
     }
 
@@ -19,7 +22,10 @@ impl Interpreter {
             Some(v) => {
                 let s = Self::slice_index_from_value(v)?;
                 if s == 0 {
-                    return Err(PyError::Runtime("slice step cannot be zero".to_string()));
+                    return Err(PyError::named(
+                        "ValueError",
+                        "slice step cannot be zero".to_string(),
+                    ));
                 }
                 s
             }
