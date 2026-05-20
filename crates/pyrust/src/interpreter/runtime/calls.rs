@@ -774,13 +774,32 @@ impl Interpreter {
                 ));
             };
             let mut items = Vec::new();
-            loop {
-                match self.call_next(iterator.clone(), None) {
-                    Ok(item) => items.push(item),
-                    // class_name_is now walks the hierarchy for Raised variants,
-                    // so StopIteration subclasses raised by __next__ are caught here.
-                    Err(ref e) if e.class_name_is("StopIteration") => break,
-                    Err(e) => return Err(e),
+            // Cache the __next__ method once for PyInstance iterators to avoid a
+            // per-iteration class-walk (lookup_class_attr traverses the full MRO).
+            if let ValueKind::PyInstance(iter_inst) = iterator.kind() {
+                let iter_class = Rc::clone(&iter_inst.borrow().class);
+                let Some(next_method) = lookup_class_attr(&iter_class, "__next__") else {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("'{}' object is not an iterator", iter_class.borrow().name),
+                    ));
+                };
+                loop {
+                    match invoke_class_method(self, next_method.clone(), iterator.clone(), &[]) {
+                        Ok(v) => items.push(v),
+                        Err(ref e) if e.class_name_is("StopIteration") => break,
+                        Err(e) => return Err(e),
+                    }
+                }
+            } else {
+                loop {
+                    match self.call_next(iterator.clone(), None) {
+                        Ok(item) => items.push(item),
+                        // class_name_is now walks the hierarchy for Raised variants,
+                        // so StopIteration subclasses raised by __next__ are caught here.
+                        Err(ref e) if e.class_name_is("StopIteration") => break,
+                        Err(e) => return Err(e),
+                    }
                 }
             }
             Ok(items)
