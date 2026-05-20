@@ -3312,6 +3312,7 @@ pub(crate) fn rewrite_offsets_with(
         ForIter(dst, slot, k) => ForIter(dst, slot, fix(k)),
         ForCountReg(v, op, stop, step, k) => ForCountReg(v, op, stop, step, fix(k)),
         ForCountConst(v, op, stop, step, k) => ForCountConst(v, op, stop, step, fix(k)),
+        ForCountConstInline(v, op, stop, step, k) => ForCountConstInline(v, op, stop, step, fix(k)),
         SetupExcept(k) => SetupExcept(fix(k)),
         MatchExcept(r, k) => MatchExcept(r, fix(k)),
         other => other,
@@ -6207,33 +6208,63 @@ elif x == 2:
     }
 
     #[test]
-    fn loadnone_merge_on_compiled_function_with_many_locals() {
-        // A function with several local variables that are all read should emit
-        // a LoadNoneRange for the prologue after optimization.
-        // The variables are conditionally assigned so dead-store elim cannot remove
-        // the initial LoadNone(s) (the optimizer must preserve them for the False branch).
-        let code = compile_fn(concat!(
-            "def f(x):\n",
-            "    a = None\n",
-            "    b = None\n",
-            "    c = None\n",
-            "    d = None\n",
-            "    if x:\n",
-            "        a = 1\n",
-            "        b = 2\n",
-            "        c = 3\n",
-            "        d = 4\n",
-            "    return a, b, c, d\n",
-        ));
-        let optimized = optimize(code);
-        let inner = &optimized.fn_protos[0].code;
-        let has_range = inner
-            .insns
-            .iter()
-            .any(|i| matches!(i, Insn::LoadNoneRange { count, .. } if *count >= 2));
+    fn loadnone_merge_fuses_prologue_with_subsequent_jump() {
+        // Simulate the instruction sequence a compiler emits for:
+        //
+        //   def f(x):        # x → reg 0
+        //       a = None     # a → reg 1
+        //       b = None     # b → reg 2
+        //       c = None     # c → reg 3
+        //       d = None     # d → reg 4
+        //       if x: ...    # JumpIfFalse(0, +3) → skips 3 LoadConst insns
+        //       return a, b, c, d
+        //
+        // Index layout (before merge):
+        //   0: LoadNone(1)
+        //   1: LoadNone(2)
+        //   2: LoadNone(3)
+        //   3: LoadNone(4)
+        //   4: JumpIfFalse(0, 3)   ← target = 4+1+3 = 8 (ReturnNone)
+        //   5: LoadConst(1, 0)
+        //   6: LoadConst(2, 0)
+        //   7: LoadConst(3, 0)
+        //   8: ReturnNone
+        //
+        // After merge: LoadNone(1..=4) becomes LoadNoneRange{start:1,count:4},
+        // positions 1..3 are removed (3 instructions deleted).
+        // JumpIfFalse was at old=4 → new=1.  Its target was old=8 → new=5.
+        // New offset = 5 - 1 - 1 = 3.  Offset should be unchanged here (both
+        // source and target shift by the same 3 removals), so the check is that
+        // JumpIfFalse still points past the 3 LoadConst instructions.
+        let insns = vec![
+            Insn::LoadNone(1),       // 0
+            Insn::LoadNone(2),       // 1
+            Insn::LoadNone(3),       // 2
+            Insn::LoadNone(4),       // 3
+            Insn::JumpIfFalse(0, 3), // 4 → target 8 (ReturnNone)
+            Insn::LoadConst(1, 0),   // 5
+            Insn::LoadConst(2, 0),   // 6
+            Insn::LoadConst(3, 0),   // 7
+            Insn::ReturnNone,        // 8
+        ];
+        let out = pass_loadnone_merge(insns);
+        // 4 LoadNones fused into 1 + 1 JumpIfFalse + 3 LoadConst + 1 ReturnNone = 6.
+        assert_eq!(
+            out.len(),
+            6,
+            "four LoadNones fused to one range; total 6 insns"
+        );
         assert!(
-            has_range,
-            "function with multiple None-initialized locals should produce LoadNoneRange"
+            matches!(out[0], Insn::LoadNoneRange { start: 1, count: 4 }),
+            "first instruction should be LoadNoneRange{{start:1,count:4}}, got {:?}",
+            out[0]
+        );
+        // JumpIfFalse is now at new index 1.  Its target is ReturnNone at new index 5.
+        // Expected offset: 5 - 1 - 1 = 3.
+        assert!(
+            matches!(out[1], Insn::JumpIfFalse(0, 3)),
+            "JumpIfFalse offset must remain 3 after compaction, got {:?}",
+            out[1]
         );
     }
 
