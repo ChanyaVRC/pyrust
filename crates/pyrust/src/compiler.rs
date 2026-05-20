@@ -3805,6 +3805,17 @@ impl Compiler {
         }
     }
 
+    /// Emit `R[dst] = R[lhs] op n` using `BinOpImm` when `n` fits in `i16`,
+    /// or `BinOpConst` with a pool entry otherwise.
+    fn emit_int_binop(&mut self, dst: Reg, lhs: Reg, op: BinaryOp, n: i64) {
+        if n >= i16::MIN as i64 && n <= i16::MAX as i64 {
+            self.emit(Insn::BinOpImm(dst, lhs, op, n as i16));
+        } else {
+            let idx = self.intern_const(Value::int(n));
+            self.emit(Insn::BinOpConst(dst, lhs, op, idx));
+        }
+    }
+
     fn intern_const(&mut self, val: Value) -> u16 {
         // PyKey treats `Bool(b)` and `Int(b as i64)` as hash/eq-equal (matching
         // CPython's `True == 1`), so they would collide in the constant pool's
@@ -5511,15 +5522,10 @@ impl Compiler {
 
         let cmp_op = if step > 0 { BinaryOp::Lt } else { BinaryOp::Gt };
         let step_idx = self.intern_const(Value::int(step));
-        let neg_step_idx = self.intern_const(Value::int(step.wrapping_neg()));
+        let neg_step = step.wrapping_neg();
 
         // Initialise var_reg = i_initial - step (so first ForCount yields i_initial).
-        self.emit(Insn::BinOpConst(
-            var_reg,
-            var_reg,
-            BinaryOp::Add,
-            neg_step_idx,
-        ));
+        self.emit_int_binop(var_reg, var_reg, BinaryOp::Add, neg_step);
 
         // Determine stop value: for inclusive (<=/>= condition) adjust by ±1.
         let loop_start = self.pc();
@@ -5544,8 +5550,7 @@ impl Compiler {
                 r
             };
             if stop_adjust != 0 {
-                let adj_idx = self.intern_const(Value::int(stop_adjust));
-                self.emit(Insn::BinOpConst(sr, sr, BinaryOp::Add, adj_idx));
+                self.emit_int_binop(sr, sr, BinaryOp::Add, stop_adjust);
             }
             let jmp = self.emit(Insn::ForCountReg(var_reg, cmp_op, sr, step_idx, 0));
             (jmp, Some(sr))
@@ -5572,8 +5577,8 @@ impl Compiler {
         self.emit(Insn::Jump(back_offset));
         self.patch_jump(exit_jmp);
         // Restore post-loop value: Python semantics require i == stop after natural exit.
-        // Break patches jump PAST this BinOpConst so break leaves the break-iteration value.
-        self.emit(Insn::BinOpConst(var_reg, var_reg, BinaryOp::Add, step_idx));
+        // Break patches jump PAST this BinOpImm/BinOpConst so break leaves the break-iteration value.
+        self.emit_int_binop(var_reg, var_reg, BinaryOp::Add, step);
         let ctx = self.loops.pop().unwrap();
         if let Some(t) = stop_temp {
             self.free_temp(t);
@@ -5656,11 +5661,12 @@ impl Compiler {
 
         // ── 1. Initialise var_reg = start - step_val ─────────────────────
         //    For the common range(n) case (start=0), init = -step_val.
-        let neg_step_idx = self.intern_const(Value::int(step_val.wrapping_neg()));
+        let neg_step_val = step_val.wrapping_neg();
+        let neg_step_idx = self.intern_const(Value::int(neg_step_val));
         if let Some(start) = start_opt {
             let r = self.compile_expr(start);
-            // var_reg = r + (-step_val) = r - step_val
-            self.emit(Insn::BinOpConst(var_reg, r, BinaryOp::Add, neg_step_idx));
+            // var_reg = r + (-step_val) = r - step_val; use BinOpImm when it fits.
+            self.emit_int_binop(var_reg, r, BinaryOp::Add, neg_step_val);
             self.free_temp(r);
         } else {
             // start = 0; init = -step_val
@@ -7093,6 +7099,7 @@ impl Compiler {
             Insn::BinOp(d, ..)
             | Insn::BinOpInPlace(d, ..)
             | Insn::BinOpConst(d, ..)
+            | Insn::BinOpImm(d, ..)
             | Insn::UnaryOp(d, ..)
             | Insn::LoadConst(d, ..)
             | Insn::LoadNone(d)
@@ -7145,8 +7152,21 @@ impl Compiler {
         }
     }
 
+    /// Try to extract a small i16 integer immediate from an expression.
+    /// Returns `Some(imm)` when `expr` is an integer literal in `i16` range.
+    fn try_imm_i16(expr: &Expr) -> Option<i16> {
+        if let Expr::Int(v) = expr {
+            if *v >= i16::MIN as i64 && *v <= i16::MAX as i64 {
+                return Some(*v as i16);
+            }
+        }
+        None
+    }
+
     fn emit_aug_binop(&mut self, reg: Reg, op: BinaryOp, expr: &Expr) {
-        if let Some(const_idx) = self.try_literal_const_idx(expr) {
+        if let Some(imm) = Self::try_imm_i16(expr) {
+            self.emit(Insn::BinOpImm(reg, reg, op, imm));
+        } else if let Some(const_idx) = self.try_literal_const_idx(expr) {
             self.emit(Insn::BinOpConst(reg, reg, op, const_idx));
         } else {
             let rhs = self.compile_expr(expr);

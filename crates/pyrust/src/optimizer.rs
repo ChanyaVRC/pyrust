@@ -408,6 +408,20 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -
                     out.push(Insn::BinOpConst(dst, lhs, op, c));
                 }
             }
+            Insn::BinOpImm(dst, lhs, op, imm) => {
+                let folded = known.get(&lhs).and_then(|&cl| {
+                    let rhs_val = Value::int(imm as i64);
+                    crate::compiler::fold_binop(&consts[cl as usize], op, &rhs_val)
+                        .and_then(|v| intern_const_in_pool(consts, v))
+                });
+                if let Some(nc) = folded {
+                    known.insert(dst, nc);
+                    out.push(Insn::LoadConst(dst, nc));
+                } else {
+                    known.remove(&dst);
+                    out.push(Insn::BinOpImm(dst, lhs, op, imm));
+                }
+            }
             // Branch/loop/raise/suspend: clear the map — values may differ per
             // path or may be written by external resume machinery.
             insn @ (Insn::Jump(_)
@@ -480,6 +494,7 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | DeleteLocal(r)
         | BinOp(r, _, _, _)
         | BinOpConst(r, _, _, _)
+        | BinOpImm(r, _, _, _)
         | BinOpInPlace(r, _, _, _)
         | UnaryOp(r, _, _)
         | GetAttr(r, _, _)
@@ -778,6 +793,25 @@ fn pass_algebraic_simplify(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Ins
                 }
                 out.push(Insn::BinOpConst(dst, lhs, op, c));
             }
+            Insn::BinOpImm(dst, lhs, op, imm) => {
+                // The immediate is always an integer; apply the same algebraic
+                // identity rewrites as BinOpConst when lhs is known to be Int.
+                let lhs_int = int_regs.contains(&lhs);
+                if lhs_int {
+                    let cv = imm as i64;
+                    if let Some(new) = identity_rewrite(dst, lhs, op, cv, consts) {
+                        int_regs.insert(dst);
+                        out.push(new);
+                        continue;
+                    }
+                }
+                if lhs_int && int_preserving(op) {
+                    int_regs.insert(dst);
+                } else {
+                    int_regs.remove(&dst);
+                }
+                out.push(Insn::BinOpImm(dst, lhs, op, imm));
+            }
             Insn::BinOp(dst, lhs, op, rhs) => {
                 // First: try the identity rewrite when `rhs` is an immutable
                 // int constant register (covers the loop case where
@@ -997,6 +1031,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | GetAttr(_, s, _)
         | DeleteAttr(s, _)
         | BinOpConst(_, s, _, _)
+        | BinOpImm(_, s, _, _)
         | CmpJumpIfFalseConst(s, _, _, _)
         | CmpJumpIfTrueConst(s, _, _, _)
         | MatchExcept(s, _)
@@ -1440,6 +1475,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | BinOp(r, _, _, _)
         | BinOpInPlace(r, _, _, _)
         | BinOpConst(r, _, _, _)
+        | BinOpImm(r, _, _, _)
         | UnaryOp(r, _, _)
         | GetAttr(r, _, _)
         | GetItem(r, _, _)
@@ -1566,7 +1602,7 @@ fn is_loop_invariant(
         Insn::LoadConst(dst, _) => is_temp(*dst) && sole_writer(*dst),
         // BinOpConst reads `src`; invariant when `src` is not written, dst is a
         // temp, this is the sole write of dst, and the operator cannot raise.
-        Insn::BinOpConst(dst, src, op, _) => {
+        Insn::BinOpConst(dst, src, op, _) | Insn::BinOpImm(dst, src, op, _) => {
             let op_is_safe = matches!(
                 op,
                 BinaryOp::Add
@@ -1824,14 +1860,17 @@ fn pass_dead_store_elim(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
 fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
     use std::collections::HashMap;
 
-    /// Discriminator tag for a CSE key — keeps `LoadConst`, `BinOpConst`, and
-    /// `UnaryOp` entries distinct even if their integer fields happen to overlap.
+    /// Discriminator tag for a CSE key — keeps `LoadConst`, `BinOpConst`,
+    /// `BinOpImm`, and `UnaryOp` entries distinct even if their integer fields
+    /// happen to overlap.
     #[derive(Eq, PartialEq, Hash, Clone)]
     enum CseKey {
         /// `LoadConst(_, idx)` — two loads of the same pool entry.
         LoadConst(u16),
         /// `BinOpConst(_, src, op, idx)`.
         BinOpConst(u32, crate::ast::BinaryOp, u16),
+        /// `BinOpImm(_, src, op, imm)`.
+        BinOpImm(u32, crate::ast::BinaryOp, i16),
         /// `UnaryOp(_, op, src)`.
         UnaryOp(crate::ast::UnaryOp, u32),
     }
@@ -1886,6 +1925,7 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             Insn::BinOpConst(dst, src, op, idx) => {
                 Some((CseKey::BinOpConst(*src, *op, *idx), *dst))
             }
+            Insn::BinOpImm(dst, src, op, imm) => Some((CseKey::BinOpImm(*src, *op, *imm), *dst)),
             Insn::UnaryOp(dst, op, src) => Some((CseKey::UnaryOp(*op, *src), *dst)),
             _ => None,
         };
@@ -1921,7 +1961,9 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 }
                 match k {
                     CseKey::LoadConst(_) => true,
-                    CseKey::BinOpConst(src, _, _) => *src < lo || *src >= hi,
+                    CseKey::BinOpConst(src, _, _) | CseKey::BinOpImm(src, _, _) => {
+                        *src < lo || *src >= hi
+                    }
                     CseKey::UnaryOp(_, src) => *src < lo || *src >= hi,
                 }
             });
@@ -1932,7 +1974,7 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 }
                 match k {
                     CseKey::LoadConst(_) => true,
-                    CseKey::BinOpConst(src, _, _) => *src != w,
+                    CseKey::BinOpConst(src, _, _) | CseKey::BinOpImm(src, _, _) => *src != w,
                     CseKey::UnaryOp(_, src) => *src != w,
                 }
             });
@@ -1956,7 +1998,7 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         ) {
             table.retain(|k, _| match k {
                 CseKey::LoadConst(_) => true,
-                CseKey::BinOpConst(src, _, _) => *src >= num_locals,
+                CseKey::BinOpConst(src, _, _) | CseKey::BinOpImm(src, _, _) => *src >= num_locals,
                 CseKey::UnaryOp(_, src) => *src >= num_locals,
             });
         }
@@ -2303,6 +2345,7 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 Insn::BinOpInPlace(dst, s(&copies, lhs), op, s(&copies, rhs))
             }
             Insn::BinOpConst(dst, lhs, op, c) => Insn::BinOpConst(dst, s(&copies, lhs), op, c),
+            Insn::BinOpImm(dst, lhs, op, imm) => Insn::BinOpImm(dst, s(&copies, lhs), op, imm),
             Insn::CmpJumpIfFalse(lhs, op, rhs, k) => {
                 Insn::CmpJumpIfFalse(s(&copies, lhs), op, s(&copies, rhs), k)
             }

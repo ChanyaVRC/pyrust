@@ -885,6 +885,23 @@ impl Interpreter {
                     };
                     regs[*dst as usize] = result;
                 }
+                Insn::BinOpImm(dst, lhs, op, imm) => {
+                    let imm_i64 = *imm as i64;
+                    if let Some(a) = regs[*lhs as usize].as_int()
+                        && let Some(result) = int_int_fast(a, imm_i64, *op)
+                    {
+                        regs[*dst as usize] = result;
+                        continue;
+                    }
+                    let l = vm_try!(vm_read(&regs, *lhs, num_locals));
+                    let r = Value::int(imm_i64);
+                    let result = if let Some(v) = vm_try!(self.try_inplace_op(l.clone(), *op, r.clone())) {
+                        v
+                    } else {
+                        vm_try!(self.eval_binary(l, *op, r))
+                    };
+                    regs[*dst as usize] = result;
+                }
                 Insn::UnaryOp(dst, op, src) => {
                     let val = vm_try!(vm_read(&regs, *src, num_locals));
                     let result = if *op == UnaryOp::Not {
