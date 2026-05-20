@@ -20,6 +20,23 @@ print(b"hello world".removesuffix(b" world"))       # b'hello'
 print(b"hello".removeprefix(b"world"))              # b'hello'
 print(b"hello".removesuffix(b"world"))              # b'hello'
 
+try:
+    b"x".removeprefix()
+except TypeError as e:
+    print("TypeError:", e)
+try:
+    b"x".removesuffix()
+except TypeError as e:
+    print("TypeError:", e)
+try:
+    b"x".removeprefix("hello")
+except TypeError as e:
+    print("TypeError:", e)
+try:
+    b"x".removesuffix(42)
+except TypeError as e:
+    print("TypeError:", e)
+
 # split / rsplit
 print(b"a,b,c".split(b","))                         # [b'a', b'b', b'c']
 print(b"a b c".split())                              # [b'a', b'b', b'c']
@@ -33,6 +50,14 @@ print(b"a\nb\nc".splitlines())                     # [b'a', b'b', b'c']
 print(b"a\r\nb".splitlines())                      # [b'a', b'b']
 print(b"".splitlines())                              # []
 print(b"a\n".splitlines(True))                     # [b'a\n']
+print(b"a\r\nb\r".splitlines(True))               # [b'a\r\n', b'b\r']
+# bytes.splitlines() only splits on \n and \r (unlike str.splitlines).
+# \x0b, \x0c, \x1c-\x1e are NOT line boundaries for bytes.
+print(b"a\x0bb".splitlines())                      # [b'a\x0bb']
+print(b"a\x0cb".splitlines())                      # [b'a\x0cb']
+print(b"a\x1cb".splitlines())                      # [b'a\x1cb']
+print(b"a\x1db".splitlines())                      # [b'a\x1db']
+print(b"a\x1eb".splitlines())                      # [b'a\x1eb']
 
 # join
 print(b",".join([b"a", b"b", b"c"]))               # b'a,b,c'

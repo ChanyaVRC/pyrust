@@ -918,12 +918,21 @@ fn bytes_strip(bytes: &[u8], args: &[Value], left: bool, right: bool) -> Result<
 // ---------------------------------------------------------------------------
 
 fn bytes_removeprefix(bytes: &[u8], args: &[Value]) -> Result<Value> {
-    let prefix: &[u8] = match args.first().map(|v| v.kind()) {
-        Some(ValueKind::Bytes(rc)) => rc.as_slice(),
+    if args.is_empty() {
+        return Err(PyError::named(
+            "TypeError",
+            "bytes.removeprefix() takes exactly one argument (0 given)".to_string(),
+        ));
+    }
+    let prefix: &[u8] = match args[0].kind() {
+        ValueKind::Bytes(rc) => rc.as_slice(),
         _ => {
             return Err(PyError::named(
                 "TypeError",
-                "removeprefix argument must be bytes".to_string(),
+                format!(
+                    "a bytes-like object is required, not '{}'",
+                    pyrust_core::builtin_type_name(&args[0])
+                ),
             ));
         }
     };
@@ -935,12 +944,21 @@ fn bytes_removeprefix(bytes: &[u8], args: &[Value]) -> Result<Value> {
 }
 
 fn bytes_removesuffix(bytes: &[u8], args: &[Value]) -> Result<Value> {
-    let suffix: &[u8] = match args.first().map(|v| v.kind()) {
-        Some(ValueKind::Bytes(rc)) => rc.as_slice(),
+    if args.is_empty() {
+        return Err(PyError::named(
+            "TypeError",
+            "bytes.removesuffix() takes exactly one argument (0 given)".to_string(),
+        ));
+    }
+    let suffix: &[u8] = match args[0].kind() {
+        ValueKind::Bytes(rc) => rc.as_slice(),
         _ => {
             return Err(PyError::named(
                 "TypeError",
-                "removesuffix argument must be bytes".to_string(),
+                format!(
+                    "a bytes-like object is required, not '{}'",
+                    pyrust_core::builtin_type_name(&args[0])
+                ),
             ));
         }
     };
@@ -1461,9 +1479,16 @@ fn bytes_translate(bytes: &[u8], args: &[Value]) -> Result<Value> {
         }
     };
 
+    // Build a 256-entry boolean table so each delete-membership check is O(1)
+    // instead of O(|delete|), making the overall loop O(n) rather than O(n × |delete|).
+    let mut delete_table = [false; 256];
+    for &b in delete {
+        delete_table[b as usize] = true;
+    }
+
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     for &b in bytes {
-        if delete.contains(&b) {
+        if delete_table[b as usize] {
             continue;
         }
         let mapped = match table {
