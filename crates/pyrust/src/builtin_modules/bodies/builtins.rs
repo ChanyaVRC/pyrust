@@ -26,7 +26,7 @@ use crate::interpreter::{
     is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_hash_bigint, py_hash_float,
     py_hash_int, py_mod_i64, py_round_half_even, py_round_half_even_f64,
     reject_keyword_args_expanded, resolve_zero_arg_super, snapshot_current_locals,
-    snapshot_module_namespace, value_to_bigint, value_to_float, value_type_name_str,
+    value_to_float, value_type_name_str,
 };
 use crate::value::{PyClass, PyKey, PyToPrimitive, PyZero, Value, ValueKind, range_len};
 use pyrust_derive::pyrust_module;
@@ -464,127 +464,132 @@ pyrust_module! {
 
     /// CPython: divmod(a, b) — `(a // b, a % b)`.
     /// <https://docs.python.org/3/library/functions.html#divmod>
+    ///
+    /// Migrated to the typed-signature dialect (#400).  Overloads cover every
+    /// CPython-accepted type combination:
+    ///  - `(int, int)` — including `BigInt`; `PyInt` wraps both small and big.
+    ///  - `(bool, int)`, `(int, bool)`, `(bool, bool)` — `bool ⊆ int` in CPython,
+    ///    so these return integer results (not float).
+    ///  - `(float, float)`, `(float, int)`, `(float, bool)`, `(int, float)`,
+    ///    `(bool, float)` — any mix involving a `float` returns floats.
+    ///  - `(PyValue, PyValue)` catch-all raises `TypeError` with CPython's exact
+    ///    `"unsupported operand type(s) for divmod(): 'X' and 'Y'"` wording.
+    ///
+    /// The `BigInt` arm inside each int-family overload promotes both operands via
+    /// `to_bigint()` when either is `Big`, mirroring PR #485's cross-type arms in
+    /// `expr.rs`.
     #[pure]
-    fn divmod(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 2 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly 2 arguments")));
-        }
-        match (args[0].value.kind(), args[1].value.kind()) {
-            (ValueKind::Int(a), ValueKind::Int(b)) => {
-                if b == 0 {
-                    return Err(PyError::named(
-                        "ZeroDivisionError",
-                        "integer division or modulo by zero".to_string(),
-                    ));
-                }
-                let modulo = py_mod_i64(a, b);
-                let quotient = (a - modulo) / b;
-                Ok(Value::tuple(vec![Value::int(quotient), Value::int(modulo)]))
-            }
-            (ValueKind::Bool(a), ValueKind::Bool(b)) => {
-                let a = a as i64;
-                let b = b as i64;
-                if b == 0 {
-                    return Err(PyError::named(
-                        "ZeroDivisionError",
-                        "integer division or modulo by zero".to_string(),
-                    ));
-                }
-                let modulo = py_mod_i64(a, b);
-                let quotient = (a - modulo) / b;
-                Ok(Value::tuple(vec![Value::int(quotient), Value::int(modulo)]))
-            }
-            _ => {
-                // BigInt cross-type arms (#485): match the new
-                // `floor_div`/`modulo` arms in `expr.rs`.  Whenever
-                // either operand is BigInt we delegate to the BigInt
-                // path; everything else falls through to the float
-                // path.  Bool coerces to int so `divmod(big, True)`
-                // works.  The `matches!` guard avoids the BigInt
-                // conversion for the float-mixed arms (`divmod(1, 2.0)`)
-                // that fell through the int-int match above.
-                if matches!(args[0].value.kind(), ValueKind::BigInt(_))
-                    || matches!(args[1].value.kind(), ValueKind::BigInt(_))
-                {
-                    if let (Some(a), Some(b)) = (
-                        value_to_bigint(&args[0].value),
-                        value_to_bigint(&args[1].value),
-                    ) {
-                        if b.is_zero() {
-                            return Err(PyError::named(
-                                "ZeroDivisionError",
-                                "integer division or modulo by zero".to_string(),
-                            ));
-                        }
-                        let (q, r) = bigint_divmod_floor(&a, &b);
-                        return Ok(Value::tuple(vec![Value::bigint(q), Value::bigint(r)]));
-                    }
-                }
-                let a = value_to_float(&args[0].value, FN_NAME)?;
-                let b = value_to_float(&args[1].value, FN_NAME)?;
-                if b == 0.0 {
-                    return Err(PyError::named(
-                        "ZeroDivisionError",
-                        "float divmod()".to_string(),
-                    ));
-                }
-                let quotient = (a / b).floor();
-                let modulo = a - b * quotient;
-                Ok(Value::tuple(vec![Value::float(quotient), Value::float(modulo)]))
-            }
-        }
+    fn divmod(#[positional_only] a: PyInt, #[positional_only] b: PyInt) -> Result<Value> {
+        divmod_int_int(a, b)
+    }
+
+    #[pure]
+    fn divmod(#[positional_only] a: PyBool, #[positional_only] b: PyInt) -> Result<Value> {
+        // bool coerces to int: `True → 1`, `False → 0`.
+        divmod_int_int(PyInt::from(a.0 as i64), b)
+    }
+
+    #[pure]
+    fn divmod(#[positional_only] a: PyInt, #[positional_only] b: PyBool) -> Result<Value> {
+        divmod_int_int(a, PyInt::from(b.0 as i64))
+    }
+
+    #[pure]
+    fn divmod(#[positional_only] a: PyBool, #[positional_only] b: PyBool) -> Result<Value> {
+        divmod_int_int(PyInt::from(a.0 as i64), PyInt::from(b.0 as i64))
+    }
+
+    #[pure]
+    fn divmod(#[positional_only] a: PyFloat, #[positional_only] b: PyFloat) -> Result<Value> {
+        divmod_float_float(*a, *b)
+    }
+
+    #[pure]
+    fn divmod(#[positional_only] a: PyFloat, #[positional_only] b: PyInt) -> Result<Value> {
+        // int→float coercion for the mixed arm.  BigInt may overflow f64 —
+        // CPython raises `OverflowError` in that case.  For BigInt values that
+        // fit in f64 (e.g. 2**100 ≈ 1.27e30) the conversion succeeds.
+        let bf = pyint_to_f64(&b)?;
+        divmod_float_float(*a, bf)
+    }
+
+    #[pure]
+    fn divmod(#[positional_only] a: PyFloat, #[positional_only] b: PyBool) -> Result<Value> {
+        divmod_float_float(*a, if b.0 { 1.0 } else { 0.0 })
+    }
+
+    #[pure]
+    fn divmod(#[positional_only] a: PyInt, #[positional_only] b: PyFloat) -> Result<Value> {
+        let af = pyint_to_f64(&a)?;
+        divmod_float_float(af, *b)
+    }
+
+    #[pure]
+    fn divmod(#[positional_only] a: PyBool, #[positional_only] b: PyFloat) -> Result<Value> {
+        divmod_float_float(if a.0 { 1.0 } else { 0.0 }, *b)
+    }
+
+    /// Catch-all: any type combination not covered above → TypeError.
+    #[pure]
+    fn divmod(#[positional_only] a: PyValue, #[positional_only] b: PyValue) -> Result<Value> {
+        Err(PyError::named(
+            "TypeError",
+            format!(
+                "unsupported operand type(s) for divmod(): '{}' and '{}'",
+                value_type_name_str(&a.0),
+                value_type_name_str(&b.0),
+            ),
+        ))
     }
 
     /// CPython: pow(base, exp[, mod]) — exponentiation, optionally modular.
     /// <https://docs.python.org/3/library/functions.html#pow>
+    ///
+    /// Migrated to the typed-signature dialect (#400) using a single-body
+    /// `Option<PyValue>` form for the optional third argument.  The body
+    /// dispatches on the actual value types, matching the logic that was
+    /// previously encoded in the `(args)` form but with the manual arity
+    /// check and arg extraction replaced by the macro's prelude.
+    ///
+    /// Two-arg form:
+    ///  - `int ** int` with non-negative exp → integer result (promoting to
+    ///    BigInt on overflow via `int_pow_promoting`).
+    ///  - `int ** int` with negative exp → `0.5` style float (CPython parity).
+    ///  - `bool ** int` → same as int (bool ⊆ int).
+    ///  - Everything else (including float inputs) → float.
+    ///
+    /// Three-arg form:
+    ///  - All three must be `int` or `bool`; `float` raises `TypeError`.
+    ///  - Modulus `0` raises `ValueError`.
+    ///  - Negative `exp` raises `ValueError`.
     #[pure]
-    fn pow(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() < 2 || args.len() > 3 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes 2 or 3 arguments")));
-        }
-        if args.len() == 3 {
-            let base = match args[0].value.kind() {
-                ValueKind::Int(v) => v,
-                ValueKind::Bool(b) => b as i64,
-                _ => return Err(PyError::named(
-                    "TypeError",
-                    "pow() 3-argument form requires integers".to_string(),
-                )),
-            };
-            let exp = match args[1].value.kind() {
-                ValueKind::Int(v) => v,
-                ValueKind::Bool(b) => b as i64,
-                _ => return Err(PyError::named(
-                    "TypeError",
-                    "pow() 3-argument form requires integers".to_string(),
-                )),
-            };
-            let modulus = match args[2].value.kind() {
-                ValueKind::Int(v) => v,
-                ValueKind::Bool(b) => b as i64,
-                _ => return Err(PyError::named(
-                    "TypeError",
-                    "pow() 3-argument form requires integers".to_string(),
-                )),
-            };
-            if modulus == 0 {
+    fn pow(
+        #[positional_only] base: PyValue,
+        #[positional_only] exp: PyValue,
+        #[positional_only] #[default(None)] mod_: Option<PyValue>,
+    ) -> Result<Value> {
+        if let Some(mod_val) = mod_ {
+            // Three-argument form — all must be int or bool.
+            let base_i = extract_pow_int_arg(&base.0, "pow() 3rd argument not allowed unless all arguments are integers")?;
+            let exp_i  = extract_pow_int_arg(&exp.0,  "pow() 3rd argument not allowed unless all arguments are integers")?;
+            let mod_i  = extract_pow_int_arg(&mod_val.0, "pow() 3rd argument not allowed unless all arguments are integers")?;
+            if mod_i == 0 {
                 return Err(PyError::named(
                     "ValueError",
                     "pow() 3rd argument cannot be 0".to_string(),
                 ));
             }
-            if exp < 0 {
+            if exp_i < 0 {
                 return Err(PyError::named(
                     "ValueError",
                     "pow() 2nd argument cannot be negative when 3rd argument specified".to_string(),
                 ));
             }
-            let result = modpow_i64(base, exp as u64, modulus);
+            let result = modpow_i64(base_i, exp_i as u64, mod_i);
             Ok(Value::int(result))
         } else {
-            match (args[0].value.kind(), args[1].value.kind()) {
+            // Two-argument form.
+            match (base.0.kind(), exp.0.kind()) {
                 (ValueKind::Int(a), ValueKind::Int(b)) if b >= 0 => {
                     Ok(int_pow_promoting(a, b))
                 }
@@ -592,8 +597,8 @@ pyrust_module! {
                     Ok(int_pow_promoting(a as i64, b))
                 }
                 _ => {
-                    let a = value_to_float(&args[0].value, FN_NAME)?;
-                    let b = value_to_float(&args[1].value, FN_NAME)?;
+                    let a = value_to_float(&base.0, FN_NAME)?;
+                    let b = value_to_float(&exp.0, FN_NAME)?;
                     Ok(Value::float(a.powf(b)))
                 }
             }
@@ -2197,6 +2202,88 @@ pyrust_module! {
         };
         Ok(Value::bool_(is_callable))
     }
+}
+
+/// Integer divmod shared by all `int`/`bool` overload combinations.
+///
+/// When either operand is `Big` (heap-stored BigInt whose magnitude exceeds
+/// `i64::MAX`) we promote both to `BigInt` for exact arithmetic.  The small-int
+/// fast path avoids any heap allocation for the common case.
+fn divmod_int_int(
+    a: crate::interpreter::builtin_args::PyInt<'_>,
+    b: crate::interpreter::builtin_args::PyInt<'_>,
+) -> crate::error::Result<Value> {
+    // Fast path: both fit in i64.
+    if let (Some(a), Some(b)) = (a.as_i64(), b.as_i64()) {
+        if b == 0 {
+            return Err(PyError::named(
+                "ZeroDivisionError",
+                "integer division or modulo by zero".to_string(),
+            ));
+        }
+        let modulo = py_mod_i64(a, b);
+        let quotient = (a - modulo) / b;
+        return Ok(Value::tuple(vec![Value::int(quotient), Value::int(modulo)]));
+    }
+    // BigInt path: at least one operand doesn't fit in i64.
+    let a_big = a.to_bigint();
+    let b_big = b.to_bigint();
+    if b_big.is_zero() {
+        return Err(PyError::named(
+            "ZeroDivisionError",
+            "integer division or modulo by zero".to_string(),
+        ));
+    }
+    let (q, r) = bigint_divmod_floor(&a_big, &b_big);
+    Ok(Value::tuple(vec![Value::bigint(q), Value::bigint(r)]))
+}
+
+/// Convert a `PyInt` to `f64` for mixed int/float arithmetic.
+///
+/// - Small ints: lossless cast (for values beyond 2^53 the cast loses
+///   precision but CPython behaves the same way).
+/// - BigInt that fits in f64 (e.g. 2^100): uses `BigInt::to_f64()`.
+/// - BigInt too large for f64 (e.g. 2^2000): raises `OverflowError`,
+///   matching CPython's `float(2**2000)`.
+fn pyint_to_f64(v: &crate::interpreter::builtin_args::PyInt<'_>) -> crate::error::Result<f64> {
+    match v.as_i64() {
+        Some(n) => Ok(n as f64),
+        None => {
+            // Must be a genuine BigInt (is_big() would be true here).
+            let b = v.to_bigint();
+            use crate::value::PyToPrimitive;
+            match b.to_f64() {
+                Some(f) if f.is_finite() => Ok(f),
+                _ => Err(PyError::named(
+                    "OverflowError",
+                    "int too large to convert to float".to_string(),
+                )),
+            }
+        }
+    }
+}
+
+/// Extract an `i64` from an `int` or `bool` value for the `pow()` 3-argument
+/// form.  Any other type raises `TypeError` with the supplied `msg`.
+fn extract_pow_int_arg(v: &Value, msg: &str) -> crate::error::Result<i64> {
+    match v.kind() {
+        ValueKind::Int(n) => Ok(n),
+        ValueKind::Bool(b) => Ok(b as i64),
+        _ => Err(PyError::named("TypeError", msg.to_string())),
+    }
+}
+
+/// Float divmod shared by all `float`-family overload combinations.
+fn divmod_float_float(a: f64, b: f64) -> crate::error::Result<Value> {
+    if b == 0.0 {
+        return Err(PyError::named(
+            "ZeroDivisionError",
+            "float divmod()".to_string(),
+        ));
+    }
+    let quotient = (a / b).floor();
+    let modulo = a - b * quotient;
+    Ok(Value::tuple(vec![Value::float(quotient), Value::float(modulo)]))
 }
 
 /// Parse a string argument to `complex()`, mirroring CPython 3.12 semantics.
