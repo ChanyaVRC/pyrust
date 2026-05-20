@@ -1424,6 +1424,157 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
     }
 }
 
+/// Collect every register read by `insn` into `reads`.  O(1) per instruction
+/// (amortised O(ranges) for range-based instructions).  Use this instead of
+/// calling `insn_reads_reg` in a loop to avoid the O(n × k) inner loop.
+fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
+    use Insn::*;
+    match insn {
+        LoadConst(..)
+        | LoadGlobal(..)
+        | LoadNone(..)
+        | LoadExc(..)
+        | ImportModule(..)
+        | DeleteName(..)
+        | DeleteLocal(..)
+        | Jump(..)
+        | SetupExcept(..)
+        | PopExcept
+        | EndExcept
+        | ReturnNone
+        | RaiseReRaise
+        | ForIter(..)
+        | ForCountConst(..)
+        | ForCountConstInline(..)
+        | DeleteModuleGlobal(..) => {}
+
+        StoreGlobal(_, s)
+        | Move(_, s)
+        | CopyReg(_, s)
+        | UnaryOp(_, _, s)
+        | Return(s)
+        | PrintExpr(s)
+        | RaiseValue(s)
+        | RaiseAssert(s)
+        | JumpIfFalse(s, _)
+        | JumpIfTrue(s, _)
+        | GetIter(_, s)
+        | Unpack(_, s, _)
+        | CheckLocal(s, _)
+        | GetAttr(_, s, _)
+        | DeleteAttr(s, _)
+        | BinOpConst(_, s, _, _)
+        | BinOpImm(_, s, _, _)
+        | CmpJumpIfFalseConst(s, _, _, _)
+        | CmpJumpIfTrueConst(s, _, _, _)
+        | MatchExcept(s, _)
+        | RecordClassStore(s)
+        | RecordClassDel(s)
+        | SyncModuleGlobal(s, _) => {
+            reads.insert(*s);
+        }
+
+        BinOp(_, a, _, b)
+        | BinOpInPlace(_, a, _, b)
+        | CmpJumpIfFalse(a, _, b, _)
+        | CmpJumpIfTrue(a, _, b, _)
+        | RaiseFrom(a, b)
+        | SetAdd(a, b)
+        | ListAppend(a, b)
+        | ListExtend(a, b)
+        | DictUpdate(a, b)
+        | GetItem(_, a, b)
+        | DeleteItem(a, b) => {
+            reads.insert(*a);
+            reads.insert(*b);
+        }
+
+        SetAttr(obj, _, val) => {
+            reads.insert(*obj);
+            reads.insert(*val);
+        }
+        ForCountReg(_, _, stop, _, _) => {
+            reads.insert(*stop);
+        }
+
+        SetItem(a, b, c) => {
+            reads.insert(*a);
+            reads.insert(*b);
+            reads.insert(*c);
+        }
+
+        Call(base, argc) | CallMemo(base, argc) => {
+            for r in *base..=(*base + *argc as u32) {
+                reads.insert(r);
+            }
+        }
+        TailCall { args_base, nargs } => {
+            reads.insert(*args_base - 1);
+            for r in *args_base..*args_base + *nargs as u32 {
+                reads.insert(r);
+            }
+        }
+        BuildList(_, base, n) | BuildTuple(_, base, n) => {
+            for r in *base..*base + *n as u32 {
+                reads.insert(r);
+            }
+        }
+        BuildDict(_, base, n) => {
+            for r in *base..*base + 2 * *n as u32 {
+                reads.insert(r);
+            }
+        }
+        CallMethod {
+            obj,
+            args_base,
+            nargs,
+            ..
+        } => {
+            reads.insert(*obj);
+            for r in *args_base..*args_base + *nargs as u32 {
+                reads.insert(r);
+            }
+        }
+        CallMethodExpanded {
+            obj,
+            pos_list,
+            kw_dict,
+            ..
+        } => {
+            reads.insert(*obj);
+            reads.insert(*pos_list);
+            reads.insert(*kw_dict);
+        }
+        MakeFunction(_, _, defs_base, defs_n, annots_base, annots_n) => {
+            for r in *defs_base..*defs_base + *defs_n as u32 {
+                reads.insert(r);
+            }
+            if *annots_n > 0 {
+                for r in *annots_base..*annots_base + *annots_n as u32 {
+                    reads.insert(r);
+                }
+            }
+        }
+        MakeClass(_, _, bases_base, bases_n, _) => {
+            for r in *bases_base..*bases_base + *bases_n as u32 {
+                reads.insert(r);
+            }
+        }
+        Yield { src, .. } => {
+            reads.insert(*src);
+        }
+        YieldFrom {
+            iter_reg, sent_reg, ..
+        } => {
+            reads.insert(*iter_reg);
+            reads.insert(*sent_reg);
+        }
+        UnpackEx { src, .. } => {
+            reads.insert(*src);
+        }
+    }
+}
+
 // ─── Constant-register propagation into CmpJump/BinOp ────────────────────────
 
 /// Convert `BinOp` and `CmpJump*` instructions that use a write-once
@@ -1540,14 +1691,12 @@ fn pass_const_reg_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
     // rewritten to account for the removed instructions.  A raw `retain` would
     // leave stale offsets and produce wrong loop targets.
     if !converted_regs.is_empty() {
-        // Single O(n) pass: collect every register read by any remaining instruction.
+        // True O(n) pass: collect every register read by any instruction, then
+        // filter converted_regs.  Avoids the O(n × k) loop from calling
+        // insn_reads_reg once per converted_reg per instruction.
         let mut all_reads: HashSet<u32> = HashSet::new();
         for insn in &out {
-            for &r in converted_regs.iter() {
-                if insn_reads_reg(insn, r) {
-                    all_reads.insert(r);
-                }
-            }
+            collect_reads(insn, &mut all_reads);
         }
         let dead_regs: HashSet<u32> = converted_regs
             .into_iter()
