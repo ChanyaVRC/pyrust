@@ -752,11 +752,11 @@ impl Interpreter {
                 // ── Loads ────────────────────────────────────────────────
                 Insn::LoadConst(dst, idx) => {
                     let cv = pool_get!(code.consts, *idx, "const");
-                    if let ValueKind::Int(n) = cv.kind() {
-                        regs[*dst as usize] = Value::int(n);
-                    } else {
-                        regs[*dst as usize] = cv.clone();
-                    }
+                    regs[*dst as usize] = match cv.kind() {
+                        ValueKind::Int(n) => Value::int(n),
+                        ValueKind::Str(s) => intern_string(s),
+                        _ => cv.clone(),
+                    };
                 }
                 Insn::LoadGlobal(dst, name_idx) => {
                     let name = pool_get!(code.names, *name_idx, "name");
