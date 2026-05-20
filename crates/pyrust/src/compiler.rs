@@ -5662,14 +5662,16 @@ impl Compiler {
         // ── 1. Initialise var_reg = start - step_val ─────────────────────
         //    For the common range(n) case (start=0), init = -step_val.
         let neg_step_val = step_val.wrapping_neg();
-        let neg_step_idx = self.intern_const(Value::int(neg_step_val));
         if let Some(start) = start_opt {
             let r = self.compile_expr(start);
             // var_reg = r + (-step_val) = r - step_val; use BinOpImm when it fits.
             self.emit_int_binop(var_reg, r, BinaryOp::Add, neg_step_val);
             self.free_temp(r);
         } else {
-            // start = 0; init = -step_val
+            // start = 0; init = -step_val.  Intern the constant only on this path
+            // so that range(start, stop) with a non-zero start doesn't pollute the
+            // const pool with an unreferenced neg_step entry.
+            let neg_step_idx = self.intern_const(Value::int(neg_step_val));
             self.emit(Insn::LoadConst(var_reg, neg_step_idx));
         }
 
