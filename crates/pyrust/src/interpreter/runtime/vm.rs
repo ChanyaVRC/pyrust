@@ -1387,6 +1387,26 @@ impl Interpreter {
                 Insn::DeleteLocal(reg) => {
                     regs[*reg as usize] = Value::unset();
                 }
+                Insn::SyncModuleGlobal(reg, name_idx) => {
+                    if self.globals_accessed {
+                        let name = pool_get!(code.names, *name_idx, "name");
+                        let val = regs[*reg as usize].clone();
+                        if !val.is_unset() {
+                            let _ = self.module_globals_dict.dict_insert(
+                                PyKey::Str(name.to_string()),
+                                val,
+                            );
+                        }
+                    }
+                }
+                Insn::DeleteModuleGlobal(name_idx) => {
+                    let name = pool_get!(code.names, *name_idx, "name");
+                    module_env(&self.env).borrow_mut().values.remove(name);
+                    if self.globals_accessed {
+                        let _ = self.module_globals_dict
+                            .dict_shift_remove(&PyKey::Str(name.to_string()));
+                    }
+                }
 
                 // ── Control flow ─────────────────────────────────────────
                 Insn::Jump(offset) => {

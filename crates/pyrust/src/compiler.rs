@@ -22,6 +22,9 @@ pub fn compile_script(
     // locals via nonlocal from a nested scope at this level.
     let cell_vars = collect_cell_vars(stmts, &local_index);
     let mut c = Compiler::new(local_index, 0, cell_vars);
+    // Issue #820: module-scope stores emit SyncModuleGlobal to keep
+    // module_globals_dict live after globals() has been called.
+    c.is_module_scope = true;
     // Issue #711: if the first statement is a bare string literal and we are
     // compiling a script file (not the REPL), it is the module docstring.
     // Emit a StoreGlobal for `__doc__` (CPython parity) before compiling the
@@ -3656,6 +3659,12 @@ struct Compiler {
     /// `nonlocal` declaration with no enclosing binding).  Controls whether
     /// `finish()` emits `PyError::Named("SyntaxError", …)` or `PyError::Runtime`.
     is_syntax_error: bool,
+    /// True when this Compiler is producing the top-level module/script body.
+    /// In that mode, every local-register store emits a `SyncModuleGlobal`
+    /// immediately after the `Move`, so that `module_globals_dict` stays live
+    /// after `globals()` has been called.  Child compilers for functions and
+    /// class bodies set this to false — they write to fastlocals only.
+    is_module_scope: bool,
 }
 
 fn class_body_has_annotations(body: &[Stmt]) -> bool {
@@ -3721,6 +3730,7 @@ impl Compiler {
             outer_locals: Vec::new(),
             is_function_scope: false,
             is_syntax_error: false,
+            is_module_scope: false,
         }
     }
 
@@ -4114,6 +4124,14 @@ impl Compiler {
             // `i` directly via `ForIter(reg, ...)` and then `compile_for`
             // calls back through here for synthetic stores.
             self.maybe_record_class_store(reg);
+            // Issue #820: at module scope, keep module_globals_dict live so
+            // that globals() always returns an up-to-date view.  SyncModuleGlobal
+            // is a NOP when globals_accessed == false (common case), so this
+            // adds zero overhead to scripts that never call globals().
+            if self.is_module_scope {
+                let name_idx = self.intern_name(name);
+                self.emit(Insn::SyncModuleGlobal(reg, name_idx));
+            }
         } else {
             let idx = self.intern_name(name);
             self.emit(Insn::StoreGlobal(idx, src));
@@ -4392,6 +4410,11 @@ impl Compiler {
                     // for class-namespace insertion order.  (Outside class
                     // bodies this is a no-op — see `maybe_record_class_store`.)
                     self.maybe_record_class_store(reg);
+                    // Issue #820: at module scope, keep module_globals_dict live.
+                    if self.is_module_scope {
+                        let name_idx = self.intern_name(name);
+                        self.emit(Insn::SyncModuleGlobal(reg, name_idx));
+                    }
                 } else {
                     // global / nonlocal / cell var → go through env
                     let src = self.compile_expr(expr);
@@ -4482,12 +4505,21 @@ impl Compiler {
                             temps.push(tmp);
                         }
                         if !self.failed {
-                            for (dst_reg, src_tmp) in target_regs.iter().zip(temps.iter()) {
-                                let dst = dst_reg.unwrap();
-                                if *src_tmp != dst {
-                                    self.emit(Insn::Move(dst, *src_tmp));
+                            for i in 0..targets.len() {
+                                let dst = target_regs[i].unwrap();
+                                let src_tmp = temps[i];
+                                if src_tmp != dst {
+                                    self.emit(Insn::Move(dst, src_tmp));
                                 }
                                 self.maybe_record_class_store(dst);
+                                // Issue #820: sync into module_globals_dict at module scope.
+                                if self.is_module_scope {
+                                    // all_name_locals guard guarantees AssignTarget::Name here
+                                    if let AssignTarget::Name(name) = &targets[i] {
+                                        let name_idx = self.intern_name(name);
+                                        self.emit(Insn::SyncModuleGlobal(dst, name_idx));
+                                    }
+                                }
                             }
                         }
                         self.next_temp = saved_next;
@@ -4521,6 +4553,11 @@ impl Compiler {
                             if let Some(reg) = self.local_reg(name) {
                                 self.emit(Insn::Move(reg, base + i));
                                 self.maybe_record_class_store(reg);
+                                // Issue #820: sync into module_globals_dict at module scope.
+                                if self.is_module_scope {
+                                    let name_idx = self.intern_name(name);
+                                    self.emit(Insn::SyncModuleGlobal(reg, name_idx));
+                                }
                             } else {
                                 let name_idx = self.intern_name(name);
                                 self.emit(Insn::StoreGlobal(name_idx, base + i));
@@ -4637,6 +4674,11 @@ impl Compiler {
                         self.emit(Insn::Move(reg, src_reg));
                     }
                     self.maybe_record_class_store(reg);
+                    // Issue #820: sync into module_globals_dict at module scope.
+                    if self.is_module_scope {
+                        let name_idx = self.intern_name(name);
+                        self.emit(Insn::SyncModuleGlobal(reg, name_idx));
+                    }
                 } else {
                     let name_idx = self.intern_name(name);
                     self.emit(Insn::StoreGlobal(name_idx, src_reg));
@@ -4669,6 +4711,12 @@ impl Compiler {
                 if let Some(reg) = self.local_reg(name) {
                     self.emit_aug_binop(reg, op, expr);
                     self.maybe_record_class_store(reg);
+                    // Issue #820: sync the updated value into module_globals_dict
+                    // when globals_accessed == true (same as compile_store_name).
+                    if self.is_module_scope {
+                        let name_idx = self.intern_name(name);
+                        self.emit(Insn::SyncModuleGlobal(reg, name_idx));
+                    }
                 } else {
                     // cell / global: load, compute, store
                     let name_idx = self.intern_name(name);
@@ -5707,6 +5755,14 @@ impl Compiler {
         // the body only after the bounds test passes, so emitting RecordClassStore
         // here gives us the correct conditional semantics for free.
         self.maybe_record_class_store(var_reg);
+        // Issue #820: sync the iteration variable into module_globals_dict at
+        // module scope so that globals() returns the live value.  The ForCount*
+        // instruction writes var_reg; SyncModuleGlobal (a NOP when globals_accessed
+        // == false) must follow immediately so it fires before the body runs.
+        if self.is_module_scope {
+            let name_idx = self.intern_name(var_name);
+            self.emit(Insn::SyncModuleGlobal(var_reg, name_idx));
+        }
         self.loops.push(LoopCtx {
             break_patches: Vec::new(),
             continue_target: Some(loop_start),
@@ -5778,6 +5834,11 @@ impl Compiler {
                     // Still record the store so class-body for-loops register the
                     // iteration variable in `vars(C)`.
                     self.maybe_record_class_store(reg);
+                    // Issue #820: sync into module_globals_dict at module scope.
+                    if self.is_module_scope {
+                        let name_idx = self.intern_name(name);
+                        self.emit(Insn::SyncModuleGlobal(reg, name_idx));
+                    }
                 } else {
                     let name_idx = self.intern_name(name);
                     self.emit(Insn::StoreGlobal(name_idx, for_dst));
@@ -5838,6 +5899,11 @@ impl Compiler {
                                 if let Some(reg) = self.local_reg(name) {
                                     self.emit(Insn::Move(reg, base + i));
                                     self.maybe_record_class_store(reg);
+                                    // Issue #820: sync into module_globals_dict at module scope.
+                                    if self.is_module_scope {
+                                        let name_idx = self.intern_name(name);
+                                        self.emit(Insn::SyncModuleGlobal(reg, name_idx));
+                                    }
                                 } else {
                                     let name_idx = self.intern_name(name);
                                     self.emit(Insn::StoreGlobal(name_idx, base + i));
@@ -5968,6 +6034,13 @@ impl Compiler {
                 if let Some(reg) = self.local_reg(name) {
                     self.emit(Insn::DeleteLocal(reg));
                     self.maybe_record_class_del(reg);
+                    // Issue #820: at module scope, also remove the name from
+                    // env.values and module_globals_dict so that LoadGlobal
+                    // from nested functions / after globals() cannot resurrect it.
+                    if self.is_module_scope {
+                        let name_idx = self.intern_name(name);
+                        self.emit(Insn::DeleteModuleGlobal(name_idx));
+                    }
                 } else {
                     let name_idx = self.intern_name(name);
                     self.emit(Insn::DeleteName(name_idx));
@@ -6885,6 +6958,11 @@ impl Compiler {
                     if let Some(reg) = self.local_reg(var_name) {
                         self.emit(Insn::Move(reg, exc_tmp));
                         self.mark_def(reg);
+                        // Issue #820: sync into module_globals_dict at module scope.
+                        if self.is_module_scope {
+                            let name_idx = self.intern_name(var_name);
+                            self.emit(Insn::SyncModuleGlobal(reg, name_idx));
+                        }
                     } else {
                         let name_idx = self.intern_name(var_name);
                         self.emit(Insn::StoreGlobal(name_idx, exc_tmp));
@@ -7003,6 +7081,11 @@ impl Compiler {
                     if let Some(reg) = self.local_reg(name) {
                         self.emit(Insn::Move(reg, val_reg));
                         self.mark_def(reg);
+                        // Issue #820: sync into module_globals_dict at module scope.
+                        if self.is_module_scope {
+                            let name_idx = self.intern_name(name);
+                            self.emit(Insn::SyncModuleGlobal(reg, name_idx));
+                        }
                     } else {
                         let name_idx = self.intern_name(name);
                         self.emit(Insn::StoreGlobal(name_idx, val_reg));

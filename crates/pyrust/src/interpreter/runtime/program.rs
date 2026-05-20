@@ -36,19 +36,39 @@ impl Interpreter {
     }
 
     fn try_exec_vm_script(&mut self, program: &[Stmt], repl_mode: bool) -> Option<Result<()>> {
-        // Issue #706: always use all-env mode for script/module execution.
+        // Issue #820: restore fastlocal registers for module scope.
         //
-        // Previously, pyrust allocated fastlocal registers for module-level names
-        // as an optimization, but that made it impossible for `globals()` to return
-        // a live dict: register writes bypassed `assign_name` entirely, so the
-        // `module_globals_dict` (and `env.values`) were never updated mid-execution.
+        // Prior to PR #810, module-scope names were allocated fastlocal registers
+        // (O(1) array access).  PR #810 switched to all-env mode (empty local_index)
+        // to fix globals() live-dict semantics (issue #706), but that caused a 3.5x
+        // slowdown because every module-scope load/store goes through lookup_name /
+        // assign_name (multiple Rc<RefCell<>> borrows + HashSet + HashMap per access).
         //
-        // With an empty `local_index`, the compiler emits `StoreGlobal` for every
-        // module-level assignment.  `StoreGlobal` → `assign_name` → writes to both
-        // `env.values` and `module_globals_dict`, keeping the globals dict live.
-        // `LoadGlobal` checks `module_globals_dict` first, so `globals()["x"] = 99`
-        // is visible as the global `x` immediately (CPython parity, issue #706).
-        let local_index: Rc<HashMap<String, crate::bytecode::Reg>> = Rc::new(HashMap::new());
+        // The fix: restore register allocation for module scope and add a new
+        // SyncModuleGlobal instruction that keeps module_globals_dict live when
+        // globals() has been called.  SyncModuleGlobal is a NOP when globals_accessed
+        // == false (the common case — most scripts never call globals()).
+        use std::collections::HashSet;
+        let empty: HashSet<String> = HashSet::new();
+        let local_names =
+            crate::interpreter::collect_local_names(&[], program, &empty, &empty);
+        // Cap at 200 locals to keep register allocation bounded for giant scripts.
+        // Anything above this threshold falls back to all-env mode for that name.
+        const MAX_SCRIPT_LOCALS: usize = 200;
+        let local_index: Rc<HashMap<String, crate::bytecode::Reg>> =
+            if local_names.len() <= MAX_SCRIPT_LOCALS {
+                Rc::new(
+                    (0u32..)
+                        .zip(local_names.iter())
+                        .map(|(i, n)| (n.clone(), i))
+                        .collect(),
+                )
+            } else {
+                // Fall back to all-env mode when there are too many module-level
+                // names.  This is an unlikely edge case (scripts with > 200
+                // top-level names) so the old regression is acceptable there.
+                Rc::new(HashMap::new())
+            };
         self.try_exec_vm_script_with_index(program, local_index, repl_mode)
     }
 
