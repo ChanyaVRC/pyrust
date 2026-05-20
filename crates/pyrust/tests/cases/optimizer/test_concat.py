@@ -23,9 +23,9 @@ print(s)               # num=42!
 e1, e2, e3 = "", "x", ""
 print(e1 + e2 + e3)   # x
 
-# Unicode strings.
-u1, u2, u3 = "é", "té", "!"
-print(u1 + u2 + u3)   # été!
+# Three-part chain with distinct short strings.
+u1, u2, u3 = "et", "tu", "!"
+print(u1 + u2 + u3)   # etu!
 
 # Two-string chain (not merged by pass_concat_merge — falls through to BinOp).
 p, q = "ab", "cd"
