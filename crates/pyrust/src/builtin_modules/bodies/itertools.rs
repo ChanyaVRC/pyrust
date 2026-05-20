@@ -2,9 +2,9 @@
 // `pyrust_builtin_modules!`.  Currently exposes: `chain`, `islice`,
 // `count`, `repeat`, `cycle`, `takewhile`, `dropwhile`, `starmap`,
 // `accumulate`, `product`, `combinations`, `combinations_with_replacement`,
-// `permutations`, `groupby`.
+// `permutations`, `groupby`, `compress`.
 //
-// Still missing vs CPython: `pairwise`, `tee`, `compress`,
+// Still missing vs CPython: `pairwise`, `tee`,
 // `filterfalse`, `zip_longest`, and `batched` (3.12+).  Tracked in
 // the follow-up to #330.
 //
@@ -1162,6 +1162,61 @@ pyrust_module! {
                     a.attrs.insert("_has_pending".to_string(), Value::bool_(true));
                     return Ok(Value::tuple(vec![first_key, Value::list(group)]));
                 }
+            }
+        }
+    }
+
+    /// CPython: itertools.compress(data, selectors) — yield elements of
+    /// `data` where the corresponding element of `selectors` is truthy.
+    /// Stops when either `data` or `selectors` is exhausted, whichever
+    /// comes first.
+    /// <https://docs.python.org/3/library/itertools.html#itertools.compress>
+    class compress {
+        fn __init__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let user = &args[1..];
+            reject_keyword_args_expanded(FN_NAME, user)?;
+            if user.len() != 2 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() takes exactly 2 arguments"),
+                ));
+            }
+            let data_iter = make_iter(_interp, user[0].value.clone())?;
+            let selectors_iter = make_iter(_interp, user[1].value.clone())?;
+            let mut a = inst.borrow_mut();
+            a.attrs.insert("_data".to_string(), data_iter);
+            a.attrs.insert("_selectors".to_string(), selectors_iter);
+            Ok(Value::none())
+        }
+
+        fn __iter__(args) -> Result<Value> {
+            Ok(args[0].value.clone())
+        }
+
+        fn __next__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let (data_iter, sel_iter) = {
+                let a = inst.borrow();
+                (
+                    a.attrs.get("_data").cloned().ok_or_else(|| internal(FN_NAME))?,
+                    a.attrs.get("_selectors").cloned().ok_or_else(|| internal(FN_NAME))?,
+                )
+            };
+            // Consume in lockstep: pull one from each iterator at a time.
+            // Stop as soon as either is exhausted (StopIteration propagates
+            // naturally from call_next when the selector side runs out; for
+            // the data side we forward it directly).
+            loop {
+                // Pull next data item — exhaustion propagates as StopIteration.
+                let item = _interp.call_next(data_iter.clone(), None)?;
+                // Pull next selector — exhaustion propagates as StopIteration.
+                let selector = _interp.call_next(sel_iter.clone(), None)?;
+                // Dispatch __bool__ / __len__ so PyInstance verdicts work.
+                if _interp.truthy_value(&selector)? {
+                    return Ok(item);
+                }
+                // Selector was falsy — skip this pair and try the next one.
             }
         }
     }
