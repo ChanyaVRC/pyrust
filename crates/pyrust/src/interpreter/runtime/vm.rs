@@ -2839,9 +2839,9 @@ impl Interpreter {
         nargs: u8,
         code: &crate::bytecode::FnCode,
     ) -> Result<Value> {
-        let method = code.names.get(name_idx as usize)
+        let method: &str = code.names.get(name_idx as usize)
             .ok_or_else(|| PyError::Runtime(format!("bytecode error: name index {name_idx} out of range")))?
-            .clone();
+            .as_str();
         let mut args: Vec<Value> = Vec::with_capacity(nargs as usize);
         for i in 0..crate::bytecode::Reg::from(nargs) {
             args.push(vm_read(regs, args_base + i, num_locals)?);
@@ -2870,10 +2870,10 @@ impl Interpreter {
                 } else {
                     args
                 };
-                pyrust_builtins::list::call(&method, &receiver, args, &empty_kw)
+                pyrust_builtins::list::call(method, &receiver, args, &empty_kw)
             }
             2 => {
-                if matches!(method.as_str(), "keys" | "values" | "items") {
+                if matches!(method, "keys" | "values" | "items") {
                     // Lazy views need the Rc to share storage with the
                     // source dict — separate from the regular method
                     // dispatch path, which only sees the Vec<Value> form.
@@ -2881,7 +2881,7 @@ impl Interpreter {
                         .get_dict_rc()
                         .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?
                         .clone();
-                    return match method.as_str() {
+                    return match method {
                         "keys" => Ok(pyrust_builtins::dict_views::dict_keys(rc)),
                         "values" => Ok(pyrust_builtins::dict_views::dict_values(rc)),
                         "items" => Ok(pyrust_builtins::dict_views::dict_items(rc)),
@@ -2889,7 +2889,7 @@ impl Interpreter {
                     };
                 }
                 let receiver = vm_read(regs, obj, num_locals)?;
-                self.call_dict_method(method.as_str(), receiver, args)
+                self.call_dict_method(method, receiver, args)
             }
             3 => {
                 if let Some(ValueKind::Tuple(items)) = regs[obj as usize].as_some().map(|v| v.kind()) {
@@ -2898,7 +2898,7 @@ impl Interpreter {
                     } else {
                         args
                     };
-                    pyrust_builtins::tuple::call(&method, items, args)
+                    pyrust_builtins::tuple::call(method, items, args)
                 } else {
                     unreachable!()
                 }
@@ -2928,11 +2928,11 @@ impl Interpreter {
                     return self.format_str_template_map(&template, mapping);
                 }
                 let receiver = vm_read(regs, obj, num_locals)?;
-                self.call_str_method(method.as_str(), receiver, args)
+                self.call_str_method(method, receiver, args)
             }
             5 => {
                 let receiver = vm_read(regs, obj, num_locals)?;
-                self.call_set_method(method.as_str(), receiver, args)
+                self.call_set_method(method, receiver, args)
             }
             _ => {
                 // Generator methods (close, throw, __next__, __iter__) are
@@ -2944,10 +2944,10 @@ impl Interpreter {
                 );
                 if is_generator {
                     let obj_val = vm_read(regs, obj, num_locals)?;
-                    return self.call_generator_method(obj_val, &method, args);
+                    return self.call_generator_method(obj_val, method, args);
                 }
                 let obj_val = vm_read(regs, obj, num_locals)?;
-                let method_val = self.get_attr(obj_val, &method)?;
+                let method_val = self.get_attr(obj_val, method)?;
                 let mut buf = std::mem::take(&mut self.call_arg_buf);
                 buf.clear();
                 for arg in args {
@@ -2972,9 +2972,9 @@ impl Interpreter {
         kw_dict: crate::bytecode::Reg,
         code: &crate::bytecode::FnCode,
     ) -> Result<Value> {
-        let method = code.names.get(name_idx as usize)
+        let method: &str = code.names.get(name_idx as usize)
             .ok_or_else(|| PyError::Runtime(format!("bytecode error: name index {name_idx} out of range")))?
-            .clone();
+            .as_str();
         let v = vm_read(regs, pos_list, num_locals)?;
         let pos_items: Vec<Value> = match v.kind() {
             ValueKind::List(items) => items.to_vec(),
@@ -3050,24 +3050,24 @@ impl Interpreter {
                         );
                     }
                     // No key: delegate to builtins (handles reverse kwarg)
-                    return pyrust_builtins::list::call(&method, &receiver, pos_items, &kw_map);
+                    return pyrust_builtins::list::call(method, &receiver, pos_items, &kw_map);
                 }
                 let pos_items = if method == "index" {
                     self.resolve_seq_index_pos(pos_items)?
                 } else {
                     pos_items
                 };
-                pyrust_builtins::list::call(&method, &receiver, pos_items, &kw_map)
+                pyrust_builtins::list::call(method, &receiver, pos_items, &kw_map)
             }
             2 => {
-                if matches!(method.as_str(), "keys" | "values" | "items") {
+                if matches!(method, "keys" | "values" | "items") {
                     // Lazy views need the Rc to share storage with the
                     // source dict — see `exec_call_method`.
                     let rc = regs[obj as usize]
                         .get_dict_rc()
                         .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?
                         .clone();
-                    return match method.as_str() {
+                    return match method {
                         "keys" => Ok(pyrust_builtins::dict_views::dict_keys(rc)),
                         "values" => Ok(pyrust_builtins::dict_views::dict_values(rc)),
                         "items" => Ok(pyrust_builtins::dict_views::dict_items(rc)),
@@ -3075,7 +3075,7 @@ impl Interpreter {
                     };
                 }
                 let receiver = vm_read(regs, obj, num_locals)?;
-                self.call_dict_method(method.as_str(), receiver, pos_items)
+                self.call_dict_method(method, receiver, pos_items)
             }
             3 => {
                 if let Some(ValueKind::Tuple(items)) = regs[obj as usize].as_some().map(|v| v.kind()) {
@@ -3084,7 +3084,7 @@ impl Interpreter {
                     } else {
                         pos_items
                     };
-                    pyrust_builtins::tuple::call(&method, items, pos_items)
+                    pyrust_builtins::tuple::call(method, items, pos_items)
                 } else {
                     Err(PyError::Runtime("internal: expected tuple".to_string()))
                 }
@@ -3120,11 +3120,11 @@ impl Interpreter {
                     return self.format_str_template_map(&template, mapping);
                 }
                 let receiver = vm_read(regs, obj, num_locals)?;
-                self.call_str_method(method.as_str(), receiver, pos_items)
+                self.call_str_method(method, receiver, pos_items)
             }
             5 => {
                 let receiver = vm_read(regs, obj, num_locals)?;
-                self.call_set_method(method.as_str(), receiver, pos_items)
+                self.call_set_method(method, receiver, pos_items)
             }
             _ => {
                 // Generator methods — see `exec_call_method` for context.
@@ -3140,10 +3140,10 @@ impl Interpreter {
                         ));
                     }
                     let obj_val = vm_read(regs, obj, num_locals)?;
-                    return self.call_generator_method(obj_val, &method, pos_items);
+                    return self.call_generator_method(obj_val, method, pos_items);
                 }
                 let obj_val = vm_read(regs, obj, num_locals)?;
-                let method_val = self.get_attr(obj_val, &method)?;
+                let method_val = self.get_attr(obj_val, method)?;
                 let mut expanded: Vec<ExpandedCallArg> = pos_items
                     .into_iter()
                     .map(|v| ExpandedCallArg { name: None, value: v })
