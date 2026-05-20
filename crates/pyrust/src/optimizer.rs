@@ -1452,7 +1452,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
 /// entire function body are considered.  Write-once guarantees the register
 /// holds that constant on every path that reaches the use, without the cost
 /// of a full dataflow analysis.
-fn pass_const_reg_prop(insns: Vec<Insn>, _num_locals: u32) -> Vec<Insn> {
+fn pass_const_reg_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
     // Pre-scan: count writes and record LoadConst targets.
     // Use collect_writes (not writable_dst) to capture ALL write destinations,
     // including Move(r, _) and Unpack which writable_dst omits.
@@ -1478,11 +1478,19 @@ fn pass_const_reg_prop(insns: Vec<Insn>, _num_locals: u32) -> Vec<Insn> {
         return insns;
     }
 
-    insns
+    // Convert BinOp/CmpJump that use immutable_const registers.  Track which
+    // *temp* registers (>= num_locals) were actually substituted — their
+    // LoadConst becomes a dead store and must be pruned below.  Named locals
+    // (< num_locals) may be captured by closures, so keep their LoadConst.
+    let mut converted_regs: HashSet<u32> = HashSet::new();
+    let mut out: Vec<Insn> = insns
         .into_iter()
         .map(|insn| match insn {
             Insn::BinOp(dst, lhs, op, rhs) => {
                 if let Some(&idx) = immutable_const.get(&rhs) {
+                    if rhs >= num_locals {
+                        converted_regs.insert(rhs);
+                    }
                     Insn::BinOpConst(dst, lhs, op, idx)
                 } else {
                     Insn::BinOp(dst, lhs, op, rhs)
@@ -1490,6 +1498,9 @@ fn pass_const_reg_prop(insns: Vec<Insn>, _num_locals: u32) -> Vec<Insn> {
             }
             Insn::CmpJumpIfFalse(lhs, op, rhs, k) => {
                 if let Some(&idx) = immutable_const.get(&rhs) {
+                    if rhs >= num_locals {
+                        converted_regs.insert(rhs);
+                    }
                     Insn::CmpJumpIfFalseConst(lhs, op, idx, k)
                 } else {
                     Insn::CmpJumpIfFalse(lhs, op, rhs, k)
@@ -1497,6 +1508,9 @@ fn pass_const_reg_prop(insns: Vec<Insn>, _num_locals: u32) -> Vec<Insn> {
             }
             Insn::CmpJumpIfTrue(lhs, op, rhs, k) => {
                 if let Some(&idx) = immutable_const.get(&rhs) {
+                    if rhs >= num_locals {
+                        converted_regs.insert(rhs);
+                    }
                     Insn::CmpJumpIfTrueConst(lhs, op, idx, k)
                 } else {
                     Insn::CmpJumpIfTrue(lhs, op, rhs, k)
@@ -1504,7 +1518,26 @@ fn pass_const_reg_prop(insns: Vec<Insn>, _num_locals: u32) -> Vec<Insn> {
             }
             other => other,
         })
-        .collect()
+        .collect();
+
+    // Prune the LoadConst instructions that are now dead.
+    //
+    // `pass_dead_store_elim` cannot remove them because it conservatively bails
+    // when it hits a CmpJumpConst (which is control flow) before seeing a
+    // subsequent write.  Since we know exactly which registers were substituted,
+    // we do a full-list read-scan here instead: if no instruction in `out` reads
+    // the register anymore, the LoadConst is safe to drop.
+    if !converted_regs.is_empty() {
+        let dead_regs: HashSet<u32> = converted_regs
+            .into_iter()
+            .filter(|&r| !reg_is_read_in(&out, r))
+            .collect();
+        if !dead_regs.is_empty() {
+            out.retain(|insn| !matches!(insn, Insn::LoadConst(r, _) if dead_regs.contains(r)));
+        }
+    }
+
+    out
 }
 
 // ─── BinOpInPlace → BinOp downgrade ───────────────────────────────────────────
@@ -6480,38 +6513,40 @@ mod tests {
     #[test]
     fn const_reg_prop_converts_cmpjump() {
         use crate::ast::BinaryOp;
-        // LoadConst(r4, idx=0) — write-once const register
-        // CmpJumpIfFalse(r0, Lt, r4, k=1)  → CmpJumpIfFalseConst(r0, Lt, 0, k=1)
+        // LoadConst(r4, idx=0) — write-once temp register (r4 >= num_locals=2)
+        // CmpJumpIfFalse(r0, Lt, r4, k=1) → CmpJumpIfFalseConst(r0, Lt, 0, k=1)
+        // LoadConst(r4) becomes dead and is pruned.
         let insns = vec![
             Insn::LoadConst(4, 0),
             Insn::CmpJumpIfFalse(0, BinaryOp::Lt, 4, 1),
             Insn::Return(0),
         ];
         let out = pass_const_reg_prop(insns, 2);
-        assert_eq!(out.len(), 3, "no instructions should be removed");
+        assert_eq!(out.len(), 2, "dead LoadConst should be removed");
         assert!(
-            matches!(out[1], Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 1)),
+            matches!(out[0], Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 1)),
             "CmpJumpIfFalse with write-once const rhs should become CmpJumpIfFalseConst: {:?}",
-            out[1]
+            out[0]
         );
     }
 
     #[test]
     fn const_reg_prop_converts_binop() {
         use crate::ast::BinaryOp;
-        // LoadConst(r5, idx=0) — write-once const register
-        // BinOp(r2, r0, Add, r5)  → BinOpConst(r2, r0, Add, 0)
+        // LoadConst(r5, idx=0) — write-once temp register (r5 >= num_locals=2)
+        // BinOp(r2, r0, Add, r5) → BinOpConst(r2, r0, Add, 0)
+        // LoadConst(r5) becomes dead and is pruned.
         let insns = vec![
             Insn::LoadConst(5, 0),
             Insn::BinOp(2, 0, BinaryOp::Add, 5),
             Insn::Return(2),
         ];
         let out = pass_const_reg_prop(insns, 2);
-        assert_eq!(out.len(), 3, "no instructions should be removed");
+        assert_eq!(out.len(), 2, "dead LoadConst should be removed");
         assert!(
-            matches!(out[1], Insn::BinOpConst(2, 0, BinaryOp::Add, 0)),
+            matches!(out[0], Insn::BinOpConst(2, 0, BinaryOp::Add, 0)),
             "BinOp with write-once const rhs should become BinOpConst: {:?}",
-            out[1]
+            out[0]
         );
     }
 
@@ -6529,6 +6564,51 @@ mod tests {
         assert!(
             matches!(out[2], Insn::CmpJumpIfFalse(0, BinaryOp::Lt, 5, 0)),
             "should not convert when rhs register is written multiple times"
+        );
+    }
+
+    #[test]
+    fn const_reg_prop_keeps_loadconst_for_named_local() {
+        use crate::ast::BinaryOp;
+        // r1 is a named local (r1 < num_locals=3): LoadConst should NOT be pruned
+        // even though CmpJumpIfFalse is converted to CmpJumpIfFalseConst.
+        let insns = vec![
+            Insn::LoadConst(1, 0), // r1 is a named local
+            Insn::CmpJumpIfFalse(0, BinaryOp::Lt, 1, 1),
+            Insn::Return(0),
+        ];
+        let out = pass_const_reg_prop(insns, 3);
+        assert_eq!(out.len(), 3, "LoadConst for named local must not be pruned");
+        assert!(
+            matches!(out[0], Insn::LoadConst(1, 0)),
+            "named-local LoadConst must survive"
+        );
+        assert!(
+            matches!(out[1], Insn::CmpJumpIfFalseConst(0, BinaryOp::Lt, 0, 1)),
+            "CmpJump should still be converted: {:?}",
+            out[1]
+        );
+    }
+
+    #[test]
+    fn const_reg_prop_keeps_loadconst_when_reg_has_other_readers() {
+        use crate::ast::BinaryOp;
+        // r5 is converted in CmpJump but also read by Return — LoadConst must stay.
+        let insns = vec![
+            Insn::LoadConst(5, 0),
+            Insn::CmpJumpIfFalse(0, BinaryOp::Lt, 5, 1),
+            Insn::Return(5), // r5 is still live here
+        ];
+        let out = pass_const_reg_prop(insns, 2);
+        assert_eq!(
+            out.len(),
+            3,
+            "LoadConst must survive when reg has other readers"
+        );
+        assert!(
+            matches!(out[0], Insn::LoadConst(5, 0)),
+            "LoadConst should remain: {:?}",
+            out[0]
         );
     }
 
