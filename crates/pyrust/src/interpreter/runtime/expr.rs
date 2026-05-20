@@ -646,6 +646,36 @@ impl Interpreter {
             }
             return Ok(PyKey::Tuple(keys));
         }
+        // Slices with PyInstance components need interpreter access to dispatch
+        // `__hash__`.  The pure `SliceOps::to_key()` path (via `value.to_key()`)
+        // returns `None` for any instance component, producing a misleading
+        // "unhashable type: 'slice'" error.  Intercept here when any component
+        // is a PyInstance and compute the hash via `hash_value_with_interp`,
+        // then store it in a `PyKey::Object` consistent with what `hash()`
+        // returns for the same slice (issue #850).
+        if let ValueKind::BuiltinObject { ops, state } = value.kind() {
+            if ops.type_name() == pyrust_builtins::slice::TYPE_NAME {
+                let borrow = state.borrow();
+                let s = borrow
+                    .downcast_ref::<pyrust_builtins::slice::SliceState>()
+                    .expect("SliceOps: bad state");
+                let needs_interp = matches!(s.start.kind(), ValueKind::PyInstance(_))
+                    || matches!(s.stop.kind(), ValueKind::PyInstance(_))
+                    || matches!(s.step.kind(), ValueKind::PyInstance(_));
+                drop(borrow);
+                if needs_interp {
+                    let hash = crate::builtin_modules::builtins::hash_value_with_interp(
+                        self, value,
+                    )? as u64;
+                    return Ok(PyKey::Object {
+                        hash,
+                        value: value.clone(),
+                    });
+                }
+                // No instance components: fall through to value.to_key() which
+                // uses SliceOps::hash (DefaultHasher), consistent with hash().
+            }
+        }
         if let Some(k) = value.to_key() {
             return Ok(k);
         }
