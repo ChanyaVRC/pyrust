@@ -8533,7 +8533,10 @@ elif x == 2:
             Insn::Return(0),
         ];
         let out = pass_loop_inversion(insns.clone());
-        assert_eq!(out, insns, "k=1 must not be transformed for CmpJumpIfTrueConst header");
+        assert_eq!(
+            out, insns,
+            "k=1 must not be transformed for CmpJumpIfTrueConst header"
+        );
     }
 
     #[test]
@@ -8547,8 +8550,10 @@ elif x == 2:
         let optimized = optimize(code);
         let inner = &optimized.fn_protos[0].code;
         // No unconditional back-edge Jump should survive.
-        let has_back_edge_jump =
-            inner.insns.iter().any(|i| matches!(i, Insn::Jump(k) if *k < 0));
+        let has_back_edge_jump = inner
+            .insns
+            .iter()
+            .any(|i| matches!(i, Insn::Jump(k) if *k < 0));
         assert!(
             !has_back_edge_jump,
             "optimizer should eliminate back-edge Jump in while-true-break loop; insns: {:?}",
