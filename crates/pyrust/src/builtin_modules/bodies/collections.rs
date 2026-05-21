@@ -150,13 +150,25 @@ pyrust_module! {
             let mut pairs: Vec<(PyKey, Value)> = counts
                 .into_iter()
                 .collect();
-            // Try to sort by integer count descending, mirroring CPython's
+            // Sort by count descending, mirroring CPython's
             // `try: most_common() except TypeError: dict(self)` fallback.
-            let all_int = pairs.iter().all(|(_, v)| {
-                matches!(v.kind(), ValueKind::Int(_) | ValueKind::Bool(_))
+            // We sort when all counts are numeric (int, bool, float); user-defined
+            // or non-orderable values fall back to insertion order.
+            let all_numeric = pairs.iter().all(|(_, v)| {
+                matches!(
+                    v.kind(),
+                    ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::Float(_)
+                )
             });
-            if all_int {
-                pairs.sort_by(|a, b| value_as_count(&b.1).cmp(&value_as_count(&a.1)));
+            if all_numeric {
+                pairs.sort_by(|a, b| {
+                    let to_f64 = |v: &Value| match v.kind() {
+                        ValueKind::Float(f) => f,
+                        ValueKind::Bool(b) => if b { 1.0 } else { 0.0 },
+                        _ => value_as_count(v) as f64,
+                    };
+                    to_f64(&b.1).total_cmp(&to_f64(&a.1))
+                });
             }
             // else: leave in insertion order (CPython fallback for non-orderable values)
             let inner: Vec<String> = pairs
