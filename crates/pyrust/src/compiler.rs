@@ -5,7 +5,7 @@ use crate::ast::{
     AssignTarget, BinaryOp, CompClause, DictItem, Expr, FStringPart, FunctionParam, MatchArm,
     Pattern, Stmt, UnaryOp,
 };
-use crate::bytecode::{CellVar, FnCode, FnParamSpec, FnProto, Insn, Reg};
+use crate::bytecode::{AttrCacheEntry, CellVar, FnCode, FnParamSpec, FnProto, Insn, Reg};
 use crate::error::PyError;
 use crate::value::{PyBigInt, PyPow, PyToPrimitive, Value, ValueKind};
 
@@ -4010,8 +4010,10 @@ impl Compiler {
             .insns
             .iter()
             .any(|i| matches!(i, Insn::Yield { .. } | Insn::YieldFrom { .. }));
+        let insns = self.insns;
+        let insns_len = insns.len();
         Ok(FnCode {
-            insns: self.insns,
+            insns,
             consts: self.consts,
             names: self.names,
             num_regs,
@@ -4021,6 +4023,7 @@ impl Compiler {
             cell_vars: self.cell_vars.into_iter().collect(),
             is_generator,
             is_class_method: self.is_class_method,
+            attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; insns_len]),
         })
     }
 

@@ -937,6 +937,7 @@ pyrust_module! {
                 name,
                 base,
                 attrs,
+                mutation_version: std::cell::Cell::new(0),
             }))));
         }
         if args.len() != 1 {

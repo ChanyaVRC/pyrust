@@ -770,6 +770,7 @@ thread_local! {
             qualname: "_Environ".to_string(),
             base: None,
             attrs,
+            mutation_version: std::cell::Cell::new(0),
         }))
     };
 }

@@ -977,10 +977,164 @@ impl Interpreter {
 
                 // ── Attribute / Index ────────────────────────────────────
                 Insn::GetAttr(dst, obj, name_idx) => {
-                    let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
-                    let name = pool_get!(code.names, *name_idx, "name");
-                    let result = vm_try!(self.get_attr(obj_val, name));
-                    regs[*dst as usize] = result;
+                    use pyrust_core::UserFunctionKind;
+                    use crate::bytecode::AttrCacheEntry;
+
+                    // Inline cache fast path: only for PyInstance objects.
+                    // Properties, __class__, __dict__, cached_property, and
+                    // megamorphic sites all fall through to the slow path.
+                    enum AttrFastResult {
+                        Hit(Value),
+                        Miss,
+                    }
+                    let fast = {
+                        let cache = code.attr_cache.borrow();
+                        if let AttrCacheEntry::ClassAttr { class_ptr, class_version, value: unbound } =
+                            &cache[pc - 1]
+                        {
+                            // Check: object is a PyInstance, same class, no
+                            // instance shadow, and class not mutated.
+                            if let Some(inst_rc) = regs[*obj as usize].as_py_instance_rc() {
+                                let inst = inst_rc.borrow();
+                                let name = code.names.get(*name_idx as usize)
+                                    .map(|s| s.as_str())
+                                    .unwrap_or("");
+                                let same_class =
+                                    Rc::as_ptr(&inst.class) as *const () == *class_ptr;
+                                let no_shadow = !inst.attrs.contains_key(name);
+                                let version_ok = inst.class.borrow().mutation_version.get()
+                                    == *class_version;
+                                if same_class && no_shadow && version_ok {
+                                    // Rebind the unbound class attr to this
+                                    // instance — same logic as get_attr's
+                                    // regular path, but avoids the MRO walk.
+                                    let unbound = unbound.clone();
+                                    let inst_rc_clone = Rc::clone(inst_rc);
+                                    let class_rc = Rc::clone(&inst.class);
+                                    drop(inst);
+                                    enum Tag {
+                                        Regular(std::rc::Rc<pyrust_core::UserFunction>),
+                                        ClassMethod(std::rc::Rc<pyrust_core::UserFunction>),
+                                        StaticMethod(std::rc::Rc<pyrust_core::UserFunction>),
+                                        Builtin,
+                                        Other,
+                                    }
+                                    let tag = match unbound.kind() {
+                                        ValueKind::UserFunction(f) => match f.kind {
+                                            UserFunctionKind::Regular =>
+                                                Tag::Regular(Rc::clone(f)),
+                                            UserFunctionKind::ClassMethod =>
+                                                Tag::ClassMethod(Rc::clone(f)),
+                                            UserFunctionKind::StaticMethod =>
+                                                Tag::StaticMethod(Rc::clone(f)),
+                                            UserFunctionKind::Builtin(_) =>
+                                                Tag::StaticMethod(Rc::clone(f)),
+                                        },
+                                        ValueKind::BuiltinFunction(_) => Tag::Builtin,
+                                        _ => Tag::Other,
+                                    };
+                                    let bound = match tag {
+                                        Tag::Regular(f) => {
+                                            Value::bound_method(f, inst_rc_clone)
+                                        }
+                                        Tag::ClassMethod(f) => {
+                                            Value::class_bound_method(f, class_rc)
+                                        }
+                                        Tag::StaticMethod(f) => Value::user_function(f),
+                                        Tag::Builtin => {
+                                            let name = code.names.get(*name_idx as usize)
+                                                .map(|s| s.as_str())
+                                                .unwrap_or("");
+                                            pyrust_builtins::bound_method::bound_method(
+                                                name.to_string(),
+                                                Value::py_instance(inst_rc_clone),
+                                            )
+                                        }
+                                        Tag::Other => unbound,
+                                    };
+                                    AttrFastResult::Hit(bound)
+                                } else {
+                                    AttrFastResult::Miss
+                                }
+                            } else {
+                                AttrFastResult::Miss
+                            }
+                        } else {
+                            AttrFastResult::Miss
+                        }
+                    };
+                    match fast {
+                        AttrFastResult::Hit(result) => {
+                            regs[*dst as usize] = result;
+                        }
+                        AttrFastResult::Miss => {
+                            let name = pool_get!(code.names, *name_idx, "name");
+                            let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
+                            let result = vm_try!(self.get_attr(obj_val.clone(), name));
+                            regs[*dst as usize] = result;
+                            // Fill the cache after the slow path, but only for
+                            // PyInstance targets that resolve to a class attr
+                            // (not an instance attr, not a property, not __class__
+                            // / __dict__, and not megamorphic already).
+                            if name != "__class__" && name != "__dict__" {
+                                let mut cache = code.attr_cache.borrow_mut();
+                                match &cache[pc - 1] {
+                                    AttrCacheEntry::Megamorphic => {}
+                                    AttrCacheEntry::ClassAttr { class_ptr: existing_ptr, .. } => {
+                                        // A different class was seen — go megamorphic.
+                                        if let Some(inst_rc) = obj_val.as_py_instance_rc() {
+                                            let new_ptr =
+                                                Rc::as_ptr(&inst_rc.borrow().class) as *const ();
+                                            if new_ptr != *existing_ptr {
+                                                cache[pc - 1] = AttrCacheEntry::Megamorphic;
+                                            }
+                                            // Same class but cache miss means a guard
+                                            // failed (version changed or instance shadow);
+                                            // leave the entry so it re-validates next
+                                            // time with the latest version.  Refill below.
+                                        }
+                                    }
+                                    AttrCacheEntry::Empty => {
+                                        // Try to fill: only for PyInstance with no instance
+                                        // shadow and with a class-attr resolution.
+                                        if let Some(inst_rc) = obj_val.as_py_instance_rc() {
+                                            let inst = inst_rc.borrow();
+                                            if !inst.attrs.contains_key(name) {
+                                                // No property — we only cache the
+                                                // straightforward class-attr case.
+                                                let unbound =
+                                                    lookup_class_attr(&inst.class, name);
+                                                if let Some(unbound_val) = unbound {
+                                                    // Don't cache cached_property (it
+                                                    // mutates instance.attrs on first
+                                                    // access and must go through get_attr).
+                                                    let is_cached_prop =
+                                                        pyrust_builtins::cached_property::with_cached_property(
+                                                            &unbound_val, |_| (),
+                                                        ).is_some();
+                                                    let is_property =
+                                                        pyrust_builtins::property::with_property(
+                                                            &unbound_val, |_| (),
+                                                        ).is_some();
+                                                    if !is_cached_prop && !is_property {
+                                                        let class_ptr =
+                                                            Rc::as_ptr(&inst.class) as *const ();
+                                                        let class_version =
+                                                            inst.class.borrow().mutation_version.get();
+                                                        cache[pc - 1] = AttrCacheEntry::ClassAttr {
+                                                            class_ptr,
+                                                            class_version,
+                                                            value: unbound_val,
+                                                        };
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 Insn::SetAttr(obj, name_idx, val) => {
                     let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
@@ -1831,7 +1985,8 @@ impl Interpreter {
                 }
 
                 Insn::CallMethod { dst, obj, name_idx, args_base, nargs } => {
-                    let r = self.exec_call_method(&mut regs, num_locals, *dst, *obj, *name_idx, *args_base, *nargs, code);
+                    // pc was incremented before dispatch; the instruction position is pc - 1.
+                    let r = self.exec_call_method(&mut regs, num_locals, *dst, *obj, *name_idx, *args_base, *nargs, code, pc - 1);
                     regs[*dst as usize] = vm_try!(r);
                 }
 
@@ -2805,6 +2960,7 @@ impl Interpreter {
                         qualname,
                         base,
                         attrs,
+                        mutation_version: std::cell::Cell::new(0),
                     }));
                     // Issue #733: write __class__ into the class env so methods
                     // that captured it (at MakeFunction time during the class body)
@@ -2868,6 +3024,7 @@ impl Interpreter {
         args_base: crate::bytecode::Reg,
         nargs: u8,
         code: &crate::bytecode::FnCode,
+        call_site_pc: usize,
     ) -> Result<Value> {
         let method: &str = code.names.get(name_idx as usize)
             .ok_or_else(|| PyError::Runtime(format!("bytecode error: name index {name_idx} out of range")))?
@@ -2965,6 +3122,9 @@ impl Interpreter {
                 self.call_set_method(method, receiver, args)
             }
             _ => {
+                use pyrust_core::UserFunctionKind;
+                use crate::bytecode::AttrCacheEntry;
+
                 // Generator methods (close, throw, __next__, __iter__) are
                 // dispatched directly here — they need access to the VM/frame
                 // and are not regular attributes on the Generator value.
@@ -2976,8 +3136,56 @@ impl Interpreter {
                     let obj_val = vm_read(regs, obj, num_locals)?;
                     return self.call_generator_method(obj_val, method, args);
                 }
+
+                // Inline cache fast path for user-defined class methods on
+                // PyInstance objects.  Only works for Regular UserFunctions and
+                // BuiltinFunctions — StaticMethod and ClassMethod are too rare
+                // and need special receive-arg treatment not worth inlining.
+                enum CallMethodFast {
+                    Hit(Value),
+                    Miss,
+                }
+                let fast = {
+                    let cache = code.attr_cache.borrow();
+                    if let AttrCacheEntry::ClassAttr { class_ptr, class_version, value: unbound } =
+                        &cache[call_site_pc]
+                    {
+                        if let Some(inst_rc) = regs[obj as usize].as_py_instance_rc() {
+                            let inst = inst_rc.borrow();
+                            let same_class =
+                                Rc::as_ptr(&inst.class) as *const () == *class_ptr;
+                            let no_shadow = !inst.attrs.contains_key(method);
+                            let version_ok = inst.class.borrow().mutation_version.get()
+                                == *class_version;
+                            if same_class && no_shadow && version_ok {
+                                let unbound = unbound.clone();
+                                let inst_val = Value::py_instance(Rc::clone(inst_rc));
+                                drop(inst);
+                                let mut buf = std::mem::take(&mut self.call_arg_buf);
+                                buf.clear();
+                                for arg in args.iter() {
+                                    buf.push(ExpandedCallArg { name: None, value: arg.clone() });
+                                }
+                                let r = invoke_class_method(self, unbound, inst_val, &buf);
+                                self.call_arg_buf = buf;
+                                CallMethodFast::Hit(r?)
+                            } else {
+                                CallMethodFast::Miss
+                            }
+                        } else {
+                            CallMethodFast::Miss
+                        }
+                    } else {
+                        CallMethodFast::Miss
+                    }
+                };
+                match fast {
+                    CallMethodFast::Hit(result) => return Ok(result),
+                    CallMethodFast::Miss => {}
+                }
+
                 let obj_val = vm_read(regs, obj, num_locals)?;
-                let method_val = self.get_attr(obj_val, method)?;
+                let method_val = self.get_attr(obj_val.clone(), method)?;
                 let mut buf = std::mem::take(&mut self.call_arg_buf);
                 buf.clear();
                 for arg in args {
@@ -2985,6 +3193,55 @@ impl Interpreter {
                 }
                 let r = self.call_function_expanded(method_val, &buf);
                 self.call_arg_buf = buf;
+
+                // Fill or update the cache for this user-object call site.
+                if let Some(inst_rc) = obj_val.as_py_instance_rc() {
+                    let mut cache = code.attr_cache.borrow_mut();
+                    match &cache[call_site_pc] {
+                        AttrCacheEntry::Megamorphic => {}
+                        AttrCacheEntry::ClassAttr { class_ptr: existing_ptr, .. } => {
+                            let new_ptr = Rc::as_ptr(&inst_rc.borrow().class) as *const ();
+                            if new_ptr != *existing_ptr {
+                                cache[call_site_pc] = AttrCacheEntry::Megamorphic;
+                            }
+                            // Same class, version mismatch — refill below by letting
+                            // the next slow-path execution do it; current entry will
+                            // re-validate on next hit attempt and miss again, which
+                            // is the right behaviour (forces a refill on version change).
+                        }
+                        AttrCacheEntry::Empty => {
+                            let inst = inst_rc.borrow();
+                            if !inst.attrs.contains_key(method) {
+                                if let Some(unbound_val) = lookup_class_attr(&inst.class, method) {
+                                    // Only cache Regular UserFunctions and
+                                    // BuiltinFunctions.  StaticMethod / ClassMethod
+                                    // need special receiver treatment — let them always
+                                    // go through get_attr + call_function_expanded.
+                                    let cacheable = match unbound_val.kind() {
+                                        ValueKind::UserFunction(f) => matches!(
+                                            f.kind,
+                                            UserFunctionKind::Regular
+                                        ),
+                                        ValueKind::BuiltinFunction(_) => true,
+                                        _ => false,
+                                    };
+                                    if cacheable {
+                                        let class_ptr =
+                                            Rc::as_ptr(&inst.class) as *const ();
+                                        let class_version =
+                                            inst.class.borrow().mutation_version.get();
+                                        cache[call_site_pc] = AttrCacheEntry::ClassAttr {
+                                            class_ptr,
+                                            class_version,
+                                            value: unbound_val,
+                                        };
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 r
             }
         }
@@ -4015,6 +4272,8 @@ mod vm_tests {
     use crate::interpreter::Interpreter;
 
     fn empty_code(insns: Vec<Insn>) -> FnCode {
+        use crate::bytecode::AttrCacheEntry;
+        let n = insns.len();
         FnCode {
             insns,
             consts: vec![],
@@ -4026,6 +4285,7 @@ mod vm_tests {
             cell_vars: vec![],
             is_generator: false,
             is_class_method: false,
+            attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; n]),
         }
     }
 

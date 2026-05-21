@@ -210,6 +210,7 @@ thread_local! {
         qualname: "object".to_string(),
         base: None,
         attrs: IndexMap::new(),
+        mutation_version: std::cell::Cell::new(0),
     }));
 
     /// Per-primitive `PyClass` singletons.  Issue #462 — `int`, `str`,
@@ -321,6 +322,7 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
             qualname: name.to_string(),
             base,
             attrs,
+            mutation_version: std::cell::Cell::new(0),
         }))
     }
     let int_class = make("int", None);
@@ -858,6 +860,7 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
             qualname: name.to_string(),
             base,
             attrs: IndexMap::new(),
+            mutation_version: std::cell::Cell::new(0),
         }))
     };
     let base_exception = mk("BaseException", None);

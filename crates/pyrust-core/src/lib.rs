@@ -745,6 +745,15 @@ pub struct PyClass {
     pub qualname: String,
     pub base: Option<Rc<RefCell<PyClass>>>,
     pub attrs: IndexMap<String, Value>,
+    /// Bumped on every `assign_attr` / `delete_attr` on this class (but NOT
+    /// its bases — a base mutation is separately detectable via the base's own
+    /// counter).  Inline attribute caches store the version at fill time and
+    /// re-validate on each hit; a mismatch triggers a slow-path re-fill.
+    ///
+    /// Wrapped u64: overflow after 2^64 writes is benign (just a cold-path
+    /// cache miss).  `Cell<u64>` avoids the `borrow_mut()` overhead on the
+    /// hot re-validation path.
+    pub mutation_version: Cell<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -2217,6 +2226,21 @@ impl Value {
         } else {
             None
         }
+    }
+
+    /// Zero-cost borrow of the inner `Rc<RefCell<PyInstance>>` without
+    /// an `Rc::clone`.  Returns `None` for any non-PyInstance value.
+    ///
+    /// Used by the GetAttr / CallMethod inline cache to read the class
+    /// pointer and version without paying the clone cost on the fast path.
+    pub fn as_py_instance_rc(&self) -> Option<&Rc<RefCell<PyInstance>>> {
+        self.as_opaque().and_then(|o| {
+            if let Opaque::PyInstance(rc) = o {
+                Some(rc)
+            } else {
+                None
+            }
+        })
     }
 
     // `as_opaque_mut` removed in #448 — the only callers were the

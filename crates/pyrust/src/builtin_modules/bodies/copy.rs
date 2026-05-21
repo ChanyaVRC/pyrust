@@ -43,6 +43,7 @@ thread_local! {
             qualname: "copy.Error".to_string(),
             base: Some(exception_base),
             attrs: IndexMap::new(),
+            mutation_version: std::cell::Cell::new(0),
         }))
     };
 }
