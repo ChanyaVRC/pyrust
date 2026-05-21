@@ -42,7 +42,7 @@ impl Interpreter {
         regs: RegsBuf,
         saved_env: EnvRef,
         local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
-        fn_name: String,
+        fn_name: std::sync::Arc<str>,
     ) -> Value {
         let frame = GeneratorFrame {
             code: Rc::clone(code),
@@ -1290,7 +1290,7 @@ impl Interpreter {
                         regs,
                         gen_env,
                         Rc::clone(&function.local_index),
-                        function.name.clone(),
+                        std::sync::Arc::from(function.name.as_str()),
                     ));
                 }
 
@@ -1346,7 +1346,7 @@ impl Interpreter {
                 pyrust_core::push_traceback_frame(pyrust_core::FrameInfo {
                     filename: tb_filename,
                     lineno: None,
-                    funcname: function.name.clone(),
+                    funcname: std::sync::Arc::from(function.name.as_str()),
                 });
                 let vm_result = self.run_bytecode_for_fn(&code, regs_slice, function.id);
                 // Pop the frame, capturing the chain if an error occurred.
@@ -1552,7 +1552,7 @@ impl Interpreter {
                     regs,
                     gen_env,
                     Rc::clone(&function.local_index),
-                    function.name.clone(),
+                    std::sync::Arc::from(function.name.as_str()),
                 ));
             }
 
@@ -1604,7 +1604,7 @@ impl Interpreter {
             pyrust_core::push_traceback_frame(pyrust_core::FrameInfo {
                 filename: tb_filename,
                 lineno: None,
-                funcname: function.name.clone(),
+                funcname: std::sync::Arc::from(function.name.as_str()),
             });
             let vm_result = self.run_bytecode_for_fn(&code, regs_slice, function.id);
             // Pop the frame, capturing the chain if an error occurred.

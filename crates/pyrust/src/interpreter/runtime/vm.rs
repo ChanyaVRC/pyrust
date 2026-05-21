@@ -92,7 +92,9 @@ pub(crate) struct GeneratorFrame {
     pub(crate) last_return_value: Option<Value>,
     /// The name of the generator function, used to populate traceback frames
     /// when an exception propagates out of the generator body (issue #908).
-    pub(crate) fn_name: String,
+    /// `Arc<str>` so `.clone()` in `resume_generator_with_exc` is a
+    /// reference-count bump rather than a heap allocation on every resume.
+    pub(crate) fn_name: std::sync::Arc<str>,
 }
 
 /// Explicit suspension state for a generator frame.

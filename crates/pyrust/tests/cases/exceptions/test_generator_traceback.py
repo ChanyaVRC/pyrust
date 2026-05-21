@@ -1,9 +1,13 @@
 # Verify that exceptions raised inside generator bodies propagate correctly.
-# The parity harness strips "Traceback ..." and "File ..." lines before
-# diffing, so we compare the exception class and message — not the exact
-# frame-chain header (which varies by path).  The underlying fix (issue #908)
-# ensures the generator frame appears in the traceback, but the harness cannot
-# diff it — manual inspection confirms CPython 3.12 parity.
+#
+# Frame-chain verification note: the parity harness strips "Traceback ..." and
+# "File ..." lines from stderr before diffing so unhandled-exception output
+# cannot prove the generator frame is present.  pyrust does not implement the
+# `traceback` stdlib module (filed as a separate task), so `format_exc()` is
+# unavailable for a stdout-based check.  The generator-frame fix (issue #908)
+# is instead verified by the reviewer via manual `pyrust` invocation, and the
+# fixture below confirms the behavioral properties: correct exception class,
+# correct message, no stale frames, PEP 479 wrapping.
 
 # Basic case: exception raised in generator body caught by the caller.
 def gen_raises():
