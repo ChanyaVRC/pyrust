@@ -70,6 +70,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_trivial_nop(insns);
     let insns = pass_self_tail_call(insns);
     let insns = pass_forcount_const_inline(insns, &consts);
+    let insns = pass_linear_loop_fold(insns, &mut consts);
     let insns = pass_loadnone_merge(insns);
     let (insns, consts) = pass_compact_consts(insns, consts);
 
@@ -4186,7 +4187,217 @@ fn pass_forcount_const_inline(insns: Vec<Insn>, consts: &[Value]) -> Vec<Insn> {
         .collect()
 }
 
-// ─── LoadNone merging ──────────────────────────────────────────────────────────
+// ─── Linear loop fold ────────────────────────────────────────────────────────
+
+/// Fold a simple linear accumulation loop into a single `LoadConst`.
+///
+/// Matches the shape produced by `for _ in range(N): acc += K` (after earlier
+/// passes have const-folded the body, sunk `SyncModuleGlobal` out, and inlined
+/// the ForCount parameters):
+///
+/// ```text
+/// [h-1]: LoadConst(iv, -1)          ← pre-decrement before ForCount
+/// [h  ]: ForCountConstInline(iv, Lt, stop, 1, +2)
+/// [h+1]: BinOpImm(acc, acc, Add/Sub, imm)  │ loop body — exactly 2 insns
+/// [h+2]: Jump(back to h)                   │
+/// ```
+///
+/// Requirements (all checked):
+/// - step == 1, cmp == Lt
+/// - exit_off == 2 (body is exactly the two instructions above)
+/// - iv != acc
+/// - iv is not read by the BinOpImm body
+/// - [h-1] is `LoadConst(iv, -1_idx)` (iv pre-decremented for ForCount start=0)
+/// - None of h-1, h, h+1, h+2 are jump targets
+/// - acc is last-written (before h) by a single `LoadConst` with a known integer
+///   value, with no other writes to acc between that `LoadConst` and h-1
+/// - The computed acc_final fits in i64 (no overflow)
+/// - `stop` may be ≤ 0; trip count is `max(stop, 0)` (zero-trip loop, acc unchanged)
+///
+/// Transformation: replace the four-instruction sequence with two `LoadConst`s
+/// that set iv and acc to their post-loop values, then compact out the dead body.
+fn pass_linear_loop_fold(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn> {
+    use crate::ast::BinaryOp;
+
+    let n = insns.len();
+    if n < 5 {
+        return insns;
+    }
+
+    // All jump targets — used for the backward acc-init scan to detect
+    // multiple incoming edges to any instruction in the scan range.
+    let mut all_jump_targets: HashSet<usize> = HashSet::new();
+    // Forward-only jump targets — used for the loop-pattern guard.
+    // The loop's own back-edge Jump at [h+2] → [h] is a *backward* jump;
+    // excluding it prevents the guard from incorrectly blocking the fold
+    // because [h] (the ForCountConstInline header) is always targeted by
+    // the back-edge and would otherwise fail the `contains(&h)` check.
+    let mut fwd_jump_targets: HashSet<usize> = HashSet::new();
+    for (i, insn) in insns.iter().enumerate() {
+        let k: Option<i32> = match insn {
+            Insn::Jump(k) => Some(*k),
+            Insn::JumpIfFalse(_, k)
+            | Insn::JumpIfTrue(_, k)
+            | Insn::CmpJumpIfFalse(_, _, _, k)
+            | Insn::CmpJumpIfTrue(_, _, _, k)
+            | Insn::CmpJumpIfFalseConst(_, _, _, k)
+            | Insn::CmpJumpIfTrueConst(_, _, _, k)
+            | Insn::ForIter(_, _, k)
+            | Insn::ForCountReg(_, _, _, _, k)
+            | Insn::ForCountConst(_, _, _, _, k)
+            | Insn::ForCountConstInline(_, _, _, _, k)
+            | Insn::SetupExcept(k)
+            | Insn::MatchExcept(_, k) => Some(*k),
+            _ => None,
+        };
+        if let Some(k) = k {
+            let t = i as i64 + 1 + k as i64;
+            if t >= 0 && (t as usize) < n {
+                let t = t as usize;
+                all_jump_targets.insert(t);
+                if t > i {
+                    fwd_jump_targets.insert(t);
+                }
+            }
+        }
+    }
+
+    let mut transformed = insns;
+    let mut keep = vec![true; n];
+    let mut modified = false;
+    let mut written_tmp: HashSet<u32> = HashSet::new();
+
+    'outer: for h in 1..n.saturating_sub(2) {
+        // [h]: ForCountConstInline(iv, Lt, stop, 1, +2)
+        let (iv, stop, exit_off) = match transformed[h] {
+            Insn::ForCountConstInline(iv, BinaryOp::Lt, stop, 1, off) => (iv, stop, off),
+            _ => continue,
+        };
+        if exit_off != 2 {
+            continue;
+        }
+
+        // [h+1]: BinOpImm(acc, acc, Add/Sub, imm) — acc != iv, iv not read
+        let (acc, acc_op, imm) = match transformed[h + 1] {
+            Insn::BinOpImm(dst, src, op, imm)
+                if dst == src && dst != iv && matches!(op, BinaryOp::Add | BinaryOp::Sub) =>
+            {
+                (dst, op, imm as i64)
+            }
+            _ => continue,
+        };
+
+        // [h+2]: Jump back to h
+        let back_ok = match transformed[h + 2] {
+            Insn::Jump(k) => (h as i64 + 3 + k as i64) as usize == h,
+            _ => false,
+        };
+        if !back_ok {
+            continue;
+        }
+
+        // None of h-1, h, h+1, h+2 may be forward-jump targets.
+        // (Backward jumps are excluded because the loop's own back-edge
+        // is a backward Jump at [h+2] → [h]; that is expected and allowed.)
+        if fwd_jump_targets.contains(&(h - 1))
+            || fwd_jump_targets.contains(&h)
+            || fwd_jump_targets.contains(&(h + 1))
+            || fwd_jump_targets.contains(&(h + 2))
+        {
+            continue;
+        }
+
+        // [h-1]: LoadConst(iv, idx) where consts[idx] == -1 (ForCount pre-decrement)
+        let iv_pre_is_neg1 = match transformed[h - 1] {
+            Insn::LoadConst(r, idx) if r == iv => {
+                matches!(
+                    consts.get(idx as usize).map(Value::kind),
+                    Some(ValueKind::Int(-1))
+                )
+            }
+            _ => false,
+        };
+        if !iv_pre_is_neg1 {
+            continue;
+        }
+
+        // Scan backward from h-2 for acc's initialisation.  Stop at a jump
+        // target (another incoming edge → acc value is not uniquely known) or
+        // when we find the LoadConst that sets acc.  Any other write to acc
+        // means the folding is unsafe.
+        let mut acc_init: Option<i64> = None;
+        for scan in (0..h - 1).rev() {
+            if all_jump_targets.contains(&scan) {
+                continue 'outer; // can't guarantee single entry path
+            }
+            written_tmp.clear();
+            collect_writes(&transformed[scan], &mut written_tmp);
+            if written_tmp.contains(&acc) {
+                // acc is written here — must be a LoadConst with an integer value.
+                if let Insn::LoadConst(r, idx) = transformed[scan] {
+                    if r == acc {
+                        if let Some(ValueKind::Int(v)) = consts.get(idx as usize).map(Value::kind) {
+                            acc_init = Some(v);
+                            break;
+                        }
+                    }
+                }
+                continue 'outer; // non-LoadConst write → unsafe
+            }
+        }
+
+        let acc_init = match acc_init {
+            Some(v) => v,
+            None => continue,
+        };
+
+        // `stop` is an i32 and may be ≤ 0 (e.g. `range(-3)` or `range(0)`).
+        // The loop is zero-trip when stop ≤ 0: acc stays unchanged and iv
+        // remains at its pre-decremented value of -1.
+        let trip_count = (stop as i64).max(0);
+
+        // Compute acc_final = acc_init ± imm * trip_count.  Reject on overflow
+        // so we never silently produce the wrong value (let the loop run instead).
+        let delta = imm.checked_mul(trip_count);
+        let acc_final = match (delta, acc_op) {
+            (Some(d), BinaryOp::Add) => acc_init.checked_add(d),
+            (Some(d), BinaryOp::Sub) => acc_init.checked_sub(d),
+            _ => None,
+        };
+        let acc_final = match acc_final {
+            Some(v) => v,
+            None => continue,
+        };
+
+        // Intern the two new constants.  Bail if the pool is full (unlikely but
+        // possible for code with thousands of existing constants).
+        let Some(acc_final_idx) = intern_const_in_pool(consts, Value::int(acc_final)) else {
+            continue;
+        };
+        // iv's post-loop value: stop - 1 when stop > 0 (last value for which
+        // iv < stop held); -1 when stop ≤ 0 (loop never ran, iv stays at
+        // its pre-decremented initial value).
+        let iv_post = if stop > 0 { stop as i64 - 1 } else { -1 };
+        let Some(iv_post_idx) = intern_const_in_pool(consts, Value::int(iv_post)) else {
+            continue;
+        };
+
+        // Apply: replace pre-decrement with post-loop iv, ForCount with
+        // LoadConst(acc, acc_final), mark body instructions as dead.
+        transformed[h - 1] = Insn::LoadConst(iv, iv_post_idx);
+        transformed[h] = Insn::LoadConst(acc, acc_final_idx);
+        keep[h + 1] = false;
+        keep[h + 2] = false;
+        modified = true;
+    }
+
+    if !modified {
+        return transformed;
+    }
+    compact(transformed, &keep)
+}
+
+// ─── LoadNone merging ────────────────────────────────────────────────────────
 
 /// Merge runs of consecutive `LoadNone(r), LoadNone(r+1), ..., LoadNone(r+N-1)` into
 /// a single `LoadNoneRange { start: r, count: N }` instruction.
