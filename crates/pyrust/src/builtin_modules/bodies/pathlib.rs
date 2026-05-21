@@ -96,6 +96,41 @@ fn fnv1a_hash(s: &str) -> i64 {
     h as i64
 }
 
+/// Normalize a POSIX path string the same way CPython's `pathlib` does:
+///
+/// - Strip duplicate `/` separators (except the `//` UNC prefix).
+/// - Remove `.` components (but NOT `..`).
+/// - Remove trailing slashes.
+/// - An all-empty relative result becomes `"."`.
+///
+/// This mirrors `pathlib._from_parsed_string` normalization in 3.12.
+fn normalize_path(path: &str) -> String {
+    // CPython special-cases exactly two leading slashes (UNC / POSIX.1 allows
+    // implementation-defined semantics for `//`).  We preserve them.
+    let (prefix, rest) = if path.starts_with("//") && !path.starts_with("///") {
+        ("//", &path[2..])
+    } else if path.starts_with('/') {
+        ("/", &path[1..])
+    } else {
+        ("", path)
+    };
+
+    let parts: Vec<&str> = rest
+        .split('/')
+        .filter(|p| !p.is_empty() && *p != ".")
+        .collect();
+
+    if parts.is_empty() {
+        if prefix.is_empty() {
+            ".".to_string()
+        } else {
+            prefix.to_string()
+        }
+    } else {
+        format!("{}{}", prefix, parts.join("/"))
+    }
+}
+
 // ── module ────────────────────────────────────────────────────────────────────
 
 pyrust_module! {
@@ -135,7 +170,7 @@ pyrust_module! {
             let joined = if segments.is_empty() {
                 ".".to_string()
             } else {
-                segments.join("/")
+                normalize_path(&segments.join("/"))
             };
             let _ = _interp;
             inst.borrow_mut()
@@ -178,14 +213,14 @@ pyrust_module! {
                 _ => return Ok(Value::not_implemented()),
             };
             // Absolute rhs replaces lhs (CPython semantics).
-            let new_path = if rhs.starts_with('/') {
+            let raw = if rhs.starts_with('/') {
                 rhs
-            } else if lhs.ends_with('/') {
-                format!("{lhs}{rhs}")
+            } else if rhs.is_empty() {
+                lhs
             } else {
                 format!("{lhs}/{rhs}")
             };
-            Ok(make_path_instance(&new_path))
+            Ok(make_path_instance(&normalize_path(&raw)))
         }
 
         /// `path == other` — compare path strings.
@@ -381,11 +416,14 @@ pyrust_module! {
             };
             let _ = _interp;
             let p = get_path(&inst, FN_NAME)?;
+            // CPython 3.10+ write_text() returns the number of characters
+            // (code points) written, not None.
+            let char_count = data.chars().count();
             std::fs::write(&p, data.as_bytes()).map_err(|e| PyError::named(
                 "OSError",
                 format!("[Errno {}] {}: '{p}'", e.raw_os_error().unwrap_or(0), e),
             ))?;
-            Ok(Value::none())
+            Ok(Value::int(char_count as i64))
         }
 
         /// `path.mkdir(mode=0o777, parents=False, exist_ok=False)` — create

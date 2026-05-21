@@ -70,4 +70,27 @@ assert _get(hidden, 'stem') == '.bashrc', repr(_get(hidden, 'stem'))
 assert Path('/tmp') == Path('/tmp')
 assert Path('/tmp') != Path('/var')
 
+# ── trailing-slash normalisation ──────────────────────────────────────────────
+# CPython normalises trailing slashes in the constructor.
+
+trailing = Path('/tmp/foo/')
+assert str(trailing) == '/tmp/foo', repr(str(trailing))
+assert _get(trailing, 'name') == 'foo', repr(_get(trailing, 'name'))
+assert str(_get(trailing, 'parent')) == '/tmp', repr(str(_get(trailing, 'parent')))
+
+# ── dot component normalisation ───────────────────────────────────────────────
+
+assert str(Path('/tmp') / '.') == '/tmp', repr(str(Path('/tmp') / '.'))
+assert str(Path('/tmp/./foo')) == '/tmp/foo', repr(str(Path('/tmp/./foo')))
+
+# ── empty rhs in / operator ───────────────────────────────────────────────────
+
+assert str(Path('/tmp') / '') == '/tmp', repr(str(Path('/tmp') / ''))
+
+# ── write_text returns character count (CPython 3.10+) ───────────────────────
+
+_wt_path = Path('/tmp/pyrust_test_pathlib_wt.txt')
+_wt_result = _wt_path.write_text('hello')
+assert _wt_result == 5, repr(_wt_result)
+
 print('pathlib ok')
