@@ -234,19 +234,8 @@ impl Interpreter {
     }
 
     fn instantiate_named_exception(&self, name: &str, message: String) -> Result<Value> {
-        let class = match lookup_name_in_module(&self.env, name) {
-            Some(v) => match v.kind() {
-                ValueKind::PyClass(c) => Rc::clone(c),
-                _ => return Err(PyError::Runtime(format!(
-                    "built-in exception '{}' is not defined",
-                    name
-                ))),
-            },
-            None => return Err(PyError::Runtime(format!(
-                "built-in exception '{}' is not defined",
-                name
-            ))),
-        };
+        let class = lookup_exc_class(name)
+            .ok_or_else(|| PyError::Runtime(format!("built-in exception '{}' is not defined", name)))?;
         Ok(instantiate_exception(class, vec![Value::string(message)]))
     }
 
@@ -254,19 +243,8 @@ impl Interpreter {
     /// `args[0]` instead of a `Value::string(message)`.  Used for `KeyError`
     /// so that `e.args[0]` returns the original key object, matching CPython.
     fn instantiate_named_exception_with_value(&self, name: &str, arg: Value) -> Result<Value> {
-        let class = match lookup_name_in_module(&self.env, name) {
-            Some(v) => match v.kind() {
-                ValueKind::PyClass(c) => Rc::clone(c),
-                _ => return Err(PyError::Runtime(format!(
-                    "built-in exception '{}' is not defined",
-                    name
-                ))),
-            },
-            None => return Err(PyError::Runtime(format!(
-                "built-in exception '{}' is not defined",
-                name
-            ))),
-        };
+        let class = lookup_exc_class(name)
+            .ok_or_else(|| PyError::Runtime(format!("built-in exception '{}' is not defined", name)))?;
         Ok(instantiate_exception(class, vec![arg]))
     }
 

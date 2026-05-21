@@ -92,64 +92,23 @@ const ENV_POOL_MAX: usize = 64;
 
 /// Pre-resolved table of built-in exception classes.
 ///
-/// Populated once at interpreter startup from `env` after
-/// `install_exception_builtins` runs.  Lets the VM dispatch loop
-/// construct `PyError::Class` errors without a per-raise env lookup.
-pub(crate) struct ExcClasses(HashMap<&'static str, Rc<RefCell<PyClass>>>);
+/// Initialised lazily on the first call to `get` — the exception hierarchy is
+/// built via the thread-local `EXC_CLASS_CACHE` only when actually needed.
+/// Scripts that never raise or catch exceptions pay zero startup cost.
+pub(crate) struct ExcClasses(RefCell<Option<HashMap<&'static str, Rc<RefCell<PyClass>>>>>);
 
 impl ExcClasses {
-    fn new(env: &EnvRef) -> Self {
-        let names: &[&'static str] = &[
-            "BaseException",
-            "Exception",
-            "ArithmeticError",
-            "OverflowError",
-            "ZeroDivisionError",
-            "FloatingPointError",
-            "LookupError",
-            "IndexError",
-            "KeyError",
-            "RuntimeError",
-            "RecursionError",
-            "NotImplementedError",
-            "TypeError",
-            "ValueError",
-            "NameError",
-            "UnboundLocalError",
-            "AssertionError",
-            "StopIteration",
-            "AttributeError",
-            "SyntaxError",
-            "ImportError",
-            "ModuleNotFoundError",
-            "UnicodeError",
-            "UnicodeEncodeError",
-            "UnicodeDecodeError",
-            "MemoryError",
-            "OSError",
-            "FileNotFoundError",
-            "SystemExit",
-            "GeneratorExit",
-            "KeyboardInterrupt",
-        ];
-        let mut map = HashMap::with_capacity(names.len());
-        let module = env.borrow();
-        for name in names {
-            if let Some(v) = module.values.get(*name) {
-                if let ValueKind::PyClass(cls) = v.kind() {
-                    map.insert(*name, Rc::clone(cls));
-                }
-            }
-        }
-        ExcClasses(map)
+    fn uninitialized() -> Self {
+        ExcClasses(RefCell::new(None))
     }
 
     /// Look up a built-in exception class by its `'static` name.
-    /// Returns `None` only when `name` is not a registered built-in
-    /// exception (should not happen in correct interpreter state).
+    /// Initialises the class table on the very first call.
     #[inline]
     pub(crate) fn get(&self, name: &'static str) -> Option<Rc<RefCell<PyClass>>> {
-        self.0.get(name).map(Rc::clone)
+        let mut guard = self.0.borrow_mut();
+        let map = guard.get_or_insert_with(build_exc_class_map);
+        map.get(name).map(Rc::clone)
     }
 }
 
@@ -372,11 +331,12 @@ impl Default for Interpreter {
         pyrust_core::install_iter_values(iter_values_for_registry);
         pyrust_core::install_compare_values(compare_values_for_registry);
         let env = Environment::new(None);
-        install_exception_builtins(&env);
-        install_singleton_builtins(&env);
-        // Snapshot built-in exception class Rcs so the VM dispatch loop can
-        // construct `PyError::Class` errors without an env lookup per raise.
-        let exc_classes = ExcClasses::new(&env);
+        // Exception classes and NotImplemented are no longer inserted into the
+        // module env at startup.  They are resolved lazily: `LoadGlobal` falls
+        // through to `resolve_builtin` which calls `lookup_exc_class` / returns
+        // `Value::not_implemented()`.  `ExcClasses` is also lazy — the class
+        // hierarchy is built from `EXC_CLASS_CACHE` on the first raise.
+        // Scripts that never raise or name-check exceptions pay zero class-build cost.
         Self {
             env,
             active_exception: None,
@@ -391,7 +351,7 @@ impl Default for Interpreter {
             class_store_order: Vec::new(),
             vm_frame_views: Vec::new(),
             eq_in_progress: Vec::new(),
-            exc_classes,
+            exc_classes: ExcClasses::uninitialized(),
             module_globals_dict: Value::dict(IndexMap::new()),
             globals_accessed: false,
         }

@@ -832,291 +832,146 @@ pub(crate) fn instance_attrs_snapshot(instance: &Rc<RefCell<PyInstance>>) -> Val
     Value::dict(dict)
 }
 
-fn install_exception_builtins(env: &EnvRef) {
+/// Ordered list of `(python_name, class_rc)` pairs for all 31 built-in
+/// exception classes, built once per thread.  Both `install_exception_builtins`
+/// and `ExcClasses::from_cache` clone the `Rc`s from here instead of
+/// reconstructing the exception hierarchy on every `Interpreter::default()`.
+type ExcClassEntry = (&'static str, Rc<RefCell<PyClass>>);
+
+#[cold]
+fn build_exc_classes() -> Vec<ExcClassEntry> {
     // CPython 3.12 hierarchy (single-inheritance model):
     //   BaseException
     //     Exception
-    //       ArithmeticError
-    //         OverflowError, ZeroDivisionError, FloatingPointError
-    //       LookupError
-    //         IndexError, KeyError
+    //       ArithmeticError → OverflowError, ZeroDivisionError, FloatingPointError
+    //       LookupError → IndexError, KeyError
     //       ValueError → UnicodeError → UnicodeEncodeError / UnicodeDecodeError
     //       RuntimeError → RecursionError, NotImplementedError
-    //       TypeError, NameError, AssertionError, AttributeError,
-    //       StopIteration, SyntaxError, ImportError → ModuleNotFoundError
-    //     SystemExit, GeneratorExit  (direct BaseException children)
-    //   OSError → FileNotFoundError
-
-    // Root: BaseException (no base).
-    let base_exception = Rc::new(RefCell::new(PyClass {
-        name: "BaseException".to_string(),
-        qualname: "BaseException".to_string(),
-        base: None,
-        attrs: IndexMap::new(),
-    }));
-
-    // Exception derives from BaseException.
-    let exception = Rc::new(RefCell::new(PyClass {
-        name: "Exception".to_string(),
-        qualname: "Exception".to_string(),
-        base: Some(Rc::clone(&base_exception)),
-        attrs: IndexMap::new(),
-    }));
-
-    // Helper: direct child of Exception.
-    let make_child = |name: &str| {
+    //       TypeError, NameError → UnboundLocalError
+    //       AssertionError, AttributeError, StopIteration, SyntaxError
+    //       MemoryError, ImportError → ModuleNotFoundError
+    //       OSError → FileNotFoundError
+    //     SystemExit, GeneratorExit, KeyboardInterrupt (direct BaseException children)
+    let mk = |name: &str, base: Option<Rc<RefCell<PyClass>>>| {
         Rc::new(RefCell::new(PyClass {
-            qualname: name.to_string(),
             name: name.to_string(),
-            base: Some(Rc::clone(&exception)),
+            qualname: name.to_string(),
+            base,
             attrs: IndexMap::new(),
         }))
     };
-
-    // ArithmeticError (child of Exception) and its leaf subclasses.
-    let arithmetic_error = make_child("ArithmeticError");
-    let overflow_error = Rc::new(RefCell::new(PyClass {
-        name: "OverflowError".to_string(),
-        qualname: "OverflowError".to_string(),
-        base: Some(Rc::clone(&arithmetic_error)),
-        attrs: IndexMap::new(),
-    }));
-    let zero_division_error = Rc::new(RefCell::new(PyClass {
-        name: "ZeroDivisionError".to_string(),
-        qualname: "ZeroDivisionError".to_string(),
-        base: Some(Rc::clone(&arithmetic_error)),
-        attrs: IndexMap::new(),
-    }));
-    let floating_point_error = Rc::new(RefCell::new(PyClass {
-        name: "FloatingPointError".to_string(),
-        qualname: "FloatingPointError".to_string(),
-        base: Some(Rc::clone(&arithmetic_error)),
-        attrs: IndexMap::new(),
-    }));
-
-    // LookupError (child of Exception) and its leaf subclasses.
-    let lookup_error = make_child("LookupError");
-    let index_error = Rc::new(RefCell::new(PyClass {
-        name: "IndexError".to_string(),
-        qualname: "IndexError".to_string(),
-        base: Some(Rc::clone(&lookup_error)),
-        attrs: IndexMap::new(),
-    }));
-    let key_error = Rc::new(RefCell::new(PyClass {
-        name: "KeyError".to_string(),
-        qualname: "KeyError".to_string(),
-        base: Some(Rc::clone(&lookup_error)),
-        attrs: IndexMap::new(),
-    }));
-
-    // RuntimeError and its children.
-    let runtime_error = make_child("RuntimeError");
-    // RecursionError and NotImplementedError derive from RuntimeError in
-    // CPython 3.12 (`RecursionError → RuntimeError → Exception`).
-    let make_runtime_child = |name: &str| {
-        Rc::new(RefCell::new(PyClass {
-            qualname: name.to_string(),
-            name: name.to_string(),
-            base: Some(Rc::clone(&runtime_error)),
-            attrs: IndexMap::new(),
-        }))
-    };
-    let recursion_error = make_runtime_child("RecursionError");
-    let not_implemented_error = make_runtime_child("NotImplementedError");
-
-    // Other direct Exception children.
-    let type_error = make_child("TypeError");
-    let value_error = make_child("ValueError");
-    let name_error = make_child("NameError");
-    // UnboundLocalError is a direct child of NameError in CPython 3.12.
-    let unbound_local_error = Rc::new(RefCell::new(PyClass {
-        name: "UnboundLocalError".to_string(),
-        qualname: "UnboundLocalError".to_string(),
-        base: Some(Rc::clone(&name_error)),
-        attrs: IndexMap::new(),
-    }));
-    let assertion_error = make_child("AssertionError");
-    let stop_iteration = make_child("StopIteration");
-    let attribute_error = make_child("AttributeError");
-    let syntax_error = make_child("SyntaxError");
-    // MemoryError: direct child of Exception (CPython 3.12 hierarchy).
-    let memory_error = make_child("MemoryError");
-
-    // ImportError and ModuleNotFoundError (child of ImportError).
-    let import_error = make_child("ImportError");
-    let module_not_found_error = Rc::new(RefCell::new(PyClass {
-        name: "ModuleNotFoundError".to_string(),
-        qualname: "ModuleNotFoundError".to_string(),
-        base: Some(Rc::clone(&import_error)),
-        attrs: IndexMap::new(),
-    }));
-
-    // UnicodeError derives from ValueError in CPython; mirror that so
-    // `except ValueError:` catches a `UnicodeEncodeError` raised by
-    // `bytes(str, encoding)` (#391).  UnicodeEncodeError derives from
-    // UnicodeError.
-    let unicode_error = Rc::new(RefCell::new(PyClass {
-        name: "UnicodeError".to_string(),
-        qualname: "UnicodeError".to_string(),
-        base: Some(Rc::clone(&value_error)),
-        attrs: IndexMap::new(),
-    }));
-    let unicode_encode_error = Rc::new(RefCell::new(PyClass {
-        name: "UnicodeEncodeError".to_string(),
-        qualname: "UnicodeEncodeError".to_string(),
-        base: Some(Rc::clone(&unicode_error)),
-        attrs: IndexMap::new(),
-    }));
-    let unicode_decode_error = Rc::new(RefCell::new(PyClass {
-        name: "UnicodeDecodeError".to_string(),
-        qualname: "UnicodeDecodeError".to_string(),
-        base: Some(Rc::clone(&unicode_error)),
-        attrs: IndexMap::new(),
-    }));
-
-    // OSError and FileNotFoundError (child of OSError, not Exception).
-    let os_error = make_child("OSError");
-    let file_not_found_error = Rc::new(RefCell::new(PyClass {
-        name: "FileNotFoundError".to_string(),
-        qualname: "FileNotFoundError".to_string(),
-        base: Some(Rc::clone(&os_error)),
-        attrs: IndexMap::new(),
-    }));
-
-    // SystemExit and GeneratorExit are direct children of BaseException in
-    // CPython, so `except Exception:` does NOT catch them.
-    let system_exit = Rc::new(RefCell::new(PyClass {
-        name: "SystemExit".to_string(),
-        qualname: "SystemExit".to_string(),
-        base: Some(Rc::clone(&base_exception)),
-        attrs: IndexMap::new(),
-    }));
-    // `GeneratorExit` derives from BaseException in CPython.
-    let generator_exit = Rc::new(RefCell::new(PyClass {
-        name: "GeneratorExit".to_string(),
-        qualname: "GeneratorExit".to_string(),
-        base: Some(Rc::clone(&base_exception)),
-        attrs: IndexMap::new(),
-    }));
-    // `KeyboardInterrupt` is a direct child of BaseException (not Exception).
-    // `except Exception:` must NOT catch it.
-    let keyboard_interrupt = Rc::new(RefCell::new(PyClass {
-        name: "KeyboardInterrupt".to_string(),
-        qualname: "KeyboardInterrupt".to_string(),
-        base: Some(Rc::clone(&base_exception)),
-        attrs: IndexMap::new(),
-    }));
-
-    let mut module = env.borrow_mut();
-    module
-        .values
-        .insert("BaseException".to_string(), Value::py_class(base_exception));
-    module
-        .values
-        .insert("Exception".to_string(), Value::py_class(exception));
-    module
-        .values
-        .insert("ArithmeticError".to_string(), Value::py_class(arithmetic_error));
-    module
-        .values
-        .insert("OverflowError".to_string(), Value::py_class(overflow_error));
-    module
-        .values
-        .insert("ZeroDivisionError".to_string(), Value::py_class(zero_division_error));
-    module
-        .values
-        .insert("FloatingPointError".to_string(), Value::py_class(floating_point_error));
-    module
-        .values
-        .insert("LookupError".to_string(), Value::py_class(lookup_error));
-    module
-        .values
-        .insert("IndexError".to_string(), Value::py_class(index_error));
-    module
-        .values
-        .insert("KeyError".to_string(), Value::py_class(key_error));
-    module
-        .values
-        .insert("RuntimeError".to_string(), Value::py_class(runtime_error));
-    module
-        .values
-        .insert("RecursionError".to_string(), Value::py_class(recursion_error));
-    module
-        .values
-        .insert("NotImplementedError".to_string(), Value::py_class(not_implemented_error));
-    module
-        .values
-        .insert("TypeError".to_string(), Value::py_class(type_error));
-    module
-        .values
-        .insert("ValueError".to_string(), Value::py_class(value_error));
-    module
-        .values
-        .insert("NameError".to_string(), Value::py_class(name_error));
-    module
-        .values
-        .insert("UnboundLocalError".to_string(), Value::py_class(unbound_local_error));
-    module
-        .values
-        .insert("AssertionError".to_string(), Value::py_class(assertion_error));
-    module
-        .values
-        .insert("StopIteration".to_string(), Value::py_class(stop_iteration));
-    module
-        .values
-        .insert("AttributeError".to_string(), Value::py_class(attribute_error));
-    module
-        .values
-        .insert("SyntaxError".to_string(), Value::py_class(syntax_error));
-    module
-        .values
-        .insert("MemoryError".to_string(), Value::py_class(memory_error));
-    module
-        .values
-        .insert("ImportError".to_string(), Value::py_class(import_error));
-    module.values.insert(
-        "ModuleNotFoundError".to_string(),
-        Value::py_class(module_not_found_error),
-    );
-    module
-        .values
-        .insert("UnicodeError".to_string(), Value::py_class(unicode_error));
-    module.values.insert(
-        "UnicodeEncodeError".to_string(),
-        Value::py_class(unicode_encode_error),
-    );
-    module.values.insert(
-        "UnicodeDecodeError".to_string(),
-        Value::py_class(unicode_decode_error),
-    );
-    module
-        .values
-        .insert("OSError".to_string(), Value::py_class(os_error));
-    module.values.insert(
-        "FileNotFoundError".to_string(),
-        Value::py_class(file_not_found_error),
-    );
-    module
-        .values
-        .insert("SystemExit".to_string(), Value::py_class(system_exit));
-    module
-        .values
-        .insert("GeneratorExit".to_string(), Value::py_class(generator_exit));
-    module.values.insert(
-        "KeyboardInterrupt".to_string(),
-        Value::py_class(keyboard_interrupt),
-    );
+    let base_exception = mk("BaseException", None);
+    let exception = mk("Exception", Some(Rc::clone(&base_exception)));
+    let arithmetic_error = mk("ArithmeticError", Some(Rc::clone(&exception)));
+    let lookup_error = mk("LookupError", Some(Rc::clone(&exception)));
+    let runtime_error = mk("RuntimeError", Some(Rc::clone(&exception)));
+    let type_error = mk("TypeError", Some(Rc::clone(&exception)));
+    let value_error = mk("ValueError", Some(Rc::clone(&exception)));
+    let name_error = mk("NameError", Some(Rc::clone(&exception)));
+    let assertion_error = mk("AssertionError", Some(Rc::clone(&exception)));
+    let stop_iteration = mk("StopIteration", Some(Rc::clone(&exception)));
+    let attribute_error = mk("AttributeError", Some(Rc::clone(&exception)));
+    let syntax_error = mk("SyntaxError", Some(Rc::clone(&exception)));
+    let memory_error = mk("MemoryError", Some(Rc::clone(&exception)));
+    let import_error = mk("ImportError", Some(Rc::clone(&exception)));
+    let os_error = mk("OSError", Some(Rc::clone(&exception)));
+    let overflow_error = mk("OverflowError", Some(Rc::clone(&arithmetic_error)));
+    let zero_division_error = mk("ZeroDivisionError", Some(Rc::clone(&arithmetic_error)));
+    let floating_point_error = mk("FloatingPointError", Some(Rc::clone(&arithmetic_error)));
+    let index_error = mk("IndexError", Some(Rc::clone(&lookup_error)));
+    let key_error = mk("KeyError", Some(Rc::clone(&lookup_error)));
+    let recursion_error = mk("RecursionError", Some(Rc::clone(&runtime_error)));
+    let not_implemented_error = mk("NotImplementedError", Some(Rc::clone(&runtime_error)));
+    let unbound_local_error = mk("UnboundLocalError", Some(Rc::clone(&name_error)));
+    let unicode_error = mk("UnicodeError", Some(Rc::clone(&value_error)));
+    let module_not_found_error = mk("ModuleNotFoundError", Some(Rc::clone(&import_error)));
+    let file_not_found_error = mk("FileNotFoundError", Some(Rc::clone(&os_error)));
+    let unicode_encode_error = mk("UnicodeEncodeError", Some(Rc::clone(&unicode_error)));
+    let unicode_decode_error = mk("UnicodeDecodeError", Some(Rc::clone(&unicode_error)));
+    let system_exit = mk("SystemExit", Some(Rc::clone(&base_exception)));
+    let generator_exit = mk("GeneratorExit", Some(Rc::clone(&base_exception)));
+    let keyboard_interrupt = mk("KeyboardInterrupt", Some(Rc::clone(&base_exception)));
+    vec![
+        ("BaseException", base_exception),
+        ("Exception", exception),
+        ("ArithmeticError", arithmetic_error),
+        ("OverflowError", overflow_error),
+        ("ZeroDivisionError", zero_division_error),
+        ("FloatingPointError", floating_point_error),
+        ("LookupError", lookup_error),
+        ("IndexError", index_error),
+        ("KeyError", key_error),
+        ("RuntimeError", runtime_error),
+        ("RecursionError", recursion_error),
+        ("NotImplementedError", not_implemented_error),
+        ("TypeError", type_error),
+        ("ValueError", value_error),
+        ("NameError", name_error),
+        ("UnboundLocalError", unbound_local_error),
+        ("AssertionError", assertion_error),
+        ("StopIteration", stop_iteration),
+        ("AttributeError", attribute_error),
+        ("SyntaxError", syntax_error),
+        ("MemoryError", memory_error),
+        ("ImportError", import_error),
+        ("ModuleNotFoundError", module_not_found_error),
+        ("UnicodeError", unicode_error),
+        ("UnicodeEncodeError", unicode_encode_error),
+        ("UnicodeDecodeError", unicode_decode_error),
+        ("OSError", os_error),
+        ("FileNotFoundError", file_not_found_error),
+        ("SystemExit", system_exit),
+        ("GeneratorExit", generator_exit),
+        ("KeyboardInterrupt", keyboard_interrupt),
+    ]
 }
 
-/// Register built-in singleton values (currently just `NotImplemented`).
-/// Kept separate from `install_exception_builtins` because singletons are
-/// neither exceptions nor classes; future additions like `Ellipsis` will
-/// live here too.
-fn install_singleton_builtins(env: &EnvRef) {
-    let mut module = env.borrow_mut();
-    module
-        .values
-        .insert("NotImplemented".to_string(), Value::not_implemented());
+thread_local! {
+    /// Per-thread cache of all 31 built-in exception class `Rc`s.
+    /// Built once per thread; each `Interpreter::default()` call clones the
+    /// `Rc`s (O(1) reference-count bumps) instead of allocating fresh
+    /// `Rc<RefCell<PyClass>>` objects for the full hierarchy.
+    static EXC_CLASS_CACHE: Vec<ExcClassEntry> = build_exc_classes();
+
+    /// Per-thread cache of the `builtins` module value.
+    /// `seed_module_dunders` clones this `Value` (one `Rc` increment) instead
+    /// of rebuilding the module's ~136-entry `HashMap<String, Value>` from
+    /// scratch on every script invocation.
+    static BUILTINS_MODULE_CACHE: Value =
+        crate::builtin_modules::load_builtin_module("builtins")
+            .unwrap_or_else(Value::none);
+}
+
+/// Return a clone of the thread-local `builtins` module.  O(1) — clones
+/// the `Rc<RefCell<PyModule>>` reference; the attrs map is shared.
+pub(crate) fn cached_builtins_module() -> Value {
+    BUILTINS_MODULE_CACHE.with(Value::clone)
+}
+
+/// Look up a built-in exception class by name, using the thread-local cache.
+/// Called by `resolve_builtin` to service `LoadGlobal("TypeError")` etc.
+/// without inserting exception classes into the module env at startup.
+/// Triggers `EXC_CLASS_CACHE` initialisation on the very first call.
+pub(crate) fn lookup_exc_class(name: &str) -> Option<Rc<RefCell<PyClass>>> {
+    EXC_CLASS_CACHE.with(|cache| {
+        cache
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, cls)| Rc::clone(cls))
+    })
+}
+
+/// Build the `ExcClasses` map from the thread-local cache.  Called once
+/// per interpreter (lazily, on first exception raise or class lookup).
+pub(crate) fn build_exc_class_map(
+) -> std::collections::HashMap<&'static str, Rc<RefCell<PyClass>>> {
+    EXC_CLASS_CACHE.with(|cache| {
+        let mut map = std::collections::HashMap::with_capacity(cache.len());
+        for (name, cls) in cache {
+            map.insert(*name, Rc::clone(cls));
+        }
+        map
+    })
 }
 
 fn key_to_value(key: PyKey) -> Value {
@@ -1336,6 +1191,7 @@ pub(crate) fn module_env(env: &EnvRef) -> EnvRef {
 
 pub(crate) fn lookup_name_in_module(env: &EnvRef, name: &str) -> Option<Value> {
     module_env(env).borrow().values.get(name).cloned()
+        .or_else(|| lookup_exc_class(name).map(Value::py_class))
 }
 
 /// Sync all module-env values into `module_globals_dict` and set

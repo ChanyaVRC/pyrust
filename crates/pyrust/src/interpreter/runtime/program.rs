@@ -82,8 +82,14 @@ impl Interpreter {
     /// which keeps both `env.values` and `module_globals_dict` in sync.
     fn seed_module_dunders(&mut self) {
         // `__builtins__` is the builtins module object in `__main__`.
-        let builtins_val = crate::builtin_modules::load_builtin_module("builtins")
-            .unwrap_or_else(Value::none);
+        // Clone from the thread-local cache (O(1)) instead of rebuilding the
+        // builtins module's ~136-entry HashMap on every script invocation.
+        let builtins_val = cached_builtins_module();
+        // Warm module_cache so `import builtins` is a free cache hit.
+        self.module_cache
+            .borrow_mut()
+            .entry("builtins".to_string())
+            .or_insert_with(|| builtins_val.clone());
 
         let me_ref = module_env(&self.env);
         let mut me = me_ref.borrow_mut();

@@ -1549,6 +1549,8 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
         })
         .collect();
 
+    let map_capacity = const_entries.len() + attr_entries.len() + class_items.len();
+
     let expanded = quote! {
         // Per-function bodies.
         #(#fn_items)*
@@ -1581,7 +1583,7 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
             use std::cell::RefCell;
             use std::collections::HashMap;
             use std::rc::Rc;
-            let mut attrs: HashMap<String, crate::value::Value> = HashMap::new();
+            let mut attrs: HashMap<String, crate::value::Value> = HashMap::with_capacity(#map_capacity);
             #(#const_entries)*
             #(#attr_entries)*
             // `class` blocks expand to `attrs.insert(<ClassName>, …PyClass…)`.
