@@ -6,18 +6,20 @@
 //
 // ## Design
 //
-// - `List`, `Dict`, `Set`, `Tuple`, `Type` are aliases for the built-in
-//   primitive classes (`list`, `dict`, `set`, `tuple`, `type`).  These
-//   already have `__class_getitem__` registered (PEP 585), so `List[int]`
-//   produces a `types.GenericAlias` exactly like `list[int]` does.
+// - `List`, `Dict`, `Set`, `Tuple` are PEP 585 deprecated aliases for the
+//   built-in primitive classes (`list`, `dict`, `set`, `tuple`).  These
+//   already have `__class_getitem__` registered, so `List[int]` produces a
+//   `types.GenericAlias` exactly like `list[int]` does.
 //
 // - `Any` is a singleton PyInstance.  The class is built via a thread-local
 //   singleton (like `os.rs`'s `_Environ`) to avoid infinite recursion
 //   during `module()` construction.
 //
-// - `Optional`, `Union`, `Callable`, `ClassVar`, `Final`, `Literal` are
-//   classes with a `__class_getitem__` classmethod that returns a
-//   `_TypingAlias` stub built from another thread-local class singleton.
+// - `Optional`, `Union`, `Callable`, `ClassVar`, `Final`, `Literal`, `Type`
+//   are special forms — stub `PyClass` values built via thread-locals with
+//   a `__class_getitem__` attr.  `expr.rs`'s sentinel path creates a
+//   `GenericAlias` directly on subscript so no extra interpreter plumbing
+//   is needed.
 //
 // ## Why thread-locals instead of `module_class()`?
 //

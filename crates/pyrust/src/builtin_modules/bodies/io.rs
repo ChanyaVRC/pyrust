@@ -92,15 +92,29 @@ pyrust_module! {
             let initial = match user.first() {
                 Some(a) => match a.value.kind() {
                     ValueKind::Str(s) => s.to_string(),
-                    ValueKind::None => String::new(),
                     _ => return Err(PyError::named(
                         "TypeError",
-                        format!("{FN_NAME}() initial_value must be str"),
+                        format!(
+                            "{FN_NAME}() initial_value must be str, not {}",
+                            pyrust_core::builtin_type_name(&a.value)
+                        ),
                     )),
                 },
                 None => String::new(),
             };
-            // newline is accepted-and-ignored (arg 2).
+            // newline must be None or str (value is accepted-and-ignored).
+            if let Some(nl) = user.get(1) {
+                match nl.value.kind() {
+                    ValueKind::None | ValueKind::Str(_) => {}
+                    _ => return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "{FN_NAME}() newline must be str or None, not {}",
+                            pyrust_core::builtin_type_name(&nl.value)
+                        ),
+                    )),
+                }
+            }
             let _ = _interp;
             let mut attrs = inst.borrow_mut();
             attrs.attrs.insert("_buf".to_string(), Value::string(&initial));
@@ -190,6 +204,13 @@ pyrust_module! {
         fn readlines(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             if is_closed(&inst) { return Err(closed_error()); }
+            let user = &args[1..];
+            if user.len() > 1 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() takes at most 1 argument"),
+                ));
+            }
             let _ = _interp;
             let buf = string_io_buf(&inst, FN_NAME)?;
             let pos = get_pos(&inst) as usize;
@@ -472,10 +493,12 @@ pyrust_module! {
             let initial: Vec<u8> = match user.first() {
                 Some(a) => match a.value.kind() {
                     ValueKind::Bytes(b) => b.to_vec(),
-                    ValueKind::None => Vec::new(),
                     _ => return Err(PyError::named(
                         "TypeError",
-                        format!("{FN_NAME}() initial_bytes must be bytes-like object"),
+                        format!(
+                            "{FN_NAME}() initial_bytes must be a bytes-like object, not {}",
+                            pyrust_core::builtin_type_name(&a.value)
+                        ),
                     )),
                 },
                 None => Vec::new(),
@@ -565,6 +588,13 @@ pyrust_module! {
         fn readlines(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             if is_closed(&inst) { return Err(closed_error()); }
+            let user = &args[1..];
+            if user.len() > 1 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() takes at most 1 argument"),
+                ));
+            }
             let _ = _interp;
             let buf = bytes_io_buf(&inst, FN_NAME)?;
             let pos = get_pos(&inst) as usize;
