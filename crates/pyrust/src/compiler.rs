@@ -6075,10 +6075,10 @@ impl Compiler {
         let mod_reg = self.alloc_temp();
         self.emit(Insn::ImportModule(mod_reg, mod_idx));
         if names.len() == 1 && names[0].0 == "*" {
-            // Star import: handled at runtime by a special path in ImportModule.
-            // Use StoreGlobal with a sentinel name to trigger star import.
-            let star_idx = self.intern_name("*");
-            self.emit(Insn::StoreGlobal(star_idx, mod_reg));
+            // Star import: emit ImportStar which iterates the module's __all__
+            // (or all non-underscore attrs when __all__ is absent) and stores
+            // each name into the current scope.
+            self.emit(Insn::ImportStar(mod_reg));
         } else {
             for (attr_name, alias) in names {
                 let attr_idx = self.intern_name(attr_name);

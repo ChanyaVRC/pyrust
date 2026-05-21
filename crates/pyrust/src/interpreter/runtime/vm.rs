@@ -3041,6 +3041,58 @@ impl Interpreter {
                     let module = vm_try!(self.load_module(&name));
                     regs[*dst as usize] = module;
                 }
+                Insn::ImportStar(mod_reg) => {
+                    let mod_val = vm_try!(vm_read(&regs, *mod_reg, num_locals));
+                    // Snapshot (name, value) pairs before calling assign_name so
+                    // we don't hold the RefCell borrow across mutation.
+                    let pairs: Vec<(String, Value)> =
+                        if let ValueKind::PyModule(m) = mod_val.kind() {
+                            let borrowed = m.borrow();
+                            if let Some(all_val) = borrowed.attrs.get("__all__") {
+                                // __all__ is present: import only those names.
+                                // CPython accepts both list and tuple for __all__.
+                                let items: Option<&[Value]> = all_val
+                                    .as_list()
+                                    .or_else(|| all_val.as_tuple());
+                                let names: Vec<String> = items
+                                    .map(|items| {
+                                        items
+                                            .iter()
+                                            .filter_map(|v| v.as_str().map(str::to_string))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                drop(borrowed);
+                                let borrowed2 = m.borrow();
+                                names
+                                    .into_iter()
+                                    .filter_map(|name| {
+                                        borrowed2.attrs.get(&name).map(|v| (name, v.clone()))
+                                    })
+                                    .collect()
+                            } else {
+                                // No __all__: export all names not starting with '_'.
+                                borrowed
+                                    .attrs
+                                    .iter()
+                                    .filter(|(k, _)| !k.starts_with('_'))
+                                    .map(|(k, v)| (k.clone(), v.clone()))
+                                    .collect()
+                            }
+                        } else {
+                            vm_try!(Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "import * requires a module, got {}",
+                                    pyrust_core::builtin_type_name(&mod_val),
+                                ),
+                            )));
+                            unreachable!()
+                        };
+                    for (name, val) in pairs {
+                        self.assign_name(name, val);
+                    }
+                }
 
                 // ── REPL output ──────────────────────────────────────────
                 Insn::PrintExpr(src) => {

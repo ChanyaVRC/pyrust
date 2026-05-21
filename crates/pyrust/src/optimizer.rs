@@ -1569,6 +1569,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
 
         // One source register.
         StoreGlobal(_, s)
+        | ImportStar(s)
         | Move(_, s)
         | CopyReg(_, s)
         | UnaryOp(_, _, s)
@@ -1688,6 +1689,7 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         | DeleteModuleGlobal(..) => {}
 
         StoreGlobal(_, s)
+        | ImportStar(s)
         | Move(_, s)
         | CopyReg(_, s)
         | UnaryOp(_, _, s)
@@ -2426,6 +2428,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         }
         // Instructions that don't write to any register.
         StoreGlobal(..)
+        | ImportStar(..)
         | SetAttr(..)
         | SetItem(..)
         | DeleteAttr(..)
@@ -4956,6 +4959,7 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         BinOpImm(_, a, _, _) | SyncModuleGlobal(a, _) => f(*a),
 
         StoreGlobal(_, s)
+        | ImportStar(s)
         | Move(_, s)
         | CopyReg(_, s)
         | UnaryOp(_, _, s)
