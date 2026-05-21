@@ -70,12 +70,7 @@ pyrust_module! {
                     }
                 } else {
                     for v in _interp.collect_iterable(arg.value.clone())? {
-                        let key = v.to_key().ok_or_else(|| {
-                            PyError::named(
-                                "TypeError",
-                                format!("{FN_NAME}() elements must be hashable"),
-                            )
-                        })?;
+                        let key = _interp.value_to_pykey(&v)?;
                         let next = match counts.get(&key).map(|v| v.kind()) {
                             Some(ValueKind::Int(n)) => n + 1,
                             _ => 1,
@@ -95,7 +90,7 @@ pyrust_module! {
         /// proper present-key lookup we fall through to the stored map.
         fn __getitem__(args) -> Result<Value> {
             let counts = read_counts(args, FN_NAME)?;
-            let key = require_key(args, 1, FN_NAME)?;
+            let key = require_key(_interp, args, 1, FN_NAME)?;
             Ok(counts.get(&key).cloned().unwrap_or_else(|| Value::int(0)))
         }
 
@@ -107,7 +102,7 @@ pyrust_module! {
                     "{FN_NAME}() takes exactly 2 arguments",
                 )));
             }
-            let key = require_key(args, 1, FN_NAME)?;
+            let key = require_key(_interp, args, 1, FN_NAME)?;
             let value = match args[2].value.kind() {
                 ValueKind::Int(_) | ValueKind::Bool(_) => args[2].value.clone(),
                 _ => return Err(PyError::named(
@@ -124,7 +119,7 @@ pyrust_module! {
         /// `key in c` — fall through to the stored map's contains.
         fn __contains__(args) -> Result<Value> {
             let counts = read_counts(args, FN_NAME)?;
-            let key = require_key(args, 1, FN_NAME)?;
+            let key = require_key(_interp, args, 1, FN_NAME)?;
             Ok(Value::bool_(counts.contains_key(&key)))
         }
 
@@ -273,7 +268,7 @@ pyrust_module! {
                     "get() takes 1 or 2 arguments".to_string(),
                 ));
             }
-            let key = require_key(args, 1, FN_NAME)?;
+            let key = require_key(_interp, args, 1, FN_NAME)?;
             match counts.get(&key) {
                 Some(v) => Ok(v.clone()),
                 None => Ok(user.get(1).cloned().map(|a| a.value).unwrap_or_else(Value::none)),
@@ -406,7 +401,7 @@ pyrust_module! {
         /// `dict.__getitem__(self, k)` falls back to `self.__missing__(k)`.
         fn __getitem__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
-            let key = require_key(args, 1, FN_NAME)?;
+            let key = require_key(_interp, args, 1, FN_NAME)?;
             let items = read_items(args, FN_NAME)?;
             if let Some(v) = items.get(&key) {
                 return Ok(v.clone());
@@ -446,9 +441,7 @@ pyrust_module! {
             // Call the factory with no args.  The result is stored
             // under `key` and returned.
             let new_val = _interp.call_function_expanded(factory, &[])?;
-            let pk = key_arg.value.to_key().ok_or_else(|| {
-                PyError::named("TypeError", "unhashable type".to_string())
-            })?;
+            let pk = _interp.value_to_pykey(&key_arg.value)?;
             let mut items = read_items(args, FN_NAME)?;
             items.insert(pk, new_val.clone());
             store_items(&inst, items);
@@ -463,7 +456,7 @@ pyrust_module! {
                     "{FN_NAME}() takes exactly 2 arguments",
                 )));
             }
-            let key = require_key(args, 1, FN_NAME)?;
+            let key = require_key(_interp, args, 1, FN_NAME)?;
             let mut items = read_items(args, FN_NAME)?;
             items.insert(key, args[2].value.clone());
             store_items(&inst, items);
@@ -472,7 +465,7 @@ pyrust_module! {
 
         fn __contains__(args) -> Result<Value> {
             let items = read_items(args, FN_NAME)?;
-            let key = require_key(args, 1, FN_NAME)?;
+            let key = require_key(_interp, args, 1, FN_NAME)?;
             Ok(Value::bool_(items.contains_key(&key)))
         }
 
@@ -518,7 +511,7 @@ pyrust_module! {
                     "get() takes 1 or 2 arguments".to_string(),
                 ));
             }
-            let key = require_key(args, 1, FN_NAME)?;
+            let key = require_key(_interp, args, 1, FN_NAME)?;
             Ok(match items.get(&key) {
                 Some(v) => v.clone(),
                 None => user.get(1).cloned().map(|a| a.value).unwrap_or_else(Value::none),
@@ -1373,14 +1366,20 @@ fn store_items(inst: &Rc<RefCell<PyInstance>>, items: IndexMap<PyKey, Value>) {
 }
 
 /// Hashable-key extraction at index `i` with a uniform TypeError on
-/// non-hashable input.
-fn require_key(args: &[ExpandedCallArg], i: usize, fn_name: &str) -> Result<PyKey> {
+/// non-hashable input.  Uses the interpreter-aware hash path so that
+/// slice keys (and any other type with a custom `__hash__`) are handled
+/// correctly rather than falling back to the pure `Value::to_key()` path
+/// which cannot hash slices (issue #905).
+fn require_key(
+    interp: &mut crate::Interpreter,
+    args: &[ExpandedCallArg],
+    i: usize,
+    fn_name: &str,
+) -> Result<PyKey> {
     let v = args.get(i).ok_or_else(|| {
         PyError::Runtime(format!("internal: {fn_name}() missing arg {i}"))
     })?;
-    v.value
-        .to_key()
-        .ok_or_else(|| PyError::named("TypeError", "unhashable type".to_string()))
+    interp.value_to_pykey(&v.value)
 }
 
 /// Method-body convention: `keys()`, `values()`, `items()` etc. take no
@@ -1435,9 +1434,7 @@ fn apply_delta(
     } else {
         // Iterable form — each element contributes ±1.
         for v in interp.collect_iterable(other.clone())? {
-            let key = v.to_key().ok_or_else(|| {
-                PyError::named("TypeError", "unhashable type".to_string())
-            })?;
+            let key = interp.value_to_pykey(&v)?;
             let cur = counts.get(&key).map(value_as_count).unwrap_or(0);
             counts.insert(key, Value::int(cur + sign));
         }
