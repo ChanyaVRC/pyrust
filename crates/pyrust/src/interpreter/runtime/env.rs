@@ -935,16 +935,6 @@ impl Interpreter {
                     format!("'method' object has no attribute '{name}'"),
                 ))
             }
-            ValueKind::BuiltinFunction(_) => {
-                // CPython: builtin_function_or_method objects have no __dict__
-                // and do not support arbitrary attribute assignment.
-                Err(PyError::named(
-                    "AttributeError",
-                    format!(
-                        "'builtin_function_or_method' object has no attribute '{name}'"
-                    ),
-                ))
-            }
             _ => Err(PyError::Runtime(format!(
                 "object has no writable attribute '{}'",
                 name

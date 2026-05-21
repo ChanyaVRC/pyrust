@@ -28,7 +28,6 @@ use std::rc::Rc;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::value::{PyInstance, Value, ValueKind};
-use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
 
 // ── sentinel error ────────────────────────────────────────────────────────────

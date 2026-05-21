@@ -2519,17 +2519,6 @@ fn hash_value(value: &Value) -> Result<i64> {
                 format!("unhashable type: '{class_name}'"),
             ))
         }
-        // Built-in objects (GenericAlias, frozenset, …) opt in to hashing via
-        // `BuiltinTypeOps::hash`.  Return `None` → TypeError.
-        ValueKind::BuiltinObject { ops, state } => {
-            match ops.hash(state) {
-                Some(h) => Ok(h as i64),
-                None => Err(PyError::named(
-                    "TypeError",
-                    format!("unhashable type: '{}'", ops.type_name()),
-                )),
-            }
-        }
         _ => Err(PyError::named(
             "TypeError",
             format!(

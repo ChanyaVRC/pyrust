@@ -995,8 +995,8 @@ fn key_to_value(key: PyKey) -> Value {
 }
 
 /// Merge the registers of a single VM frame view into `dict`,
-/// dereferencing the view's raw pointer.  Shared by
-/// [`snapshot_module_namespace`] and [`snapshot_current_locals`].
+/// dereferencing the view's raw pointer.  Used by
+/// [`snapshot_current_locals`].
 ///
 /// SAFETY: `view.regs_ptr` / `view.regs_len` describe a VM frame's
 /// register slice.  `Interpreter::vm_frame_views` is pushed
@@ -1063,37 +1063,6 @@ fn merge_frame_view_into_dict(
             dict.insert(PyKey::Str(name.clone()), val.clone());
         }
     }
-}
-
-/// Take a snapshot of the current module's user-visible namespace
-/// (issue #389: backing for `globals()`).  Combines:
-///   * the module-level `Environment::values` (where the script's spilled
-///     bindings, imported names, and the built-in exception classes live),
-///   * the bottom-most `Script` entry in `Interpreter::vm_frame_views`,
-///     which exposes the active script frame's fastlocal registers so
-///     module-level `x = 5` surfaces mid-execution (without this, the
-///     regs are only spilled back to `env.values` AFTER `exec_program`
-///     returns — see `try_exec_vm_script_with_index`).
-///
-/// Inside a function frame, this still returns the module globals: we
-/// walk the frame stack from the bottom and pick the first `Script`
-/// entry, never the calling function's locals.
-pub(crate) fn snapshot_module_namespace(
-    interp: &Interpreter,
-) -> indexmap::IndexMap<PyKey, Value> {
-    let mut dict: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
-    let me = module_env(&interp.env);
-    for (k, v) in me.borrow().values.iter() {
-        dict.insert(PyKey::Str(k.clone()), v.clone());
-    }
-    if let Some(script_view) = interp
-        .vm_frame_views
-        .iter()
-        .find(|v| v.kind == FrameKind::Script)
-    {
-        merge_frame_view_into_dict(script_view, &mut dict);
-    }
-    dict
 }
 
 /// Take a snapshot of the innermost VM frame's local namespace
@@ -1382,11 +1351,6 @@ fn collect_local_names_from_block(
                     }
                 }
             }
-            Stmt::AnnDeclare(name) => {
-                if !global_names.contains(name) && !nonlocal_names.contains(name) {
-                    names.insert(name.clone());
-                }
-            }
             Stmt::AnnAssign { name, .. } => {
                 // Both `x: T = v` (value = Some) and `x: T` (value = None) declare
                 // a local slot.  At function scope the bare form causes UnboundLocalError
@@ -1558,69 +1522,6 @@ pub(crate) fn collect_nonlocal_names(body: &[Stmt]) -> HashSet<String> {
     })
 }
 
-/// Collect all bare-annotation target names (`x: T` with no value) directly
-/// inside `body` — only at the top level of this scope (no recursion into
-/// nested `def` / `class` bodies, matching CPython's per-scope check).
-pub(crate) fn collect_annotation_targets(body: &[Stmt]) -> HashSet<String> {
-    let mut names = HashSet::new();
-    collect_annotation_targets_from_block(body, &mut names);
-    names
-}
-
-fn collect_annotation_targets_from_block(body: &[Stmt], names: &mut HashSet<String>) {
-    for stmt in body {
-        match stmt {
-            Stmt::AnnDeclare(name) => {
-                names.insert(name.clone());
-            }
-            // Walk control-flow blocks: the annotation could appear inside an
-            // if/while/for/try/with/match arm at the same scope level.
-            Stmt::If { branches, else_branch } => {
-                for (_, branch) in branches {
-                    collect_annotation_targets_from_block(branch, names);
-                }
-                if let Some(branch) = else_branch {
-                    collect_annotation_targets_from_block(branch, names);
-                }
-            }
-            Stmt::While { body, else_branch, .. } => {
-                collect_annotation_targets_from_block(body, names);
-                if let Some(branch) = else_branch {
-                    collect_annotation_targets_from_block(branch, names);
-                }
-            }
-            Stmt::For { body, else_branch, .. } => {
-                collect_annotation_targets_from_block(body, names);
-                if let Some(branch) = else_branch {
-                    collect_annotation_targets_from_block(branch, names);
-                }
-            }
-            Stmt::Try { body, handlers, else_branch, finally_branch } => {
-                collect_annotation_targets_from_block(body, names);
-                for handler in handlers {
-                    collect_annotation_targets_from_block(&handler.body, names);
-                }
-                if let Some(branch) = else_branch {
-                    collect_annotation_targets_from_block(branch, names);
-                }
-                if let Some(branch) = finally_branch {
-                    collect_annotation_targets_from_block(branch, names);
-                }
-            }
-            Stmt::With { body, .. } => {
-                collect_annotation_targets_from_block(body, names);
-            }
-            Stmt::Match { arms, .. } => {
-                for arm in arms {
-                    collect_annotation_targets_from_block(&arm.body, names);
-                }
-            }
-            // Do not descend into nested def/class — each has its own scope.
-            _ => {}
-        }
-    }
-}
-
 /// Collect the names used as annotation targets (`x: T` or `x: T = v`) in the
 /// direct body, without descending into nested `Def` or `Class` scopes.  Used
 /// by `compile_def` to detect conflicts between annotated names and
@@ -1634,7 +1535,7 @@ pub(crate) fn collect_annotation_target_names(body: &[Stmt]) -> HashSet<String> 
 fn collect_annotation_target_names_from_block(body: &[Stmt], names: &mut HashSet<String>) {
     for stmt in body {
         match stmt {
-            Stmt::AnnAssign { name, .. } | Stmt::AnnDeclare(name) => {
+            Stmt::AnnAssign { name, .. } => {
                 names.insert(name.clone());
             }
             // Do not descend into nested function/class scopes.
@@ -2173,8 +2074,6 @@ fn is_pure_stmt(stmt: &Stmt, pure_fns: &std::collections::HashSet<String>) -> bo
     match stmt {
         // Explicit side effects on outer state.
         Stmt::Global(_) | Stmt::Nonlocal(_) => false,
-        // Bare annotation: no-op at runtime, no side effects.
-        Stmt::AnnDeclare(_) => true,
         // Object / container mutation.
         Stmt::AttrAssign { .. } | Stmt::IndexAssign { .. } | Stmt::SliceAssign { .. } => false,
         // Deletion and imports can affect shared state.
@@ -2236,7 +2135,7 @@ fn is_pure_stmt(stmt: &Stmt, pure_fns: &std::collections::HashSet<String>) -> bo
         // PyClass), so any function that defines and returns one is non-pure: successive
         // calls with identical arguments produce values with distinct identities.
         Stmt::Def { .. } | Stmt::Class { .. } => false,
-        Stmt::Pass | Stmt::AnnDeclare(_) | Stmt::Break | Stmt::Continue => true,
+        Stmt::Pass | Stmt::Break | Stmt::Continue => true,
         Stmt::Match { subject, arms } => {
             is_pure_expr(subject, pure_fns)
                 && arms

@@ -727,7 +727,6 @@ fn lambda_captures_in_stmt(
                 lambda_captures_in_expr(v, local_index, is_class_scope, cells);
             }
         }
-        Stmt::AnnDeclare(_) => {}
         Stmt::Import { .. }
         | Stmt::ImportFrom { .. }
         | Stmt::Global(_)
@@ -1040,16 +1039,6 @@ fn collect_class_body_names_textual(
             Stmt::With { body, .. } => {
                 collect_class_body_names_textual(body, ordered, seen, body_local);
             }
-            Stmt::AnnAssign {
-                name,
-                value: Some(_),
-                ..
-            } => {
-                if body_local.contains(name) && seen.insert(name.clone()) {
-                    ordered.push(name.clone());
-                }
-            }
-            Stmt::AnnAssign { value: None, .. } => {}
             _ => {}
         }
     }
@@ -1209,57 +1198,6 @@ fn collect_class_method_outer_refs(
                 }
                 if let Some(b) = else_branch {
                     collect_class_method_outer_refs(b, local_index, outer_is_class_scope, cells);
-                }
-            }
-            Stmt::While {
-                body, else_branch, ..
-            } => {
-                collect_class_method_outer_refs(body, local_index, outer_is_class_scope, cells);
-                if let Some(b) = else_branch {
-                    collect_class_method_outer_refs(b, local_index, outer_is_class_scope, cells);
-                }
-            }
-            Stmt::For {
-                body, else_branch, ..
-            } => {
-                collect_class_method_outer_refs(body, local_index, outer_is_class_scope, cells);
-                if let Some(b) = else_branch {
-                    collect_class_method_outer_refs(b, local_index, outer_is_class_scope, cells);
-                }
-            }
-            Stmt::Try {
-                body,
-                handlers,
-                else_branch,
-                finally_branch,
-            } => {
-                collect_class_method_outer_refs(body, local_index, outer_is_class_scope, cells);
-                for h in handlers {
-                    collect_class_method_outer_refs(
-                        &h.body,
-                        local_index,
-                        outer_is_class_scope,
-                        cells,
-                    );
-                }
-                if let Some(b) = else_branch {
-                    collect_class_method_outer_refs(b, local_index, outer_is_class_scope, cells);
-                }
-                if let Some(b) = finally_branch {
-                    collect_class_method_outer_refs(b, local_index, outer_is_class_scope, cells);
-                }
-            }
-            Stmt::With { body, .. } => {
-                collect_class_method_outer_refs(body, local_index, outer_is_class_scope, cells);
-            }
-            Stmt::Match { arms, .. } => {
-                for arm in arms {
-                    collect_class_method_outer_refs(
-                        &arm.body,
-                        local_index,
-                        outer_is_class_scope,
-                        cells,
-                    );
                 }
             }
             Stmt::While {
@@ -1644,7 +1582,6 @@ fn collect_free_var_reads_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>) {
                 collect_free_var_reads_in_expr(v, uses);
             }
         }
-        Stmt::AnnDeclare(_) => {}
         Stmt::Import { .. }
         | Stmt::ImportFrom { .. }
         | Stmt::Global(_)
@@ -2010,7 +1947,6 @@ fn collect_transitive_free_vars_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>)
                 collect_transitive_free_vars_in_expr(v, uses);
             }
         }
-        Stmt::AnnDeclare(_) => {}
         Stmt::Return(None)
         | Stmt::Import { .. }
         | Stmt::ImportFrom { .. }
@@ -2598,7 +2534,7 @@ fn collect_written_in(body: &[Stmt], names: &mut HashSet<String>) {
             } => {
                 names.insert(name.clone());
             }
-            Stmt::AnnAssign { value: None, .. } | Stmt::AnnDeclare(_) => {}
+            Stmt::AnnAssign { value: None, .. } => {}
             Stmt::If {
                 branches,
                 else_branch,
@@ -2940,7 +2876,7 @@ fn stmt_safe_for_index_rewrite(stmt: &Stmt, i_name: &str, c_name: &str) -> bool 
                     .as_deref()
                     .is_none_or(|b| body_index_pattern_is_safe(b, i_name, c_name))
         }
-        Stmt::Pass | Stmt::AnnDeclare(_) | Stmt::Global(_) | Stmt::Nonlocal(_) => true,
+        Stmt::Pass | Stmt::Global(_) | Stmt::Nonlocal(_) => true,
         Stmt::AnnAssign {
             name,
             value: Some(value),
@@ -3237,7 +3173,6 @@ fn stmt_reads_var(stmt: &Stmt, name: &str) -> bool {
             expr_reads_var(annotation, name)
                 || value.as_ref().is_some_and(|v| expr_reads_var(v, name))
         }
-        Stmt::AnnDeclare(_) => false,
         Stmt::Global(_)
         | Stmt::Nonlocal(_)
         | Stmt::Break
@@ -4145,7 +4080,7 @@ impl Compiler {
             return;
         }
         match stmt {
-            Stmt::Pass | Stmt::AnnDeclare(_) => {}
+            Stmt::Pass => {}
             Stmt::Break => {
                 if self.loops.is_empty() {
                     self.failed = true;
@@ -4239,9 +4174,6 @@ impl Compiler {
                 value,
             } => {
                 self.compile_ann_assign(name, annotation, value.as_ref().map(|v| v as &Expr));
-            }
-            Stmt::AnnDeclare(_) => {
-                // Bare annotation with no value: no-op at runtime.
             }
             Stmt::AugAssign { target, op, expr } => {
                 self.compile_aug_assign(target, *op, expr);
@@ -6006,7 +5938,7 @@ impl Compiler {
         // slot (e.g. a nested alloc_temp gave us exactly that register), skip the
         // move to avoid a redundant copy. When the bound is absent, emit LoadNone
         // directly into the slot — no temp needed.
-        let mut fill_slot = |this: &mut Self, slot: Reg, expr: Option<&Expr>| {
+        let fill_slot = |this: &mut Self, slot: Reg, expr: Option<&Expr>| {
             if let Some(e) = expr {
                 let src = this.compile_expr(e);
                 if src != slot {
