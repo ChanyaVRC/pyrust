@@ -2654,17 +2654,15 @@ fn value_needs_slow_hash(v: &Value) -> bool {
     if value_needs_interp(v) {
         return true;
     }
-    // Check for slice with unhashable primitive components (no PyInstance involved,
-    // so value_needs_interp returned false, but hash_value would still produce the
-    // wrong error message).
-    if let ValueKind::BuiltinObject { ops, state } = v.kind() {
+    // All slices need the slow path: SliceOps::hash is not implemented, so
+    // hash_value would always produce a misleading "unhashable type: 'slice'"
+    // error regardless of whether the components are actually hashable.
+    // hash_value_with_interp handles all three cases correctly: unhashable
+    // primitive component (names the component type), PyInstance component
+    // (dispatches __hash__), and all-hashable components (computes the hash).
+    if let ValueKind::BuiltinObject { ops, .. } = v.kind() {
         if ops.type_name() == pyrust_builtins::slice::TYPE_NAME {
-            let borrow = state.borrow();
-            if let Some(s) = borrow.downcast_ref::<pyrust_builtins::slice::SliceState>() {
-                return s.start.to_key().is_none()
-                    || s.stop.to_key().is_none()
-                    || s.step.to_key().is_none();
-            }
+            return true;
         }
     }
     // Recurse into tuple elements.

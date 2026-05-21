@@ -694,6 +694,12 @@ impl Interpreter {
                 // All slices (instance or primitive components) go through
                 // hash_value_with_interp to get the CPython-compatible slice hash
                 // and to dispatch user __hash__ on PyInstance components.
+                let hash =
+                    crate::builtin_modules::builtins::hash_value_with_interp(self, value)? as u64;
+                return Ok(PyKey::Object {
+                    hash,
+                    value: value.clone(),
+                });
             }
         }
         if let Some(k) = value.to_key() {
@@ -1487,6 +1493,50 @@ impl Interpreter {
                     },
                     _ => unreachable!(),
                 }
+            }
+            // set.update uses value_to_pykey so that hashable slices and
+            // PyInstance elements (which need __hash__ dispatch) work correctly.
+            // The pyrust-builtins path calls Value::to_key() which returns None
+            // for slices (SliceOps doesn't implement hash), causing a misleading
+            // "unhashable type: 'slice'" error for all slices.
+            "update" => {
+                for arg in args {
+                    // Snapshot if the argument is the receiver itself to avoid
+                    // aliased-borrow issues during iteration (matches CPython
+                    // semantics: s.update(s) is a no-op).
+                    if arg.value_id() == receiver.value_id() && arg.value_id().is_some() {
+                        let snapshot: Vec<PyKey> = receiver
+                            .set_with(|s| s.iter().cloned().collect())
+                            .unwrap_or_default();
+                        for pk in snapshot {
+                            if self.set_lookup(&receiver, &pk)?.is_none() {
+                                receiver.set_add(pk)?;
+                            }
+                        }
+                        continue;
+                    }
+                    // If the arg is already a set, copy its PyKeys directly.
+                    if arg.as_set().is_some() {
+                        let keys: Vec<PyKey> =
+                            arg.set_with(|s| s.iter().cloned().collect()).unwrap_or_default();
+                        for pk in keys {
+                            if self.set_lookup(&receiver, &pk)?.is_none() {
+                                receiver.set_add(pk)?;
+                            }
+                        }
+                        continue;
+                    }
+                    // General iterable: iterate and hash each element via
+                    // value_to_pykey so slices and PyInstances are handled.
+                    let items = self.collect_iterable(arg)?;
+                    for item in items {
+                        let pk = self.value_to_pykey(&item)?;
+                        if self.set_lookup(&receiver, &pk)?.is_none() {
+                            receiver.set_add(pk)?;
+                        }
+                    }
+                }
+                Ok(Value::none())
             }
             _ => pyrust_builtins::set::call(method, &receiver, args),
         }
