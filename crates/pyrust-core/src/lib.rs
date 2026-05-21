@@ -507,6 +507,26 @@ impl indexmap::Equivalent<PyKey> for StrKey<'_> {
     }
 }
 
+/// Returns the canonical hash of `None`, matching CPython's
+/// `_Py_HashPointer(Py_None)` semantics: a stable per-process non-zero value
+/// derived from a static sentinel address.
+///
+/// **Call this function from every site that needs `hash(None)`** — do NOT
+/// define a separate `static NONE_SENTINEL` in another crate, because two
+/// statics compile to two distinct addresses and will produce different hashes,
+/// violating the Python invariant that `hash(x)` equals the hash used for `x`
+/// in any container.
+pub fn py_hash_none() -> i64 {
+    // CPython uses _Py_HashPointer(Py_None): the hash of the singleton's memory
+    // address. pyrust's None is NaN-boxed (no heap pointer), so we derive a
+    // stable per-process value from a static sentinel instead. The sentinel must
+    // live in a single crate so that all callers share the same address.
+    static NONE_SENTINEL: u8 = 0;
+    let addr = (&NONE_SENTINEL as *const u8 as usize) >> 4;
+    let h = (addr as i64).wrapping_rem((1i64 << 61) - 1);
+    if h == 0 || h == -1 { 2654435761 } else { h }
+}
+
 /// Compute the CPython-compatible hash for a `PyKey`.
 ///
 /// This replicates the hash semantics that CPython applies at the C level for
@@ -517,7 +537,7 @@ impl indexmap::Equivalent<PyKey> for StrKey<'_> {
 /// - `Float`: integer-valued floats hash identically to the corresponding `Int`.
 /// - `Str`: FNV-1a (matches pyrust's `hash_value` str arm; CPython uses SipHash
 ///   with a random seed so str-element frozenset hashes differ from CPython).
-/// - `None`: 0.
+/// - `None`: stable per-process value via [`py_hash_none`].
 /// - `Tuple`: CPython's multiply-add fold (`h = h*1000003 + elem_hash`), seeded
 ///   at 3527539.
 /// - `FrozenSet`: CPython's XOR-shuffle accumulation with length mixing and
@@ -589,15 +609,7 @@ pub fn py_hash_pykey(key: &PyKey) -> i64 {
             }
             h as i64
         }
-        PyKey::None => {
-            // CPython returns _Py_HashPointer(Py_None) — a hash of None's
-            // memory address. pyrust's None is NaN-boxed (no heap pointer),
-            // so we derive a stable per-process value from a static sentinel.
-            static NONE_SENTINEL: u8 = 0;
-            let addr = (&NONE_SENTINEL as *const u8 as usize) >> 4;
-            let h = (addr as i64).wrapping_rem((1i64 << 61) - 1);
-            if h == 0 || h == -1 { 2654435761 } else { h }
-        }
+        PyKey::None => py_hash_none(),
         PyKey::Tuple(items) => {
             let mut h: i64 = 3527539;
             for item in items {
@@ -3457,6 +3469,98 @@ pub fn range_len(start: i64, stop: i64, step: i64) -> i64 {
     } else {
         ((start - stop - 1) / (-step)) + 1
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Traceback frame tracking
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A single frame in a Python-style traceback.
+///
+/// Populated by the interpreter when errors propagate out of
+/// `run_bytecode` / `run_bytecode_for_fn`.  `lineno` is `None` until
+/// per-instruction line-number tracking is implemented (Phase 2).
+#[derive(Debug, Clone)]
+pub struct FrameInfo {
+    /// Path to the source file that contains this frame.
+    pub filename: String,
+    /// 1-based source line that raised the error, or `None` when no line
+    /// table is available (Phase 1 limitation).
+    pub lineno: Option<u32>,
+    /// Function or method name.  `"<module>"` for module-scope code.
+    pub funcname: String,
+}
+
+thread_local! {
+    /// Active frame stack for the current interpreter thread.
+    ///
+    /// Pushed by `call_user_function_expanded` before entering each user
+    /// function body and popped when the body returns (or errors).  At the
+    /// module level `try_exec_vm_script_with_index` reads the current stack,
+    /// prepends the `<module>` frame, and attaches it to any propagating error
+    /// so that `format_traceback` can format the full chain.
+    static TRACEBACK_FRAME_STACK: RefCell<Vec<FrameInfo>> = RefCell::new(Vec::new());
+}
+
+/// Push a frame onto the current thread's traceback stack.
+///
+/// Called by `calls.rs::call_user_function_expanded` immediately before
+/// entering each user-function body.
+#[inline]
+pub fn push_traceback_frame(frame: FrameInfo) {
+    TRACEBACK_FRAME_STACK.with(|s| s.borrow_mut().push(frame));
+}
+
+/// Pop the innermost frame from the current thread's traceback stack.
+///
+/// Called by `calls.rs::call_user_function_expanded` immediately after the
+/// body returns (including error paths) via a RAII drop guard.
+#[inline]
+pub fn pop_traceback_frame() {
+    TRACEBACK_FRAME_STACK.with(|s| {
+        s.borrow_mut().pop();
+    });
+}
+
+/// Snapshot a clone of the current traceback frame stack (innermost last).
+#[inline]
+pub fn snapshot_traceback_frames() -> Vec<FrameInfo> {
+    TRACEBACK_FRAME_STACK.with(|s| s.borrow().clone())
+}
+
+/// Format a traceback chain as CPython does, returning it as a `String`.
+///
+/// `module_filename` is the path of the top-level script; `frames` is the
+/// list produced by `snapshot_traceback_frames()` (innermost last) with
+/// the `<module>` frame prepended by the caller.
+///
+/// Output format (no column underlines — Phase 1):
+/// ```text
+/// Traceback (most recent call last):
+///   File "test.py", in <module>
+///   File "test.py", in foo
+/// SomeError: message
+/// ```
+pub fn format_traceback(frames: &[FrameInfo], error_line: &str) -> String {
+    let mut out = String::from("Traceback (most recent call last):\n");
+    for frame in frames {
+        match frame.lineno {
+            Some(n) => {
+                out.push_str(&format!(
+                    "  File \"{}\", line {}, in {}\n",
+                    frame.filename, n, frame.funcname
+                ));
+            }
+            None => {
+                out.push_str(&format!(
+                    "  File \"{}\", in {}\n",
+                    frame.filename, frame.funcname
+                ));
+            }
+        }
+    }
+    out.push_str(error_line);
+    out
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
