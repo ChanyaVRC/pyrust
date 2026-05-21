@@ -139,4 +139,6 @@ pyrust_builtin_modules! {
     functools,
     itertools,
     collections,
+    io,
+    typing,
 }
