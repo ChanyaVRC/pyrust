@@ -141,4 +141,5 @@ pyrust_builtin_modules! {
     collections,
     io,
     typing,
+    copy,
 }
