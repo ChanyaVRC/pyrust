@@ -1054,8 +1054,17 @@ impl Interpreter {
                     }
 
                     let idx_val = vm_try!(vm_read(&regs, *idx, num_locals));
-                    // Slice key: tuple of (lo, hi, step) produced by the compiler.
-                    if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
+                    // Slice key: 3-element tuple `(lo, hi, step)` produced by
+                    // `compile_slice_key`.  Skip this path for dicts — dicts
+                    // accept arbitrary hashable keys including 3-element tuples,
+                    // so a tuple key must not be mistaken for a slice descriptor.
+                    let obj_is_dict = matches!(
+                        regs[*obj as usize].as_some().map(|v| v.kind()),
+                        Some(ValueKind::Dict(_))
+                    );
+                    if !obj_is_dict
+                        && let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val)
+                    {
                         let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
                         let result = vm_try!(self.eval_slice(obj_val, lo, hi, st));
                         regs[*dst as usize] = result;
@@ -1228,13 +1237,18 @@ impl Interpreter {
                                 // `__eq__`), both of which require `&mut self`.  Compute
                                 // the key first, then take the dict-mut borrow.
                                 let key = vm_try!(self.value_to_pykey(&idx_val));
-                                if matches!(&key, PyKey::Object { .. }) {
-                                    // Object keys may need `__eq__` dispatch to dedup
-                                    // against an existing entry.  Rc-clone the dict
-                                    // Value (cheap) so `dict_lookup` can run with no
-                                    // live alias into the register file; if an entry
-                                    // matches, replace its value in place to preserve
-                                    // insertion order.
+                                // `Object` keys may need `__eq__` dispatch to
+                                // dedup against an existing entry.  `None` keys
+                                // also need it for the cross-variant case
+                                // (issue #906): a stored PyKey::Object with
+                                // hash 0 that __eq__-matches None must be
+                                // overwritten, not added as a second entry.
+                                if matches!(&key, PyKey::Object { .. } | PyKey::None) {
+                                    // Rc-clone the dict Value (cheap) so
+                                    // `dict_lookup` can run with no live alias
+                                    // into the register file; if an entry
+                                    // matches, replace its value in place to
+                                    // preserve insertion order.
                                     let dict_val = regs[*obj as usize]
                                         .as_some()
                                         .cloned()
@@ -1957,8 +1971,11 @@ impl Interpreter {
                 Insn::SetAdd(set_reg, val_reg) => {
                     let val = vm_try!(vm_read(&regs, *val_reg, num_locals));
                     let key = vm_try!(self.value_to_pykey(&val));
-                    if let PyKey::Object { .. } = &key {
-                        // Object keys need `__eq__` dispatch for dedup.
+                    // `Object` keys need `__eq__` dispatch for dedup.
+                    // `None` keys also need it for the cross-variant case
+                    // (issue #906): a stored PyKey::Object with hash 0
+                    // that __eq__-matches None must not become a duplicate.
+                    if matches!(&key, PyKey::Object { .. } | PyKey::None) {
                         // Rc-clone the set Value (cheap) so `set_lookup` can
                         // run without an alias into the register file.
                         let set_val = regs[*set_reg as usize]

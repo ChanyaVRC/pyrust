@@ -452,7 +452,11 @@ impl Hash for PyKey {
                 s.hash(state);
             }
             PyKey::None => {
-                3u8.hash(state);
+                // Hash the Python-level value so that a PyKey::Object whose
+                // __hash__ returns hash(None) lands in the same IndexMap
+                // bucket, enabling the slow-path __eq__ to deduplicate them
+                // (issue #906).
+                (py_hash_none() as u64).hash(state);
             }
             PyKey::FrozenSet(items) => {
                 4u8.hash(state);
@@ -507,6 +511,24 @@ impl indexmap::Equivalent<PyKey> for StrKey<'_> {
     }
 }
 
+/// Returns the canonical Python-level hash of `None`.
+///
+/// CPython's `hash(None)` returns `_Py_HashPointer(Py_None)` — a stable
+/// per-process value derived from `None`'s memory address.  pyrust's `None`
+/// is NaN-boxed (no heap pointer), so we derive a stable per-process value
+/// from a single `static` sentinel whose address is fixed at link time.
+///
+/// **All callers must use this function** — do NOT define a separate
+/// `static NONE_SENTINEL` in another crate; two statics compile to two
+/// distinct addresses, violating the invariant that `hash(None)` equals the
+/// hash used for `None` in any container.
+pub fn py_hash_none() -> i64 {
+    static NONE_SENTINEL: u8 = 0;
+    let addr = (&NONE_SENTINEL as *const u8 as usize) >> 4;
+    let h = (addr as i64).wrapping_rem((1i64 << 61) - 1);
+    if h == 0 || h == -1 { 2654435761 } else { h }
+}
+
 /// Compute the CPython-compatible hash for a `PyKey`.
 ///
 /// This replicates the hash semantics that CPython applies at the C level for
@@ -517,7 +539,7 @@ impl indexmap::Equivalent<PyKey> for StrKey<'_> {
 /// - `Float`: integer-valued floats hash identically to the corresponding `Int`.
 /// - `Str`: FNV-1a (matches pyrust's `hash_value` str arm; CPython uses SipHash
 ///   with a random seed so str-element frozenset hashes differ from CPython).
-/// - `None`: 0.
+/// - `None`: stable per-process value via [`py_hash_none`].
 /// - `Tuple`: CPython's multiply-add fold (`h = h*1000003 + elem_hash`), seeded
 ///   at 3527539.
 /// - `FrozenSet`: CPython's XOR-shuffle accumulation with length mixing and
@@ -589,7 +611,7 @@ pub fn py_hash_pykey(key: &PyKey) -> i64 {
             }
             h as i64
         }
-        PyKey::None => 0,
+        PyKey::None => py_hash_none(),
         PyKey::Tuple(items) => {
             let mut h: i64 = 3527539;
             for item in items {
