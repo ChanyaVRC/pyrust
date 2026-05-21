@@ -1054,8 +1054,17 @@ impl Interpreter {
                     }
 
                     let idx_val = vm_try!(vm_read(&regs, *idx, num_locals));
-                    // Slice key: tuple of (lo, hi, step) produced by the compiler.
-                    if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
+                    // Slice key: 3-element tuple `(lo, hi, step)` produced by
+                    // `compile_slice_key`.  Skip this path for dicts — dicts
+                    // accept arbitrary hashable keys including 3-element tuples,
+                    // so a tuple key must not be mistaken for a slice descriptor.
+                    let obj_is_dict = matches!(
+                        regs[*obj as usize].as_some().map(|v| v.kind()),
+                        Some(ValueKind::Dict(_))
+                    );
+                    if !obj_is_dict
+                        && let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val)
+                    {
                         let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
                         let result = vm_try!(self.eval_slice(obj_val, lo, hi, st));
                         regs[*dst as usize] = result;
@@ -1152,8 +1161,16 @@ impl Interpreter {
                     }
                     let idx_val = vm_try!(vm_read(&regs, *idx, num_locals));
                     let val_val = vm_try!(vm_read(&regs, *val, num_locals));
-                    // Slice assignment: tuple key on a list.
-                    if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
+                    // Slice assignment: 3-tuple `(lo, hi, step)` key on a list.
+                    // Skip for dicts — they accept tuple keys of any length, so a
+                    // 3-element tuple must not be mistaken for a slice descriptor.
+                    let obj_is_dict = matches!(
+                        regs[*obj as usize].as_some().map(|v| v.kind()),
+                        Some(ValueKind::Dict(_))
+                    );
+                    if !obj_is_dict
+                        && let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val)
+                    {
                         // Guard: only lists support slice assignment.  Reject
                         // non-list targets before invoking __index__ on the bounds,
                         // so that a dict or user-instance target never accidentally
@@ -1309,7 +1326,14 @@ impl Interpreter {
                 }
                 Insn::DeleteItem(obj, idx) => {
                     let idx_val = vm_try!(vm_read(&regs, *idx, num_locals));
-                    if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
+                    // Skip the slice path for dicts — they accept tuple keys of any length.
+                    let obj_is_dict = matches!(
+                        regs[*obj as usize].as_some().map(|v| v.kind()),
+                        Some(ValueKind::Dict(_))
+                    );
+                    if !obj_is_dict
+                        && let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val)
+                    {
                         // Guard: only lists support slice deletion.  Check before
                         // resolving bounds so that __index__ is never invoked on
                         // non-list targets.
