@@ -646,34 +646,23 @@ impl Interpreter {
             }
             return Ok(PyKey::Tuple(keys));
         }
-        // Slices with PyInstance components need interpreter access to dispatch
-        // `__hash__`.  The pure `SliceOps::to_key()` path (via `value.to_key()`)
-        // returns `None` for any instance component, producing a misleading
-        // "unhashable type: 'slice'" error.  Intercept here when any component
-        // is a PyInstance and compute the hash via `hash_value_with_interp`,
-        // then store it in a `PyKey::Object` consistent with what `hash()`
-        // returns for the same slice (issue #850).
-        if let ValueKind::BuiltinObject { ops, state } = value.kind() {
+        // Slices always go through the interpreter-aware hash path so that:
+        // 1. `PyInstance` components can dispatch `__hash__`.
+        // 2. Unhashable components (e.g. a list bound) surface the correct
+        //    per-component "unhashable type: 'list'" error instead of the
+        //    misleading "unhashable type: 'slice'" (issue #850).
+        // The hash stored in `PyKey::Object` is computed by
+        // `hash_value_with_interp`, matching what `hash()` returns for the
+        // same slice, so dict/set lookups remain consistent.
+        if let ValueKind::BuiltinObject { ops, .. } = value.kind() {
             if ops.type_name() == pyrust_builtins::slice::TYPE_NAME {
-                let borrow = state.borrow();
-                let s = borrow
-                    .downcast_ref::<pyrust_builtins::slice::SliceState>()
-                    .expect("SliceOps: bad state");
-                let needs_interp = matches!(s.start.kind(), ValueKind::PyInstance(_))
-                    || matches!(s.stop.kind(), ValueKind::PyInstance(_))
-                    || matches!(s.step.kind(), ValueKind::PyInstance(_));
-                drop(borrow);
-                if needs_interp {
-                    let hash = crate::builtin_modules::builtins::hash_value_with_interp(
-                        self, value,
-                    )? as u64;
-                    return Ok(PyKey::Object {
-                        hash,
-                        value: value.clone(),
-                    });
-                }
-                // No instance components: fall through to value.to_key() which
-                // uses SliceOps::hash (DefaultHasher), consistent with hash().
+                let hash = crate::builtin_modules::builtins::hash_value_with_interp(
+                    self, value,
+                )? as u64;
+                return Ok(PyKey::Object {
+                    hash,
+                    value: value.clone(),
+                });
             }
         }
         if let Some(k) = value.to_key() {

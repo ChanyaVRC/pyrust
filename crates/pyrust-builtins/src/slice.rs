@@ -7,10 +7,8 @@
 //! and `.step` and print/repr the slice value correctly.
 
 use std::any::Any;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
-use pyrust_core::{BuiltinState, BuiltinTypeOps, PyError, PyKey, Value};
+use pyrust_core::{BuiltinState, BuiltinTypeOps, PyError, Value};
 
 pub const TYPE_NAME: &str = "slice";
 pub const SLICE_OPS: &SliceOps = &SliceOps;
@@ -82,29 +80,14 @@ impl BuiltinTypeOps for SliceOps {
         }
     }
 
-    /// `slice` objects are hashable in CPython 3.12 when all their components
-    /// are hashable (CPython changed slice to be hashable in 3.12; the common
-    /// case of `slice(int_or_None, int_or_None, int_or_None)` is always
-    /// hashable).  We combine the component hashes to produce a stable value.
-    fn hash(&self, state: &BuiltinState) -> Option<u64> {
-        let borrow = state.borrow();
-        let s = borrow.downcast_ref::<SliceState>()?;
-        let hstart = component_hash(&s.start)?;
-        let hstop = component_hash(&s.stop)?;
-        let hstep = component_hash(&s.step)?;
-        let mut h = DefaultHasher::new();
-        hstart.hash(&mut h);
-        hstop.hash(&mut h);
-        hstep.hash(&mut h);
-        Some(h.finish())
-    }
-
-    /// Expose `slice` as a hashable key so it can be used in sets/dicts.
-    fn to_key(&self, state: &BuiltinState) -> Option<PyKey> {
-        let hash = self.hash(state)?;
-        let value = Value::builtin_object_shared(SLICE_OPS, state.clone());
-        Some(PyKey::Object { hash, value })
-    }
+    // `slice` does not implement `hash` or `to_key` here.  Hashing goes
+    // entirely through `hash_value_with_interp` in the interpreter, which
+    // recurses into each component with full error propagation.  That path
+    // surfaces the correct per-component error message (e.g.
+    // "unhashable type: 'list'" when a bound is a list) instead of the
+    // misleading "unhashable type: 'slice'" that `component_hash` used to
+    // produce.  `value_to_pykey` in expr.rs stores the resulting hash in a
+    // `PyKey::Object` so dict/set lookups remain consistent with `hash()`.
 
     fn setattr(&self, _state: &BuiltinState, name: &str, _value: Value) -> Result<(), PyError> {
         Err(PyError::named(
@@ -124,16 +107,4 @@ pub fn make_slice(start: Option<Value>, stop: Option<Value>, step: Option<Value>
     let step = step.unwrap_or_else(Value::none);
     let state: Box<dyn Any> = Box::new(SliceState { start, stop, step });
     Value::builtin_object(SLICE_OPS, state)
-}
-
-/// Hash a single slice component (`None` or an integer value).
-///
-/// Returns `None` if the component is unhashable (e.g. a list), making the
-/// whole slice unhashable — matching CPython's "hashable if components are
-/// hashable" contract.
-fn component_hash(v: &Value) -> Option<u64> {
-    let key = v.to_key()?;
-    let mut h = DefaultHasher::new();
-    key.hash(&mut h);
-    Some(h.finish())
 }
