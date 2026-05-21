@@ -3,6 +3,22 @@ impl Interpreter {
         Self { script_dir: Some(dir), ..Default::default() }
     }
 
+    /// Create an interpreter for running a named script file.
+    ///
+    /// Stores both the directory (for module-relative imports) and the
+    /// filename (for traceback `File "..."` entries).
+    pub fn with_script_path(path: &str) -> Self {
+        let dir = std::path::Path::new(path)
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        Self {
+            script_dir: Some(dir),
+            script_filename: Some(path.to_string()),
+            ..Default::default()
+        }
+    }
+
     pub fn exec_program(&mut self, program: &[Stmt], repl_mode: bool) -> Result<()> {
         let result = if let Some(r) = self.try_exec_vm_script(program, repl_mode) {
             r
@@ -137,6 +153,8 @@ impl Interpreter {
         local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
         repl_mode: bool,
     ) -> Option<Result<()>> {
+        // Reset any captured frames from a previous run (REPL re-invocation).
+        pyrust_core::reset_captured_error_frames();
         let code = match crate::compiler::compile_script(program, Rc::clone(&local_index), repl_mode) {
             Ok(c) => Rc::new(crate::optimizer::optimize(c)),
             Err(e) => return Some(Err(e)),
@@ -195,6 +213,73 @@ impl Interpreter {
                 .or_insert_with(|| crate::value::Value::dict(IndexMap::new()));
         }
         let vm_result = self.run_bytecode(&code, regs_slice);
+        // Snapshot the traceback frame stack before the inner function frames
+        // are cleared.  The `<module>` frame is prepended by us since it is
+        // owned by this level; inner function frames were pushed/popped by
+        // `call_user_function_expanded` and are no longer on the stack here
+        // (they were popped before returning the error).  The call-site frames
+        // were captured into the CAPTURED_FRAMES thread-local by calls.rs.
+        let maybe_tb: Option<String> = if let (Err(e), Some(filename)) =
+            (&vm_result, &self.script_filename)
+        {
+            // CPython does not emit a traceback for SystemExit (the process
+            // exits cleanly).  Skip traceback formatting when the error is a
+            // SystemExit so that `exec_program`'s SystemExit handler still
+            // receives the original `PyError::Raised(SystemExit)` variant
+            // (not a pre-formatted `PyError::Runtime` string).
+            let is_system_exit = e.class_name_is("SystemExit");
+            // Take the captured frames regardless; cleans the thread-local
+            // for the next invocation.
+            let inner_frames = pyrust_core::take_captured_error_frames().unwrap_or_default();
+            if is_system_exit {
+                // Suppress traceback; let exec_program handle SystemExit normally.
+                None
+            } else {
+                // Build the full frame list: <module> at the bottom (outermost),
+                // then the function frames in innermost-last order.
+                let mut frames = vec![pyrust_core::FrameInfo {
+                    filename: filename.clone(),
+                    lineno: None,
+                    funcname: "<module>".to_string(),
+                }];
+                frames.extend(inner_frames);
+                let error_line = match e {
+                    PyError::Lex(s) => format!("Lex error: {s}"),
+                    PyError::Parse(s) => format!("Parse error: {s}"),
+                    PyError::Runtime(s) => s.clone(),
+                    PyError::Named(cls, s) => format!("{cls}: {s}"),
+                    PyError::Class(cls, s) => format!("{}: {s}", cls.borrow().name),
+                    PyError::KeyError(key) => format!("KeyError: {}", key.repr()),
+                    PyError::Raised(value) => match value.kind() {
+                        ValueKind::PyInstance(inst) => {
+                            let inst_ref = inst.borrow();
+                            let class_name = inst_ref.class.borrow().name.clone();
+                            let msg = match inst_ref.attrs.get("args") {
+                                Some(args_val) => match args_val.kind() {
+                                    ValueKind::Tuple(args) if !args.is_empty() => {
+                                        match args[0].kind() {
+                                            ValueKind::Str(s) => s.to_string(),
+                                            _ => args[0].repr(),
+                                        }
+                                    }
+                                    _ => String::new(),
+                                },
+                                None => String::new(),
+                            };
+                            if msg.is_empty() {
+                                class_name
+                            } else {
+                                format!("{class_name}: {msg}")
+                            }
+                        }
+                        _ => format!("Uncaught exception: {}", value.repr()),
+                    },
+                };
+                Some(pyrust_core::format_traceback(&frames, &error_line))
+            }
+        } else {
+            None
+        };
         self.vm_frame_views.pop();
         // Write fastlocal registers back to the module env so that imported
         // modules and post-run inspection can find all names.
@@ -206,6 +291,13 @@ impl Interpreter {
                 let val = std::mem::replace(&mut regs[idx as usize], Value::unset());
                 self.assign_name(name.clone(), val);
             }
+        }
+        // If a traceback was formatted, return it as a pre-formatted Runtime
+        // error.  The `run_file` thread boundary extracts the raw message from
+        // `PyError::Runtime` (without the "Runtime error: " prefix) so the
+        // formatted traceback reaches `main`'s `eprintln!` unchanged.
+        if let Some(tb) = maybe_tb {
+            return Some(Err(PyError::Runtime(tb)));
         }
         Some(vm_result.map(|_| ()))
     }

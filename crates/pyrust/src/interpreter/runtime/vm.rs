@@ -652,6 +652,10 @@ impl Interpreter {
         }
         self.handled_exc_stack.push(exc_val.clone());
         self.active_exception = Some(exc_val);
+        // Reset the captured error frame snapshot: the exception was caught
+        // by a `try/except` handler, so any frames captured during its
+        // propagation must not pollute a subsequent unhandled error's traceback.
+        pyrust_core::reset_captured_error_frames();
         Ok(h)
     }
 

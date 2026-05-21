@@ -130,6 +130,10 @@ pub struct Interpreter {
     /// `EndExcept`).  The stack lets us restore the outer context.
     handled_exc_stack: Vec<Value>,
     script_dir: Option<PathBuf>,
+    /// Path to the top-level script being executed, used to populate the
+    /// `filename` field of `FrameInfo` when formatting tracebacks.
+    /// `None` in REPL mode (no persistent filename).
+    pub(crate) script_filename: Option<String>,
     module_cache: ModuleCache,
     env_pool: Vec<EnvRef>,
     fn_cache: FnCache,
@@ -342,6 +346,7 @@ impl Default for Interpreter {
             active_exception: None,
             handled_exc_stack: Vec::new(),
             script_dir: None,
+            script_filename: None,
             module_cache: Rc::new(RefCell::new(HashMap::new())),
             env_pool: Vec::new(),
             fn_cache: HashMap::new(),
