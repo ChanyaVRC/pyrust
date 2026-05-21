@@ -2501,6 +2501,9 @@ fn hash_value(value: &Value) -> Result<i64> {
         // BuiltinObject: probe the BuiltinTypeOps hash hook (added in PR #781).
         // Types that override BuiltinTypeOps::hash (e.g. frozenset) return
         // Some(u64); anything that leaves it at the default None is unhashable.
+        // Note: slice is intercepted before this match in hash_value_with_interp;
+        // reaching this arm for a slice correctly returns None (unhashable) because
+        // SliceOps::hash was removed in PR #850.
         ValueKind::BuiltinObject { ops, state } => match ops.hash(state) {
             Some(h) => Ok(h as i64),
             None => Err(PyError::named(
@@ -2518,17 +2521,6 @@ fn hash_value(value: &Value) -> Result<i64> {
                 "TypeError",
                 format!("unhashable type: '{class_name}'"),
             ))
-        }
-        // Built-in objects (GenericAlias, frozenset, …) opt in to hashing via
-        // `BuiltinTypeOps::hash`.  Return `None` → TypeError.
-        ValueKind::BuiltinObject { ops, state } => {
-            match ops.hash(state) {
-                Some(h) => Ok(h as i64),
-                None => Err(PyError::named(
-                    "TypeError",
-                    format!("unhashable type: '{}'", ops.type_name()),
-                )),
-            }
         }
         _ => Err(PyError::named(
             "TypeError",
