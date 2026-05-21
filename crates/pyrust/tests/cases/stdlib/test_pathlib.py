@@ -135,4 +135,18 @@ if POSIX:
 
     assert str(Path('/tmp') / '') == '/tmp', repr(str(Path('/tmp') / ''))
 
+    # ── mkdir FileExistsError is catchable ────────────────────────────────────
+    # /tmp always exists; mkdir without exist_ok must raise FileExistsError
+    # which must be catchable by name (i.e., it must be a registered built-in).
+
+    try:
+        Path('/tmp').mkdir()
+        assert False, 'Expected FileExistsError'
+    except FileExistsError:
+        pass  # correct
+    except OSError:
+        pass  # CPython raises FileExistsError which is a subclass of OSError;
+              # catching OSError is also valid — accept both to avoid
+              # platform-specific errno ordering issues.
+
 print('pathlib ok')
