@@ -1359,8 +1359,10 @@ impl Interpreter {
                         // triggers user code via __index__ before raising the
                         // canonical "does not support slice assignment" error.
                         if regs[*obj as usize].list_len().is_none() {
-                            vm_try!(Err(PyError::Runtime(
-                                "object does not support slice assignment".to_string(),
+                            let tname = value_type_name_str(&regs[*obj as usize]);
+                            vm_try!(Err(PyError::named(
+                                "TypeError",
+                                format!("'{}' object does not support item assignment", tname),
                             )));
                         }
                         // Resolve each bound through the __index__ protocol before
@@ -1401,9 +1403,16 @@ impl Interpreter {
                         });
                         match updated {
                             Some(r) => vm_try!(r),
-                            None => vm_try!(Err(PyError::Runtime(
-                                "object does not support slice assignment".to_string(),
-                            ))),
+                            None => {
+                                let tname = value_type_name_str(&regs[*obj as usize]);
+                                vm_try!(Err(PyError::named(
+                                    "TypeError",
+                                    format!(
+                                        "'{}' object does not support item assignment",
+                                        tname
+                                    ),
+                                )));
+                            }
                         }
                     } else {
                         // Non-slice set: determine target type first, then mutate
@@ -1504,8 +1513,13 @@ impl Interpreter {
                                 }
                             }
                             _ => {
-                                vm_try!(Err(PyError::Runtime(
-                                    "object does not support item assignment".to_string(),
+                                let tname = value_type_name_str(&regs[*obj as usize]);
+                                vm_try!(Err(PyError::named(
+                                    "TypeError",
+                                    format!(
+                                        "'{}' object does not support item assignment",
+                                        tname
+                                    ),
                                 )));
                             }
                         }
@@ -1525,8 +1539,10 @@ impl Interpreter {
                         // resolving bounds so that __index__ is never invoked on
                         // non-list targets.
                         if regs[*obj as usize].list_len().is_none() {
-                            vm_try!(Err(PyError::Runtime(
-                                "object does not support slice deletion".to_string(),
+                            let tname = value_type_name_str(&regs[*obj as usize]);
+                            vm_try!(Err(PyError::named(
+                                "TypeError",
+                                format!("'{}' object does not support item deletion", tname),
                             )));
                         }
                         // Resolve each bound through the __index__ protocol before
@@ -1544,9 +1560,16 @@ impl Interpreter {
                         });
                         match updated {
                             Some(r) => vm_try!(r),
-                            None => vm_try!(Err(PyError::Runtime(
-                                "object does not support slice deletion".to_string(),
-                            ))),
+                            None => {
+                                let tname = value_type_name_str(&regs[*obj as usize]);
+                                vm_try!(Err(PyError::named(
+                                    "TypeError",
+                                    format!(
+                                        "'{}' object does not support item deletion",
+                                        tname
+                                    ),
+                                )));
+                            }
                         }
                     } else {
                         let mut handled = false;
@@ -1626,9 +1649,10 @@ impl Interpreter {
                                     format!("'{class_name}' object doesn't support item deletion"),
                                 )));
                             }
+                            let tname = value_type_name_str(&regs[*obj as usize]);
                             vm_try!(Err(PyError::named(
                                 "TypeError",
-                                "object does not support item deletion".to_string(),
+                                format!("'{}' object doesn't support item deletion", tname),
                             )));
                         }
                     }
