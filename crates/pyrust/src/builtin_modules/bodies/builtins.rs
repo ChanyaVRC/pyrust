@@ -2581,8 +2581,7 @@ fn hash_value(value: &Value) -> Result<i64> {
 /// remains a pure helper for primitive leaf types; this function calls it for
 /// those cases to avoid duplicating their logic.
 ///
-/// `Tuple`: uses the same initial value and multiply-add mixing as
-/// `hash_value`'s Tuple arm (`h = h.wrapping_mul(1000003).wrapping_add(elem)`),
+/// `Tuple`: uses the CPython 3.12 xxHash-based tuplehash algorithm (issue #892),
 /// but each element is hashed via this function rather than `hash_value`, so
 /// `PyInstance` elements dispatch `__hash__` correctly (issue #502).
 ///
