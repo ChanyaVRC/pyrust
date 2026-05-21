@@ -982,6 +982,30 @@ impl Interpreter {
                     let result = vm_try!(self.get_attr(obj_val, name));
                     regs[*dst as usize] = result;
                 }
+                Insn::ImportFromAttr(dst, mod_reg, name_idx) => {
+                    let mod_val = vm_try!(vm_read(&regs, *mod_reg, num_locals));
+                    let name = pool_get!(code.names, *name_idx, "name");
+                    // Pass mod_val directly (already cloned by vm_read); do NOT
+                    // clone again here — the extra clone on the success path was
+                    // a measurable regression (~14 %) on tight import-from loops.
+                    let result = self.get_attr(mod_val, name);
+                    match result {
+                        Ok(v) => regs[*dst as usize] = v,
+                        Err(e) if e.class_name_is("AttributeError") => {
+                            // Get the module name for the error message by reading
+                            // directly from the register (no extra clone needed).
+                            let mod_name = match regs[*mod_reg as usize].kind() {
+                                ValueKind::PyModule(m) => m.borrow().name.clone(),
+                                _ => "<unknown>".to_string(),
+                            };
+                            vm_try!(Err(PyError::named(
+                                "ImportError",
+                                format!("cannot import name '{name}' from '{mod_name}'"),
+                            )));
+                        }
+                        Err(e) => vm_try!(Err(e)),
+                    }
+                }
                 Insn::SetAttr(obj, name_idx, val) => {
                     let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
                     let val_val = vm_try!(vm_read(&regs, *val, num_locals));

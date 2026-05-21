@@ -198,6 +198,11 @@ pub enum Insn {
     MakeFunction(Reg, u8, Reg, u8, Reg, u8),
     /// R[dst] = load_module(names[name_idx])
     ImportModule(Reg, u16),
+    /// Attribute lookup on R[mod_reg] by the name `code.names[name_idx]`, with any
+    /// AttributeError re-raised as ImportError. Emitted by compile_import_from so that
+    /// missing names produce `ImportError: cannot import name '<name>' from '<module>'`
+    /// matching CPython 3.12. Result stored in R[dst].
+    ImportFromAttr(Reg, Reg, u16),
     /// Push an exception handler; if an exception is raised before PopExcept,
     /// the active_exception is set and pc jumps to (pc_after_this_insn + offset).
     SetupExcept(i32),
