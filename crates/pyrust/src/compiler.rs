@@ -5232,28 +5232,24 @@ impl Compiler {
                             } else {
                                 r_len2
                             };
-                            // Build slice subj[start:stop]
-                            let slice_key = self.alloc_temp();
-                            // Build a 3-tuple (start, stop, None) to represent the slice
-                            let none_r = self.alloc_temp();
-                            self.emit(Insn::LoadNone(none_r));
-                            // Use BuildTuple to create the slice key
-                            // Arrange args in consecutive regs: start_r, stop_r, none_r
-                            // They might not be consecutive, so move them.
+                            // Build slice subj[start:stop] via BuildSlice (issue #931).
+                            // Arrange the three bounds in consecutive registers and emit
+                            // BuildSlice so the VM unambiguously identifies it as a slice
+                            // (not a user 3-tuple).
                             let base = self.alloc_temp();
                             self.emit(Insn::Move(base, start_r));
                             let base1 = self.alloc_temp();
                             self.emit(Insn::Move(base1, stop_r));
                             let base2 = self.alloc_temp();
-                            self.emit(Insn::Move(base2, none_r));
-                            self.emit(Insn::BuildTuple(slice_key, base, 3));
+                            self.emit(Insn::LoadNone(base2));
+                            let slice_key = self.alloc_temp();
+                            self.emit(Insn::BuildSlice(slice_key, base));
                             self.free_temp(base2);
                             self.free_temp(base1);
                             self.free_temp(base);
-                            self.free_temp(none_r);
                             self.free_temp(stop_r);
                             self.free_temp(start_r);
-                            // Get the slice: subj[start:stop] via GetItem with a slice tuple
+                            // Get the slice: subj[start:stop] via GetItem with a slice key
                             let elem_r = self.alloc_temp();
                             self.emit(Insn::GetItem(elem_r, subj, slice_key));
                             self.free_temp(slice_key);
@@ -5962,10 +5958,12 @@ impl Compiler {
         fill_slot(self, hi_slot, upper);
         fill_slot(self, st_slot, step);
 
-        // The three slots are already contiguous; BuildTuple reads [lo_slot .. lo_slot+3).
+        // The three slots are already contiguous; BuildSlice reads [lo_slot .. lo_slot+3).
+        // BuildSlice (not BuildTuple) so the VM can unambiguously distinguish a
+        // compiler-generated slice key from a user 3-tuple (issue #931).
         let slice_r = self.alloc_temp();
-        self.emit(Insn::BuildTuple(slice_r, lo_slot, 3));
-        // Release the three component slots — they are consumed by BuildTuple.
+        self.emit(Insn::BuildSlice(slice_r, lo_slot));
+        // Release the three component slots — they are consumed by BuildSlice.
         self.next_temp = slice_r + 1;
         slice_r
     }

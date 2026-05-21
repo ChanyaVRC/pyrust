@@ -1329,15 +1329,19 @@ impl Interpreter {
                     }
 
                     let idx_val = vm_try!(vm_read(&regs, *idx, num_locals));
-                    // Slice key: 3-element tuple `(lo, hi, step)` produced by
-                    // `compile_slice_key`.  Skip this path for dicts — dicts
-                    // accept arbitrary hashable keys including 3-element tuples,
-                    // so a tuple key must not be mistaken for a slice descriptor.
-                    let obj_is_dict = matches!(
+                    // Slice key: `BuildSlice` produces a runtime slice BuiltinObject.
+                    // `unpack_slice_key` matches that (and only that), so a user
+                    // 3-tuple `(1, 2, 3)` is no longer mistaken for a slice (issue #931).
+                    //
+                    // Guard: skip the slice path for dict and BuiltinObject targets
+                    // (e.g. defaultdict, Counter) — these types may use a slice object
+                    // as a hashable key (`d[slice(1,2)]`), which must go through normal
+                    // item lookup rather than `eval_slice`.
+                    let obj_is_mapping = matches!(
                         regs[*obj as usize].as_some().map(|v| v.kind()),
-                        Some(ValueKind::Dict(_))
+                        Some(ValueKind::Dict(_) | ValueKind::BuiltinObject { .. })
                     );
-                    if !obj_is_dict
+                    if !obj_is_mapping
                         && let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val)
                     {
                         let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
@@ -1355,19 +1359,7 @@ impl Interpreter {
                             DictLookup(Value),
                             Miss,
                         }
-                        // If the index is a runtime `slice` object (produced
-                        // by `eval_slice` and passed into a user `__getitem__`
-                        // that then subscripts a built-in sequence), fall
-                        // through to `eval_index` which handles slice-object
-                        // detection and dispatches back to `eval_slice`.
-                        let is_runtime_slice = matches!(
-                            idx_val.kind(),
-                            ValueKind::BuiltinObject { ops, .. }
-                                if ops.type_name() == pyrust_builtins::slice::TYPE_NAME
-                        );
-                        let fast = if is_runtime_slice {
-                            FastResult::Miss
-                        } else if let Some(ov) = regs[*obj as usize].as_some() {
+                        let fast = if let Some(ov) = regs[*obj as usize].as_some() {
                             match ov.kind() {
                                 ValueKind::List(items) => {
                                     let i = vm_try!(normalize_index(&idx_val, items.len(), "list"));
@@ -1436,28 +1428,15 @@ impl Interpreter {
                     }
                     let idx_val = vm_try!(vm_read(&regs, *idx, num_locals));
                     let val_val = vm_try!(vm_read(&regs, *val, num_locals));
-                    // Slice assignment: 3-tuple `(lo, hi, step)` key on a list.
-                    // Skip for dicts — they accept tuple keys of any length, so a
-                    // 3-element tuple must not be mistaken for a slice descriptor.
-                    let obj_is_dict = matches!(
-                        regs[*obj as usize].as_some().map(|v| v.kind()),
-                        Some(ValueKind::Dict(_))
-                    );
-                    if !obj_is_dict
+                    // Slice assignment: `BuildSlice` produces a runtime slice BuiltinObject;
+                    // `unpack_slice_key` matches that.  Only enter the slice path when the
+                    // target is a list — dicts and BuiltinObjects may legitimately use
+                    // a runtime slice object as a hashable key (e.g. `d[slice(1,3)] = 99`),
+                    // so for non-list targets we fall through to normal item assignment.
+                    let is_list_target = regs[*obj as usize].list_len().is_some();
+                    if is_list_target
                         && let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val)
                     {
-                        // Guard: only lists support slice assignment.  Reject
-                        // non-list targets before invoking __index__ on the bounds,
-                        // so that a dict or user-instance target never accidentally
-                        // triggers user code via __index__ before raising the
-                        // canonical "does not support slice assignment" error.
-                        if regs[*obj as usize].list_len().is_none() {
-                            let tname = value_type_name_str(&regs[*obj as usize]);
-                            vm_try!(Err(PyError::named(
-                                "TypeError",
-                                format!("'{}' object does not support item assignment", tname),
-                            )));
-                        }
                         // Resolve each bound through the __index__ protocol before
                         // entering the list_with_mut closure (issue #849).  Must
                         // happen here because resolve_slice_bound_val needs &mut self
@@ -1644,24 +1623,14 @@ impl Interpreter {
                 }
                 Insn::DeleteItem(obj, idx) => {
                     let idx_val = vm_try!(vm_read(&regs, *idx, num_locals));
-                    // Skip the slice path for dicts — they accept tuple keys of any length.
-                    let obj_is_dict = matches!(
-                        regs[*obj as usize].as_some().map(|v| v.kind()),
-                        Some(ValueKind::Dict(_))
-                    );
-                    if !obj_is_dict
+                    // Slice deletion: only enter the slice path for list targets.
+                    // A dict may legitimately use a runtime slice object as a key
+                    // (`del d[slice(1,3)]`), so non-list targets fall through to
+                    // the normal item-deletion path (issue #931).
+                    let is_list_target = regs[*obj as usize].list_len().is_some();
+                    if is_list_target
                         && let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val)
                     {
-                        // Guard: only lists support slice deletion.  Check before
-                        // resolving bounds so that __index__ is never invoked on
-                        // non-list targets.
-                        if regs[*obj as usize].list_len().is_none() {
-                            let tname = value_type_name_str(&regs[*obj as usize]);
-                            vm_try!(Err(PyError::named(
-                                "TypeError",
-                                format!("'{}' object does not support item deletion", tname),
-                            )));
-                        }
                         // Resolve each bound through the __index__ protocol before
                         // entering the list_with_mut closure (issue #849).
                         let lo = vm_try!(self.resolve_slice_bound_val(lo));
@@ -1763,14 +1732,18 @@ impl Interpreter {
                                 let class_name = class.borrow().name.clone();
                                 vm_try!(Err(PyError::named(
                                     "TypeError",
-                                    format!("'{class_name}' object doesn't support item deletion"),
+                                    format!("'{class_name}' object does not support item deletion"),
                                 )));
                             }
                             let tname = value_type_name_str(&regs[*obj as usize]);
-                            vm_try!(Err(PyError::named(
-                                "TypeError",
-                                format!("'{}' object doesn't support item deletion", tname),
-                            )));
+                            // CPython uses "does not" for slice deletion and "doesn't" for
+                            // regular index deletion on immutable built-in types (e.g. tuple).
+                            let msg = if Self::unpack_slice_key(&idx_val).is_some() {
+                                format!("'{}' object does not support item deletion", tname)
+                            } else {
+                                format!("'{}' object doesn't support item deletion", tname)
+                            };
+                            vm_try!(Err(PyError::named("TypeError", msg)));
                         }
                     }
                 }
@@ -2321,6 +2294,20 @@ impl Interpreter {
                         items.push(vm_try!(vm_read(&regs, *base + i, num_locals)));
                     }
                     regs[*dst as usize] = Value::tuple(items);
+                }
+                Insn::BuildSlice(dst, base) => {
+                    // Reads three contiguous registers (base, base+1, base+2) holding
+                    // the start, stop, step bounds.  `None` values mean "absent bound".
+                    // Produces a runtime `slice` BuiltinObject rather than a tuple so
+                    // that `unpack_slice_key` can distinguish it from a user 3-tuple
+                    // (issue #931 fix).
+                    let start = vm_try!(vm_read(&regs, *base, num_locals));
+                    let stop = vm_try!(vm_read(&regs, *base + 1, num_locals));
+                    let step = vm_try!(vm_read(&regs, *base + 2, num_locals));
+                    let lo = if start.is_none() { None } else { Some(start) };
+                    let hi = if stop.is_none() { None } else { Some(stop) };
+                    let st = if step.is_none() { None } else { Some(step) };
+                    regs[*dst as usize] = pyrust_builtins::slice::make_slice(lo, hi, st);
                 }
                 Insn::BuildDict(dst, base, n) => {
                     let mut dict = indexmap::IndexMap::new();
