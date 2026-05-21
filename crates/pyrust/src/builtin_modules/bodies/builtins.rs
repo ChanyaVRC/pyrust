@@ -2641,12 +2641,47 @@ fn tuple_needs_interp(items: &[Value]) -> bool {
     items.iter().any(value_needs_interp)
 }
 
+/// Returns `true` when hashing `v` requires the slow per-element path of
+/// `hash_value_with_interp` rather than the pure `hash_value` shortcut.
+///
+/// Two cases force the slow path:
+/// 1. A `PyInstance` anywhere in the tree (needs interpreter `__hash__` dispatch).
+/// 2. A `slice` whose components contain an unhashable primitive (list/dict/set/…)
+///    at any nesting depth — the pure `hash_value` path would blame `'slice'` via
+///    `SliceOps::hash` returning `None`, but the slow path properly names the leaf
+///    unhashable type (issue #893).
+fn value_needs_slow_hash(v: &Value) -> bool {
+    if value_needs_interp(v) {
+        return true;
+    }
+    // Check for slice with unhashable primitive components (no PyInstance involved,
+    // so value_needs_interp returned false, but hash_value would still produce the
+    // wrong error message).
+    if let ValueKind::BuiltinObject { ops, state } = v.kind() {
+        if ops.type_name() == pyrust_builtins::slice::TYPE_NAME {
+            let borrow = state.borrow();
+            if let Some(s) = borrow.downcast_ref::<pyrust_builtins::slice::SliceState>() {
+                return s.start.to_key().is_none()
+                    || s.stop.to_key().is_none()
+                    || s.step.to_key().is_none();
+            }
+        }
+    }
+    // Recurse into tuple elements.
+    if let ValueKind::Tuple(items) = v.kind() {
+        return items.iter().any(value_needs_slow_hash);
+    }
+    false
+}
+
 pub(crate) fn hash_value_with_interp(interp: &mut crate::Interpreter, value: &Value) -> Result<i64> {
     match value.kind() {
         ValueKind::Tuple(items) => {
-            // Fast path: if no element at any depth is a PyInstance, delegate
-            // to the pure hash_value helper — no Vec allocation needed.
-            if !tuple_needs_interp(items) {
+            // Fast path: if no element at any depth requires the slow path
+            // (PyInstance needing __hash__ dispatch, or a slice with unhashable
+            // primitive components that hash_value would misreport as 'slice'),
+            // delegate to the pure hash_value helper — no Vec allocation needed.
+            if !items.iter().any(value_needs_slow_hash) {
                 return hash_value(value);
             }
             // At least one element needs interpreter access (PyInstance or a

@@ -115,3 +115,17 @@ try:
     d[slice([1, 2], 3)] = 1
 except TypeError as e:
     print(e)  # unhashable type: 'list'
+
+# ── hash() of tuple containing slice with unhashable component ─────────────────
+# Regression: hash_value_with_interp fast-path for tuples delegated to
+# hash_value which blamed 'slice' instead of the leaf unhashable type.
+
+try:
+    hash((slice([1, 2], 3),))
+except TypeError as e:
+    print(e)  # unhashable type: 'list'
+
+try:
+    hash((1, slice({}, None)))
+except TypeError as e:
+    print(e)  # unhashable type: 'dict'
