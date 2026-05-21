@@ -1607,6 +1607,62 @@ impl Interpreter {
         // exposed to PyInstance-based subclass dispatch — see #463
         // Copilot review).  They land in the `None` arm of the
         // init match below.
+
+        // `__new__` protocol: if the class declares a `__new__` builtin in
+        // its OWN attrs (not inherited — CPython's `object.__new__` is the
+        // root and we don't emulate the full MRO here), call it as a class
+        // method with `cls` as the first argument.  The return value is the
+        // new instance; if it is a `PyInstance` whose class is a subclass of
+        // `cls`, `__init__` is called on it (CPython parity).  This is the
+        // mechanism that lets `pathlib.Path.__new__` return a `PosixPath`
+        // instance on POSIX platforms (issue #922).
+        let own_new = class.borrow().attrs.get("__new__").cloned();
+        if let Some(new_val) = own_new {
+            if let ValueKind::BuiltinFunction(name) = new_val.kind() {
+                let dispatch = crate::builtin_registry::lookup(name).ok_or_else(|| {
+                    PyError::Runtime(format!(
+                        "internal: __new__ builtin '{name}' not in registry"
+                    ))
+                })?;
+                // Pass cls as args[0], user args follow.
+                let mut combined: Vec<ExpandedCallArg> = Vec::with_capacity(args.len() + 1);
+                combined.push(ExpandedCallArg {
+                    name: None,
+                    value: Value::py_class(Rc::clone(&class)),
+                });
+                combined.extend(args.iter().cloned());
+                let new_result = dispatch(self, &combined)?;
+
+                // After `__new__` succeeds, call `__init__` on the result if it
+                // is a PyInstance whose class is equal to or a subclass of `cls`.
+                if let ValueKind::PyInstance(inst_rc) = new_result.kind() {
+                    let inst_class = inst_rc.borrow().class.clone();
+                    if class_is_subclass_of(&inst_class, &class) {
+                        let init = lookup_class_attr(&inst_class, "__init__");
+                        if let Some(init_val) = init {
+                            if matches!(
+                                init_val.kind(),
+                                ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_)
+                            ) {
+                                let result = invoke_class_method(
+                                    self,
+                                    init_val,
+                                    Value::py_instance(Rc::clone(&inst_rc)),
+                                    args,
+                                )?;
+                                if !result.is_none() {
+                                    return Err(PyError::Runtime(
+                                        "__init__() should return None".to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+                return Ok(new_result);
+            }
+        }
+
         let instance = Rc::new(RefCell::new(PyInstance {
             class: Rc::clone(&class),
             attrs: IndexMap::new(),

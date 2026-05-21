@@ -852,7 +852,7 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
     //       TypeError, NameError → UnboundLocalError
     //       AssertionError, AttributeError, StopIteration, SyntaxError
     //       MemoryError, ImportError → ModuleNotFoundError
-    //       OSError → FileNotFoundError
+    //       OSError → FileNotFoundError, FileExistsError
     //     SystemExit, GeneratorExit, KeyboardInterrupt (direct BaseException children)
     let mk = |name: &str, base: Option<Rc<RefCell<PyClass>>>| {
         Rc::new(RefCell::new(PyClass {
@@ -889,6 +889,7 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
     let unicode_error = mk("UnicodeError", Some(Rc::clone(&value_error)));
     let module_not_found_error = mk("ModuleNotFoundError", Some(Rc::clone(&import_error)));
     let file_not_found_error = mk("FileNotFoundError", Some(Rc::clone(&os_error)));
+    let file_exists_error = mk("FileExistsError", Some(Rc::clone(&os_error)));
     let unicode_encode_error = mk("UnicodeEncodeError", Some(Rc::clone(&unicode_error)));
     let unicode_decode_error = mk("UnicodeDecodeError", Some(Rc::clone(&unicode_error)));
     let system_exit = mk("SystemExit", Some(Rc::clone(&base_exception)));
@@ -923,6 +924,7 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
         ("UnicodeDecodeError", unicode_decode_error),
         ("OSError", os_error),
         ("FileNotFoundError", file_not_found_error),
+        ("FileExistsError", file_exists_error),
         ("SystemExit", system_exit),
         ("GeneratorExit", generator_exit),
         ("KeyboardInterrupt", keyboard_interrupt),
@@ -930,7 +932,7 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
 }
 
 thread_local! {
-    /// Per-thread cache of all 31 built-in exception class `Rc`s.
+    /// Per-thread cache of all 32 built-in exception class `Rc`s.
     /// Built once per thread; each `Interpreter::default()` call clones the
     /// `Rc`s (O(1) reference-count bumps) instead of allocating fresh
     /// `Rc<RefCell<PyClass>>` objects for the full hierarchy.
