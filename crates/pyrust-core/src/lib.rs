@@ -541,8 +541,8 @@ pub fn py_hash_none() -> i64 {
 /// - `Str`: FNV-1a (matches pyrust's `hash_value` str arm; CPython uses SipHash
 ///   with a random seed so str-element frozenset hashes differ from CPython).
 /// - `None`: stable per-process value via [`py_hash_none`].
-/// - `Tuple`: CPython's multiply-add fold (`h = h*1000003 + elem_hash`), seeded
-///   at 3527539.
+/// - `Tuple`: CPython 3.12 xxHash-based tuplehash (Python 3.8+ algorithm):
+///   `acc = PRIME5; for each item: acc = rotl31(acc + hash*PRIME2)*PRIME1; acc += n^(PRIME5^3527539)`.
 /// - `FrozenSet`: CPython's XOR-shuffle accumulation with length mixing and
 ///   final scramble (Objects/setobject.c `frozenset_hash`).
 /// - `Object { hash, .. }`: the precomputed hash cast to `i64`.
@@ -614,12 +614,24 @@ pub fn py_hash_pykey(key: &PyKey) -> i64 {
         }
         PyKey::None => py_hash_none(),
         PyKey::Tuple(items) => {
-            let mut h: i64 = 3527539;
+            // CPython 3.12 xxHash-based tuplehash (Python 3.8+ algorithm).
+            const PRIME1: u64 = 11400714785074694791;
+            const PRIME2: u64 = 14029467366897019727;
+            const PRIME5: u64 = 2870177450012600261;
+            let mut acc: u64 = PRIME5;
+            let mut n: u64 = 0;
             for item in items {
-                let item_hash = py_hash_pykey(item);
-                h = h.wrapping_mul(1000003).wrapping_add(item_hash);
+                let lane = py_hash_pykey(item) as u64;
+                acc = acc.wrapping_add(lane.wrapping_mul(PRIME2));
+                acc = (acc << 31) | (acc >> 33); // rotl31
+                acc = acc.wrapping_mul(PRIME1);
+                n += 1;
             }
-            h
+            acc = acc.wrapping_add(n ^ (PRIME5 ^ 3527539u64));
+            if acc == u64::MAX {
+                acc = 1546275796;
+            }
+            acc as i64
         }
         PyKey::FrozenSet(items) => {
             // CPython Objects/setobject.c frozenset_hash algorithm.
