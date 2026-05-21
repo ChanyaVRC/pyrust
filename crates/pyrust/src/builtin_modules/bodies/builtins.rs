@@ -2708,30 +2708,27 @@ pub(crate) fn hash_value_with_interp(interp: &mut crate::Interpreter, value: &Va
             let needs_interp = value_needs_interp(&s.start)
                 || value_needs_interp(&s.stop)
                 || value_needs_interp(&s.step);
-            if !needs_interp {
-                // Check for unhashable primitive components (e.g. list, dict,
-                // set inside the slice).  hash_value's BuiltinObject arm would
-                // blame 'slice'; instead name the actual offending leaf type
-                // (issue #893).
-                let unhashable = [&s.start, &s.stop, &s.step].iter().find_map(|c| {
+            // Check for unhashable primitive components while the borrow is live.
+            let unhashable = if !needs_interp {
+                [&s.start, &s.stop, &s.step].iter().find_map(|c| {
                     if c.to_key().is_none() {
                         Some(pyrust_builtins::set::leaf_unhashable_type_name(c))
                     } else {
                         None
                     }
-                });
-                drop(borrow);
-                if let Some(bad_type) = unhashable {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!("unhashable type: '{bad_type}'"),
-                    ));
-                }
-                // All components hashable: use CPython-compatible slice hash.
-            }
-            // Clone components to release the borrow before mutable interp calls.
+                })
+            } else {
+                None
+            };
+            // Clone before dropping the borrow — all accesses to s must happen here.
             let (start, stop, step) = (s.start.clone(), s.stop.clone(), s.step.clone());
             drop(borrow);
+            if let Some(bad_type) = unhashable {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("unhashable type: '{bad_type}'"),
+                ));
+            }
             let hstart = hash_value_with_interp(interp, &start)?;
             let hstop = hash_value_with_interp(interp, &stop)?;
             let hstep = hash_value_with_interp(interp, &step)?;
