@@ -802,27 +802,40 @@ impl Interpreter {
         }
         // Cross-variant slow path: lookup key is PyKey::None but a stored
         // PyKey::Object with hash py_hash_none() may __eq__-match None (issue #906).
+        // Fast pre-check (issue #934): skip the full scan if the dict has no
+        // Object entries with hash == py_hash_none().  The common case exits here
+        // without building a candidates Vec.
         if matches!(key, PyKey::None) {
-            let candidates: Vec<(usize, Value, Value)> = {
+            let none_hash = pyrust_core::py_hash_none() as u64;
+            let has_cross_variant = {
                 let dict = receiver
                     .as_dict()
                     .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
-                dict.iter()
-                    .enumerate()
-                    .filter_map(|(i, (k, v))| match k {
-                        PyKey::Object { hash, value }
-                            if *hash == (pyrust_core::py_hash_none() as u64) =>
-                        {
-                            Some((i, value.clone(), v.clone()))
-                        }
-                        _ => None,
-                    })
-                    .collect()
+                dict.keys()
+                    .any(|k| matches!(k, PyKey::Object { hash, .. } if *hash == none_hash))
             };
-            let none_val = Value::none();
-            for (idx, candidate_key, value) in candidates {
-                if self.values_user_eq(&none_val, &candidate_key)? {
-                    return Ok(Some((idx, value)));
+            if has_cross_variant {
+                let candidates: Vec<(usize, Value, Value)> = {
+                    let dict = receiver
+                        .as_dict()
+                        .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+                    dict.iter()
+                        .enumerate()
+                        .filter_map(|(i, (k, v))| match k {
+                            PyKey::Object { hash, value }
+                                if *hash == none_hash =>
+                            {
+                                Some((i, value.clone(), v.clone()))
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                };
+                let none_val = Value::none();
+                for (idx, candidate_key, value) in candidates {
+                    if self.values_user_eq(&none_val, &candidate_key)? {
+                        return Ok(Some((idx, value)));
+                    }
                 }
             }
         }
@@ -870,23 +883,29 @@ impl Interpreter {
             }
         }
         // Cross-variant slow path: None key vs Object entries with hash py_hash_none()
-        // (issue #906).
+        // (issue #906).  Fast pre-check (issue #934): skip the full scan if no
+        // Object entry with hash == py_hash_none() exists (common case, no alloc).
         if matches!(key, PyKey::None) {
             let none_hash = pyrust_core::py_hash_none() as u64;
-            let candidates: Vec<(usize, Value, Value)> = dict
-                .iter()
-                .enumerate()
-                .filter_map(|(i, (k, v))| match k {
-                    PyKey::Object { hash, value } if *hash == none_hash => {
-                        Some((i, value.clone(), v.clone()))
+            if dict
+                .keys()
+                .any(|k| matches!(k, PyKey::Object { hash, .. } if *hash == none_hash))
+            {
+                let candidates: Vec<(usize, Value, Value)> = dict
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, (k, v))| match k {
+                        PyKey::Object { hash, value } if *hash == none_hash => {
+                            Some((i, value.clone(), v.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let none_val = Value::none();
+                for (idx, candidate_key, value) in candidates {
+                    if self.values_user_eq(&none_val, &candidate_key)? {
+                        return Ok(Some((idx, value)));
                     }
-                    _ => None,
-                })
-                .collect();
-            let none_val = Value::none();
-            for (idx, candidate_key, value) in candidates {
-                if self.values_user_eq(&none_val, &candidate_key)? {
-                    return Ok(Some((idx, value)));
                 }
             }
         }
@@ -962,24 +981,37 @@ impl Interpreter {
             }
         }
         // Cross-variant slow path: None key vs Object entries with hash py_hash_none()
-        // (issue #906).
+        // (issue #906).  Fast pre-check (issue #934): skip the full scan if no
+        // Object entry with hash == py_hash_none() exists (common case, no alloc).
         if matches!(key, PyKey::None) {
-            let candidates: Vec<(usize, Value)> = {
+            let none_hash = pyrust_core::py_hash_none() as u64;
+            let has_cross_variant = {
                 let set = receiver
                     .as_set()
                     .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
                 set.iter()
-                    .enumerate()
-                    .filter_map(|(i, k)| match k {
-                        PyKey::Object { hash, value } if *hash == (pyrust_core::py_hash_none() as u64) => Some((i, value.clone())),
-                        _ => None,
-                    })
-                    .collect()
+                    .any(|k| matches!(k, PyKey::Object { hash, .. } if *hash == none_hash))
             };
-            let none_val = Value::none();
-            for (idx, candidate) in candidates {
-                if self.values_user_eq(&none_val, &candidate)? {
-                    return Ok(Some(idx));
+            if has_cross_variant {
+                let candidates: Vec<(usize, Value)> = {
+                    let set = receiver
+                        .as_set()
+                        .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
+                    set.iter()
+                        .enumerate()
+                        .filter_map(|(i, k)| match k {
+                            PyKey::Object { hash, value } if *hash == none_hash => {
+                                Some((i, value.clone()))
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                };
+                let none_val = Value::none();
+                for (idx, candidate) in candidates {
+                    if self.values_user_eq(&none_val, &candidate)? {
+                        return Ok(Some(idx));
+                    }
                 }
             }
         }
@@ -1023,20 +1055,29 @@ impl Interpreter {
             }
         }
         // Cross-variant slow path: None key vs Object entries with hash py_hash_none()
-        // (issue #906).
+        // (issue #906).  Fast pre-check (issue #934): skip the full scan if no
+        // Object entry with hash == py_hash_none() exists (common case, no alloc).
         if matches!(key, PyKey::None) {
-            let candidates: Vec<(usize, Value)> = set
+            let none_hash = pyrust_core::py_hash_none() as u64;
+            if set
                 .iter()
-                .enumerate()
-                .filter_map(|(i, k)| match k {
-                    PyKey::Object { hash, value } if *hash == (pyrust_core::py_hash_none() as u64) => Some((i, value.clone())),
-                    _ => None,
-                })
-                .collect();
-            let none_val = Value::none();
-            for (idx, candidate) in candidates {
-                if self.values_user_eq(&none_val, &candidate)? {
-                    return Ok(Some(idx));
+                .any(|k| matches!(k, PyKey::Object { hash, .. } if *hash == none_hash))
+            {
+                let candidates: Vec<(usize, Value)> = set
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, k)| match k {
+                        PyKey::Object { hash, value } if *hash == none_hash => {
+                            Some((i, value.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let none_val = Value::none();
+                for (idx, candidate) in candidates {
+                    if self.values_user_eq(&none_val, &candidate)? {
+                        return Ok(Some(idx));
+                    }
                 }
             }
         }
@@ -1056,7 +1097,26 @@ impl Interpreter {
         key: PyKey,
         value: Value,
     ) -> Result<()> {
-        let needs_dedup = matches!(&key, PyKey::Object { .. } | PyKey::None);
+        // `PyKey::Object` keys may collide with another Object entry (or with a
+        // stored `PyKey::None`) and require `__eq__` dedup via `dict_lookup_in`.
+        // `PyKey::None` is the cross-variant case (issue #906): a stored
+        // `PyKey::Object{hash == py_hash_none()}` that `__eq__`-matches `None`
+        // must be overwritten rather than creating a second entry.
+        //
+        // Fast path for `PyKey::None` (issue #934): IndexMap already deduplicates
+        // `None == None` natively via `Hash`+`PartialEq`.  We only need the slow
+        // `dict_lookup_in` path when the dict contains a `PyKey::Object` with hash
+        // `py_hash_none()` — an extremely rare cross-variant scenario.  Skip the
+        // entire lookup call in the common case.
+        let needs_dedup = match &key {
+            PyKey::Object { .. } => true,
+            PyKey::None => {
+                let none_hash = pyrust_core::py_hash_none() as u64;
+                dict.keys()
+                    .any(|k| matches!(k, PyKey::Object { hash, .. } if *hash == none_hash))
+            }
+            _ => false,
+        };
         if needs_dedup {
             if let Some((idx, _)) = self.dict_lookup_in(dict, &key)? {
                 // Replace value in-place via index access to preserve order.
@@ -1081,7 +1141,18 @@ impl Interpreter {
         set: &mut indexmap::IndexSet<PyKey>,
         key: PyKey,
     ) -> Result<()> {
-        let needs_dedup = matches!(&key, PyKey::Object { .. } | PyKey::None);
+        // Same fast pre-check as `dict_insert` (issue #934): for `PyKey::None`,
+        // only call `set_lookup_in` when the set contains a `PyKey::Object` with
+        // hash `py_hash_none()` (rare cross-variant case, issue #906).
+        let needs_dedup = match &key {
+            PyKey::Object { .. } => true,
+            PyKey::None => {
+                let none_hash = pyrust_core::py_hash_none() as u64;
+                set.iter()
+                    .any(|k| matches!(k, PyKey::Object { hash, .. } if *hash == none_hash))
+            }
+            _ => false,
+        };
         if needs_dedup && self.set_lookup_in(set, &key)?.is_some() {
             return Ok(());
         }
