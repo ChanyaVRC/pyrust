@@ -1268,7 +1268,7 @@ impl Interpreter {
                 return Ok(module);
             }
         }
-        Err(PyError::Runtime(format!("No module named '{name}'")))
+        Err(PyError::named("ModuleNotFoundError", format!("No module named '{name}'")))
     }
 
     fn assign_name(&self, name: String, value: Value) {
