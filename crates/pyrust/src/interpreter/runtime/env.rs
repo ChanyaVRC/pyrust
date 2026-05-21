@@ -1290,6 +1290,9 @@ impl Interpreter {
             // Write to the module env HashMap so LoadGlobal / post-run
             // inspection can find the new value.
             module_env(&self.env).borrow_mut().values.insert(name.clone(), value.clone());
+            // Invalidate the LoadGlobal inline cache: any function that cached
+            // this global under the current version will re-fetch on its next call.
+            bump_global_env_version(self);
             // Mirror into the live module globals dict only when globals() has
             // been called (globals_accessed == true).  Without this guard,
             // every StoreGlobal pays an extra IndexMap write even for scripts
@@ -1340,11 +1343,15 @@ impl Interpreter {
         // module_globals_dict only when globals() has already been called so
         // the live view stays in sync — see globals_accessed above.
         let is_module_scope = self.env.borrow().parent.is_none();
-        if is_module_scope && self.globals_accessed {
-            let _ = self.module_globals_dict.dict_insert(
-                PyKey::Str(name.clone()),
-                value.clone(),
-            );
+        if is_module_scope {
+            // Invalidate the LoadGlobal inline cache for module-scope writes.
+            bump_global_env_version(self);
+            if self.globals_accessed {
+                let _ = self.module_globals_dict.dict_insert(
+                    PyKey::Str(name.clone()),
+                    value.clone(),
+                );
+            }
         }
         env_assign_local(&self.env, &name, value);
     }
@@ -1446,6 +1453,18 @@ fn func_attrs_rc(func: &UserFunction) -> Rc<RefCell<Value>> {
         *slot = Some(Rc::new(RefCell::new(Value::dict(IndexMap::new()))));
     }
     Rc::clone(slot.as_ref().unwrap())
+}
+
+/// Increment `Interpreter::global_env_version`, skipping the two sentinel
+/// values (`GLOBAL_CACHE_EMPTY` and `GLOBAL_CACHE_BUILTIN`) that the
+/// `LoadGlobal` inline cache reserves.  Wraps through 0 so that the counter
+/// never collides with either sentinel.
+#[inline]
+fn bump_global_env_version(interp: &Interpreter) {
+    let v = interp.global_env_version.get().wrapping_add(1);
+    // Skip GLOBAL_CACHE_EMPTY (u32::MAX - 1) and GLOBAL_CACHE_BUILTIN (u32::MAX).
+    let v = if v >= GLOBAL_CACHE_EMPTY { 0 } else { v };
+    interp.global_env_version.set(v);
 }
 
 /// Returns `true` if `name` is a built-in method on `target`'s type.

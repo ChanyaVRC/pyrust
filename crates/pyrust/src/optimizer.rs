@@ -3,10 +3,11 @@
 // `old_to_new`, which is fundamentally an index-based algorithm. Iterator
 // rewrites would obscure the dataflow without speeding anything up.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use crate::bytecode::{AttrCacheEntry, FnCode, FnProto, Insn};
+use crate::bytecode::{AttrCacheEntry, FnCode, FnProto, GLOBAL_CACHE_EMPTY, Insn};
 use crate::value::{Value, ValueKind};
 
 /// Optimize a compiled `FnCode` and all nested function prototypes.
@@ -75,6 +76,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let (insns, consts) = pass_compact_consts(insns, consts);
 
     let insns_len = insns.len();
+    let names_len = names.len();
     FnCode {
         insns,
         consts,
@@ -87,6 +89,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         is_generator: code.is_generator,
         is_class_method: code.is_class_method,
         attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; insns_len]),
+        global_cache: RefCell::new(vec![(GLOBAL_CACHE_EMPTY, Value::none()); names_len]),
     }
 }
 

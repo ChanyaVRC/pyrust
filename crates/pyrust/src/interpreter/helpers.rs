@@ -1932,7 +1932,11 @@ pub(crate) fn value_to_float(v: &Value, ctx: &str) -> Result<f64> {
 /// so purity is now derived from the `#[pure]` attribute at each builtin's
 /// declaration site.  Adding a `#[pure] fn foo(...)` to `pyrust_module!`
 /// makes the optimizer DCE / fold `foo(…)` calls without any further edit.
-fn is_pure_expr(expr: &Expr, pure_fns: &std::collections::HashSet<String>) -> bool {
+fn is_pure_expr(
+    expr: &Expr,
+    pure_fns: &std::collections::HashSet<String>,
+    local_names: &std::collections::HashMap<String, crate::bytecode::Reg>,
+) -> bool {
     match expr {
         Expr::Int(_)
         | Expr::BigInt(_)
@@ -1942,29 +1946,37 @@ fn is_pure_expr(expr: &Expr, pure_fns: &std::collections::HashSet<String>) -> bo
         | Expr::Bytes(_)
         | Expr::Bool(_)
         | Expr::None => true,
-        Expr::Var(_) => true,
+        // A variable read is pure only when it refers to a local register in the
+        // current function scope.  Reads of free variables (globals, names captured
+        // from an enclosing scope) are inherently impure: the caller cannot
+        // control whether the value changes between invocations, so memoising the
+        // result via `CallMemo` would serve stale data.  Without this guard, a
+        // function like `def f(): return counter` would be mis-classified as pure
+        // and its first result permanently cached, hiding subsequent mutations of
+        // `counter` (issue #346 correctness requirement).
+        Expr::Var(n) => local_names.contains_key(n.as_str()),
         Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
-            items.iter().all(|e| is_pure_expr(e, pure_fns))
+            items.iter().all(|e| is_pure_expr(e, pure_fns, local_names))
         }
-        Expr::Starred(inner) => is_pure_expr(inner, pure_fns),
+        Expr::Starred(inner) => is_pure_expr(inner, pure_fns, local_names),
         Expr::Dict(items) => items.iter().all(|item| match item {
             crate::ast::DictItem::Pair(k, v) => {
-                is_pure_expr(k, pure_fns) && is_pure_expr(v, pure_fns)
+                is_pure_expr(k, pure_fns, local_names) && is_pure_expr(v, pure_fns, local_names)
             }
-            crate::ast::DictItem::DoubleSplat(e) => is_pure_expr(e, pure_fns),
+            crate::ast::DictItem::DoubleSplat(e) => is_pure_expr(e, pure_fns, local_names),
         }),
-        Expr::Unary { expr, .. } => is_pure_expr(expr, pure_fns),
+        Expr::Unary { expr, .. } => is_pure_expr(expr, pure_fns, local_names),
         Expr::Binary { left, right, .. } => {
-            is_pure_expr(left, pure_fns) && is_pure_expr(right, pure_fns)
+            is_pure_expr(left, pure_fns, local_names) && is_pure_expr(right, pure_fns, local_names)
         }
         Expr::Compare { left, ops } => {
-            is_pure_expr(left, pure_fns)
-                && ops.iter().all(|(_, e)| is_pure_expr(e, pure_fns))
+            is_pure_expr(left, pure_fns, local_names)
+                && ops.iter().all(|(_, e)| is_pure_expr(e, pure_fns, local_names))
         }
         Expr::Ternary { cond, then, else_ } => {
-            is_pure_expr(cond, pure_fns)
-                && is_pure_expr(then, pure_fns)
-                && is_pure_expr(else_, pure_fns)
+            is_pure_expr(cond, pure_fns, local_names)
+                && is_pure_expr(then, pure_fns, local_names)
+                && is_pure_expr(else_, pure_fns, local_names)
         }
         // A lambda expression allocates a fresh Rc<UserFunction> on every evaluation,
         // so any enclosing function that returns one is not pure in the identity sense.
@@ -2022,17 +2034,17 @@ fn is_pure_expr(expr: &Expr, pure_fns: &std::collections::HashSet<String>) -> bo
             if !callee_is_pure {
                 return false;
             }
-            args.iter().all(|a| is_pure_expr(&a.value, pure_fns))
+            args.iter().all(|a| is_pure_expr(&a.value, pure_fns, local_names))
         }
-        Expr::Attr { target, .. } => is_pure_expr(target, pure_fns),
+        Expr::Attr { target, .. } => is_pure_expr(target, pure_fns, local_names),
         Expr::Index { target, index } => {
-            is_pure_expr(target, pure_fns) && is_pure_expr(index, pure_fns)
+            is_pure_expr(target, pure_fns, local_names) && is_pure_expr(index, pure_fns, local_names)
         }
         Expr::Slice { target, lower, upper, step } => {
-            is_pure_expr(target, pure_fns)
-                && lower.as_deref().is_none_or(|e| is_pure_expr(e, pure_fns))
-                && upper.as_deref().is_none_or(|e| is_pure_expr(e, pure_fns))
-                && step.as_deref().is_none_or(|e| is_pure_expr(e, pure_fns))
+            is_pure_expr(target, pure_fns, local_names)
+                && lower.as_deref().is_none_or(|e| is_pure_expr(e, pure_fns, local_names))
+                && upper.as_deref().is_none_or(|e| is_pure_expr(e, pure_fns, local_names))
+                && step.as_deref().is_none_or(|e| is_pure_expr(e, pure_fns, local_names))
         }
         // Comprehensions involve iteration (GetIter, ForIter) which may call
         // __iter__/__next__ — conservatively treat as impure.
@@ -2041,18 +2053,22 @@ fn is_pure_expr(expr: &Expr, pure_fns: &std::collections::HashSet<String>) -> bo
         Expr::Named { .. } => false,
         Expr::FString(parts) => {
             use crate::ast::FStringPart;
-            fn check_parts(parts: &[FStringPart], pure_fns: &std::collections::HashSet<String>) -> bool {
+            fn check_parts(
+                parts: &[FStringPart],
+                pure_fns: &std::collections::HashSet<String>,
+                local_names: &std::collections::HashMap<String, crate::bytecode::Reg>,
+            ) -> bool {
                 parts.iter().all(|p| match p {
                     FStringPart::Literal(_) => true,
                     FStringPart::Expr { expr, format_spec, .. } => {
-                        is_pure_expr(expr, pure_fns)
+                        is_pure_expr(expr, pure_fns, local_names)
                             && format_spec
                                 .as_ref()
-                                .is_none_or(|sp| check_parts(sp, pure_fns))
+                                .is_none_or(|sp| check_parts(sp, pure_fns, local_names))
                     }
                 })
             }
-            check_parts(parts, pure_fns)
+            check_parts(parts, pure_fns, local_names)
         }
         // yield/yield from always have side effects (generator suspension).
         Expr::Yield(_) | Expr::YieldFrom(_) => false,
@@ -2066,14 +2082,25 @@ fn is_pure_expr(expr: &Expr, pure_fns: &std::collections::HashSet<String>) -> bo
 /// builtins (see `crate::builtin_registry::is_pure`) are treated as impure.
 /// Attribute/index mutation, global/nonlocal declarations, imports, and
 /// `with` blocks are always impure.
+///
+/// `local_names` is the local-variable index for the function being analysed.
+/// Variable reads (`Expr::Var`) are pure only when the name is a function-local;
+/// reads of free variables (module globals, outer-scope names) are impure
+/// because the memoisation in `CallMemo` would cache the first result and
+/// silently hide subsequent mutations.
 pub(crate) fn is_pure_body(
     body: &[Stmt],
     pure_fns: &std::collections::HashSet<String>,
+    local_names: &std::collections::HashMap<String, crate::bytecode::Reg>,
 ) -> bool {
-    body.iter().all(|s| is_pure_stmt(s, pure_fns))
+    body.iter().all(|s| is_pure_stmt(s, pure_fns, local_names))
 }
 
-fn is_pure_stmt(stmt: &Stmt, pure_fns: &std::collections::HashSet<String>) -> bool {
+fn is_pure_stmt(
+    stmt: &Stmt,
+    pure_fns: &std::collections::HashSet<String>,
+    local_names: &std::collections::HashMap<String, crate::bytecode::Reg>,
+) -> bool {
     match stmt {
         // Explicit side effects on outer state.
         Stmt::Global(_) | Stmt::Nonlocal(_) => false,
@@ -2085,51 +2112,51 @@ fn is_pure_stmt(stmt: &Stmt, pure_fns: &std::collections::HashSet<String>) -> bo
         Stmt::With { .. } => false,
 
         // Assignments and augmented assignments are local writes → pure if RHS is.
-        Stmt::Assign(_, expr) | Stmt::Expr(expr) => is_pure_expr(expr, pure_fns),
-        Stmt::AugAssign { expr, .. } => is_pure_expr(expr, pure_fns),
-        Stmt::Return(Some(expr)) => is_pure_expr(expr, pure_fns),
+        Stmt::Assign(_, expr) | Stmt::Expr(expr) => is_pure_expr(expr, pure_fns, local_names),
+        Stmt::AugAssign { expr, .. } => is_pure_expr(expr, pure_fns, local_names),
+        Stmt::Return(Some(expr)) => is_pure_expr(expr, pure_fns, local_names),
         Stmt::Return(None) => true,
         Stmt::Assert { test, msg } => {
-            is_pure_expr(test, pure_fns)
-                && msg.as_ref().is_none_or(|e| is_pure_expr(e, pure_fns))
+            is_pure_expr(test, pure_fns, local_names)
+                && msg.as_ref().is_none_or(|e| is_pure_expr(e, pure_fns, local_names))
         }
         Stmt::Raise { expr, cause } => {
-            expr.as_ref().is_none_or(|e| is_pure_expr(e, pure_fns))
-                && cause.as_ref().is_none_or(|e| is_pure_expr(e, pure_fns))
+            expr.as_ref().is_none_or(|e| is_pure_expr(e, pure_fns, local_names))
+                && cause.as_ref().is_none_or(|e| is_pure_expr(e, pure_fns, local_names))
         }
 
         // Control flow: recurse into sub-blocks.
         Stmt::If { branches, else_branch } => {
             branches
                 .iter()
-                .all(|(cond, blk)| is_pure_expr(cond, pure_fns) && is_pure_body(blk, pure_fns))
+                .all(|(cond, blk)| is_pure_expr(cond, pure_fns, local_names) && is_pure_body(blk, pure_fns, local_names))
                 && else_branch
                     .as_deref()
-                    .is_none_or(|b| is_pure_body(b, pure_fns))
+                    .is_none_or(|b| is_pure_body(b, pure_fns, local_names))
         }
         Stmt::While { cond, body, else_branch } => {
-            is_pure_expr(cond, pure_fns)
-                && is_pure_body(body, pure_fns)
+            is_pure_expr(cond, pure_fns, local_names)
+                && is_pure_body(body, pure_fns, local_names)
                 && else_branch
                     .as_deref()
-                    .is_none_or(|b| is_pure_body(b, pure_fns))
+                    .is_none_or(|b| is_pure_body(b, pure_fns, local_names))
         }
         Stmt::For { iter, body, else_branch, .. } => {
-            is_pure_expr(iter, pure_fns)
-                && is_pure_body(body, pure_fns)
+            is_pure_expr(iter, pure_fns, local_names)
+                && is_pure_body(body, pure_fns, local_names)
                 && else_branch
                     .as_deref()
-                    .is_none_or(|b| is_pure_body(b, pure_fns))
+                    .is_none_or(|b| is_pure_body(b, pure_fns, local_names))
         }
         Stmt::Try { body, handlers, else_branch, finally_branch } => {
-            is_pure_body(body, pure_fns)
-                && handlers.iter().all(|h| is_pure_body(&h.body, pure_fns))
+            is_pure_body(body, pure_fns, local_names)
+                && handlers.iter().all(|h| is_pure_body(&h.body, pure_fns, local_names))
                 && else_branch
                     .as_deref()
-                    .is_none_or(|b| is_pure_body(b, pure_fns))
+                    .is_none_or(|b| is_pure_body(b, pure_fns, local_names))
                 && finally_branch
                     .as_deref()
-                    .is_none_or(|b| is_pure_body(b, pure_fns))
+                    .is_none_or(|b| is_pure_body(b, pure_fns, local_names))
         }
 
         // Annotated assignment modifies __annotations__ dict — impure at module/class scope.
@@ -2140,10 +2167,10 @@ fn is_pure_stmt(stmt: &Stmt, pure_fns: &std::collections::HashSet<String>) -> bo
         Stmt::Def { .. } | Stmt::Class { .. } => false,
         Stmt::Pass | Stmt::Break | Stmt::Continue => true,
         Stmt::Match { subject, arms } => {
-            is_pure_expr(subject, pure_fns)
+            is_pure_expr(subject, pure_fns, local_names)
                 && arms
                     .iter()
-                    .all(|arm| is_pure_body(&arm.body, pure_fns))
+                    .all(|arm| is_pure_body(&arm.body, pure_fns, local_names))
         }
     }
 }
@@ -2361,7 +2388,7 @@ mod purity_tests {
     use super::is_pure_body;
     use crate::lexer::Lexer;
     use crate::parser::Parser;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     fn parse_body(src: &str) -> Vec<crate::ast::Stmt> {
         let tokens = Lexer::new(src).expect("lex failed").into_tokens();
@@ -2378,8 +2405,14 @@ mod purity_tests {
     #[test]
     fn module_namespaced_math_calls_are_pure() {
         let body = parse_body("y = math.sqrt(x)\nz = math.sin(y)\nreturn z\n");
+        // Treat x, y, z as local registers so only the callee purity is tested,
+        // not whether variable reads are free variables.
+        let locals: HashMap<String, u32> = [("x", 0u32), ("y", 1), ("z", 2)]
+            .iter()
+            .map(|(k, v)| (k.to_string(), *v))
+            .collect();
         assert!(
-            is_pure_body(&body, &HashSet::new()),
+            is_pure_body(&body, &HashSet::new(), &locals),
             "math.sqrt / math.sin must register as pure (registry-keyed lookup)"
         );
     }
@@ -2391,7 +2424,7 @@ mod purity_tests {
     fn value_method_calls_stay_impure() {
         let body = parse_body("y = obj.frobnicate(x)\nreturn y\n");
         assert!(
-            !is_pure_body(&body, &HashSet::new()),
+            !is_pure_body(&body, &HashSet::new(), &HashMap::new()),
             "obj.method(...) calls must be conservatively impure"
         );
     }
@@ -2402,7 +2435,7 @@ mod purity_tests {
     fn nested_attribute_calls_stay_impure() {
         let body = parse_body("y = a.b.c(x)\nreturn y\n");
         assert!(
-            !is_pure_body(&body, &HashSet::new()),
+            !is_pure_body(&body, &HashSet::new(), &HashMap::new()),
             "a.b.c(...) calls must be conservatively impure"
         );
     }
@@ -2414,7 +2447,7 @@ mod purity_tests {
     fn impure_builtins_are_rejected() {
         let body = parse_body("print(x)\nreturn x\n");
         assert!(
-            !is_pure_body(&body, &HashSet::new()),
+            !is_pure_body(&body, &HashSet::new(), &HashMap::new()),
             "print(...) is registered impure and must NOT pass the gate"
         );
     }
@@ -2428,7 +2461,7 @@ mod purity_tests {
     fn nested_def_is_impure() {
         let body = parse_body("def f(): pass\nreturn f\n");
         assert!(
-            !is_pure_body(&body, &HashSet::new()),
+            !is_pure_body(&body, &HashSet::new(), &HashMap::new()),
             "body with nested def must be impure (fixes #769)"
         );
     }
@@ -2440,7 +2473,7 @@ mod purity_tests {
     fn nested_class_is_impure() {
         let body = parse_body("class C: pass\nreturn C\n");
         assert!(
-            !is_pure_body(&body, &HashSet::new()),
+            !is_pure_body(&body, &HashSet::new(), &HashMap::new()),
             "body with nested class must be impure (fixes #769)"
         );
     }
@@ -2452,7 +2485,7 @@ mod purity_tests {
     fn lambda_expr_is_impure() {
         let body = parse_body("return lambda x: x + 1\n");
         assert!(
-            !is_pure_body(&body, &HashSet::new()),
+            !is_pure_body(&body, &HashSet::new(), &HashMap::new()),
             "body returning a lambda must be impure (fixes #769)"
         );
     }

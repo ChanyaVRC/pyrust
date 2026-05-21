@@ -673,6 +673,10 @@ pub struct Environment {
     pub global_names: NameSet,
     pub nonlocal_names: NameSet,
     pub parent: Option<EnvRef>,
+    /// Monotonic version counter incremented on every insert or remove from
+    /// `values`.  Only meaningful on the module-level (root) `Environment`;
+    /// function-level envs never participate in `LoadGlobal` caching.
+    pub version: u32,
 }
 
 pub type EnvRef = Rc<RefCell<Environment>>;
@@ -685,6 +689,7 @@ impl Environment {
             global_names: Rc::new(HashSet::new()),
             nonlocal_names: Rc::new(HashSet::new()),
             parent,
+            version: 0,
         }))
     }
 }

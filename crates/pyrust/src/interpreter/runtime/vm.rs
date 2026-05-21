@@ -778,6 +778,25 @@ impl Interpreter {
                     };
                 }
                 Insn::LoadGlobal(dst, name_idx) => {
+                    // ── Inline cache fast path ────────────────────────────
+                    // Check the per-name cache slot before doing any env-chain
+                    // walk.  A hit requires either:
+                    //   * the cached version == global_env_version (module env
+                    //     unchanged since the value was last resolved), or
+                    //   * the cached version == GLOBAL_CACHE_BUILTIN (builtin;
+                    //     permanently immutable, no version to check).
+                    let cur_ver = self.global_env_version.get();
+                    {
+                        let cache = code.global_cache.borrow();
+                        if (*name_idx as usize) < cache.len() {
+                            let entry = &cache[*name_idx as usize];
+                            if entry.0 == cur_ver || entry.0 == GLOBAL_CACHE_BUILTIN {
+                                regs[*dst as usize] = entry.1.clone();
+                                continue;
+                            }
+                        }
+                    }
+                    // ── Slow path: full name resolution ──────────────────
                     let name = pool_get!(code.names, *name_idx, "name");
                     // Issue #706: look up the name through the env chain first
                     // (this covers function-level cell vars, nonlocal bindings,
@@ -788,8 +807,17 @@ impl Interpreter {
                     // env.values).  Putting the dict check BEFORE lookup_name
                     // was wrong: a function-level cell var named "g" would have
                     // shadowed by a same-named module global in the dict.
-                    let val = if let Some(v) = vm_try!(self.lookup_name(name)) {
-                        v
+                    let (val, cache_ver) = if let Some(v) = vm_try!(self.lookup_name(name)) {
+                        // Value came from the env chain.  Only cache it if the name
+                        // is in the module env — that is the only env whose version
+                        // is tracked by `global_env_version`.  Cell vars / nonlocal
+                        // bindings live in intermediate (function-level) envs whose
+                        // mutations do NOT increment `global_env_version`, so caching
+                        // them here would serve stale values after a write.
+                        let in_module_env =
+                            lookup_name_in_module(&self.env, name).is_some();
+                        let ver = if in_module_env { cur_ver } else { GLOBAL_CACHE_EMPTY };
+                        (v, ver)
                     } else if let Some(v) = self
                         .module_globals_dict
                         .dict_with(|d| d.get(&StrKey(name)).cloned())
@@ -798,7 +826,9 @@ impl Interpreter {
                         // Fallback: pick up globals()["x"] = val mutations that
                         // write to the dict without going through assign_name.
                         // StrKey avoids a String allocation on every miss.
-                        v
+                        // Do NOT cache this value: we don't track when the dict
+                        // is mutated directly, so we can't guarantee correctness.
+                        (v, GLOBAL_CACHE_EMPTY)
                     } else if let Some(v) = self
                         .vm_frame_views
                         .iter()
@@ -822,15 +852,27 @@ impl Interpreter {
                             if v.is_unset() { None } else { Some(v.clone()) }
                         })
                     {
-                        v
+                        // Script-frame register fallback: cache as a regular
+                        // env-version value (assign_name bumps the version when
+                        // these registers change).
+                        (v, cur_ver)
                     } else {
-                        vm_try!(resolve_builtin(name).ok_or_else(|| {
+                        let v = vm_try!(resolve_builtin(name).ok_or_else(|| {
                             PyError::named(
                                 "NameError",
                                 format!("name '{}' is not defined", name),
                             )
-                        }))
+                        }));
+                        // Builtins are permanently immutable: cache with the
+                        // sentinel GLOBAL_CACHE_BUILTIN, which is never equal
+                        // to any real global_env_version value.
+                        (v, GLOBAL_CACHE_BUILTIN)
                     };
+                    // Update the cache slot.
+                    if cache_ver != GLOBAL_CACHE_EMPTY {
+                        code.global_cache.borrow_mut()[*name_idx as usize] =
+                            (cache_ver, val.clone());
+                    }
                     regs[*dst as usize] = val;
                 }
                 Insn::StoreGlobal(name_idx, src) => {
@@ -1654,6 +1696,8 @@ impl Interpreter {
                                 format!("name '{}' is not defined", name),
                             )));
                         }
+                        // Invalidate the LoadGlobal inline cache.
+                        bump_global_env_version(self);
                         // Also clear the module-level fastlocal register so the
                         // write-back loop in `program.rs` does not re-insert the
                         // stale value.  Mirrors the write-through that `assign_name`
@@ -1703,6 +1747,11 @@ impl Interpreter {
                                 "NameError",
                                 format!("name '{}' is not defined", name),
                             )));
+                        }
+                        // Invalidate the LoadGlobal inline cache for module-scope
+                        // deletions (non-global-declared `del x` at module scope).
+                        if is_module_scope {
+                            bump_global_env_version(self);
                         }
                     }
                 }
@@ -1754,6 +1803,8 @@ impl Interpreter {
                     // through a subsequent globals() lookup (issue #846).
                     let _ = self.module_globals_dict
                         .dict_shift_remove(&PyKey::Str(name.to_string()));
+                    // Invalidate the LoadGlobal inline cache.
+                    bump_global_env_version(self);
                 }
 
                 // ── Control flow ─────────────────────────────────────────
@@ -4334,7 +4385,7 @@ mod vm_tests {
     use crate::interpreter::Interpreter;
 
     fn empty_code(insns: Vec<Insn>) -> FnCode {
-        use crate::bytecode::AttrCacheEntry;
+        use crate::bytecode::{AttrCacheEntry, GLOBAL_CACHE_EMPTY};
         let n = insns.len();
         FnCode {
             insns,
@@ -4348,6 +4399,7 @@ mod vm_tests {
             is_generator: false,
             is_class_method: false,
             attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; n]),
+            global_cache: std::cell::RefCell::new(vec![(GLOBAL_CACHE_EMPTY, Value::none()); 0]),
         }
     }
 
