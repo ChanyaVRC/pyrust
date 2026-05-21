@@ -665,6 +665,12 @@ impl Interpreter {
                     Err(e2) => return Err(e2),
                 }
             }
+            PyError::ImportError { class_name, message, module_name } => {
+                match self.instantiate_import_error_exception(class_name, message, module_name) {
+                    Ok(v) => v,
+                    Err(e2) => return Err(e2),
+                }
+            }
             other => return Err(other),
         };
         self.attach_implicit_context(&exc_val);
@@ -1249,9 +1255,10 @@ impl Interpreter {
                                 ValueKind::PyModule(m) => m.borrow().name.clone(),
                                 _ => "<unknown>".to_string(),
                             };
-                            vm_try!(Err(PyError::named(
+                            vm_try!(Err(PyError::import_error(
                                 "ImportError",
                                 format!("cannot import name '{name}' from '{mod_name}'"),
+                                Some(mod_name),
                             )));
                         }
                         Err(e) => vm_try!(Err(e)),

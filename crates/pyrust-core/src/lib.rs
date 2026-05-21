@@ -3726,6 +3726,22 @@ pub enum PyError {
     /// through without pre-rendering it as a string.  The VM materialises it
     /// as `instantiate_exception(KeyError_class, vec![key])`.
     KeyError(Value),
+    /// An `ImportError` (or `ModuleNotFoundError`) that carries the module
+    /// name so the VM can set `.name` and `.path` on the resulting instance.
+    ///
+    /// CPython 3.12: `ImportError.__init__` accepts `*args, name=None,
+    /// path=None` keyword arguments and stores them as instance attributes.
+    /// Raise sites that know the module name should use this variant instead
+    /// of `PyError::Named("ImportError", …)` so that `e.name` works in
+    /// `except ImportError as e:` blocks.
+    ///
+    /// `class_name` is `"ImportError"` or `"ModuleNotFoundError"`.
+    /// `module_name` is `None` when the module name is not available.
+    ImportError {
+        class_name: &'static str,
+        message: String,
+        module_name: Option<String>,
+    },
     Raised(Value),
 }
 
@@ -3761,6 +3777,24 @@ impl PyError {
         PyError::KeyError(key)
     }
 
+    /// Constructor for an `ImportError` or `ModuleNotFoundError` that carries
+    /// the module name.
+    ///
+    /// `class_name` must be `"ImportError"` or `"ModuleNotFoundError"`.
+    /// The VM materialises the exception and sets `.name` and `.path` on it.
+    #[inline]
+    pub fn import_error(
+        class_name: &'static str,
+        message: impl Into<String>,
+        module_name: Option<String>,
+    ) -> Self {
+        PyError::ImportError {
+            class_name,
+            message: message.into(),
+            module_name,
+        }
+    }
+
     /// Returns `true` when `self` is a `Named`, `Class`, `KeyError`, or `Raised` error
     /// whose exception class name equals `name`.
     ///
@@ -3776,6 +3810,13 @@ impl PyError {
             PyError::Named(cls, _) => cls.as_ref() == name,
             PyError::Class(cls, _) => cls.borrow().name == name,
             PyError::KeyError(_) => name == "KeyError",
+            PyError::ImportError { class_name, .. } => {
+                // ModuleNotFoundError is a subclass of ImportError; treat it
+                // as both so that `class_name_is("ImportError")` returns true
+                // for a ModuleNotFoundError variant too.
+                *class_name == name
+                    || (name == "ImportError" && *class_name == "ModuleNotFoundError")
+            }
             PyError::Raised(exc) => match exc.kind() {
                 ValueKind::PyInstance(inst) => class_chain_has_name(&inst.borrow().class, name),
                 ValueKind::PyClass(cls) => class_chain_has_name(cls, name),
@@ -3795,6 +3836,13 @@ impl fmt::Display for PyError {
             PyError::Named(cls, s) => write!(f, "{cls}: {s}"),
             PyError::Class(cls, s) => write!(f, "{}: {s}", cls.borrow().name),
             PyError::KeyError(key) => write!(f, "KeyError: {}", key.repr()),
+            PyError::ImportError {
+                class_name,
+                message,
+                ..
+            } => {
+                write!(f, "{class_name}: {message}")
+            }
             PyError::Raised(value) => write!(f, "Uncaught exception: {}", value.repr()),
         }
     }

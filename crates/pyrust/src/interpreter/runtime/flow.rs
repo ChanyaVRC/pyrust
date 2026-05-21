@@ -248,6 +248,21 @@ impl Interpreter {
         Ok(instantiate_exception(class, vec![arg]))
     }
 
+    /// Instantiate an `ImportError` or `ModuleNotFoundError` with the CPython
+    /// 3.12 `.name` and `.path` instance attributes set.
+    ///
+    /// `class_name` must be `"ImportError"` or `"ModuleNotFoundError"`.
+    fn instantiate_import_error_exception(
+        &self,
+        class_name: &str,
+        message: String,
+        module_name: Option<String>,
+    ) -> Result<Value> {
+        let class = lookup_exc_class(class_name)
+            .ok_or_else(|| PyError::Runtime(format!("built-in exception '{class_name}' is not defined")))?;
+        Ok(instantiate_import_error(class, message, module_name))
+    }
+
     fn exception_matches(&self, exception: &Value, kind: &Value) -> Result<bool> {
         let instance = match exception.kind() {
             ValueKind::PyInstance(i) => Rc::clone(i),
