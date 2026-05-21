@@ -1257,7 +1257,9 @@ impl Interpreter {
                             };
                             vm_try!(Err(PyError::import_error(
                                 "ImportError",
-                                format!("cannot import name '{name}' from '{mod_name}'"),
+                                format!(
+                                    "cannot import name '{name}' from '{mod_name}' (unknown location)"
+                                ),
                                 Some(mod_name),
                             )));
                         }
