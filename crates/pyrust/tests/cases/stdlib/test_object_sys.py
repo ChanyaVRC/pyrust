@@ -35,6 +35,7 @@ print(sys.version_info.major)      # 3
 print(isinstance(sys.version_info.minor, int))     # True
 print(isinstance(sys.version_info.micro, int))     # True
 print(sys.version_info.releaselevel)               # final
+print(type(sys.version_info).__qualname__)         # version_info
 
 # ── sys.platform ─────────────────────────────────────────────────────────────
 

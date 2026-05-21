@@ -77,7 +77,7 @@ const fn sys_platform() -> &'static str {
 thread_local! {
     static VERSION_INFO_CLASS: Rc<RefCell<PyClass>> = Rc::new(RefCell::new(PyClass {
         name: "version_info".to_string(),
-        qualname: "sys.version_info".to_string(),
+        qualname: "version_info".to_string(),
         base: None,
         attrs: indexmap::IndexMap::new(),
         mutation_version: std::cell::Cell::new(0),
