@@ -240,7 +240,7 @@ impl Interpreter {
                 let mut frames = vec![pyrust_core::FrameInfo {
                     filename: filename.clone(),
                     lineno: None,
-                    funcname: "<module>".to_string(),
+                    funcname: std::sync::Arc::from("<module>"),
                 }];
                 frames.extend(inner_frames);
                 let error_line = match e {

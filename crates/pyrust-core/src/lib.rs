@@ -3473,7 +3473,8 @@ pub struct FrameInfo {
     /// table is available (Phase 1 limitation).
     pub lineno: Option<u32>,
     /// Function or method name.  `"<module>"` for module-scope code.
-    pub funcname: String,
+    /// `Arc<str>` so cloning a frame is a reference-count bump, not a heap alloc.
+    pub funcname: Arc<str>,
 }
 
 thread_local! {
