@@ -58,6 +58,7 @@ thread_local! {
             qualname: "_Any".to_string(),
             base: None,
             attrs,
+            mutation_version: std::cell::Cell::new(0),
         }))
     };
 
@@ -71,6 +72,7 @@ thread_local! {
             qualname: "_TypingAlias".to_string(),
             base: None,
             attrs,
+            mutation_version: std::cell::Cell::new(0),
         }))
     };
 }
@@ -240,6 +242,7 @@ thread_local! {
                 qualname: (*name).to_string(),
                 base: None,
                 attrs,
+                mutation_version: std::cell::Cell::new(0),
             }));
             map.insert(*name, class);
         }

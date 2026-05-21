@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -283,6 +284,73 @@ pub enum Insn {
     DeleteModuleGlobal(u16),
 }
 
+/// Per-call-site inline cache entry for `Insn::GetAttr` and `Insn::CallMethod`.
+///
+/// The cache is indexed by the instruction's position (`pc`) in `FnCode::insns`.
+/// On every hit the cache checks that (a) the object is still a `PyInstance` of
+/// the same class (`class_ptr` pointer equality) and (b) that class has not been
+/// mutated since the fill (`class_version` matches `PyClass::mutation_version`).
+/// When both guards hold the cached unbound value is rebound to the current
+/// instance instead of repeating the `lookup_class_attr` chain walk.
+///
+/// The value stored is the **unbound** class-attribute value (i.e. what
+/// `lookup_class_attr` returns).  `GetAttr` rebinds it on each hit; `CallMethod`
+/// passes it to `invoke_class_method` which prepends the receiver.  Storing the
+/// unbound value is critical for correctness: a `BoundMethod` captures a specific
+/// receiver and would be stale when the same call site is executed for a different
+/// object.
+///
+/// `Megamorphic` is set when two or more distinct class pointers are observed at
+/// the same call site.  Once megamorphic the slot is never re-filled — the slow
+/// path is cheaper than the overhead of re-checking on every execution.
+///
+/// # Safety
+///
+/// `class_ptr` is a raw pointer derived from `Rc::as_ptr(&Rc<RefCell<PyClass>>)`.
+/// It is used **only** for identity comparison (pointer equality), never
+/// dereferenced.  The interpreter is single-threaded and the `Rc` is kept alive
+/// for the lifetime of the class (which outlives any `FnCode` that references
+/// it), so the pointer is always valid for the lifetime of this cache entry.
+#[derive(Clone)]
+pub enum AttrCacheEntry {
+    /// No observation yet — slot is uninitialised.
+    Empty,
+    /// Monomorphic: one class seen.  Validated by pointer + version check.
+    ClassAttr {
+        /// Raw pointer to the `RefCell<PyClass>` inside the class's `Rc`.
+        /// Used for O(1) identity comparison; never dereferenced.
+        class_ptr: *const (),
+        /// Value of `PyClass::mutation_version` when the cache was filled.
+        class_version: u64,
+        /// The unbound class-attr value from `lookup_class_attr`.
+        value: Value,
+    },
+    /// More than one class seen at this site — disable caching.
+    Megamorphic,
+}
+
+// SAFETY: pyrust's interpreter is single-threaded.  `AttrCacheEntry` is only
+// ever read or written inside `run_bytecode_inner`, which runs on one thread.
+// The raw `class_ptr` is never sent across threads.
+unsafe impl Send for AttrCacheEntry {}
+unsafe impl Sync for AttrCacheEntry {}
+
+impl std::fmt::Debug for AttrCacheEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AttrCacheEntry::Empty => write!(f, "Empty"),
+            AttrCacheEntry::ClassAttr {
+                class_ptr,
+                class_version,
+                ..
+            } => {
+                write!(f, "ClassAttr({class_ptr:?}, v{class_version})")
+            }
+            AttrCacheEntry::Megamorphic => write!(f, "Megamorphic"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FnCode {
     pub(crate) insns: Vec<Insn>,
@@ -309,4 +377,14 @@ pub struct FnCode {
     /// functions or in functions nested inside methods.  Used by
     /// `resolve_zero_arg_super` to identify the correct enclosing frame.
     pub(crate) is_class_method: bool,
+    /// Per-instruction inline cache for `GetAttr` and `CallMethod`.
+    ///
+    /// Indexed by instruction position (`pc`) — same length as `insns`.
+    /// Only entries at `GetAttr` / `CallMethod` positions are ever populated;
+    /// all other entries remain `AttrCacheEntry::Empty`.
+    ///
+    /// `RefCell` provides interior mutability so the cache can be updated
+    /// through a shared `Rc<FnCode>` during dispatch without requiring an
+    /// exclusive borrow of the enclosing `FnCode`.
+    pub(crate) attr_cache: RefCell<Vec<AttrCacheEntry>>,
 }

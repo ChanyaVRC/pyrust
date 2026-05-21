@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use crate::bytecode::{FnCode, FnProto, Insn};
+use crate::bytecode::{AttrCacheEntry, FnCode, FnProto, Insn};
 use crate::value::{Value, ValueKind};
 
 /// Optimize a compiled `FnCode` and all nested function prototypes.
@@ -74,6 +74,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_loadnone_merge(insns);
     let (insns, consts) = pass_compact_consts(insns, consts);
 
+    let insns_len = insns.len();
     FnCode {
         insns,
         consts,
@@ -85,6 +86,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         cell_vars: code.cell_vars,
         is_generator: code.is_generator,
         is_class_method: code.is_class_method,
+        attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; insns_len]),
     }
 }
 

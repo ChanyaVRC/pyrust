@@ -80,6 +80,7 @@ thread_local! {
         qualname: "sys.version_info".to_string(),
         base: None,
         attrs: indexmap::IndexMap::new(),
+        mutation_version: std::cell::Cell::new(0),
     }));
 }
 

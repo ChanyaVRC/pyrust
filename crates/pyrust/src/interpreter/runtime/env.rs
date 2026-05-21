@@ -719,7 +719,12 @@ impl Interpreter {
                         }
                     }
                 }
-                class.borrow_mut().attrs.insert(name.to_string(), value);
+                {
+                    let mut cls = class.borrow_mut();
+                    cls.attrs.insert(name.to_string(), value);
+                    let v = cls.mutation_version.get().wrapping_add(1);
+                    cls.mutation_version.set(v);
+                }
                 Ok(())
             }
             ValueKind::UserFunction(func) => {
@@ -1082,12 +1087,17 @@ impl Interpreter {
                     ));
                 }
                 // CPython raises AttributeError when the attribute is absent.
-                if class.borrow_mut().attrs.shift_remove(name).is_none() {
-                    let class_name = class.borrow().name.clone();
-                    return Err(PyError::named(
-                        "AttributeError",
-                        format!("type object '{class_name}' has no attribute '{name}'"),
-                    ));
+                {
+                    let mut cls = class.borrow_mut();
+                    if cls.attrs.shift_remove(name).is_none() {
+                        let class_name = cls.name.clone();
+                        return Err(PyError::named(
+                            "AttributeError",
+                            format!("type object '{class_name}' has no attribute '{name}'"),
+                        ));
+                    }
+                    let v = cls.mutation_version.get().wrapping_add(1);
+                    cls.mutation_version.set(v);
                 }
                 Ok(())
             }

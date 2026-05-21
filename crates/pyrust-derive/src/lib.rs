@@ -1535,6 +1535,7 @@ pub fn pyrust_module(input: TokenStream) -> TokenStream {
                     qualname: #class_name_lit.to_string(),
                     base: None,
                     attrs,
+                    mutation_version: std::cell::Cell::new(0),
                 })))
             });
         });
