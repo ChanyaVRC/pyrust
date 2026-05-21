@@ -653,6 +653,12 @@ impl Interpreter {
         // is a PyInstance and compute the hash via `hash_value_with_interp`,
         // then store it in a `PyKey::Object` consistent with what `hash()`
         // returns for the same slice (issue #850).
+        //
+        // When a component is a plain unhashable primitive (list, dict, set),
+        // `SliceOps::to_key()` also returns `None` but the fall-through error
+        // at the end of this function would blame `'slice'` rather than the
+        // actual offending component.  Detect that case here too and surface
+        // the correct type name (issue #893).
         if let ValueKind::BuiltinObject { ops, state } = value.kind() {
             if ops.type_name() == pyrust_builtins::slice::TYPE_NAME {
                 let borrow = state.borrow();
@@ -662,6 +668,21 @@ impl Interpreter {
                 let needs_interp = matches!(s.start.kind(), ValueKind::PyInstance(_))
                     || matches!(s.stop.kind(), ValueKind::PyInstance(_))
                     || matches!(s.step.kind(), ValueKind::PyInstance(_));
+                // Check whether any component is an unhashable primitive so we
+                // can name it precisely in the error rather than blaming 'slice'.
+                // Use recursive descent so that a tuple-inside-slice (or
+                // further nesting) names the leaf type, matching CPython.
+                let unhashable_component: Option<String> = if !needs_interp {
+                    [&s.start, &s.stop, &s.step].iter().find_map(|c| {
+                        if c.to_key().is_none() {
+                            Some(pyrust_builtins::set::leaf_unhashable_type_name(c))
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                };
                 drop(borrow);
                 if needs_interp {
                     let hash = crate::builtin_modules::builtins::hash_value_with_interp(
@@ -672,7 +693,13 @@ impl Interpreter {
                         value: value.clone(),
                     });
                 }
-                // No instance components: fall through to value.to_key() which
+                if let Some(component_name) = unhashable_component {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("unhashable type: '{component_name}'"),
+                    ));
+                }
+                // No unhashable components: fall through to value.to_key() which
                 // uses SliceOps::hash (DefaultHasher), consistent with hash().
             }
         }

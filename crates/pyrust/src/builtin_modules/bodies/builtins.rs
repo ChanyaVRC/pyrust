@@ -2601,10 +2601,27 @@ pub(crate) fn hash_value_with_interp(interp: &mut crate::Interpreter, value: &Va
                 || matches!(s.stop.kind(), ValueKind::PyInstance(_))
                 || matches!(s.step.kind(), ValueKind::PyInstance(_));
             if !needs_interp {
-                // Fast path: delegate to the pure path (SliceOps::hash via
-                // hash_value) to keep dict-key hashes consistent with the
-                // SliceOps::to_key path used in value_to_pykey.
+                // Check for unhashable primitive components (e.g. list, dict,
+                // set inside the slice).  hash_value's BuiltinObject arm would
+                // blame 'slice'; instead name the actual offending leaf type
+                // (issue #893).
+                let unhashable = [&s.start, &s.stop, &s.step].iter().find_map(|c| {
+                    if c.to_key().is_none() {
+                        Some(pyrust_builtins::set::leaf_unhashable_type_name(c))
+                    } else {
+                        None
+                    }
+                });
                 drop(borrow);
+                if let Some(bad_type) = unhashable {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("unhashable type: '{bad_type}'"),
+                    ));
+                }
+                // All components hashable: delegate to the pure path (SliceOps::hash
+                // via hash_value) to keep dict-key hashes consistent with the
+                // SliceOps::to_key path used in value_to_pykey.
                 return hash_value(value);
             }
             // Clone components to release the borrow before mutable interp calls.

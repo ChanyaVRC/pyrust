@@ -165,9 +165,56 @@ fn snapshot_iterable(receiver: &Value, arg: &Value) -> Result<IndexSet<PyKey>> {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+/// Walk `v` recursively (into tuples and slice components) to find the leaf
+/// unhashable value and return its type name.
+///
+/// This mirrors CPython's `PyObject_Hash` behaviour: when a tuple or slice
+/// contains an unhashable element, the error names the leaf type (e.g.
+/// `'list'`), not the container (`'tuple'` or `'slice'`).
+pub fn leaf_unhashable_type_name(v: &Value) -> String {
+    // Tuple: recurse into elements.
+    if let ValueKind::Tuple(items) = v.kind() {
+        for item in items {
+            if item.to_key().is_none() {
+                return leaf_unhashable_type_name(item);
+            }
+        }
+        // All elements hashable — the tuple itself is the culprit (shouldn't
+        // happen if caller verified to_key() == None, but be safe).
+        return pyrust_core::builtin_type_name(v).into_owned();
+    }
+    // Slice: recurse into components.
+    if let ValueKind::BuiltinObject { ops, state } = v.kind() {
+        if ops.type_name() == crate::slice::TYPE_NAME {
+            let borrow = state.borrow();
+            if let Some(s) = borrow.downcast_ref::<crate::slice::SliceState>() {
+                for component in [&s.start, &s.stop, &s.step] {
+                    if component.to_key().is_none() {
+                        return leaf_unhashable_type_name(component);
+                    }
+                }
+            }
+        }
+    }
+    // Leaf unhashable value (list, dict, set, …).
+    pyrust_core::builtin_type_name(v).into_owned()
+}
+
+/// Convert `v` to a `PyKey`, producing a precise "unhashable type: 'X'" error.
+///
+/// When `v` is a `slice` or a `tuple` whose `to_key()` returns `None`, the
+/// components are inspected recursively to surface the actual unhashable leaf
+/// (e.g. a `list` argument to `slice()`) rather than blaming the container.
+/// This matches CPython 3.12 behaviour where `s.update([slice([1,2], 3)])`
+/// raises `TypeError: unhashable type: 'list'`, not `'slice'`.
 fn to_key(v: &Value) -> Result<PyKey> {
-    v.to_key()
-        .ok_or_else(|| PyError::named("TypeError", "unhashable type".to_string()))
+    if let Some(key) = v.to_key() {
+        return Ok(key);
+    }
+    Err(PyError::named(
+        "TypeError",
+        format!("unhashable type: '{}'", leaf_unhashable_type_name(v)),
+    ))
 }
 
 /// Collect an iterable `Value` into a set of `PyKey`s.
