@@ -40,7 +40,7 @@ thread_local! {
             .expect("EXC_CLASS_CACHE must contain Exception");
         Rc::new(RefCell::new(PyClass {
             name: "Error".to_string(),
-            qualname: "copy.Error".to_string(),
+            qualname: "Error".to_string(),
             base: Some(exception_base),
             attrs: IndexMap::new(),
             mutation_version: std::cell::Cell::new(0),

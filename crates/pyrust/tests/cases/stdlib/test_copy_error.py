@@ -13,8 +13,9 @@ import copy
 # The class is accessible on the module (no AttributeError).
 print(type(copy.Error).__name__)   # -> "type"
 
-# Name attribute matches CPython.
+# Name and qualname attributes match CPython.
 print(copy.Error.__name__)         # -> "Error"
+print(copy.Error.__qualname__)     # -> "Error"
 
 # Subclass relationships hold.
 print(issubclass(copy.Error, Exception))      # -> True
@@ -45,3 +46,4 @@ except Exception as exc:
 # Both names must resolve to the same class object.
 print(copy.error is copy.Error)        # -> True
 print(copy.error.__name__)             # -> "Error"
+print(copy.error.__qualname__)         # -> "Error"
