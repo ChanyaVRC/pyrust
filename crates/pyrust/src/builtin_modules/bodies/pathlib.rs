@@ -728,7 +728,8 @@ pyrust_module! {
 // `FN_PREFIX` resolves to `"pathlib."` (injected by `pyrust_builtin_modules!`),
 // so the registered names are `"pathlib.Path.__init__"` etc.
 
-/// (method-short, registry-name) pairs for every `Path` method.
+/// (method-short, registry-name) pairs for every `Path` method that should be
+/// exposed as a regular callable method.
 ///
 /// These must match the `#[py_name = "Path.<method>"]` annotations above.
 const PATH_METHODS: &[(&str, &str)] = &[
@@ -741,11 +742,6 @@ const PATH_METHODS: &[(&str, &str)] = &[
     ("__hash__", "pathlib.Path.__hash__"),
     ("__fspath__", "pathlib.Path.__fspath__"),
     ("joinpath", "pathlib.Path.joinpath"),
-    ("name", "pathlib.Path.name"),
-    ("parent", "pathlib.Path.parent"),
-    ("stem", "pathlib.Path.stem"),
-    ("suffix", "pathlib.Path.suffix"),
-    ("parts", "pathlib.Path.parts"),
     ("exists", "pathlib.Path.exists"),
     ("is_file", "pathlib.Path.is_file"),
     ("is_dir", "pathlib.Path.is_dir"),
@@ -754,12 +750,36 @@ const PATH_METHODS: &[(&str, &str)] = &[
     ("mkdir", "pathlib.Path.mkdir"),
 ];
 
+/// (attr-short, registry-name) pairs for `Path` attributes that CPython exposes
+/// as read-only properties.  These are stored in the class attrs as `property`
+/// descriptors so that `path.name` evaluates to the string value directly,
+/// matching CPython's descriptor protocol.  Calling them without `()` is the
+/// correct access pattern.
+const PATH_PROPERTIES: &[(&str, &str)] = &[
+    ("name", "pathlib.Path.name"),
+    ("parent", "pathlib.Path.parent"),
+    ("stem", "pathlib.Path.stem"),
+    ("suffix", "pathlib.Path.suffix"),
+    ("parts", "pathlib.Path.parts"),
+];
+
 thread_local! {
     /// The `Path` class singleton — shared across all `Path` instances.
     static PATH_CLASS: Rc<RefCell<PyClass>> = {
         let mut attrs: IndexMap<String, Value> = IndexMap::new();
         for (short, py_full) in PATH_METHODS {
             attrs.insert((*short).to_string(), Value::builtin_function(py_full));
+        }
+        // Property descriptors: stored as read-only property objects so that
+        // `path.name` evaluates to the value directly (CPython parity).  The
+        // interpreter's `get_attr` dispatches `with_property` before the
+        // ordinary class-attr path, calling the getter with `self`.
+        for (short, py_full) in PATH_PROPERTIES {
+            let getter = Value::builtin_function(py_full);
+            attrs.insert(
+                (*short).to_string(),
+                pyrust_builtins::property::property(getter, Value::none(), Value::none()),
+            );
         }
         Rc::new(RefCell::new(PyClass {
             name: "Path".to_string(),

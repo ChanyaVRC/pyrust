@@ -3,10 +3,8 @@
 # On Linux/macOS, `pathlib.Path(...)` returns a `PosixPath` instance, not a
 # bare `Path` instance.  `type(Path('/tmp')).__name__` must be `'PosixPath'`.
 #
-# pyrust implements `name`/`parent`/`stem`/`suffix`/`parts` as callable
-# methods rather than descriptors (properties).  CPython exposes them as
-# read-only properties.  The `_get` helper bridges the gap without branching
-# on the interpreter.
+# `name`/`parent`/`stem`/`suffix`/`parts` are read-only properties in CPython.
+# pyrust now exposes them as property descriptors so direct access works.
 #
 # Windows note: CPython uses `WindowsPath` on Windows.  These tests are
 # POSIX-only (Linux/macOS) and are skipped on Windows to avoid platform
@@ -19,12 +17,6 @@ if sys.platform == 'win32':
     raise SystemExit
 
 from pathlib import Path, PosixPath
-
-
-def _get(obj, attr):
-    """Get a Path attribute, calling it if pyrust exposes it as a method."""
-    v = getattr(obj, attr)
-    return v() if callable(v) else v
 
 
 # ── type identity ──────────────────────────────────────────────────────────────
@@ -62,16 +54,19 @@ assert repr(PosixPath('/tmp/foo')) == "PosixPath('/tmp/foo')", repr(repr(PosixPa
 assert str(Path('/tmp/foo')) == '/tmp/foo', repr(str(Path('/tmp/foo')))
 assert str(PosixPath('/tmp/foo')) == '/tmp/foo', repr(str(PosixPath('/tmp/foo')))
 
-# ── methods inherited from Path work on PosixPath instances ───────────────────
+# ── properties: direct access without () ──────────────────────────────────────
 
-assert _get(Path('/tmp/foo/bar.txt'), 'name') == 'bar.txt'
-assert _get(Path('/tmp/foo/bar.txt'), 'stem') == 'bar'
-assert _get(Path('/tmp/foo/bar.txt'), 'suffix') == '.txt'
-assert str(_get(Path('/tmp/foo/bar.txt'), 'parent')) == '/tmp/foo'
+# name, stem, suffix, parent, parts are read-only properties in CPython.
+# Access them without calling; calling them would raise TypeError.
+assert Path('/tmp/foo/bar.txt').name == 'bar.txt'
+assert Path('/tmp/foo/bar.txt').stem == 'bar'
+assert Path('/tmp/foo/bar.txt').suffix == '.txt'
+assert str(Path('/tmp/foo/bar.txt').parent) == '/tmp/foo'
+assert Path('/tmp/foo/bar.txt').parts == ('/', 'tmp', 'foo', 'bar.txt')
 
-assert _get(PosixPath('/tmp/foo/bar.txt'), 'name') == 'bar.txt'
-assert _get(PosixPath('/tmp/foo/bar.txt'), 'stem') == 'bar'
-assert _get(PosixPath('/tmp/foo/bar.txt'), 'suffix') == '.txt'
+assert PosixPath('/tmp/foo/bar.txt').name == 'bar.txt'
+assert PosixPath('/tmp/foo/bar.txt').stem == 'bar'
+assert PosixPath('/tmp/foo/bar.txt').suffix == '.txt'
 
 # ── / operator produces PosixPath ─────────────────────────────────────────────
 
@@ -79,9 +74,9 @@ joined = Path('/tmp') / 'foo'
 assert type(joined).__name__ == 'PosixPath', repr(type(joined).__name__)
 assert str(joined) == '/tmp/foo', repr(str(joined))
 
-# ── parent() produces PosixPath ───────────────────────────────────────────────
+# ── parent produces PosixPath ─────────────────────────────────────────────────
 
-parent = _get(Path('/tmp/foo/bar'), 'parent')
+parent = Path('/tmp/foo/bar').parent
 assert type(parent).__name__ == 'PosixPath', repr(type(parent).__name__)
 assert str(parent) == '/tmp/foo', repr(str(parent))
 
@@ -120,27 +115,27 @@ assert str(jp4) == '/tmp/foo', repr(str(jp4))
 # ── name/stem/suffix edge cases ───────────────────────────────────────────────
 
 # CPython: Path('.').name == '' (dot is a pure-anchor, not a filename).
-assert _get(Path('.'), 'name') == '', repr(_get(Path('.'), 'name'))
-assert _get(Path('.'), 'stem') == '', repr(_get(Path('.'), 'stem'))
-assert _get(Path('.'), 'suffix') == '', repr(_get(Path('.'), 'suffix'))
+assert Path('.').name == '', repr(Path('.').name)
+assert Path('.').stem == '', repr(Path('.').stem)
+assert Path('.').suffix == '', repr(Path('.').suffix)
 
 # CPython: Path('/').name == ''.
-assert _get(Path('/'), 'name') == '', repr(_get(Path('/'), 'name'))
-assert _get(Path('/'), 'stem') == '', repr(_get(Path('/'), 'stem'))
-assert _get(Path('/'), 'suffix') == '', repr(_get(Path('/'), 'suffix'))
+assert Path('/').name == '', repr(Path('/').name)
+assert Path('/').stem == '', repr(Path('/').stem)
+assert Path('/').suffix == '', repr(Path('/').suffix)
 
 # CPython: Path('..').name == '..', stem == '..', suffix == ''.
-assert _get(Path('..'), 'name') == '..', repr(_get(Path('..'), 'name'))
-assert _get(Path('..'), 'stem') == '..', repr(_get(Path('..'), 'stem'))
-assert _get(Path('..'), 'suffix') == '', repr(_get(Path('..'), 'suffix'))
+assert Path('..').name == '..', repr(Path('..').name)
+assert Path('..').stem == '..', repr(Path('..').stem)
+assert Path('..').suffix == '', repr(Path('..').suffix)
 
 # Hidden files: leading dot is NOT a suffix separator.
-assert _get(Path('/tmp/.hidden'), 'name') == '.hidden', repr(_get(Path('/tmp/.hidden'), 'name'))
-assert _get(Path('/tmp/.hidden'), 'stem') == '.hidden', repr(_get(Path('/tmp/.hidden'), 'stem'))
-assert _get(Path('/tmp/.hidden'), 'suffix') == '', repr(_get(Path('/tmp/.hidden'), 'suffix'))
+assert Path('/tmp/.hidden').name == '.hidden', repr(Path('/tmp/.hidden').name)
+assert Path('/tmp/.hidden').stem == '.hidden', repr(Path('/tmp/.hidden').stem)
+assert Path('/tmp/.hidden').suffix == '', repr(Path('/tmp/.hidden').suffix)
 
 # Hidden files with extension.
-assert _get(Path('/tmp/.hidden.txt'), 'stem') == '.hidden', repr(_get(Path('/tmp/.hidden.txt'), 'stem'))
-assert _get(Path('/tmp/.hidden.txt'), 'suffix') == '.txt', repr(_get(Path('/tmp/.hidden.txt'), 'suffix'))
+assert Path('/tmp/.hidden.txt').stem == '.hidden', repr(Path('/tmp/.hidden.txt').stem)
+assert Path('/tmp/.hidden.txt').suffix == '.txt', repr(Path('/tmp/.hidden.txt').suffix)
 
 print('pathlib_posixpath ok')
