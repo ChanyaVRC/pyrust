@@ -766,6 +766,7 @@ thread_local! {
             qualname: "Path".to_string(),
             base: None,
             attrs,
+            mutation_version: std::cell::Cell::new(0),
         }))
     };
 
@@ -780,6 +781,7 @@ thread_local! {
                 qualname: "PosixPath".to_string(),
                 base: Some(Rc::clone(path_class)),
                 attrs: IndexMap::new(),
+                mutation_version: std::cell::Cell::new(0),
             }))
         })
     };
