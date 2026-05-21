@@ -7,10 +7,8 @@
 //! and `.step` and print/repr the slice value correctly.
 
 use std::any::Any;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
-use pyrust_core::{BuiltinState, BuiltinTypeOps, PyError, PyKey, Value};
+use pyrust_core::{BuiltinState, BuiltinTypeOps, PyError, PyKey, Value, py_hash_pykey};
 
 pub const TYPE_NAME: &str = "slice";
 pub const SLICE_OPS: &SliceOps = &SliceOps;
@@ -85,18 +83,18 @@ impl BuiltinTypeOps for SliceOps {
     /// `slice` objects are hashable in CPython 3.12 when all their components
     /// are hashable (CPython changed slice to be hashable in 3.12; the common
     /// case of `slice(int_or_None, int_or_None, int_or_None)` is always
-    /// hashable).  We combine the component hashes to produce a stable value.
+    /// hashable).
+    ///
+    /// Algorithm matches CPython 3.12 Objects/sliceobject.c::slice_hash: the same
+    /// xxHash kernel as tuplehash but without the final length-mixing XOR step
+    /// (i.e. just the per-element accumulation over 3 items with PRIME5 seed).
     fn hash(&self, state: &BuiltinState) -> Option<u64> {
         let borrow = state.borrow();
         let s = borrow.downcast_ref::<SliceState>()?;
         let hstart = component_hash(&s.start)?;
         let hstop = component_hash(&s.stop)?;
         let hstep = component_hash(&s.step)?;
-        let mut h = DefaultHasher::new();
-        hstart.hash(&mut h);
-        hstop.hash(&mut h);
-        hstep.hash(&mut h);
-        Some(h.finish())
+        Some(slice_hash_xxh([hstart, hstop, hstep]) as u64)
     }
 
     /// Expose `slice` as a hashable key so it can be used in sets/dicts.
@@ -126,14 +124,39 @@ pub fn make_slice(start: Option<Value>, stop: Option<Value>, step: Option<Value>
     Value::builtin_object(SLICE_OPS, state)
 }
 
-/// Hash a single slice component (`None` or an integer value).
+/// Hash a single slice component using the CPython-compatible hash from `py_hash_pykey`.
 ///
 /// Returns `None` if the component is unhashable (e.g. a list), making the
 /// whole slice unhashable — matching CPython's "hashable if components are
 /// hashable" contract.
-fn component_hash(v: &Value) -> Option<u64> {
+fn component_hash(v: &Value) -> Option<i64> {
     let key = v.to_key()?;
-    let mut h = DefaultHasher::new();
-    key.hash(&mut h);
-    Some(h.finish())
+    Some(py_hash_pykey(&key))
+}
+
+/// CPython 3.12 slice hash kernel (Objects/sliceobject.c::slice_hash).
+///
+/// Same xxHash per-element accumulation as tuplehash but WITHOUT the final
+/// `acc += n ^ (PRIME5 ^ 3527539)` length-mixing step.  Accepts exactly 3
+/// elements: (start_hash, stop_hash, step_hash).
+fn slice_hash_xxh(component_hashes: [i64; 3]) -> i64 {
+    const PRIME1: u64 = 11400714785074694791;
+    const PRIME2: u64 = 14029467366897019727;
+    const PRIME5: u64 = 2870177450012600261;
+
+    #[inline(always)]
+    fn xxstep(acc: u64, lane: u64) -> u64 {
+        let acc = acc.wrapping_add(lane.wrapping_mul(PRIME2));
+        let acc = (acc << 31) | (acc >> 33); // rotl31
+        acc.wrapping_mul(PRIME1)
+    }
+
+    let mut acc: u64 = PRIME5;
+    for h in component_hashes {
+        acc = xxstep(acc, h as u64);
+    }
+    if acc == u64::MAX {
+        acc = 1546275796;
+    }
+    acc as i64
 }
