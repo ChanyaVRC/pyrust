@@ -56,6 +56,10 @@ pyrust_module! {
     constants {
         // copy.Error — subclass of Exception, raised on deepcopy failures.
         "Error" => copy_error_class_value(),
+        // CPython's `copy.py` keeps a lowercase alias for backward
+        // compatibility: `error = Error`.  Both names must resolve to the
+        // same class so `copy.error is copy.Error` is `True`.
+        "error" => copy_error_class_value(),
     }
     /// CPython: copy.copy(x) — shallow copy.
     ///
