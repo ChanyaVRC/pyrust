@@ -829,6 +829,7 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | CallMemo(r, _)
         | BuildList(r, _, _)
         | BuildTuple(r, _, _)
+        | BuildSlice(r, _)
         | BuildDict(r, _, _)
         | MakeFunction(r, _, _, _, _, _)
         | ImportModule(r, _)
@@ -1620,6 +1621,8 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
             r == *args_base - 1 || (r >= *args_base && r < *args_base + *nargs as u32)
         }
         BuildList(_, base, n) | BuildTuple(_, base, n) => r >= *base && r < *base + *n as u32,
+        // BuildSlice always reads exactly 3 registers: start, stop, step.
+        BuildSlice(_, base) => r >= *base && r < *base + 3,
         // BuildDict stores n key-value PAIRS — each pair occupies 2 registers,
         // so the live range is base .. base + 2*n (not base + n).
         BuildDict(_, base, n) => r >= *base && r < *base + 2 * *n as u32,
@@ -1756,6 +1759,11 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         }
         BuildList(_, base, n) | BuildTuple(_, base, n) => {
             for r in *base..*base + *n as u32 {
+                reads.insert(r);
+            }
+        }
+        BuildSlice(_, base) => {
+            for r in *base..*base + 3 {
                 reads.insert(r);
             }
         }
@@ -2363,6 +2371,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | MakeClass(r, _, _, _, _)
         | BuildList(r, _, _)
         | BuildTuple(r, _, _)
+        | BuildSlice(r, _)
         | BuildDict(r, _, _)
         | BinOp(r, _, _, _)
         | BinOpInPlace(r, _, _, _)
@@ -5016,6 +5025,11 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         }
         BuildList(_, base, n) | BuildTuple(_, base, n) => {
             for r in *base..*base + *n as u32 {
+                f(r);
+            }
+        }
+        BuildSlice(_, base) => {
+            for r in *base..*base + 3 {
                 f(r);
             }
         }

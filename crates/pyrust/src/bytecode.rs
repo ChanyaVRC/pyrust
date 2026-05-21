@@ -151,6 +151,13 @@ pub enum Insn {
     BuildList(Reg, Reg, u8),
     /// R[dst] = (R[base], R[base+1], ..., R[base+n-1])
     BuildTuple(Reg, Reg, u8),
+    /// R[dst] = slice(R[base], R[base+1], R[base+2])
+    /// Emitted by the compiler for slice notation (a[lo:hi:step]).  Always
+    /// reads exactly three registers (start, stop, step); `None` means absent.
+    /// Using a dedicated instruction (rather than `BuildTuple`) removes the
+    /// ambiguity that caused 3-element tuples to be misidentified as slices
+    /// in `unpack_slice_key` (issue #931).
+    BuildSlice(Reg, Reg),
     /// R[dst] = {R[base]: R[base+1], R[base+2]: R[base+3], ...}  (n key-value pairs)
     BuildDict(Reg, Reg, u8),
     /// R[base..base+n] = iter_values(R[src])

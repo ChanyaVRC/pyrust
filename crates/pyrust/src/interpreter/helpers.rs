@@ -755,7 +755,15 @@ fn normalize_index(index: &Value, len: usize, label: &str) -> Result<usize> {
     let mut value = match index.kind() {
         ValueKind::Int(v) => v,
         ValueKind::Bool(b) => b as i64,
-        _ => return Err(PyError::Runtime("indices must be integers".to_string())),
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "{label} indices must be integers or slices, not {}",
+                    value_type_name_str(index)
+                ),
+            ))
+        }
     };
     if value < 0 {
         value += len as i64;
