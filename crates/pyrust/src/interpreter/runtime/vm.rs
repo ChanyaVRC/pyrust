@@ -1241,8 +1241,8 @@ impl Interpreter {
                                 // dedup against an existing entry.  `None` keys
                                 // also need it for the cross-variant case
                                 // (issue #906): a stored PyKey::Object with
-                                // hash 0 that __eq__-matches None must be
-                                // overwritten, not added as a second entry.
+                                // hash py_hash_none() that __eq__-matches None
+                                // must be overwritten, not added as a second entry.
                                 if matches!(&key, PyKey::Object { .. } | PyKey::None) {
                                     // Rc-clone the dict Value (cheap) so
                                     // `dict_lookup` can run with no live alias
@@ -1973,7 +1973,7 @@ impl Interpreter {
                     let key = vm_try!(self.value_to_pykey(&val));
                     // `Object` keys need `__eq__` dispatch for dedup.
                     // `None` keys also need it for the cross-variant case
-                    // (issue #906): a stored PyKey::Object with hash 0
+                    // (issue #906): a stored PyKey::Object with hash py_hash_none()
                     // that __eq__-matches None must not become a duplicate.
                     if matches!(&key, PyKey::Object { .. } | PyKey::None) {
                         // Rc-clone the set Value (cheap) so `set_lookup` can

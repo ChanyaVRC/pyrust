@@ -801,7 +801,7 @@ impl Interpreter {
             }
         }
         // Cross-variant slow path: lookup key is PyKey::None but a stored
-        // PyKey::Object with hash 0 may __eq__-match None (issue #906).
+        // PyKey::Object with hash py_hash_none() may __eq__-match None (issue #906).
         if matches!(key, PyKey::None) {
             let candidates: Vec<(usize, Value, Value)> = {
                 let dict = receiver
@@ -854,8 +854,9 @@ impl Interpreter {
                     PyKey::Object { hash, value } if hash == target_hash => {
                         Some((i, value.clone(), v.clone()))
                     }
-                    // Cross-variant: PyKey::None with Python-level hash 0
-                    // (issue #906).
+                    // Cross-variant: PyKey::None has Python-level hash py_hash_none();
+                    // include it as a candidate when the Object also hashes to that
+                    // value so that __eq__ can confirm the match (issue #906).
                     PyKey::None if *target_hash == (pyrust_core::py_hash_none() as u64) => {
                         Some((i, Value::none(), v.clone()))
                     }
@@ -868,7 +869,7 @@ impl Interpreter {
                 }
             }
         }
-        // Cross-variant slow path: None key vs Object entries with hash 0
+        // Cross-variant slow path: None key vs Object entries with hash py_hash_none()
         // (issue #906).
         if matches!(key, PyKey::None) {
             let none_hash = pyrust_core::py_hash_none() as u64;
@@ -946,9 +947,9 @@ impl Interpreter {
                         PyKey::Object { hash, value } if hash == target_hash => {
                             Some((i, value.clone()))
                         }
-                        // PyKey::None has Python-level hash 0; include it as a
-                        // candidate when the Object key also hashes to 0 so
-                        // that __eq__ can confirm the match (issue #906).
+                        // PyKey::None has Python-level hash py_hash_none(); include it
+                        // as a candidate when the Object key hashes to the same value
+                        // so that __eq__ can confirm the match (issue #906).
                         PyKey::None if *target_hash == (pyrust_core::py_hash_none() as u64) => Some((i, Value::none())),
                         _ => None,
                     })
@@ -960,7 +961,7 @@ impl Interpreter {
                 }
             }
         }
-        // Cross-variant slow path: None key vs Object entries with hash 0
+        // Cross-variant slow path: None key vs Object entries with hash py_hash_none()
         // (issue #906).
         if matches!(key, PyKey::None) {
             let candidates: Vec<(usize, Value)> = {
@@ -1008,8 +1009,9 @@ impl Interpreter {
                     PyKey::Object { hash, value } if hash == target_hash => {
                         Some((i, value.clone()))
                     }
-                    // Cross-variant: PyKey::None with Python-level hash 0
-                    // (issue #906).
+                    // Cross-variant: PyKey::None has Python-level hash py_hash_none();
+                    // include it as a candidate when the Object hashes to the same
+                    // value (issue #906).
                     PyKey::None if *target_hash == (pyrust_core::py_hash_none() as u64) => Some((i, Value::none())),
                     _ => None,
                 })
@@ -1020,7 +1022,7 @@ impl Interpreter {
                 }
             }
         }
-        // Cross-variant slow path: None key vs Object entries with hash 0
+        // Cross-variant slow path: None key vs Object entries with hash py_hash_none()
         // (issue #906).
         if matches!(key, PyKey::None) {
             let candidates: Vec<(usize, Value)> = set
@@ -1045,8 +1047,8 @@ impl Interpreter {
     /// `dict_value`, dispatching user `__eq__` to deduplicate against an
     /// existing entry when `key` is a `PyKey::Object` or `PyKey::None`.
     /// The None case handles cross-variant dedup (issue #906): inserting
-    /// None into a dict that already holds an Object key with hash 0 that
-    /// __eq__-matches None should overwrite the existing entry, not add a
+    /// None into a dict that already holds an Object key with hash py_hash_none()
+    /// that __eq__-matches None should overwrite the existing entry, not add a
     /// second one.
     pub(crate) fn dict_insert(
         &mut self,
@@ -1072,7 +1074,8 @@ impl Interpreter {
     /// Insert `key` into a set, dispatching user `__eq__` for dedup.
     /// Handles both `Object` keys and `None` keys for cross-variant dedup
     /// (issue #906): inserting None into a set that already holds an Object
-    /// with hash 0 that __eq__-matches None must not create a duplicate.
+    /// with hash py_hash_none() that __eq__-matches None must not create a
+    /// duplicate.
     pub(crate) fn set_insert(
         &mut self,
         set: &mut indexmap::IndexSet<PyKey>,
