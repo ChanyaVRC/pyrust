@@ -156,3 +156,24 @@ class MathObj:
 objs = [MathObj(i) for i in range(1, 6)]
 results = [o.mul(10) for o in objs]
 print("callmethod", results)   # [10, 20, 30, 40, 50]
+
+
+# ── 10. Base-class monkey-patch invalidation ─────────────────────────────────
+# A method resolved from a base class is cached on the derived-class call site.
+# Patching the base class must invalidate the cache so the next call returns
+# the new implementation.  This verifies that Base.mutation_version is bumped
+# by SetAttr and that the version check in the fast path catches the change.
+
+class AnimalBase:
+    def speak(self):
+        return "base"
+
+class Dog(AnimalBase):
+    pass
+
+dog = Dog()
+for _ in range(3):
+    print("pre-patch speak:", dog.speak())   # base
+
+AnimalBase.speak = lambda self: "patched"
+print("post-patch speak:", dog.speak())      # patched

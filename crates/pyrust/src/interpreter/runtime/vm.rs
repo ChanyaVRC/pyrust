@@ -996,12 +996,14 @@ impl Interpreter {
                             // instance shadow, and class not mutated.
                             if let Some(inst_rc) = regs[*obj as usize].as_py_instance_rc() {
                                 let inst = inst_rc.borrow();
-                                let name = code.names.get(*name_idx as usize)
-                                    .map(|s| s.as_str())
-                                    .unwrap_or("");
+                                let name_opt =
+                                    code.names.get(*name_idx as usize).map(|s| s.as_str());
                                 let same_class =
                                     Rc::as_ptr(&inst.class) as *const () == *class_ptr;
-                                let no_shadow = !inst.attrs.contains_key(name);
+                                // If name_idx is somehow out of range (bytecode invariant
+                                // violation), treat as a shadow present — forces slow path.
+                                let no_shadow = name_opt
+                                    .map_or(false, |n| !inst.attrs.contains_key(n));
                                 let version_ok = inst.class.borrow().mutation_version.get()
                                     == *class_version;
                                 if same_class && no_shadow && version_ok {
@@ -1042,11 +1044,11 @@ impl Interpreter {
                                         }
                                         Tag::StaticMethod(f) => Value::user_function(f),
                                         Tag::Builtin => {
-                                            let name = code.names.get(*name_idx as usize)
-                                                .map(|s| s.as_str())
-                                                .unwrap_or("");
+                                            // name_opt is Some here: no_shadow was true,
+                                            // which requires name_opt.is_some().
+                                            let n = name_opt.unwrap_or_default();
                                             pyrust_builtins::bound_method::bound_method(
-                                                name.to_string(),
+                                                n.to_string(),
                                                 Value::py_instance(inst_rc_clone),
                                             )
                                         }
