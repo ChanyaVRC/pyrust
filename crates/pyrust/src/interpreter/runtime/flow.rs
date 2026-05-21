@@ -107,14 +107,23 @@ impl Interpreter {
         targets
     }
 
-    /// If `key` is a 3-element tuple produced by the slice compiler, unpack it.
+    /// If `key` is a runtime `slice` object (produced by `BuildSlice`), unpack it.
     /// Returns `Some((lo, hi, step))` where each is `None` for a missing bound.
+    ///
+    /// Prior to issue #931 this function matched any 3-element tuple, which
+    /// ambiguously treated user tuples like `(1, 2, 3)` as slice keys.  The
+    /// `BuildSlice` instruction now creates a real slice BuiltinObject, so we
+    /// match on that instead.
     pub(crate) fn unpack_slice_key(key: &Value) -> Option<(Option<Value>, Option<Value>, Option<Value>)> {
-        if let ValueKind::Tuple(elems) = key.kind()
-            && elems.len() == 3 {
-                let opt = |v: &Value| if v.is_none() { None } else { Some(v.clone()) };
-                return Some((opt(&elems[0]), opt(&elems[1]), opt(&elems[2])));
-            }
+        if let ValueKind::BuiltinObject { ops, state } = key.kind()
+            && ops.type_name() == pyrust_builtins::slice::TYPE_NAME
+        {
+            let borrow = state.borrow();
+            let s = borrow.downcast_ref::<pyrust_builtins::slice::SliceState>()
+                .expect("unpack_slice_key: SliceState type mismatch");
+            let opt = |v: &Value| if v.is_none() { None } else { Some(v.clone()) };
+            return Some((opt(&s.start), opt(&s.stop), opt(&s.step)));
+        }
         None
     }
 
