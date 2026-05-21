@@ -2611,26 +2611,34 @@ fn hash_value(value: &Value) -> Result<i64> {
 /// but each element is hashed via this function rather than `hash_value`, so
 /// `PyInstance` elements dispatch `__hash__` correctly (issue #502).
 ///
-/// `PyInstance`: dispatches `__hash__` via the interpreter, then applies
-/// CPython's slot_tp_hash semantics (`-1 → -2`, Mersenne reduction for BigInt).
-/// Returns `true` if any element at any nesting depth is a `PyInstance`
-/// that requires interpreter access for `__hash__` dispatch.
-fn tuple_needs_interp(items: &[Value]) -> bool {
-    items.iter().any(|v| match v.kind() {
+/// Returns `true` if `v` (or any value recursively nested inside it) is a
+/// `PyInstance` that requires interpreter access for `__hash__` dispatch.
+///
+/// Recurses into `Tuple` elements and `slice` components so that a
+/// `PyInstance` hidden inside `(inst, 1)` or `slice((inst, 1), 2)` is
+/// correctly detected and routed through the interpreter hashing path.
+pub(crate) fn value_needs_interp(v: &Value) -> bool {
+    match v.kind() {
         ValueKind::PyInstance(_) => true,
         ValueKind::Tuple(inner) => tuple_needs_interp(inner),
-        // Slices are always hashed via hash_value_with_interp (not the pure
-        // hash_value path) so that per-component errors ("unhashable type:
-        // 'list'") are preserved and PyInstance bounds can dispatch __hash__.
-        // Any tuple element that is a slice, or a nested tuple containing a
-        // slice, must therefore force the interpreter-aware branch.
-        ValueKind::BuiltinObject { ops, .. }
+        ValueKind::BuiltinObject { ops, state }
             if ops.type_name() == pyrust_builtins::slice::TYPE_NAME =>
         {
-            true
+            let borrow = state.borrow();
+            if let Some(s) = borrow.downcast_ref::<pyrust_builtins::slice::SliceState>() {
+                value_needs_interp(&s.start)
+                    || value_needs_interp(&s.stop)
+                    || value_needs_interp(&s.step)
+            } else {
+                false
+            }
         }
         _ => false,
-    })
+    }
+}
+
+fn tuple_needs_interp(items: &[Value]) -> bool {
+    items.iter().any(value_needs_interp)
 }
 
 pub(crate) fn hash_value_with_interp(interp: &mut crate::Interpreter, value: &Value) -> Result<i64> {
@@ -2662,9 +2670,9 @@ pub(crate) fn hash_value_with_interp(interp: &mut crate::Interpreter, value: &Va
             let s = borrow
                 .downcast_ref::<pyrust_builtins::slice::SliceState>()
                 .expect("SliceOps: bad state");
-            let needs_interp = matches!(s.start.kind(), ValueKind::PyInstance(_))
-                || matches!(s.stop.kind(), ValueKind::PyInstance(_))
-                || matches!(s.step.kind(), ValueKind::PyInstance(_));
+            let needs_interp = value_needs_interp(&s.start)
+                || value_needs_interp(&s.stop)
+                || value_needs_interp(&s.step);
             if !needs_interp {
                 // Check for unhashable primitive components (e.g. list, dict,
                 // set inside the slice).  hash_value's BuiltinObject arm would
