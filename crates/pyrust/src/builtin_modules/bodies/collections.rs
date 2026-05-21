@@ -1447,7 +1447,16 @@ fn apply_delta(
         // falling through to the iterable path (contributing +1 per key
         // rather than the actual stored count).
         for (k, v) in other_counts.iter() {
-            let delta = value_as_count(v);
+            let delta = match v.kind() {
+                ValueKind::Int(n) => n,
+                ValueKind::Bool(b) => b as i64,
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "Counter delta values must be integers".to_string(),
+                    ))
+                }
+            };
             let cur = counts.get(k).map(value_as_count).unwrap_or(0);
             counts.insert(k.clone(), Value::int(cur + sign * delta));
         }

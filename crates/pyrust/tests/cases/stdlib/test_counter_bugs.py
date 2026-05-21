@@ -61,3 +61,24 @@ c13 = Counter({'a': 2})
 c13.update(['a', 'b', 'b'])
 print(c13['a'])           # 3
 print(c13['b'])           # 2
+
+# update/subtract from a Counter with non-integer stored values raises TypeError.
+# CPython raises because Counter.update() does `count + self_get(elem, 0)`, which
+# fails when `count` is a non-integer (e.g. a string).
+c14 = Counter({'a': 1})
+c15 = Counter()
+c15['b'] = 'hello'
+try:
+    c14.update(c15)
+    print('no-error')   # should not reach here
+except TypeError:
+    print('TypeError')
+
+c16 = Counter({'a': 5})
+c17 = Counter()
+c17['a'] = 'world'
+try:
+    c16.subtract(c17)
+    print('no-error')   # should not reach here
+except TypeError:
+    print('TypeError')
