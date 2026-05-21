@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use indexmap::IndexMap;
 use smallvec::smallvec;
@@ -133,7 +134,9 @@ pub struct Interpreter {
     /// Path to the top-level script being executed, used to populate the
     /// `filename` field of `FrameInfo` when formatting tracebacks.
     /// `None` in REPL mode (no persistent filename).
-    pub(crate) script_filename: Option<String>,
+    /// Stored as `Arc<str>` so that each call frame can clone the filename
+    /// with a reference-count bump rather than a heap allocation.
+    pub(crate) script_filename: Option<Arc<str>>,
     module_cache: ModuleCache,
     env_pool: Vec<EnvRef>,
     fn_cache: FnCache,

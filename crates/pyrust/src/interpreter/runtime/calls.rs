@@ -1332,10 +1332,12 @@ impl Interpreter {
                 let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
                 // Push a traceback frame so errors propagating out of this
                 // function body carry the correct `File / in <name>` entry.
+                // Cloning an `Arc<str>` is a cheap reference-count bump; no
+                // heap allocation per call.
                 let tb_filename = self
                     .script_filename
                     .clone()
-                    .unwrap_or_else(|| "<unknown>".to_string());
+                    .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
                 pyrust_core::push_traceback_frame(pyrust_core::FrameInfo {
                     filename: tb_filename,
                     lineno: None,
@@ -1587,10 +1589,12 @@ impl Interpreter {
             let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
             // Push a traceback frame so errors propagating out of this
             // function body carry the correct `File / in <name>` entry.
+            // Cloning an `Arc<str>` is a cheap reference-count bump; no
+            // heap allocation per call.
             let tb_filename = self
                 .script_filename
                 .clone()
-                .unwrap_or_else(|| "<unknown>".to_string());
+                .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
             pyrust_core::push_traceback_frame(pyrust_core::FrameInfo {
                 filename: tb_filename,
                 lineno: None,

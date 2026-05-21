@@ -7,7 +7,10 @@ use std::collections::HashSet;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use indexmap::{IndexMap, IndexSet};
 use num_bigint::BigInt;
@@ -3462,8 +3465,10 @@ pub fn range_len(start: i64, stop: i64, step: i64) -> i64 {
 /// per-instruction line-number tracking is implemented (Phase 2).
 #[derive(Debug, Clone)]
 pub struct FrameInfo {
-    /// Path to the source file that contains this frame.
-    pub filename: String,
+    /// Path to the source file that contains this frame.  Stored as `Arc<str>`
+    /// so that cloning a frame (e.g. when snapshotting `CAPTURED_ERROR_FRAMES`)
+    /// is a cheap reference-count bump rather than a heap allocation.
+    pub filename: Arc<str>,
     /// 1-based source line that raised the error, or `None` when no line
     /// table is available (Phase 1 limitation).
     pub lineno: Option<u32>,
@@ -3568,20 +3573,23 @@ pub fn reset_captured_error_frames() {
 /// SomeError: message
 /// ```
 pub fn format_traceback(frames: &[FrameInfo], error_line: &str) -> String {
+    use std::fmt::Write as _;
     let mut out = String::from("Traceback (most recent call last):\n");
     for frame in frames {
         match frame.lineno {
             Some(n) => {
-                out.push_str(&format!(
+                let _ = write!(
+                    out,
                     "  File \"{}\", line {}, in {}\n",
                     frame.filename, n, frame.funcname
-                ));
+                );
             }
             None => {
-                out.push_str(&format!(
+                let _ = write!(
+                    out,
                     "  File \"{}\", in {}\n",
                     frame.filename, frame.funcname
-                ));
+                );
             }
         }
     }

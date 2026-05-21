@@ -14,7 +14,7 @@ impl Interpreter {
             .unwrap_or_else(|| std::path::PathBuf::from("."));
         Self {
             script_dir: Some(dir),
-            script_filename: Some(path.to_string()),
+            script_filename: Some(std::sync::Arc::from(path)),
             ..Default::default()
         }
     }
@@ -218,7 +218,7 @@ impl Interpreter {
         // owned by this level; inner function frames were pushed/popped by
         // `call_user_function_expanded` and are no longer on the stack here
         // (they were popped before returning the error).  The call-site frames
-        // were captured into the CAPTURED_FRAMES thread-local by calls.rs.
+        // were captured into the CAPTURED_ERROR_FRAMES thread-local by calls.rs.
         let maybe_tb: Option<String> = if let (Err(e), Some(filename)) =
             (&vm_result, &self.script_filename)
         {
@@ -246,26 +246,17 @@ impl Interpreter {
                 let error_line = match e {
                     PyError::Lex(s) => format!("Lex error: {s}"),
                     PyError::Parse(s) => format!("Parse error: {s}"),
-                    PyError::Runtime(s) => s.clone(),
+                    PyError::Runtime(s) => format!("RuntimeError: {s}"),
                     PyError::Named(cls, s) => format!("{cls}: {s}"),
                     PyError::Class(cls, s) => format!("{}: {s}", cls.borrow().name),
                     PyError::KeyError(key) => format!("KeyError: {}", key.repr()),
                     PyError::Raised(value) => match value.kind() {
                         ValueKind::PyInstance(inst) => {
-                            let inst_ref = inst.borrow();
-                            let class_name = inst_ref.class.borrow().name.clone();
-                            let msg = match inst_ref.attrs.get("args") {
-                                Some(args_val) => match args_val.kind() {
-                                    ValueKind::Tuple(args) if !args.is_empty() => {
-                                        match args[0].kind() {
-                                            ValueKind::Str(s) => s.to_string(),
-                                            _ => args[0].repr(),
-                                        }
-                                    }
-                                    _ => String::new(),
-                                },
-                                None => String::new(),
-                            };
+                            let class_name = inst.borrow().class.borrow().name.clone();
+                            // to_py_str() uses exception_to_string() which correctly
+                            // handles KeyError (repr of single arg) and multi-arg
+                            // exceptions (tuple notation), matching CPython __str__.
+                            let msg = value.to_py_str();
                             if msg.is_empty() {
                                 class_name
                             } else {

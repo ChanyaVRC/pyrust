@@ -652,10 +652,6 @@ impl Interpreter {
         }
         self.handled_exc_stack.push(exc_val.clone());
         self.active_exception = Some(exc_val);
-        // Reset the captured error frame snapshot: the exception was caught
-        // by a `try/except` handler, so any frames captured during its
-        // propagation must not pollute a subsequent unhandled error's traceback.
-        pyrust_core::reset_captured_error_frames();
         Ok(h)
     }
 
@@ -1642,15 +1638,22 @@ impl Interpreter {
                     // routed us here, so MatchExcept is purely a filter.
                 }
                 Insn::EndExcept => {
-                    // Leaving an `except` handler body — pop the entry
-                    // that vm_try! pushed on dispatch.  Restore
-                    // `active_exception` to the outer handler's exception
-                    // (if any), bounded by this frame's base depth so we
-                    // never pop into caller-frame entries.
+                    // Leaving an `except` handler body normally (the exception
+                    // was truly handled, not re-raised).  Pop the entry that
+                    // vm_try! pushed on dispatch.  Restore `active_exception`
+                    // to the outer handler's exception (if any), bounded by
+                    // this frame's base depth so we never pop into caller-frame
+                    // entries.
                     if self.handled_exc_stack.len() > exc_ctx_frame_base {
                         self.handled_exc_stack.pop();
                     }
                     self.active_exception = self.handled_exc_stack.last().cloned();
+                    // Clear the captured frame snapshot only here — on normal
+                    // handler exit.  Clearing at handler *entry* (dispatch_exc_handler)
+                    // was wrong because a bare `raise` inside the handler would
+                    // clear the original frames before the re-raised exception
+                    // propagated, producing a traceback that omitted inner frames.
+                    pyrust_core::reset_captured_error_frames();
                 }
                 Insn::RaiseAssert(msg_reg) => {
                     let msg = vm_try!(vm_read(&regs, *msg_reg, num_locals));
