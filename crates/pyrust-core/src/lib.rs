@@ -452,7 +452,13 @@ impl Hash for PyKey {
                 s.hash(state);
             }
             PyKey::None => {
-                3u8.hash(state);
+                // Python-level hash(None) == 0.  Hash the same way
+                // PyKey::Object does (bare u64, no discriminant tag) so that
+                // a PyKey::Object whose __hash__ returns hash(None) lands in
+                // the same IndexMap bucket as PyKey::None, allowing the
+                // runtime slow-path to dispatch __eq__ across the two
+                // variants (issue #906).
+                (0u64).hash(state);
             }
             PyKey::FrozenSet(items) => {
                 4u8.hash(state);
