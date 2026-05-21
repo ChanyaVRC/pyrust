@@ -2458,21 +2458,29 @@ fn bigint_hash(n: &crate::value::PyBigInt) -> i64 { py_hash_bigint(n) }
 //
 // slice_hash (CPython 3.12, Objects/sliceobject.c): same kernel but WITHOUT
 // the final length-mixing step.
+//
+// Both functions share the same per-element accumulation step via `xxstep` so
+// the two paths can't silently diverge if the kernel is ever updated.
+
+const XX_PRIME1: u64 = 11400714785074694791;
+const XX_PRIME2: u64 = 14029467366897019727;
+const XX_PRIME5: u64 = 2870177450012600261;
+
+#[inline(always)]
+fn xxstep(acc: u64, lane: u64) -> u64 {
+    let acc = acc.wrapping_add(lane.wrapping_mul(XX_PRIME2));
+    let acc = (acc << 31) | (acc >> 33); // rotl31
+    acc.wrapping_mul(XX_PRIME1)
+}
 
 fn tuple_hash_cpython(items: impl Iterator<Item = Result<i64>>) -> Result<i64> {
-    const PRIME1: u64 = 11400714785074694791;
-    const PRIME2: u64 = 14029467366897019727;
-    const PRIME5: u64 = 2870177450012600261;
-    let mut acc: u64 = PRIME5;
+    let mut acc: u64 = XX_PRIME5;
     let mut n: u64 = 0;
     for h in items {
-        let lane = h? as u64;
-        acc = acc.wrapping_add(lane.wrapping_mul(PRIME2));
-        acc = (acc << 31) | (acc >> 33);
-        acc = acc.wrapping_mul(PRIME1);
+        acc = xxstep(acc, h? as u64);
         n += 1;
     }
-    acc = acc.wrapping_add(n ^ (PRIME5 ^ 3527539u64));
+    acc = acc.wrapping_add(n ^ (XX_PRIME5 ^ 3527539u64));
     if acc == u64::MAX {
         acc = 1546275796;
     }
@@ -2480,15 +2488,9 @@ fn tuple_hash_cpython(items: impl Iterator<Item = Result<i64>>) -> Result<i64> {
 }
 
 fn slice_hash_cpython(items: impl Iterator<Item = Result<i64>>) -> Result<i64> {
-    const PRIME1: u64 = 11400714785074694791;
-    const PRIME2: u64 = 14029467366897019727;
-    const PRIME5: u64 = 2870177450012600261;
-    let mut acc: u64 = PRIME5;
+    let mut acc: u64 = XX_PRIME5;
     for h in items {
-        let lane = h? as u64;
-        acc = acc.wrapping_add(lane.wrapping_mul(PRIME2));
-        acc = (acc << 31) | (acc >> 33);
-        acc = acc.wrapping_mul(PRIME1);
+        acc = xxstep(acc, h? as u64);
     }
     if acc == u64::MAX {
         acc = 1546275796;
