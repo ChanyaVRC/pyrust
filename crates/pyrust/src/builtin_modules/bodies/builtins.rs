@@ -2477,7 +2477,7 @@ fn hash_value(value: &Value) -> Result<i64> {
             }
             Ok(h as i64)
         }
-        ValueKind::None => Ok(0),
+        ValueKind::None => Ok(pyrust_core::py_hash_none()),
         ValueKind::Tuple(items) => {
             let mut h: i64 = 3527539;
             for item in items {
