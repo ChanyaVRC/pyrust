@@ -1,7 +1,6 @@
 // Thread-local call depth counter. Using thread_local avoids the split-borrow
 // problem: a guard that holds &mut self.call_depth cannot coexist with a &mut self
 // method call. The thread_local is safe because the interpreter is single-threaded.
-use std::cell::Cell;
 
 
 thread_local! {

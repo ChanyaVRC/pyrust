@@ -803,6 +803,27 @@ impl Interpreter {
                     };
                 }
                 Insn::LoadGlobal(dst, name_idx) => {
+                    // ── Inline cache fast path ────────────────────────────
+                    // Check the per-name cache slot before doing any env-chain
+                    // walk.  A hit requires the cached version == global_env_version
+                    // (module env unchanged since the value was last resolved).
+                    // Builtins are now also cached with the current
+                    // global_env_version so that a module-level assignment of the
+                    // same name (e.g. `len = my_fn`) correctly invalidates the
+                    // cached builtin and the slow path re-resolves to the new
+                    // module-scope value.
+                    let cur_ver = self.global_env_version.get();
+                    {
+                        let cache = code.global_cache.borrow();
+                        if (*name_idx as usize) < cache.len() {
+                            let entry = &cache[*name_idx as usize];
+                            if entry.0 == cur_ver {
+                                regs[*dst as usize] = entry.1.clone();
+                                continue;
+                            }
+                        }
+                    }
+                    // ── Slow path: full name resolution ──────────────────
                     let name = pool_get!(code.names, *name_idx, "name");
                     // Issue #706: look up the name through the env chain first
                     // (this covers function-level cell vars, nonlocal bindings,
@@ -813,8 +834,34 @@ impl Interpreter {
                     // env.values).  Putting the dict check BEFORE lookup_name
                     // was wrong: a function-level cell var named "g" would have
                     // shadowed by a same-named module global in the dict.
-                    let val = if let Some(v) = vm_try!(self.lookup_name(name)) {
-                        v
+                    let (val, cache_ver) = if let Some(v) = vm_try!(self.lookup_name(name)) {
+                        // Value came from the env chain.  Cache it only when the
+                        // value actually came from the MODULE env — the only env
+                        // whose mutations are tracked by `global_env_version`.
+                        //
+                        // Two cases where the value came from the module env:
+                        //   1. The name is explicitly `global`-declared in the
+                        //      current function: `lookup_name` went directly to the
+                        //      module env via `lookup_name_in_module`.
+                        //   2. `self.env` IS the module env (no parent): we are at
+                        //      module scope, so any env-chain hit IS in the module env.
+                        //
+                        // Critically, we MUST NOT check `lookup_name_in_module(name)`
+                        // here.  That check is true whenever the module env has a
+                        // name with the same key — even if `lookup_name` found the
+                        // value in an INTERMEDIATE env (e.g. an outer function's
+                        // cell-var env).  Caching the cell-var value with `cur_ver`
+                        // would cause stale results after a nonlocal write that
+                        // changes the cell var but does not bump `global_env_version`
+                        // (bug found during review: `z = "module_z"` at module scope
+                        // combined with `z` as a cell var in an enclosing function
+                        // triggered incorrect cache hits in the inner closure).
+                        let in_module_env = {
+                            let env = self.env.borrow();
+                            env.global_names.contains(name) || env.parent.is_none()
+                        };
+                        let ver = if in_module_env { cur_ver } else { GLOBAL_CACHE_EMPTY };
+                        (v, ver)
                     } else if let Some(v) = self
                         .module_globals_dict
                         .dict_with(|d| d.get(&StrKey(name)).cloned())
@@ -823,7 +870,9 @@ impl Interpreter {
                         // Fallback: pick up globals()["x"] = val mutations that
                         // write to the dict without going through assign_name.
                         // StrKey avoids a String allocation on every miss.
-                        v
+                        // Do NOT cache this value: we don't track when the dict
+                        // is mutated directly, so we can't guarantee correctness.
+                        (v, GLOBAL_CACHE_EMPTY)
                     } else if let Some(v) = self
                         .vm_frame_views
                         .iter()
@@ -847,15 +896,28 @@ impl Interpreter {
                             if v.is_unset() { None } else { Some(v.clone()) }
                         })
                     {
-                        v
+                        // Script-frame register fallback: cache as a regular
+                        // env-version value (assign_name bumps the version when
+                        // these registers change).
+                        (v, cur_ver)
                     } else {
-                        vm_try!(resolve_builtin(name).ok_or_else(|| {
+                        let v = vm_try!(resolve_builtin(name).ok_or_else(|| {
                             PyError::named(
                                 "NameError",
                                 format!("name '{}' is not defined", name),
                             )
-                        }))
+                        }));
+                        // Cache with the current global_env_version so that a
+                        // subsequent module-level assignment of the same name
+                        // (e.g. `len = my_fn`) bumps the version and invalidates
+                        // this entry, forcing a re-resolve on the next LoadGlobal.
+                        (v, cur_ver)
                     };
+                    // Update the cache slot.
+                    if cache_ver != GLOBAL_CACHE_EMPTY {
+                        code.global_cache.borrow_mut()[*name_idx as usize] =
+                            (cache_ver, val.clone());
+                    }
                     regs[*dst as usize] = val;
                 }
                 Insn::StoreGlobal(name_idx, src) => {
@@ -1679,6 +1741,8 @@ impl Interpreter {
                                 format!("name '{}' is not defined", name),
                             )));
                         }
+                        // Invalidate the LoadGlobal inline cache.
+                        bump_global_env_version(self);
                         // Also clear the module-level fastlocal register so the
                         // write-back loop in `program.rs` does not re-insert the
                         // stale value.  Mirrors the write-through that `assign_name`
@@ -1729,6 +1793,11 @@ impl Interpreter {
                                 format!("name '{}' is not defined", name),
                             )));
                         }
+                        // Invalidate the LoadGlobal inline cache for module-scope
+                        // deletions (non-global-declared `del x` at module scope).
+                        if is_module_scope {
+                            bump_global_env_version(self);
+                        }
                     }
                 }
                 Insn::DeleteLocal(reg, name_idx) => {
@@ -1758,6 +1827,15 @@ impl Interpreter {
                     regs[*reg as usize] = Value::unset();
                 }
                 Insn::SyncModuleGlobal(reg, name_idx) => {
+                    // Always bump global_env_version: this instruction fires on
+                    // every module-scope assignment that uses a fastlocal register.
+                    // Without the bump, a `LoadGlobal` inline cache that resolved
+                    // a name to a builtin at `cur_ver` would never be invalidated
+                    // when the same name is later shadowed at module scope
+                    // (e.g. `len = my_fn`), because `SyncModuleGlobal` is the
+                    // only store instruction executed — `StoreGlobal` (which also
+                    // bumps the version) is only used for `global`-declared names.
+                    bump_global_env_version(self);
                     if self.globals_accessed {
                         let name = pool_get!(code.names, *name_idx, "name");
                         let val = regs[*reg as usize].clone();
@@ -1779,6 +1857,8 @@ impl Interpreter {
                     // through a subsequent globals() lookup (issue #846).
                     let _ = self.module_globals_dict
                         .dict_shift_remove(&PyKey::Str(name.to_string()));
+                    // Invalidate the LoadGlobal inline cache.
+                    bump_global_env_version(self);
                 }
 
                 // ── Control flow ─────────────────────────────────────────
@@ -4366,7 +4446,7 @@ mod vm_tests {
     use crate::interpreter::Interpreter;
 
     fn empty_code(insns: Vec<Insn>) -> FnCode {
-        use crate::bytecode::AttrCacheEntry;
+        use crate::bytecode::{AttrCacheEntry, GLOBAL_CACHE_EMPTY};
         let n = insns.len();
         FnCode {
             insns,
@@ -4380,6 +4460,7 @@ mod vm_tests {
             is_generator: false,
             is_class_method: false,
             attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; n]),
+            global_cache: std::cell::RefCell::new(vec![(GLOBAL_CACHE_EMPTY, Value::none()); 0]),
         }
     }
 

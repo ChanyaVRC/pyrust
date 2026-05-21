@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -5,7 +6,9 @@ use crate::ast::{
     AssignTarget, BinaryOp, CompClause, DictItem, Expr, FStringPart, FunctionParam, MatchArm,
     Pattern, Stmt, UnaryOp,
 };
-use crate::bytecode::{AttrCacheEntry, CellVar, FnCode, FnParamSpec, FnProto, Insn, Reg};
+use crate::bytecode::{
+    AttrCacheEntry, CellVar, FnCode, FnParamSpec, FnProto, GLOBAL_CACHE_EMPTY, Insn, Reg,
+};
 use crate::error::PyError;
 use crate::value::{PyBigInt, PyPow, PyToPrimitive, Value, ValueKind};
 
@@ -4012,6 +4015,7 @@ impl Compiler {
             .any(|i| matches!(i, Insn::Yield { .. } | Insn::YieldFrom { .. }));
         let insns = self.insns;
         let insns_len = insns.len();
+        let names_len = self.names.len();
         Ok(FnCode {
             insns,
             consts: self.consts,
@@ -4024,6 +4028,7 @@ impl Compiler {
             is_generator,
             is_class_method: self.is_class_method,
             attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; insns_len]),
+            global_cache: RefCell::new(vec![(GLOBAL_CACHE_EMPTY, Value::none()); names_len]),
         })
     }
 
@@ -6130,7 +6135,7 @@ impl Compiler {
         // Include `name` so self-recursive calls are treated as pure (fixpoint assumption).
         let mut pure_fns_with_self = self.pure_locals.clone();
         pure_fns_with_self.insert(name.to_string());
-        let is_pure = crate::interpreter::is_pure_body(body, &pure_fns_with_self);
+        let is_pure = crate::interpreter::is_pure_body(body, &pure_fns_with_self, &inner_index_rc);
 
         // Detect cell vars for the inner function.
         let inner_cell_vars = collect_cell_vars(body, &inner_index_rc);

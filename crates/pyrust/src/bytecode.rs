@@ -387,4 +387,21 @@ pub struct FnCode {
     /// through a shared `Rc<FnCode>` during dispatch without requiring an
     /// exclusive borrow of the enclosing `FnCode`.
     pub(crate) attr_cache: RefCell<Vec<AttrCacheEntry>>,
+    /// Per-name inline cache for `LoadGlobal`.
+    ///
+    /// Indexed by `name_idx` (the second operand of `Insn::LoadGlobal`).
+    /// Each entry is `(cached_env_version, cached_value)`.  A hit requires
+    /// `cached_env_version == interpreter.global_env_version` (module env
+    /// unchanged since last lookup).  Builtins are cached with the current
+    /// `global_env_version` so that a subsequent module-level assignment of
+    /// the same name (e.g. `len = my_fn`) invalidates the entry correctly.
+    /// Shared across all invocations of this function via `Rc<FnCode>` — the
+    /// cache is function-granular, not call-granular.
+    pub(crate) global_cache: RefCell<Vec<(u32, Value)>>,
 }
+
+/// Initial version stored in every `global_cache` slot at construction
+/// time.  Chosen so that it never matches a real `global_env_version`
+/// value (which starts at 0 and increments), guaranteeing a cache miss
+/// on the very first `LoadGlobal` execution.
+pub(crate) const GLOBAL_CACHE_EMPTY: u32 = u32::MAX - 1;

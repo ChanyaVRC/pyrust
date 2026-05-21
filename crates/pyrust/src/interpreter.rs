@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -8,7 +8,7 @@ use indexmap::IndexMap;
 use smallvec::smallvec;
 
 use crate::ast::{AssignTarget, BinaryOp, Expr, Stmt, UnaryOp};
-use crate::bytecode::FnCode;
+use crate::bytecode::{FnCode, GLOBAL_CACHE_EMPTY};
 use crate::error::{PyError, Result};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
@@ -234,6 +234,32 @@ pub struct Interpreter {
     /// introduced by PR #810.  Once `true`, `assign_name` resumes writing
     /// to the dict so the returned live view stays in sync (issue #810).
     pub(crate) globals_accessed: bool,
+    /// Monotonic version counter for the global environment.
+    ///
+    /// Incremented on every write or delete to the module-level `env.values`
+    /// (via `assign_name` at module scope or `global`-declared names in
+    /// functions) and on explicit `del` of module-level names.
+    ///
+    /// `LoadGlobal` caches the resolved value alongside this counter in
+    /// `FnCode::global_cache[name_idx]`.  A cache entry is valid when its
+    /// stored version equals the current `global_env_version`; on mismatch
+    /// the slow env-chain lookup runs and the entry is refreshed.  Builtin
+    /// resolutions are cached with the current version as well, so that a
+    /// subsequent module-level assignment of the same name (e.g. `len = fn`)
+    /// correctly invalidates the cached builtin entry.
+    ///
+    /// Wrapped in `Cell<u32>` so that `assign_name` (which takes `&self`
+    /// for consistency with its callers) can increment it via interior
+    /// mutability without requiring `&mut Interpreter` at call sites.
+    ///
+    /// Note: `globals()["x"] = y` mutations (writing directly to
+    /// `module_globals_dict` without going through `assign_name`) do not
+    /// increment this counter.  Values surfaced only through the dict
+    /// fallback path are therefore not cached — they fall through to the
+    /// slow lookup on every `LoadGlobal` execution.  This is acceptable
+    /// because the dict-only path is already guarded by `globals_accessed`
+    /// and is not on the hot path of normal code.
+    pub(crate) global_env_version: Cell<u32>,
 }
 
 /// Discriminator for `VmFrameView`: script-level (module-scope) vs.
@@ -362,6 +388,7 @@ impl Default for Interpreter {
             exc_classes: ExcClasses::uninitialized(),
             module_globals_dict: Value::dict(IndexMap::new()),
             globals_accessed: false,
+            global_env_version: Cell::new(0),
         }
     }
 }
