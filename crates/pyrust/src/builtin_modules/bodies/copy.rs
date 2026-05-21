@@ -27,11 +27,34 @@ use std::rc::Rc;
 
 use crate::error::{PyError, Result};
 use crate::interpreter::{invoke_class_method, lookup_class_attr, ExpandedCallArg};
-use crate::value::{PyInstance, PyKey, Value, ValueKind};
+use crate::value::{PyClass, PyInstance, PyKey, Value, ValueKind};
 use indexmap::{IndexMap, IndexSet};
 use pyrust_derive::pyrust_module;
 
+// ── copy.Error class singleton ────────────────────────────────────────────────
+
+thread_local! {
+    static COPY_ERROR_CLASS: Rc<RefCell<PyClass>> = {
+        let exception_base = crate::interpreter::lookup_exc_class("Exception")
+            .expect("EXC_CLASS_CACHE must contain Exception");
+        Rc::new(RefCell::new(PyClass {
+            name: "Error".to_string(),
+            qualname: "copy.Error".to_string(),
+            base: Some(exception_base),
+            attrs: IndexMap::new(),
+        }))
+    };
+}
+
+fn copy_error_class_value() -> Value {
+    COPY_ERROR_CLASS.with(|c| Value::py_class(Rc::clone(c)))
+}
+
 pyrust_module! {
+    constants {
+        // copy.Error — subclass of Exception, raised on deepcopy failures.
+        "Error" => copy_error_class_value(),
+    }
     /// CPython: copy.copy(x) — shallow copy.
     ///
     /// Immutable types (int, float, str, bool, None, bytes, tuple, frozenset)
