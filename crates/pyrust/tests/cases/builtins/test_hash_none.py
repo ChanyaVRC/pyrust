@@ -44,3 +44,9 @@ print("Case 6 - len({obj, None}):", len(dedup2))
 d_native = {None: 42}
 print("Regression - d[None]:", d_native[None])
 print("Regression - None in {None}:", None in {None})
+
+# Issue #902: hash(None) must not equal 0 or False's hash (which is 0),
+# and must not equal the Python hash error sentinel -1.
+print("hash(None) != hash(0):", hash(None) != hash(0))
+print("hash(None) != hash(False):", hash(None) != hash(False))
+print("hash(None) != -1:", hash(None) != -1)

@@ -516,7 +516,8 @@ impl indexmap::Equivalent<PyKey> for StrKey<'_> {
 /// CPython's `hash(None)` returns `_Py_HashPointer(Py_None)` — a stable
 /// per-process value derived from `None`'s memory address.  pyrust's `None`
 /// is NaN-boxed (no heap pointer), so we derive a stable per-process value
-/// from a single `static` sentinel whose address is fixed at link time.
+/// from a single `static` sentinel whose address is stable for the lifetime
+/// of this process (fixed at process launch; may differ across runs with ASLR).
 ///
 /// **All callers must use this function** — do NOT define a separate
 /// `static NONE_SENTINEL` in another crate; two statics compile to two
