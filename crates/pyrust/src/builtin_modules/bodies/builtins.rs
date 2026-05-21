@@ -2543,6 +2543,29 @@ fn hash_value(value: &Value) -> Result<i64> {
             "TypeError",
             "unhashable type: 'set'".to_string(),
         )),
+        // Range: mirrors CPython Objects/rangeobject.c range_hash (Ubuntu 3.12.3).
+        //
+        // CPython always builds a 3-element tuple (length, a, b) and hashes it:
+        //   len == 0 -> hash((len, None, None))
+        //   len == 1 -> hash((len, start, None))
+        //   len  > 1 -> hash((len, start, step))
+        //
+        // `py_hash_int` applies the Mersenne-prime reduction and -1→-2 remap for
+        // integer components; `py_hash_none` mirrors CPython's pointer-based
+        // `hash(None)` using a stable per-process static address.
+        ValueKind::Range { start, stop, step } => {
+            let len = range_len(start, stop, step);
+            let h_len = py_hash_int(len);
+            let h_none = pyrust_core::py_hash_none();
+            tuple_hash_cpython(
+                [
+                    Ok(h_len),
+                    Ok(if len >= 1 { py_hash_int(start) } else { h_none }),
+                    Ok(if len >= 2 { py_hash_int(step) } else { h_none }),
+                ]
+                .into_iter(),
+            )
+        }
         // BuiltinObject: probe the BuiltinTypeOps hash hook (added in PR #781).
         // Types that override BuiltinTypeOps::hash (e.g. frozenset) return
         // Some(u64); anything that leaves it at the default None is unhashable.

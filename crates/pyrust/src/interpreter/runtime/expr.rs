@@ -668,6 +668,19 @@ impl Interpreter {
         if let Some(k) = value.to_key() {
             return Ok(k);
         }
+        // Range objects are hashable (issue #937).  `Value::to_key` returns
+        // `None` for ranges (they have no `PyKey` variant), so we handle them
+        // here: compute the hash via `hash_value_with_interp` (which calls the
+        // `ValueKind::Range` arm in `hash_value`) and store it in `PyKey::Object`
+        // so that `range == range` lookup uses `Value`'s `PartialEq`.
+        if matches!(value.kind(), ValueKind::Range { .. }) {
+            let hash =
+                crate::builtin_modules::builtins::hash_value_with_interp(self, value)? as u64;
+            return Ok(PyKey::Object {
+                hash,
+                value: value.clone(),
+            });
+        }
         if let ValueKind::PyInstance(inst) = value.kind() {
             let class = Rc::clone(&inst.borrow().class);
             // CPython treats a class that explicitly sets `__hash__ = None`
