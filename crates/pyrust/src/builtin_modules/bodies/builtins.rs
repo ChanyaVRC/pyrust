@@ -2444,17 +2444,70 @@ pub(super) fn materialize_user_iter(
 // reduction and the `-1 → -2` sentinel remap (issue #503).
 // Local aliases preserve the call sites below unchanged.
 #[inline(always)]
-fn int_hash(v: i64) -> i64 { py_hash_int(v) }
+fn int_hash(v: i64) -> i64 {
+    py_hash_int(v)
+}
 #[inline(always)]
-fn bigint_hash(n: &crate::value::PyBigInt) -> i64 { py_hash_bigint(n) }
+fn bigint_hash(n: &crate::value::PyBigInt) -> i64 {
+    py_hash_bigint(n)
+}
+
+// CPython 3.12 (Python 3.8+) xxHash-based accumulation constants.
+// From Objects/tupleobject.c and Include/cpython/pyhash.h.
+const XXHASH_PRIME1: u64 = 11400714785074694791;
+const XXHASH_PRIME2: u64 = 14029467366897019727;
+const XXHASH_PRIME5: u64 = 2870177450012600261;
+
+/// One step of the CPython 3.12 xxHash-based per-element accumulation.
+/// Mirrors `_PyHASH_XXROTATE` (rotl31) + multiply by `PRIME1`.
+#[inline(always)]
+fn xxstep(acc: u64, lane: u64) -> u64 {
+    let acc = acc.wrapping_add(lane.wrapping_mul(XXHASH_PRIME2));
+    let acc = (acc << 31) | (acc >> 33); // rotl31
+    acc.wrapping_mul(XXHASH_PRIME1)
+}
+
+/// Compute the CPython 3.12 xxHash-based tuple hash from per-element hashes.
+/// Matches `tuplehash` in Objects/tupleobject.c (Python 3.8+ algorithm):
+/// `acc = PRIME5; for each h: acc = xxstep(acc, h); acc += n ^ (PRIME5 ^ 3527539)`.
+/// Returns `Err` immediately if any element hash is `Err`.
+fn tuple_hash_cpython<E>(
+    element_hashes: impl Iterator<Item = std::result::Result<i64, E>>,
+    len: u64,
+) -> std::result::Result<i64, E> {
+    let mut acc: u64 = XXHASH_PRIME5;
+    for h in element_hashes {
+        acc = xxstep(acc, h? as u64);
+    }
+    acc = acc.wrapping_add(len ^ (XXHASH_PRIME5 ^ 3527539u64));
+    if acc == u64::MAX {
+        acc = 1546275796;
+    }
+    Ok(acc as i64)
+}
+
+/// Compute the CPython 3.12 xxHash-based slice hash from component hashes.
+/// CPython's `slice_hash` (Objects/sliceobject.c) applies the same per-element
+/// accumulation as `tuple_hash_cpython` over exactly three components (start,
+/// stop, step) but does NOT add the length-XOR term (issue #916).
+fn slice_hash_cpython(hstart: i64, hstop: i64, hstep: i64) -> i64 {
+    let mut acc: u64 = XXHASH_PRIME5;
+    acc = xxstep(acc, hstart as u64);
+    acc = xxstep(acc, hstop as u64);
+    acc = xxstep(acc, hstep as u64);
+    if acc == u64::MAX {
+        acc = 1546275796;
+    }
+    acc as i64
+}
 
 /// Compute the hash of a `Value` for the `hash()` builtin.  Mirrors
 /// CPython's semantics:
 /// - numeric types use their integer value (so `hash(True) == hash(1)`
 ///   and `hash(1.0) == hash(1)`);
 /// - strings use an FNV-1a-style byte hash;
-/// - tuples fold each element's hash with a CPython-style xor/mul mix,
-///   recursing through nested tuples (issue #382);
+/// - tuples use the CPython 3.12 xxHash-based algorithm (issue #916),
+///   recursing through nested tuples;
 /// - mutable containers (list / dict / set) raise `TypeError`.
 fn hash_value(value: &Value) -> Result<i64> {
     match value.kind() {
@@ -2479,12 +2532,10 @@ fn hash_value(value: &Value) -> Result<i64> {
         }
         ValueKind::None => Ok(0),
         ValueKind::Tuple(items) => {
-            let mut h: i64 = 3527539;
-            for item in items {
-                let item_hash = hash_value(item)?;
-                h = h.wrapping_mul(1000003).wrapping_add(item_hash);
-            }
-            Ok(h)
+            // CPython 3.12 xxHash-based tuplehash (Python 3.8+ algorithm).
+            // See tuple_hash_cpython / Objects/tupleobject.c.
+            let len = items.len() as u64;
+            tuple_hash_cpython(items.iter().map(|item| hash_value(item)), len)
         }
         ValueKind::List(_) => Err(PyError::named(
             "TypeError",
@@ -2539,9 +2590,8 @@ fn hash_value(value: &Value) -> Result<i64> {
 /// remains a pure helper for primitive leaf types; this function calls it for
 /// those cases to avoid duplicating their logic.
 ///
-/// `Tuple`: uses the same initial value and multiply-add mixing as
-/// `hash_value`'s Tuple arm (`h = h.wrapping_mul(1000003).wrapping_add(elem)`),
-/// but each element is hashed via this function rather than `hash_value`, so
+/// `Tuple`: uses the CPython 3.12 xxHash-based algorithm (issue #916),
+/// with each element hashed via this function rather than `hash_value` so
 /// `PyInstance` elements dispatch `__hash__` correctly (issue #502).
 ///
 /// `PyInstance`: dispatches `__hash__` via the interpreter, then applies
@@ -2578,12 +2628,13 @@ pub(crate) fn hash_value_with_interp(interp: &mut crate::Interpreter, value: &Va
             // nested tuple that may contain one).  Clone the slice to release
             // the borrow of `value` before the mutable `interp` calls.
             let items: Vec<Value> = items.to_vec();
-            let mut h: i64 = 3527539;
+            let len = items.len() as u64;
+            // Collect element hashes eagerly so we can propagate the first Err.
+            let mut hashes: Vec<i64> = Vec::with_capacity(items.len());
             for item in &items {
-                let item_hash = hash_value_with_interp(interp, item)?;
-                h = h.wrapping_mul(1000003).wrapping_add(item_hash);
+                hashes.push(hash_value_with_interp(interp, item)?);
             }
-            Ok(h)
+            tuple_hash_cpython(hashes.into_iter().map(Ok::<i64, crate::error::PyError>), len)
         }
         // Slices: CPython 3.12 makes slice hashable when all components are
         // hashable.  Always recurse into each component via this function so
@@ -2593,6 +2644,11 @@ pub(crate) fn hash_value_with_interp(interp: &mut crate::Interpreter, value: &Va
         // `SliceOps::hash` (DefaultHasher) path used to produce (issue #850).
         // This also handles `PyInstance` bounds that need interpreter access
         // for `__hash__` dispatch.
+        //
+        // The hash algorithm matches CPython 3.12 Objects/sliceobject.c
+        // `slice_hash`: same xxHash accumulation as `tuplehash` but over the
+        // three fixed components (start, stop, step) with no length-XOR term
+        // (issue #916).
         ValueKind::BuiltinObject { ops, state }
             if ops.type_name() == pyrust_builtins::slice::TYPE_NAME =>
         {
@@ -2606,13 +2662,7 @@ pub(crate) fn hash_value_with_interp(interp: &mut crate::Interpreter, value: &Va
             let hstart = hash_value_with_interp(interp, &start)?;
             let hstop = hash_value_with_interp(interp, &stop)?;
             let hstep = hash_value_with_interp(interp, &step)?;
-            // Mix the three component hashes using the same multiply-add
-            // accumulator as the Tuple arm.
-            let mut h: i64 = 3527539;
-            for &c in &[hstart, hstop, hstep] {
-                h = h.wrapping_mul(1000003).wrapping_add(c);
-            }
-            Ok(h)
+            Ok(slice_hash_cpython(hstart, hstop, hstep))
         }
         ValueKind::PyInstance(inst) => {
             let inst_rc = Rc::clone(inst);

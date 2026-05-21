@@ -518,8 +518,9 @@ impl indexmap::Equivalent<PyKey> for StrKey<'_> {
 /// - `Str`: FNV-1a (matches pyrust's `hash_value` str arm; CPython uses SipHash
 ///   with a random seed so str-element frozenset hashes differ from CPython).
 /// - `None`: 0.
-/// - `Tuple`: CPython's multiply-add fold (`h = h*1000003 + elem_hash`), seeded
-///   at 3527539.
+/// - `Tuple`: CPython 3.12 xxHash-based tuplehash (Python 3.8+ algorithm):
+///   `acc = PRIME5; for each h: acc = xxstep(acc, h); acc += n ^ (PRIME5 ^ 3527539)`.
+///   Matches the algorithm in `hash_value` / `hash_value_with_interp` (issue #916).
 /// - `FrozenSet`: CPython's XOR-shuffle accumulation with length mixing and
 ///   final scramble (Objects/setobject.c `frozenset_hash`).
 /// - `Object { hash, .. }`: the precomputed hash cast to `i64`.
@@ -591,12 +592,27 @@ pub fn py_hash_pykey(key: &PyKey) -> i64 {
         }
         PyKey::None => 0,
         PyKey::Tuple(items) => {
-            let mut h: i64 = 3527539;
-            for item in items {
-                let item_hash = py_hash_pykey(item);
-                h = h.wrapping_mul(1000003).wrapping_add(item_hash);
+            // CPython 3.12 xxHash-based tuplehash (Python 3.8+ algorithm).
+            // Mirrors the implementation in builtins.rs::tuple_hash_cpython (issue #916).
+            const PRIME1: u64 = 11400714785074694791;
+            const PRIME2: u64 = 14029467366897019727;
+            const PRIME5: u64 = 2870177450012600261;
+            #[inline(always)]
+            fn xxstep(acc: u64, lane: u64) -> u64 {
+                let acc = acc.wrapping_add(lane.wrapping_mul(PRIME2));
+                let acc = (acc << 31) | (acc >> 33); // rotl31
+                acc.wrapping_mul(PRIME1)
             }
-            h
+            let mut acc: u64 = PRIME5;
+            let n = items.len() as u64;
+            for item in items {
+                acc = xxstep(acc, py_hash_pykey(item) as u64);
+            }
+            acc = acc.wrapping_add(n ^ (PRIME5 ^ 3527539u64));
+            if acc == u64::MAX {
+                acc = 1546275796;
+            }
+            acc as i64
         }
         PyKey::FrozenSet(items) => {
             // CPython Objects/setobject.c frozenset_hash algorithm.
