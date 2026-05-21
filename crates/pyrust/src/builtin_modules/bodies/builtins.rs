@@ -2552,6 +2552,16 @@ fn tuple_needs_interp(items: &[Value]) -> bool {
     items.iter().any(|v| match v.kind() {
         ValueKind::PyInstance(_) => true,
         ValueKind::Tuple(inner) => tuple_needs_interp(inner),
+        // Slices are always hashed via hash_value_with_interp (not the pure
+        // hash_value path) so that per-component errors ("unhashable type:
+        // 'list'") are preserved and PyInstance bounds can dispatch __hash__.
+        // Any tuple element that is a slice, or a nested tuple containing a
+        // slice, must therefore force the interpreter-aware branch.
+        ValueKind::BuiltinObject { ops, .. }
+            if ops.type_name() == pyrust_builtins::slice::TYPE_NAME =>
+        {
+            true
+        }
         _ => false,
     })
 }

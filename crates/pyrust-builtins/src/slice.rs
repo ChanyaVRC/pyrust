@@ -88,6 +88,15 @@ impl BuiltinTypeOps for SliceOps {
     // misleading "unhashable type: 'slice'" that `component_hash` used to
     // produce.  `value_to_pykey` in expr.rs stores the resulting hash in a
     // `PyKey::Object` so dict/set lookups remain consistent with `hash()`.
+    //
+    // Known parity gap: pure call sites that call `Value::to_key()` directly
+    // without going through `value_to_pykey` (e.g. `Counter([slice(1,2)])`,
+    // `defaultdict.__missing__`, `require_key` in collections.rs) will treat
+    // slices as unhashable because `to_key()` returns `None` here.  In CPython
+    // 3.12 these operations work correctly since slices are hashable.  Fixing
+    // the gap requires either routing those sites through the interpreter or
+    // giving `BuiltinTypeOps::to_key` a `Result`-returning variant — tracked
+    // as a follow-up to PR #850.
 
     fn setattr(&self, _state: &BuiltinState, name: &str, _value: Value) -> Result<(), PyError> {
         Err(PyError::named(

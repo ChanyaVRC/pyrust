@@ -67,4 +67,24 @@ try:
 except TypeError as e:
     print("set unhashable:", e)
 
+# Tuples containing hashable slices are hashable.
+t1 = (slice(1, 2),)
+t2 = (slice(1, 2),)
+print("tuple+slice hashable:", hash(t1) == hash(t2))
+print("tuple+two slices hashable:", hash((slice(1, 2), slice(3, 4))) == hash((slice(1, 2), slice(3, 4))))
+
+# Tuple containing a slice with an unhashable bound raises TypeError naming
+# the bound type, not 'slice' or 'tuple'.
+try:
+    hash((slice([1], 2),))
+    print("FAIL: expected TypeError")
+except TypeError as e:
+    print("tuple+slice+list bound:", e)
+
+try:
+    hash((slice(1, {2, 3}),))
+    print("FAIL: expected TypeError")
+except TypeError as e:
+    print("tuple+slice+set bound:", e)
+
 print("done")
