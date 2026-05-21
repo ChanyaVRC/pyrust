@@ -130,6 +130,8 @@ class WithDeepCopy:
         self.deep_copied = False
 
     def __deepcopy__(self, memo):
+        # memo must be a dict (CPython always passes a dict).
+        assert isinstance(memo, dict), f"memo should be dict, got {type(memo)}"
         obj = WithDeepCopy(self.val)
         obj.deep_copied = True
         return obj
@@ -139,5 +141,11 @@ wd_deep = copy.deepcopy(wd)
 assert wd_deep.val == 7
 assert wd_deep.deep_copied is True   # __deepcopy__ was called
 assert wd.deep_copied is False
+
+# Verify that an explicitly-passed memo dict is forwarded to __deepcopy__.
+custom_memo = {}
+wd_deep2 = copy.deepcopy(wd, custom_memo)
+assert wd_deep2.val == 7
+assert wd_deep2.deep_copied is True
 
 print("copy ok")

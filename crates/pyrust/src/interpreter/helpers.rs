@@ -974,7 +974,7 @@ pub(crate) fn build_exc_class_map(
     })
 }
 
-fn key_to_value(key: PyKey) -> Value {
+pub(crate) fn key_to_value(key: PyKey) -> Value {
     match key {
         PyKey::Int(v) => Value::int(v),
         PyKey::BigInt(v) => Value::bigint(*v),

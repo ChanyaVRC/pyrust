@@ -17,8 +17,9 @@
 //     its Rc — no element-level copies).
 //
 // `deepcopy` recurses into the elements of mutable containers.  The `memo`
-// parameter is accepted but ignored in this v1 implementation (Python programs
-// rarely pass it explicitly; it is there for API compatibility).
+// dict is forwarded to any `__deepcopy__(self, memo)` dunder calls so user
+// code receives a proper dict argument.  Circular-reference tracking via the
+// memo dict is out of scope for v1.
 //
 // Reference: <https://docs.python.org/3/library/copy.html>
 
@@ -26,7 +27,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::error::{PyError, Result};
-use crate::interpreter::{invoke_class_method, lookup_class_attr, ExpandedCallArg};
+use crate::interpreter::{invoke_class_method, key_to_value, lookup_class_attr, ExpandedCallArg};
 use crate::value::{PyClass, PyInstance, PyKey, Value, ValueKind};
 use indexmap::{IndexMap, IndexSet};
 use pyrust_derive::pyrust_module;
@@ -76,8 +77,10 @@ pyrust_module! {
     /// CPython: copy.deepcopy(x, memo=None) — deep copy.
     ///
     /// Immutable types are returned as-is.  Mutable containers are recursively
-    /// copied.  `memo` is accepted but ignored (circular-reference tracking is
-    /// out of scope for v1).
+    /// copied.  `memo` is forwarded to `__deepcopy__` calls (as a dict) so
+    /// user-defined `__deepcopy__(self, memo)` methods receive a proper dict
+    /// argument.  Circular-reference tracking via the memo dict is out of scope
+    /// for v1.
     /// <https://docs.python.org/3/library/copy.html#copy.deepcopy>
     fn deepcopy(args) -> Result<Value> {
         if args.is_empty() || args.len() > 2 {
@@ -89,9 +92,16 @@ pyrust_module! {
                 ),
             ));
         }
-        // `memo` (second arg) is accepted and ignored.
         let obj = args[0].value.clone();
-        deep_copy(obj, _interp)
+        // Use the caller-supplied memo dict when present; otherwise start with
+        // an empty dict.  CPython always passes a dict (never None) to
+        // __deepcopy__, so we must forward a proper dict here.
+        let memo = if args.len() == 2 {
+            args[1].value.clone()
+        } else {
+            Value::dict(IndexMap::new())
+        };
+        deep_copy(obj, memo, _interp)
     }
 }
 
@@ -187,8 +197,13 @@ fn shallow_copy(obj: Value, interp: &mut crate::interpreter::Interpreter) -> Res
 // ── deep_copy ─────────────────────────────────────────────────────────────────
 
 /// Produce a deep copy of `obj`.  Immutable types are returned as-is.
-/// Mutable containers are recursively copied.
-fn deep_copy(obj: Value, interp: &mut crate::interpreter::Interpreter) -> Result<Value> {
+/// Mutable containers are recursively copied.  `memo` is forwarded to any
+/// `__deepcopy__(self, memo)` dunder calls so user code receives a proper dict.
+fn deep_copy(
+    obj: Value,
+    memo: Value,
+    interp: &mut crate::interpreter::Interpreter,
+) -> Result<Value> {
     match obj.kind() {
         // Immutable scalars.
         ValueKind::None
@@ -201,9 +216,25 @@ fn deep_copy(obj: Value, interp: &mut crate::interpreter::Interpreter) -> Result
         | ValueKind::Complex(_, _)
         | ValueKind::Range { .. } => Ok(obj.clone()),
 
-        // frozenset is immutable — same object.
+        // frozenset — CPython deep-copies the elements even though the
+        // container itself is immutable; user-defined hashable objects inside
+        // the frozenset may have __deepcopy__ methods.  Extract the inner
+        // IndexSet<PyKey>, convert each key to a Value, deep-copy it, then
+        // convert back via value_to_pykey and rebuild a new frozenset.
         ValueKind::BuiltinObject { ops, .. } if ops.type_name() == "frozenset" => {
-            Ok(obj.clone())
+            let items_rc = pyrust_builtins::frozenset::as_items(&obj)
+                .expect("frozenset arm: as_items must succeed");
+            // Snapshot before borrowing mutably through interp.
+            let keys: Vec<PyKey> = items_rc.iter().cloned().collect();
+            drop(items_rc);
+            let mut new_set: IndexSet<PyKey> = IndexSet::with_capacity(keys.len());
+            for k in keys {
+                let v = key_to_value(k);
+                let deep_v = deep_copy(v, memo.clone(), interp)?;
+                let new_k = interp.value_to_pykey(&deep_v)?;
+                new_set.insert(new_k);
+            }
+            Ok(pyrust_builtins::frozenset::frozenset(new_set))
         }
 
         // tuple — CPython deepcopies each element into a new tuple even though
@@ -216,7 +247,7 @@ fn deep_copy(obj: Value, interp: &mut crate::interpreter::Interpreter) -> Result
             // items is &[Value] — a raw reference, no Ref guard to drop.
             let mut new_items = Vec::with_capacity(items_vec.len());
             for item in items_vec {
-                new_items.push(deep_copy(item, interp)?);
+                new_items.push(deep_copy(item, memo.clone(), interp)?);
             }
             Ok(Value::tuple(new_items))
         }
@@ -228,30 +259,45 @@ fn deep_copy(obj: Value, interp: &mut crate::interpreter::Interpreter) -> Result
             drop(items);
             let mut new_items = Vec::with_capacity(items_vec.len());
             for item in items_vec {
-                new_items.push(deep_copy(item, interp)?);
+                new_items.push(deep_copy(item, memo.clone(), interp)?);
             }
             Ok(Value::list(new_items))
         }
 
-        // dict — new dict with deeply-copied values.  Keys are PyKey (hashable
-        // and immutable by construction) so they need no deep copy.
+        // dict — new dict with deeply-copied keys and values.  Keys are PyKey
+        // but PyKey::Object can hold user instances with __deepcopy__; CPython
+        // deep-copies both keys and values (matching `copy.deepcopy({obj: v})`).
         ValueKind::Dict(d) => {
             let pairs: Vec<(PyKey, Value)> =
                 d.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
             drop(d);
             let mut new_dict: IndexMap<PyKey, Value> = IndexMap::with_capacity(pairs.len());
             for (k, v) in pairs {
-                new_dict.insert(k, deep_copy(v, interp)?);
+                let deep_k = {
+                    let kv = key_to_value(k);
+                    let deep_kv = deep_copy(kv, memo.clone(), interp)?;
+                    interp.value_to_pykey(&deep_kv)?
+                };
+                new_dict.insert(deep_k, deep_copy(v, memo.clone(), interp)?);
             }
             Ok(Value::dict(new_dict))
         }
 
-        // set — set keys are PyKey (immutable/hashable), so the elements
-        // themselves need no deep copy; a new independent set is sufficient.
+        // set — elements are PyKey but PyKey::Object holds user instances that
+        // may define __deepcopy__; CPython deep-copies set elements.  Convert
+        // each key to a Value, deep-copy it, then convert back via
+        // value_to_pykey and rebuild a new independent set.
         ValueKind::Set(items) => {
-            let new_items: IndexSet<PyKey> = items.clone();
+            let keys: Vec<PyKey> = items.iter().cloned().collect();
             drop(items);
-            Ok(Value::set(new_items))
+            let mut new_set: IndexSet<PyKey> = IndexSet::with_capacity(keys.len());
+            for k in keys {
+                let v = key_to_value(k);
+                let deep_v = deep_copy(v, memo.clone(), interp)?;
+                let new_k = interp.value_to_pykey(&deep_v)?;
+                new_set.insert(new_k);
+            }
+            Ok(Value::set(new_set))
         }
 
         // PyInstance — check for __deepcopy__ dunder first (MRO-aware).
@@ -266,16 +312,17 @@ fn deep_copy(obj: Value, interp: &mut crate::interpreter::Interpreter) -> Result
                 lookup_class_attr(&class, "__deepcopy__")
             };
             if let Some(method) = deepcopy_method {
-                // Call `__deepcopy__(self, memo)` — pass None for memo.
-                // invoke_class_method binds `self` via bound_prefix and
-                // appends the remaining args after.
+                // Call `__deepcopy__(self, memo)` — forward the memo dict so
+                // user code receives a proper dict argument (CPython never
+                // passes None here).  invoke_class_method binds `self` via
+                // bound_prefix and appends the remaining args after.
                 invoke_class_method(
                     interp,
                     method,
                     Value::py_instance(Rc::clone(&rc)),
                     &[ExpandedCallArg {
                         name: None,
-                        value: Value::none(),
+                        value: memo,
                     }],
                 )
             } else {
@@ -287,7 +334,7 @@ fn deep_copy(obj: Value, interp: &mut crate::interpreter::Interpreter) -> Result
                 let mut new_attrs: IndexMap<String, Value> =
                     IndexMap::with_capacity(attrs_snapshot.len());
                 for (k, v) in attrs_snapshot {
-                    new_attrs.insert(k, deep_copy(v, interp)?);
+                    new_attrs.insert(k, deep_copy(v, memo.clone(), interp)?);
                 }
                 Ok(Value::py_instance(Rc::new(RefCell::new(PyInstance {
                     class,
