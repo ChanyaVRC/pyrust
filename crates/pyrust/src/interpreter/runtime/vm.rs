@@ -1529,7 +1529,31 @@ impl Interpreter {
                                 // (issue #906): a stored PyKey::Object with
                                 // hash py_hash_none() that __eq__-matches None
                                 // must be overwritten, not added as a second entry.
-                                if matches!(&key, PyKey::Object { .. } | PyKey::None) {
+                                //
+                                // Fast path for `PyKey::None` (issue #934): only
+                                // enter the slow dedup path when the dict actually
+                                // contains a `PyKey::Object{hash == py_hash_none()}`.
+                                // In the common case we skip the Rc-clone and the
+                                // full `dict_lookup` scan.
+                                let needs_dedup = match &key {
+                                    PyKey::Object { .. } => true,
+                                    PyKey::None => {
+                                        let none_hash =
+                                            pyrust_core::py_hash_none() as u64;
+                                        regs[*obj as usize]
+                                            .as_dict()
+                                            .map(|d| {
+                                                d.keys().any(|k| {
+                                                    matches!(k,
+                                                        PyKey::Object { hash, .. }
+                                                        if *hash == none_hash)
+                                                })
+                                            })
+                                            .unwrap_or(false)
+                                    }
+                                    _ => false,
+                                };
+                                if needs_dedup {
                                     // Rc-clone the dict Value (cheap) so
                                     // `dict_lookup` can run with no live alias
                                     // into the register file; if an entry
@@ -2309,7 +2333,28 @@ impl Interpreter {
                     // `None` keys also need it for the cross-variant case
                     // (issue #906): a stored PyKey::Object with hash py_hash_none()
                     // that __eq__-matches None must not become a duplicate.
-                    if matches!(&key, PyKey::Object { .. } | PyKey::None) {
+                    //
+                    // Fast path for `PyKey::None` (issue #934): only enter the
+                    // slow dedup path when the set contains a
+                    // `PyKey::Object{hash == py_hash_none()}`.
+                    let needs_dedup = match &key {
+                        PyKey::Object { .. } => true,
+                        PyKey::None => {
+                            let none_hash = pyrust_core::py_hash_none() as u64;
+                            regs[*set_reg as usize]
+                                .as_set()
+                                .map(|s| {
+                                    s.iter().any(|k| {
+                                        matches!(k,
+                                            PyKey::Object { hash, .. }
+                                            if *hash == none_hash)
+                                    })
+                                })
+                                .unwrap_or(false)
+                        }
+                        _ => false,
+                    };
+                    if needs_dedup {
                         // Rc-clone the set Value (cheap) so `set_lookup` can
                         // run without an alias into the register file.
                         let set_val = regs[*set_reg as usize]
