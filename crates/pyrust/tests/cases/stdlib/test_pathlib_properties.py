@@ -51,6 +51,31 @@ assert not callable(p.parts), 'parts should not be callable'
 # parent returns a Path object, which is not callable in this context.
 assert not callable(p.parent), 'parent should not be callable'
 
+# Calling a property value raises TypeError (str/tuple/Path is not callable).
+try:
+    p.name()
+    assert False, 'p.name() should raise TypeError'
+except TypeError:
+    pass
+
+try:
+    p.stem()
+    assert False, 'p.stem() should raise TypeError'
+except TypeError:
+    pass
+
+try:
+    p.suffix()
+    assert False, 'p.suffix() should raise TypeError'
+except TypeError:
+    pass
+
+try:
+    p.parts()
+    assert False, 'p.parts() should raise TypeError'
+except TypeError:
+    pass
+
 # ── chained property access ────────────────────────────────────────────────────
 
 # Chaining: path.parent.name should work without any ()
