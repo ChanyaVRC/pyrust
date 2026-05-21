@@ -725,6 +725,11 @@ impl Interpreter {
                     let v = cls.mutation_version.get().wrapping_add(1);
                     cls.mutation_version.set(v);
                 }
+                // Bump the global epoch so that caches keyed on subclasses of
+                // this class (which only check their own mutation_version) also
+                // invalidate — the epoch guard catches ancestor mutations that
+                // the leaf-class version check would miss.
+                pyrust_core::bump_class_epoch();
                 Ok(())
             }
             ValueKind::UserFunction(func) => {
@@ -1099,6 +1104,9 @@ impl Interpreter {
                     let v = cls.mutation_version.get().wrapping_add(1);
                     cls.mutation_version.set(v);
                 }
+                // Bump the global epoch so that caches keyed on subclasses of
+                // this class also invalidate after a base-class deletion.
+                pyrust_core::bump_class_epoch();
                 Ok(())
             }
             ValueKind::BuiltinFunction(func_name) => {

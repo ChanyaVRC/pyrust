@@ -293,9 +293,15 @@ pub enum Insn {
 ///
 /// The cache is indexed by the instruction's position (`pc`) in `FnCode::insns`.
 /// On every hit the cache checks that (a) the object is still a `PyInstance` of
-/// the same class (`class_ptr` pointer equality) and (b) that class has not been
-/// mutated since the fill (`class_version` matches `PyClass::mutation_version`).
-/// When both guards hold the cached unbound value is rebound to the current
+/// the same class (`class_ptr` pointer equality), (b) that class has not been
+/// mutated since the fill (`class_version` matches `PyClass::mutation_version`),
+/// and (c) the global class-mutation epoch has not advanced (`epoch` matches
+/// `pyrust_core::class_epoch()`).  Guard (c) catches mutations to ancestor
+/// classes in the MRO (e.g. `Base.method = new_fn` when the cached instance is
+/// a `Child(Base)` — `Child.mutation_version` is unchanged but the global epoch
+/// advances, so the cache correctly misses).
+///
+/// When all guards hold the cached unbound value is rebound to the current
 /// instance instead of repeating the `lookup_class_attr` chain walk.
 ///
 /// The value stored is the **unbound** class-attribute value (i.e. what
@@ -320,13 +326,17 @@ pub enum Insn {
 pub enum AttrCacheEntry {
     /// No observation yet — slot is uninitialised.
     Empty,
-    /// Monomorphic: one class seen.  Validated by pointer + version check.
+    /// Monomorphic: one class seen.  Validated by pointer + version + epoch check.
     ClassAttr {
         /// Raw pointer to the `RefCell<PyClass>` inside the class's `Rc`.
         /// Used for O(1) identity comparison; never dereferenced.
         class_ptr: *const (),
         /// Value of `PyClass::mutation_version` when the cache was filled.
         class_version: u64,
+        /// Value of `pyrust_core::class_epoch()` when the cache was filled.
+        /// Any mutation to any class — including ancestor classes in the MRO —
+        /// advances the global epoch, causing this guard to fail.
+        epoch: u64,
         /// The unbound class-attr value from `lookup_class_attr`.
         value: Value,
     },
@@ -347,9 +357,10 @@ impl std::fmt::Debug for AttrCacheEntry {
             AttrCacheEntry::ClassAttr {
                 class_ptr,
                 class_version,
+                epoch,
                 ..
             } => {
-                write!(f, "ClassAttr({class_ptr:?}, v{class_version})")
+                write!(f, "ClassAttr({class_ptr:?}, v{class_version}, e{epoch})")
             }
             AttrCacheEntry::Megamorphic => write!(f, "Megamorphic"),
         }
