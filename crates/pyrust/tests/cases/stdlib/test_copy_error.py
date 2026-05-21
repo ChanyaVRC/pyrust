@@ -40,3 +40,8 @@ try:
     raise copy.Error("base catch")
 except Exception as exc:
     print("caught as Exception:", exc)  # -> caught as Exception: base catch
+
+# CPython exports `copy.error` as a backward-compat alias for `copy.Error`.
+# Both names must resolve to the same class object.
+print(copy.error is copy.Error)        # -> True
+print(copy.error.__name__)             # -> "Error"
