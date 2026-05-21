@@ -1081,17 +1081,19 @@ impl Interpreter {
                                 match &cache[pc - 1] {
                                     AttrCacheEntry::Megamorphic => {}
                                     AttrCacheEntry::ClassAttr { class_ptr: existing_ptr, .. } => {
-                                        // A different class was seen — go megamorphic.
                                         if let Some(inst_rc) = obj_val.as_py_instance_rc() {
                                             let new_ptr =
                                                 Rc::as_ptr(&inst_rc.borrow().class) as *const ();
                                             if new_ptr != *existing_ptr {
+                                                // Different class at this call site — go megamorphic.
                                                 cache[pc - 1] = AttrCacheEntry::Megamorphic;
+                                            } else {
+                                                // Same class but version changed (or instance
+                                                // shadow exists).  Reset to Empty so the next
+                                                // slow-path execution refills with the current
+                                                // version and value.
+                                                cache[pc - 1] = AttrCacheEntry::Empty;
                                             }
-                                            // Same class but cache miss means a guard
-                                            // failed (version changed or instance shadow);
-                                            // leave the entry so it re-validates next
-                                            // time with the latest version.  Refill below.
                                         }
                                     }
                                     AttrCacheEntry::Empty => {
@@ -3202,12 +3204,14 @@ impl Interpreter {
                         AttrCacheEntry::ClassAttr { class_ptr: existing_ptr, .. } => {
                             let new_ptr = Rc::as_ptr(&inst_rc.borrow().class) as *const ();
                             if new_ptr != *existing_ptr {
+                                // Different class at this call site — go megamorphic.
                                 cache[call_site_pc] = AttrCacheEntry::Megamorphic;
+                            } else {
+                                // Same class but version changed (or instance shadow exists).
+                                // Reset to Empty so the next slow-path execution refills
+                                // with the current class version and updated method value.
+                                cache[call_site_pc] = AttrCacheEntry::Empty;
                             }
-                            // Same class, version mismatch — refill below by letting
-                            // the next slow-path execution do it; current entry will
-                            // re-validate on next hit attempt and miss again, which
-                            // is the right behaviour (forces a refill on version change).
                         }
                         AttrCacheEntry::Empty => {
                             let inst = inst_rc.borrow();
