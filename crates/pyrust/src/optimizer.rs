@@ -62,6 +62,11 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     // Second run catches argument-prep moves that became dead after the first
     // pass removed their consuming CallMemo (pure-call DCE cascade).
     let insns = pass_dead_store_elim(insns, num_locals);
+    // Drop Call instructions to pure builtins whose result is never used.
+    // A third dead-store pass then removes the now-dead LoadGlobal and arg
+    // loads that fed the eliminated calls.
+    let insns = pass_builtin_dce(insns, num_locals, &names);
+    let insns = pass_dead_store_elim(insns, num_locals);
     let insns = pass_syncmod_sink(insns);
     let insns = pass_cross_jump(insns);
     let insns = pass_copy_prop(insns, num_locals);
@@ -3251,6 +3256,131 @@ fn pass_ivsr(insns: Vec<Insn>, consts: &mut Vec<Value>, num_regs: &mut u32) -> V
 }
 
 // ─── Trivial no-op removal ─────────────────────────────────────────────────────
+
+// ─── Pure-builtin dead call elimination ───────────────────────────────────────
+
+/// Remove `Call` instructions to pure built-in functions whose result register
+/// is never read after the call.
+///
+/// ## When is a call removable?
+///
+/// A `Call(func_reg, argc)` is eliminated when **all** of the following hold:
+///
+/// 1. `func_reg` was loaded by a `LoadGlobal(func_reg, name_idx)` instruction
+///    and has not been overwritten since (i.e. it still holds the builtin).
+/// 2. `crate::builtin_registry::is_pure(&names[name_idx])` returns `true`.
+/// 3. `func_reg` is not read by any instruction between the `Call` and the
+///    next write to `func_reg` (i.e. the result is dead).  The check bails
+///    conservatively at any control-flow branch.
+///
+/// ## What is NOT removed
+///
+/// - Calls to impure builtins (`print`, `input`, `open`, user-dunder-dispatchers
+///   like `str`, `sorted`, `min`, …) — `is_pure` returns `false` for these.
+/// - Calls through a register that was last written by something other than
+///   `LoadGlobal` (e.g. a computed function stored via a user expression).
+/// - Calls in loops that have a visible back-edge in the suffix (conservative:
+///   the result might feed a subsequent iteration).
+/// - `CallMemo` instructions — those are already handled by `pass_dead_store_elim`.
+///
+/// ## Interaction with `pass_dead_store_elim`
+///
+/// After this pass removes a `Call`, the `LoadGlobal` that loaded the callee
+/// and the `LoadConst` / `Move` instructions that prepared the arguments are
+/// typically dead.  A subsequent `pass_dead_store_elim` invocation cleans those
+/// up (see the pipeline in `optimize_fn_code`).
+fn pass_builtin_dce(insns: Vec<Insn>, num_locals: u32, names: &[String]) -> Vec<Insn> {
+    let n = insns.len();
+    if n == 0 {
+        return insns;
+    }
+
+    // `pure_reg` tracks temp registers (>= num_locals) that are known to
+    // currently hold a pure builtin function loaded by `LoadGlobal`.
+    // Entries are cleared whenever any instruction overwrites the register.
+    let mut pure_reg: HashSet<u32> = HashSet::new();
+
+    // Track active exception handlers.  `SetupExcept` increments this counter;
+    // `PopExcept` / `EndExcept` decrement it.  Any `Call` seen while the counter
+    // is > 0 is inside a try-except block: even though the result may be dead,
+    // the call may raise an exception that the handler is supposed to catch.
+    // Removing such a call would swallow the exception — incorrect behaviour.
+    let mut exc_depth: i32 = 0;
+
+    let mut keep = vec![true; n];
+
+    for i in 0..n {
+        let insn = &insns[i];
+
+        // ── Step 1: check if this Call targets a dead pure-builtin result ──
+        //
+        // Do this BEFORE the generic write-invalidation step below so that
+        // `pure_reg` still reflects the state from the preceding `LoadGlobal`.
+        if let Insn::Call(func_reg, _argc) = insn {
+            let func_reg = *func_reg;
+            if exc_depth == 0 && func_reg >= num_locals && pure_reg.contains(&func_reg) {
+                // Conservative: skip if a back-edge follows (same guard as DSE).
+                let dead = if slice_has_back_edge(&insns[i + 1..]) {
+                    false
+                } else {
+                    !reg_is_read_before_next_write(&insns[i + 1..], func_reg)
+                };
+                if dead {
+                    keep[i] = false;
+                }
+                // The Call overwrites func_reg with the return value; it no
+                // longer holds the pure builtin.  Fall through to invalidation.
+            }
+        }
+
+        // ── Step 2: update exception-handler depth ──
+        //
+        // `SetupExcept` pushes an exception handler; `PopExcept` pops it on
+        // the normal (no-exception) path.  `EndExcept` terminates the handler
+        // body on the exception path — but in the linear instruction stream it
+        // appears *after* the `Jump` that skips past it on the normal path, so
+        // it does NOT correspond to an open `SetupExcept` at that point.  Only
+        // count `PopExcept` as the matching close, not `EndExcept`.
+        match insn {
+            Insn::SetupExcept(..) => exc_depth += 1,
+            Insn::PopExcept => exc_depth = exc_depth.saturating_sub(1),
+            _ => {}
+        }
+
+        // ── Step 3: update pure_reg based on what this instruction writes ──
+
+        if let Insn::LoadGlobal(r, name_idx) = insn {
+            // Track temp registers that are loaded with a pure builtin name.
+            if *r >= num_locals {
+                let is_pure = (*name_idx as usize) < names.len()
+                    && crate::builtin_registry::is_pure(&names[*name_idx as usize]);
+                if is_pure {
+                    pure_reg.insert(*r);
+                } else {
+                    pure_reg.remove(r);
+                }
+            }
+        } else {
+            // Any other write to a temp register invalidates the pure-builtin
+            // tracking for that register.
+            if let Some(dst) = writable_dst(insn) {
+                if dst >= num_locals {
+                    pure_reg.remove(&dst);
+                }
+            }
+            // LoadNoneRange writes a contiguous range — invalidate each slot.
+            if let Insn::LoadNoneRange { start, count } = insn {
+                for r in *start..*start + *count as u32 {
+                    if r >= num_locals {
+                        pure_reg.remove(&r);
+                    }
+                }
+            }
+        }
+    }
+
+    compact(insns, &keep)
+}
 
 // ─── SyncModuleGlobal sinking ─────────────────────────────────────────────────
 
@@ -6906,6 +7036,53 @@ mod tests {
         ];
         let out = pass_dead_store_elim(insns, 2);
         assert_eq!(out.len(), 3, "CallMemo to local must not be removed");
+    }
+
+    // ── pass_builtin_dce ─────────────────────────────────────────────────────
+
+    #[test]
+    fn builtin_dce_drops_dead_call_to_pure_builtin() {
+        // LoadGlobal(r2, 0) loads "abs" (pure); Call(r2, 0) result never read.
+        // The Call must be removed; LoadGlobal is kept (may raise NameError).
+        let names = vec!["abs".to_string(), "print".to_string()];
+        let insns = vec![
+            Insn::LoadGlobal(2, 0), // r2 = abs  (names[0] = "abs", pure)
+            Insn::Call(2, 0),       // r2 = abs() — result dead
+            Insn::ReturnNone,
+        ];
+        let out = pass_builtin_dce(insns, 2, &names);
+        assert_eq!(out.len(), 2, "dead Call to pure builtin should be removed");
+        assert!(matches!(out[0], Insn::LoadGlobal(2, 0)));
+        assert!(matches!(out[1], Insn::ReturnNone));
+    }
+
+    #[test]
+    fn builtin_dce_keeps_call_whose_result_is_used() {
+        // Call(r2, 0) result is returned — must NOT be dropped.
+        let names = vec!["abs".to_string()];
+        let insns = vec![
+            Insn::LoadGlobal(2, 0), // r2 = abs
+            Insn::Call(2, 0),       // r2 = abs() — result used by Return
+            Insn::Return(2),
+        ];
+        let out = pass_builtin_dce(insns, 2, &names);
+        assert_eq!(out.len(), 3, "live Call must not be removed");
+        assert!(matches!(out[1], Insn::Call(2, 0)));
+    }
+
+    #[test]
+    fn builtin_dce_keeps_call_to_impure_builtin() {
+        // LoadGlobal(r2, 0) loads "print" (impure); Call must be kept even if
+        // the result is never read.
+        let names = vec!["print".to_string()];
+        let insns = vec![
+            Insn::LoadGlobal(2, 0), // r2 = print  (impure)
+            Insn::Call(2, 0),       // r2 = print() — result dead, but call has side effects
+            Insn::ReturnNone,
+        ];
+        let out = pass_builtin_dce(insns, 2, &names);
+        assert_eq!(out.len(), 3, "Call to impure builtin must not be removed");
+        assert!(matches!(out[1], Insn::Call(2, 0)));
     }
 
     // ── pass_exit_inline ─────────────────────────────────────────────────────
