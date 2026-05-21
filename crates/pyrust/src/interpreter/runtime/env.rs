@@ -1455,15 +1455,15 @@ fn func_attrs_rc(func: &UserFunction) -> Rc<RefCell<Value>> {
     Rc::clone(slot.as_ref().unwrap())
 }
 
-/// Increment `Interpreter::global_env_version`, skipping the two sentinel
-/// values (`GLOBAL_CACHE_EMPTY` and `GLOBAL_CACHE_BUILTIN`) that the
-/// `LoadGlobal` inline cache reserves.  Wraps through 0 so that the counter
-/// never collides with either sentinel.
+/// Increment `Interpreter::global_env_version`, skipping the sentinel
+/// value `GLOBAL_CACHE_EMPTY` (u32::MAX - 1) that the `LoadGlobal` inline
+/// cache reserves as the "not yet populated" marker.  Wraps through 0 so
+/// that the counter never collides with the sentinel.
 #[inline]
 fn bump_global_env_version(interp: &Interpreter) {
     let v = interp.global_env_version.get().wrapping_add(1);
-    // Skip GLOBAL_CACHE_EMPTY (u32::MAX - 1) and GLOBAL_CACHE_BUILTIN (u32::MAX).
-    let v = if v >= GLOBAL_CACHE_EMPTY { 0 } else { v };
+    // Skip GLOBAL_CACHE_EMPTY (u32::MAX - 1); wrap back to 0.
+    let v = if v == GLOBAL_CACHE_EMPTY { 0 } else { v };
     interp.global_env_version.set(v);
 }
 

@@ -125,6 +125,67 @@ def outer_shadow():
 print(outer_shadow())  # ['cell_a', 'cell_a', 'cell_b', 'cell_b']
 print(shadow_g)        # 'module_shadow_g' — module global unchanged
 
+# ── Module global and cell var share the same name; module reassignment must ──
+# not poison the cell-var read path.
+#
+# `y` exists at module scope.  `outer_cellvar` defines its own `y` (cell var)
+# and `inner_cellvar` reads and mutates it via `nonlocal`.  After the module-
+# level `y` is reassigned the closure must still see the cell-var value, not
+# the freshly cached module-scope value, because the cache-eligibility check
+# inspects `global_names` (the `global`-declaration set) and `env.parent.is_none()`
+# to determine whether the slow-path hit was truly in the module env.
+
+y = 0  # module-level global
+
+def outer_cellvar():
+    y = 10            # cell var in outer_cellvar, shadows the module global
+    def inner_cellvar():
+        nonlocal y
+        y += 1
+        return y
+    r1 = inner_cellvar()   # 11
+    r2 = inner_cellvar()   # 12
+    return [r1, r2]
+
+print(outer_cellvar())   # [11, 12]
+
+# Reassign the module global — must not disturb the cell-var logic above.
+y = 999
+print(outer_cellvar())   # still [11, 12] because each call creates a fresh cell
+
+# ── Builtin shadowed by a module-level assignment must resolve to the new name ─
+# When a builtin name is first loaded by a function it is cached with the
+# current global_env_version.  A subsequent module-level assignment to that
+# name bumps the version, so the cache entry is invalidated and the slow path
+# re-resolves.  The test uses global declarations to go through the StoreGlobal
+# path (which bumps global_env_version), and impure side effects so the
+# function is not mis-classified as pure and memoized.
+
+results = []
+
+def record_len():
+    # Side effect (list.append) makes this function impure so the compiler
+    # does not cache its result via CallMemo.
+    results.append(len([1, 2, 3]))
+
+record_len()          # results[0] = 3  — uses builtin len
+
+def shadow_len():
+    global len
+    len = lambda v: 99
+
+shadow_len()          # shadows builtin len via StoreGlobal, bumps global_env_version
+record_len()          # results[1] = 99 — must see the module-scope shadow
+
+def restore_len():
+    global len
+    del len
+
+restore_len()         # removes the shadow; builtin len is visible again
+record_len()          # results[2] = 3  — builtin restored
+
+print(results)        # [3, 99, 3]
+
 # ── Builtin still found after a same-named global is deleted ─────────────────
 # Not a realistic scenario, but ensures cache correctness.
 

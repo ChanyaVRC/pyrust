@@ -7,7 +7,7 @@ use indexmap::IndexMap;
 use smallvec::smallvec;
 
 use crate::ast::{AssignTarget, BinaryOp, Expr, Stmt, UnaryOp};
-use crate::bytecode::{FnCode, GLOBAL_CACHE_BUILTIN, GLOBAL_CACHE_EMPTY};
+use crate::bytecode::{FnCode, GLOBAL_CACHE_EMPTY};
 use crate::error::{PyError, Result};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
@@ -236,9 +236,10 @@ pub struct Interpreter {
     /// `LoadGlobal` caches the resolved value alongside this counter in
     /// `FnCode::global_cache[name_idx]`.  A cache entry is valid when its
     /// stored version equals the current `global_env_version`; on mismatch
-    /// the slow env-chain lookup runs and the entry is refreshed.  Builtins
-    /// use the sentinel `GLOBAL_CACHE_BUILTIN` (u32::MAX) instead, since
-    /// they never change.
+    /// the slow env-chain lookup runs and the entry is refreshed.  Builtin
+    /// resolutions are cached with the current version as well, so that a
+    /// subsequent module-level assignment of the same name (e.g. `len = fn`)
+    /// correctly invalidates the cached builtin entry.
     ///
     /// Wrapped in `Cell<u32>` so that `assign_name` (which takes `&self`
     /// for consistency with its callers) can increment it via interior

@@ -780,17 +780,19 @@ impl Interpreter {
                 Insn::LoadGlobal(dst, name_idx) => {
                     // ── Inline cache fast path ────────────────────────────
                     // Check the per-name cache slot before doing any env-chain
-                    // walk.  A hit requires either:
-                    //   * the cached version == global_env_version (module env
-                    //     unchanged since the value was last resolved), or
-                    //   * the cached version == GLOBAL_CACHE_BUILTIN (builtin;
-                    //     permanently immutable, no version to check).
+                    // walk.  A hit requires the cached version == global_env_version
+                    // (module env unchanged since the value was last resolved).
+                    // Builtins are now also cached with the current
+                    // global_env_version so that a module-level assignment of the
+                    // same name (e.g. `len = my_fn`) correctly invalidates the
+                    // cached builtin and the slow path re-resolves to the new
+                    // module-scope value.
                     let cur_ver = self.global_env_version.get();
                     {
                         let cache = code.global_cache.borrow();
                         if (*name_idx as usize) < cache.len() {
                             let entry = &cache[*name_idx as usize];
-                            if entry.0 == cur_ver || entry.0 == GLOBAL_CACHE_BUILTIN {
+                            if entry.0 == cur_ver {
                                 regs[*dst as usize] = entry.1.clone();
                                 continue;
                             }
@@ -880,10 +882,11 @@ impl Interpreter {
                                 format!("name '{}' is not defined", name),
                             )
                         }));
-                        // Builtins are permanently immutable: cache with the
-                        // sentinel GLOBAL_CACHE_BUILTIN, which is never equal
-                        // to any real global_env_version value.
-                        (v, GLOBAL_CACHE_BUILTIN)
+                        // Cache with the current global_env_version so that a
+                        // subsequent module-level assignment of the same name
+                        // (e.g. `len = my_fn`) bumps the version and invalidates
+                        // this entry, forcing a re-resolve on the next LoadGlobal.
+                        (v, cur_ver)
                     };
                     // Update the cache slot.
                     if cache_ver != GLOBAL_CACHE_EMPTY {
@@ -1799,6 +1802,15 @@ impl Interpreter {
                     regs[*reg as usize] = Value::unset();
                 }
                 Insn::SyncModuleGlobal(reg, name_idx) => {
+                    // Always bump global_env_version: this instruction fires on
+                    // every module-scope assignment that uses a fastlocal register.
+                    // Without the bump, a `LoadGlobal` inline cache that resolved
+                    // a name to a builtin at `cur_ver` would never be invalidated
+                    // when the same name is later shadowed at module scope
+                    // (e.g. `len = my_fn`), because `SyncModuleGlobal` is the
+                    // only store instruction executed — `StoreGlobal` (which also
+                    // bumps the version) is only used for `global`-declared names.
+                    bump_global_env_version(self);
                     if self.globals_accessed {
                         let name = pool_get!(code.names, *name_idx, "name");
                         let val = regs[*reg as usize].clone();
