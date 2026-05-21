@@ -2501,6 +2501,9 @@ fn hash_value(value: &Value) -> Result<i64> {
         // BuiltinObject: probe the BuiltinTypeOps hash hook (added in PR #781).
         // Types that override BuiltinTypeOps::hash (e.g. frozenset) return
         // Some(u64); anything that leaves it at the default None is unhashable.
+        // Note: slice is intercepted before this match in hash_value_with_interp;
+        // reaching this arm for a slice correctly returns None (unhashable) because
+        // SliceOps::hash was removed in PR #850.
         ValueKind::BuiltinObject { ops, state } => match ops.hash(state) {
             Some(h) => Ok(h as i64),
             None => Err(PyError::named(
@@ -2518,17 +2521,6 @@ fn hash_value(value: &Value) -> Result<i64> {
                 "TypeError",
                 format!("unhashable type: '{class_name}'"),
             ))
-        }
-        // Built-in objects (GenericAlias, frozenset, …) opt in to hashing via
-        // `BuiltinTypeOps::hash`.  Return `None` → TypeError.
-        ValueKind::BuiltinObject { ops, state } => {
-            match ops.hash(state) {
-                Some(h) => Ok(h as i64),
-                None => Err(PyError::named(
-                    "TypeError",
-                    format!("unhashable type: '{}'", ops.type_name()),
-                )),
-            }
         }
         _ => Err(PyError::named(
             "TypeError",
@@ -2560,6 +2552,16 @@ fn tuple_needs_interp(items: &[Value]) -> bool {
     items.iter().any(|v| match v.kind() {
         ValueKind::PyInstance(_) => true,
         ValueKind::Tuple(inner) => tuple_needs_interp(inner),
+        // Slices are always hashed via hash_value_with_interp (not the pure
+        // hash_value path) so that per-component errors ("unhashable type:
+        // 'list'") are preserved and PyInstance bounds can dispatch __hash__.
+        // Any tuple element that is a slice, or a nested tuple containing a
+        // slice, must therefore force the interpreter-aware branch.
+        ValueKind::BuiltinObject { ops, .. }
+            if ops.type_name() == pyrust_builtins::slice::TYPE_NAME =>
+        {
+            true
+        }
         _ => false,
     })
 }
@@ -2584,12 +2586,13 @@ pub(crate) fn hash_value_with_interp(interp: &mut crate::Interpreter, value: &Va
             Ok(h)
         }
         // Slices: CPython 3.12 makes slice hashable when all components are
-        // hashable.  `pyrust-builtins::component_hash` uses `Value::to_key()`
-        // which returns `None` for `PyInstance` (no interpreter access), so
-        // `hash(slice(inst, 2))` fails even though CPython 3.12 succeeds via
-        // identity hash.  Handle slices here with full interpreter dispatch so
-        // that each component can dispatch `__hash__` and produce the precise
-        // per-component "unhashable type: 'X'" message (issue #850).
+        // hashable.  Always recurse into each component via this function so
+        // that unhashable components (e.g. a list bound) surface the correct
+        // per-component "unhashable type: 'list'" TypeError instead of the
+        // misleading "unhashable type: 'slice'" that the pure
+        // `SliceOps::hash` (DefaultHasher) path used to produce (issue #850).
+        // This also handles `PyInstance` bounds that need interpreter access
+        // for `__hash__` dispatch.
         ValueKind::BuiltinObject { ops, state }
             if ops.type_name() == pyrust_builtins::slice::TYPE_NAME =>
         {
@@ -2597,16 +2600,6 @@ pub(crate) fn hash_value_with_interp(interp: &mut crate::Interpreter, value: &Va
             let s = borrow
                 .downcast_ref::<pyrust_builtins::slice::SliceState>()
                 .expect("SliceOps: bad state");
-            let needs_interp = matches!(s.start.kind(), ValueKind::PyInstance(_))
-                || matches!(s.stop.kind(), ValueKind::PyInstance(_))
-                || matches!(s.step.kind(), ValueKind::PyInstance(_));
-            if !needs_interp {
-                // Fast path: delegate to the pure path (SliceOps::hash via
-                // hash_value) to keep dict-key hashes consistent with the
-                // SliceOps::to_key path used in value_to_pykey.
-                drop(borrow);
-                return hash_value(value);
-            }
             // Clone components to release the borrow before mutable interp calls.
             let (start, stop, step) = (s.start.clone(), s.stop.clone(), s.step.clone());
             drop(borrow);
