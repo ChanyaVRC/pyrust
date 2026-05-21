@@ -589,7 +589,15 @@ pub fn py_hash_pykey(key: &PyKey) -> i64 {
             }
             h as i64
         }
-        PyKey::None => 0,
+        PyKey::None => {
+            // CPython returns _Py_HashPointer(Py_None) — a hash of None's
+            // memory address. pyrust's None is NaN-boxed (no heap pointer),
+            // so we derive a stable per-process value from a static sentinel.
+            static NONE_SENTINEL: u8 = 0;
+            let addr = (&NONE_SENTINEL as *const u8 as usize) >> 4;
+            let h = (addr as i64).wrapping_rem((1i64 << 61) - 1);
+            if h == 0 || h == -1 { 2654435761 } else { h }
+        }
         PyKey::Tuple(items) => {
             let mut h: i64 = 3527539;
             for item in items {

@@ -2477,7 +2477,15 @@ fn hash_value(value: &Value) -> Result<i64> {
             }
             Ok(h as i64)
         }
-        ValueKind::None => Ok(0),
+        ValueKind::None => {
+            // CPython uses _Py_HashPointer(Py_None) — a stable per-process
+            // non-zero hash derived from None's memory address. pyrust's None
+            // is NaN-boxed (no pointer), so use a static sentinel address.
+            static NONE_SENTINEL: u8 = 0;
+            let addr = (&NONE_SENTINEL as *const u8 as usize) >> 4;
+            let h = (addr as i64).wrapping_rem((1i64 << 61) - 1);
+            Ok(if h == 0 || h == -1 { 2654435761 } else { h })
+        }
         ValueKind::Tuple(items) => {
             let mut h: i64 = 3527539;
             for item in items {
