@@ -67,5 +67,9 @@ pyrust_module! {
         // `copy.Error` — subclass of `Exception`.  Exposed as a module
         // attribute so `import copy; copy.Error` resolves correctly.
         "Error" => copy_error_class_value(),
+        // CPython's `copy.py` keeps a lowercase alias for backward
+        // compatibility: `error = Error`.  Both names must resolve to the
+        // same class so `copy.error is copy.Error` is `True`.
+        "error" => copy_error_class_value(),
     }
 }
