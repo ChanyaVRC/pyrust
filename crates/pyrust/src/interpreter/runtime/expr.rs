@@ -665,9 +665,10 @@ impl Interpreter {
                 let s = borrow
                     .downcast_ref::<pyrust_builtins::slice::SliceState>()
                     .expect("SliceOps: bad state");
-                let needs_interp = matches!(s.start.kind(), ValueKind::PyInstance(_))
-                    || matches!(s.stop.kind(), ValueKind::PyInstance(_))
-                    || matches!(s.step.kind(), ValueKind::PyInstance(_));
+                let needs_interp =
+                    crate::builtin_modules::builtins::value_needs_interp(&s.start)
+                        || crate::builtin_modules::builtins::value_needs_interp(&s.stop)
+                        || crate::builtin_modules::builtins::value_needs_interp(&s.step);
                 // Check whether any component is an unhashable primitive so we
                 // can name it precisely in the error rather than blaming 'slice'.
                 // Use recursive descent so that a tuple-inside-slice (or

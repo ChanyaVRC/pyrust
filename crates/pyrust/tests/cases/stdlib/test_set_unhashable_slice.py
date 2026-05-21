@@ -44,6 +44,22 @@ try:
 except TypeError as e:
     print(e)  # unhashable type: 'list'
 
+# ── set.discard ───────────────────────────────────────────────────────────────
+
+try:
+    s = set()
+    s.discard(slice([1, 2], 3))
+except TypeError as e:
+    print(e)  # unhashable type: 'list'
+
+# ── set.remove ────────────────────────────────────────────────────────────────
+
+try:
+    s = set()
+    s.remove(slice([1, 2], 3))
+except TypeError as e:
+    print(e)  # unhashable type: 'list'
+
 # ── set() constructor ─────────────────────────────────────────────────────────
 
 try:
