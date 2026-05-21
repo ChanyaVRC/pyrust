@@ -94,7 +94,9 @@ pyrust_module! {
             Ok(counts.get(&key).cloned().unwrap_or_else(|| Value::int(0)))
         }
 
-        /// `c[k] = v` — Counter values must be integers (matches CPython).
+        /// `c[k] = v` — store any value under the key (CPython does not
+        /// enforce integer-only counts in `__setitem__`; it is merely
+        /// conventional to store integers).
         fn __setitem__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             if args.len() != 3 {
@@ -103,13 +105,7 @@ pyrust_module! {
                 )));
             }
             let key = require_key(_interp, args, 1, FN_NAME)?;
-            let value = match args[2].value.kind() {
-                ValueKind::Int(_) | ValueKind::Bool(_) => args[2].value.clone(),
-                _ => return Err(PyError::named(
-                    "TypeError",
-                    "Counter values must be integers".to_string(),
-                )),
-            };
+            let value = args[2].value.clone();
             let mut counts = read_counts(args, FN_NAME)?;
             counts.insert(key, value);
             store_counts(&inst, counts);
@@ -140,20 +136,44 @@ pyrust_module! {
             Ok(Value::generator(Box::new(NativeIterFrame { items, pos: 0 })))
         }
 
-        /// `repr(c)` — most-common-first, matching CPython.
+        /// `repr(c)` — most-common-first when all values are integers
+        /// (matching CPython's `most_common()` sort); falls back to
+        /// insertion order when any value is non-integer (matching
+        /// CPython's `try: most_common() except TypeError: dict(self)`).
         fn __repr__(args) -> Result<Value> {
             let counts = read_counts(args, FN_NAME)?;
             if counts.is_empty() {
                 return Ok(Value::string("Counter()".to_string()));
             }
-            let mut pairs: Vec<(PyKey, i64)> = counts
-                .iter()
-                .map(|(k, v)| (k.clone(), value_as_count(v)))
+            // Collect as (key, value) preserving the actual stored value so
+            // non-integer entries repr correctly (issue #920).
+            let mut pairs: Vec<(PyKey, Value)> = counts
+                .into_iter()
                 .collect();
-            pairs.sort_by(|a, b| b.1.cmp(&a.1));
+            // Sort by count descending, mirroring CPython's
+            // `try: most_common() except TypeError: dict(self)` fallback.
+            // We sort when all counts are numeric (int, bool, float); user-defined
+            // or non-orderable values fall back to insertion order.
+            let all_numeric = pairs.iter().all(|(_, v)| {
+                matches!(
+                    v.kind(),
+                    ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::Float(_)
+                )
+            });
+            if all_numeric {
+                pairs.sort_by(|a, b| {
+                    let to_f64 = |v: &Value| match v.kind() {
+                        ValueKind::Float(f) => f,
+                        ValueKind::Bool(b) => if b { 1.0 } else { 0.0 },
+                        _ => value_as_count(v) as f64,
+                    };
+                    to_f64(&b.1).total_cmp(&to_f64(&a.1))
+                });
+            }
+            // else: leave in insertion order (CPython fallback for non-orderable values)
             let inner: Vec<String> = pairs
                 .iter()
-                .map(|(k, v)| format!("{}: {v}", key_repr(k)))
+                .map(|(k, v)| format!("{}: {}", key_repr(k), v.repr()))
                 .collect();
             Ok(Value::string(format!(
                 "Counter({{{}}})",
@@ -1418,6 +1438,7 @@ fn apply_delta(
     let mut counts = read_counts(args, fn_name)?;
     let other = &user[0].value;
 
+    // `other` is a plain dict — use its values as deltas directly.
     if let ValueKind::Dict(map) = other.kind() {
         for (k, v) in map.iter() {
             let delta = match v.kind() {
@@ -1427,6 +1448,26 @@ fn apply_delta(
                     "TypeError",
                     "Counter delta values must be integers".to_string(),
                 )),
+            };
+            let cur = counts.get(k).map(value_as_count).unwrap_or(0);
+            counts.insert(k.clone(), Value::int(cur + sign * delta));
+        }
+    } else if let Some(other_counts) = counts_of(other) {
+        // `other` is a Counter (PyInstance with `_counts`) — treat its
+        // stored counts as deltas, exactly like the plain-dict branch.
+        // This fixes the case where `Counter.update(another_counter)` was
+        // falling through to the iterable path (contributing +1 per key
+        // rather than the actual stored count).
+        for (k, v) in other_counts.iter() {
+            let delta = match v.kind() {
+                ValueKind::Int(n) => n,
+                ValueKind::Bool(b) => b as i64,
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "Counter delta values must be integers".to_string(),
+                    ))
+                }
             };
             let cur = counts.get(k).map(value_as_count).unwrap_or(0);
             counts.insert(k.clone(), Value::int(cur + sign * delta));
