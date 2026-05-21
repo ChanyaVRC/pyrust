@@ -808,14 +808,31 @@ impl Interpreter {
                     // was wrong: a function-level cell var named "g" would have
                     // shadowed by a same-named module global in the dict.
                     let (val, cache_ver) = if let Some(v) = vm_try!(self.lookup_name(name)) {
-                        // Value came from the env chain.  Only cache it if the name
-                        // is in the module env — that is the only env whose version
-                        // is tracked by `global_env_version`.  Cell vars / nonlocal
-                        // bindings live in intermediate (function-level) envs whose
-                        // mutations do NOT increment `global_env_version`, so caching
-                        // them here would serve stale values after a write.
-                        let in_module_env =
-                            lookup_name_in_module(&self.env, name).is_some();
+                        // Value came from the env chain.  Cache it only when the
+                        // value actually came from the MODULE env — the only env
+                        // whose mutations are tracked by `global_env_version`.
+                        //
+                        // Two cases where the value came from the module env:
+                        //   1. The name is explicitly `global`-declared in the
+                        //      current function: `lookup_name` went directly to the
+                        //      module env via `lookup_name_in_module`.
+                        //   2. `self.env` IS the module env (no parent): we are at
+                        //      module scope, so any env-chain hit IS in the module env.
+                        //
+                        // Critically, we MUST NOT check `lookup_name_in_module(name)`
+                        // here.  That check is true whenever the module env has a
+                        // name with the same key — even if `lookup_name` found the
+                        // value in an INTERMEDIATE env (e.g. an outer function's
+                        // cell-var env).  Caching the cell-var value with `cur_ver`
+                        // would cause stale results after a nonlocal write that
+                        // changes the cell var but does not bump `global_env_version`
+                        // (bug found during review: `z = "module_z"` at module scope
+                        // combined with `z` as a cell var in an enclosing function
+                        // triggered incorrect cache hits in the inner closure).
+                        let in_module_env = {
+                            let env = self.env.borrow();
+                            env.global_names.contains(name) || env.parent.is_none()
+                        };
                         let ver = if in_module_env { cur_ver } else { GLOBAL_CACHE_EMPTY };
                         (v, ver)
                     } else if let Some(v) = self

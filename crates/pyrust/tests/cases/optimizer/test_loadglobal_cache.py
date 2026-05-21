@@ -98,6 +98,33 @@ def outer2():
 
 print(outer2())  # [10, 99]
 
+# ── Cell var shadowing a module global must not be cached as a module global ──
+# When an inner closure reads a name via LoadGlobal, the slow-path must not
+# cache the cell-var value under the global_env_version sentinel just because
+# the module env also happens to have a binding for the same name.  Doing so
+# causes stale results after the outer function mutates the cell var (which
+# does NOT bump global_env_version).
+#
+# Regression test for review-time fix: the original PR used
+# `lookup_name_in_module(name).is_some()` to decide whether to cache, which
+# returns True even when the value came from an intermediate (cell-var) env.
+
+shadow_g = "module_shadow_g"  # module global — same name as the cell var below
+
+def outer_shadow():
+    shadow_g = "cell_a"         # outer's cell var, shadows the module global
+    def inner_shadow():
+        return shadow_g         # LoadGlobal: must always see outer's live cell var
+    r1 = inner_shadow()         # "cell_a"
+    r2 = inner_shadow()         # "cell_a" (cached correctly)
+    shadow_g = "cell_b"         # nonlocal write — does NOT bump global_env_version
+    r3 = inner_shadow()         # MUST be "cell_b", not stale "cell_a"
+    r4 = inner_shadow()         # also "cell_b"
+    return [r1, r2, r3, r4]
+
+print(outer_shadow())  # ['cell_a', 'cell_a', 'cell_b', 'cell_b']
+print(shadow_g)        # 'module_shadow_g' — module global unchanged
+
 # ── Builtin still found after a same-named global is deleted ─────────────────
 # Not a realistic scenario, but ensures cache correctness.
 
