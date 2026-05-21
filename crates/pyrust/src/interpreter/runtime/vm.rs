@@ -982,6 +982,27 @@ impl Interpreter {
                     let result = vm_try!(self.get_attr(obj_val, name));
                     regs[*dst as usize] = result;
                 }
+                Insn::ImportFromAttr(dst, mod_reg, name_idx) => {
+                    let mod_val = vm_try!(vm_read(&regs, *mod_reg, num_locals));
+                    let name = pool_get!(code.names, *name_idx, "name");
+                    let result = self.get_attr(mod_val.clone(), name);
+                    match result {
+                        Ok(v) => regs[*dst as usize] = v,
+                        Err(e) if e.class_name_is("AttributeError") => {
+                            // Get the module name for the error message; fall
+                            // back to "<unknown>" when the value is not a module.
+                            let mod_name = match mod_val.kind() {
+                                ValueKind::PyModule(m) => m.borrow().name.clone(),
+                                _ => "<unknown>".to_string(),
+                            };
+                            vm_try!(Err(PyError::named(
+                                "ImportError",
+                                format!("cannot import name '{name}' from '{mod_name}'"),
+                            )));
+                        }
+                        Err(e) => vm_try!(Err(e)),
+                    }
+                }
                 Insn::SetAttr(obj, name_idx, val) => {
                     let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
                     let val_val = vm_try!(vm_read(&regs, *val, num_locals));

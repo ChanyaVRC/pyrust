@@ -6080,7 +6080,7 @@ impl Compiler {
             for (attr_name, alias) in names {
                 let attr_idx = self.intern_name(attr_name);
                 let val_reg = self.alloc_temp();
-                self.emit(Insn::GetAttr(val_reg, mod_reg, attr_idx));
+                self.emit(Insn::ImportFromAttr(val_reg, mod_reg, attr_idx));
                 let bound = alias.as_deref().unwrap_or(attr_name);
                 self.compile_store_name(bound, val_reg);
                 self.free_temp(val_reg);
@@ -7132,6 +7132,7 @@ impl Compiler {
             | Insn::LoadGlobal(d, ..)
             | Insn::Move(d, ..)
             | Insn::GetAttr(d, ..)
+            | Insn::ImportFromAttr(d, ..)
             | Insn::GetItem(d, ..)
             // Call is NOT retargetable: Call(func_reg, argc) uses func_reg as both
             // the function source and the result destination. Retargeting it to a
