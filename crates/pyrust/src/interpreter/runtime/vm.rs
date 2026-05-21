@@ -1154,6 +1154,16 @@ impl Interpreter {
                     let val_val = vm_try!(vm_read(&regs, *val, num_locals));
                     // Slice assignment: tuple key on a list.
                     if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
+                        // Guard: only lists support slice assignment.  Reject
+                        // non-list targets before invoking __index__ on the bounds,
+                        // so that a dict or user-instance target never accidentally
+                        // triggers user code via __index__ before raising the
+                        // canonical "does not support slice assignment" error.
+                        if regs[*obj as usize].list_len().is_none() {
+                            vm_try!(Err(PyError::Runtime(
+                                "object does not support slice assignment".to_string(),
+                            )));
+                        }
                         // Resolve each bound through the __index__ protocol before
                         // entering the list_with_mut closure (issue #849).  Must
                         // happen here because resolve_slice_bound_val needs &mut self
@@ -1300,6 +1310,14 @@ impl Interpreter {
                 Insn::DeleteItem(obj, idx) => {
                     let idx_val = vm_try!(vm_read(&regs, *idx, num_locals));
                     if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
+                        // Guard: only lists support slice deletion.  Check before
+                        // resolving bounds so that __index__ is never invoked on
+                        // non-list targets.
+                        if regs[*obj as usize].list_len().is_none() {
+                            vm_try!(Err(PyError::Runtime(
+                                "object does not support slice deletion".to_string(),
+                            )));
+                        }
                         // Resolve each bound through the __index__ protocol before
                         // entering the list_with_mut closure (issue #849).
                         let lo = vm_try!(self.resolve_slice_bound_val(lo));
