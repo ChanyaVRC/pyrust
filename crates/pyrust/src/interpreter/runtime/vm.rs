@@ -3054,22 +3054,61 @@ impl Interpreter {
                                 let items: Option<&[Value]> = all_val
                                     .as_list()
                                     .or_else(|| all_val.as_tuple());
-                                let names: Vec<String> = items
-                                    .map(|items| {
-                                        items
-                                            .iter()
-                                            .filter_map(|v| v.as_str().map(str::to_string))
-                                            .collect()
-                                    })
-                                    .unwrap_or_default();
+                                let mod_name = borrowed.name.clone();
+                                // Collect names, raising TypeError for non-str items
+                                // (CPython: "Item in M.__all__ must be str, not <type>").
+                                // Extract all data we need while the borrow is live,
+                                // then drop it before the error path (vm_try! may
+                                // propagate and the borrow must not outlive the block).
+                                let mut names: Vec<String> = Vec::new();
+                                let mut type_err_msg: Option<String> = None;
+                                if let Some(items) = items {
+                                    for item in items {
+                                        match item.as_str() {
+                                            Some(s) => names.push(s.to_string()),
+                                            None => {
+                                                type_err_msg = Some(format!(
+                                                    "Item in {}.__all__ must be str, not {}",
+                                                    mod_name,
+                                                    pyrust_core::builtin_type_name(item),
+                                                ));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                // Drop the borrow before surfacing any error or
+                                // taking the second borrow below.
                                 drop(borrowed);
+                                // Surface TypeError now that the borrow is released.
+                                if let Some(msg) = type_err_msg {
+                                    vm_try!(Err(PyError::named("TypeError", msg)));
+                                    unreachable!()
+                                }
                                 let borrowed2 = m.borrow();
-                                names
-                                    .into_iter()
-                                    .filter_map(|name| {
-                                        borrowed2.attrs.get(&name).map(|v| (name, v.clone()))
-                                    })
-                                    .collect()
+                                // Raise AttributeError for any name in __all__ that
+                                // is absent from the module (CPython behaviour).
+                                let mut out = Vec::with_capacity(names.len());
+                                let mut attr_err: Option<String> = None;
+                                for name in &names {
+                                    match borrowed2.attrs.get(name) {
+                                        Some(v) => out.push((name.clone(), v.clone())),
+                                        None => {
+                                            attr_err = Some(format!(
+                                                "module '{}' has no attribute '{}'",
+                                                mod_name, name,
+                                            ));
+                                            break;
+                                        }
+                                    }
+                                }
+                                drop(borrowed2);
+                                // Surface AttributeError now that the borrow is released.
+                                if let Some(msg) = attr_err {
+                                    vm_try!(Err(PyError::named("AttributeError", msg)));
+                                    unreachable!()
+                                }
+                                out
                             } else {
                                 // No __all__: export all names not starting with '_'.
                                 borrowed
