@@ -334,14 +334,65 @@ pyrust_module! {
         Ok(Value::string(p))
     }
 
+    /// `path.joinpath(*args)` — join one or more path components to this
+    /// path.  Equivalent to repeatedly applying `path / part` for each
+    /// argument.  If any argument is absolute it replaces all prior
+    /// components (CPython semantics).
+    #[py_name = "Path.joinpath"]
+    fn path_joinpath(args) -> Result<Value> {
+        let inst = expect_self(args, FN_NAME)?;
+        let _ = _interp;
+        let mut current = get_path(&inst, FN_NAME)?;
+        for a in args.iter().skip(1) {
+            let part = match a.value.kind() {
+                ValueKind::Str(s) => s.to_string(),
+                ValueKind::PyInstance(rc) => {
+                    if !is_path_instance(&rc) {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "{FN_NAME}(): argument must be str or Path, not {}",
+                                rc.borrow().class.borrow().name,
+                            ),
+                        ));
+                    }
+                    get_path(&Rc::clone(&rc), FN_NAME)?
+                }
+                _ => return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "{FN_NAME}(): argument must be str or Path, not {}",
+                        pyrust_core::builtin_type_name(&a.value),
+                    ),
+                )),
+            };
+            current = if part.starts_with('/') {
+                normalize_path(&part)
+            } else if part.is_empty() {
+                current
+            } else {
+                normalize_path(&format!("{current}/{part}"))
+            };
+        }
+        Ok(make_path_instance(&current))
+    }
+
     // ── path component accessors (callable methods, not descriptors) ───────
 
     /// `path.name()` — the final path component (filename + extension).
+    ///
+    /// Returns `''` for paths that are pure anchors: `"."` (current dir),
+    /// `"/"` (root), and `"//"` (POSIX.1 double-slash prefix).  This matches
+    /// CPython 3.12 where `Path('.').name == ''` and `Path('/').name == ''`.
     #[py_name = "Path.name"]
     fn path_name(args) -> Result<Value> {
         let inst = expect_self(args, FN_NAME)?;
         let _ = _interp;
         let p = get_path(&inst, FN_NAME)?;
+        // Pure-anchor paths have no file-name component.
+        if p == "." || p == "/" || p == "//" {
+            return Ok(Value::string(String::new()));
+        }
         let name = p.rsplit('/').next().unwrap_or(&p).to_string();
         Ok(Value::string(name))
     }
@@ -363,30 +414,58 @@ pyrust_module! {
     }
 
     /// `path.stem()` — the final component without its suffix.
+    ///
+    /// Names composed entirely of dots (`.`, `..`) have no suffix, so stem
+    /// equals the name.  For anchor-only paths the stem is `''`.  This
+    /// matches CPython 3.12: `Path('..').stem == '..'`,
+    /// `Path('.hidden').stem == '.hidden'`, `Path('foo.txt').stem == 'foo'`.
     #[py_name = "Path.stem"]
     fn path_stem(args) -> Result<Value> {
         let inst = expect_self(args, FN_NAME)?;
         let _ = _interp;
         let p = get_path(&inst, FN_NAME)?;
+        // Pure-anchor paths have no name component.
+        if p == "." || p == "/" || p == "//" {
+            return Ok(Value::string(String::new()));
+        }
         let name = p.rsplit('/').next().unwrap_or(&p);
-        // Find last `.` that is not the leading dot (hidden files).
-        let stem = match name.rfind('.') {
-            Some(i) if i > 0 => &name[..i],
-            _ => name,
+        // A name composed only of dots (e.g. `..`) has no suffix; its stem is
+        // the whole name.  Otherwise split at the last `.` that is not the
+        // first character (leading-dot hidden files also have no suffix).
+        let stem = if name.chars().all(|c| c == '.') {
+            name
+        } else {
+            match name.rfind('.') {
+                Some(i) if i > 0 => &name[..i],
+                _ => name,
+            }
         };
         Ok(Value::string(stem.to_string()))
     }
 
     /// `path.suffix()` — the final suffix including `.`, or `''` if none.
+    ///
+    /// Names composed entirely of dots and anchor-only paths have no suffix.
+    /// This matches CPython 3.12: `Path('..').suffix == ''`,
+    /// `Path('.hidden').suffix == ''`, `Path('foo.txt').suffix == '.txt'`.
     #[py_name = "Path.suffix"]
     fn path_suffix(args) -> Result<Value> {
         let inst = expect_self(args, FN_NAME)?;
         let _ = _interp;
         let p = get_path(&inst, FN_NAME)?;
+        // Pure-anchor paths have no name component.
+        if p == "." || p == "/" || p == "//" {
+            return Ok(Value::string(String::new()));
+        }
         let name = p.rsplit('/').next().unwrap_or(&p);
-        let suf = match name.rfind('.') {
-            Some(i) if i > 0 => name[i..].to_string(),
-            _ => String::new(),
+        // All-dots names (`.`, `..`) have no suffix.
+        let suf = if name.chars().all(|c| c == '.') {
+            String::new()
+        } else {
+            match name.rfind('.') {
+                Some(i) if i > 0 => name[i..].to_string(),
+                _ => String::new(),
+            }
         };
         Ok(Value::string(suf))
     }
@@ -661,6 +740,7 @@ const PATH_METHODS: &[(&str, &str)] = &[
     ("__eq__", "pathlib.Path.__eq__"),
     ("__hash__", "pathlib.Path.__hash__"),
     ("__fspath__", "pathlib.Path.__fspath__"),
+    ("joinpath", "pathlib.Path.joinpath"),
     ("name", "pathlib.Path.name"),
     ("parent", "pathlib.Path.parent"),
     ("stem", "pathlib.Path.stem"),

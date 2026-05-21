@@ -98,4 +98,49 @@ assert Path('/tmp').exists()
 assert Path('/tmp').is_dir()
 assert not Path('/tmp').is_file()
 
+# ── joinpath ──────────────────────────────────────────────────────────────────
+
+# Single argument joinpath.
+jp = Path('/tmp').joinpath('foo')
+assert str(jp) == '/tmp/foo', repr(str(jp))
+assert type(jp).__name__ == 'PosixPath', repr(type(jp).__name__)
+
+# Multiple arguments joinpath.
+jp2 = Path('/tmp').joinpath('foo', 'bar.txt')
+assert str(jp2) == '/tmp/foo/bar.txt', repr(str(jp2))
+
+# Absolute component in joinpath resets the path (CPython semantics).
+jp3 = Path('/tmp').joinpath('/var', 'log')
+assert str(jp3) == '/var/log', repr(str(jp3))
+
+# Joinpath with a Path instance argument.
+jp4 = Path('/tmp').joinpath(PosixPath('foo'))
+assert str(jp4) == '/tmp/foo', repr(str(jp4))
+
+# ── name/stem/suffix edge cases ───────────────────────────────────────────────
+
+# CPython: Path('.').name == '' (dot is a pure-anchor, not a filename).
+assert _get(Path('.'), 'name') == '', repr(_get(Path('.'), 'name'))
+assert _get(Path('.'), 'stem') == '', repr(_get(Path('.'), 'stem'))
+assert _get(Path('.'), 'suffix') == '', repr(_get(Path('.'), 'suffix'))
+
+# CPython: Path('/').name == ''.
+assert _get(Path('/'), 'name') == '', repr(_get(Path('/'), 'name'))
+assert _get(Path('/'), 'stem') == '', repr(_get(Path('/'), 'stem'))
+assert _get(Path('/'), 'suffix') == '', repr(_get(Path('/'), 'suffix'))
+
+# CPython: Path('..').name == '..', stem == '..', suffix == ''.
+assert _get(Path('..'), 'name') == '..', repr(_get(Path('..'), 'name'))
+assert _get(Path('..'), 'stem') == '..', repr(_get(Path('..'), 'stem'))
+assert _get(Path('..'), 'suffix') == '', repr(_get(Path('..'), 'suffix'))
+
+# Hidden files: leading dot is NOT a suffix separator.
+assert _get(Path('/tmp/.hidden'), 'name') == '.hidden', repr(_get(Path('/tmp/.hidden'), 'name'))
+assert _get(Path('/tmp/.hidden'), 'stem') == '.hidden', repr(_get(Path('/tmp/.hidden'), 'stem'))
+assert _get(Path('/tmp/.hidden'), 'suffix') == '', repr(_get(Path('/tmp/.hidden'), 'suffix'))
+
+# Hidden files with extension.
+assert _get(Path('/tmp/.hidden.txt'), 'stem') == '.hidden', repr(_get(Path('/tmp/.hidden.txt'), 'stem'))
+assert _get(Path('/tmp/.hidden.txt'), 'suffix') == '.txt', repr(_get(Path('/tmp/.hidden.txt'), 'suffix'))
+
 print('pathlib_posixpath ok')
