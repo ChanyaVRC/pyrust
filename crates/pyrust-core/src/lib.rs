@@ -595,13 +595,20 @@ pub fn py_hash_pykey(key: &PyKey) -> i64 {
             const PRIME1: u64 = 11400714785074694791;
             const PRIME2: u64 = 14029467366897019727;
             const PRIME5: u64 = 2870177450012600261;
+
+            // Shared per-element accumulation step; mirrors the xxstep helper
+            // in pyrust's tuple_hash_cpython / slice_hash_cpython.
+            #[inline(always)]
+            fn xxstep(acc: u64, lane: u64) -> u64 {
+                let acc = acc.wrapping_add(lane.wrapping_mul(PRIME2));
+                let acc = (acc << 31) | (acc >> 33); // rotl31
+                acc.wrapping_mul(PRIME1)
+            }
+
             let mut acc: u64 = PRIME5;
             let mut n: u64 = 0;
             for item in items {
-                let lane = py_hash_pykey(item) as u64;
-                acc = acc.wrapping_add(lane.wrapping_mul(PRIME2));
-                acc = (acc << 31) | (acc >> 33); // rotl31
-                acc = acc.wrapping_mul(PRIME1);
+                acc = xxstep(acc, py_hash_pykey(item) as u64);
                 n += 1;
             }
             acc = acc.wrapping_add(n ^ (PRIME5 ^ 3527539u64));

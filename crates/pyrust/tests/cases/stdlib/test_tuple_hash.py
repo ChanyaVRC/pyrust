@@ -55,6 +55,21 @@ assert hash(s1) == hash(s2), "equal slices must have equal hash"
 assert hash(slice(1, 2, 3)) != hash((1, 2, 3)), \
     "slice hash must differ from tuple hash of same components"
 
+# Tuples as frozenset elements: exercises the py_hash_pykey PyKey::Tuple path,
+# which is used when tuples appear as dict keys or frozenset members.
+assert hash(frozenset({(1, 2)})) == 3819360209092968377, \
+    f"hash(frozenset({{(1, 2)}})) = {hash(frozenset({(1, 2)}))}"
+assert hash(frozenset({(1, 2, 3)})) == 695348416378838752, \
+    f"hash(frozenset({{(1, 2, 3)}})) = {hash(frozenset({(1, 2, 3)}))}"
+# Nested tuple inside frozenset exercises recursive PyKey::Tuple hashing.
+assert hash(frozenset({(1, (2, 3))})) == -4069781824127057112, \
+    f"hash(frozenset({{(1, (2, 3))}})) = {hash(frozenset({(1, (2, 3))}))}"
+# Empty frozenset and frozenset containing an empty tuple:
+assert hash(frozenset()) == 133146708735736, \
+    f"hash(frozenset()) = {hash(frozenset())}"
+assert hash(frozenset({()})) == 8445006405840299555, \
+    f"hash(frozenset({{()}})) = {hash(frozenset({()}))}"
+
 # Unhashable types still raise TypeError:
 try:
     hash([1, 2, 3])
