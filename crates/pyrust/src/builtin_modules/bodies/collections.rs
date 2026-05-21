@@ -58,15 +58,15 @@ pyrust_module! {
             if let Some(arg) = user.first() {
                 if let ValueKind::Dict(map) = arg.value.kind() {
                     for (k, v) in map.iter() {
-                        let count = match v.kind() {
-                            ValueKind::Int(n) => n,
-                            ValueKind::Bool(b) => b as i64,
+                        match v.kind() {
+                            ValueKind::Int(_) | ValueKind::Bool(_) => {
+                                counts.insert(k.clone(), v.clone());
+                            }
                             _ => return Err(PyError::named(
                                 "TypeError",
                                 format!("{FN_NAME}() mapping values must be integers"),
                             )),
-                        };
-                        counts.insert(k.clone(), Value::int(count));
+                        }
                     }
                 } else {
                     for v in _interp.collect_iterable(arg.value.clone())? {
@@ -201,17 +201,17 @@ pyrust_module! {
                     "most_common() n must be a non-negative integer or None".to_string(),
                 )),
             };
-            let mut pairs: Vec<(PyKey, i64)> = counts
+            let mut pairs: Vec<(PyKey, Value)> = counts
                 .iter()
-                .map(|(k, v)| (k.clone(), value_as_count(v)))
+                .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            pairs.sort_by(|a, b| b.1.cmp(&a.1));
+            pairs.sort_by(|a, b| value_as_count(&b.1).cmp(&value_as_count(&a.1)));
             let upper = n.unwrap_or(pairs.len()).min(pairs.len());
             Ok(Value::list(
                 pairs
                     .into_iter()
                     .take(upper)
-                    .map(|(k, v)| Value::tuple(vec![key_to_value(k), Value::int(v)]))
+                    .map(|(k, v)| Value::tuple(vec![key_to_value(k), v]))
                     .collect(),
             ))
         }
