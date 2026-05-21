@@ -6,7 +6,9 @@ use crate::ast::{
     AssignTarget, BinaryOp, CompClause, DictItem, Expr, FStringPart, FunctionParam, MatchArm,
     Pattern, Stmt, UnaryOp,
 };
-use crate::bytecode::{AttrCacheEntry, CellVar, FnCode, FnParamSpec, FnProto, GLOBAL_CACHE_EMPTY, Insn, Reg};
+use crate::bytecode::{
+    AttrCacheEntry, CellVar, FnCode, FnParamSpec, FnProto, GLOBAL_CACHE_EMPTY, Insn, Reg,
+};
 use crate::error::PyError;
 use crate::value::{PyBigInt, PyPow, PyToPrimitive, Value, ValueKind};
 
