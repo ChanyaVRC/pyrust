@@ -142,4 +142,5 @@ pyrust_builtin_modules! {
     io,
     typing,
     copy,
+    pathlib,
 }
