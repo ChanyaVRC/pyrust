@@ -46,12 +46,13 @@ thread_local! {
         // that cache if it hasn't happened yet.
         let exception_base = crate::interpreter::lookup_exc_class("Exception")
             .expect("EXC_CLASS_CACHE must contain Exception");
+        let mut attrs = IndexMap::new();
+        attrs.insert("__module__".to_string(), Value::string("copy".to_string()));
         Rc::new(RefCell::new(PyClass {
             name: "Error".to_string(),
-            // CPython's qualified name for this class is `copy.Error`.
-            qualname: "copy.Error".to_string(),
+            qualname: "Error".to_string(),
             base: Some(exception_base),
-            attrs: IndexMap::new(),
+            attrs,
         }))
     };
 }
