@@ -19,3 +19,11 @@ try:
     print("ERROR: expected TypeError not raised")
 except TypeError as e:
     print("TypeError:", e)
+
+# ── Non-iterable __all__ must raise TypeError ─────────────────────────────────
+
+try:
+    from _all_not_iterable import *
+    print("ERROR: expected TypeError not raised")
+except TypeError as e:
+    print("TypeError:", e)

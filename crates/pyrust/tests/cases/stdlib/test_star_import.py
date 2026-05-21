@@ -34,3 +34,17 @@ print(abs(ceil(2.1) - 3) == 0)
 # join came from os.path star import earlier; should still be accessible
 # (unless shadowed by math, which has no 'join')
 print(join("/a", "b"))
+
+# ── __all__ as list ───────────────────────────────────────────────────────────
+
+from _all_with_list import *
+
+print(pub_a)        # 10
+print(pub_b)        # 20
+print("_private" not in dir())  # private name must not be imported
+
+# ── __all__ as tuple ──────────────────────────────────────────────────────────
+
+from _all_with_tuple import *
+
+print(pub_c)        # 30
