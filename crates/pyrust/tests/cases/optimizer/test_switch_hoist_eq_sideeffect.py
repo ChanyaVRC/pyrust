@@ -66,3 +66,43 @@ for word in ("apple", "banana", "cherry", "durian"):
         print("fruit-cherry")
     else:
         print("fruit-other")
+
+# ── Case 4: user-defined __eq__ that MUTATES the global between elif branches ─
+# This is the core case motivating issue #844.  If pass_switch_hoist hoisted
+# LoadGlobal(g) and reused the cached register across the elif, mutating g in
+# __eq__ would not be visible to the second test — pyrust would compare the
+# stale cached object, and the elif that should match would be skipped.
+#
+# The guard (primitive-const check on the RHS constant) ensures the hoist only
+# fires when the VM's fast int-int / str-str path applies, which never invokes
+# user __eq__ and therefore cannot mutate the global.
+#
+# Expected (CPython 3.12 and correct pyrust):
+#   - __eq__ called once with other=1; sets g to an int (2)
+#   - elif g == 2: re-reads g (now 2), fast int==int path → True → "mutated-match"
+# If hoist fires incorrectly:
+#   - elif would compare cached Switcher against 2 → calls __eq__ again → "no-match"
+
+_mut_log = []
+
+class Switcher:
+    def __eq__(self, other):
+        global g
+        _mut_log.append(other)
+        g = 2            # replace the global with a plain int
+        return False     # this object never matches directly
+
+g = Switcher()
+
+def _run_mut():
+    global g
+    if g == 1:
+        print("mutated-one")
+    elif g == 2:
+        print("mutated-match")
+    else:
+        print("mutated-no-match")
+
+_run_mut()
+# One __eq__ call (for the first branch); second branch uses re-read g == 2 (int fast path).
+print(len(_mut_log))
