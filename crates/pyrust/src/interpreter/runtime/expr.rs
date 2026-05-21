@@ -646,23 +646,53 @@ impl Interpreter {
             }
             return Ok(PyKey::Tuple(keys));
         }
-        // Slices always go through the interpreter-aware hash path so that:
-        // 1. `PyInstance` components can dispatch `__hash__`.
-        // 2. Unhashable components (e.g. a list bound) surface the correct
-        //    per-component "unhashable type: 'list'" error instead of the
-        //    misleading "unhashable type: 'slice'" (issue #850).
-        // The hash stored in `PyKey::Object` is computed by
-        // `hash_value_with_interp`, matching what `hash()` returns for the
-        // same slice, so dict/set lookups remain consistent.
-        if let ValueKind::BuiltinObject { ops, .. } = value.kind() {
+        // Slices with PyInstance components need interpreter access to dispatch
+        // `__hash__`.  The pure `SliceOps::to_key()` path (via `value.to_key()`)
+        // returns `None` for any instance component, producing a misleading
+        // "unhashable type: 'slice'" error.  Intercept here when any component
+        // is a PyInstance and compute the hash via `hash_value_with_interp`,
+        // then store it in a `PyKey::Object` consistent with what `hash()`
+        // returns for the same slice (issue #850).
+        //
+        // When a component is a plain unhashable primitive (list, dict, set),
+        // `SliceOps::to_key()` also returns `None` but the fall-through error
+        // at the end of this function would blame `'slice'` rather than the
+        // actual offending component.  Detect that case here too and surface
+        // the correct type name (issue #893).
+        if let ValueKind::BuiltinObject { ops, state } = value.kind() {
             if ops.type_name() == pyrust_builtins::slice::TYPE_NAME {
-                let hash = crate::builtin_modules::builtins::hash_value_with_interp(
-                    self, value,
-                )? as u64;
-                return Ok(PyKey::Object {
-                    hash,
-                    value: value.clone(),
-                });
+                let borrow = state.borrow();
+                let s = borrow
+                    .downcast_ref::<pyrust_builtins::slice::SliceState>()
+                    .expect("SliceOps: bad state");
+                let needs_interp = matches!(s.start.kind(), ValueKind::PyInstance(_))
+                    || matches!(s.stop.kind(), ValueKind::PyInstance(_))
+                    || matches!(s.step.kind(), ValueKind::PyInstance(_));
+                // Check whether any component is an unhashable primitive so we
+                // can name it precisely in the error rather than blaming 'slice'.
+                // Use recursive descent so that a tuple-inside-slice (or
+                // further nesting) names the leaf type, matching CPython.
+                let unhashable_component: Option<String> = if !needs_interp {
+                    [&s.start, &s.stop, &s.step].iter().find_map(|c| {
+                        if c.to_key().is_none() {
+                            Some(pyrust_builtins::set::leaf_unhashable_type_name(c))
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                };
+                drop(borrow);
+                if let Some(component_name) = unhashable_component {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("unhashable type: '{component_name}'"),
+                    ));
+                }
+                // All slices (instance or primitive components) go through
+                // hash_value_with_interp to get the CPython-compatible slice hash
+                // and to dispatch user __hash__ on PyInstance components.
             }
         }
         if let Some(k) = value.to_key() {

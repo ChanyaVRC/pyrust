@@ -2662,6 +2662,30 @@ pub(crate) fn hash_value_with_interp(interp: &mut crate::Interpreter, value: &Va
             let s = borrow
                 .downcast_ref::<pyrust_builtins::slice::SliceState>()
                 .expect("SliceOps: bad state");
+            let needs_interp = matches!(s.start.kind(), ValueKind::PyInstance(_))
+                || matches!(s.stop.kind(), ValueKind::PyInstance(_))
+                || matches!(s.step.kind(), ValueKind::PyInstance(_));
+            if !needs_interp {
+                // Check for unhashable primitive components (e.g. list, dict,
+                // set inside the slice).  hash_value's BuiltinObject arm would
+                // blame 'slice'; instead name the actual offending leaf type
+                // (issue #893).
+                let unhashable = [&s.start, &s.stop, &s.step].iter().find_map(|c| {
+                    if c.to_key().is_none() {
+                        Some(pyrust_builtins::set::leaf_unhashable_type_name(c))
+                    } else {
+                        None
+                    }
+                });
+                drop(borrow);
+                if let Some(bad_type) = unhashable {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("unhashable type: '{bad_type}'"),
+                    ));
+                }
+                // All components hashable: use CPython-compatible slice hash.
+            }
             // Clone components to release the borrow before mutable interp calls.
             let (start, stop, step) = (s.start.clone(), s.stop.clone(), s.step.clone());
             drop(borrow);
