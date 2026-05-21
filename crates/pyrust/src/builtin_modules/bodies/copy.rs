@@ -26,7 +26,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::error::{PyError, Result};
-use crate::interpreter::ExpandedCallArg;
+use crate::interpreter::{invoke_class_method, lookup_class_attr, ExpandedCallArg};
 use crate::value::{PyInstance, PyKey, Value, ValueKind};
 use indexmap::{IndexMap, IndexSet};
 use pyrust_derive::pyrust_module;
@@ -120,25 +120,26 @@ fn shallow_copy(obj: Value, interp: &mut crate::interpreter::Interpreter) -> Res
             Ok(Value::set(new_items))
         }
 
-        // PyInstance — check for __copy__ dunder first.
+        // PyInstance — check for __copy__ dunder first (MRO-aware).
         ValueKind::PyInstance(rc) => {
             let rc = Rc::clone(rc);
-            // Look up __copy__ on the class (do not hold any borrow across the
-            // call_function_expanded invocation).
+            // Look up __copy__ on the class via MRO so inherited dunders
+            // are found.  Do not hold any borrow across the call.
             let copy_method = {
                 let borrow = rc.borrow();
                 let class = Rc::clone(&borrow.class);
                 drop(borrow);
-                class.borrow().attrs.get("__copy__").cloned()
+                lookup_class_attr(&class, "__copy__")
             };
             if let Some(method) = copy_method {
-                // Bind and call `__copy__(self)`.
-                interp.call_function_expanded(
+                // Call `__copy__(self)` — use invoke_class_method so that
+                // UserFunction and BuiltinFunction are both handled and
+                // `self` is bound via the bound_prefix slot.
+                invoke_class_method(
+                    interp,
                     method,
-                    &[ExpandedCallArg {
-                        name: None,
-                        value: Value::py_instance(Rc::clone(&rc)),
-                    }],
+                    Value::py_instance(Rc::clone(&rc)),
+                    &[],
                 )
             } else {
                 // Default: clone the instance with a shallowly-cloned attr map.
@@ -230,29 +231,29 @@ fn deep_copy(obj: Value, interp: &mut crate::interpreter::Interpreter) -> Result
             Ok(Value::set(new_items))
         }
 
-        // PyInstance — check for __deepcopy__ dunder first.
+        // PyInstance — check for __deepcopy__ dunder first (MRO-aware).
         ValueKind::PyInstance(rc) => {
             let rc = Rc::clone(rc);
+            // Look up __deepcopy__ on the class via MRO so inherited
+            // dunders are found.  Do not hold any borrow across the call.
             let deepcopy_method = {
                 let borrow = rc.borrow();
                 let class = Rc::clone(&borrow.class);
                 drop(borrow);
-                class.borrow().attrs.get("__deepcopy__").cloned()
+                lookup_class_attr(&class, "__deepcopy__")
             };
             if let Some(method) = deepcopy_method {
                 // Call `__deepcopy__(self, memo)` — pass None for memo.
-                interp.call_function_expanded(
+                // invoke_class_method binds `self` via bound_prefix and
+                // appends the remaining args after.
+                invoke_class_method(
+                    interp,
                     method,
-                    &[
-                        ExpandedCallArg {
-                            name: None,
-                            value: Value::py_instance(Rc::clone(&rc)),
-                        },
-                        ExpandedCallArg {
-                            name: None,
-                            value: Value::none(),
-                        },
-                    ],
+                    Value::py_instance(Rc::clone(&rc)),
+                    &[ExpandedCallArg {
+                        name: None,
+                        value: Value::none(),
+                    }],
                 )
             } else {
                 // Default: deep-copy each attribute value.
