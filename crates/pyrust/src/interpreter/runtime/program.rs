@@ -246,6 +246,9 @@ impl Interpreter {
                     PyError::Named(cls, s) => format!("{cls}: {s}"),
                     PyError::Class(cls, s) => format!("{}: {s}", cls.borrow().name),
                     PyError::KeyError(key) => format!("KeyError: {}", key.repr()),
+                    PyError::ImportError { class_name, message, .. } => {
+                        format!("{class_name}: {message}")
+                    }
                     PyError::Raised(value) => match value.kind() {
                         ValueKind::PyInstance(inst) => {
                             let class_name = inst.borrow().class.borrow().name.clone();

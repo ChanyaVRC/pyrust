@@ -821,6 +821,29 @@ pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 
+/// Instantiate an `ImportError` or `ModuleNotFoundError` with `.name` and
+/// `.path` instance attributes, matching CPython 3.12 `ImportError.__init__`.
+///
+/// `class_name` must be `"ImportError"` or `"ModuleNotFoundError"`.
+/// `message` becomes `args[0]`.
+/// `module_name` is stored as `.name`; if `None`, `.name` is set to `None`.
+/// `.path` is always `None` (pyrust has no physical package paths).
+pub(crate) fn instantiate_import_error(
+    class: Rc<RefCell<PyClass>>,
+    message: String,
+    module_name: Option<String>,
+) -> Value {
+    let mut attrs = IndexMap::new();
+    attrs.insert("args".to_string(), Value::tuple(vec![Value::string(message)]));
+    let name_val = match module_name {
+        Some(n) => Value::string(n),
+        None => Value::none(),
+    };
+    attrs.insert("name".to_string(), name_val);
+    attrs.insert("path".to_string(), Value::none());
+    Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
+}
+
 /// Snapshot of an instance's own attrs as a fresh `Value::dict`.  Backs both
 /// `obj.__dict__` (env.rs) and `vars(obj)` (builtins.rs) so the two stay in
 /// lock-step.  CPython's `__dict__` is a live mapping; we return a clone —
