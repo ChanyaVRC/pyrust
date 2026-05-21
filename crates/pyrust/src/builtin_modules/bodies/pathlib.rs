@@ -51,9 +51,13 @@ fn expect_self(
 fn get_path(inst: &Rc<RefCell<PyInstance>>, fn_name: &str) -> Result<String> {
     match inst.borrow().attrs.get("_path").map(|v| v.kind()) {
         Some(ValueKind::Str(s)) => Ok(s.to_string()),
-        _ => Err(PyError::Runtime(format!(
-            "internal: {fn_name}() Path._path corrupted",
-        ))),
+        _ => Err(PyError::named(
+            "TypeError",
+            format!(
+                "{fn_name}: Path._path has been overwritten with a non-str; \
+                 don't assign to internal attributes",
+            ),
+        )),
     }
 }
 
@@ -154,7 +158,7 @@ pyrust_module! {
                     _ => return Err(PyError::named(
                         "TypeError",
                         format!(
-                            "argument should be str or os.PathLike object, not '{}'",
+                            "argument should be str, not '{}'",
                             pyrust_core::builtin_type_name(&a.value),
                         ),
                     )),
@@ -187,12 +191,20 @@ pyrust_module! {
             Ok(Value::string(p))
         }
 
-        /// `repr(path)` — returns `PosixPath('...')`.
+        /// `repr(path)` — returns `PosixPath('...')` with the path string
+        /// escaped the same way CPython does (backslash, newline, tab,
+        /// carriage-return, and single-quote are all escaped).
         fn __repr__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let _ = _interp;
             let p = get_path(&inst, FN_NAME)?;
-            Ok(Value::string(format!("PosixPath('{p}')")))
+            let escaped = p
+                .replace('\\', "\\\\")
+                .replace('\n', "\\n")
+                .replace('\t', "\\t")
+                .replace('\r', "\\r")
+                .replace('\'', "\\'");
+            Ok(Value::string(format!("PosixPath('{escaped}')")))
         }
 
         /// `path / other` — join `other` segment to `path`, returning a new
@@ -209,7 +221,14 @@ pyrust_module! {
             let lhs = get_path(&inst, FN_NAME)?;
             let rhs = match args[1].value.kind() {
                 ValueKind::Str(s) => s.to_string(),
-                ValueKind::PyInstance(rc) => get_path(&Rc::clone(&rc), FN_NAME)?,
+                ValueKind::PyInstance(rc) => {
+                    // Only accept other Path instances (class name check), not
+                    // arbitrary instances that happen to have a `_path` attr.
+                    if rc.borrow().class.borrow().name != "Path" {
+                        return Ok(Value::not_implemented());
+                    }
+                    get_path(&Rc::clone(&rc), FN_NAME)?
+                }
                 _ => return Ok(Value::not_implemented()),
             };
             // Absolute rhs replaces lhs (CPython semantics).
@@ -232,11 +251,19 @@ pyrust_module! {
             let _ = _interp;
             let lhs = get_path(&inst, FN_NAME)?;
             let rhs = match args[1].value.kind() {
-                ValueKind::Str(s) => s.to_string(),
-                ValueKind::PyInstance(rc) => match get_path(&Rc::clone(&rc), FN_NAME) {
-                    Ok(s) => s,
-                    Err(_) => return Ok(Value::not_implemented()),
-                },
+                // CPython: Path('x') == 'x' is False — str is not a Path.
+                // Return NotImplemented so the runtime falls back to identity.
+                ValueKind::Str(_) => return Ok(Value::not_implemented()),
+                ValueKind::PyInstance(rc) => {
+                    // Only compare against other Path instances.
+                    if rc.borrow().class.borrow().name != "Path" {
+                        return Ok(Value::not_implemented());
+                    }
+                    match get_path(&Rc::clone(&rc), FN_NAME) {
+                        Ok(s) => s,
+                        Err(_) => return Ok(Value::not_implemented()),
+                    }
+                }
                 _ => return Ok(Value::not_implemented()),
             };
             Ok(Value::bool_(lhs == rhs))
@@ -313,17 +340,27 @@ pyrust_module! {
 
         /// `path.parts()` — tuple of path components split by `/`.
         ///
-        /// For absolute paths the first element is `'/'`.  For relative paths
-        /// the separator is not included as a separate element.
+        /// For absolute paths the first element is the anchor: `'/'` for a
+        /// single leading slash, or `'//'` for the POSIX.1 double-slash UNC
+        /// prefix (which `normalize_path` preserves).  For relative paths the
+        /// separator is not included as a separate element.
         fn parts(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let _ = _interp;
             let p = get_path(&inst, FN_NAME)?;
             let mut components: Vec<Value> = Vec::new();
-            if p.starts_with('/') {
+            if p.starts_with("//") && !p.starts_with("///") {
+                // Double-slash UNC prefix — anchor is '//' per POSIX.1.
+                components.push(Value::string("//".to_string()));
+                for part in p[2..].split('/') {
+                    if !part.is_empty() {
+                        components.push(Value::string(part.to_string()));
+                    }
+                }
+            } else if p.starts_with('/') {
                 components.push(Value::string("/".to_string()));
                 // Drop the leading slash then split.
-                for part in p.trim_start_matches('/').split('/') {
+                for part in p[1..].split('/') {
                     if !part.is_empty() {
                         components.push(Value::string(part.to_string()));
                     }
@@ -394,7 +431,8 @@ pyrust_module! {
         }
 
         /// `path.write_text(data, encoding=None, errors=None)` — write `data`
-        /// to the file as UTF-8.  Returns `None`.  Raises `TypeError` if
+        /// to the file as UTF-8.  Returns the number of characters (code
+        /// points) written, matching CPython 3.10+.  Raises `TypeError` if
         /// `data` is not a string.
         fn write_text(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
@@ -419,43 +457,106 @@ pyrust_module! {
             // CPython 3.10+ write_text() returns the number of characters
             // (code points) written, not None.
             let char_count = data.chars().count();
-            std::fs::write(&p, data.as_bytes()).map_err(|e| PyError::named(
-                "OSError",
-                format!("[Errno {}] {}: '{p}'", e.raw_os_error().unwrap_or(0), e),
-            ))?;
+            std::fs::write(&p, data.as_bytes()).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    PyError::named(
+                        "FileNotFoundError",
+                        format!("[Errno 2] No such file or directory: '{p}'"),
+                    )
+                } else {
+                    PyError::named(
+                        "OSError",
+                        format!("[Errno {}] {}: '{p}'", e.raw_os_error().unwrap_or(0), e),
+                    )
+                }
+            })?;
             Ok(Value::int(char_count as i64))
         }
 
         /// `path.mkdir(mode=0o777, parents=False, exist_ok=False)` — create
         /// the directory.  If `parents=True` creates all intermediate
         /// directories.  If `exist_ok=True` does not raise when the directory
-        /// already exists.
+        /// already exists.  All three parameters may be passed positionally or
+        /// by keyword.
         fn mkdir(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
-            // Accept at most 3 extra positional args: mode, parents, exist_ok.
-            if args.len() > 4 {
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() takes at most 3 arguments"),
-                ));
+            // Accept mode, parents, exist_ok by position or keyword name.
+            let mut parents = false;
+            let mut exist_ok = false;
+            let mut pos_index: usize = 0; // positional slot counter (0 = mode, 1 = parents, 2 = exist_ok)
+            let mut seen_mode_kw = false;
+            let mut seen_parents_kw = false;
+            let mut seen_exist_ok_kw = false;
+            for a in args.iter().skip(1) {
+                match a.name.as_deref() {
+                    Some("mode") => {
+                        if seen_mode_kw {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "{FN_NAME}() got multiple values for argument 'mode'",
+                                ),
+                            ));
+                        }
+                        seen_mode_kw = true;
+                        // mode is accepted but not used (std::fs doesn't expose umask control).
+                    }
+                    Some("parents") => {
+                        if seen_parents_kw {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "{FN_NAME}() got multiple values for argument 'parents'",
+                                ),
+                            ));
+                        }
+                        parents = matches!(a.value.kind(), ValueKind::Bool(true))
+                            || matches!(a.value.kind(), ValueKind::Int(n) if n != 0);
+                        seen_parents_kw = true;
+                    }
+                    Some("exist_ok") => {
+                        if seen_exist_ok_kw {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "{FN_NAME}() got multiple values for argument 'exist_ok'",
+                                ),
+                            ));
+                        }
+                        exist_ok = matches!(a.value.kind(), ValueKind::Bool(true))
+                            || matches!(a.value.kind(), ValueKind::Int(n) if n != 0);
+                        seen_exist_ok_kw = true;
+                    }
+                    Some(other) => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "{FN_NAME}() got an unexpected keyword argument '{other}'",
+                            ),
+                        ));
+                    }
+                    None => {
+                        match pos_index {
+                            0 => { /* mode — ignored */ }
+                            1 => {
+                                parents = matches!(a.value.kind(), ValueKind::Bool(true))
+                                    || matches!(a.value.kind(), ValueKind::Int(n) if n != 0);
+                            }
+                            2 => {
+                                exist_ok = matches!(a.value.kind(), ValueKind::Bool(true))
+                                    || matches!(a.value.kind(), ValueKind::Int(n) if n != 0);
+                            }
+                            _ => {
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    format!("{FN_NAME}() takes at most 3 arguments"),
+                                ));
+                            }
+                        }
+                        pos_index += 1;
+                    }
+                }
             }
-            let _mode = match args.get(1).map(|a| a.value.kind()) {
-                None | Some(ValueKind::None) => 0o777i64,
-                Some(ValueKind::Int(n)) => n,
-                _ => 0o777i64,
-            };
-            let parents = match args.get(2).map(|a| a.value.kind()) {
-                None | Some(ValueKind::None) => false,
-                Some(ValueKind::Bool(b)) => b,
-                Some(ValueKind::Int(n)) => n != 0,
-                _ => false,
-            };
-            let exist_ok = match args.get(3).map(|a| a.value.kind()) {
-                None | Some(ValueKind::None) => false,
-                Some(ValueKind::Bool(b)) => b,
-                Some(ValueKind::Int(n)) => n != 0,
-                _ => false,
-            };
             let _ = _interp;
             let p = get_path(&inst, FN_NAME)?;
             let result = if parents {

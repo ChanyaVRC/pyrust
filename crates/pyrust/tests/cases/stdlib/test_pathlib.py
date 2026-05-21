@@ -52,11 +52,19 @@ assert _get(Path('.bashrc'), 'suffix') == ''
 assert _get(Path('.bashrc'), 'stem') == '.bashrc'
 
 # ── write_text returns character count (CPython 3.10+) ───────────────────────
-# Use a relative path so this works on every platform.
+# Use a relative path so this works on every platform.  Clean up afterwards
+# so the harness doesn't leave test artifacts in the repo/worktree.
 
 _wt_path = Path('pyrust_test_pathlib_wt_tmp.txt')
-_wt_result = _wt_path.write_text('hello')
-assert _wt_result == 5, repr(_wt_result)
+try:
+    _wt_result = _wt_path.write_text('hello')
+    assert _wt_result == 5, repr(_wt_result)
+finally:
+    import os as _os
+    try:
+        _os.remove('pyrust_test_pathlib_wt_tmp.txt')
+    except OSError:
+        pass
 
 # ── POSIX-only tests (absolute paths with '/' root) ───────────────────────────
 
