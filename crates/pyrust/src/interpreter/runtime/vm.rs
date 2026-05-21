@@ -90,6 +90,11 @@ pub(crate) struct GeneratorFrame {
     /// is received, so that `YieldFrom` can capture `StopIteration.value`
     /// from the sub-iterator's frame.
     pub(crate) last_return_value: Option<Value>,
+    /// The name of the generator function, used to populate traceback frames
+    /// when an exception propagates out of the generator body (issue #908).
+    /// `Arc<str>` so `.clone()` in `resume_generator_with_exc` is a
+    /// reference-count bump rather than a heap allocation on every resume.
+    pub(crate) fn_name: std::sync::Arc<str>,
 }
 
 /// Explicit suspension state for a generator frame.
@@ -478,6 +483,21 @@ impl Interpreter {
         // pointer + len) is used instead, removing the LLVM noalias constraint
         // that made the VmFrameView dereferences UB (issue #547).
         let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
+        // Push a traceback frame so that exceptions propagating out of the
+        // generator body carry the generator function's name in the chain
+        // (issue #908: the regular-call path in calls.rs does this for normal
+        // functions; the generator resume path was missing it).
+        // Cloning an `Arc<str>` is a cheap reference-count bump; no
+        // heap allocation per resume.
+        let tb_filename = self
+            .script_filename
+            .clone()
+            .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
+        pyrust_core::push_traceback_frame(pyrust_core::FrameInfo {
+            filename: tb_filename,
+            lineno: None,
+            funcname: frame.fn_name.clone(),
+        });
         let result = self.run_bytecode_inner(
             &frame.code.clone(),
             regs_slice,
@@ -489,6 +509,11 @@ impl Interpreter {
             gen_handled,
             gen_active,
         );
+        // Pop the traceback frame; capture the chain if an error occurred.
+        // On yield (Ok(Yielded)) the call succeeded from the traceback's
+        // perspective — the error has not propagated yet.
+        let is_err = matches!(result, Err(_));
+        pyrust_core::pop_traceback_frame(is_err);
         self.vm_frame_views.pop();
 
         // Restore env.
@@ -1879,15 +1904,22 @@ impl Interpreter {
                     // routed us here, so MatchExcept is purely a filter.
                 }
                 Insn::EndExcept => {
-                    // Leaving an `except` handler body — pop the entry
-                    // that vm_try! pushed on dispatch.  Restore
-                    // `active_exception` to the outer handler's exception
-                    // (if any), bounded by this frame's base depth so we
-                    // never pop into caller-frame entries.
+                    // Leaving an `except` handler body normally (the exception
+                    // was truly handled, not re-raised).  Pop the entry that
+                    // vm_try! pushed on dispatch.  Restore `active_exception`
+                    // to the outer handler's exception (if any), bounded by
+                    // this frame's base depth so we never pop into caller-frame
+                    // entries.
                     if self.handled_exc_stack.len() > exc_ctx_frame_base {
                         self.handled_exc_stack.pop();
                     }
                     self.active_exception = self.handled_exc_stack.last().cloned();
+                    // Clear the captured frame snapshot only here — on normal
+                    // handler exit.  Clearing at handler *entry* (dispatch_exc_handler)
+                    // was wrong because a bare `raise` inside the handler would
+                    // clear the original frames before the re-raised exception
+                    // propagated, producing a traceback that omitted inner frames.
+                    pyrust_core::reset_captured_error_frames();
                 }
                 Insn::RaiseAssert(msg_reg) => {
                     let msg = vm_try!(vm_read(&regs, *msg_reg, num_locals));

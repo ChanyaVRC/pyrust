@@ -33,21 +33,23 @@ fn run_file(path: &str) -> Result<()> {
     let src = std::fs::read_to_string(path)
         .map_err(|e| PyError::Runtime(format!("failed to read '{path}': {e}")))?;
     let program = parse_source(&src)?;
-    let script_dir = std::path::Path::new(path)
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let path_owned = path.to_string();
 
     // Marshal errors as strings so the Result crosses the thread boundary
     // (Value contains Rc which is not Send).
+    //
+    // `PyError::Runtime` is used by `program.rs` to carry a pre-formatted
+    // traceback string (the "Traceback (most recent call last): …" header
+    // plus the error line).  Extract the inner message directly instead of
+    // going through `Display` (which would prepend "Runtime error: ").
     let err_str: Option<String> = std::thread::Builder::new()
         .stack_size(INTERPRETER_STACK_SIZE)
         .spawn(move || {
-            let mut interp = Interpreter::with_script_dir(script_dir);
-            interp
-                .exec_program(&program, false)
-                .err()
-                .map(|e| e.to_string())
+            let mut interp = Interpreter::with_script_path(&path_owned);
+            interp.exec_program(&program, false).err().map(|e| match e {
+                PyError::Runtime(msg) => msg,
+                other => other.to_string(),
+            })
         })
         .expect("failed to spawn interpreter thread")
         .join()

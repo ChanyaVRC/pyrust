@@ -42,6 +42,7 @@ impl Interpreter {
         regs: RegsBuf,
         saved_env: EnvRef,
         local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
+        fn_name: std::sync::Arc<str>,
     ) -> Value {
         let frame = GeneratorFrame {
             code: Rc::clone(code),
@@ -63,6 +64,9 @@ impl Interpreter {
             // is received; read by Insn::YieldFrom to retrieve the sub-iterator's
             // StopIteration.value (PEP 380).
             last_return_value: None,
+            // Stored so resume_generator_with_exc can name the generator's
+            // traceback frame when an exception propagates out (issue #908).
+            fn_name,
         };
         Value::generator(Box::new(frame))
     }
@@ -1286,6 +1290,7 @@ impl Interpreter {
                         regs,
                         gen_env,
                         Rc::clone(&function.local_index),
+                        std::sync::Arc::from(function.name.as_str()),
                     ));
                 }
 
@@ -1330,7 +1335,24 @@ impl Interpreter {
                 // runs; RegSlice (raw pointer + len) is used instead, removing
                 // the LLVM noalias constraint (issue #547).
                 let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
+                // Push a traceback frame so errors propagating out of this
+                // function body carry the correct `File / in <name>` entry.
+                // Cloning an `Arc<str>` is a cheap reference-count bump; no
+                // heap allocation per call.
+                let tb_filename = self
+                    .script_filename
+                    .clone()
+                    .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
+                pyrust_core::push_traceback_frame(pyrust_core::FrameInfo {
+                    filename: tb_filename,
+                    lineno: None,
+                    funcname: std::sync::Arc::from(function.name.as_str()),
+                });
                 let vm_result = self.run_bytecode_for_fn(&code, regs_slice, function.id);
+                // Pop the frame, capturing the chain if an error occurred.
+                // `pop_traceback_frame(true)` snapshots the stack (including this
+                // frame) into CAPTURED_ERROR_FRAMES before removing this entry.
+                pyrust_core::pop_traceback_frame(vm_result.is_err());
                 self.vm_frame_views.pop();
 
                 let used_env = std::mem::replace(&mut self.env, previous_env);
@@ -1530,6 +1552,7 @@ impl Interpreter {
                     regs,
                     gen_env,
                     Rc::clone(&function.local_index),
+                    std::sync::Arc::from(function.name.as_str()),
                 ));
             }
 
@@ -1570,7 +1593,22 @@ impl Interpreter {
             // runs; RegSlice (raw pointer + len) is used instead, removing
             // the LLVM noalias constraint (issue #547).
             let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
+            // Push a traceback frame so errors propagating out of this
+            // function body carry the correct `File / in <name>` entry.
+            // Cloning an `Arc<str>` is a cheap reference-count bump; no
+            // heap allocation per call.
+            let tb_filename = self
+                .script_filename
+                .clone()
+                .unwrap_or_else(|| std::sync::Arc::from("<unknown>"));
+            pyrust_core::push_traceback_frame(pyrust_core::FrameInfo {
+                filename: tb_filename,
+                lineno: None,
+                funcname: std::sync::Arc::from(function.name.as_str()),
+            });
             let vm_result = self.run_bytecode_for_fn(&code, regs_slice, function.id);
+            // Pop the frame, capturing the chain if an error occurred.
+            pyrust_core::pop_traceback_frame(vm_result.is_err());
             self.vm_frame_views.pop();
 
             let used_env = std::mem::replace(&mut self.env, previous_env);

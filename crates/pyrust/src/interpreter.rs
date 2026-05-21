@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use indexmap::IndexMap;
 use smallvec::smallvec;
@@ -130,6 +131,12 @@ pub struct Interpreter {
     /// `EndExcept`).  The stack lets us restore the outer context.
     handled_exc_stack: Vec<Value>,
     script_dir: Option<PathBuf>,
+    /// Path to the top-level script being executed, used to populate the
+    /// `filename` field of `FrameInfo` when formatting tracebacks.
+    /// `None` in REPL mode (no persistent filename).
+    /// Stored as `Arc<str>` so that each call frame can clone the filename
+    /// with a reference-count bump rather than a heap allocation.
+    pub(crate) script_filename: Option<Arc<str>>,
     module_cache: ModuleCache,
     env_pool: Vec<EnvRef>,
     fn_cache: FnCache,
@@ -342,6 +349,7 @@ impl Default for Interpreter {
             active_exception: None,
             handled_exc_stack: Vec::new(),
             script_dir: None,
+            script_filename: None,
             module_cache: Rc::new(RefCell::new(HashMap::new())),
             env_pool: Vec::new(),
             fn_cache: HashMap::new(),

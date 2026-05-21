@@ -7,7 +7,10 @@ use std::collections::HashSet;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use indexmap::{IndexMap, IndexSet};
 use num_bigint::BigInt;
@@ -3515,6 +3518,150 @@ pub fn range_len(start: i64, stop: i64, step: i64) -> i64 {
     } else {
         ((start - stop - 1) / (-step)) + 1
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Traceback frame tracking
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A single frame in a Python-style traceback.
+///
+/// Populated by the interpreter when errors propagate out of
+/// `run_bytecode` / `run_bytecode_for_fn`.  `lineno` is `None` until
+/// per-instruction line-number tracking is implemented (Phase 2).
+#[derive(Debug, Clone)]
+pub struct FrameInfo {
+    /// Path to the source file that contains this frame.  Stored as `Arc<str>`
+    /// so that cloning a frame (e.g. when snapshotting `CAPTURED_ERROR_FRAMES`)
+    /// is a cheap reference-count bump rather than a heap allocation.
+    pub filename: Arc<str>,
+    /// 1-based source line that raised the error, or `None` when no line
+    /// table is available (Phase 1 limitation).
+    pub lineno: Option<u32>,
+    /// Function or method name.  `"<module>"` for module-scope code.
+    /// `Arc<str>` so cloning a frame is a reference-count bump, not a heap alloc.
+    pub funcname: Arc<str>,
+}
+
+thread_local! {
+    /// Active frame stack for the current interpreter thread.
+    ///
+    /// Pushed by `call_user_function_expanded` before entering each user
+    /// function body and popped when the body returns (or errors).
+    static TRACEBACK_FRAME_STACK: RefCell<Vec<FrameInfo>> = RefCell::new(Vec::new());
+
+    /// The frame snapshot captured at the first point an error exits a user
+    /// function boundary during the current interpreter invocation.
+    ///
+    /// `calls.rs::call_user_function_expanded` checks this BEFORE popping its
+    /// frame: if `None`, it snapshots the full frame stack (which still includes
+    /// the current frame) and stores it here.  Subsequent outer callers see
+    /// `Some(_)` and leave it intact, so the innermost error site wins.
+    ///
+    /// Reset to `None` at the top of each `try_exec_vm_script_with_index` run.
+    static CAPTURED_ERROR_FRAMES: RefCell<Option<Vec<FrameInfo>>> = RefCell::new(None);
+}
+
+/// Push a frame onto the current thread's traceback stack.
+///
+/// Called by `calls.rs::call_user_function_expanded` immediately before
+/// entering each user-function body.
+#[inline]
+pub fn push_traceback_frame(frame: FrameInfo) {
+    TRACEBACK_FRAME_STACK.with(|s| s.borrow_mut().push(frame));
+}
+
+/// Pop the innermost frame from the current thread's traceback stack,
+/// optionally capturing the frame chain into `CAPTURED_ERROR_FRAMES` when
+/// the call returned an error, or clearing it when the call succeeded.
+///
+/// `is_error` — pass `true` when the `run_bytecode_for_fn` call returned
+/// `Err(_)`.
+///
+/// - When `true` and no frame snapshot has been captured yet: snapshots the
+///   current stack (including the frame being popped) into
+///   `CAPTURED_ERROR_FRAMES` before popping.  Subsequent outer frames see
+///   `Some(_)` and leave the snapshot intact so the innermost error site wins.
+///
+/// - When `false` (the call returned successfully): clears any stale
+///   `CAPTURED_ERROR_FRAMES`.  This handles the case where an inner call
+///   raised but the error was caught by a `try/except` inside that inner
+///   call — the outer call returns successfully, so the stale inner-frame
+///   snapshot must not pollute a subsequent error in the same outer call.
+#[inline]
+pub fn pop_traceback_frame(is_error: bool) {
+    TRACEBACK_FRAME_STACK.with(|stack| {
+        if is_error {
+            CAPTURED_ERROR_FRAMES.with(|captured| {
+                let mut cap = captured.borrow_mut();
+                if cap.is_none() {
+                    // First frame to see this error: snapshot the full stack
+                    // while it still contains the current frame.
+                    *cap = Some(stack.borrow().clone());
+                }
+            });
+        } else {
+            // Success path: clear any stale snapshot from a previously caught
+            // error inside this call stack so it does not pollute future errors.
+            CAPTURED_ERROR_FRAMES.with(|captured| {
+                *captured.borrow_mut() = None;
+            });
+        }
+        stack.borrow_mut().pop();
+    });
+}
+
+/// Take the captured error frame snapshot, leaving the thread-local as `None`.
+///
+/// Called once by `try_exec_vm_script_with_index` after `run_bytecode`
+/// returns an error, to build the traceback header.  Also called at the start
+/// of each script run to reset any stale snapshot from a previous run.
+#[inline]
+pub fn take_captured_error_frames() -> Option<Vec<FrameInfo>> {
+    CAPTURED_ERROR_FRAMES.with(|c| c.borrow_mut().take())
+}
+
+/// Clear the captured error frame snapshot (reset between script runs).
+#[inline]
+pub fn reset_captured_error_frames() {
+    CAPTURED_ERROR_FRAMES.with(|c| *c.borrow_mut() = None);
+}
+
+/// Format a traceback chain as CPython does, returning it as a `String`.
+///
+/// `frames` is the list produced by `snapshot_traceback_frames()` (innermost
+/// last) with the `<module>` frame prepended by the caller.
+///
+/// Output format (no column underlines — Phase 1):
+/// ```text
+/// Traceback (most recent call last):
+///   File "test.py", in <module>
+///   File "test.py", in foo
+/// SomeError: message
+/// ```
+pub fn format_traceback(frames: &[FrameInfo], error_line: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::from("Traceback (most recent call last):\n");
+    for frame in frames {
+        match frame.lineno {
+            Some(n) => {
+                let _ = write!(
+                    out,
+                    "  File \"{}\", line {}, in {}\n",
+                    frame.filename, n, frame.funcname
+                );
+            }
+            None => {
+                let _ = write!(
+                    out,
+                    "  File \"{}\", in {}\n",
+                    frame.filename, frame.funcname
+                );
+            }
+        }
+    }
+    out.push_str(error_line);
+    out
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
