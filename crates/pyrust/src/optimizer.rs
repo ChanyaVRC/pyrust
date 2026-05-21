@@ -4187,27 +4187,8 @@ fn pass_forcount_const_inline(insns: Vec<Insn>, consts: &[Value]) -> Vec<Insn> {
         .collect()
 }
 
-// ─── LoadNone merging ──────────────────────────────────────────────────────────
+// ─── Linear loop fold ────────────────────────────────────────────────────────
 
-/// Merge runs of consecutive `LoadNone(r), LoadNone(r+1), ..., LoadNone(r+N-1)` into
-/// a single `LoadNoneRange { start: r, count: N }` instruction.
-///
-/// Only contiguous ascending register sequences are merged, AND the run must be
-/// free of any jump targets in its interior — a jump to the middle of a run
-/// cannot be redirected to the first instruction without changing semantics.
-/// A run of 1 is left as a bare `LoadNone` (no gain from wrapping).  If a run
-/// exceeds 255 registers, it is split into multiple `LoadNoneRange` instructions.
-///
-/// ## Why this helps
-///
-/// Function entry emits one `LoadNone` per local variable.  A function with N
-/// locals emits N separate VM dispatches through the giant `match insn`.
-/// `LoadNoneRange` collapses those N dispatches into one tight `for` loop that
-/// Rust/LLVM can lower to a memset-style fill.
-///
-/// ## Jump-offset correctness
-///
-/// When the pass merges a run of K instructions into one, it uses the `compact`
 /// Fold a simple linear accumulation loop into a single `LoadConst`.
 ///
 /// Matches the shape produced by `for _ in range(N): acc += K` (after earlier
@@ -4231,6 +4212,7 @@ fn pass_forcount_const_inline(insns: Vec<Insn>, consts: &[Value]) -> Vec<Insn> {
 /// - acc is last-written (before h) by a single `LoadConst` with a known integer
 ///   value, with no other writes to acc between that `LoadConst` and h-1
 /// - The computed acc_final fits in i64 (no overflow)
+/// - `stop` may be ≤ 0; trip count is `max(stop, 0)` (zero-trip loop, acc unchanged)
 ///
 /// Transformation: replace the four-instruction sequence with two `LoadConst`s
 /// that set iv and acc to their post-loop values, then compact out the dead body.
@@ -4369,9 +4351,14 @@ fn pass_linear_loop_fold(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn>
             None => continue,
         };
 
-        // Compute acc_final = acc_init ± imm * stop.  Reject on overflow so we
-        // never silently produce the wrong value (let the loop run instead).
-        let delta = (imm).checked_mul(stop as i64);
+        // `stop` is an i32 and may be ≤ 0 (e.g. `range(-3)` or `range(0)`).
+        // The loop is zero-trip when stop ≤ 0: acc stays unchanged and iv
+        // remains at its pre-decremented value of -1.
+        let trip_count = (stop as i64).max(0);
+
+        // Compute acc_final = acc_init ± imm * trip_count.  Reject on overflow
+        // so we never silently produce the wrong value (let the loop run instead).
+        let delta = imm.checked_mul(trip_count);
         let acc_final = match (delta, acc_op) {
             (Some(d), BinaryOp::Add) => acc_init.checked_add(d),
             (Some(d), BinaryOp::Sub) => acc_init.checked_sub(d),
@@ -4387,9 +4374,11 @@ fn pass_linear_loop_fold(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn>
         let Some(acc_final_idx) = intern_const_in_pool(consts, Value::int(acc_final)) else {
             continue;
         };
-        // iv's post-loop value: the last value for which iv < stop held,
-        // i.e. stop - 1 (since step == 1 and cmp == Lt).
-        let Some(iv_post_idx) = intern_const_in_pool(consts, Value::int(stop as i64 - 1)) else {
+        // iv's post-loop value: stop - 1 when stop > 0 (last value for which
+        // iv < stop held); -1 when stop ≤ 0 (loop never ran, iv stays at
+        // its pre-decremented initial value).
+        let iv_post = if stop > 0 { stop as i64 - 1 } else { -1 };
+        let Some(iv_post_idx) = intern_const_in_pool(consts, Value::int(iv_post)) else {
             continue;
         };
 
@@ -4408,6 +4397,27 @@ fn pass_linear_loop_fold(insns: Vec<Insn>, consts: &mut Vec<Value>) -> Vec<Insn>
     compact(transformed, &keep)
 }
 
+// ─── LoadNone merging ────────────────────────────────────────────────────────
+
+/// Merge runs of consecutive `LoadNone(r), LoadNone(r+1), ..., LoadNone(r+N-1)` into
+/// a single `LoadNoneRange { start: r, count: N }` instruction.
+///
+/// Only contiguous ascending register sequences are merged, AND the run must be
+/// free of any jump targets in its interior — a jump to the middle of a run
+/// cannot be redirected to the first instruction without changing semantics.
+/// A run of 1 is left as a bare `LoadNone` (no gain from wrapping).  If a run
+/// exceeds 255 registers, it is split into multiple `LoadNoneRange` instructions.
+///
+/// ## Why this helps
+///
+/// Function entry emits one `LoadNone` per local variable.  A function with N
+/// locals emits N separate VM dispatches through the giant `match insn`.
+/// `LoadNoneRange` collapses those N dispatches into one tight `for` loop that
+/// Rust/LLVM can lower to a memset-style fill.
+///
+/// ## Jump-offset correctness
+///
+/// When the pass merges a run of K instructions into one, it uses the `compact`
 /// helper to rewrite all subsequent jump offsets automatically.  The `keep`
 /// vector marks which instructions to retain: the first instruction in a run is
 /// replaced with a `LoadNoneRange`; the rest are marked `keep = false`.

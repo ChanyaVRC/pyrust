@@ -41,3 +41,10 @@ for _ in range(0):
     z += 100
 assert z == 42
 print("linear-fold-zero-iters", z)
+
+# Negative stop: ForCountConstInline with stop < 0 is also zero-trip
+neg = 7
+for _ in range(-3):
+    neg += 100
+assert neg == 7
+print("linear-fold-neg-stop", neg)
