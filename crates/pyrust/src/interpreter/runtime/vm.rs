@@ -1154,6 +1154,13 @@ impl Interpreter {
                     let val_val = vm_try!(vm_read(&regs, *val, num_locals));
                     // Slice assignment: tuple key on a list.
                     if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
+                        // Resolve each bound through the __index__ protocol before
+                        // entering the list_with_mut closure (issue #849).  Must
+                        // happen here because resolve_slice_bound_val needs &mut self
+                        // and list_with_mut holds a mutable borrow on the list.
+                        let lo = vm_try!(self.resolve_slice_bound_val(lo));
+                        let hi = vm_try!(self.resolve_slice_bound_val(hi));
+                        let st = vm_try!(self.resolve_slice_bound_val(st));
                         // Drop the kind() Ref before the fallback path
                         // may move `val_val` into `collect_iterable`
                         // (#450).
@@ -1293,6 +1300,11 @@ impl Interpreter {
                 Insn::DeleteItem(obj, idx) => {
                     let idx_val = vm_try!(vm_read(&regs, *idx, num_locals));
                     if let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val) {
+                        // Resolve each bound through the __index__ protocol before
+                        // entering the list_with_mut closure (issue #849).
+                        let lo = vm_try!(self.resolve_slice_bound_val(lo));
+                        let hi = vm_try!(self.resolve_slice_bound_val(hi));
+                        let st = vm_try!(self.resolve_slice_bound_val(st));
                         let updated = regs[*obj as usize].list_with_mut(|items| {
                             Self::slice_delitem(
                                 items,

@@ -111,3 +111,25 @@ ctr = Counter()
 print(ctr[::2])     # (None, None, 2)
 print(ctr[1::3])    # (1, None, 3)
 print(ctr[2:10:])   # (2, 10, None)
+
+# --- __index__ protocol as slice bounds on list setitem (issue #849) ---
+#
+# CPython resolves __index__ for slice assignment bounds on built-in sequences.
+
+lst = [0, 1, 2, 3, 4]
+lst[Index(1):Index(3)] = [99]
+print(lst)             # [0, 99, 3, 4]
+
+lst2 = [0, 1, 2, 3, 4, 5, 6]
+lst2[::Index(2)] = [10, 11, 12, 13]
+print(lst2)            # [10, 1, 11, 3, 12, 5, 13]
+
+# --- __index__ protocol as slice bounds on list delitem (issue #849) ---
+
+lst3 = [0, 1, 2, 3, 4]
+del lst3[Index(1):Index(3)]
+print(lst3)            # [0, 3, 4]
+
+lst4 = [0, 1, 2, 3, 4, 5]
+del lst4[::Index(2)]
+print(lst4)            # [1, 3, 5]
