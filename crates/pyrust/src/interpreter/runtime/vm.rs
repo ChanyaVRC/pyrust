@@ -3177,6 +3177,107 @@ impl Interpreter {
                     let module = vm_try!(self.load_module(&name));
                     regs[*dst as usize] = module;
                 }
+                Insn::ImportStar(mod_reg) => {
+                    let mod_val = vm_try!(vm_read(&regs, *mod_reg, num_locals));
+                    // Raise TypeError through exception handlers before binding `m`.
+                    if !matches!(mod_val.kind(), ValueKind::PyModule(_)) {
+                        vm_try!(Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "import * requires a module, got {}",
+                                pyrust_core::builtin_type_name(&mod_val),
+                            ),
+                        )));
+                    }
+                    let ValueKind::PyModule(m) = mod_val.kind() else {
+                        unreachable!()
+                    };
+                    // Snapshot (name, value) pairs before calling assign_name so
+                    // we don't hold the RefCell borrow across mutation.
+                    let pairs: Vec<(String, Value)> = {
+                        let borrowed = m.borrow();
+                        if let Some(all_val) = borrowed.attrs.get("__all__") {
+                            // __all__ is present: import only those names.
+                            // CPython accepts list or tuple; anything else is TypeError.
+                            let items: Option<&[Value]> =
+                                all_val.as_list().or_else(|| all_val.as_tuple());
+                            let mod_name = borrowed.name.clone();
+                            // Collect names while the borrow is live; defer errors until
+                            // after drop(borrowed) so vm_try! never fires with a live borrow.
+                            let mut names: Vec<String> = Vec::new();
+                            let mut err: Option<PyError> = None;
+                            match items {
+                                Some(items) => {
+                                    for item in items {
+                                        match item.as_str() {
+                                            Some(s) => names.push(s.to_string()),
+                                            None => {
+                                                err = Some(PyError::named(
+                                                    "TypeError",
+                                                    format!(
+                                                        "Item in {}.__all__ must be str, not {}",
+                                                        mod_name,
+                                                        pyrust_core::builtin_type_name(item),
+                                                    ),
+                                                ));
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                None => {
+                                    // __all__ is present but not a list or tuple.
+                                    // CPython tries sequence indexing on __all__ and
+                                    // raises this message when __getitem__ is absent.
+                                    err = Some(PyError::named(
+                                        "TypeError",
+                                        format!(
+                                            "'{}' object does not support indexing",
+                                            pyrust_core::builtin_type_name(all_val),
+                                        ),
+                                    ));
+                                }
+                            }
+                            drop(borrowed);
+                            if let Some(e) = err {
+                                vm_try!(Err(e));
+                            }
+                            let borrowed2 = m.borrow();
+                            // Raise AttributeError for any name in __all__ that
+                            // is absent from the module (CPython behaviour).
+                            let mut out = Vec::with_capacity(names.len());
+                            let mut attr_err: Option<String> = None;
+                            for name in &names {
+                                match borrowed2.attrs.get(name) {
+                                    Some(v) => out.push((name.clone(), v.clone())),
+                                    None => {
+                                        attr_err = Some(format!(
+                                            "module '{}' has no attribute '{}'",
+                                            mod_name, name,
+                                        ));
+                                        break;
+                                    }
+                                }
+                            }
+                            drop(borrowed2);
+                            if let Some(msg) = attr_err {
+                                vm_try!(Err(PyError::named("AttributeError", msg)));
+                            }
+                            out
+                        } else {
+                            // No __all__: export all names not starting with '_'.
+                            borrowed
+                                .attrs
+                                .iter()
+                                .filter(|(k, _)| !k.starts_with('_'))
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect()
+                        }
+                    };
+                    for (name, val) in pairs {
+                        self.assign_name(name, val);
+                    }
+                }
 
                 // ── REPL output ──────────────────────────────────────────
                 Insn::PrintExpr(src) => {
