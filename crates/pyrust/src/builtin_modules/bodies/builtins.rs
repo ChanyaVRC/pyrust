@@ -2611,34 +2611,75 @@ fn hash_value(value: &Value) -> Result<i64> {
 /// but each element is hashed via this function rather than `hash_value`, so
 /// `PyInstance` elements dispatch `__hash__` correctly (issue #502).
 ///
-/// `PyInstance`: dispatches `__hash__` via the interpreter, then applies
-/// CPython's slot_tp_hash semantics (`-1 → -2`, Mersenne reduction for BigInt).
-/// Returns `true` if any element at any nesting depth is a `PyInstance`
-/// that requires interpreter access for `__hash__` dispatch.
-fn tuple_needs_interp(items: &[Value]) -> bool {
-    items.iter().any(|v| match v.kind() {
+/// Returns `true` if `v` (or any value recursively nested inside it) is a
+/// `PyInstance` that requires interpreter access for `__hash__` dispatch.
+///
+/// Recurses into `Tuple` elements and `slice` components so that a
+/// `PyInstance` hidden inside `(inst, 1)` or `slice((inst, 1), 2)` is
+/// correctly detected and routed through the interpreter hashing path.
+pub(crate) fn value_needs_interp(v: &Value) -> bool {
+    match v.kind() {
         ValueKind::PyInstance(_) => true,
         ValueKind::Tuple(inner) => tuple_needs_interp(inner),
-        // Slices are always hashed via hash_value_with_interp (not the pure
-        // hash_value path) so that per-component errors ("unhashable type:
-        // 'list'") are preserved and PyInstance bounds can dispatch __hash__.
-        // Any tuple element that is a slice, or a nested tuple containing a
-        // slice, must therefore force the interpreter-aware branch.
-        ValueKind::BuiltinObject { ops, .. }
+        ValueKind::BuiltinObject { ops, state }
             if ops.type_name() == pyrust_builtins::slice::TYPE_NAME =>
         {
-            true
+            let borrow = state.borrow();
+            if let Some(s) = borrow.downcast_ref::<pyrust_builtins::slice::SliceState>() {
+                value_needs_interp(&s.start)
+                    || value_needs_interp(&s.stop)
+                    || value_needs_interp(&s.step)
+            } else {
+                false
+            }
         }
         _ => false,
-    })
+    }
+}
+
+fn tuple_needs_interp(items: &[Value]) -> bool {
+    items.iter().any(value_needs_interp)
+}
+
+/// Returns `true` when hashing `v` requires the slow per-element path of
+/// `hash_value_with_interp` rather than the pure `hash_value` shortcut.
+///
+/// Two cases force the slow path:
+/// 1. A `PyInstance` anywhere in the tree (needs interpreter `__hash__` dispatch).
+/// 2. A `slice` whose components contain an unhashable primitive (list/dict/set/…)
+///    at any nesting depth — the pure `hash_value` path would blame `'slice'` via
+///    `SliceOps::hash` returning `None`, but the slow path properly names the leaf
+///    unhashable type (issue #893).
+fn value_needs_slow_hash(v: &Value) -> bool {
+    if value_needs_interp(v) {
+        return true;
+    }
+    // All slices need the slow path: SliceOps::hash is not implemented, so
+    // hash_value would always produce a misleading "unhashable type: 'slice'"
+    // error regardless of whether the components are actually hashable.
+    // hash_value_with_interp handles all three cases correctly: unhashable
+    // primitive component (names the component type), PyInstance component
+    // (dispatches __hash__), and all-hashable components (computes the hash).
+    if let ValueKind::BuiltinObject { ops, .. } = v.kind() {
+        if ops.type_name() == pyrust_builtins::slice::TYPE_NAME {
+            return true;
+        }
+    }
+    // Recurse into tuple elements.
+    if let ValueKind::Tuple(items) = v.kind() {
+        return items.iter().any(value_needs_slow_hash);
+    }
+    false
 }
 
 pub(crate) fn hash_value_with_interp(interp: &mut crate::Interpreter, value: &Value) -> Result<i64> {
     match value.kind() {
         ValueKind::Tuple(items) => {
-            // Fast path: if no element at any depth is a PyInstance, delegate
-            // to the pure hash_value helper — no Vec allocation needed.
-            if !tuple_needs_interp(items) {
+            // Fast path: if no element at any depth requires the slow path
+            // (PyInstance needing __hash__ dispatch, or a slice with unhashable
+            // primitive components that hash_value would misreport as 'slice'),
+            // delegate to the pure hash_value helper — no Vec allocation needed.
+            if !items.iter().any(value_needs_slow_hash) {
                 return hash_value(value);
             }
             // At least one element needs interpreter access (PyInstance or a
@@ -2662,9 +2703,30 @@ pub(crate) fn hash_value_with_interp(interp: &mut crate::Interpreter, value: &Va
             let s = borrow
                 .downcast_ref::<pyrust_builtins::slice::SliceState>()
                 .expect("SliceOps: bad state");
-            // Clone components to release the borrow before mutable interp calls.
+            let needs_interp = value_needs_interp(&s.start)
+                || value_needs_interp(&s.stop)
+                || value_needs_interp(&s.step);
+            // Check for unhashable primitive components while the borrow is live.
+            let unhashable = if !needs_interp {
+                [&s.start, &s.stop, &s.step].iter().find_map(|c| {
+                    if c.to_key().is_none() {
+                        Some(pyrust_builtins::set::leaf_unhashable_type_name(c))
+                    } else {
+                        None
+                    }
+                })
+            } else {
+                None
+            };
+            // Clone before dropping the borrow — all accesses to s must happen here.
             let (start, stop, step) = (s.start.clone(), s.stop.clone(), s.step.clone());
             drop(borrow);
+            if let Some(bad_type) = unhashable {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("unhashable type: '{bad_type}'"),
+                ));
+            }
             let hstart = hash_value_with_interp(interp, &start)?;
             let hstop = hash_value_with_interp(interp, &stop)?;
             let hstep = hash_value_with_interp(interp, &step)?;

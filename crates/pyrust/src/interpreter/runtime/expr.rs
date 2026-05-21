@@ -646,19 +646,56 @@ impl Interpreter {
             }
             return Ok(PyKey::Tuple(keys));
         }
-        // Slices always go through the interpreter-aware hash path so that:
-        // 1. `PyInstance` components can dispatch `__hash__`.
-        // 2. Unhashable components (e.g. a list bound) surface the correct
-        //    per-component "unhashable type: 'list'" error instead of the
-        //    misleading "unhashable type: 'slice'" (issue #850).
-        // The hash stored in `PyKey::Object` is computed by
-        // `hash_value_with_interp`, matching what `hash()` returns for the
-        // same slice, so dict/set lookups remain consistent.
-        if let ValueKind::BuiltinObject { ops, .. } = value.kind() {
+        // Slices with PyInstance components need interpreter access to dispatch
+        // `__hash__`.  The pure `SliceOps::to_key()` path (via `value.to_key()`)
+        // returns `None` for any instance component, producing a misleading
+        // "unhashable type: 'slice'" error.  Intercept here when any component
+        // is a PyInstance and compute the hash via `hash_value_with_interp`,
+        // then store it in a `PyKey::Object` consistent with what `hash()`
+        // returns for the same slice (issue #850).
+        //
+        // When a component is a plain unhashable primitive (list, dict, set),
+        // `SliceOps::to_key()` also returns `None` but the fall-through error
+        // at the end of this function would blame `'slice'` rather than the
+        // actual offending component.  Detect that case here too and surface
+        // the correct type name (issue #893).
+        if let ValueKind::BuiltinObject { ops, state } = value.kind() {
             if ops.type_name() == pyrust_builtins::slice::TYPE_NAME {
-                let hash = crate::builtin_modules::builtins::hash_value_with_interp(
-                    self, value,
-                )? as u64;
+                let borrow = state.borrow();
+                let s = borrow
+                    .downcast_ref::<pyrust_builtins::slice::SliceState>()
+                    .expect("SliceOps: bad state");
+                let needs_interp =
+                    crate::builtin_modules::builtins::value_needs_interp(&s.start)
+                        || crate::builtin_modules::builtins::value_needs_interp(&s.stop)
+                        || crate::builtin_modules::builtins::value_needs_interp(&s.step);
+                // Check whether any component is an unhashable primitive so we
+                // can name it precisely in the error rather than blaming 'slice'.
+                // Use recursive descent so that a tuple-inside-slice (or
+                // further nesting) names the leaf type, matching CPython.
+                let unhashable_component: Option<String> = if !needs_interp {
+                    [&s.start, &s.stop, &s.step].iter().find_map(|c| {
+                        if c.to_key().is_none() {
+                            Some(pyrust_builtins::set::leaf_unhashable_type_name(c))
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                };
+                drop(borrow);
+                if let Some(component_name) = unhashable_component {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("unhashable type: '{component_name}'"),
+                    ));
+                }
+                // All slices (instance or primitive components) go through
+                // hash_value_with_interp to get the CPython-compatible slice hash
+                // and to dispatch user __hash__ on PyInstance components.
+                let hash =
+                    crate::builtin_modules::builtins::hash_value_with_interp(self, value)? as u64;
                 return Ok(PyKey::Object {
                     hash,
                     value: value.clone(),
@@ -1527,6 +1564,50 @@ impl Interpreter {
                     },
                     _ => unreachable!(),
                 }
+            }
+            // set.update uses value_to_pykey so that hashable slices and
+            // PyInstance elements (which need __hash__ dispatch) work correctly.
+            // The pyrust-builtins path calls Value::to_key() which returns None
+            // for slices (SliceOps doesn't implement hash), causing a misleading
+            // "unhashable type: 'slice'" error for all slices.
+            "update" => {
+                for arg in args {
+                    // Snapshot if the argument is the receiver itself to avoid
+                    // aliased-borrow issues during iteration (matches CPython
+                    // semantics: s.update(s) is a no-op).
+                    if arg.value_id() == receiver.value_id() && arg.value_id().is_some() {
+                        let snapshot: Vec<PyKey> = receiver
+                            .set_with(|s| s.iter().cloned().collect())
+                            .unwrap_or_default();
+                        for pk in snapshot {
+                            if self.set_lookup(&receiver, &pk)?.is_none() {
+                                receiver.set_add(pk)?;
+                            }
+                        }
+                        continue;
+                    }
+                    // If the arg is already a set, copy its PyKeys directly.
+                    if arg.as_set().is_some() {
+                        let keys: Vec<PyKey> =
+                            arg.set_with(|s| s.iter().cloned().collect()).unwrap_or_default();
+                        for pk in keys {
+                            if self.set_lookup(&receiver, &pk)?.is_none() {
+                                receiver.set_add(pk)?;
+                            }
+                        }
+                        continue;
+                    }
+                    // General iterable: iterate and hash each element via
+                    // value_to_pykey so slices and PyInstances are handled.
+                    let items = self.collect_iterable(arg)?;
+                    for item in items {
+                        let pk = self.value_to_pykey(&item)?;
+                        if self.set_lookup(&receiver, &pk)?.is_none() {
+                            receiver.set_add(pk)?;
+                        }
+                    }
+                }
+                Ok(Value::none())
             }
             _ => pyrust_builtins::set::call(method, &receiver, args),
         }
