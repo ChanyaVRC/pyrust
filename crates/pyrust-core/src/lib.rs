@@ -28,6 +28,30 @@ pub fn next_fn_id() -> u64 {
     FN_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
+// Global class-mutation epoch counter.  Bumped on every PyClass attribute write
+// or delete, regardless of which class was mutated.  Inline attribute caches
+// store the epoch at fill time and re-validate it on each hit; a mismatch means
+// some class (possibly an ancestor in the MRO) was mutated since the fill,
+// which triggers a cache miss and a slow-path re-fill.
+//
+// This is the same approach CPython's specialising adaptive interpreter uses to
+// invalidate inline caches after class mutations.  The counter wraps on u64
+// overflow — a missed invalidation after 2^64 mutations is benign in practice.
+thread_local! {
+    static CLASS_MUTATION_EPOCH: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Bump the global class-mutation epoch.  Call this whenever any `PyClass`
+/// attribute is written or deleted so that all attribute caches are invalidated.
+pub fn bump_class_epoch() {
+    CLASS_MUTATION_EPOCH.with(|c| c.set(c.get().wrapping_add(1)));
+}
+
+/// Return the current global class-mutation epoch.
+pub fn class_epoch() -> u64 {
+    CLASS_MUTATION_EPOCH.with(|c| c.get())
+}
+
 // Monotonic counter for list/tuple object identity. Each new allocation gets a
 // unique id stored at hdr+24; clones copy the same id so `id(x) == id(y)` when
 // y is a copy of x, and `id([1]) != id([2])` because they are separate objects.

@@ -1076,11 +1076,13 @@ impl Interpreter {
                     }
                     let fast = {
                         let cache = code.attr_cache.borrow();
-                        if let AttrCacheEntry::ClassAttr { class_ptr, class_version, value: unbound } =
+                        if let AttrCacheEntry::ClassAttr { class_ptr, class_version, epoch, value: unbound } =
                             &cache[pc - 1]
                         {
                             // Check: object is a PyInstance, same class, no
-                            // instance shadow, and class not mutated.
+                            // instance shadow, class not mutated, and the global
+                            // class-mutation epoch unchanged (catches base-class
+                            // mutations that don't bump the leaf class version).
                             if let Some(inst_rc) = regs[*obj as usize].as_py_instance_rc() {
                                 let inst = inst_rc.borrow();
                                 let name_opt =
@@ -1093,7 +1095,8 @@ impl Interpreter {
                                     .map_or(false, |n| !inst.attrs.contains_key(n));
                                 let version_ok = inst.class.borrow().mutation_version.get()
                                     == *class_version;
-                                if same_class && no_shadow && version_ok {
+                                let epoch_ok = pyrust_core::class_epoch() == *epoch;
+                                if same_class && no_shadow && version_ok && epoch_ok {
                                     // Rebind the unbound class attr to this
                                     // instance — same logic as get_attr's
                                     // regular path, but avoids the MRO walk.
@@ -1212,9 +1215,12 @@ impl Interpreter {
                                                             Rc::as_ptr(&inst.class) as *const ();
                                                         let class_version =
                                                             inst.class.borrow().mutation_version.get();
+                                                        let epoch =
+                                                            pyrust_core::class_epoch();
                                                         cache[pc - 1] = AttrCacheEntry::ClassAttr {
                                                             class_ptr,
                                                             class_version,
+                                                            epoch,
                                                             value: unbound_val,
                                                         };
                                                     }
@@ -3444,7 +3450,7 @@ impl Interpreter {
                 }
                 let fast = {
                     let cache = code.attr_cache.borrow();
-                    if let AttrCacheEntry::ClassAttr { class_ptr, class_version, value: unbound } =
+                    if let AttrCacheEntry::ClassAttr { class_ptr, class_version, epoch, value: unbound } =
                         &cache[call_site_pc]
                     {
                         if let Some(inst_rc) = regs[obj as usize].as_py_instance_rc() {
@@ -3454,7 +3460,8 @@ impl Interpreter {
                             let no_shadow = !inst.attrs.contains_key(method);
                             let version_ok = inst.class.borrow().mutation_version.get()
                                 == *class_version;
-                            if same_class && no_shadow && version_ok {
+                            let epoch_ok = pyrust_core::class_epoch() == *epoch;
+                            if same_class && no_shadow && version_ok && epoch_ok {
                                 let unbound = unbound.clone();
                                 let inst_val = Value::py_instance(Rc::clone(inst_rc));
                                 drop(inst);
@@ -3529,9 +3536,12 @@ impl Interpreter {
                                             Rc::as_ptr(&inst.class) as *const ();
                                         let class_version =
                                             inst.class.borrow().mutation_version.get();
+                                        let epoch =
+                                            pyrust_core::class_epoch();
                                         cache[call_site_pc] = AttrCacheEntry::ClassAttr {
                                             class_ptr,
                                             class_version,
+                                            epoch,
                                             value: unbound_val,
                                         };
                                     }
