@@ -1,8 +1,4 @@
 impl Interpreter {
-    pub fn with_script_dir(dir: PathBuf) -> Self {
-        Self { script_dir: Some(dir), ..Default::default() }
-    }
-
     /// Create an interpreter for running a named script file.
     ///
     /// Stores both the directory (for module-relative imports) and the
