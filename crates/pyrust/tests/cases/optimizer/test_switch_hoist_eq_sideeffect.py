@@ -73,15 +73,21 @@ for word in ("apple", "banana", "cherry", "durian"):
 # __eq__ would not be visible to the second test — pyrust would compare the
 # stale cached object, and the elif that should match would be skipped.
 #
-# The guard (primitive-const check on the RHS constant) ensures the hoist only
-# fires when the VM's fast int-int / str-str path applies, which never invokes
-# user __eq__ and therefore cannot mutate the global.
+# The guard (primitive-const check on the RHS constant) prevents hoisting when
+# the RHS is a non-primitive object that could itself define __eq__.  Note that
+# even a primitive RHS does not guarantee no user __eq__ is called: if the LHS
+# is a PyInstance the VM still dispatches to the LHS __eq__.  The guard is a
+# necessary but not sufficient condition for safety; the broader correctness
+# argument rests on the fact that LoadGlobal is only hoisted when the global
+# binding itself cannot be replaced by a side-effecting __eq__ on the LHS — the
+# primitive-const check is the first filter that stops obviously unsafe cases
+# (non-primitive RHS values whose own __eq__ could mutate state).
 #
 # Expected (CPython 3.12 and correct pyrust):
 #   - __eq__ called once with other=1; sets g to an int (2)
 #   - elif g == 2: re-reads g (now 2), fast int==int path → True → "mutated-match"
 # If hoist fires incorrectly:
-#   - elif would compare cached Switcher against 2 → calls __eq__ again → "no-match"
+#   - elif would compare cached Switcher against 2 → calls __eq__ again → "mutated-no-match"
 
 _mut_log = []
 
