@@ -1339,6 +1339,51 @@ fn parse_escape(chars: &[char], pos: usize) -> Result<(char, usize)> {
                 .map_err(|_| PyError::Lex(format!("invalid \\x escape: \\x{hi}{lo}")))?;
             Ok((char::from(v), pos + 3))
         }
+        'u' => {
+            // \uNNNN — exactly four hex digits; BMP codepoint (surrogates forbidden).
+            let digits: String = (1..=4)
+                .map(|i| {
+                    chars.get(pos + i).copied().ok_or_else(|| {
+                        PyError::Lex("incomplete \\u escape (need 4 hex digits)".to_string())
+                    })
+                })
+                .collect::<Result<_>>()?;
+            let codepoint = u32::from_str_radix(&digits, 16)
+                .map_err(|_| PyError::Lex(format!("invalid \\u escape: \\u{digits}")))?;
+            if (0xD800..=0xDFFF).contains(&codepoint) {
+                return Err(PyError::Lex(format!(
+                    "invalid \\u escape: surrogate codepoint U+{codepoint:04X}"
+                )));
+            }
+            let ch = char::from_u32(codepoint)
+                .ok_or_else(|| PyError::Lex(format!("invalid \\u escape: U+{codepoint:04X}")))?;
+            Ok((ch, pos + 5))
+        }
+        'U' => {
+            // \UNNNNNNNN — exactly eight hex digits; full Unicode range (surrogates and >0x10FFFF forbidden).
+            let digits: String = (1..=8)
+                .map(|i| {
+                    chars.get(pos + i).copied().ok_or_else(|| {
+                        PyError::Lex("incomplete \\U escape (need 8 hex digits)".to_string())
+                    })
+                })
+                .collect::<Result<_>>()?;
+            let codepoint = u32::from_str_radix(&digits, 16)
+                .map_err(|_| PyError::Lex(format!("invalid \\U escape: \\U{digits}")))?;
+            if (0xD800..=0xDFFF).contains(&codepoint) {
+                return Err(PyError::Lex(format!(
+                    "invalid \\U escape: surrogate codepoint U+{codepoint:04X}"
+                )));
+            }
+            if codepoint > 0x10FFFF {
+                return Err(PyError::Lex(format!(
+                    "invalid \\U escape: codepoint U+{codepoint:08X} out of range"
+                )));
+            }
+            let ch = char::from_u32(codepoint)
+                .ok_or_else(|| PyError::Lex(format!("invalid \\U escape: U+{codepoint:08X}")))?;
+            Ok((ch, pos + 9))
+        }
         other => Err(PyError::Lex(format!("unsupported escape \\{other}"))),
     }
 }
