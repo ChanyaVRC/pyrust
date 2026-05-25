@@ -1309,8 +1309,9 @@ fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<Vec<FStringPart>> 
 /// backslash) and return `(resulting_char, next_pos)` where `next_pos` is the
 /// index of the first character not consumed by this escape.
 ///
-/// Supports single-character escapes (`\n`, `\t`, ...) and `\xNN` hex escapes
-/// (exactly two hex digits, producing U+0000–U+00FF).
+/// Supports single-character escapes (`\n`, `\t`, ...), octal escapes
+/// (`\ooo`, 1–3 digits, value 0–255), and `\xNN` hex escapes (exactly two
+/// hex digits, producing U+0000–U+00FF).
 fn parse_escape(chars: &[char], pos: usize) -> Result<(char, usize)> {
     let c = *chars
         .get(pos)
@@ -1322,11 +1323,31 @@ fn parse_escape(chars: &[char], pos: usize) -> Result<(char, usize)> {
         '\\' => Ok(('\\', pos + 1)),
         '\'' => Ok(('\'', pos + 1)),
         '"' => Ok(('"', pos + 1)),
-        '0' => Ok(('\0', pos + 1)),
         'a' => Ok(('\x07', pos + 1)),
         'b' => Ok(('\x08', pos + 1)),
         'f' => Ok(('\x0C', pos + 1)),
         'v' => Ok(('\x0B', pos + 1)),
+        '0'..='7' => {
+            // \ooo — 1 to 3 octal digits; produces values 0x00–0xFF.
+            let d1 = c as u32 - '0' as u32;
+            let mut val = d1;
+            let mut end = pos + 1;
+            if let Some(&d) = chars.get(end) {
+                if ('0'..='7').contains(&d) {
+                    val = val * 8 + (d as u32 - '0' as u32);
+                    end += 1;
+                    if let Some(&d2) = chars.get(end) {
+                        if ('0'..='7').contains(&d2) {
+                            val = val * 8 + (d2 as u32 - '0' as u32);
+                            end += 1;
+                        }
+                    }
+                }
+            }
+            let v = u8::try_from(val)
+                .map_err(|_| PyError::Lex(format!("octal escape value out of range: \\{val:o}")))?;
+            Ok((char::from(v), end))
+        }
         'x' => {
             // \xNN — exactly two hex digits; produces U+0000–U+00FF.
             let hi = chars.get(pos + 1).copied().ok_or_else(|| {
