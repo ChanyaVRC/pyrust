@@ -1909,8 +1909,8 @@ pyrust_module! {
                 ))),
             },
             2 => {
-                let base = match args[1].value.kind() {
-                    ValueKind::Int(b) if (2..=36).contains(&b) => b as u32,
+                let base_arg = match args[1].value.kind() {
+                    ValueKind::Int(b) if b == 0 || (2..=36).contains(&b) => b,
                     ValueKind::Int(b) => return Err(PyError::named(
                         "ValueError",
                         format!("int() base must be >= 2 and <= 36, or 0, not {b}"),
@@ -1919,25 +1919,42 @@ pyrust_module! {
                 };
                 match args[0].value.kind() {
                     ValueKind::Str(s) => {
-                        let stripped = s.trim();
-                        let stripped = if (base == 16 && (stripped.starts_with("0x") || stripped.starts_with("0X")))
-                            || (base == 2 && (stripped.starts_with("0b") || stripped.starts_with("0B")))
-                            || (base == 8 && (stripped.starts_with("0o") || stripped.starts_with("0O")))
-                        {
-                            &stripped[2..]
+                        let trimmed = s.trim();
+                        if base_arg == 0 {
+                            let (base, digits) = int_parse_base_zero(trimmed).ok_or_else(|| {
+                                PyError::named(
+                                    "ValueError",
+                                    format!("invalid literal for int() with base 0: '{trimmed}'"),
+                                )
+                            })?;
+                            i64::from_str_radix(&digits, base).map(Value::int).map_err(|_| {
+                                PyError::named(
+                                    "ValueError",
+                                    format!("invalid literal for int() with base 0: '{trimmed}'"),
+                                )
+                            })
                         } else {
-                            stripped
-                        };
-                        i64::from_str_radix(stripped, base).map(Value::int).map_err(|_| {
-                            PyError::named(
-                                "ValueError",
-                                format!("invalid literal for int() with base {base}: '{}'", s.trim()),
-                            )
-                        })
+                            let base = base_arg as u32;
+                            let stripped = if (base == 16 && (trimmed.starts_with("0x") || trimmed.starts_with("0X")))
+                                || (base == 2 && (trimmed.starts_with("0b") || trimmed.starts_with("0B")))
+                                || (base == 8 && (trimmed.starts_with("0o") || trimmed.starts_with("0O")))
+                            {
+                                &trimmed[2..]
+                            } else {
+                                trimmed
+                            };
+                            i64::from_str_radix(stripped, base).map(Value::int).map_err(|_| {
+                                PyError::named(
+                                    "ValueError",
+                                    format!("invalid literal for int() with base {base_arg}: '{trimmed}'"),
+                                )
+                            })
+                        }
                     }
-                    _ => Err(PyError::Runtime(format!(
-                        "{FN_NAME}() can't convert non-string with explicit base",
-                    ))),
+                    _ => Err(PyError::named(
+                        "TypeError",
+                        format!("{FN_NAME}() can't convert non-string with explicit base"),
+                    )),
                 }
             }
             _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most two arguments"))),
@@ -2523,6 +2540,55 @@ pyrust_module! {
     fn tuple_init(_args) -> Result<Value> {
         Ok(Value::none())
     }
+}
+
+/// Detect the numeric base and build the digits string to parse when
+/// `int(s, 0)` is called (base=0 means "auto-detect from prefix").
+///
+/// CPython 3.12 rules for base=0:
+///   - Whitespace must have been stripped before calling.
+///   - An optional sign (`+`/`-`) is consumed first, then re-prepended to the
+///     returned digits string so that `i64::from_str_radix` handles it.
+///   - `0x`/`0X` → base 16; `0b`/`0B` → base 2; `0o`/`0O` → base 8.
+///   - `0` alone, or repeated `0`s with no letter prefix → base 10 (value 0).
+///   - A leading `0` followed by a non-zero digit (e.g. `"09"`) → None.
+///   - Anything else is parsed as base-10 decimal.
+///
+/// Returns `Some((base, digits))` on success or `None` on error.
+fn int_parse_base_zero(s: &str) -> Option<(u32, String)> {
+    let (sign, after_sign) = if let Some(rest) = s.strip_prefix('-') {
+        ("-", rest)
+    } else if let Some(rest) = s.strip_prefix('+') {
+        ("", rest) // `+` consumed but not forwarded; from_str_radix doesn't accept it
+    } else {
+        ("", s)
+    };
+
+    let signed = |digits: &str| -> String {
+        if sign.is_empty() { digits.to_owned() } else { format!("{sign}{digits}") }
+    };
+
+    if let Some(rest) = after_sign.strip_prefix("0x").or_else(|| after_sign.strip_prefix("0X")) {
+        if rest.is_empty() { return None; }
+        return Some((16, signed(rest)));
+    }
+    if let Some(rest) = after_sign.strip_prefix("0b").or_else(|| after_sign.strip_prefix("0B")) {
+        if rest.is_empty() { return None; }
+        return Some((2, signed(rest)));
+    }
+    if let Some(rest) = after_sign.strip_prefix("0o").or_else(|| after_sign.strip_prefix("0O")) {
+        if rest.is_empty() { return None; }
+        return Some((8, signed(rest)));
+    }
+    // No letter prefix: a leading `0` followed by more chars must all be `0`
+    // (Python 3 forbids the Python 2 octal syntax `09` etc.).
+    if after_sign.starts_with('0') && after_sign.len() > 1 {
+        if after_sign.chars().all(|c| c == '0') {
+            return Some((10, signed(after_sign)));
+        }
+        return None;
+    }
+    Some((10, signed(after_sign)))
 }
 
 /// Integer divmod shared by all `int`/`bool` overload combinations.
