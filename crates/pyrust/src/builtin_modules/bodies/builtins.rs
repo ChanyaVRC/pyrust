@@ -2555,6 +2555,82 @@ pyrust_module! {
     fn object_init_subclass(_args) -> Result<Value> {
         Ok(Value::none())
     }
+
+    /// Issue #1067: `BaseException.add_note(note)` — Python 3.11+ method.
+    ///
+    /// Appends `note` (a str) to `self.__notes__`, creating `__notes__` as
+    /// a fresh list if it does not yet exist.  Matches CPython 3.12 semantics:
+    /// - `note` must be a `str`; otherwise raises `TypeError`.
+    /// - Returns `None`.
+    /// - `hasattr(exc, "__notes__")` is `False` until `add_note` is called.
+    ///
+    /// CPython signature: `BaseException.add_note(self, note, /)`
+    #[py_name = "BaseException.add_note"]
+    fn base_exception_add_note(args) -> Result<Value> {
+        // args[0] = self, args[1] = note; exactly one user argument expected.
+        let user_argc = args.len().saturating_sub(1);
+        if user_argc != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "BaseException.add_note() takes exactly one argument ({user_argc} given)"
+                ),
+            ));
+        }
+        // Reject keyword arguments.
+        if args.iter().any(|a| a.name.is_some()) {
+            return Err(PyError::named(
+                "TypeError",
+                "BaseException.add_note() takes no keyword arguments".to_string(),
+            ));
+        }
+        let self_val = &args[0].value;
+        let note_val = &args[1].value;
+
+        // `note` must be a str.
+        let note_str = match note_val.kind() {
+            ValueKind::Str(s) => s.to_string(),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "note must be a str, not '{}'",
+                        value_type_name_str(note_val)
+                    ),
+                ));
+            }
+        };
+
+        // Mutate self.__notes__ in place.
+        let ValueKind::PyInstance(inst_rc) = self_val.kind() else {
+            return Err(PyError::Runtime(
+                "BaseException.add_note() requires a BaseException instance".to_string(),
+            ));
+        };
+        // If __notes__ is absent, insert a fresh empty list so we can
+        // always call list_push on the value without re-borrowing inst.
+        {
+            let mut inst = inst_rc.borrow_mut();
+            inst.attrs
+                .entry("__notes__".to_string())
+                .or_insert_with(|| Value::list(vec![]));
+        }
+        // Re-borrow immutably to read the list value and push to it.
+        // Value::list_push takes &self and uses RefCell internally — no
+        // need to hold a mutable borrow on the instance for this step.
+        let notes_val = inst_rc
+            .borrow()
+            .attrs
+            .get("__notes__")
+            .cloned()
+            .unwrap_or_else(|| Value::list(vec![]));
+        notes_val
+            .list_push(Value::string(note_str))
+            .map_err(|_| {
+                PyError::Runtime("BaseException.add_note: __notes__ is not a list".to_string())
+            })?;
+        Ok(Value::none())
+    }
 }
 
 /// Detect the numeric base and build the digits string to parse when

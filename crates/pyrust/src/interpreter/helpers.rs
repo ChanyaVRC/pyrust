@@ -1026,6 +1026,18 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
         }))
     };
     let base_exception = mk("BaseException", None);
+    // Install `add_note` (Python 3.11+ — issue #1067) on BaseException so that
+    // every exception subclass inherits it via `lookup_class_attr`.
+    {
+        static ADD_NOTE_NAME: std::sync::LazyLock<&'static str> =
+            std::sync::LazyLock::new(|| {
+                Box::leak("BaseException.add_note".to_string().into_boxed_str())
+            });
+        base_exception.borrow_mut().attrs.insert(
+            "add_note".to_string(),
+            Value::builtin_function(*ADD_NOTE_NAME),
+        );
+    }
     let exception = mk("Exception", Some(Rc::clone(&base_exception)));
     let arithmetic_error = mk("ArithmeticError", Some(Rc::clone(&exception)));
     let lookup_error = mk("LookupError", Some(Rc::clone(&exception)));
