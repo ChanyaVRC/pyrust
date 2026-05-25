@@ -3486,12 +3486,14 @@ fn min_max_impl(
 ) -> Result<Value> {
     let key_fn = args.iter().find(|a| a.name.as_deref() == Some("key"))
         .map(|a| a.value.clone());
+    let default_val = args.iter().find(|a| a.name.as_deref() == Some("default"))
+        .map(|a| a.value.clone());
     for a in args.iter().filter(|a| a.name.is_some()) {
-        if a.name.as_deref() != Some("key") {
-            return Err(PyError::Runtime(format!(
-                "{fn_name}() got an unexpected keyword argument '{}'",
-                a.name.as_ref().unwrap()
-            )));
+        if a.name.as_deref() != Some("key") && a.name.as_deref() != Some("default") {
+            return Err(PyError::named(
+                "TypeError",
+                format!("'{}' is an invalid keyword argument for {fn_name}()", a.name.as_ref().unwrap()),
+            ));
         }
     }
     let positional: Vec<&ExpandedCallArg> =
@@ -3499,12 +3501,27 @@ fn min_max_impl(
     let items: Vec<Value> = if positional.len() == 1 {
         interp.collect_iterable(positional[0].value.clone())?
     } else if positional.len() >= 2 {
+        if default_val.is_some() {
+            return Err(PyError::named(
+                "TypeError",
+                format!("Cannot specify a default for {fn_name}() with multiple positional arguments"),
+            ));
+        }
         positional.iter().map(|a| a.value.clone()).collect()
     } else {
-        return Err(PyError::Runtime(format!("{fn_name}() expected at least one argument")));
+        return Err(PyError::named(
+            "TypeError",
+            format!("{fn_name} expected at least 1 argument, got 0"),
+        ));
     };
     if items.is_empty() {
-        return Err(PyError::Runtime(format!("{fn_name}() arg is an empty sequence")));
+        if let Some(default) = default_val {
+            return Ok(default);
+        }
+        return Err(PyError::named(
+            "ValueError",
+            format!("{fn_name}() iterable argument is empty"),
+        ));
     }
     if let Some(kfn) = key_fn {
         let keyed: Vec<(Value, Value)> = items
