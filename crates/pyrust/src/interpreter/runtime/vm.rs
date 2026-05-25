@@ -3642,24 +3642,43 @@ impl Interpreter {
                     if attrs.contains_key("__eq__") && !attrs.contains_key("__hash__") {
                         attrs.insert("__hash__".to_string(), Value::none());
                     }
-                    let base = if *bases_n > 0 {
+                    // Collect all bases: first into `base` (primary), rest into
+                    // `extra_bases_vec`.  The compiler stores bases in consecutive
+                    // registers starting at `bases_base` with count `bases_n`.
+                    let (base, extra_bases_vec) = if *bases_n > 0 {
                         let base_val = vm_try!(vm_read(&regs, *bases_base, num_locals));
-                        match base_val.kind() {
-                            ValueKind::PyClass(c) => Some(Rc::clone(c)),
+                        let first = match base_val.kind() {
+                            ValueKind::PyClass(c) => Rc::clone(c),
                             _ => {
                                 vm_try!(Err::<(), _>(PyError::Runtime(
                                     "class base must be a class".to_string(),
                                 )));
                                 unreachable!()
                             }
+                        };
+                        let mut extras: Vec<Rc<RefCell<PyClass>>> = Vec::new();
+                        for i in 1..*bases_n as usize {
+                            let reg = (*bases_base as usize + i) as crate::bytecode::Reg;
+                            let base_val = vm_try!(vm_read(&regs, reg, num_locals));
+                            match base_val.kind() {
+                                ValueKind::PyClass(c) => extras.push(Rc::clone(c)),
+                                _ => {
+                                    vm_try!(Err::<(), _>(PyError::Runtime(
+                                        "class base must be a class".to_string(),
+                                    )));
+                                    unreachable!()
+                                }
+                            }
                         }
+                        (Some(first), extras)
                     } else {
-                        None
+                        (None, vec![])
                     };
                     let class = Rc::new(RefCell::new(PyClass {
                         name: class_name,
                         qualname,
                         base,
+                        extra_bases: extra_bases_vec,
                         attrs,
                         mutation_version: std::cell::Cell::new(0),
                     }));

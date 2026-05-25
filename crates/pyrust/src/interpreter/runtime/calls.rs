@@ -3202,30 +3202,35 @@ fn trim_g_trailing_zeros(s: String) -> String {
 
 /// Returns the list of attribute/method names that `dir(obj)` should report.
 pub(crate) fn dir_names(value: &Value) -> Vec<String> {
+    /// Recursively collect all attribute names from a class and its entire
+    /// MRO (primary base then extra_bases, depth-first).
+    fn collect_class_names(class: &Rc<RefCell<PyClass>>, names: &mut Vec<String>) {
+        let (own_keys, base, extra_bases): (Vec<String>, _, _) = {
+            let borrowed = class.borrow();
+            (
+                borrowed.attrs.keys().cloned().collect(),
+                borrowed.base.clone(),
+                borrowed.extra_bases.clone(),
+            )
+        };
+        names.extend(own_keys);
+        if let Some(b) = base {
+            collect_class_names(&b, names);
+        }
+        for eb in &extra_bases {
+            collect_class_names(eb, names);
+        }
+    }
     match value.kind() {
         ValueKind::PyInstance(inst) => {
             let mut names: Vec<String> = inst.borrow().attrs.keys().cloned().collect();
             let class = Rc::clone(&inst.borrow().class);
-            let mut cls = Some(class);
-            while let Some(c) = cls {
-                let cb = c.borrow();
-                for k in cb.attrs.keys() {
-                    names.push(k.clone());
-                }
-                cls = cb.base.clone();
-            }
+            collect_class_names(&class, &mut names);
             names
         }
         ValueKind::PyClass(class) => {
             let mut names: Vec<String> = Vec::new();
-            let mut cls = Some(Rc::clone(class));
-            while let Some(c) = cls {
-                let cb = c.borrow();
-                for k in cb.attrs.keys() {
-                    names.push(k.clone());
-                }
-                cls = cb.base.clone();
-            }
+            collect_class_names(class, &mut names);
             names
         }
         ValueKind::PyModule(module) => module.borrow().attrs.keys().cloned().collect(),

@@ -851,7 +851,15 @@ pub struct PyClass {
     /// stored in `attrs` — CPython keeps `__qualname__` as a type-level
     /// descriptor on `type`, not as an entry in the class's own `__dict__`.
     pub qualname: String,
+    /// First (primary) base class, or `None` if there is no explicit base.
+    /// Kept as a dedicated `Option` so that the many existing single-inheritance
+    /// paths (exception walks, `super()`, primitive-class chains) remain fast
+    /// without iterating a `Vec`.
     pub base: Option<Rc<RefCell<PyClass>>>,
+    /// Second through Nth bases for multiple inheritance.  Empty for classes
+    /// with zero or one explicit base.  Combined with `base`, the full list of
+    /// direct bases is `[base] ++ extra_bases` (in declaration order).
+    pub extra_bases: Vec<Rc<RefCell<PyClass>>>,
     pub attrs: IndexMap<String, Value>,
     /// Bumped on every `assign_attr` / `delete_attr` on this class (but NOT
     /// its bases — a base mutation is separately detectable via the base's own
@@ -3512,28 +3520,44 @@ pub fn is_exception_instance(instance: &Rc<RefCell<PyInstance>>) -> bool {
 /// [`crate::interpreter::helpers::install_exception_builtins`] in the
 /// `pyrust` crate for where the classes are constructed.
 pub fn class_chain_contains_exception(class: &Rc<RefCell<PyClass>>) -> bool {
-    let (name, base) = {
+    let (name, base, extra_bases) = {
         let borrowed = class.borrow();
-        (borrowed.name.clone(), borrowed.base.clone())
+        (
+            borrowed.name.clone(),
+            borrowed.base.clone(),
+            borrowed.extra_bases.clone(),
+        )
     };
     if name == "BaseException" || name == "Exception" || name == "GeneratorExit" {
         return true;
     }
-    base.is_some_and(|base| class_chain_contains_exception(&base))
+    if base.is_some_and(|base| class_chain_contains_exception(&base)) {
+        return true;
+    }
+    extra_bases
+        .iter()
+        .any(|b| class_chain_contains_exception(b))
 }
 
 /// Walk the class base chain and return `true` if any class in the chain has
 /// the given `name`.  Used by `PyError::class_name_is` to handle subclasses
 /// of `StopIteration` / `GeneratorExit` carried as `PyError::Raised`.
 fn class_chain_has_name(class: &Rc<RefCell<PyClass>>, name: &str) -> bool {
-    let (class_name, base) = {
+    let (class_name, base, extra_bases) = {
         let borrowed = class.borrow();
-        (borrowed.name.clone(), borrowed.base.clone())
+        (
+            borrowed.name.clone(),
+            borrowed.base.clone(),
+            borrowed.extra_bases.clone(),
+        )
     };
     if class_name == name {
         return true;
     }
-    base.is_some_and(|base| class_chain_has_name(&base, name))
+    if base.is_some_and(|base| class_chain_has_name(&base, name)) {
+        return true;
+    }
+    extra_bases.iter().any(|b| class_chain_has_name(b, name))
 }
 
 fn exception_args(instance: &Rc<RefCell<PyInstance>>) -> Vec<Value> {

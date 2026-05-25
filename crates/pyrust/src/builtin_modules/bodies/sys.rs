@@ -79,6 +79,7 @@ thread_local! {
         name: "version_info".to_string(),
         qualname: "version_info".to_string(),
         base: None,
+        extra_bases: vec![],
         attrs: indexmap::IndexMap::new(),
         mutation_version: std::cell::Cell::new(0),
     }));

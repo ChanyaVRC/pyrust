@@ -57,6 +57,7 @@ thread_local! {
             name: "_Any".to_string(),
             qualname: "_Any".to_string(),
             base: None,
+            extra_bases: vec![],
             attrs,
             mutation_version: std::cell::Cell::new(0),
         }))
@@ -71,6 +72,7 @@ thread_local! {
             name: "_TypingAlias".to_string(),
             qualname: "_TypingAlias".to_string(),
             base: None,
+            extra_bases: vec![],
             attrs,
             mutation_version: std::cell::Cell::new(0),
         }))
@@ -241,6 +243,7 @@ thread_local! {
                 name: (*name).to_string(),
                 qualname: (*name).to_string(),
                 base: None,
+                extra_bases: vec![],
                 attrs,
                 mutation_version: std::cell::Cell::new(0),
             }));

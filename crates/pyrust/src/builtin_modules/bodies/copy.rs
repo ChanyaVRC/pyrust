@@ -42,6 +42,7 @@ thread_local! {
             name: "Error".to_string(),
             qualname: "Error".to_string(),
             base: Some(exception_base),
+            extra_bases: vec![],
             attrs: IndexMap::new(),
             mutation_version: std::cell::Cell::new(0),
         }))
