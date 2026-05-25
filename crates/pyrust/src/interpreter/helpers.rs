@@ -671,6 +671,38 @@ pub(crate) fn find_mutable_primitive_base(
     base.and_then(|b| find_mutable_primitive_base(&b))
 }
 
+/// Walk the base chain of `class` and return the name of the first
+/// immutable primitive builtin base found (`"frozenset"` or `"tuple"`),
+/// or `None` if the class does not inherit from either.
+///
+/// These types are immutable — their backing must be populated from the
+/// constructor argument at `__new__` time, before any `__init__` runs.
+/// Unlike the mutable types handled by `find_mutable_primitive_base`,
+/// there is no empty pre-initialisation step (issue #994).
+pub(crate) fn find_immutable_primitive_base(
+    class: &Rc<RefCell<PyClass>>,
+) -> Option<&'static str> {
+    let (name, base) = {
+        let borrowed = class.borrow();
+        (borrowed.name.clone(), borrowed.base.clone())
+    };
+    match name.as_str() {
+        "frozenset" | "tuple" => {
+            // Check that this is actually the primitive singleton, not a
+            // user class that happens to share the name.
+            if is_primitive_class(class) {
+                return Some(match name.as_str() {
+                    "frozenset" => "frozenset",
+                    "tuple" => "tuple",
+                    _ => unreachable!(),
+                });
+            }
+        }
+        _ => {}
+    }
+    base.and_then(|b| find_immutable_primitive_base(&b))
+}
+
 /// Constant key used to store the backing primitive value inside a
 /// `PyInstance` that subclasses `dict`, `list`, or `set`.
 pub(crate) const BUILTIN_DATA_ATTR: &str = "__builtin_data__";
