@@ -934,27 +934,35 @@ pyrust_module! {
                     format!("{FN_NAME}() argument 1 must be a str"),
                 )),
             };
-            // Extract the first element (if any) of the base-class
-            // sequence in a scoped block so the kind() Ref guard drops
-            // before we work with it (#450).
-            let first_base: Option<Value> = match args[1].value.kind() {
-                ValueKind::Tuple(items) => items.first().cloned(),
-                ValueKind::List(items) => items.first().cloned(),
+            // Extract all bases from the bases sequence.  Collect into a Vec
+            // first (inside a scoped block so the kind() Ref guard drops before
+            // we work with the Values — see #450).
+            let base_values: Vec<Value> = match args[1].value.kind() {
+                ValueKind::Tuple(items) => items.to_vec(),
+                ValueKind::List(items) => items.to_vec(),
                 _ => return Err(PyError::named(
                     "TypeError",
                     format!("{FN_NAME}() argument 2 must be a tuple"),
                 )),
             };
-            let base = match first_base {
-                None => None,
-                Some(first) => match first.kind() {
-                    ValueKind::PyClass(c) => Some(Rc::clone(c)),
+            // Validate each entry and split into primary base + extra bases.
+            let mut base: Option<Rc<RefCell<PyClass>>> = None;
+            let mut extra_bases: Vec<Rc<RefCell<PyClass>>> = Vec::new();
+            for (i, entry) in base_values.iter().enumerate() {
+                match entry.kind() {
+                    ValueKind::PyClass(c) => {
+                        if i == 0 {
+                            base = Some(Rc::clone(c));
+                        } else {
+                            extra_bases.push(Rc::clone(c));
+                        }
+                    }
                     _ => return Err(PyError::named(
                         "TypeError",
                         format!("{FN_NAME}() argument 2 entries must be classes"),
                     )),
-                },
-            };
+                }
+            }
             let mut attrs: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
             match args[2].value.kind() {
                 ValueKind::Dict(map) => {
@@ -985,6 +993,7 @@ pyrust_module! {
                 qualname: name.clone(),
                 name,
                 base,
+                extra_bases,
                 attrs,
                 mutation_version: std::cell::Cell::new(0),
             }))));

@@ -194,14 +194,24 @@ pub(crate) fn compare_values_with_op(
 }
 
 pub(crate) fn lookup_class_attr(class: &Rc<RefCell<PyClass>>, name: &str) -> Option<Value> {
-    let (value, base) = {
+    let (value, base, extra_bases) = {
         let borrowed = class.borrow();
-        (borrowed.attrs.get(name).cloned(), borrowed.base.clone())
+        (borrowed.attrs.get(name).cloned(), borrowed.base.clone(), borrowed.extra_bases.clone())
     };
     if value.is_some() {
         return value;
     }
-    base.and_then(|base| lookup_class_attr(&base, name))
+    if let Some(base) = base {
+        if let Some(v) = lookup_class_attr(&base, name) {
+            return Some(v);
+        }
+    }
+    for extra in &extra_bases {
+        if let Some(v) = lookup_class_attr(extra, name) {
+            return Some(v);
+        }
+    }
+    None
 }
 
 thread_local! {
@@ -219,6 +229,7 @@ thread_local! {
             name: "object".to_string(),
             qualname: "object".to_string(),
             base: None,
+            extra_bases: vec![],
             attrs,
             mutation_version: std::cell::Cell::new(0),
         }))
@@ -332,6 +343,7 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
             name: name.to_string(),
             qualname: name.to_string(),
             base,
+            extra_bases: vec![],
             attrs,
             mutation_version: std::cell::Cell::new(0),
         }))
@@ -917,8 +929,14 @@ pub(crate) fn class_is_subclass_of(class: &Rc<RefCell<PyClass>>, expected: &Rc<R
     if Rc::ptr_eq(expected, &object_class_singleton()) {
         return true;
     }
-    let base = class.borrow().base.clone();
-    base.is_some_and(|base| class_is_subclass_of(&base, expected))
+    let (base, extra_bases) = {
+        let borrowed = class.borrow();
+        (borrowed.base.clone(), borrowed.extra_bases.clone())
+    };
+    if base.is_some_and(|base| class_is_subclass_of(&base, expected)) {
+        return true;
+    }
+    extra_bases.iter().any(|b| class_is_subclass_of(b, expected))
 }
 
 /// Runtime-side "is this class an exception?" predicate used by the
@@ -935,14 +953,17 @@ pub(crate) fn is_exception_class(class: &Rc<RefCell<PyClass>>) -> bool {
 /// the given `name`.  Used to check subclass relationships by class name when
 /// the `Rc` singleton for the expected class is not in scope.
 fn class_chain_contains_name(class: &Rc<RefCell<PyClass>>, name: &str) -> bool {
-    let (class_name, base) = {
+    let (class_name, base, extra_bases) = {
         let borrowed = class.borrow();
-        (borrowed.name.clone(), borrowed.base.clone())
+        (borrowed.name.clone(), borrowed.base.clone(), borrowed.extra_bases.clone())
     };
     if class_name == name {
         return true;
     }
-    base.is_some_and(|base| class_chain_contains_name(&base, name))
+    if base.is_some_and(|base| class_chain_contains_name(&base, name)) {
+        return true;
+    }
+    extra_bases.iter().any(|b| class_chain_contains_name(b, name))
 }
 
 pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value>) -> Value {
@@ -1021,6 +1042,7 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
             name: name.to_string(),
             qualname: name.to_string(),
             base,
+            extra_bases: vec![],
             attrs: IndexMap::new(),
             mutation_version: std::cell::Cell::new(0),
         }))

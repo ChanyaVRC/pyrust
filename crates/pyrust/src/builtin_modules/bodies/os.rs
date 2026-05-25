@@ -769,6 +769,7 @@ thread_local! {
             name: "_Environ".to_string(),
             qualname: "_Environ".to_string(),
             base: None,
+            extra_bases: vec![],
             attrs,
             mutation_version: std::cell::Cell::new(0),
         }))
