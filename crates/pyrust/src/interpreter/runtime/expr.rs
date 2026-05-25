@@ -2662,7 +2662,13 @@ impl Interpreter {
                     )?;
                     return Ok(Value::bool_(result.truthy()));
                 }
-                // No __contains__: fall back to __iter__ if available.
+                // list/dict/set subclass with no user-defined __contains__:
+                // delegate to the backing primitive, matching CPython's
+                // inherited tp_sq_contains / sq_contains slot behaviour.
+                if let Some(backing) = instance_builtin_data(&inst_rc) {
+                    return self.eval_in(backing, item);
+                }
+                // No __contains__ or __builtin_data__: fall back to __iter__ if available.
                 if let Some(iter_method) = lookup_class_attr(&class, "__iter__") {
                     let iter_obj = invoke_class_method(
                         self,
@@ -2755,6 +2761,12 @@ fn coerce_numeric(v: Value) -> Value {
 }
 
 pub(crate) fn iter_values(value: Value) -> Result<Vec<Value>> {
+    // list/dict/set subclass: delegate to the backing primitive value.
+    if let Some(inst_rc) = value.as_py_instance_rc() {
+        if let Some(backing) = instance_builtin_data(inst_rc) {
+            return iter_values(backing);
+        }
+    }
     match value.kind() {
         ValueKind::List(items) => Ok(items.to_vec()),
         ValueKind::Tuple(items) => Ok(items.to_vec()),
