@@ -1052,6 +1052,9 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
     let module_not_found_error = mk("ModuleNotFoundError", Some(Rc::clone(&import_error)));
     let file_not_found_error = mk("FileNotFoundError", Some(Rc::clone(&os_error)));
     let file_exists_error = mk("FileExistsError", Some(Rc::clone(&os_error)));
+    // Python 3.3+: IOError and EnvironmentError are aliases for OSError.
+    let io_error = Rc::clone(&os_error);
+    let environment_error = Rc::clone(&os_error);
     let unicode_encode_error = mk("UnicodeEncodeError", Some(Rc::clone(&unicode_error)));
     let unicode_decode_error = mk("UnicodeDecodeError", Some(Rc::clone(&unicode_error)));
     let system_exit = mk("SystemExit", Some(Rc::clone(&base_exception)));
@@ -1085,6 +1088,8 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
         ("UnicodeEncodeError", unicode_encode_error),
         ("UnicodeDecodeError", unicode_decode_error),
         ("OSError", os_error),
+        ("IOError", io_error),
+        ("EnvironmentError", environment_error),
         ("FileNotFoundError", file_not_found_error),
         ("FileExistsError", file_exists_error),
         ("SystemExit", system_exit),

@@ -2949,6 +2949,8 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
             | "ModuleNotFoundError"
             | "NameError"
             | "NotImplementedError"
+            | "EnvironmentError"
+            | "IOError"
             | "OSError"
             | "OverflowError"
             | "RecursionError"
