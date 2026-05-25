@@ -234,13 +234,14 @@ fn float_float_fast(a: f64, b: f64, op: BinaryOp) -> Option<Value> {
             if b == 0.0 {
                 None
             } else {
-                let r = a % b;
-                // CPython sign-adjusts: result has same sign as divisor.
-                let r = if (r > 0.0 && b < 0.0) || (r < 0.0 && b > 0.0) {
-                    r + b
-                } else {
-                    r
-                };
+                let mut r = a % b;
+                // Match CPython float_rem: zero result copies sign of divisor;
+                // non-zero result is adjusted so sign matches divisor.
+                if r == 0.0 {
+                    r = r.copysign(b);
+                } else if r.signum() != b.signum() {
+                    r += b;
+                }
                 Some(Value::float(r))
             }
         }
