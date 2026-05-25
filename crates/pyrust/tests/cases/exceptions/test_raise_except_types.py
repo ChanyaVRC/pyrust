@@ -97,6 +97,28 @@ def check_except_non_class():
         print("except (ValueError, TypeError) -> ok:", e)
 
 
+def check_generator_throw_non_exception():
+    def gen():
+        yield 1
+
+    g = gen()
+    next(g)
+    try:
+        g.throw(42)
+    except TypeError as e:
+        print("throw 42 -> TypeError:", e)
+    except Exception as e:
+        print("throw 42 -> WRONG", type(e).__name__, e)
+
+    g2 = gen()
+    next(g2)
+    try:
+        g2.throw(ValueError("ok"))
+    except ValueError as e:
+        print("throw exc -> ValueError:", e)
+
+
 check_raise_non_exception()
 check_raise_from_cause()
 check_except_non_class()
+check_generator_throw_non_exception()

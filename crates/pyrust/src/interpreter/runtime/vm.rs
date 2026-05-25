@@ -4560,9 +4560,17 @@ impl Interpreter {
         // Convert `exc` argument into a concrete exception instance so we can
         // hand it to the VM via `PyError::Raised`.  Accepts the same shapes as
         // a `raise` statement: an exception class (auto-instantiates) or an
-        // exception instance.  `coerce_to_exception` already raises `TypeError`
-        // for non-exception values since #1083 was fixed.
-        let exc_val = self.coerce_to_exception(exc)?;
+        // exception instance.  CPython's message for generator.throw() includes
+        // the type name ("not int"), which differs from the plain `raise` message.
+        let exc_tname = value_type_name_str(&exc);
+        let exc_val = self.coerce_to_exception(exc).map_err(|_| {
+            PyError::named(
+                "TypeError",
+                format!(
+                    "exceptions must be classes or instances deriving from BaseException, not {exc_tname}"
+                ),
+            )
+        })?;
 
         // Re-entrancy guard: see generator_close for rationale.
         {
