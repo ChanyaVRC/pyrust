@@ -840,6 +840,42 @@ impl Interpreter {
                 }
             }
 
+            // CallableIter path: drive iter(callable, sentinel) to exhaustion.
+            {
+                let is_callable_iter = state_rc
+                    .borrow()
+                    .downcast_ref::<CallableIter>()
+                    .is_some();
+                if is_callable_iter {
+                    let mut items = Vec::new();
+                    loop {
+                        match self.step_callable_iter(&state_rc)? {
+                            Some(v) => items.push(v),
+                            None => break,
+                        }
+                    }
+                    return Ok(items);
+                }
+            }
+
+            // GetItemIter path: drive __getitem__(0), __getitem__(1), … to exhaustion.
+            {
+                let is_getitem_iter = state_rc
+                    .borrow()
+                    .downcast_ref::<GetItemIter>()
+                    .is_some();
+                if is_getitem_iter {
+                    let mut items = Vec::new();
+                    loop {
+                        match self.step_getitem_iter(&state_rc)? {
+                            Some(v) => items.push(v),
+                            None => break,
+                        }
+                    }
+                    return Ok(items);
+                }
+            }
+
             // GeneratorFrame path: drive the generator to exhaustion.
             let mut items = Vec::new();
             loop {
@@ -1000,6 +1036,51 @@ impl Interpreter {
         }
     }
 
+    /// One step of the callable iterator created by `iter(callable, sentinel)`.
+    /// Invokes `callable()` with no arguments, then checks whether the returned
+    /// value equals `sentinel`.  Returns `Ok(Some(v))` when a value was
+    /// produced, `Ok(None)` when the sentinel was matched (exhausted), or
+    /// `Err(e)` when the callable raised.
+    ///
+    /// The borrow on `state_rc` is fully released before `call_function_expanded`
+    /// is invoked, mirroring the `step_getitem_iter` approach.
+    pub(crate) fn step_callable_iter(
+        &mut self,
+        state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
+    ) -> Result<Option<Value>> {
+        // Extract callable and sentinel while releasing the borrow, so that
+        // call_function_expanded can re-enter the interpreter without aliasing.
+        let snapshot: Option<(Value, Value)> = {
+            let borrow = state_rc.borrow();
+            if let Some(it) = borrow.downcast_ref::<CallableIter>() {
+                if it.done {
+                    return Ok(None);
+                }
+                Some((it.callable.clone(), it.sentinel.clone()))
+            } else {
+                return Err(PyError::Runtime(
+                    "step_callable_iter on non-CallableIter state".to_string(),
+                ));
+            }
+        };
+        let (callable, sentinel) = snapshot.unwrap();
+        let result = self.call_function_expanded(callable, &[]);
+        match result {
+            Ok(v) => {
+                let equal = self.values_user_eq(&v, &sentinel)?;
+                if equal {
+                    if let Some(it) = state_rc.borrow_mut().downcast_mut::<CallableIter>() {
+                        it.done = true;
+                    }
+                    Ok(None)
+                } else {
+                    Ok(Some(v))
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Call next() on a generator or any object with __next__.
     pub(crate) fn call_next(&mut self, val: Value, default: Option<Value>) -> Result<Value> {
         if let ValueKind::Generator(state_rc) = val.kind() {
@@ -1032,6 +1113,26 @@ impl Interpreter {
                     .is_some();
                 if is_getitem {
                     return match self.step_getitem_iter(&state_rc)? {
+                        Some(v) => Ok(v),
+                        None => {
+                            if let Some(d) = default {
+                                Ok(d)
+                            } else {
+                                Err(PyError::named("StopIteration", String::new()))
+                            }
+                        }
+                    };
+                }
+            }
+
+            // CallableIter path: invoke callable(), stop when result == sentinel.
+            {
+                let is_callable_iter = state_rc
+                    .borrow()
+                    .downcast_ref::<CallableIter>()
+                    .is_some();
+                if is_callable_iter {
+                    return match self.step_callable_iter(&state_rc)? {
                         Some(v) => Ok(v),
                         None => {
                             if let Some(d) = default {
