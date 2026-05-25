@@ -3563,10 +3563,59 @@ fn escape_str(s: &str, quote: char) -> String {
                 out.push('\\');
                 out.push(c);
             }
+            c if !py_is_printable(c) => {
+                let n = c as u32;
+                if n <= 0xFF {
+                    out.push_str(&format!("\\x{n:02x}"));
+                } else if n <= 0xFFFF {
+                    out.push_str(&format!("\\u{n:04x}"));
+                } else {
+                    out.push_str(&format!("\\U{n:08x}"));
+                }
+            }
             c => out.push(c),
         }
     }
     out
+}
+
+/// Returns `true` when `c` is considered "printable" by Python's
+/// `str.isprintable()` / CPython's `Py_UNICODE_ISPRINTABLE`.
+///
+/// CPython considers a character non-printable when its Unicode general
+/// category is one of: Cc (control), Cs (surrogate), Co (private-use),
+/// Cn (unassigned), Zl/Zp (line/paragraph separators), or any Zs (space
+/// separator) except ASCII space (U+0020).
+#[inline]
+fn py_is_printable(c: char) -> bool {
+    let cp = c as u32;
+    // ASCII: printable range is 0x20 (space) through 0x7E (~) inclusive.
+    // 0x00-0x1F are C0 controls; 0x7F is DEL (Cc). All non-printable.
+    // Note: \t, \n, \r are handled before this function is reached.
+    if cp <= 0x7F {
+        return cp >= 0x20 && cp != 0x7F;
+    }
+    // C1 controls U+0080-U+009F (Cc) — non-printable.
+    if cp <= 0x9F {
+        return false;
+    }
+    // U+00A0 NO-BREAK SPACE (Zs) and U+00AD SOFT HYPHEN (Cf) — non-printable.
+    if cp == 0x00A0 || cp == 0x00AD {
+        return false;
+    }
+    // Remaining Latin-1 supplement U+00A1-U+00FF (excluding U+00AD) — printable.
+    if cp <= 0xFF {
+        return true;
+    }
+    // For higher code points, Rust's char::is_control covers Unicode Cc.
+    if c.is_control() {
+        return false;
+    }
+    // Line separator U+2028 (Zl) and paragraph separator U+2029 (Zp).
+    if cp == 0x2028 || cp == 0x2029 {
+        return false;
+    }
+    true
 }
 
 pub fn range_len(start: i64, stop: i64, step: i64) -> i64 {
