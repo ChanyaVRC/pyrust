@@ -821,7 +821,8 @@ fn lex_string(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)>
 
     // Triple-quoted strings
     if chars.get(start + 1) == Some(&quote) && chars.get(start + 2) == Some(&quote) {
-        let mut pos = start + 3;
+        let content_start = start + 3;
+        let mut pos = content_start;
         let mut out = String::new();
         loop {
             if pos + 2 < chars.len()
@@ -870,7 +871,7 @@ fn lex_string(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)>
                             pos += 1;
                         }
                     } else {
-                        let (ch, next_pos) = parse_escape(chars, pos)?;
+                        let (ch, next_pos) = parse_escape(chars, pos, content_start)?;
                         out.push(ch);
                         pos = next_pos;
                     }
@@ -892,7 +893,8 @@ fn lex_string(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)>
         }
     }
 
-    let mut pos = start + 1;
+    let content_start = start + 1;
+    let mut pos = content_start;
     let mut out = String::new();
 
     while let Some(c) = chars.get(pos).copied() {
@@ -917,7 +919,7 @@ fn lex_string(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)>
                 continue;
             }
             pos += 1;
-            let (ch, next_pos) = parse_escape(chars, pos)?;
+            let (ch, next_pos) = parse_escape(chars, pos, content_start)?;
             out.push(ch);
             pos = next_pos;
             continue;
@@ -946,11 +948,11 @@ fn lex_fstring(chars: &[char], start: usize, quote: char, raw: bool) -> Result<(
     let mut literal = String::new();
 
     // Detect triple-quoted f-string.
-    let (triple, mut pos) =
+    let (triple, content_start, mut pos) =
         if chars.get(start) == Some(&quote) && chars.get(start + 1) == Some(&quote) {
-            (true, start + 2)
+            (true, start + 2, start + 2)
         } else {
-            (false, start)
+            (false, start, start)
         };
 
     loop {
@@ -1028,7 +1030,7 @@ fn lex_fstring(chars: &[char], start: usize, quote: char, raw: bool) -> Result<(
                 literal.push(next_ch);
                 pos += 1;
             } else {
-                let (ch, next_pos) = parse_escape(chars, pos)?;
+                let (ch, next_pos) = parse_escape(chars, pos, content_start)?;
                 literal.push(ch);
                 pos = next_pos;
             }
@@ -1333,10 +1335,14 @@ fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<Vec<FStringPart>> 
 /// backslash) and return `(resulting_char, next_pos)` where `next_pos` is the
 /// index of the first character not consumed by this escape.
 ///
+/// `content_start` is the index in `chars` of the first character after the
+/// opening quote(s) of the string literal.  It is used to compute accurate
+/// byte positions for `\N` error messages (matching CPython 3.12 output).
+///
 /// Supports single-character escapes (`\n`, `\t`, ...), octal escapes
 /// (`\ooo`, 1–3 digits, value 0–255), and `\xNN` hex escapes (exactly two
 /// hex digits, producing U+0000–U+00FF).
-fn parse_escape(chars: &[char], pos: usize) -> Result<(char, usize)> {
+fn parse_escape(chars: &[char], pos: usize, content_start: usize) -> Result<(char, usize)> {
     let c = *chars
         .get(pos)
         .ok_or_else(|| PyError::Lex("unterminated escape sequence".to_string()))?;
@@ -1431,37 +1437,53 @@ fn parse_escape(chars: &[char], pos: usize) -> Result<(char, usize)> {
         }
         'N' => {
             // \N{Unicode name} — look up character by Unicode name.
+            //
+            // Byte positions in error messages are relative to the string
+            // content (after the opening quote), matching CPython 3.12.
+            let bs_byte: usize = chars[content_start..pos - 1]
+                .iter()
+                .map(|c| c.len_utf8())
+                .sum();
             if chars.get(pos + 1) != Some(&'{') {
-                return Err(PyError::Lex(
-                    "(unicode error) 'unicodeescape' codec can't decode bytes in position 0-1: \
-                     malformed \\N character escape"
-                        .to_string(),
-                ));
+                return Err(PyError::Lex(format!(
+                    "(unicode error) 'unicodeescape' codec can't decode bytes in position \
+                     {bs_byte}-{}: malformed \\N character escape",
+                    bs_byte + 1
+                )));
             }
             let mut end = pos + 2;
             while end < chars.len() && chars[end] != '}' {
                 end += 1;
             }
             if end >= chars.len() {
-                return Err(PyError::Lex(
-                    "(unicode error) 'unicodeescape' codec can't decode bytes in position 0-1: \
-                     malformed \\N character escape"
-                        .to_string(),
-                ));
+                // Unterminated \N{ — report up to the last name char scanned,
+                // excluding the string-terminating quote/newline that caused us
+                // to overshoot.  Unicode character names never contain quote
+                // chars or newlines, so stopping at any of those is safe.
+                let name_bytes: usize = chars[pos + 2..]
+                    .iter()
+                    .take_while(|&&c| c != '}' && c != '\'' && c != '"' && c != '\n' && c != '\r')
+                    .map(|c| c.len_utf8())
+                    .sum();
+                let end_byte = bs_byte + 2 + name_bytes;
+                return Err(PyError::Lex(format!(
+                    "(unicode error) 'unicodeescape' codec can't decode bytes in position \
+                     {bs_byte}-{end_byte}: malformed \\N character escape"
+                )));
             }
             let name: String = chars[pos + 2..end].iter().collect();
             if name.is_empty() {
-                return Err(PyError::Lex(
-                    "(unicode error) 'unicodeescape' codec can't decode bytes in position 0-2: \
-                     malformed \\N character escape"
-                        .to_string(),
-                ));
+                return Err(PyError::Lex(format!(
+                    "(unicode error) 'unicodeescape' codec can't decode bytes in position \
+                     {bs_byte}-{}: malformed \\N character escape",
+                    bs_byte + 2
+                )));
             }
+            let end_byte: usize = chars[content_start..end].iter().map(|c| c.len_utf8()).sum();
             let ch = unicode_names2::character(&name).ok_or_else(|| {
                 PyError::Lex(format!(
-                    "(unicode error) 'unicodeescape' codec can't decode bytes in position 0-{}: \
-                     unknown Unicode character name",
-                    name.len() + 3
+                    "(unicode error) 'unicodeescape' codec can't decode bytes in position \
+                     {bs_byte}-{end_byte}: unknown Unicode character name"
                 ))
             })?;
             Ok((ch, end + 1))
