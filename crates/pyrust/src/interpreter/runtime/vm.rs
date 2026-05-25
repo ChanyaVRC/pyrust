@@ -4260,7 +4260,13 @@ impl Interpreter {
                     return self.format_str_template_map(&template, mapping);
                 }
                 let receiver = vm_read(regs, obj, num_locals)?;
-                self.call_str_method(method, receiver, pos_items)
+                if kw_map.is_empty() {
+                    self.call_str_method(method, receiver, pos_items)
+                } else {
+                    let mut pos = pos_items;
+                    str_merge_kwargs(method, &mut pos, kw_map)?;
+                    self.call_str_method(method, receiver, pos)
+                }
             }
             5 => {
                 let receiver = vm_read(regs, obj, num_locals)?;
