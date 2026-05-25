@@ -2410,7 +2410,14 @@ impl Interpreter {
                 "float modulo".to_string(),
             ));
         }
-        Ok(Value::float(a - b * (a / b).floor()))
+        let mut r = a % b;
+        if r == 0.0 {
+            // Match CPython float_rem: zero result copies sign of divisor.
+            r = r.copysign(b);
+        } else if r.signum() != b.signum() {
+            r += b;
+        }
+        Ok(Value::float(r))
     }
 
     fn compare(
