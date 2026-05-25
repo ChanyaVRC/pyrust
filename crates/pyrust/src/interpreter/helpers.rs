@@ -1012,7 +1012,7 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
     //       ValueError → UnicodeError → UnicodeEncodeError / UnicodeDecodeError
     //       RuntimeError → RecursionError, NotImplementedError
     //       TypeError, NameError → UnboundLocalError
-    //       AssertionError, AttributeError, StopIteration, SyntaxError
+    //       AssertionError, AttributeError, EOFError, StopIteration, SyntaxError
     //       MemoryError, ImportError → ModuleNotFoundError
     //       OSError → FileNotFoundError, FileExistsError
     //     SystemExit, GeneratorExit, KeyboardInterrupt (direct BaseException children)
@@ -1057,6 +1057,7 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
     let environment_error = Rc::clone(&os_error);
     let unicode_encode_error = mk("UnicodeEncodeError", Some(Rc::clone(&unicode_error)));
     let unicode_decode_error = mk("UnicodeDecodeError", Some(Rc::clone(&unicode_error)));
+    let eof_error = mk("EOFError", Some(Rc::clone(&exception)));
     let system_exit = mk("SystemExit", Some(Rc::clone(&base_exception)));
     let generator_exit = mk("GeneratorExit", Some(Rc::clone(&base_exception)));
     let keyboard_interrupt = mk("KeyboardInterrupt", Some(Rc::clone(&base_exception)));
@@ -1078,6 +1079,7 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
         ("NameError", name_error),
         ("UnboundLocalError", unbound_local_error),
         ("AssertionError", assertion_error),
+        ("EOFError", eof_error),
         ("StopIteration", stop_iteration),
         ("AttributeError", attribute_error),
         ("SyntaxError", syntax_error),

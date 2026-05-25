@@ -2935,6 +2935,7 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
             | "AssertionError"
             | "AttributeError"
             | "BaseException"
+            | "EOFError"
             | "Exception"
             | "FileExistsError"
             | "FileNotFoundError"
