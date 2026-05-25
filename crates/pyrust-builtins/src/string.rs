@@ -453,15 +453,18 @@ fn str_rpartition(s: &str, sep: &str) -> Result<Value> {
 }
 
 fn str_splitlines(s: &str, args: &[Value]) -> Result<Value> {
+    // CPython accepts any truthy value for keepends (bool, int, str, etc.)
     let keepends = match args.first().map(|v| v.kind()) {
         None => false,
         Some(ValueKind::Bool(b)) => b,
         Some(ValueKind::Int(n)) => n != 0,
-        _ => {
-            return Err(PyError::Runtime(
-                "str.splitlines() keepends must be bool or int".to_string(),
-            ));
-        }
+        Some(ValueKind::Float(f)) => f != 0.0,
+        Some(ValueKind::None) => false,
+        Some(ValueKind::Str(s)) => !s.is_empty(),
+        Some(ValueKind::List(items)) => !items.is_empty(),
+        Some(ValueKind::Tuple(items)) => !items.is_empty(),
+        Some(ValueKind::Bytes(b)) => !b.is_empty(),
+        Some(_) => true,
     };
     let mut lines: Vec<Value> = Vec::new();
     let bytes = s.as_bytes();
@@ -802,8 +805,18 @@ fn is_python_alpha(c: char) -> bool {
 fn str_index(s: &str, args: &[Value]) -> Result<Value> {
     let sub = match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(sub)) => sub,
-        _ => {
-            return Err(PyError::Runtime(
+        Some(_) => {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "must be str, not {}",
+                    builtin_type_name(args.first().unwrap())
+                ),
+            ));
+        }
+        None => {
+            return Err(PyError::named(
+                "TypeError",
                 "str.index() requires a str argument".to_string(),
             ));
         }
@@ -830,8 +843,18 @@ fn str_index(s: &str, args: &[Value]) -> Result<Value> {
 fn str_count(s: &str, args: &[Value]) -> Result<Value> {
     let sub = match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(sub)) => sub,
-        _ => {
-            return Err(PyError::Runtime(
+        Some(_) => {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "must be str, not {}",
+                    builtin_type_name(args.first().unwrap())
+                ),
+            ));
+        }
+        None => {
+            return Err(PyError::named(
+                "TypeError",
                 "str.count() requires a str argument".to_string(),
             ));
         }
@@ -852,8 +875,18 @@ fn str_count(s: &str, args: &[Value]) -> Result<Value> {
 fn str_find(s: &str, args: &[Value], raise_on_miss: bool) -> Result<Value> {
     let sub = match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(sub)) => sub,
-        _ => {
-            return Err(PyError::Runtime(
+        Some(_) => {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "must be str, not {}",
+                    builtin_type_name(args.first().unwrap())
+                ),
+            ));
+        }
+        None => {
+            return Err(PyError::named(
+                "TypeError",
                 "str.find() requires a str argument".to_string(),
             ));
         }
@@ -889,8 +922,18 @@ fn str_find(s: &str, args: &[Value], raise_on_miss: bool) -> Result<Value> {
 fn str_rfind(s: &str, args: &[Value], raise_on_miss: bool) -> Result<Value> {
     let sub = match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(sub)) => sub,
-        _ => {
-            return Err(PyError::Runtime(
+        Some(_) => {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "must be str, not {}",
+                    builtin_type_name(args.first().unwrap())
+                ),
+            ));
+        }
+        None => {
+            return Err(PyError::named(
+                "TypeError",
                 "str.rfind() requires a str argument".to_string(),
             ));
         }
@@ -1151,23 +1194,32 @@ fn join(sep: &str, args: &[Value]) -> Result<Value> {
 
 fn str_replace(s: &str, args: &[Value]) -> Result<Value> {
     if args.len() < 2 {
-        return Err(PyError::Runtime(
-            "str.replace() requires 2 arguments".to_string(),
+        return Err(PyError::named(
+            "TypeError",
+            format!("replace expected at least 2 arguments, got {}", args.len()),
         ));
     }
     let old: &str = match args[0].kind() {
         ValueKind::Str(s) => s,
         _ => {
-            return Err(PyError::Runtime(
-                "str.replace() argument 1 must be str".to_string(),
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "replace() argument 1 must be str, not {}",
+                    builtin_type_name(&args[0])
+                ),
             ));
         }
     };
     let new: &str = match args[1].kind() {
         ValueKind::Str(s) => s,
         _ => {
-            return Err(PyError::Runtime(
-                "str.replace() argument 2 must be str".to_string(),
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "replace() argument 2 must be str, not {}",
+                    builtin_type_name(&args[1])
+                ),
             ));
         }
     };
@@ -1176,8 +1228,12 @@ fn str_replace(s: &str, args: &[Value]) -> Result<Value> {
         Some(ValueKind::Bool(b)) => b as i64,
         None => -1,
         _ => {
-            return Err(PyError::Runtime(
-                "str.replace() count must be int".to_string(),
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "'{}' object cannot be interpreted as an integer",
+                    builtin_type_name(&args[2])
+                ),
             ));
         }
     };
@@ -1205,8 +1261,16 @@ fn str_startswith(s: &str, args: &[Value]) -> Result<Value> {
                 false
             }
         }))),
-        _ => Err(PyError::Runtime(
-            "str.startswith() first arg must be str or a tuple of str".to_string(),
+        Some(_) => Err(PyError::named(
+            "TypeError",
+            format!(
+                "startswith first arg must be str or a tuple of str, not {}",
+                builtin_type_name(args.first().unwrap())
+            ),
+        )),
+        None => Err(PyError::named(
+            "TypeError",
+            "startswith first arg must be str or a tuple of str".to_string(),
         )),
     }
 }
@@ -1226,8 +1290,16 @@ fn str_endswith(s: &str, args: &[Value]) -> Result<Value> {
                 false
             }
         }))),
-        _ => Err(PyError::Runtime(
-            "str.endswith() first arg must be str or a tuple of str".to_string(),
+        Some(_) => Err(PyError::named(
+            "TypeError",
+            format!(
+                "endswith first arg must be str or a tuple of str, not {}",
+                builtin_type_name(args.first().unwrap())
+            ),
+        )),
+        None => Err(PyError::named(
+            "TypeError",
+            "endswith first arg must be str or a tuple of str".to_string(),
         )),
     }
 }
@@ -1280,9 +1352,13 @@ fn split_args(args: &[Value]) -> Result<(Option<&str>, i64)> {
     let sep = match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(s)) => Some(s),
         Some(ValueKind::None) | None => None,
-        _ => {
-            return Err(PyError::Runtime(
-                "split() separator must be str or None".to_string(),
+        Some(_) => {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "must be str or None, not {}",
+                    builtin_type_name(args.first().unwrap())
+                ),
             ));
         }
     };
@@ -1290,7 +1366,15 @@ fn split_args(args: &[Value]) -> Result<(Option<&str>, i64)> {
         Some(ValueKind::Int(n)) => n,
         Some(ValueKind::Bool(b)) => b as i64,
         None => -1,
-        _ => return Err(PyError::Runtime("split() maxsplit must be int".to_string())),
+        Some(_) => {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "'{}' object cannot be interpreted as an integer",
+                    builtin_type_name(&args[1])
+                ),
+            ));
+        }
     };
     Ok((sep, maxsplit))
 }

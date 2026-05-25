@@ -234,6 +234,19 @@ impl Interpreter {
                                 .collect();
                             // Borrow pos; capacity retained in the buf below.
                             self.format_str_template(&template, &pos, &keyword)
+                        } else if !kw.is_empty() {
+                            // Resolve kwargs for str methods before passing to
+                            // call_str_method, which only accepts positional args.
+                            match str_merge_kwargs(method, &mut pos, kw) {
+                                Ok(()) => {
+                                    let args_vec: Vec<Value> = pos.drain(..).collect();
+                                    self.call_str_method(method, receiver, args_vec)
+                                }
+                                Err(e) => {
+                                    self.bound_method_pos_buf = pos;
+                                    return Err(e);
+                                }
+                            }
                         } else {
                             // call_str_method takes Vec<Value> by value; drain
                             // so pos retains its capacity for the next call.
@@ -699,7 +712,14 @@ impl Interpreter {
                         pyrust_builtins::int::call(method, &self_val, &pos)
                     }
                     "bytes" => pyrust_builtins::bytes::call(method, &self_val, &pos, &kw),
-                    "str" => self.call_str_method(method, self_val, pos),
+                    "str" => {
+                        if kw.is_empty() || method == "format" {
+                            self.call_str_method(method, self_val, pos)
+                        } else {
+                            str_merge_kwargs(method, &mut pos, kw)?;
+                            self.call_str_method(method, self_val, pos)
+                        }
+                    }
                     "list" => {
                         let pos = if method == "index" {
                             self.resolve_seq_index_pos(pos)?
@@ -3716,4 +3736,151 @@ pub(crate) fn ascii_repr(value: &Value) -> String {
             }
         })
         .collect()
+}
+
+/// Merge keyword arguments into the positional `pos` buffer for str methods,
+/// or raise `TypeError` for unknown kwargs or methods that accept none.
+///
+/// Methods that accept kwargs map them into the appropriate positional slot.
+/// All other str methods reject any keyword arguments with a CPython-matching
+/// `TypeError` message.  This is called only when `!kw.is_empty()`.
+fn str_merge_kwargs(
+    method: &str,
+    pos: &mut Vec<Value>,
+    kw: indexmap::IndexMap<PyKey, Value>,
+) -> Result<()> {
+    match method {
+        // split(sep=None, maxsplit=-1)
+        "split" | "rsplit" => {
+            let mut sep: Option<Value> = None;
+            let mut maxsplit: Option<Value> = None;
+            for (k, v) in kw {
+                let key_str = match &k {
+                    PyKey::Str(s) => s.as_str().unwrap_or("").to_owned(),
+                    _ => String::new(),
+                };
+                match key_str.as_str() {
+                    "sep" => {
+                        if pos.first().is_some() {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "argument for {method}() given by name ('sep') and position (1)"
+                                ),
+                            ));
+                        }
+                        sep = Some(v);
+                    }
+                    "maxsplit" => {
+                        if pos.get(1).is_some() {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "argument for {method}() given by name ('maxsplit') and position (2)"
+                                ),
+                            ));
+                        }
+                        maxsplit = Some(v);
+                    }
+                    other => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!("'{other}' is an invalid keyword argument for {method}()"),
+                        ));
+                    }
+                }
+            }
+            // Merge into positional slots, extending as needed.
+            // pos[0] = sep, pos[1] = maxsplit
+            if let Some(ms) = maxsplit {
+                // Ensure pos[0] exists (sep defaults to None)
+                if pos.is_empty() {
+                    pos.push(sep.unwrap_or_else(Value::none));
+                } else if let Some(sep_val) = sep {
+                    pos[0] = sep_val;
+                }
+                if pos.len() < 2 {
+                    pos.push(ms);
+                }
+            } else if let Some(sep_val) = sep {
+                if pos.is_empty() {
+                    pos.push(sep_val);
+                } else {
+                    pos[0] = sep_val;
+                }
+            }
+            Ok(())
+        }
+        // splitlines(keepends=False)
+        "splitlines" => {
+            let mut keepends: Option<Value> = None;
+            for (k, v) in kw {
+                let key_str = match &k {
+                    PyKey::Str(s) => s.as_str().unwrap_or("").to_owned(),
+                    _ => String::new(),
+                };
+                match key_str.as_str() {
+                    "keepends" => {
+                        if pos.first().is_some() {
+                            return Err(PyError::named(
+                                "TypeError",
+                                "argument for splitlines() given by name ('keepends') and position (1)".to_string(),
+                            ));
+                        }
+                        keepends = Some(v);
+                    }
+                    other => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!("'{other}' is an invalid keyword argument for splitlines()"),
+                        ));
+                    }
+                }
+            }
+            if let Some(ke) = keepends {
+                pos.push(ke);
+            }
+            Ok(())
+        }
+        // expandtabs(tabsize=8)
+        "expandtabs" => {
+            let mut tabsize: Option<Value> = None;
+            for (k, v) in kw {
+                let key_str = match &k {
+                    PyKey::Str(s) => s.as_str().unwrap_or("").to_owned(),
+                    _ => String::new(),
+                };
+                match key_str.as_str() {
+                    "tabsize" => {
+                        if pos.first().is_some() {
+                            return Err(PyError::named(
+                                "TypeError",
+                                "argument for expandtabs() given by name ('tabsize') and position (1)".to_string(),
+                            ));
+                        }
+                        tabsize = Some(v);
+                    }
+                    other => {
+                        // CPython: "expandtabs() takes at most 1 keyword argument (N given)"
+                        // but for unknown kwarg it raises "'foo' is an invalid keyword argument"
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "'{other}' is an invalid keyword argument for expandtabs()"
+                            ),
+                        ));
+                    }
+                }
+            }
+            if let Some(ts) = tabsize {
+                pos.push(ts);
+            }
+            Ok(())
+        }
+        // All str methods that take no keyword arguments use the `str.` prefix
+        _ => Err(PyError::named(
+            "TypeError",
+            format!("str.{method}() takes no keyword arguments"),
+        )),
+    }
 }
