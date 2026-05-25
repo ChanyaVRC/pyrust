@@ -6740,6 +6740,42 @@ mod tests {
     }
 
     #[test]
+    fn thread_jumps_stops_at_backward_jump() {
+        // Simulates the nested-loop pattern that triggered issue #966.
+        //
+        // Layout:
+        //   [0] ForCountConstInline(v, Lt, 3, 1, off=2)  — inner loop header
+        //   [1] LoadNone(0)                               — body instruction
+        //   [2] Jump(-3)                                  — inner back-edge → [0]
+        //   [3] Jump(-4)                                  — outer back-edge → before [0]
+        //   [4] Return(0)
+        //
+        // Before the fix, follow() would start at [3] (the exit target of
+        // ForCountConstInline off=2 → idx 0+1+2=3), see Jump(-4) and follow it to
+        // idx 0 (3+1+(-4)=0), then see ForCountConstInline and stop. The computed
+        // exit offset relative to [0] would be 0 - 0 - 1 = -1 (negative).
+        //
+        // After the fix, follow() stops at [3] because Jump(-4) is a backward jump
+        // (k < 0). The offset for ForCountConstInline stays 2.
+        let insns = vec![
+            Insn::ForCountConstInline(0, crate::ast::BinaryOp::Lt, 3, 1, 2), // 0
+            Insn::LoadNone(0),                                               // 1
+            Insn::Jump(-3),  // 2  inner back-edge → 0
+            Insn::Jump(-4),  // 3  outer back-edge → before [0] (simulated)
+            Insn::Return(0), // 4
+        ];
+        let out = pass_thread_jumps(insns);
+        // The ForCountConstInline exit offset must remain 2 (not become negative).
+        match out[0] {
+            Insn::ForCountConstInline(_, _, _, _, off) => assert!(
+                off >= 0,
+                "ForCountConstInline off must not be negative after threading; got {off}"
+            ),
+            _ => panic!("insn[0] should still be ForCountConstInline"),
+        }
+    }
+
+    #[test]
     fn thread_conditional_jump_through_unconditional() {
         // [0] JumpIfFalse(r, 1)   [1] Jump(1)   [2] LoadNone(0)   [3] Return(0)
         // JumpIfFalse at 0 targets 2. idx 2 is Jump(1) targeting idx 4 (past end).
