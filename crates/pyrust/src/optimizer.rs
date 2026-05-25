@@ -76,6 +76,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
     let insns = pass_trivial_nop(insns);
     let insns = pass_self_tail_call(insns);
     let insns = pass_forcount_const_inline(insns, &consts);
+    let insns = pass_forcount_unroll(insns, &mut consts, code.is_generator);
     let insns = pass_linear_loop_fold(insns, &mut consts);
     let insns = pass_loadnone_merge(insns);
     let (insns, consts) = pass_compact_consts(insns, consts);
@@ -4375,6 +4376,394 @@ fn pass_forcount_const_inline(insns: Vec<Insn>, consts: &[Value]) -> Vec<Insn> {
             other => other,
         })
         .collect()
+}
+
+// ─── ForCountConstInline loop unrolling ───────────────────────────────────────
+
+/// Unroll `ForCountConstInline` loops whose trip count is ≤ 4 and whose total
+/// unrolled body size (body_insns × trip) is ≤ 32 instructions.
+///
+/// For each qualifying loop at position `h` with exit-offset `off`:
+/// - The body occupies `[h+1, h+off-1]` (size = `off-1`).
+/// - The back-edge `Jump` is at `h+off`.
+/// - The post-loop code starts at `h+off+1`.
+///
+/// The loop is replaced with `trip` copies of:
+///   `LoadConst(var, iter_val)` + `[h+1 … h+off-1]`
+/// totalling `trip × off` instructions (vs. the original `off+1`).
+///
+/// Offset rewriting:
+/// - Intra-body jumps (target ∈ `[h+1, h+off-1]`) are unchanged because each
+///   copy is laid out with the same `off`-instruction stride.
+/// - Jumps from the body targeting the back-edge (`h+off`) also require no
+///   change: in copy k they resolve to `h + (k+1)*off` (= first instruction of
+///   the next copy's `LoadConst`), which is exactly the same relative offset.
+/// - External instructions (before or after the loop) whose jump targets cross
+///   the loop boundary are adjusted via an `old_to_new` table.
+///
+/// Safety guards:
+/// - Generator functions are skipped entirely (`is_generator == true`).
+/// - The preceding instruction must be `LoadConst(var, idx)` with a known
+///   integer value (gives the pre-initialised value `start - step`).
+/// - No body instruction is `Return`, `ReturnNone`, `Yield`, `YieldFrom`, or
+///   `SetupExcept`.
+/// - No body instruction has a jump target outside `[h+1, h+off]`.
+/// - No external instruction (position ∉ `[h, h+off]`) jumps into the loop
+///   body `[h, h+off]`.
+fn pass_forcount_unroll(
+    insns: Vec<Insn>,
+    consts: &mut Vec<Value>,
+    is_generator: bool,
+) -> Vec<Insn> {
+    use crate::ast::BinaryOp;
+
+    if is_generator {
+        return insns;
+    }
+
+    let n = insns.len();
+    if n < 3 {
+        return insns;
+    }
+
+    const MAX_TRIP: usize = 4;
+    const MAX_BUDGET: usize = 32;
+
+    // Extract the jump-offset field from an instruction, if any.
+    let insn_jump_off = |insn: &Insn| -> Option<i32> {
+        match insn {
+            Insn::Jump(k) => Some(*k),
+            Insn::JumpIfFalse(_, k) | Insn::JumpIfTrue(_, k) => Some(*k),
+            Insn::CmpJumpIfFalse(_, _, _, k)
+            | Insn::CmpJumpIfTrue(_, _, _, k)
+            | Insn::CmpJumpIfFalseConst(_, _, _, k)
+            | Insn::CmpJumpIfTrueConst(_, _, _, k) => Some(*k),
+            Insn::ForIter(_, _, k)
+            | Insn::ForCountReg(_, _, _, _, k)
+            | Insn::ForCountConst(_, _, _, _, k)
+            | Insn::ForCountConstInline(_, _, _, _, k) => Some(*k),
+            Insn::SetupExcept(k) | Insn::MatchExcept(_, k) => Some(*k),
+            _ => None,
+        }
+    };
+
+    // Describe a single loop to unroll.
+    struct Plan {
+        h: usize,              // position of ForCountConstInline
+        off: usize,            // exit offset (body size = off-1, back-edge at h+off)
+        var: u32,              // loop variable register
+        val_indices: Vec<u16>, // const-pool indices for each iteration value
+    }
+
+    // Scan for unrollable loops. We process the instruction list front-to-back
+    // and skip past any loop we decide to unroll (to avoid overlapping plans).
+    let mut plans: Vec<Plan> = Vec::new();
+    let mut skip_until = 0usize;
+
+    for h in 0..n {
+        if h < skip_until {
+            continue;
+        }
+
+        let (var, op, stop, step, off_i32) = match insns[h] {
+            Insn::ForCountConstInline(var, op, stop, step, off) => (var, op, stop, step, off),
+            _ => continue,
+        };
+        let off = off_i32 as usize;
+
+        // off >= 2: at least one body instruction + the back-edge Jump.
+        if off < 2 {
+            continue;
+        }
+        let back_edge = h + off;
+        if back_edge >= n {
+            continue;
+        }
+        let body_start = h + 1;
+        // body_insns = off - 1 (excluding back-edge).
+        let body_insns = off - 1;
+
+        // Verify the back-edge is a Jump targeting h.
+        let back_ok = match &insns[back_edge] {
+            Insn::Jump(k) => ((back_edge as i64 + 1 + *k as i64) as usize) == h,
+            _ => false,
+        };
+        if !back_ok {
+            continue;
+        }
+
+        // The pre-init instruction immediately before h must be
+        // `LoadConst(var, idx)` with a known integer value.
+        if h == 0 {
+            continue;
+        }
+        let pre_init: i64 = match &insns[h - 1] {
+            Insn::LoadConst(r, idx) if *r == var => {
+                match consts.get(*idx as usize).map(Value::kind) {
+                    Some(ValueKind::Int(v)) => v,
+                    _ => continue,
+                }
+            }
+            _ => continue,
+        };
+
+        // Compute the sequence of iteration values.
+        let step_i64 = step as i64;
+        let stop_i64 = stop as i64;
+        // First iteration value: pre_init + step (the value ForCount writes on iter 1).
+        let start = match pre_init.checked_add(step_i64) {
+            Some(v) => v,
+            None => continue,
+        };
+
+        let mut iter_vals: Vec<i64> = Vec::new();
+        let mut cur = start;
+        let mut overflow = false;
+        loop {
+            let cont = match op {
+                BinaryOp::Lt => cur < stop_i64,
+                BinaryOp::Gt => cur > stop_i64,
+                _ => break, // unexpected op
+            };
+            if !cont {
+                break;
+            }
+            iter_vals.push(cur);
+            if iter_vals.len() > MAX_TRIP {
+                break;
+            }
+            match cur.checked_add(step_i64) {
+                Some(v) => cur = v,
+                None => {
+                    overflow = true;
+                    break;
+                }
+            }
+        }
+
+        let trip = iter_vals.len();
+        if trip == 0 || trip > MAX_TRIP || overflow {
+            continue;
+        }
+
+        // Instruction budget: body_insns * trip <= MAX_BUDGET.
+        if body_insns * trip > MAX_BUDGET {
+            continue;
+        }
+
+        // Safety: no unsafe instructions in the body [h+1, h+off-1].
+        let mut safe = true;
+        for j in body_start..back_edge {
+            match &insns[j] {
+                Insn::Return(_)
+                | Insn::ReturnNone
+                | Insn::Yield { .. }
+                | Insn::YieldFrom { .. }
+                | Insn::SetupExcept(_) => {
+                    safe = false;
+                    break;
+                }
+                insn => {
+                    if let Some(k) = insn_jump_off(insn) {
+                        let target = (j as i64 + 1 + k as i64) as usize;
+                        // Allow jump targets within the body or to the back-edge.
+                        // Jumps to back_edge are fine (see offset-rewriting rationale
+                        // in the module-level comment).  Jumps outside the loop
+                        // (continue → h, break → h+off+1, or other exits) make
+                        // unrolling unsafe.
+                        if target < body_start || target > back_edge {
+                            safe = false;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if !safe {
+            continue;
+        }
+
+        // Safety: no external instruction (outside [h, back_edge]) jumps into
+        // the loop range [h, back_edge].  Violations would produce dangling
+        // offsets after we splice in the unrolled copies.
+        let external_jump_in = insns.iter().enumerate().any(|(i, insn)| {
+            if i >= h && i <= back_edge {
+                return false; // inside loop — not external
+            }
+            if let Some(k) = insn_jump_off(insn) {
+                let tgt = (i as i64 + 1 + k as i64) as usize;
+                tgt >= h && tgt <= back_edge
+            } else {
+                false
+            }
+        });
+        if external_jump_in {
+            continue;
+        }
+
+        // Intern all iteration values into the const pool.
+        let mut val_indices: Vec<u16> = Vec::with_capacity(trip);
+        let mut intern_ok = true;
+        for &v in &iter_vals {
+            match intern_const_in_pool(consts, Value::int(v)) {
+                Some(idx) => val_indices.push(idx),
+                None => {
+                    intern_ok = false;
+                    break;
+                }
+            }
+        }
+        if !intern_ok {
+            continue;
+        }
+
+        plans.push(Plan {
+            h,
+            off,
+            var,
+            val_indices,
+        });
+        // Skip past this loop so we don't try to unroll its body instructions
+        // as separate loops.
+        skip_until = back_edge + 1;
+    }
+
+    if plans.is_empty() {
+        return insns;
+    }
+
+    // Build the new instruction vector.
+    //
+    // Layout for a loop [h, h+off] with trip copies:
+    //   - First copy at [h .. h+off-1]:
+    //       [h]          : LoadConst(var, val_indices[0])
+    //       [h+1..h+off-1]: body instructions (same as original)
+    //   - Copy k (0-indexed) at [h+k*off .. h+(k+1)*off-1]:
+    //       [h+k*off]    : LoadConst(var, val_indices[k])
+    //       [h+k*off+1..h+(k+1)*off-1]: body instructions (same as original)
+    //   - Post-loop starts at [h + trip*off].
+    //
+    // The original loop occupied [h .. h+off] (size off+1).
+    // The new loop occupies   [h .. h+trip*off-1] (size trip*off).
+    // Net shift for post-loop = trip*off - (off+1) = (trip-1)*off - 1.
+    //
+    // Build `old_to_new[0..=n]` for external-code offset rewriting.
+
+    // Compute old_to_new: maps old positions to new positions.
+    // For positions inside the first copy (h..h+off-1): same position.
+    // For the back-edge at h+off: maps to h+trip*off (post-loop) — only needed
+    //   if some external instruction happened to jump there, which we've ruled out.
+    // For post-loop positions (> h+off): shift by (trip-1)*off-1.
+    let mut old_to_new: Vec<usize> = (0..=n).collect(); // identity by default
+    for plan in &plans {
+        let Plan { h, off, .. } = *plan;
+        let back_edge = h + off;
+        let trip = plan.val_indices.len();
+        // shift for positions after back_edge.
+        // (trip-1)*off - 1: replaces (off+1) old insns with trip*off new insns.
+        let shift = trip * off - (off + 1);
+        // Sentinel: the old back-edge maps to the new post-loop start.
+        // Use old_to_new[h] (the new header position, which accounts for prior
+        // plans' shifts) plus trip*off to get the new post-loop start.
+        old_to_new[back_edge] = old_to_new[h] + trip * off;
+        for p in (back_edge + 1)..=n {
+            old_to_new[p] += shift;
+        }
+        // Multiple plans are accumulated correctly since each plan only shifts
+        // positions strictly after its own back-edge, and plans are non-overlapping.
+    }
+
+    // Build the output (first pass: emit instructions without rewriting).
+    // Track each output instruction's old source position in new_to_old:
+    //   - n+1 sentinel → skip offset rewriting (body copies, LoadConst)
+    //   - anything ≤ n  → apply old_to_new when rewriting offsets (external insns)
+    let out_capacity = old_to_new[n];
+    let mut out: Vec<Insn> = Vec::with_capacity(out_capacity);
+    let mut new_to_old: Vec<usize> = Vec::with_capacity(out_capacity);
+    let mut plan_idx = 0usize;
+    let mut i = 0usize;
+
+    while i < n {
+        if plan_idx < plans.len() && i == plans[plan_idx].h {
+            let plan = &plans[plan_idx];
+            let h = plan.h;
+            let off = plan.off;
+            let var = plan.var;
+            let back_edge = h + off;
+            let body_start = h + 1;
+
+            // Emit trip copies of: [LoadConst(var, val)] + [body h+1..h+off-1].
+            for &val_idx in &plan.val_indices {
+                // LoadConst for this iteration — no jump offsets; sentinel to skip.
+                out.push(Insn::LoadConst(var, val_idx));
+                new_to_old.push(n + 1);
+
+                // Body instructions (excluding back-edge).
+                // Intra-body offsets and back-edge jumps are all correct without
+                // rewriting (uniform `off`-stride layout — see pass doc comment).
+                for delta in 0..off - 1 {
+                    let old_pos = body_start + delta;
+                    out.push(insns[old_pos].clone());
+                    new_to_old.push(n + 1); // sentinel: skip offset rewriting
+                }
+            }
+
+            // Skip past the original loop (ForCountConstInline + body + back-edge).
+            i = back_edge + 1;
+            plan_idx += 1;
+        } else {
+            // Non-loop instruction: emit as-is, record old position.
+            out.push(insns[i].clone());
+            new_to_old.push(i);
+            i += 1;
+        }
+    }
+
+    debug_assert_eq!(out.len(), out_capacity, "unexpected output size");
+
+    // Rewrite jump offsets using old_to_new and new_to_old.
+    // For each instruction at new position p:
+    //   - old_i = new_to_old[p]
+    //   - If old_i > n: skip (copy k>0 instruction, no rewriting needed)
+    //   - Otherwise: for each jump offset k in the instruction,
+    //     old_target = old_i + 1 + k, new_target = old_to_new[old_target],
+    //     new_k = new_target - p - 1.
+    let rewrite_offset = |k: i32, p: usize, old_i: usize| -> i32 {
+        let old_target = (old_i as i64 + 1 + k as i64) as usize;
+        let new_target = old_to_new[old_target];
+        (new_target as i64 - p as i64 - 1) as i32
+    };
+
+    for p in 0..out.len() {
+        let old_i = new_to_old[p];
+        if old_i > n {
+            // Copy k>0 body instruction — offsets already correct, no rewrite.
+            continue;
+        }
+        let fix = |k: i32| rewrite_offset(k, p, old_i);
+        out[p] = match out[p].clone() {
+            Insn::Jump(k) => Insn::Jump(fix(k)),
+            Insn::JumpIfFalse(r, k) => Insn::JumpIfFalse(r, fix(k)),
+            Insn::JumpIfTrue(r, k) => Insn::JumpIfTrue(r, fix(k)),
+            Insn::CmpJumpIfFalse(a, op, b, k) => Insn::CmpJumpIfFalse(a, op, b, fix(k)),
+            Insn::CmpJumpIfTrue(a, op, b, k) => Insn::CmpJumpIfTrue(a, op, b, fix(k)),
+            Insn::CmpJumpIfFalseConst(r, op, c, k) => Insn::CmpJumpIfFalseConst(r, op, c, fix(k)),
+            Insn::CmpJumpIfTrueConst(r, op, c, k) => Insn::CmpJumpIfTrueConst(r, op, c, fix(k)),
+            Insn::ForIter(dst, slot, k) => Insn::ForIter(dst, slot, fix(k)),
+            Insn::ForCountReg(v, op, stop, step, k) => Insn::ForCountReg(v, op, stop, step, fix(k)),
+            Insn::ForCountConst(v, op, stop, step, k) => {
+                Insn::ForCountConst(v, op, stop, step, fix(k))
+            }
+            Insn::ForCountConstInline(v, op, stop, step, k) => {
+                Insn::ForCountConstInline(v, op, stop, step, fix(k))
+            }
+            Insn::SetupExcept(k) => Insn::SetupExcept(fix(k)),
+            Insn::MatchExcept(r, k) => Insn::MatchExcept(r, fix(k)),
+            other => other,
+        };
+    }
+
+    out
 }
 
 // ─── Linear loop fold ────────────────────────────────────────────────────────
