@@ -849,9 +849,14 @@ impl Interpreter {
                 if is_callable_iter {
                     let mut items = Vec::new();
                     loop {
-                        match self.step_callable_iter(&state_rc)? {
-                            Some(v) => items.push(v),
-                            None => break,
+                        match self.step_callable_iter(&state_rc) {
+                            Ok(Some(v)) => items.push(v),
+                            Ok(None) => break,
+                            // StopIteration raised by the callable stops the
+                            // iteration gracefully — CPython treats it the same
+                            // as hitting the sentinel (list/tuple exhaustion).
+                            Err(ref e) if e.class_name_is("StopIteration") => break,
+                            Err(e) => return Err(e),
                         }
                     }
                     return Ok(items);
