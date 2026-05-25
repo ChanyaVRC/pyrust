@@ -73,3 +73,25 @@ print(type(s).__name__)      # MySet
 # Set operations.
 s.add(4)
 print(len(s))            # 4
+
+# Subclass with a custom __init__ that uses self[] and self.method
+# inside a for loop (exercises the CallMethod inline cache fast path —
+# regression for the bug where the second iteration failed with
+# "builtin method not in registry").
+class MyList2(list):
+    def __init__(self, items):
+        for item in items:
+            self.append(item)
+
+lst2 = MyList2([1, 2, 3])
+print(len(lst2))         # 3
+print(lst2[0])           # 1
+
+class MyDict2(dict):
+    def __init__(self, keys):
+        for k in keys:
+            self[k] = 1
+
+d5 = MyDict2(["a", "b", "c"])
+print(len(d5))           # 3
+print(d5["a"])           # 1

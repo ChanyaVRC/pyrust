@@ -3902,8 +3902,41 @@ impl Interpreter {
                             let epoch_ok = pyrust_core::class_epoch() == *epoch;
                             if same_class && no_shadow && version_ok && epoch_ok {
                                 let unbound = unbound.clone();
-                                let inst_val = Value::py_instance(Rc::clone(inst_rc));
+                                let inst_rc_clone = Rc::clone(inst_rc);
                                 drop(inst);
+                                // Issue #976: if the cached method is a primitive
+                                // builtin (list.X / dict.X / set.X) and the instance
+                                // has a __builtin_data__ backing value, dispatch
+                                // directly to the backing primitive.
+                                // invoke_class_method cannot handle BuiltinFunction
+                                // method names — it looks them up in the top-level
+                                // registry which has no "list.append" entry.
+                                if let ValueKind::BuiltinFunction(fn_name) = unbound.kind() {
+                                    if let Some((prim_type, prim_method)) =
+                                        fn_name.split_once('.')
+                                        .filter(|(t, _)| matches!(*t, "dict" | "list" | "set"))
+                                    {
+                                        if let Some(backing) = instance_builtin_data(&inst_rc_clone) {
+                                            let result = match prim_type {
+                                                "list" => {
+                                                    let empty_kw = indexmap::IndexMap::new();
+                                                    pyrust_builtins::list::call(
+                                                        prim_method, &backing, args, &empty_kw,
+                                                    )
+                                                }
+                                                "dict" => {
+                                                    self.call_dict_method(prim_method, backing, args)
+                                                }
+                                                "set" => {
+                                                    self.call_set_method(prim_method, backing, args)
+                                                }
+                                                _ => unreachable!(),
+                                            };
+                                            return result;
+                                        }
+                                    }
+                                }
+                                let inst_val = Value::py_instance(inst_rc_clone);
                                 let mut buf = std::mem::take(&mut self.call_arg_buf);
                                 buf.clear();
                                 for arg in args.iter() {

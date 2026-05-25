@@ -1775,6 +1775,25 @@ impl Interpreter {
             attrs: IndexMap::new(),
         }));
 
+        // Issue #976: if this class inherits from dict/list/set, pre-initialise
+        // an empty backing store on the instance *before* calling __init__.
+        // This ensures that `self[k] = v` (or any other subscript / method
+        // call on `self`) inside a user-defined __init__ sees a valid
+        // __builtin_data__ entry to delegate to.  When there is no __init__,
+        // the None arm below calls the primitive constructor with the user's
+        // args to populate the backing value.
+        let prim_base = find_mutable_primitive_base(&class);
+        if let Some(prim_name) = prim_base {
+            if let Some(dispatch) = crate::builtin_registry::lookup(prim_name) {
+                // Empty args → empty primitive (dict/list/set with no content).
+                let backing = dispatch(self, &[])?;
+                instance
+                    .borrow_mut()
+                    .attrs
+                    .insert(BUILTIN_DATA_ATTR.to_string(), backing);
+            }
+        }
+
         let init = lookup_class_attr(&class, "__init__");
         match init {
             Some(method_val)
@@ -1806,7 +1825,9 @@ impl Interpreter {
                 // constructor with the provided args and store the result as
                 // `__builtin_data__` so subscript / method dispatch can
                 // delegate to the backing value (issue #976).
-                if let Some(prim_name) = find_mutable_primitive_base(&class) {
+                // NOTE: the empty backing was already inserted above; replace it
+                // with the args-populated value now.
+                if let Some(prim_name) = prim_base {
                     if let Some(dispatch) = crate::builtin_registry::lookup(prim_name) {
                         let backing = dispatch(self, args)?;
                         instance
