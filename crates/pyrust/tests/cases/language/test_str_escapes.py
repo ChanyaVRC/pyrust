@@ -3,7 +3,7 @@
 # \x hex escapes (U+0000–U+00FF)
 print("\x41")        # A
 print("\x61")        # a
-print("\xff")        # ÿ
+print(ord("\xff"))   # 255 — avoids Windows console encoding issues
 print(len("\x00"))   # 1 — null character, length 1
 
 # \x and its named counterpart produce the same character
