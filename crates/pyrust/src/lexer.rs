@@ -1429,6 +1429,43 @@ fn parse_escape(chars: &[char], pos: usize) -> Result<(char, usize)> {
                 .ok_or_else(|| PyError::Lex(format!("invalid \\U escape: U+{codepoint:08X}")))?;
             Ok((ch, pos + 9))
         }
+        'N' => {
+            // \N{Unicode name} — look up character by Unicode name.
+            if chars.get(pos + 1) != Some(&'{') {
+                return Err(PyError::Lex(
+                    "(unicode error) 'unicodeescape' codec can't decode bytes in position 0-1: \
+                     malformed \\N character escape"
+                        .to_string(),
+                ));
+            }
+            let mut end = pos + 2;
+            while end < chars.len() && chars[end] != '}' {
+                end += 1;
+            }
+            if end >= chars.len() {
+                return Err(PyError::Lex(
+                    "(unicode error) 'unicodeescape' codec can't decode bytes in position 0-1: \
+                     malformed \\N character escape"
+                        .to_string(),
+                ));
+            }
+            let name: String = chars[pos + 2..end].iter().collect();
+            if name.is_empty() {
+                return Err(PyError::Lex(
+                    "(unicode error) 'unicodeescape' codec can't decode bytes in position 0-2: \
+                     malformed \\N character escape"
+                        .to_string(),
+                ));
+            }
+            let ch = unicode_names2::character(&name).ok_or_else(|| {
+                PyError::Lex(format!(
+                    "(unicode error) 'unicodeescape' codec can't decode bytes in position 0-{}: \
+                     unknown Unicode character name",
+                    name.len() + 3
+                ))
+            })?;
+            Ok((ch, end + 1))
+        }
         other => Err(PyError::Lex(format!("unsupported escape \\{other}"))),
     }
 }
