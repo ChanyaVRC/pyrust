@@ -1346,7 +1346,8 @@ pyrust_module! {
             None => false,
         };
         let key_fn = args.iter().find(|a| a.name.as_deref() == Some("key"))
-            .map(|a| a.value.clone());
+            .map(|a| a.value.clone())
+            .filter(|v| !v.is_none());
         let positional: Vec<&ExpandedCallArg> = args.iter()
             .filter(|a| a.name.is_none())
             .collect();
@@ -3498,7 +3499,8 @@ fn min_max_impl(
         ));
     }
     let key_fn = args.iter().find(|a| a.name.as_deref() == Some("key"))
-        .map(|a| a.value.clone());
+        .map(|a| a.value.clone())
+        .filter(|v| !v.is_none());
     let default_val = args.iter().find(|a| a.name.as_deref() == Some("default"))
         .map(|a| a.value.clone());
     for a in args.iter().filter(|a| a.name.is_some()) {
