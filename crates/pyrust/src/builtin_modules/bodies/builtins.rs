@@ -784,7 +784,7 @@ pyrust_module! {
                 if !is_callable {
                     return Err(PyError::named(
                         "TypeError",
-                        "iter(object, sentinel): object must be callable".to_string(),
+                        "iter(v, w): v must be callable".to_string(),
                     ));
                 }
                 Ok(Value::generator(Box::new(CallableIter {

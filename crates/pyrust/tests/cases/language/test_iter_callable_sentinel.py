@@ -63,10 +63,12 @@ except StopIteration:
     print("StopIteration raised correctly")
 
 # Non-callable first argument raises TypeError.
+# The exact message wording changed between CPython 3.12.3 and 3.12.13;
+# only assert the stable part.
 try:
     iter("not callable", "x")
 except TypeError as e:
-    print("TypeError:", e)
+    print("TypeError: must be callable:", "must be callable" in str(e))
 
 # Three arguments raises TypeError.
 try:
