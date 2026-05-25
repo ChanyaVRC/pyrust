@@ -1984,7 +1984,10 @@ pyrust_module! {
                         )
                     }),
                 ValueKind::Str(s) => s.trim().parse::<f64>().map(Value::float).map_err(|_| {
-                    PyError::Runtime(format!("could not convert string to float: '{s}'"))
+                    PyError::named(
+                        "ValueError",
+                        format!("could not convert string to float: '{s}'"),
+                    )
                 }),
                 _ => Err(PyError::Runtime(format!(
                     "{FN_NAME}() argument must be a number or string",
