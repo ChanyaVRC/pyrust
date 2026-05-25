@@ -561,6 +561,13 @@ pub(crate) fn primitive_class_isinstance_fast(
     obj: &Value,
     cls: &Rc<RefCell<PyClass>>,
 ) -> Option<bool> {
+    // Issue #976: a PyInstance may subclass a primitive.  Skip the fast-path
+    // tag check and return None so the caller falls through to the general
+    // `class_is_subclass_of` MRO walk, which correctly handles
+    // `isinstance(MyDict(), dict)` when MyDict inherits from dict.
+    if matches!(obj.kind(), ValueKind::PyInstance(_)) {
+        return None;
+    }
     let cls_ptr = Rc::as_ptr(cls);
     PRIMITIVE_CLASSES.with(|c| {
         // bool ⊂ int: an int-class test matches both Int and Bool.
@@ -613,6 +620,53 @@ pub(crate) fn primitive_class_isinstance_fast(
         }
         None
     })
+}
+
+/// Walk the base chain of `class` and return the name of the first
+/// primitive builtin base found (`"dict"`, `"list"`, `"set"`, …), or
+/// `None` if the class does not inherit from any primitive.
+///
+/// Only the directly-supported container primitives that need backing-
+/// data storage are returned: `dict`, `list`, and `set`.  Other
+/// primitives (`int`, `str`, `float`, …) require deep storage-variant
+/// changes and are out of scope for issue #976.
+pub(crate) fn find_mutable_primitive_base(
+    class: &Rc<RefCell<PyClass>>,
+) -> Option<&'static str> {
+    let (name, base) = {
+        let borrowed = class.borrow();
+        (borrowed.name.clone(), borrowed.base.clone())
+    };
+    match name.as_str() {
+        "dict" | "list" | "set" => {
+            // Check that this is actually the primitive singleton, not a
+            // user class that happens to be named "dict".
+            if is_primitive_class(class) {
+                return Some(match name.as_str() {
+                    "dict" => "dict",
+                    "list" => "list",
+                    "set" => "set",
+                    _ => unreachable!(),
+                });
+            }
+        }
+        _ => {}
+    }
+    base.and_then(|b| find_mutable_primitive_base(&b))
+}
+
+/// Constant key used to store the backing primitive value inside a
+/// `PyInstance` that subclasses `dict`, `list`, or `set`.
+pub(crate) const BUILTIN_DATA_ATTR: &str = "__builtin_data__";
+
+/// Extract the backing primitive value from a `PyInstance` that was
+/// constructed by `call_class_expanded` for a subclass of `dict`,
+/// `list`, or `set`.  Returns `None` for any other instance.
+pub(crate) fn instance_builtin_data(inst: &Rc<RefCell<PyInstance>>) -> Option<Value> {
+    inst.borrow()
+        .attrs
+        .get(BUILTIN_DATA_ATTR)
+        .cloned()
 }
 
 pub(crate) struct PrintOptions {

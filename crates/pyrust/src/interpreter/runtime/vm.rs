@@ -1878,6 +1878,54 @@ impl Interpreter {
                                 let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
                                 if let ValueKind::PyInstance(inst) = obj_val.kind() {
                                     let inst_rc = Rc::clone(inst);
+                                    // Issue #976: delegate to backing primitive
+                                    // value for dict/list/set subclasses.
+                                    if let Some(backing) =
+                                        instance_builtin_data(&inst_rc)
+                                    {
+                                        // Determine backing kind before any
+                                        // mutable borrow (kind() holds a shared
+                                        // borrow on Dict/List RefCells).
+                                        enum BkKind { Dict, List, Other }
+                                        let bk_kind = match backing.kind() {
+                                            ValueKind::Dict(_) => BkKind::Dict,
+                                            ValueKind::List(_) => BkKind::List,
+                                            _ => BkKind::Other,
+                                        };
+                                        match bk_kind {
+                                            BkKind::Dict => {
+                                                let key = vm_try!(
+                                                    self.value_to_pykey(&idx_val)
+                                                );
+                                                backing.dict_with_mut(|dict| {
+                                                    dict.insert(key, val_val);
+                                                });
+                                            }
+                                            BkKind::List => {
+                                                let len = backing
+                                                    .list_len()
+                                                    .unwrap_or(0);
+                                                let i = vm_try!(
+                                                    normalize_index_write(
+                                                        &idx_val,
+                                                        len,
+                                                        "list",
+                                                    )
+                                                );
+                                                backing.list_with_mut(|items| {
+                                                    items[i] = val_val;
+                                                });
+                                            }
+                                            BkKind::Other => {
+                                                vm_try!(Err(PyError::named(
+                                                    "TypeError",
+                                                    "object does not support item assignment"
+                                                        .to_string(),
+                                                )));
+                                            }
+                                        }
+                                        continue;
+                                    }
                                     let class = Rc::clone(&inst_rc.borrow().class);
                                     if let Some(method_val) =
                                         lookup_class_attr(&class, "__setitem__")

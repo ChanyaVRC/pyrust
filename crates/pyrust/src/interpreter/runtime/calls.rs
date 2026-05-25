@@ -293,6 +293,49 @@ impl Interpreter {
                                 ));
                             }
                         };
+                        // Issue #976: if the resolved method is a primitive
+                        // builtin (e.g. `dict.keys`), and the instance has a
+                        // `__builtin_data__` backing value (set at construction
+                        // time for subclasses of dict/list/set), dispatch on
+                        // the backing value directly.  This avoids the
+                        // `kind_ok` type guard in `call_function_expanded`
+                        // rejecting the PyInstance receiver.
+                        if let ValueKind::BuiltinFunction(fn_name) = method_val.kind() {
+                            if fn_name.split_once('.').is_some_and(|(t, _)| {
+                                matches!(t, "dict" | "list" | "set")
+                            }) {
+                                if let Some(backing) = instance_builtin_data(&inst) {
+                                    enum BkKind { Dict, List, Set, Other }
+                                    let bk_kind = match backing.kind() {
+                                        ValueKind::Dict(_) => BkKind::Dict,
+                                        ValueKind::List(_) => BkKind::List,
+                                        ValueKind::Set(_) => BkKind::Set,
+                                        _ => BkKind::Other,
+                                    };
+                                    let args_vec: Vec<Value> = pos.drain(..).collect();
+                                    self.bound_method_pos_buf = pos;
+                                    return match bk_kind {
+                                        BkKind::Dict => {
+                                            self.call_dict_method(method, backing, args_vec)
+                                        }
+                                        BkKind::List => {
+                                            pyrust_builtins::list::call(
+                                                method,
+                                                &backing,
+                                                args_vec,
+                                                &kw,
+                                            )
+                                        }
+                                        BkKind::Set => {
+                                            self.call_set_method(method, backing, args_vec)
+                                        }
+                                        BkKind::Other => Err(PyError::Runtime(format!(
+                                            "internal: unexpected builtin_data kind for method '{method}'"
+                                        ))),
+                                    };
+                                }
+                            }
+                        }
                         // Reconstitute kwargs as ExpandedCallArgs (the
                         // bound_method dispatch split them into pos+kw maps).
                         // Drain pos so its capacity is preserved in the buf.
@@ -556,6 +599,26 @@ impl Interpreter {
                         None => pos.push(a.value.clone()),
                     }
                 }
+                // Issue #976: if `self_val` is a PyInstance with a
+                // `__builtin_data__` backing value (set at construction for
+                // subclasses of dict/list/set), use that backing value as the
+                // effective receiver so the kind_ok check and dispatch below
+                // see the expected primitive type.
+                let self_val = if matches!(type_name, "dict" | "list" | "set") {
+                    // Extract the Rc before kind() drops its borrow.
+                    let maybe_inst = if let ValueKind::PyInstance(inst) = self_val.kind() {
+                        Some(Rc::clone(inst))
+                    } else {
+                        None
+                    };
+                    if let Some(inst) = maybe_inst {
+                        instance_builtin_data(&inst).unwrap_or(self_val)
+                    } else {
+                        self_val
+                    }
+                } else {
+                    self_val
+                };
                 // Receiver-type guard: validate `self_val`'s kind matches
                 // `type_name` before dispatch — otherwise the per-type call fn
                 // surfaces an internal `"expected dict"` / `"receiver is not a
@@ -1738,7 +1801,20 @@ impl Interpreter {
                 ));
             }
             None => {
-                if !args.is_empty() {
+                // No `__init__` in the MRO.  If the class inherits from a
+                // mutable primitive (dict / list / set), call that base's
+                // constructor with the provided args and store the result as
+                // `__builtin_data__` so subscript / method dispatch can
+                // delegate to the backing value (issue #976).
+                if let Some(prim_name) = find_mutable_primitive_base(&class) {
+                    if let Some(dispatch) = crate::builtin_registry::lookup(prim_name) {
+                        let backing = dispatch(self, args)?;
+                        instance
+                            .borrow_mut()
+                            .attrs
+                            .insert(BUILTIN_DATA_ATTR.to_string(), backing);
+                    }
+                } else if !args.is_empty() {
                     let class_name = class.borrow().name.clone();
                     return Err(PyError::Runtime(format!(
                         "{}() takes no arguments",
