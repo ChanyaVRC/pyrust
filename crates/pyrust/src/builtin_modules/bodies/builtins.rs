@@ -2810,6 +2810,8 @@ fn hash_value(value: &Value) -> Result<i64> {
             Ok(h as i64)
         }
         ValueKind::None => Ok(pyrust_core::py_hash_none()),
+        ValueKind::NotImplemented => Ok(pyrust_core::py_hash_not_implemented()),
+        ValueKind::Ellipsis => Ok(pyrust_core::py_hash_ellipsis()),
         ValueKind::Tuple(items) => {
             tuple_hash_cpython(items.iter().map(hash_value))
         }

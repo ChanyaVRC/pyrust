@@ -24,6 +24,11 @@ print(... == ...)   # True
 print(... != 1)     # True
 print(... != None)  # True
 
+# Hashable — hash() returns an integer without raising
+print(type(hash(...)).__name__)   # int
+print(hash(...) != 0)             # True (Ellipsis never hashes to 0)
+print(hash(...) != -1)            # True (-1 is reserved by Python hash protocol)
+
 # Hashable — usable as dict key and set element
 d = {...: "val"}
 print(d[...])       # val

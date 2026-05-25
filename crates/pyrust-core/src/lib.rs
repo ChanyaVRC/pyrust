@@ -586,6 +586,15 @@ pub fn py_hash_ellipsis() -> i64 {
     if h == 0 || h == -1 { 2654435761 } else { h }
 }
 
+/// Compute a stable per-process hash for `NotImplemented`, matching CPython's
+/// approach of using the object's identity address.
+pub fn py_hash_not_implemented() -> i64 {
+    static NOT_IMPLEMENTED_SENTINEL: u8 = 0;
+    let addr = (&NOT_IMPLEMENTED_SENTINEL as *const u8 as usize) >> 4;
+    let h = (addr as i64).wrapping_rem((1i64 << 61) - 1);
+    if h == 0 || h == -1 { 2654435761 } else { h }
+}
+
 /// Compute the CPython-compatible hash for a `PyKey`.
 ///
 /// This replicates the hash semantics that CPython applies at the C level for
