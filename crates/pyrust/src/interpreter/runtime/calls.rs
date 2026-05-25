@@ -28,6 +28,21 @@ impl Drop for CallDepthGuard {
     }
 }
 
+/// Build the per-type `TypeError` message for sequence item access with a
+/// non-integer non-`__index__` index, matching CPython 3.12.
+///
+/// CPython uses different message formats per type:
+/// - list / tuple / bytes: `"X indices must be integers or slices, not Y"`
+/// - string: `"string indices must be integers, not 'Y'"` (different wording
+///   and the type name is quoted).
+fn seq_index_type_error(label: &str, type_name: &str) -> String {
+    if label == "string" {
+        format!("string indices must be integers, not '{type_name}'")
+    } else {
+        format!("{label} indices must be integers or slices, not {type_name}")
+    }
+}
+
 impl Interpreter {
     /// Shared constructor for the `GeneratorFrame` wrapped in a
     /// `Value::generator`. Both call-site branches in
@@ -2272,6 +2287,74 @@ impl Interpreter {
             pos.insert(2, resolved);
         }
         Ok(pos)
+    }
+
+    /// Resolve an index argument for **sequence item access** (`a[i]`, `a[i] = v`,
+    /// `del a[i]`) through the `__index__` protocol, matching CPython 3.12.
+    ///
+    /// Differs from `resolve_index_arg` (used for slice bounds) only in the
+    /// error message when the object provides neither an integer type nor
+    /// `__index__`.  CPython's per-type messages:
+    /// - list/tuple/bytes: `"X indices must be integers or slices, not Y"`
+    /// - string: `"string indices must be integers, not 'Y'"` (different!)
+    ///
+    /// - `Int` / `Bool` / `BigInt`: returned unchanged.
+    /// - `PyInstance` with `__index__`: called; result must be `Int`/`Bool`/`BigInt`.
+    /// - `PyInstance` without `__index__` / any other type: `TypeError` with the
+    ///   label-specific message.
+    pub(crate) fn call_index_protocol(&mut self, val: Value, label: &str) -> Result<Value> {
+        enum Tag {
+            Int,
+            Instance(Rc<RefCell<PyInstance>>),
+            Other,
+        }
+        let tag = match val.kind() {
+            ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => Tag::Int,
+            ValueKind::PyInstance(inst) => Tag::Instance(Rc::clone(inst)),
+            _ => Tag::Other,
+        };
+        match tag {
+            Tag::Int => Ok(val),
+            Tag::Instance(inst_rc) => {
+                let class = Rc::clone(&inst_rc.borrow().class);
+                if let Some(method_val) = lookup_class_attr(&class, "__index__") {
+                    let result = invoke_class_method(
+                        self,
+                        method_val,
+                        Value::py_instance(Rc::clone(&inst_rc)),
+                        &[],
+                    )?;
+                    let result_ok = matches!(
+                        result.kind(),
+                        ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+                    );
+                    if result_ok {
+                        Ok(result)
+                    } else {
+                        Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "__index__ returned non-int (type {})",
+                                value_type_name_str(&result),
+                            ),
+                        ))
+                    }
+                } else {
+                    let type_name = value_type_name_str(&Value::py_instance(inst_rc));
+                    Err(PyError::named(
+                        "TypeError",
+                        seq_index_type_error(label, &type_name),
+                    ))
+                }
+            }
+            Tag::Other => {
+                let type_name = value_type_name_str(&val);
+                Err(PyError::named(
+                    "TypeError",
+                    seq_index_type_error(label, &type_name),
+                ))
+            }
+        }
     }
 }
 

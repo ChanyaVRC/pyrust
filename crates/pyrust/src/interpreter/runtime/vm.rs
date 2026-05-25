@@ -1617,12 +1617,29 @@ impl Interpreter {
                         let fast = if let Some(ov) = regs[*obj as usize].as_some() {
                             match ov.kind() {
                                 ValueKind::List(items) => {
-                                    let i = vm_try!(normalize_index(&idx_val, items.len(), "list"));
-                                    FastResult::Value(items[i].clone())
+                                    // Non-int indices may need __index__ resolution; fall
+                                    // through to eval_index (which calls call_index_protocol)
+                                    // for anything that is not already a concrete integer.
+                                    if !matches!(
+                                        idx_val.kind(),
+                                        ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+                                    ) {
+                                        FastResult::Miss
+                                    } else {
+                                        let i = vm_try!(normalize_index(&idx_val, items.len(), "list"));
+                                        FastResult::Value(items[i].clone())
+                                    }
                                 }
                                 ValueKind::Tuple(items) => {
-                                    let i = vm_try!(normalize_index(&idx_val, items.len(), "tuple"));
-                                    FastResult::Value(items[i].clone())
+                                    if !matches!(
+                                        idx_val.kind(),
+                                        ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+                                    ) {
+                                        FastResult::Miss
+                                    } else {
+                                        let i = vm_try!(normalize_index(&idx_val, items.len(), "tuple"));
+                                        FastResult::Value(items[i].clone())
+                                    }
                                 }
                                 ValueKind::Dict(_) => FastResult::DictLookup(ov.clone()),
                                 _ => FastResult::Miss,
@@ -1753,7 +1770,10 @@ impl Interpreter {
                         match target_kind {
                             1 => {
                                 let len = regs[*obj as usize].list_len().unwrap_or(0);
-                                let i = vm_try!(normalize_index_write(&idx_val, len, "list"));
+                                // Resolve __index__ protocol before integer normalization.
+                                // Clone so idx_val remains available for other match arms.
+                                let idx_resolved = vm_try!(self.call_index_protocol(idx_val.clone(), "list"));
+                                let i = vm_try!(normalize_index_write(&idx_resolved, len, "list"));
                                 regs[*obj as usize].list_with_mut(|items| {
                                     items[i] = val_val;
                                 });
@@ -1920,9 +1940,11 @@ impl Interpreter {
                                                 let len = backing
                                                     .list_len()
                                                     .unwrap_or(0);
+                                                // Resolve __index__ protocol before integer normalization.
+                                                let idx_resolved = vm_try!(self.call_index_protocol(idx_val.clone(), "list"));
                                                 let i = vm_try!(
                                                     normalize_index_write(
-                                                        &idx_val,
+                                                        &idx_resolved,
                                                         len,
                                                         "list",
                                                     )
@@ -2038,7 +2060,9 @@ impl Interpreter {
                         }).unwrap_or(0);
                         if target_kind == 1 {
                             let len = regs[*obj as usize].list_len().unwrap_or(0);
-                            let i = vm_try!(normalize_index_write(&idx_val, len, "list"));
+                            // Resolve __index__ protocol before integer normalization.
+                            let idx_resolved = vm_try!(self.call_index_protocol(idx_val.clone(), "list"));
+                            let i = vm_try!(normalize_index_write(&idx_resolved, len, "list"));
                             regs[*obj as usize].list_with_mut(|items| {
                                 if i + 1 == items.len() {
                                     items.pop();
