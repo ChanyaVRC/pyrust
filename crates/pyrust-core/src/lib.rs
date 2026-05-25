@@ -271,7 +271,11 @@ pub enum PyKey {
     /// and to make the recursive type representable with a fixed-size enum.
     BigInt(Box<BigInt>),
     Float(u64),
-    Str(String),
+    /// A string key.  Holds a `Value` (O(1) RC bump clone) rather than a
+    /// `String` (heap alloc + memcpy) so that `Value::to_key()` on the hot
+    /// path incurs zero allocation.  Use `PyKey::str_from(s)` to construct
+    /// from a bare `&str`/`String`.
+    Str(Value),
     Bool(bool),
     None,
     /// Hashable frozenset key.  Stores a sorted-canonical Vec of inner keys
@@ -296,6 +300,16 @@ pub enum PyKey {
         hash: u64,
         value: Value,
     },
+}
+
+impl PyKey {
+    /// Construct a string key from a bare `&str` / `String` (or anything
+    /// implementing `AsRef<str>`).  Allocates a fresh `Value::string` once;
+    /// subsequent `.clone()` calls on the returned `PyKey` are O(1) RC bumps.
+    #[inline]
+    pub fn str_from(s: impl AsRef<str>) -> PyKey {
+        PyKey::Str(Value::string(s.as_ref()))
+    }
 }
 
 // ── PyKey cross-type numeric helpers ─────────────────────────────────────────
@@ -398,7 +412,7 @@ impl PartialEq for PyKey {
             (PyKey::Float(bits), PyKey::BigInt(n)) | (PyKey::BigInt(n), PyKey::Float(bits)) => {
                 bigint_float_eq(n, f64::from_bits(*bits))
             }
-            (PyKey::Str(a), PyKey::Str(b)) => a == b,
+            (PyKey::Str(a), PyKey::Str(b)) => a.as_str() == b.as_str(),
             (PyKey::None, PyKey::None) => true,
             (PyKey::FrozenSet(a), PyKey::FrozenSet(b)) => a == b,
             (PyKey::Tuple(a), PyKey::Tuple(b)) => a == b,
@@ -476,7 +490,7 @@ impl Hash for PyKey {
             }
             PyKey::Str(s) => {
                 2u8.hash(state);
-                s.hash(state);
+                s.as_str().unwrap_or("").hash(state);
             }
             PyKey::None => {
                 // Hash the Python-level value so that a PyKey::Object whose
@@ -534,7 +548,7 @@ impl Hash for StrKey<'_> {
 impl indexmap::Equivalent<PyKey> for StrKey<'_> {
     #[inline]
     fn equivalent(&self, key: &PyKey) -> bool {
-        matches!(key, PyKey::Str(s) if s == self.0)
+        matches!(key, PyKey::Str(s) if s.as_str() == Some(self.0))
     }
 }
 
@@ -633,7 +647,7 @@ pub fn py_hash_pykey(key: &PyKey) -> i64 {
         PyKey::Str(s) => {
             // FNV-1a: matches pyrust's hash_value str arm.
             let mut h: u64 = 14695981039346656037u64;
-            for b in s.bytes() {
+            for b in s.as_str().unwrap_or("").bytes() {
                 h ^= b as u64;
                 h = h.wrapping_mul(1099511628211u64);
             }
@@ -2955,7 +2969,7 @@ impl Value {
                 .map(PyKey::Int)
                 .or_else(|| Some(PyKey::BigInt(Box::new(v.clone())))),
             ValueKind::Float(v) => Some(PyKey::Float(v.to_bits())),
-            ValueKind::Str(v) => Some(PyKey::Str(v.to_string())),
+            ValueKind::Str(_) => Some(PyKey::Str(self.clone())),
             ValueKind::Bool(v) => Some(PyKey::Bool(v)),
             ValueKind::None => Some(PyKey::None),
             ValueKind::BuiltinObject { ops, state } => ops.to_key(state),
@@ -3393,7 +3407,7 @@ pub fn key_repr(key: &PyKey) -> String {
         PyKey::Int(v) => v.to_string(),
         PyKey::BigInt(v) => v.to_string(),
         PyKey::Float(v) => format_float(f64::from_bits(*v)),
-        PyKey::Str(v) => format!("'{}'", escape_str(v)),
+        PyKey::Str(v) => format!("'{}'", escape_str(v.as_str().unwrap_or(""))),
         PyKey::Bool(v) => {
             if *v {
                 "True".to_string()
@@ -4346,7 +4360,7 @@ mod tests {
         // `id()` surface for it via `value_id()`.  Pin the invariant.
         let a = Value::dict({
             let mut m = IndexMap::new();
-            m.insert(PyKey::Str("k".to_string()), Value::int(1));
+            m.insert(PyKey::str_from("k"), Value::int(1));
             m
         });
         let b = a.clone();
@@ -4354,7 +4368,7 @@ mod tests {
 
         let c = Value::dict({
             let mut m = IndexMap::new();
-            m.insert(PyKey::Str("k".to_string()), Value::int(1));
+            m.insert(PyKey::str_from("k"), Value::int(1));
             m
         });
         assert_ne!(a.value_id(), c.value_id());

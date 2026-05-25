@@ -249,7 +249,7 @@ fn collect_iterable(v: &Value) -> Result<IndexSet<PyKey>> {
         }
         ValueKind::Str(s) => {
             for ch in s.chars() {
-                out.insert(PyKey::Str(ch.to_string()));
+                out.insert(PyKey::str_from(ch.encode_utf8(&mut [0u8; 4])));
             }
         }
         ValueKind::Range { start, stop, step } => {
@@ -462,7 +462,7 @@ fn key_to_value(k: PyKey) -> Value {
         PyKey::Int(v) => Value::int(v),
         PyKey::BigInt(v) => Value::bigint(*v),
         PyKey::Float(bits) => Value::float(f64::from_bits(bits)),
-        PyKey::Str(s) => Value::string(s),
+        PyKey::Str(s) => s,
         PyKey::Bool(b) => Value::bool_(b),
         PyKey::None => Value::none(),
         PyKey::FrozenSet(items) => {

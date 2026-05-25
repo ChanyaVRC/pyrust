@@ -36,7 +36,7 @@ use std::rc::Rc;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::reject_keyword_args_expanded;
-use crate::value::{PyInstance, PyKey, Value, ValueKind};
+use crate::value::{PyInstance, PyKey, StrKey, Value, ValueKind};
 use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
 
@@ -124,7 +124,7 @@ pyrust_module! {
             for a in &user[1..] {
                 match &a.name {
                     Some(n) => {
-                        bound_kwargs.insert(PyKey::Str(n.clone()), a.value.clone());
+                        bound_kwargs.insert(PyKey::str_from(n.as_str()), a.value.clone());
                     }
                     None => bound_args.push(a.value.clone()),
                 }
@@ -157,7 +157,7 @@ pyrust_module! {
             let mut kw_map: IndexMap<String, Value> = IndexMap::new();
             for (k, v) in bound_kw {
                 if let PyKey::Str(name) = k {
-                    kw_map.insert(name, v);
+                    kw_map.insert(name.as_str().unwrap_or("").to_owned(), v);
                 }
             }
             for a in user {
@@ -293,7 +293,7 @@ pyrust_module! {
                 (func, maxsize, typed)
             };
             let key = build_key(user, typed);
-            let key_pykey = PyKey::Str(key.clone());
+            let key_pykey = PyKey::str_from(&key);
             // Hit?  The `_cache` dict is keyed by `PyKey::Str(key)` and
             // `_order` is the LRU list (front = LRU, back = MRU).
             let hit = {
@@ -735,7 +735,7 @@ fn insert_cache(
             && let Some(ref cache) = cache_val
         {
             let _ = cache.dict_with_mut(|dict| {
-                dict.shift_remove(&PyKey::Str(k));
+                dict.shift_remove(&StrKey(&k));
             });
         }
     }

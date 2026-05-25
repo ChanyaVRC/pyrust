@@ -911,7 +911,7 @@ pyrust_module! {
                 ValueKind::Dict(map) => {
                     for (k, v) in map.iter() {
                         if let PyKey::Str(key) = k {
-                            attrs.insert(key.clone(), v.clone());
+                            attrs.insert(key.as_str().unwrap_or("").to_owned(), v.clone());
                         }
                     }
                 }
@@ -1064,7 +1064,7 @@ pyrust_module! {
         if args.is_empty() {
             let mut dict: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
             for (k, v) in _interp.env.borrow().values.iter() {
-                dict.insert(PyKey::Str(k.clone()), v.clone());
+                dict.insert(PyKey::str_from(k), v.clone());
             }
             return Ok(Value::dict(dict));
         }
@@ -1073,7 +1073,7 @@ pyrust_module! {
             ValueKind::PyModule(module) => {
                 let mut dict: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
                 for (k, v) in module.borrow().attrs.iter() {
-                    dict.insert(PyKey::Str(k.clone()), v.clone());
+                    dict.insert(PyKey::str_from(k), v.clone());
                 }
                 Ok(Value::dict(dict))
             }
@@ -1939,7 +1939,7 @@ pyrust_module! {
                         let mut d: indexmap::IndexMap<PyKey, Value> =
                             indexmap::IndexMap::new();
                         for (k, v) in class.attrs.iter() {
-                            d.insert(PyKey::Str(k.clone()), v.clone());
+                            d.insert(PyKey::str_from(k), v.clone());
                         }
                         return Ok(Value::dict(d));
                     }
@@ -2002,7 +2002,10 @@ pyrust_module! {
         if let ValueKind::Dict(kw_map) = args[2].value.kind() {
             for (k, v) in kw_map.iter() {
                 if let PyKey::Str(name) = k {
-                    expanded.push(ExpandedCallArg { name: Some(name.clone()), value: v.clone() });
+                    expanded.push(ExpandedCallArg {
+                        name: Some(name.as_str().unwrap_or("").to_owned()),
+                        value: v.clone(),
+                    });
                 }
             }
         }

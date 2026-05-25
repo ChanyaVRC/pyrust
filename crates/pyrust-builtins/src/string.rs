@@ -1129,7 +1129,7 @@ fn join(sep: &str, args: &[Value]) -> Result<Value> {
             .keys()
             .enumerate()
             .map(|(i, k)| match k {
-                PyKey::Str(s) => Ok(s.clone()),
+                PyKey::Str(s) => Ok(s.as_str().unwrap_or("").to_owned()),
                 _ => Err(PyError::named(
                     "TypeError",
                     format!(

@@ -136,7 +136,7 @@ impl Interpreter {
                 .unwrap_or(false);
             if !has_key {
                 if let Some(v) = me.values.get(*name).cloned() {
-                    let key = PyKey::Str((*name).to_string());
+                    let key = PyKey::str_from(*name);
                     let _ = self.module_globals_dict.dict_insert(key, v);
                 }
             }

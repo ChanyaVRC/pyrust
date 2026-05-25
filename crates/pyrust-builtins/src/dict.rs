@@ -191,7 +191,7 @@ fn key_to_value(k: PyKey) -> Value {
         PyKey::Int(v) => Value::int(v),
         PyKey::BigInt(v) => Value::bigint(*v),
         PyKey::Float(bits) => Value::float(f64::from_bits(bits)),
-        PyKey::Str(s) => Value::string(s),
+        PyKey::Str(s) => s,
         PyKey::Bool(b) => Value::bool_(b),
         PyKey::None => Value::none(),
         PyKey::FrozenSet(items) => {

@@ -1767,7 +1767,7 @@ impl Interpreter {
                         let me = module_env(&self.env);
                         let in_env = me.borrow_mut().values.remove(&name).is_some();
                         let in_dict = self.module_globals_dict
-                            .dict_shift_remove(&PyKey::Str(name.clone()))
+                            .dict_shift_remove(&PyKey::str_from(&*name))
                             .ok()
                             .flatten()
                             .is_some();
@@ -1816,7 +1816,7 @@ impl Interpreter {
                         let is_module_scope = self.env.borrow().parent.is_none();
                         let in_dict = if is_module_scope {
                             self.module_globals_dict
-                                .dict_shift_remove(&PyKey::Str(name.clone()))
+                                .dict_shift_remove(&PyKey::str_from(&*name))
                                 .ok()
                                 .flatten()
                                 .is_some()
@@ -1877,7 +1877,7 @@ impl Interpreter {
                         let val = regs[*reg as usize].clone();
                         if !val.is_unset() {
                             let _ = self.module_globals_dict.dict_insert(
-                                PyKey::Str(name.to_string()),
+                                PyKey::str_from(name),
                                 val,
                             );
                         }
@@ -1892,7 +1892,7 @@ impl Interpreter {
                     // be cleared when deleted, otherwise they can resurface
                     // through a subsequent globals() lookup (issue #846).
                     let _ = self.module_globals_dict
-                        .dict_shift_remove(&PyKey::Str(name.to_string()));
+                        .dict_shift_remove(&PyKey::str_from(name));
                     // Invalidate the LoadGlobal inline cache.
                     bump_global_env_version(self);
                 }
@@ -2905,7 +2905,7 @@ impl Interpreter {
                             *annots_base + i as u32,
                             num_locals
                         ));
-                        annotations_map.insert(PyKey::Str(key.clone()), val);
+                        annotations_map.insert(PyKey::str_from(key.as_str()), val);
                     }
                     let annotations = Value::dict(annotations_map);
                     // Validate that every nonlocal name resolves to an enclosing local scope.
@@ -3646,13 +3646,14 @@ impl Interpreter {
                     // superseding the prior LazyLock approach (which still paid
                     // a one-time String allocation per static).
                     for k in kw_map.keys() {
-                        if let PyKey::Str(s) = k
-                            && s != "key" && s != "reverse"
-                        {
-                            return Err(PyError::named(
-                                "TypeError",
-                                format!("sort() got an unexpected keyword argument '{s}'"),
-                            ));
+                        if let PyKey::Str(s) = k {
+                            let s = s.as_str().unwrap_or("");
+                            if s != "key" && s != "reverse" {
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    format!("sort() got an unexpected keyword argument '{s}'"),
+                                ));
+                            }
                         }
                     }
                     let key_fn = kw_map.get(&StrKey("key")).cloned();
@@ -3731,7 +3732,7 @@ impl Interpreter {
                     let mut keyword: Vec<(String, Value)> = Vec::with_capacity(kw_map.len());
                     for (k, v) in &kw_map {
                         if let PyKey::Str(name) = k {
-                            keyword.push((name.clone(), v.clone()));
+                            keyword.push((name.as_str().unwrap_or("").to_owned(), v.clone()));
                         }
                     }
                     let template = regs[obj as usize]
@@ -3787,7 +3788,10 @@ impl Interpreter {
                     .collect();
                 for (k, v) in &kw_map {
                     if let PyKey::Str(name) = k {
-                        expanded.push(ExpandedCallArg { name: Some(name.clone()), value: v.clone() });
+                        expanded.push(ExpandedCallArg {
+                            name: Some(name.as_str().unwrap_or("").to_owned()),
+                            value: v.clone(),
+                        });
                     }
                 }
                 let mut buf = std::mem::take(&mut self.call_arg_buf);

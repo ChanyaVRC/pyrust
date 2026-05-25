@@ -1209,9 +1209,9 @@ result = fact(10)
         );
         use crate::value::PyKey;
         let mut expected = indexmap::IndexMap::new();
-        expected.insert(PyKey::Str("x".to_string()), Value::int(1));
-        expected.insert(PyKey::Str("y".to_string()), Value::int(99));
-        expected.insert(PyKey::Str("z".to_string()), Value::int(3));
+        expected.insert(PyKey::str_from("x"), Value::int(1));
+        expected.insert(PyKey::str_from("y"), Value::int(99));
+        expected.insert(PyKey::str_from("z"), Value::int(3));
         assert_eq!(
             interpreter.lookup_name("result").unwrap(),
             Some(Value::dict(expected))

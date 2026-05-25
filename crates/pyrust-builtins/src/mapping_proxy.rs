@@ -59,7 +59,7 @@ impl BuiltinTypeOps for MappingProxyOps {
                     return false;
                 }
                 for (k, v) in class.attrs.iter() {
-                    match rhs.get(&PyKey::Str(k.clone())) {
+                    match rhs.get(&PyKey::str_from(k)) {
                         Some(other_v) => {
                             if v != other_v {
                                 return false;
@@ -208,7 +208,7 @@ impl BuiltinTypeOps for MappingProxyOps {
                 let class = cls.borrow();
                 let mut dict: IndexMap<PyKey, Value> = IndexMap::new();
                 for (k, v) in class.attrs.iter() {
-                    dict.insert(PyKey::Str(k.clone()), v.clone());
+                    dict.insert(PyKey::str_from(k), v.clone());
                 }
                 Ok(Value::dict(dict))
             }

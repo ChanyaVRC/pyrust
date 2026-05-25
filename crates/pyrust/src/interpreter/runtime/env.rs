@@ -853,7 +853,7 @@ impl Interpreter {
                         let attrs_rc = func_attrs_rc(func);
                         attrs_rc
                             .borrow()
-                            .dict_insert(PyKey::Str(name.to_string()), value)
+                            .dict_insert(PyKey::str_from(name), value)
                             .map(|_| ())
                     }
                 }
@@ -1044,7 +1044,7 @@ impl Interpreter {
                     _ => {
                         // Short-circuit: if attrs were never initialised, there
                         // is nothing to delete — raise AttributeError immediately.
-                        let key = PyKey::Str(name.to_string());
+                        let key = PyKey::str_from(name);
                         let removed = func
                             .attrs
                             .borrow()
@@ -1314,7 +1314,7 @@ impl Interpreter {
             // the dict live from that point on.
             if self.globals_accessed {
                 let _ = self.module_globals_dict.dict_insert(
-                    PyKey::Str(name.clone()),
+                    PyKey::str_from(&name),
                     value.clone(),
                 );
             }
@@ -1360,7 +1360,7 @@ impl Interpreter {
             bump_global_env_version(self);
             if self.globals_accessed {
                 let _ = self.module_globals_dict.dict_insert(
-                    PyKey::Str(name.clone()),
+                    PyKey::str_from(&name),
                     value.clone(),
                 );
             }

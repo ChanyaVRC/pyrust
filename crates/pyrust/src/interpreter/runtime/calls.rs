@@ -119,7 +119,7 @@ impl Interpreter {
                 if has_kw {
                     for a in args {
                         match &a.name {
-                            Some(n) => { kw.insert(PyKey::Str(n.clone()), a.value.clone()); }
+                            Some(n) => { kw.insert(PyKey::str_from(n.as_str()), a.value.clone()); }
                             None => pos.push(a.value.clone()),
                         }
                     }
@@ -207,7 +207,11 @@ impl Interpreter {
                             let keyword: Vec<(String, Value)> = kw
                                 .into_iter()
                                 .filter_map(|(k, v)| {
-                                    if let PyKey::Str(name) = k { Some((name, v)) } else { None }
+                                    if let PyKey::Str(name) = k {
+                                        Some((name.as_str().unwrap_or("").to_owned(), v))
+                                    } else {
+                                        None
+                                    }
                                 })
                                 .collect();
                             // Borrow pos; capacity retained in the buf below.
@@ -299,7 +303,10 @@ impl Interpreter {
                         }
                         for (k, v) in kw {
                             if let PyKey::Str(name) = k {
-                                combined.push(ExpandedCallArg { name: Some(name), value: v });
+                                combined.push(ExpandedCallArg {
+                                    name: Some(name.as_str().unwrap_or("").to_owned()),
+                                    value: v,
+                                });
                             }
                         }
                         invoke_class_method(
@@ -545,7 +552,7 @@ impl Interpreter {
                 let mut kw: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
                 for a in &args[1..] {
                     match &a.name {
-                        Some(n) => { kw.insert(PyKey::Str(n.clone()), a.value.clone()); }
+                        Some(n) => { kw.insert(PyKey::str_from(n.as_str()), a.value.clone()); }
                         None => pos.push(a.value.clone()),
                     }
                 }

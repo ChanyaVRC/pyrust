@@ -860,7 +860,7 @@ pub(crate) fn instantiate_import_error(
 pub(crate) fn instance_attrs_snapshot(instance: &Rc<RefCell<PyInstance>>) -> Value {
     let mut dict: IndexMap<PyKey, Value> = IndexMap::new();
     for (k, v) in instance.borrow().attrs.iter() {
-        dict.insert(PyKey::Str(k.clone()), v.clone());
+        dict.insert(PyKey::str_from(k), v.clone());
     }
     Value::dict(dict)
 }
@@ -1015,7 +1015,7 @@ pub(crate) fn key_to_value(key: PyKey) -> Value {
         PyKey::Int(v) => Value::int(v),
         PyKey::BigInt(v) => Value::bigint(*v),
         PyKey::Float(v) => Value::float(f64::from_bits(v)),
-        PyKey::Str(v) => Value::string(v),
+        PyKey::Str(v) => v,
         PyKey::Bool(v) => Value::bool_(v),
         PyKey::None => Value::none(),
         PyKey::FrozenSet(items) => {
@@ -1096,7 +1096,7 @@ fn merge_frame_view_into_dict(
         // `.clone()` call and does not escape this loop body.
         let val = unsafe { view.regs_ptr.add(slot).as_ref() };
         if !val.is_unset() {
-            dict.insert(PyKey::Str(name.clone()), val.clone());
+            dict.insert(PyKey::str_from(name), val.clone());
         }
     }
 }
@@ -1119,7 +1119,7 @@ pub(crate) fn snapshot_current_locals(
             // same complete view as `globals()`.
             let me = module_env(&interp.env);
             for (k, v) in me.borrow().values.iter() {
-                dict.insert(PyKey::Str(k.clone()), v.clone());
+                dict.insert(PyKey::str_from(k), v.clone());
             }
             merge_frame_view_into_dict(view, &mut dict);
         }
@@ -1168,7 +1168,7 @@ pub(crate) fn snapshot_current_locals(
                     if let Ok(Some(val)) =
                         lookup_name_in_enclosing_local_env(env, name)
                     {
-                        dict.insert(PyKey::Str(name.clone()), val);
+                        dict.insert(PyKey::str_from(name), val);
                     }
                 }
             }
@@ -1176,7 +1176,7 @@ pub(crate) fn snapshot_current_locals(
         None => {
             // No active VM frame: fall back to env.values.
             for (k, v) in interp.env.borrow().values.iter() {
-                dict.insert(PyKey::Str(k.clone()), v.clone());
+                dict.insert(PyKey::str_from(k), v.clone());
             }
         }
     }
@@ -1213,7 +1213,7 @@ pub(crate) fn sync_module_env_to_globals_dict(interp: &mut Interpreter) {
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     for (k, v) in pairs {
-        let _ = interp.module_globals_dict.dict_insert(PyKey::Str(k), v);
+        let _ = interp.module_globals_dict.dict_insert(PyKey::str_from(&k), v);
     }
     // Also sync fastlocal registers from the active script frame (issue #820).
     // With fastlocal mode restored, module-scope assignments write only to the
@@ -1240,7 +1240,7 @@ pub(crate) fn sync_module_env_to_globals_dict(interp: &mut Interpreter) {
                 // duration of the script dispatch loop (see above comment).
                 let val = unsafe { script_view.regs_ptr.add(slot).as_ref() }.clone();
                 if !val.is_unset() {
-                    let _ = interp.module_globals_dict.dict_insert(PyKey::Str(name), val);
+                    let _ = interp.module_globals_dict.dict_insert(PyKey::str_from(&name), val);
                 }
             }
         }
