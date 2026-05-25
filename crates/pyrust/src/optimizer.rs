@@ -4469,12 +4469,16 @@ fn pass_forcount_unroll(
             Insn::ForCountConstInline(var, op, stop, step, off) => (var, op, stop, step, off),
             _ => continue,
         };
-        let off = off_i32 as usize;
 
-        // off >= 2: at least one body instruction + the back-edge Jump.
-        if off < 2 {
+        // Guard: off must be a positive i32 before converting to usize.
+        // A non-positive off would indicate a backward exit (corrupted bytecode
+        // from a prior pass) or a trivially empty loop; skip in both cases.
+        // This check MUST precede the `as usize` cast to avoid wrapping overflow.
+        if off_i32 < 2 {
             continue;
         }
+        let off = off_i32 as usize;
+
         let back_edge = h + off;
         if back_edge >= n {
             continue;
@@ -4661,13 +4665,15 @@ fn pass_forcount_unroll(
         let trip = plan.val_indices.len();
         // shift for positions after back_edge.
         // (trip-1)*off - 1: replaces (off+1) old insns with trip*off new insns.
-        let shift = trip * off - (off + 1);
+        // Use isize arithmetic: trip == 1 gives shift == -1 (contraction), which
+        // is valid — a usize subtraction would underflow in that case.
+        let shift = (trip * off) as isize - (off + 1) as isize;
         // Sentinel: the old back-edge maps to the new post-loop start.
         // Use old_to_new[h] (the new header position, which accounts for prior
         // plans' shifts) plus trip*off to get the new post-loop start.
         old_to_new[back_edge] = old_to_new[h] + trip * off;
         for p in (back_edge + 1)..=n {
-            old_to_new[p] += shift;
+            old_to_new[p] = (old_to_new[p] as isize + shift) as usize;
         }
         // Multiple plans are accumulated correctly since each plan only shifts
         // positions strictly after its own back-edge, and plans are non-overlapping.
