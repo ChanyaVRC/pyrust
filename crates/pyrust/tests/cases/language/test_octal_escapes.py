@@ -32,3 +32,17 @@ print(ord("""\0"""))   # 0
 # octal in f-strings
 x = "!"
 print(f"\101{x}")      # A!
+
+# octal in bytes literals
+print(b'\0')           # b'\x00'
+print(b'\1')           # b'\x01'
+print(b'\7')           # b'\x07'
+print(b'\12')          # b'\n'
+print(b'\101')         # b'A'
+print(b'\377')         # b'\xff'
+
+# 4-digit truncation in bytes
+bs = b'\1234'
+print(len(bs))         # 2
+print(bs[0])           # 83
+print(bs[1])           # 52 (ord('4'))

@@ -751,10 +751,34 @@ fn lex_bytes(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> 
                 'n' => 0x0a,
                 't' => 0x09,
                 'r' => 0x0d,
-                '0' => 0x00,
                 '\\' => 0x5c,
                 '\'' => 0x27,
                 '"' => 0x22,
+                'a' => 0x07,
+                'b' => 0x08,
+                'f' => 0x0c,
+                'v' => 0x0b,
+                '0'..='7' => {
+                    // \ooo — 1 to 3 octal digits; produces values 0x00–0xFF.
+                    let mut val = esc as u32 - '0' as u32;
+                    if let Some(&d) = chars.get(pos + 1) {
+                        if ('0'..='7').contains(&d) {
+                            val = val * 8 + (d as u32 - '0' as u32);
+                            pos += 1;
+                            if let Some(&d2) = chars.get(pos + 1) {
+                                if ('0'..='7').contains(&d2) {
+                                    val = val * 8 + (d2 as u32 - '0' as u32);
+                                    pos += 1;
+                                }
+                            }
+                        }
+                    }
+                    u8::try_from(val).map_err(|_| {
+                        PyError::Lex(format!(
+                            "octal escape value out of range in bytes literal: \\{val:o}"
+                        ))
+                    })?
+                }
                 'x' => {
                     // \xNN — two hex digits
                     let hi = chars
