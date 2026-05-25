@@ -63,3 +63,15 @@ try:
     max([1, 2], bar=1)
 except TypeError as e:
     print("TypeError:", e)
+
+# invalid keyword with zero positionals: CPython emits "at least 1 argument"
+# error, NOT the kwarg error — positional-count check takes priority.
+try:
+    min(foo=1)
+except TypeError as e:
+    print("TypeError:", e)
+
+try:
+    max(bar=1)
+except TypeError as e:
+    print("TypeError:", e)

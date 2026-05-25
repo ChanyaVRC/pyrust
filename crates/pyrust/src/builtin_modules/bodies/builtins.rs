@@ -3484,6 +3484,16 @@ fn min_max_impl(
     is_max: bool,
     fn_name: &str,
 ) -> Result<Value> {
+    // Collect positional args first: CPython emits the "at least 1 argument"
+    // error before any kwarg validation when no positionals are present.
+    let positional: Vec<&ExpandedCallArg> =
+        args.iter().filter(|a| a.name.is_none()).collect();
+    if positional.is_empty() {
+        return Err(PyError::named(
+            "TypeError",
+            format!("{fn_name} expected at least 1 argument, got 0"),
+        ));
+    }
     let key_fn = args.iter().find(|a| a.name.as_deref() == Some("key"))
         .map(|a| a.value.clone());
     let default_val = args.iter().find(|a| a.name.as_deref() == Some("default"))
@@ -3496,11 +3506,10 @@ fn min_max_impl(
             ));
         }
     }
-    let positional: Vec<&ExpandedCallArg> =
-        args.iter().filter(|a| a.name.is_none()).collect();
     let items: Vec<Value> = if positional.len() == 1 {
         interp.collect_iterable(positional[0].value.clone())?
-    } else if positional.len() >= 2 {
+    } else {
+        // positional.len() >= 2
         if default_val.is_some() {
             return Err(PyError::named(
                 "TypeError",
@@ -3508,11 +3517,6 @@ fn min_max_impl(
             ));
         }
         positional.iter().map(|a| a.value.clone()).collect()
-    } else {
-        return Err(PyError::named(
-            "TypeError",
-            format!("{fn_name} expected at least 1 argument, got 0"),
-        ));
     };
     if items.is_empty() {
         if let Some(default) = default_val {
