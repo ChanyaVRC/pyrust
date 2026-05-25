@@ -46,6 +46,21 @@ pub(crate) struct GetItemIter {
     pub(crate) exhausted: bool,
 }
 
+/// Callable-iterator created by `iter(callable, sentinel)` (the two-argument
+/// form of the builtin).  Stored type-erased inside `Value::generator()` like
+/// [`NativeIterFrame`] and [`GetItemIter`].
+///
+/// On each `next()` call the interpreter invokes `callable()` with no
+/// arguments; if the result compares equal to `sentinel` the iterator is
+/// exhausted (StopIteration) and the sentinel value is *not* yielded, matching
+/// CPython semantics.  Once `done` is set subsequent `next()` calls return
+/// StopIteration immediately without re-calling `callable`.
+pub(crate) struct CallableIter {
+    pub(crate) callable: Value,
+    pub(crate) sentinel: Value,
+    pub(crate) done: bool,
+}
+
 /// Heap-allocated execution state for a suspended generator.
 /// Stored type-erased inside `Value::generator()` via `Box<dyn Any>`.
 pub(crate) struct GeneratorFrame {
@@ -3099,11 +3114,10 @@ impl Interpreter {
                             let next_result: Option<Result<Value>> =
                                 if let ValueKind::Generator(state_rc) = iter_val.kind() {
                                     let state_rc = Rc::clone(state_rc);
-                                    // Probe for the lazy GetItemIter shape
-                                    // first — its step needs &mut self for
-                                    // the `__getitem__` invocation, so we
-                                    // must release any cell borrow before
-                                    // calling.
+                                    // Probe for shapes that need &mut self
+                                    // before taking borrow_mut — these must
+                                    // release the cell borrow before calling
+                                    // back into the interpreter.
                                     let is_getitem_iter = state_rc
                                         .borrow()
                                         .downcast_ref::<GetItemIter>()
@@ -3118,6 +3132,20 @@ impl Interpreter {
                                             Err(e) => Err(e),
                                         })
                                     } else {
+                                        let is_callable_iter = state_rc
+                                            .borrow()
+                                            .downcast_ref::<CallableIter>()
+                                            .is_some();
+                                        if is_callable_iter {
+                                            Some(match self.step_callable_iter(&state_rc) {
+                                                Ok(Some(v)) => Ok(v),
+                                                Ok(None) => Err(PyError::named(
+                                                    "StopIteration",
+                                                    String::new(),
+                                                )),
+                                                Err(e) => Err(e),
+                                            })
+                                        } else {
                                         let mut borrow = state_rc.borrow_mut();
                                         if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
                                             // Built-in iterator created by iter().
@@ -3145,6 +3173,7 @@ impl Interpreter {
                                             Some(Err(PyError::Runtime(
                                                 "invalid generator state".to_string(),
                                             )))
+                                        }
                                         }
                                     }
                                 } else if let ValueKind::PyInstance(inst) = iter_val.kind() {

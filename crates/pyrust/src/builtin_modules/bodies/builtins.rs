@@ -20,7 +20,7 @@ use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
-    NativeIterFrame, apply_format_spec, ascii_repr, bigint_divmod_floor, class_is_subclass_of,
+    CallableIter, NativeIterFrame, apply_format_spec, ascii_repr, bigint_divmod_floor, class_is_subclass_of,
     compare_values, compare_values_with_op, dir_names, instance_attrs_snapshot,
     instance_builtin_data,
     int_pow_promoting, invoke_class_method,
@@ -748,56 +748,104 @@ pyrust_module! {
         Ok(Value::list(result))
     }
 
-    /// CPython: iter(obj) — return an iterator over obj.
+    /// CPython: iter(obj) / iter(callable, sentinel) — return an iterator.
     /// <https://docs.python.org/3/library/functions.html#iter>
-    #[pure]
+    ///
+    /// The one-argument form returns an iterator over an iterable object.
+    /// The two-argument form returns a callable-iterator that calls
+    /// `callable()` on each `next()` and stops when the result equals
+    /// `sentinel`.  `#[pure]` is absent because the two-argument form calls
+    /// user code on every iteration.
     fn iter(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() != 1 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
-        }
-        let val = args[0].value.clone();
-        // Detect kind tag in a scoped block so the kind() borrow drops
-        // before we may need to move `val` (#450).
-        enum IterKind {
-            Generator,
-            PyInstance(Rc<RefCell<crate::value::PyInstance>>),
-            Other,
-        }
-        let kind = match val.kind() {
-            ValueKind::Generator(_) => IterKind::Generator,
-            ValueKind::PyInstance(inst) => IterKind::PyInstance(Rc::clone(inst)),
-            _ => IterKind::Other,
-        };
-        match kind {
-            IterKind::Generator => Ok(val),
-            IterKind::PyInstance(inst_rc) => {
-                let class = Rc::clone(&inst_rc.borrow().class);
-                if let Some(method_val) = lookup_class_attr(&class, "__iter__") {
-                    invoke_class_method(
-                        _interp,
-                        method_val,
-                        Value::py_instance(inst_rc),
-                        &[],
-                    )
-                } else if lookup_class_attr(&class, "__getitem__").is_some() {
-                    _interp.make_getitem_iter(inst_rc)
-                } else {
-                    Err(PyError::named(
+        match args.len() {
+            2 => {
+                // Two-argument form: iter(callable, sentinel).
+                let callable = args[0].value.clone();
+                let sentinel = args[1].value.clone();
+                // Validate that arg 0 is callable — matches CPython's TypeError.
+                let is_callable = match callable.kind() {
+                    ValueKind::UserFunction(_)
+                    | ValueKind::BuiltinFunction(_)
+                    | ValueKind::BoundMethod { .. }
+                    | ValueKind::ClassBoundMethod { .. }
+                    | ValueKind::PyClass(_) => true,
+                    ValueKind::BuiltinObject { .. } => {
+                        pyrust_builtins::bound_method::is_bound_method(&callable)
+                            || pyrust_builtins::property::property_partial_slot(&callable)
+                                .is_some_and(|slot| slot.is_some())
+                    }
+                    ValueKind::PyInstance(inst) => {
+                        let class = Rc::clone(&inst.borrow().class);
+                        lookup_class_attr(&class, "__call__").is_some()
+                    }
+                    _ => false,
+                };
+                if !is_callable {
+                    return Err(PyError::named(
                         "TypeError",
-                        format!("'{}' object is not iterable", class.borrow().name),
-                    ))
+                        "iter(v, w): v must be callable".to_string(),
+                    ));
+                }
+                Ok(Value::generator(Box::new(CallableIter {
+                    callable,
+                    sentinel,
+                    done: false,
+                })))
+            }
+            1 => {
+                let val = args[0].value.clone();
+                // Detect kind tag in a scoped block so the kind() borrow drops
+                // before we may need to move `val` (#450).
+                enum IterKind {
+                    Generator,
+                    PyInstance(Rc<RefCell<crate::value::PyInstance>>),
+                    Other,
+                }
+                let kind = match val.kind() {
+                    ValueKind::Generator(_) => IterKind::Generator,
+                    ValueKind::PyInstance(inst) => IterKind::PyInstance(Rc::clone(inst)),
+                    _ => IterKind::Other,
+                };
+                match kind {
+                    IterKind::Generator => Ok(val),
+                    IterKind::PyInstance(inst_rc) => {
+                        let class = Rc::clone(&inst_rc.borrow().class);
+                        if let Some(method_val) = lookup_class_attr(&class, "__iter__") {
+                            invoke_class_method(
+                                _interp,
+                                method_val,
+                                Value::py_instance(inst_rc),
+                                &[],
+                            )
+                        } else if lookup_class_attr(&class, "__getitem__").is_some() {
+                            _interp.make_getitem_iter(inst_rc)
+                        } else {
+                            Err(PyError::named(
+                                "TypeError",
+                                format!("'{}' object is not iterable", class.borrow().name),
+                            ))
+                        }
+                    }
+                    IterKind::Other => {
+                        let items = iter_values(val.clone()).map_err(|_| {
+                            PyError::named(
+                                "TypeError",
+                                format!("'{}' object is not iterable", value_type_name_str(&val)),
+                            )
+                        })?;
+                        Ok(Value::generator(Box::new(NativeIterFrame { items, pos: 0 })))
+                    }
                 }
             }
-            IterKind::Other => {
-                let items = iter_values(val.clone()).map_err(|_| {
-                    PyError::named(
-                        "TypeError",
-                        format!("'{}' object is not iterable", value_type_name_str(&val)),
-                    )
-                })?;
-                Ok(Value::generator(Box::new(NativeIterFrame { items, pos: 0 })))
-            }
+            0 => Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME} expected at least 1 argument, got 0"),
+            )),
+            n => Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME} expected at most 2 arguments, got {n}"),
+            )),
         }
     }
 
