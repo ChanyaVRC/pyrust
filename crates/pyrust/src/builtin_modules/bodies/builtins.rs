@@ -2141,6 +2141,55 @@ pyrust_module! {
         Ok(Value::dict(result))
     }
 
+    /// CPython: input([prompt]) — read a line from stdin, stripping the trailing newline.
+    /// <https://docs.python.org/3/library/functions.html#input>
+    ///
+    /// Accepts 0 or 1 positional argument (the prompt); no keyword arguments.
+    /// The prompt (any type — converted to `str`) is printed to stdout without
+    /// a trailing newline, with stdout flushed before reading.  Raises
+    /// `EOFError` when stdin is at EOF.
+    fn input(args) -> Result<Value> {
+        // Reject keyword arguments with CPython's exact message.
+        if args.iter().any(|a| a.name.is_some()) {
+            return Err(PyError::named(
+                "TypeError",
+                "input() takes no keyword arguments".to_string(),
+            ));
+        }
+        // Reject more than 1 positional argument.
+        if args.len() > 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("input expected at most 1 argument, got {}", args.len()),
+            ));
+        }
+        // Print the prompt (if any) to stdout without a trailing newline, then flush.
+        if let Some(prompt_arg) = args.first() {
+            let prompt_str = render_instance_str(_interp, &prompt_arg.value)?;
+            print!("{}", prompt_str);
+            use std::io::Write as _;
+            std::io::stdout().flush().ok();
+        }
+        // Read one line from stdin.
+        // CPython raises OSError for real I/O errors and EOFError only for EOF.
+        let mut line = String::new();
+        let n = std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|e| PyError::named("OSError", e.to_string()))?;
+        if n == 0 {
+            return Err(PyError::named(
+                "EOFError",
+                "EOF when reading a line".to_string(),
+            ));
+        }
+        // CPython strips only the trailing '\n'; it does NOT strip '\r'.
+        // On Linux, a \r\n line from stdin should return "hello\r", not "hello".
+        if line.ends_with('\n') {
+            line.pop();
+        }
+        Ok(Value::string(line))
+    }
+
     /// CPython: print(*objects, sep=' ', end='\n', file=sys.stdout, flush=False).
     /// <https://docs.python.org/3/library/functions.html#print>
     fn print(args) -> Result<Value> {
