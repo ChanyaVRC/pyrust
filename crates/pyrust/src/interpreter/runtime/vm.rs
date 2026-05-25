@@ -1738,7 +1738,7 @@ impl Interpreter {
                         match target_kind {
                             1 => {
                                 let len = regs[*obj as usize].list_len().unwrap_or(0);
-                                let i = vm_try!(normalize_index(&idx_val, len, "list"));
+                                let i = vm_try!(normalize_index_write(&idx_val, len, "list"));
                                 regs[*obj as usize].list_with_mut(|items| {
                                     items[i] = val_val;
                                 });
@@ -1975,7 +1975,7 @@ impl Interpreter {
                         }).unwrap_or(0);
                         if target_kind == 1 {
                             let len = regs[*obj as usize].list_len().unwrap_or(0);
-                            let i = vm_try!(normalize_index(&idx_val, len, "list"));
+                            let i = vm_try!(normalize_index_write(&idx_val, len, "list"));
                             regs[*obj as usize].list_with_mut(|items| {
                                 if i + 1 == items.len() {
                                     items.pop();
