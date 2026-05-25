@@ -1,35 +1,32 @@
-# Unicode escape sequences (\uNNNN and \UNNNNNNNN) — parity with CPython 3.12
+# Unicode escape sequences (\uNNNN and \UNNNNNNNN) -- parity with CPython 3.12
 
-# \uNNNN — four hex digits, BMP codepoint
-print("A")                       # A  (basic ASCII sanity check)
-print(ord("é") == 0xe9)          # True
-print("A" == "A")                # True
+# \uNNNN -- four hex digits, BMP codepoints
+print(ord("\u0041") == 0x41)   # True -- 'A'
+print("\u0041" == "A")         # True
+print(ord("\u00e9") == 0xe9)   # True -- e-acute
+print(ord("\u03b1") == 0x3b1)  # True -- Greek small alpha
 
-# \uNNNN round-trips
-print(ord("A") == 0x0041)        # True
-print("A" == "A")                # True
+# Multiple \u in one string
+print("\u0041\u0042\u0043" == "ABC")  # True
 
-# \UNNNNNNNN — eight hex digits, full Unicode range
-print(ord("\U00000041") == 0x41)   # True — \U of 'A'
-print("\U00000041" == "A")         # True
-
-# Emoji via \U (outside BMP)
-print(ord("\U0001F600") == 0x1F600)   # True
+# \UNNNNNNNN -- eight hex digits, full Unicode range
+print(ord("\U00000041") == 0x41)      # True -- \U of 'A'
+print("\U00000041" == "A")            # True
+print(ord("\U0001F600") == 0x1F600)   # True -- emoji outside BMP
 print("\U0001F600" == "\U0001F600")   # True
 
-# Verify é via \u
-print(ord("é") == 0xe9)    # True
-print("é" == "é")          # True
+# \u and \U denote the same codepoint when digits match
+print("\u0041" == "\U00000041")            # True
+print(ord("\u0041") == ord("\U00000041"))  # True
 
 # \u in f-strings
-print(f"A{1+1}")            # A2
-print(f"{'A'}")             # A
-print(f"\U00000041{2}")     # A2
+print(f"\u0041{1+1}")          # A2
+print(f"\U00000041{2}")        # A2
 
 # \u in triple-quoted strings
-print("""\U00000041""")     # A
-print("""A""")              # A
+print("""\u0041""")             # A
+print("""\U00000041""")         # A
 
 # \u and \U for the same codepoint are equal
-print("A" == "\U00000041")  # True
+print("\u0041" == "\U00000041")  # True
 print(ord("\U0001F600") == ord("\U0001F600"))  # True
