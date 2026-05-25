@@ -216,6 +216,7 @@ pub enum Expr {
     Bytes(Vec<u8>),
     Bool(bool),
     None,
+    Ellipsis,
     /// An f-string: `f"Hello, {name}!"`
     FString(Vec<FStringPart>),
     Var(String),

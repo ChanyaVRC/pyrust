@@ -1082,6 +1082,7 @@ fn pykey_type_name(k: &PyKey) -> std::borrow::Cow<'static, str> {
         PyKey::Bool(_) => std::borrow::Cow::Borrowed("bool"),
         PyKey::Str(_) => std::borrow::Cow::Borrowed("str"),
         PyKey::None => std::borrow::Cow::Borrowed("NoneType"),
+        PyKey::Ellipsis => std::borrow::Cow::Borrowed("ellipsis"),
         PyKey::FrozenSet(_) => std::borrow::Cow::Borrowed("frozenset"),
         PyKey::Tuple(_) => std::borrow::Cow::Borrowed("tuple"),
         PyKey::Object { value, .. } => builtin_type_name(value),

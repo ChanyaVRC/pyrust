@@ -1844,6 +1844,10 @@ impl Parser {
                 self.bump();
                 Ok(Expr::None)
             }
+            Some(Token::Ellipsis) => {
+                self.bump();
+                Ok(Expr::Ellipsis)
+            }
             Some(Token::Ident(name)) => {
                 self.bump();
                 Ok(Expr::Var(name))
