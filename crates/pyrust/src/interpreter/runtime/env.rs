@@ -678,6 +678,42 @@ impl Interpreter {
                     )
                     .map(|_| ());
                 }
+                // PEP 3134: __cause__ and __context__ must be None or a
+                // BaseException subclass instance.  __suppress_context__ must
+                // be a bool.  CPython enforces these in the C slot setters;
+                // not enforcing them makes pyrust silently accept bad values
+                // that CPython raises TypeError for (issue #1066 review).
+                if is_exception_class(&class) {
+                    match name {
+                        "__cause__" | "__context__" => {
+                            let ok = match value.kind() {
+                                ValueKind::None => true,
+                                ValueKind::PyInstance(inst) => {
+                                    is_exception_class(&inst.borrow().class)
+                                }
+                                _ => false,
+                            };
+                            if !ok {
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    format!(
+                                        "exception {} must be None or derive from BaseException",
+                                        if name == "__cause__" { "cause" } else { "context" }
+                                    ),
+                                ));
+                            }
+                        }
+                        "__suppress_context__" => {
+                            if !matches!(value.kind(), ValueKind::Bool(_)) {
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    "attribute value type must be bool",
+                                ));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 instance.borrow_mut().attrs.insert(name.to_string(), value);
                 Ok(())
             }

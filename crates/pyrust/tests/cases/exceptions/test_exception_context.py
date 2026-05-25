@@ -74,6 +74,23 @@ print(e3.__cause__ is cause_val)  # True
 e3.__cause__ = None
 print(e3.__cause__)               # None
 
+# --- Type validation: __cause__/__context__ must be None or BaseException; __suppress_context__ must be bool ---
+e5 = ValueError("typecheck")
+try:
+    e5.__cause__ = "not an exception"
+except TypeError as te:
+    print(type(te).__name__)  # TypeError
+
+try:
+    e5.__context__ = 42
+except TypeError as te:
+    print(type(te).__name__)  # TypeError
+
+try:
+    e5.__suppress_context__ = "not a bool"
+except TypeError as te:
+    print(type(te).__name__)  # TypeError
+
 # --- StopIteration: has .value and also the context attrs ---
 e4 = StopIteration(42)
 print(e4.value)                  # 42
