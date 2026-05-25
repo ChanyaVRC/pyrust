@@ -2161,22 +2161,21 @@ pyrust_module! {
             std::io::stdout().flush().ok();
         }
         // Read one line from stdin.
+        // CPython raises OSError for real I/O errors and EOFError only for EOF.
         let mut line = String::new();
         let n = std::io::stdin()
             .read_line(&mut line)
-            .map_err(|e| PyError::named("EOFError", e.to_string()))?;
+            .map_err(|e| PyError::named("OSError", e.to_string()))?;
         if n == 0 {
             return Err(PyError::named(
                 "EOFError",
                 "EOF when reading a line".to_string(),
             ));
         }
-        // Strip trailing \r\n or \n.
+        // CPython strips only the trailing '\n'; it does NOT strip '\r'.
+        // On Linux, a \r\n line from stdin should return "hello\r", not "hello".
         if line.ends_with('\n') {
             line.pop();
-            if line.ends_with('\r') {
-                line.pop();
-            }
         }
         Ok(Value::string(line))
     }
