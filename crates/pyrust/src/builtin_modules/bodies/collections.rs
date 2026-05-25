@@ -1500,6 +1500,7 @@ fn key_to_value(key: PyKey) -> Value {
         PyKey::Str(s) => s,
         PyKey::Bool(b) => Value::bool_(b),
         PyKey::None => Value::none(),
+        PyKey::Ellipsis => Value::ellipsis(),
         PyKey::FrozenSet(items) => {
             pyrust_builtins::frozenset::frozenset(items.into_iter().collect())
         }

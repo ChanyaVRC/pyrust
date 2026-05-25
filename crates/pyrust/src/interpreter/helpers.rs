@@ -1138,6 +1138,7 @@ pub(crate) fn key_to_value(key: PyKey) -> Value {
         PyKey::Str(v) => v,
         PyKey::Bool(v) => Value::bool_(v),
         PyKey::None => Value::none(),
+        PyKey::Ellipsis => Value::ellipsis(),
         PyKey::FrozenSet(items) => {
             let mut set = indexmap::IndexSet::new();
             for k in items {
@@ -1806,6 +1807,8 @@ fn collect_declared_names_from_block(
 fn values_are_identical(a: &Value, b: &Value) -> bool {
     match (a.kind(), b.kind()) {
         (ValueKind::None, ValueKind::None) => true,
+        (ValueKind::NotImplemented, ValueKind::NotImplemented) => true,
+        (ValueKind::Ellipsis, ValueKind::Ellipsis) => true,
         (ValueKind::Bool(x), ValueKind::Bool(y)) => x == y,
         (ValueKind::Int(x), ValueKind::Int(y)) => x == y,
         (ValueKind::PyInstance(x), ValueKind::PyInstance(y)) => Rc::ptr_eq(x, y),
@@ -2098,7 +2101,8 @@ fn is_pure_expr(
         | Expr::Str(_)
         | Expr::Bytes(_)
         | Expr::Bool(_)
-        | Expr::None => true,
+        | Expr::None
+        | Expr::Ellipsis => true,
         // A variable read is pure only when it refers to a local register in the
         // current function scope.  Reads of free variables (globals, names captured
         // from an enclosing scope) are inherently impure: the caller cannot

@@ -972,7 +972,8 @@ fn lambda_captures_in_expr(
         | Expr::Str(_)
         | Expr::Bytes(_)
         | Expr::Bool(_)
-        | Expr::None => {}
+        | Expr::None
+        | Expr::Ellipsis => {}
         Expr::Yield(Some(e)) => lambda_captures_in_expr(e, local_index, is_class_scope, cells),
         Expr::Yield(None) => {}
         Expr::YieldFrom(e) => lambda_captures_in_expr(e, local_index, is_class_scope, cells),
@@ -1424,7 +1425,8 @@ fn collect_class_lambda_outer_refs_in_expr(
         | Expr::Str(_)
         | Expr::Bytes(_)
         | Expr::Bool(_)
-        | Expr::None => {}
+        | Expr::None
+        | Expr::Ellipsis => {}
         Expr::Yield(Some(e)) => {
             collect_class_lambda_outer_refs_in_expr(e, local_index, class_locals, cells)
         }
@@ -1690,7 +1692,8 @@ fn collect_free_var_reads_in_expr(expr: &Expr, uses: &mut HashSet<String>) {
         | Expr::Bytes(_)
         | Expr::Complex(_, _)
         | Expr::Bool(_)
-        | Expr::None => {}
+        | Expr::None
+        | Expr::Ellipsis => {}
         Expr::Yield(Some(e)) => collect_free_var_reads_in_expr(e, uses),
         Expr::Yield(None) => {}
         Expr::YieldFrom(e) => collect_free_var_reads_in_expr(e, uses),
@@ -2066,7 +2069,8 @@ fn collect_transitive_free_vars_in_expr(expr: &Expr, uses: &mut HashSet<String>)
         | Expr::Str(_)
         | Expr::Bytes(_)
         | Expr::Bool(_)
-        | Expr::None => {}
+        | Expr::None
+        | Expr::Ellipsis => {}
         Expr::Yield(Some(e)) => collect_transitive_free_vars_in_expr(e, uses),
         Expr::Yield(None) => {}
         Expr::YieldFrom(e) => collect_transitive_free_vars_in_expr(e, uses),
@@ -2107,6 +2111,7 @@ fn fold_constant(expr: &Expr) -> Option<Value> {
         Expr::Complex(re, im) => Some(Value::complex(*re, *im)),
         Expr::Bool(b) => Some(Value::bool_(*b)),
         Expr::None => Some(Value::none()),
+        Expr::Ellipsis => Some(Value::ellipsis()),
         Expr::Unary { op, expr } => {
             let val = fold_constant(expr)?;
             match op {
@@ -2426,6 +2431,7 @@ fn expr_is_side_effect_free(expr: &Expr) -> bool {
         | Expr::Bytes(_)
         | Expr::Bool(_)
         | Expr::None
+        | Expr::Ellipsis
         | Expr::Var(_) => true,
         Expr::Unary { expr, .. } => expr_is_side_effect_free(expr),
         Expr::Binary { left, right, op: _ } => {
@@ -2601,7 +2607,8 @@ fn expr_is_invariant(expr: &Expr, written: &HashSet<String>) -> bool {
         | Expr::Bytes(_)
         | Expr::Complex(_, _)
         | Expr::Bool(_)
-        | Expr::None => true,
+        | Expr::None
+        | Expr::Ellipsis => true,
         Expr::Var(name) => !written.contains(name.as_str()),
         Expr::Binary { left, right, .. } => {
             expr_is_invariant(left, written) && expr_is_invariant(right, written)
@@ -2962,7 +2969,8 @@ fn expr_safe(expr: &Expr, i_name: &str, c_name: &str) -> bool {
         | Expr::Str(_)
         | Expr::Bytes(_)
         | Expr::Bool(_)
-        | Expr::None => true,
+        | Expr::None
+        | Expr::Ellipsis => true,
         Expr::Var(n) => {
             // A bare reference to `i` outside of `c[i]` would still need to
             // see the index, not the value — bail.  Bare `c` reads are fine.
@@ -3197,7 +3205,8 @@ fn expr_reads_var(expr: &Expr, name: &str) -> bool {
         | Expr::Str(_)
         | Expr::Bytes(_)
         | Expr::Bool(_)
-        | Expr::None => false,
+        | Expr::None
+        | Expr::Ellipsis => false,
         Expr::FString(parts) => any_fstring_expr(parts, &mut |e| expr_reads_var(e, name)),
         Expr::Unary { expr, .. } => expr_reads_var(expr, name),
         Expr::Binary { left, right, .. } => {
@@ -3395,6 +3404,7 @@ fn rewrite_c_at_i_in_expr(expr: &mut Expr, c_name: &str, i_name: &str) {
         | Expr::Bytes(_)
         | Expr::Bool(_)
         | Expr::None
+        | Expr::Ellipsis
         | Expr::Var(_) => {}
         Expr::FString(parts) => {
             for_each_fstring_expr_mut(parts, &mut |e| rewrite_c_at_i_in_expr(e, c_name, i_name));
@@ -3750,6 +3760,7 @@ impl Compiler {
             Expr::Complex(re, im) => Some(self.intern_const(Value::complex(*re, *im))),
             Expr::Bool(b) => Some(self.intern_const(Value::bool_(*b))),
             Expr::None => Some(self.intern_const(Value::none())),
+            Expr::Ellipsis => Some(self.intern_const(Value::ellipsis())),
             _ => fold_constant(expr).map(|v| self.intern_const(v)),
         }
     }
@@ -7248,6 +7259,7 @@ impl Compiler {
                 self.emit(Insn::LoadNone(dst));
                 dst
             }
+            Expr::Ellipsis => self.compile_literal(Value::ellipsis()),
             Expr::Int(v) => self.compile_literal(Value::int(*v)),
             Expr::BigInt(s) => {
                 // The decimal string was validated at lex time; parse cannot fail.

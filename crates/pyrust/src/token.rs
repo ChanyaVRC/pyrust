@@ -76,7 +76,8 @@ pub enum Token {
     Walrus, // :=
     Semicolon,
     Dot,
-    Arrow, // ->
+    Ellipsis, // ...
+    Arrow,    // ->
     // Comparison / assignment
     Assign,
     Eq,

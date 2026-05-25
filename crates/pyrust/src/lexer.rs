@@ -432,8 +432,13 @@ impl Lexer {
                     }
                 }
                 Some('.') => {
-                    self.tokens.push(Token::Dot);
-                    pos += 1;
+                    if chars.get(pos + 1) == Some(&'.') && chars.get(pos + 2) == Some(&'.') {
+                        self.tokens.push(Token::Ellipsis);
+                        pos += 3;
+                    } else {
+                        self.tokens.push(Token::Dot);
+                        pos += 1;
+                    }
                 }
                 Some('=') => {
                     if chars.get(pos + 1) == Some(&'=') {

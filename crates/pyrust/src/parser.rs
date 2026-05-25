@@ -282,6 +282,10 @@ impl Parser {
                 self.bump();
                 Ok(Pattern::Literal(Expr::None))
             }
+            Some(Token::Ellipsis) => {
+                self.bump();
+                Ok(Pattern::Literal(Expr::Ellipsis))
+            }
             // Name: could be a capture pattern or the start of a class pattern.
             // A name followed by `(` → class pattern.
             // Otherwise → capture pattern (or dotted value pattern, not supported here).
@@ -1843,6 +1847,10 @@ impl Parser {
             Some(Token::None) => {
                 self.bump();
                 Ok(Expr::None)
+            }
+            Some(Token::Ellipsis) => {
+                self.bump();
+                Ok(Expr::Ellipsis)
             }
             Some(Token::Ident(name)) => {
                 self.bump();

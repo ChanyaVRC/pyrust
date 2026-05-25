@@ -279,6 +279,7 @@ pub enum PyKey {
     Str(Value),
     Bool(bool),
     None,
+    Ellipsis,
     /// Hashable frozenset key.  Stores a sorted-canonical Vec of inner keys
     /// so equality and hashing are content-based (matching CPython).
     FrozenSet(Vec<PyKey>),
@@ -415,6 +416,7 @@ impl PartialEq for PyKey {
             }
             (PyKey::Str(a), PyKey::Str(b)) => a.as_str() == b.as_str(),
             (PyKey::None, PyKey::None) => true,
+            (PyKey::Ellipsis, PyKey::Ellipsis) => true,
             (PyKey::FrozenSet(a), PyKey::FrozenSet(b)) => a == b,
             (PyKey::Tuple(a), PyKey::Tuple(b)) => a == b,
             (PyKey::Object { value: a, .. }, PyKey::Object { value: b, .. }) => a == b,
@@ -500,6 +502,9 @@ impl Hash for PyKey {
                 // (issue #906).
                 (py_hash_none() as u64).hash(state);
             }
+            PyKey::Ellipsis => {
+                (py_hash_ellipsis() as u64).hash(state);
+            }
             PyKey::FrozenSet(items) => {
                 4u8.hash(state);
                 for k in items {
@@ -568,6 +573,15 @@ impl indexmap::Equivalent<PyKey> for StrKey<'_> {
 pub fn py_hash_none() -> i64 {
     static NONE_SENTINEL: u8 = 0;
     let addr = (&NONE_SENTINEL as *const u8 as usize) >> 4;
+    let h = (addr as i64).wrapping_rem((1i64 << 61) - 1);
+    if h == 0 || h == -1 { 2654435761 } else { h }
+}
+
+/// Compute a stable per-process hash for `Ellipsis`, matching CPython's
+/// approach of using the object's identity address.
+pub fn py_hash_ellipsis() -> i64 {
+    static ELLIPSIS_SENTINEL: u8 = 0;
+    let addr = (&ELLIPSIS_SENTINEL as *const u8 as usize) >> 4;
     let h = (addr as i64).wrapping_rem((1i64 << 61) - 1);
     if h == 0 || h == -1 { 2654435761 } else { h }
 }
@@ -655,6 +669,7 @@ pub fn py_hash_pykey(key: &PyKey) -> i64 {
             h as i64
         }
         PyKey::None => py_hash_none(),
+        PyKey::Ellipsis => py_hash_ellipsis(),
         PyKey::Tuple(items) => {
             // CPython 3.12 xxHash-based tuplehash (Python 3.8+ algorithm).
             const PRIME1: u64 = 11400714785074694791;
@@ -871,6 +886,10 @@ const UNSET_BITS: u64 = 0x7FF8_0000_0000_BAD0;
 /// `UNSET_BITS` — not classified as a float by `top16()`-based checks
 /// because we test the exact bit pattern explicitly. See [`Value::not_implemented`].
 const NOT_IMPLEMENTED_BITS: u64 = 0x7FF8_0000_0000_BAD2;
+/// The `Ellipsis` singleton (`...`). Stored as a reserved NaN-box pattern
+/// in the same positive-NaN family as `UNSET_BITS` and `NOT_IMPLEMENTED_BITS`.
+/// Must be tested explicitly before the float arm in `kind()` / `is_float()`.
+const ELLIPSIS_BITS: u64 = 0x7FF8_0000_0000_BAD4;
 const TAG_BOOL_BITS: u64 = 0xFFFA_0000_0000_0000;
 const TAG_INT_BITS: u64 = 0xFFFB_0000_0000_0000;
 const TAG_STR_BITS: u64 = 0xFFFC_0000_0000_0000;
@@ -1471,6 +1490,9 @@ pub enum ValueKind<'a> {
     /// pattern, and `kind()` decodes it here so existing matchers keep
     /// working.  Identity-test via `Value::is_not_implemented()` is cheaper.
     NotImplemented,
+    /// Synthesized view of the `Ellipsis` singleton (`...`).  Encoded as a
+    /// reserved NaN-box bit pattern; no `Opaque` variant.
+    Ellipsis,
     Bytes(&'a Rc<Vec<u8>>),
     Complex(f64, f64),
     BuiltinObject {
@@ -1935,6 +1957,14 @@ impl Value {
         self.0 == NOT_IMPLEMENTED_BITS
     }
 
+    pub fn ellipsis() -> Self {
+        Value(ELLIPSIS_BITS)
+    }
+
+    pub fn is_ellipsis(&self) -> bool {
+        self.0 == ELLIPSIS_BITS
+    }
+
     pub fn py_class(c: Rc<RefCell<PyClass>>) -> Self {
         Value::opaque(Opaque::PyClass(c))
     }
@@ -2058,9 +2088,9 @@ impl Value {
     }
 
     pub fn is_float(&self) -> bool {
-        // Exclude the reserved positive-NaN sentinels (UNSET, NotImplemented)
-        // whose `top16` falls in the float range but which aren't floats.
-        if self.0 == NOT_IMPLEMENTED_BITS || self.0 == UNSET_BITS {
+        // Exclude the reserved positive-NaN sentinels (UNSET, NotImplemented,
+        // Ellipsis) whose `top16` falls in the float range but which aren't floats.
+        if self.0 == NOT_IMPLEMENTED_BITS || self.0 == UNSET_BITS || self.0 == ELLIPSIS_BITS {
             return false;
         }
         top16(self.0) <= TAG_FLOAT_MAX
@@ -2682,10 +2712,13 @@ impl Value {
             "Value::kind() called on an uninitialised register slot (Value::unset()). \
              A CheckLocal instruction is missing for this read."
         );
-        // NotImplemented is encoded as a reserved NaN-box bit pattern; check
-        // before the float arm so it doesn't get classified as a float NaN.
+        // Reserved NaN-box sentinels: check before the float arm so they
+        // don't get classified as float NaNs.
         if self.0 == NOT_IMPLEMENTED_BITS {
             return ValueKind::NotImplemented;
+        }
+        if self.0 == ELLIPSIS_BITS {
+            return ValueKind::Ellipsis;
         }
         match top16(self.0) {
             t if t <= TAG_FLOAT_MAX => ValueKind::Float(self.as_float_raw()),
@@ -2781,6 +2814,7 @@ impl Value {
             ValueKind::SuperProxyClass { .. } => true,
             ValueKind::Generator(_) => true,
             ValueKind::NotImplemented => true,
+            ValueKind::Ellipsis => true,
             // (NaN-box pattern handled by kind() dispatch above; included
             // in this match for completeness.)
             ValueKind::Bytes(b) => !b.is_empty(),
@@ -2816,6 +2850,7 @@ impl Value {
                 }
             }
             ValueKind::None => "None".to_string(),
+            ValueKind::Ellipsis => "Ellipsis".to_string(),
             ValueKind::List(items) => {
                 // Cycle detection (#364): if the same list is already being
                 // formatted further up the call stack, emit CPython's
@@ -2976,6 +3011,7 @@ impl Value {
             ValueKind::Str(_) => Some(PyKey::Str(self.clone())),
             ValueKind::Bool(v) => Some(PyKey::Bool(v)),
             ValueKind::None => Some(PyKey::None),
+            ValueKind::Ellipsis => Some(PyKey::Ellipsis),
             ValueKind::BuiltinObject { ops, state } => ops.to_key(state),
             ValueKind::Tuple(items) => {
                 // Recursively hash each element.  If any element is itself
@@ -3198,6 +3234,7 @@ impl PartialEq for Value {
             (ValueKind::Bool(a), ValueKind::Float(b)) => (a as u8 as f64) == b,
             (ValueKind::Float(a), ValueKind::Bool(b)) => a == (b as u8 as f64),
             (ValueKind::None, ValueKind::None) => true,
+            (ValueKind::Ellipsis, ValueKind::Ellipsis) => true,
             // `Ref<T>` doesn't impl `==` directly — deref to compare the
             // underlying containers.  `*a == *b` calls Vec/IndexMap/IndexSet's
             // `PartialEq`, which is what we want.
@@ -3313,6 +3350,7 @@ pub fn builtin_type_name(value: &Value) -> Cow<'static, str> {
         ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => Cow::Borrowed("super"),
         ValueKind::Generator(_) => Cow::Borrowed("generator"),
         ValueKind::NotImplemented => Cow::Borrowed("NotImplementedType"),
+        ValueKind::Ellipsis => Cow::Borrowed("ellipsis"),
         ValueKind::BuiltinObject { ops, .. } => Cow::Borrowed(ops.type_name()),
     }
 }
@@ -3424,6 +3462,7 @@ pub fn key_repr(key: &PyKey) -> String {
             }
         }
         PyKey::None => "None".to_string(),
+        PyKey::Ellipsis => "Ellipsis".to_string(),
         PyKey::FrozenSet(items) => {
             if items.is_empty() {
                 "frozenset()".to_string()

@@ -1024,6 +1024,7 @@ pyrust_module! {
             ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => Ok(Value::builtin_function("super")),
             ValueKind::Generator(_) => Ok(Value::builtin_function("generator")),
             ValueKind::NotImplemented => Ok(Value::builtin_function("NotImplementedType")),
+            ValueKind::Ellipsis => Ok(Value::builtin_function("ellipsis")),
             ValueKind::BuiltinObject { ops, .. } => {
                 Ok(Value::builtin_function(ops.type_name()))
             }
@@ -3104,6 +3105,8 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
     // type tokens).
     match (obj.kind(), cls.kind()) {
         (ValueKind::None, ValueKind::BuiltinFunction("NoneType")) => true,
+        (ValueKind::NotImplemented, ValueKind::BuiltinFunction("NotImplementedType")) => true,
+        (ValueKind::Ellipsis, ValueKind::BuiltinFunction("ellipsis")) => true,
         (ValueKind::BuiltinObject { ops, .. }, ValueKind::BuiltinFunction(name)) => {
             ops.type_name() == name
         }
