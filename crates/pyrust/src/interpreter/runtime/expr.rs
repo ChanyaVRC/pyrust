@@ -398,6 +398,11 @@ impl Interpreter {
             }
             ValueKind::PyInstance(inst) => {
                 let inst_rc = Rc::clone(inst);
+                // Issue #976: if the instance has a backing primitive value
+                // (dict / list / set subclass), delegate subscript to it.
+                if let Some(backing) = instance_builtin_data(&inst_rc) {
+                    return self.eval_index(backing, index);
+                }
                 let class = Rc::clone(&inst_rc.borrow().class);
                 if let Some(method_val) = lookup_class_attr(&class, "__getitem__") {
                     return invoke_class_method(

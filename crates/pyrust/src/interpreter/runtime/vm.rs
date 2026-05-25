@@ -1878,6 +1878,54 @@ impl Interpreter {
                                 let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
                                 if let ValueKind::PyInstance(inst) = obj_val.kind() {
                                     let inst_rc = Rc::clone(inst);
+                                    // Issue #976: delegate to backing primitive
+                                    // value for dict/list/set subclasses.
+                                    if let Some(backing) =
+                                        instance_builtin_data(&inst_rc)
+                                    {
+                                        // Determine backing kind before any
+                                        // mutable borrow (kind() holds a shared
+                                        // borrow on Dict/List RefCells).
+                                        enum BkKind { Dict, List, Other }
+                                        let bk_kind = match backing.kind() {
+                                            ValueKind::Dict(_) => BkKind::Dict,
+                                            ValueKind::List(_) => BkKind::List,
+                                            _ => BkKind::Other,
+                                        };
+                                        match bk_kind {
+                                            BkKind::Dict => {
+                                                let key = vm_try!(
+                                                    self.value_to_pykey(&idx_val)
+                                                );
+                                                backing.dict_with_mut(|dict| {
+                                                    dict.insert(key, val_val);
+                                                });
+                                            }
+                                            BkKind::List => {
+                                                let len = backing
+                                                    .list_len()
+                                                    .unwrap_or(0);
+                                                let i = vm_try!(
+                                                    normalize_index_write(
+                                                        &idx_val,
+                                                        len,
+                                                        "list",
+                                                    )
+                                                );
+                                                backing.list_with_mut(|items| {
+                                                    items[i] = val_val;
+                                                });
+                                            }
+                                            BkKind::Other => {
+                                                vm_try!(Err(PyError::named(
+                                                    "TypeError",
+                                                    "object does not support item assignment"
+                                                        .to_string(),
+                                                )));
+                                            }
+                                        }
+                                        continue;
+                                    }
                                     let class = Rc::clone(&inst_rc.borrow().class);
                                     if let Some(method_val) =
                                         lookup_class_attr(&class, "__setitem__")
@@ -3854,8 +3902,41 @@ impl Interpreter {
                             let epoch_ok = pyrust_core::class_epoch() == *epoch;
                             if same_class && no_shadow && version_ok && epoch_ok {
                                 let unbound = unbound.clone();
-                                let inst_val = Value::py_instance(Rc::clone(inst_rc));
+                                let inst_rc_clone = Rc::clone(inst_rc);
                                 drop(inst);
+                                // Issue #976: if the cached method is a primitive
+                                // builtin (list.X / dict.X / set.X) and the instance
+                                // has a __builtin_data__ backing value, dispatch
+                                // directly to the backing primitive.
+                                // invoke_class_method cannot handle BuiltinFunction
+                                // method names — it looks them up in the top-level
+                                // registry which has no "list.append" entry.
+                                if let ValueKind::BuiltinFunction(fn_name) = unbound.kind() {
+                                    if let Some((prim_type, prim_method)) =
+                                        fn_name.split_once('.')
+                                        .filter(|(t, _)| matches!(*t, "dict" | "list" | "set"))
+                                    {
+                                        if let Some(backing) = instance_builtin_data(&inst_rc_clone) {
+                                            let result = match prim_type {
+                                                "list" => {
+                                                    let empty_kw = indexmap::IndexMap::new();
+                                                    pyrust_builtins::list::call(
+                                                        prim_method, &backing, args, &empty_kw,
+                                                    )
+                                                }
+                                                "dict" => {
+                                                    self.call_dict_method(prim_method, backing, args)
+                                                }
+                                                "set" => {
+                                                    self.call_set_method(prim_method, backing, args)
+                                                }
+                                                _ => unreachable!(),
+                                            };
+                                            return result;
+                                        }
+                                    }
+                                }
+                                let inst_val = Value::py_instance(inst_rc_clone);
                                 let mut buf = std::mem::take(&mut self.call_arg_buf);
                                 buf.clear();
                                 for arg in args.iter() {

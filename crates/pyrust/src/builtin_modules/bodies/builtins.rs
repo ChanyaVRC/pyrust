@@ -22,6 +22,7 @@ use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, P
 use crate::interpreter::{
     NativeIterFrame, apply_format_spec, ascii_repr, bigint_divmod_floor, class_is_subclass_of,
     compare_values, compare_values_with_op, dir_names, instance_attrs_snapshot,
+    instance_builtin_data,
     int_pow_promoting, invoke_class_method,
     is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_hash_bigint, py_hash_float,
     py_hash_int, py_mod_i64, py_round_half_even, py_round_half_even_f64,
@@ -1190,34 +1191,57 @@ pyrust_module! {
             },
             ValueKind::PyInstance(inst) => {
                 let inst_rc = Rc::clone(inst);
-                let class = Rc::clone(&inst_rc.borrow().class);
-                if let Some(method_val) = lookup_class_attr(&class, "__len__") {
-                    let result = invoke_class_method(
-                        _interp,
-                        method_val,
-                        Value::py_instance(inst_rc),
-                        &[],
-                    )?;
-                    match result.kind() {
-                        ValueKind::Int(n) if n >= 0 => n,
-                        ValueKind::Int(_) => return Err(PyError::named(
-                            "ValueError",
-                            "__len__() should return >= 0".to_string(),
-                        )),
-                        ValueKind::Bool(b) => if b { 1 } else { 0 },
-                        _ => return Err(PyError::named(
-                            "TypeError",
-                            "__len__ returned non-int".to_string(),
-                        )),
+                // Issue #976: delegate to backing primitive for dict/list/set
+                // subclasses constructed by call_class_expanded.
+                if let Some(backing) = instance_builtin_data(&inst_rc) {
+                    match backing.kind() {
+                        ValueKind::List(items) => items.len() as i64,
+                        ValueKind::Dict(items) => items.len() as i64,
+                        ValueKind::Set(items) => items.len() as i64,
+                        _ => {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "object of type '{}' has no len()",
+                                    inst_rc.borrow().class.borrow().name,
+                                ),
+                            ));
+                        }
                     }
                 } else {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "object of type '{}' has no len()",
-                            inst_rc.borrow().class.borrow().name,
-                        ),
-                    ));
+                    let class = Rc::clone(&inst_rc.borrow().class);
+                    if let Some(method_val) = lookup_class_attr(&class, "__len__") {
+                        let result = invoke_class_method(
+                            _interp,
+                            method_val,
+                            Value::py_instance(inst_rc),
+                            &[],
+                        )?;
+                        match result.kind() {
+                            ValueKind::Int(n) if n >= 0 => n,
+                            ValueKind::Int(_) => {
+                                return Err(PyError::named(
+                                    "ValueError",
+                                    "__len__() should return >= 0".to_string(),
+                                ))
+                            }
+                            ValueKind::Bool(b) => if b { 1 } else { 0 },
+                            _ => {
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    "__len__ returned non-int".to_string(),
+                                ))
+                            }
+                        }
+                    } else {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "object of type '{}' has no len()",
+                                inst_rc.borrow().class.borrow().name,
+                            ),
+                        ));
+                    }
                 }
             }
             _ => {
@@ -1920,37 +1944,104 @@ pyrust_module! {
     /// <https://docs.python.org/3/library/functions.html#func-dict>
     #[pure]
     fn dict(args) -> Result<Value> {
-        reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.is_empty() {
-            return Ok(Value::dict(indexmap::IndexMap::new()));
+        // Separate positional and keyword args.
+        // CPython: dict([mapping_or_iterable], **kwargs)
+        let mut pos_args: Vec<&ExpandedCallArg> = Vec::new();
+        let mut kw_pairs: Vec<(String, Value)> = Vec::new();
+        for a in args {
+            match &a.name {
+                None => pos_args.push(a),
+                Some(n) => kw_pairs.push((n.clone(), a.value.clone())),
+            }
         }
-        if args.len() == 1 {
-            match args[0].value.kind() {
+        if pos_args.len() > 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "{FN_NAME} takes at most 1 positional argument ({} given)",
+                    pos_args.len()
+                ),
+            ));
+        }
+
+        let mut result: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
+
+        // Process the optional positional argument.
+        if let Some(arg) = pos_args.first() {
+            match arg.value.kind() {
                 ValueKind::Dict(map) => {
-                    return Ok(Value::dict(map.clone()));
+                    result.extend(map.clone());
                 }
                 ValueKind::BuiltinObject { ops, .. }
                     if ops.type_name() == pyrust_builtins::mapping_proxy::TYPE_NAME =>
                 {
                     if let Some(class_rc) =
-                        pyrust_builtins::mapping_proxy::as_class_rc(&args[0].value)
+                        pyrust_builtins::mapping_proxy::as_class_rc(&arg.value)
                     {
                         let class = class_rc.borrow();
-                        let mut d: indexmap::IndexMap<PyKey, Value> =
-                            indexmap::IndexMap::new();
                         for (k, v) in class.attrs.iter() {
-                            d.insert(PyKey::str_from(k), v.clone());
+                            result.insert(PyKey::str_from(k), v.clone());
                         }
-                        return Ok(Value::dict(d));
                     }
                 }
-                _ => {}
+                // PyInstance with a backing dict (dict subclass).
+                ValueKind::PyInstance(inst) => {
+                    let inst_rc = Rc::clone(inst);
+                    if let Some(backing) = instance_builtin_data(&inst_rc) {
+                        if let Some(map) = backing.as_dict() {
+                            result.extend(map.clone());
+                        } else {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!("{FN_NAME}() argument must be a mapping or iterable"),
+                            ));
+                        }
+                    } else {
+                        // Treat as iterable of (key, value) pairs.
+                        let pairs = _interp.collect_iterable(arg.value.clone())?;
+                        for pair in pairs {
+                            let items = _interp.collect_iterable(pair)?;
+                            if items.len() != 2 {
+                                return Err(PyError::named(
+                                    "ValueError",
+                                    format!(
+                                        "{FN_NAME}() update sequence element has length {}; 2 is required",
+                                        items.len()
+                                    ),
+                                ));
+                            }
+                            let key = _interp.value_to_pykey(&items[0])?;
+                            result.insert(key, items[1].clone());
+                        }
+                    }
+                }
+                _ => {
+                    // Treat as iterable of (key, value) pairs.
+                    let pairs = _interp.collect_iterable(arg.value.clone())?;
+                    for pair in pairs {
+                        let items = _interp.collect_iterable(pair)?;
+                        if items.len() != 2 {
+                            return Err(PyError::named(
+                                "ValueError",
+                                format!(
+                                    "{FN_NAME}() update sequence element has length {}; 2 is required",
+                                    items.len()
+                                ),
+                            ));
+                        }
+                        let key = _interp.value_to_pykey(&items[0])?;
+                        result.insert(key, items[1].clone());
+                    }
+                }
             }
         }
-        Err(PyError::named(
-            "TypeError",
-            format!("{FN_NAME}() with arguments is not yet supported"),
-        ))
+
+        // Apply keyword arguments.
+        for (name, value) in kw_pairs {
+            result.insert(PyKey::str_from(&name), value);
+        }
+
+        Ok(Value::dict(result))
     }
 
     /// CPython: print(*objects, sep=' ', end='\n', file=sys.stdout, flush=False).
