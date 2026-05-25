@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ast::{
-    AssignTarget, BinaryOp, CompClause, DictItem, Expr, FStringPart, FunctionParam, MatchArm,
-    Pattern, Stmt, UnaryOp,
+    AssignTarget, BinaryOp, CallArg, CompClause, DictItem, Expr, FStringPart, FunctionParam,
+    MatchArm, Pattern, Stmt, UnaryOp,
 };
 use crate::bytecode::{
     AttrCacheEntry, BinOpCacheEntry, CellVar, FnCode, FnParamSpec, FnProto, GLOBAL_CACHE_EMPTY,
@@ -808,6 +808,83 @@ fn all_fstring_exprs<F: FnMut(&Expr) -> bool>(parts: &[FStringPart], pred: &mut 
     })
 }
 
+/// Collect names bound by walrus (`:=`) inside `expr`, without descending
+/// into nested comprehensions, lambdas, or generator expressions (they create
+/// their own implicit scopes, so their walrus targets don't propagate here).
+fn collect_walrus_writes_in_expr(expr: &Expr, out: &mut HashSet<String>) {
+    match expr {
+        Expr::Named { target, value } => {
+            out.insert(target.clone());
+            collect_walrus_writes_in_expr(value, out);
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_walrus_writes_in_expr(left, out);
+            collect_walrus_writes_in_expr(right, out);
+        }
+        Expr::Unary { expr: e, .. } => collect_walrus_writes_in_expr(e, out),
+        Expr::Compare { left, ops } => {
+            collect_walrus_writes_in_expr(left, out);
+            for (_, e) in ops {
+                collect_walrus_writes_in_expr(e, out);
+            }
+        }
+        Expr::Call { func, args } => {
+            collect_walrus_writes_in_expr(func, out);
+            for a in args {
+                collect_walrus_writes_in_expr(&a.value, out);
+            }
+        }
+        Expr::Ternary { cond, then, else_ } => {
+            collect_walrus_writes_in_expr(cond, out);
+            collect_walrus_writes_in_expr(then, out);
+            collect_walrus_writes_in_expr(else_, out);
+        }
+        Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
+            for e in items {
+                collect_walrus_writes_in_expr(e, out);
+            }
+        }
+        Expr::Dict(items) => {
+            for item in items {
+                match item {
+                    DictItem::Pair(k, v) => {
+                        collect_walrus_writes_in_expr(k, out);
+                        collect_walrus_writes_in_expr(v, out);
+                    }
+                    DictItem::DoubleSplat(e) => collect_walrus_writes_in_expr(e, out),
+                }
+            }
+        }
+        Expr::Index { target, index } => {
+            collect_walrus_writes_in_expr(target, out);
+            collect_walrus_writes_in_expr(index, out);
+        }
+        Expr::Attr { target, .. } => collect_walrus_writes_in_expr(target, out),
+        Expr::Starred(e) => collect_walrus_writes_in_expr(e, out),
+        Expr::Slice {
+            target,
+            lower,
+            upper,
+            step,
+        } => {
+            collect_walrus_writes_in_expr(target, out);
+            for e in [lower, upper, step].iter().flat_map(|o| o.as_deref()) {
+                collect_walrus_writes_in_expr(e, out);
+            }
+        }
+        Expr::FString(parts) => {
+            for_each_fstring_expr(parts, &mut |e| collect_walrus_writes_in_expr(e, out));
+        }
+        // Nested comprehensions/lambdas/genexps create their own scope.
+        Expr::ListComp { .. }
+        | Expr::SetComp { .. }
+        | Expr::DictComp { .. }
+        | Expr::GenExp { .. }
+        | Expr::Lambda { .. } => {}
+        _ => {}
+    }
+}
+
 fn lambda_captures_in_expr(
     expr: &Expr,
     local_index: &HashMap<String, Reg>,
@@ -894,27 +971,23 @@ fn lambda_captures_in_expr(
                 }
             }
         }
-        Expr::ListComp { elt, clauses } | Expr::SetComp { elt, clauses } => {
-            for clause in clauses {
-                lambda_captures_in_expr(&clause.iter, local_index, is_class_scope, cells);
-                if let Some(c) = &clause.cond {
-                    lambda_captures_in_expr(c, local_index, is_class_scope, cells);
-                }
-            }
-            lambda_captures_in_expr(elt, local_index, is_class_scope, cells);
-        }
-        Expr::GenExp { elt, clauses } => {
+        // List/set/dict comprehensions and generator expressions all create an
+        // implicit nested function scope (CPython behaviour since Python 3).
+        // Only the outermost iterable is evaluated in the enclosing scope; the
+        // body (inner iters, conditions, element/key/value expressions) runs
+        // inside the nested scope and can close over enclosing locals.
+        Expr::ListComp { elt, clauses }
+        | Expr::SetComp { elt, clauses }
+        | Expr::GenExp { elt, clauses } => {
             // The outermost iterable is evaluated in the enclosing scope.
             if let Some(first) = clauses.first() {
                 lambda_captures_in_expr(&first.iter, local_index, is_class_scope, cells);
             }
-            // Everything inside the genexp body (outermost cond, inner
-            // iters/conds, and the element expression) runs in the genexp's
-            // own scope.  Collect all free-var reads from that inner body,
-            // subtract the loop-target names that are bound by the genexp
-            // itself, and promote any remaining names that live in the
-            // enclosing local_index to cell vars so they're accessible via
-            // the env chain when the generator body resumes.
+            // Everything inside the comprehension body runs in its own scope.
+            // Collect free-var reads from that inner body, subtract the names
+            // bound by the comprehension's own clause targets, and promote any
+            // remaining names that live in the enclosing local_index to cell
+            // vars so they're accessible via the env chain.
             if !is_class_scope {
                 let mut inner_uses: HashSet<String> = HashSet::new();
                 if let Some(first) = clauses.first() {
@@ -929,7 +1002,7 @@ fn lambda_captures_in_expr(
                     }
                 }
                 collect_free_var_reads_in_expr(elt, &mut inner_uses);
-                // Remove names bound by the genexp's own clause targets.
+                // Remove names bound by the comprehension's own clause targets.
                 let mut bound: HashSet<String> = HashSet::new();
                 for clause in clauses {
                     collect_written_target(&clause.target, &mut bound);
@@ -939,17 +1012,67 @@ fn lambda_captures_in_expr(
                         cells.insert(name);
                     }
                 }
+                // PEP 572: walrus targets in a comprehension body belong to the
+                // enclosing scope. Promote them to cell vars so they're reachable
+                // via the env chain from inside the comprehension's implicit function.
+                let mut walrus_writes: HashSet<String> = HashSet::new();
+                for clause in clauses {
+                    if let Some(c) = &clause.cond {
+                        collect_walrus_writes_in_expr(c, &mut walrus_writes);
+                    }
+                }
+                collect_walrus_writes_in_expr(elt, &mut walrus_writes);
+                for name in walrus_writes {
+                    if !bound.contains(&name) && local_index.contains_key(&name) {
+                        cells.insert(name);
+                    }
+                }
             }
         }
         Expr::DictComp { key, val, clauses } => {
-            for clause in clauses {
-                lambda_captures_in_expr(&clause.iter, local_index, is_class_scope, cells);
-                if let Some(c) = &clause.cond {
-                    lambda_captures_in_expr(c, local_index, is_class_scope, cells);
+            // Same scope-isolation logic as list/set comprehensions above.
+            if let Some(first) = clauses.first() {
+                lambda_captures_in_expr(&first.iter, local_index, is_class_scope, cells);
+            }
+            if !is_class_scope {
+                let mut inner_uses: HashSet<String> = HashSet::new();
+                if let Some(first) = clauses.first() {
+                    if let Some(c) = &first.cond {
+                        collect_free_var_reads_in_expr(c, &mut inner_uses);
+                    }
+                }
+                for clause in clauses.iter().skip(1) {
+                    collect_free_var_reads_in_expr(&clause.iter, &mut inner_uses);
+                    if let Some(c) = &clause.cond {
+                        collect_free_var_reads_in_expr(c, &mut inner_uses);
+                    }
+                }
+                collect_free_var_reads_in_expr(key, &mut inner_uses);
+                collect_free_var_reads_in_expr(val, &mut inner_uses);
+                let mut bound: HashSet<String> = HashSet::new();
+                for clause in clauses {
+                    collect_written_target(&clause.target, &mut bound);
+                }
+                for name in inner_uses {
+                    if !bound.contains(&name) && local_index.contains_key(&name) {
+                        cells.insert(name);
+                    }
+                }
+                // PEP 572: promote walrus write targets to cell vars.
+                let mut walrus_writes: HashSet<String> = HashSet::new();
+                for clause in clauses {
+                    if let Some(c) = &clause.cond {
+                        collect_walrus_writes_in_expr(c, &mut walrus_writes);
+                    }
+                }
+                collect_walrus_writes_in_expr(key, &mut walrus_writes);
+                collect_walrus_writes_in_expr(val, &mut walrus_writes);
+                for name in walrus_writes {
+                    if !bound.contains(&name) && local_index.contains_key(&name) {
+                        cells.insert(name);
+                    }
                 }
             }
-            lambda_captures_in_expr(key, local_index, is_class_scope, cells);
-            lambda_captures_in_expr(val, local_index, is_class_scope, cells);
         }
         Expr::Ternary { cond, then, else_ } => {
             lambda_captures_in_expr(cond, local_index, is_class_scope, cells);
@@ -1373,36 +1496,29 @@ fn collect_class_lambda_outer_refs_in_expr(
                 }
             }
         }
-        Expr::ListComp { elt, clauses }
-        | Expr::SetComp { elt, clauses }
-        | Expr::GenExp { elt, clauses } => {
-            for clause in clauses {
+        // All comprehension forms create an implicit nested function scope.
+        // Only the outermost iterable is evaluated in the enclosing (class) scope.
+        Expr::ListComp { clauses, .. }
+        | Expr::SetComp { clauses, .. }
+        | Expr::GenExp { clauses, .. } => {
+            if let Some(first) = clauses.first() {
                 collect_class_lambda_outer_refs_in_expr(
-                    &clause.iter,
+                    &first.iter,
                     local_index,
                     class_locals,
                     cells,
                 );
-                if let Some(c) = &clause.cond {
-                    collect_class_lambda_outer_refs_in_expr(c, local_index, class_locals, cells);
-                }
             }
-            collect_class_lambda_outer_refs_in_expr(elt, local_index, class_locals, cells);
         }
-        Expr::DictComp { key, val, clauses } => {
-            for clause in clauses {
+        Expr::DictComp { clauses, .. } => {
+            if let Some(first) = clauses.first() {
                 collect_class_lambda_outer_refs_in_expr(
-                    &clause.iter,
+                    &first.iter,
                     local_index,
                     class_locals,
                     cells,
                 );
-                if let Some(c) = &clause.cond {
-                    collect_class_lambda_outer_refs_in_expr(c, local_index, class_locals, cells);
-                }
             }
-            collect_class_lambda_outer_refs_in_expr(key, local_index, class_locals, cells);
-            collect_class_lambda_outer_refs_in_expr(val, local_index, class_locals, cells);
         }
         Expr::Ternary { cond, then, else_ } => {
             collect_class_lambda_outer_refs_in_expr(cond, local_index, class_locals, cells);
@@ -1654,26 +1770,20 @@ fn collect_free_var_reads_in_expr(expr: &Expr, uses: &mut HashSet<String>) {
                 }
             }
         }
-        Expr::ListComp { elt, clauses }
-        | Expr::SetComp { elt, clauses }
-        | Expr::GenExp { elt, clauses } => {
-            for clause in clauses {
-                collect_free_var_reads_in_expr(&clause.iter, uses);
-                if let Some(c) = &clause.cond {
-                    collect_free_var_reads_in_expr(c, uses);
-                }
+        // All comprehension forms and generator expressions create an implicit
+        // nested function scope.  Only the outermost iterable is evaluated at
+        // the current scope level; the body runs inside the nested scope.
+        Expr::ListComp { clauses, .. }
+        | Expr::SetComp { clauses, .. }
+        | Expr::GenExp { clauses, .. } => {
+            if let Some(first) = clauses.first() {
+                collect_free_var_reads_in_expr(&first.iter, uses);
             }
-            collect_free_var_reads_in_expr(elt, uses);
         }
-        Expr::DictComp { key, val, clauses } => {
-            for clause in clauses {
-                collect_free_var_reads_in_expr(&clause.iter, uses);
-                if let Some(c) = &clause.cond {
-                    collect_free_var_reads_in_expr(c, uses);
-                }
+        Expr::DictComp { clauses, .. } => {
+            if let Some(first) = clauses.first() {
+                collect_free_var_reads_in_expr(&first.iter, uses);
             }
-            collect_free_var_reads_in_expr(key, uses);
-            collect_free_var_reads_in_expr(val, uses);
         }
         Expr::Ternary { cond, then, else_ } => {
             collect_free_var_reads_in_expr(cond, uses);
@@ -2029,26 +2139,80 @@ fn collect_transitive_free_vars_in_expr(expr: &Expr, uses: &mut HashSet<String>)
                 }
             }
         }
+        // All comprehension forms and generator expressions create an implicit
+        // nested function scope.  For transitive free-var collection we treat
+        // them like lambdas: compute the inner body's free-var reads, subtract
+        // the names locally bound by the comprehension, then surface the
+        // remainder as uses at the enclosing scope.
         Expr::ListComp { elt, clauses }
         | Expr::SetComp { elt, clauses }
         | Expr::GenExp { elt, clauses } => {
-            for clause in clauses {
-                collect_transitive_free_vars_in_expr(&clause.iter, uses);
-                if let Some(c) = &clause.cond {
-                    collect_transitive_free_vars_in_expr(c, uses);
+            // Outermost iterable is evaluated at this scope level.
+            if let Some(first) = clauses.first() {
+                collect_transitive_free_vars_in_expr(&first.iter, uses);
+                collect_free_var_reads_in_expr(&first.iter, uses);
+            }
+            // Inner body free vars (subtract clause-bound names).
+            let mut inner_uses: HashSet<String> = HashSet::new();
+            if let Some(first) = clauses.first() {
+                if let Some(c) = &first.cond {
+                    collect_free_var_reads_in_expr(c, &mut inner_uses);
+                    collect_transitive_free_vars_in_expr(c, &mut inner_uses);
                 }
             }
-            collect_transitive_free_vars_in_expr(elt, uses);
+            for clause in clauses.iter().skip(1) {
+                collect_free_var_reads_in_expr(&clause.iter, &mut inner_uses);
+                collect_transitive_free_vars_in_expr(&clause.iter, &mut inner_uses);
+                if let Some(c) = &clause.cond {
+                    collect_free_var_reads_in_expr(c, &mut inner_uses);
+                    collect_transitive_free_vars_in_expr(c, &mut inner_uses);
+                }
+            }
+            collect_free_var_reads_in_expr(elt, &mut inner_uses);
+            collect_transitive_free_vars_in_expr(elt, &mut inner_uses);
+            let mut bound: HashSet<String> = HashSet::new();
+            for clause in clauses {
+                collect_written_target(&clause.target, &mut bound);
+            }
+            for name in inner_uses {
+                if !bound.contains(&name) {
+                    uses.insert(name);
+                }
+            }
         }
         Expr::DictComp { key, val, clauses } => {
-            for clause in clauses {
-                collect_transitive_free_vars_in_expr(&clause.iter, uses);
-                if let Some(c) = &clause.cond {
-                    collect_transitive_free_vars_in_expr(c, uses);
+            if let Some(first) = clauses.first() {
+                collect_transitive_free_vars_in_expr(&first.iter, uses);
+                collect_free_var_reads_in_expr(&first.iter, uses);
+            }
+            let mut inner_uses: HashSet<String> = HashSet::new();
+            if let Some(first) = clauses.first() {
+                if let Some(c) = &first.cond {
+                    collect_free_var_reads_in_expr(c, &mut inner_uses);
+                    collect_transitive_free_vars_in_expr(c, &mut inner_uses);
                 }
             }
-            collect_transitive_free_vars_in_expr(key, uses);
-            collect_transitive_free_vars_in_expr(val, uses);
+            for clause in clauses.iter().skip(1) {
+                collect_free_var_reads_in_expr(&clause.iter, &mut inner_uses);
+                collect_transitive_free_vars_in_expr(&clause.iter, &mut inner_uses);
+                if let Some(c) = &clause.cond {
+                    collect_free_var_reads_in_expr(c, &mut inner_uses);
+                    collect_transitive_free_vars_in_expr(c, &mut inner_uses);
+                }
+            }
+            collect_free_var_reads_in_expr(key, &mut inner_uses);
+            collect_transitive_free_vars_in_expr(key, &mut inner_uses);
+            collect_free_var_reads_in_expr(val, &mut inner_uses);
+            collect_transitive_free_vars_in_expr(val, &mut inner_uses);
+            let mut bound: HashSet<String> = HashSet::new();
+            for clause in clauses {
+                collect_written_target(&clause.target, &mut bound);
+            }
+            for name in inner_uses {
+                if !bound.contains(&name) {
+                    uses.insert(name);
+                }
+            }
         }
         Expr::Ternary { cond, then, else_ } => {
             collect_transitive_free_vars_in_expr(cond, uses);
@@ -7683,179 +7847,480 @@ impl Compiler {
 
     // ── Comprehension compilation ──────────────────────────────────────────────
 
-    /// Emit the nested for+if loop structure shared by all comprehension kinds.
+    /// Build the loop-nest AST shared by list/set/dict comprehensions.
     ///
-    /// `acc` is the accumulator register (already initialised with an empty
-    /// list/dict/set).  For each element that passes all filters, `emit_body` is
-    /// called with `(compiler, item_reg, acc_reg)` to append/insert the value.
-    fn compile_comp_loops(
-        &mut self,
-        clauses: &[CompClause],
-        acc: Reg,
-        emit_body: &mut impl FnMut(&mut Self, Reg),
-    ) {
-        if clauses.is_empty() {
-            return;
+    /// Returns a `Vec<Stmt>` representing the `for`/`if` structure that wraps
+    /// `innermost`.  The outermost `for` iterates over `IT_PARAM` (the implicit
+    /// parameter that receives the outermost iterable from the enclosing scope).
+    fn build_comp_loop_body(clauses: &[CompClause], innermost: Stmt) -> Vec<Stmt> {
+        const IT_PARAM: &str = ".0";
+
+        let mut body = vec![innermost];
+        for clause in clauses[1..].iter().rev() {
+            if let Some(cond) = &clause.cond {
+                body = vec![Stmt::If {
+                    branches: vec![(cond.clone(), body)],
+                    else_branch: None,
+                }];
+            }
+            body = vec![Stmt::For {
+                target: clause.target.clone(),
+                iter: clause.iter.clone(),
+                body,
+                else_branch: None,
+            }];
         }
-        let clause = &clauses[0];
+        if let Some(cond) = &clauses[0].cond {
+            body = vec![Stmt::If {
+                branches: vec![(cond.clone(), body)],
+                else_branch: None,
+            }];
+        }
+        body = vec![Stmt::For {
+            target: clauses[0].target.clone(),
+            iter: Expr::Var(IT_PARAM.to_string()),
+            body,
+            else_branch: None,
+        }];
+        body
+    }
 
-        let iter_slot = self.alloc_iter();
-        let src = self.compile_expr(&clause.iter);
-        self.emit(Insn::GetIter(iter_slot, src));
-        self.free_temp(src);
-
-        let loop_start = self.pc();
-
-        // Choose a destination register for the loop variable.
-        let item_reg = if let AssignTarget::Name(n) = &clause.target {
-            self.local_reg(n).unwrap_or_else(|| self.alloc_temp())
-        } else {
-            self.alloc_temp()
-        };
-
-        let exit_jmp = self.emit(Insn::ForIter(item_reg, iter_slot, 0));
-
-        // Assign loop variable (same logic as compile_for).
-        match &clause.target {
-            AssignTarget::Name(name) => {
-                if self.local_reg(name).is_none() {
-                    let name_idx = self.intern_name(name);
-                    self.emit(Insn::StoreGlobal(name_idx, item_reg));
-                    // item_reg is a temp that was just stored; keep it alive for body use.
+    /// Collect all `Expr::Named` (walrus `:=`) target names from an expression,
+    /// without descending into nested comprehensions or lambdas (those create
+    /// their own implicit scopes, so their walrus targets don't leak here).
+    fn collect_walrus_targets_in_expr(expr: &Expr, out: &mut HashSet<String>) {
+        match expr {
+            Expr::Named { target, value } => {
+                out.insert(target.clone());
+                Self::collect_walrus_targets_in_expr(value, out);
+            }
+            Expr::Binary { left, right, .. } => {
+                Self::collect_walrus_targets_in_expr(left, out);
+                Self::collect_walrus_targets_in_expr(right, out);
+            }
+            Expr::Unary { expr: e, .. } => Self::collect_walrus_targets_in_expr(e, out),
+            Expr::Compare { left, ops } => {
+                Self::collect_walrus_targets_in_expr(left, out);
+                for (_, e) in ops {
+                    Self::collect_walrus_targets_in_expr(e, out);
                 }
             }
-            AssignTarget::Tuple(targets) => {
-                let n = targets.len() as u32;
-                let base = item_reg + 1;
-                self.next_temp = base + n;
-                if self.next_temp - 1 > self.max_reg {
-                    self.max_reg = self.next_temp - 1;
+            Expr::Call { func, args } => {
+                Self::collect_walrus_targets_in_expr(func, out);
+                for a in args {
+                    Self::collect_walrus_targets_in_expr(&a.value, out);
                 }
-                self.emit(Insn::Unpack(base, item_reg, n));
-                for (i, t) in (0u32..).zip(targets.iter()) {
-                    match t {
-                        AssignTarget::Name(name) => {
-                            if let Some(reg) = self.local_reg(name) {
-                                self.emit(Insn::Move(reg, base + i));
-                            } else {
-                                let name_idx = self.intern_name(name);
-                                self.emit(Insn::StoreGlobal(name_idx, base + i));
-                            }
+            }
+            Expr::Ternary { cond, then, else_ } => {
+                Self::collect_walrus_targets_in_expr(cond, out);
+                Self::collect_walrus_targets_in_expr(then, out);
+                Self::collect_walrus_targets_in_expr(else_, out);
+            }
+            Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
+                for e in items {
+                    Self::collect_walrus_targets_in_expr(e, out);
+                }
+            }
+            Expr::Dict(items) => {
+                for item in items {
+                    match item {
+                        DictItem::Pair(k, v) => {
+                            Self::collect_walrus_targets_in_expr(k, out);
+                            Self::collect_walrus_targets_in_expr(v, out);
                         }
-                        _ => {
-                            self.failed = true;
-                            if self.error_msg.is_none() {
-                                self.error_msg =
-                                    Some("unsupported comprehension unpack target".to_string());
-                            }
-                            return;
+                        DictItem::DoubleSplat(e) => {
+                            Self::collect_walrus_targets_in_expr(e, out);
                         }
                     }
                 }
-                self.next_temp = item_reg;
             }
-            _ => {
-                self.failed = true;
-                if self.error_msg.is_none() {
-                    self.error_msg = Some("unsupported comprehension target".to_string());
+            Expr::Index { target, index } => {
+                Self::collect_walrus_targets_in_expr(target, out);
+                Self::collect_walrus_targets_in_expr(index, out);
+            }
+            Expr::Attr { target, .. } => Self::collect_walrus_targets_in_expr(target, out),
+            Expr::Starred(e) => Self::collect_walrus_targets_in_expr(e, out),
+            Expr::Slice {
+                target,
+                lower,
+                upper,
+                step,
+            } => {
+                Self::collect_walrus_targets_in_expr(target, out);
+                for e in [lower, upper, step].iter().flat_map(|o| o.as_deref()) {
+                    Self::collect_walrus_targets_in_expr(e, out);
                 }
-                return;
+            }
+            Expr::FString(parts) => {
+                for_each_fstring_expr(parts, &mut |e| {
+                    Self::collect_walrus_targets_in_expr(e, out);
+                });
+            }
+            // Nested comprehensions/lambdas create their own scope; don't descend.
+            Expr::ListComp { .. }
+            | Expr::SetComp { .. }
+            | Expr::DictComp { .. }
+            | Expr::GenExp { .. }
+            | Expr::Lambda { .. } => {}
+            _ => {}
+        }
+    }
+
+    /// Collect walrus targets from an entire statement list (used to find
+    /// which names a comprehension body writes to the enclosing scope).
+    fn collect_walrus_targets_in_stmts(stmts: &[Stmt], out: &mut HashSet<String>) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::AnnAssign { value: Some(e), .. } => {
+                    Self::collect_walrus_targets_in_expr(e, out);
+                }
+                Stmt::Assign(_, e) => {
+                    Self::collect_walrus_targets_in_expr(e, out);
+                }
+                Stmt::AugAssign { expr: e, .. } => {
+                    Self::collect_walrus_targets_in_expr(e, out);
+                }
+                Stmt::If {
+                    branches,
+                    else_branch,
+                } => {
+                    for (cond, body) in branches {
+                        Self::collect_walrus_targets_in_expr(cond, out);
+                        Self::collect_walrus_targets_in_stmts(body, out);
+                    }
+                    if let Some(b) = else_branch {
+                        Self::collect_walrus_targets_in_stmts(b, out);
+                    }
+                }
+                Stmt::For {
+                    iter,
+                    body,
+                    else_branch,
+                    ..
+                } => {
+                    Self::collect_walrus_targets_in_expr(iter, out);
+                    Self::collect_walrus_targets_in_stmts(body, out);
+                    if let Some(b) = else_branch {
+                        Self::collect_walrus_targets_in_stmts(b, out);
+                    }
+                }
+                Stmt::While {
+                    cond,
+                    body,
+                    else_branch,
+                } => {
+                    Self::collect_walrus_targets_in_expr(cond, out);
+                    Self::collect_walrus_targets_in_stmts(body, out);
+                    if let Some(b) = else_branch {
+                        Self::collect_walrus_targets_in_stmts(b, out);
+                    }
+                }
+                // Def/Class create their own scopes; don't descend.
+                _ => {}
+            }
+        }
+    }
+
+    /// Compile a comprehension (list/set/dict) as a nested implicit function,
+    /// mirroring CPython's scope-isolation behaviour.
+    ///
+    /// `iter_reg`   — register holding the outermost iterable (already compiled
+    ///                in the enclosing scope by the caller).
+    /// `fn_body`    — complete body of the inner function (init + loops + return).
+    /// `comp_name`  — display name used in the `FnProto` ("listcomp", etc.).
+    ///
+    /// Returns the result register (holds the constructed collection after
+    /// the implicit call returns).
+    fn compile_collection_comp_impl(
+        &mut self,
+        iter_reg: Reg,
+        fn_body: Vec<Stmt>,
+        comp_name: &str,
+    ) -> Reg {
+        const IT_PARAM: &str = ".0";
+
+        let params = vec![FunctionParam {
+            name: IT_PARAM.to_string(),
+            default: None,
+            annotation: None,
+            is_args: false,
+            is_kwargs: false,
+            is_keyword_only: false,
+            is_positional_only: false,
+        }];
+
+        // PEP 572: walrus targets inside a comprehension body belong to the
+        // *enclosing* scope, not to the comprehension's implicit inner scope.
+        // Collect them here so we can route writes to the right place:
+        //   - target in enclosing function scope → inject as `nonlocal`
+        //   - target in module/global scope      → inject as `global`
+        let mut walrus_targets: HashSet<String> = HashSet::new();
+        Self::collect_walrus_targets_in_stmts(&fn_body, &mut walrus_targets);
+
+        // Determine which walrus targets live in an enclosing function scope.
+        let walrus_nonlocal: HashSet<String> = walrus_targets
+            .iter()
+            .filter(|name| {
+                self.outer_locals.iter().any(|m| m.contains_key(*name))
+                    || (self.is_function_scope && self.local_index.contains_key(*name))
+            })
+            .cloned()
+            .collect();
+
+        // Walrus targets NOT in any enclosing function scope go through the
+        // global (module) env instead.
+        let walrus_global: HashSet<String> = walrus_targets
+            .difference(&walrus_nonlocal)
+            .cloned()
+            .collect();
+
+        let mut inner_global = crate::interpreter::collect_global_names(&fn_body);
+        inner_global.extend(walrus_global);
+        let mut inner_nonlocal = crate::interpreter::collect_nonlocal_names(&fn_body);
+        inner_nonlocal.extend(walrus_nonlocal);
+
+        // Build inner locals excluding any walrus targets (they belong to the
+        // enclosing scope, not the comprehension's implicit function).
+        let raw_inner_local = crate::interpreter::collect_local_names(
+            &params,
+            &fn_body,
+            &inner_global,
+            &inner_nonlocal,
+        );
+        // `collect_local_names` already excludes names in inner_global /
+        // inner_nonlocal, but it does NOT know about walrus targets yet
+        // (they were just added above). Filter them out explicitly.
+        let inner_local: indexmap::IndexSet<String> = raw_inner_local
+            .into_iter()
+            .filter(|n| !walrus_targets.contains(n))
+            .collect();
+
+        let mut inner_index: HashMap<String, Reg> = HashMap::new();
+        let mut slot: Reg = 0;
+        for param in &params {
+            if inner_local.contains(&param.name) {
+                inner_index.insert(param.name.clone(), slot);
+                slot += 1;
+            }
+        }
+        for loc in &inner_local {
+            if !inner_index.contains_key(loc) {
+                inner_index.insert(loc.clone(), slot);
+                slot += 1;
+            }
+        }
+        let inner_index_rc: Rc<HashMap<String, Reg>> = Rc::new(inner_index);
+        let def_bound = crate::interpreter::compute_def_bound_mask(&params, &inner_index_rc);
+        let is_pure = false;
+        let inner_cell_vars = collect_cell_vars(&fn_body, &inner_index_rc);
+        let inner_global_rc = Rc::new(inner_global);
+        let inner_nonlocal_rc = Rc::new(inner_nonlocal);
+
+        // Validate nonlocal declarations (same as compile_def / compile_gen_exp).
+        let mut sorted_nonlocals: Vec<&String> = inner_nonlocal_rc.iter().collect();
+        sorted_nonlocals.sort();
+        for nonlocal_name in sorted_nonlocals {
+            let found = self
+                .outer_locals
+                .iter()
+                .any(|m| m.contains_key(nonlocal_name))
+                || (self.is_function_scope && self.local_index.contains_key(nonlocal_name));
+            if !found {
+                self.failed = true;
+                self.is_syntax_error = true;
+                if self.error_msg.is_none() {
+                    self.error_msg =
+                        Some(format!("no binding for nonlocal '{}' found", nonlocal_name));
+                }
+                return 0;
             }
         }
 
-        // Optional `if` filter.
-        let skip_jmp = if let Some(cond) = &clause.cond {
-            let cond_reg = self.compile_expr(cond);
-            let j = self.emit(Insn::JumpIfFalse(cond_reg, 0));
-            self.free_temp(cond_reg);
-            Some(j)
-        } else {
-            None
+        let mut sub = Compiler::new(Rc::clone(&inner_index_rc), def_bound, inner_cell_vars);
+        sub.outer_locals = self.outer_locals.clone();
+        if self.is_function_scope {
+            sub.outer_locals.push(Rc::clone(&self.local_index));
+        }
+        sub.is_function_scope = true;
+        sub.compile_block(&fn_body);
+        let inner_code = match sub.finish() {
+            Ok(c) => c,
+            Err(e) => {
+                self.failed = true;
+                if matches!(e, PyError::Named(ref cls, _) if cls.as_ref() == "SyntaxError") {
+                    self.is_syntax_error = true;
+                }
+                if self.error_msg.is_none() {
+                    self.error_msg = Some(match e {
+                        PyError::Named(_, msg) | PyError::Runtime(msg) => msg,
+                        other => other.to_string(),
+                    });
+                }
+                return 0;
+            }
         };
 
-        // Recurse for nested clauses, or emit the accumulator body.
-        if clauses.len() > 1 {
-            self.compile_comp_loops(&clauses[1..], acc, emit_body);
-        } else {
-            emit_body(self, acc);
-        }
-
-        // Patch the `if` skip jump.
-        if let Some(j) = skip_jmp {
-            self.patch_jump(j);
-        }
-
-        // Jump back to loop top.
-        let back_from = self.pc() as i32 + 1;
-        let back_offset = loop_start as i32 - back_from;
-        self.emit(Insn::Jump(back_offset));
-
-        self.patch_jump(exit_jmp);
-        self.free_iter();
-        if let AssignTarget::Name(_) = &clause.target {
-            if item_reg >= self.base_temp {
-                self.free_temp(item_reg);
+        if self.fn_protos.len() >= 256 {
+            self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg =
+                    Some("too many nested functions in one scope (max 256)".to_string());
             }
-        } else {
-            self.free_temp(item_reg);
+            return 0;
         }
+        let proto_idx = self.fn_protos.len() as u8;
+        let local_names = Rc::new(inner_index_rc.keys().cloned().collect::<HashSet<_>>());
+        let display = format!("<{}>", comp_name);
+        self.fn_protos.push(FnProto {
+            name: display.clone(),
+            qualname: display,
+            param_spec: Rc::new(FnParamSpec {
+                names: params.iter().map(|p| p.name.clone()).collect(),
+                has_default: params.iter().map(|p| p.default.is_some()).collect(),
+                is_args: params.iter().map(|p| p.is_args).collect(),
+                is_kwargs: params.iter().map(|p| p.is_kwargs).collect(),
+                is_keyword_only: params.iter().map(|p| p.is_keyword_only).collect(),
+                is_positional_only: params.iter().map(|p| p.is_positional_only).collect(),
+            }),
+            code: Rc::new(inner_code),
+            local_index: inner_index_rc,
+            local_names,
+            global_names: inner_global_rc,
+            nonlocal_names: inner_nonlocal_rc,
+            is_pure,
+            annotation_keys: Vec::new(),
+        });
+
+        // Emit MakeFunction + Call, same layout as compile_gen_exp.
+        let fn_reg = self.alloc_temp();
+        self.emit(Insn::MakeFunction(fn_reg, proto_idx, 0, 0, 0, 0));
+
+        let arg_reg = fn_reg + 1;
+        if arg_reg > self.max_reg {
+            self.max_reg = arg_reg;
+        }
+        if fn_reg + 2 > self.next_temp {
+            self.next_temp = fn_reg + 2;
+        }
+        self.emit(Insn::Move(arg_reg, iter_reg));
+        self.emit(Insn::Call(fn_reg, 1));
+        self.next_temp = fn_reg + 1;
+        self.free_temp(iter_reg);
+
+        fn_reg
     }
 
     fn compile_list_comp(&mut self, elt: &Expr, clauses: &[CompClause]) -> Reg {
-        // Allocate the result register first (before any loop temps).
-        let acc = self.alloc_temp();
-        self.emit(Insn::BuildList(acc, acc, 0));
+        if clauses.is_empty() {
+            self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg =
+                    Some("list comprehension requires at least one clause".to_string());
+            }
+            return 0;
+        }
 
-        // Save/restore next_temp around the loop body so temps don't accumulate.
-        let saved_temp = self.next_temp;
+        const ACC_NAME: &str = ".acc";
 
-        self.compile_comp_loops(clauses, acc, &mut |this, acc_reg| {
-            let val = this.compile_expr(elt);
-            this.emit(Insn::ListAppend(acc_reg, val));
-            this.free_temp(val);
-            this.next_temp = saved_temp;
+        // Evaluate the outermost iterable in the enclosing scope.
+        let iter_reg = self.compile_expr(&clauses[0].iter);
+
+        // Build the innermost statement: .acc.append(elt)
+        let innermost = Stmt::Expr(Expr::Call {
+            func: Box::new(Expr::Attr {
+                target: Box::new(Expr::Var(ACC_NAME.to_string())),
+                name: "append".to_string(),
+            }),
+            args: vec![CallArg {
+                name: None,
+                value: elt.clone(),
+                splat: false,
+                double_splat: false,
+            }],
         });
 
-        acc
+        // Build loop nest around the innermost statement.
+        let mut fn_body = vec![Stmt::Assign(
+            AssignTarget::Name(ACC_NAME.to_string()),
+            Expr::List(vec![]),
+        )];
+        fn_body.extend(Self::build_comp_loop_body(clauses, innermost));
+        fn_body.push(Stmt::Return(Some(Expr::Var(ACC_NAME.to_string()))));
+
+        self.compile_collection_comp_impl(iter_reg, fn_body, "listcomp")
     }
 
     fn compile_dict_comp(&mut self, key: &Expr, val: &Expr, clauses: &[CompClause]) -> Reg {
-        let acc = self.alloc_temp();
-        // BuildDict with 0 pairs → empty dict.
-        self.emit(Insn::BuildDict(acc, acc, 0));
+        if clauses.is_empty() {
+            self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg =
+                    Some("dict comprehension requires at least one clause".to_string());
+            }
+            return 0;
+        }
 
-        let saved_temp = self.next_temp;
+        const ACC_NAME: &str = ".acc";
 
-        self.compile_comp_loops(clauses, acc, &mut |this, acc_reg| {
-            let k = this.compile_expr(key);
-            let v = this.compile_expr(val);
-            this.emit(Insn::SetItem(acc_reg, k, v));
-            this.free_temp(v);
-            this.free_temp(k);
-            this.next_temp = saved_temp;
-        });
+        let iter_reg = self.compile_expr(&clauses[0].iter);
 
-        acc
+        // Build the innermost statement: .acc[key] = val
+        let innermost = Stmt::IndexAssign {
+            target: Box::new(Expr::Var(ACC_NAME.to_string())),
+            index: Box::new(key.clone()),
+            expr: val.clone(),
+        };
+
+        let mut fn_body = vec![Stmt::Assign(
+            AssignTarget::Name(ACC_NAME.to_string()),
+            Expr::Dict(vec![]),
+        )];
+        fn_body.extend(Self::build_comp_loop_body(clauses, innermost));
+        fn_body.push(Stmt::Return(Some(Expr::Var(ACC_NAME.to_string()))));
+
+        self.compile_collection_comp_impl(iter_reg, fn_body, "dictcomp")
     }
 
     fn compile_set_comp(&mut self, elt: &Expr, clauses: &[CompClause]) -> Reg {
-        // Build an empty set via set() call.
-        let acc = self.alloc_temp();
-        let set_name_idx = self.intern_name("set");
-        self.emit(Insn::LoadGlobal(acc, set_name_idx));
-        // Call set() with zero args: Call(acc, 0) — result in acc.
-        self.emit(Insn::Call(acc, 0));
+        if clauses.is_empty() {
+            self.failed = true;
+            if self.error_msg.is_none() {
+                self.error_msg = Some("set comprehension requires at least one clause".to_string());
+            }
+            return 0;
+        }
 
-        let saved_temp = self.next_temp;
+        const ACC_NAME: &str = ".acc";
 
-        self.compile_comp_loops(clauses, acc, &mut |this, acc_reg| {
-            let val = this.compile_expr(elt);
-            this.emit(Insn::SetAdd(acc_reg, val));
-            this.free_temp(val);
-            this.next_temp = saved_temp;
+        let iter_reg = self.compile_expr(&clauses[0].iter);
+
+        // Build the innermost statement: .acc.add(elt)
+        let innermost = Stmt::Expr(Expr::Call {
+            func: Box::new(Expr::Attr {
+                target: Box::new(Expr::Var(ACC_NAME.to_string())),
+                name: "add".to_string(),
+            }),
+            args: vec![CallArg {
+                name: None,
+                value: elt.clone(),
+                splat: false,
+                double_splat: false,
+            }],
         });
 
-        acc
+        // Build the accumulator: .acc = set()
+        let acc_init = Expr::Call {
+            func: Box::new(Expr::Var("set".to_string())),
+            args: vec![],
+        };
+        let mut fn_body = vec![Stmt::Assign(
+            AssignTarget::Name(ACC_NAME.to_string()),
+            acc_init,
+        )];
+        fn_body.extend(Self::build_comp_loop_body(clauses, innermost));
+        fn_body.push(Stmt::Return(Some(Expr::Var(ACC_NAME.to_string()))));
+
+        self.compile_collection_comp_impl(iter_reg, fn_body, "setcomp")
     }
 
     /// Compile a generator expression `(elt for target in iter ...)`.
@@ -8424,13 +8889,10 @@ impl Compiler {
         self.emit(Insn::Move(f2, pos_list_reg));
         self.emit(Insn::Move(f3, kw_dict_reg));
         self.emit(Insn::Call(vcall_reg, 3));
-        self.free_temp(f3);
-        self.free_temp(f2);
-        self.free_temp(f1);
-        self.free_temp(vcall_reg);
-        self.free_temp(kw_dict_reg);
-        self.free_temp(pos_list_reg);
-        self.free_temp(func_reg);
+        // Keep next_temp at vcall_reg+1 so the result register stays live.
+        // This matches compile_call's convention: the returned register is NOT
+        // freed, so callers can safely alloc_temp() without aliasing it.
+        self.next_temp = vcall_reg + 1;
         // Return value is in vcall_reg
         vcall_reg
     }
