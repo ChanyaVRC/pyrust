@@ -752,6 +752,19 @@ pub(crate) fn py_hash_bigint(n: &PyBigInt) -> i64 {
 }
 
 fn normalize_index(index: &Value, len: usize, label: &str) -> Result<usize> {
+    normalize_index_inner(index, len, label, &format!("{label} index out of range"))
+}
+
+fn normalize_index_write(index: &Value, len: usize, label: &str) -> Result<usize> {
+    normalize_index_inner(
+        index,
+        len,
+        label,
+        &format!("{label} assignment index out of range"),
+    )
+}
+
+fn normalize_index_inner(index: &Value, len: usize, label: &str, oor_msg: &str) -> Result<usize> {
     let mut value = match index.kind() {
         ValueKind::Int(v) => v,
         ValueKind::Bool(b) => b as i64,
@@ -769,7 +782,7 @@ fn normalize_index(index: &Value, len: usize, label: &str) -> Result<usize> {
         value += len as i64;
     }
     if value < 0 || value >= len as i64 {
-        return Err(PyError::named("IndexError", format!("{label} index out of range")));
+        return Err(PyError::named("IndexError", oor_msg));
     }
     Ok(value as usize)
 }
