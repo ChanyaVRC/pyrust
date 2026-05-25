@@ -433,8 +433,18 @@ impl Lexer {
                 }
                 Some('.') => {
                     if chars.get(pos + 1) == Some(&'.') && chars.get(pos + 2) == Some(&'.') {
+                        // Ellipsis literal: `...`
                         self.tokens.push(Token::Ellipsis);
                         pos += 3;
+                    } else if matches!(chars.get(pos + 1), Some('0'..='9')) {
+                        // Leading-dot float: `.5`, `.5e-3` etc.  Check whether the
+                        // character immediately following the dot is a decimal digit;
+                        // if so, lex the whole thing as a float literal.  Otherwise
+                        // emit a plain Dot token (used for attribute access and import
+                        // relative-path notation).
+                        let (tok, next) = lex_leading_dot_float(chars, pos)?;
+                        self.tokens.push(tok);
+                        pos = next;
                     } else {
                         self.tokens.push(Token::Dot);
                         pos += 1;
@@ -518,6 +528,35 @@ fn validate_underscores(raw: &[char], kind: &str) -> Result<()> {
     Ok(())
 }
 
+/// Lex a leading-dot float literal: `.DIGITS[e[+-]DIGITS]` or `.DIGITSj`.
+/// `start` points at the `.` character.  The caller has already verified that
+/// the character at `start+1` is a decimal digit.
+fn lex_leading_dot_float(chars: &[char], start: usize) -> Result<(Token, usize)> {
+    let mut pos = start + 1; // skip the leading dot; pos is now at first digit
+    while matches!(chars.get(pos), Some('0'..='9' | '_')) {
+        pos += 1;
+    }
+    // Optional exponent
+    if matches!(chars.get(pos), Some(&'e') | Some(&'E')) {
+        pos += 1;
+        if matches!(chars.get(pos), Some(&'+') | Some(&'-')) {
+            pos += 1;
+        }
+        while matches!(chars.get(pos), Some('0'..='9')) {
+            pos += 1;
+        }
+    }
+    let text: String = chars[start..pos].iter().filter(|&&c| c != '_').collect();
+    let val = text
+        .parse::<f64>()
+        .map_err(|_| PyError::Lex(format!("invalid float '{text}'")))?;
+    // Imaginary suffix: .5j
+    if matches!(chars.get(pos), Some(&'j') | Some(&'J')) {
+        return Ok((Token::Imag(val), pos + 1));
+    }
+    Ok((Token::Float(val), pos))
+}
+
 fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
     let mut pos = start;
     // Hex
@@ -595,8 +634,16 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
         pos += 1;
     }
 
-    if chars.get(pos) == Some(&'.') && matches!(chars.get(pos + 1), Some('0'..='9')) {
-        pos += 1;
+    // Accept DIGITS. (trailing-dot float: `1.`, `1.e5`) as well as DIGITS.DIGITS
+    // (standard float: `1.5`).  In CPython, `1.` tokenises as float `1.0` and
+    // the subsequent character (whatever it is) is a separate token; `1..` gives
+    // float `1.` then a bare `.` dot token.  The only case where we do NOT
+    // consume the dot is when the first character of the integer part indicates a
+    // non-decimal literal (0x / 0o / 0b) — those are handled above and never
+    // reach here.
+    if chars.get(pos) == Some(&'.') {
+        pos += 1; // consume the dot
+        // Optional fractional digits
         while matches!(chars.get(pos), Some('0'..='9' | '_')) {
             pos += 1;
         }
