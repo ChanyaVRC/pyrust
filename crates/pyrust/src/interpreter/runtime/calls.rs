@@ -84,6 +84,24 @@ impl Interpreter {
         // accessor partial-slot guard) — these key on `Value` state rather
         // than on a registered name, so they can't live in the registry.
         // See `crates/pyrust/src/builtin_modules/` for the per-module bodies.
+
+        // Issue #988: `super().__init__(args)` on a dict/list/set subclass.
+        // The SuperProxy wraps the resolved BuiltinFunction sentinel together
+        // with the instance in a `super_bound_builtin` object so that `self`
+        // is available here.  Prepend the instance and call the registry
+        // dispatch — mirroring what `invoke_class_method` does for the normal
+        // `__init__` path (called from `call_class_expanded`).
+        if let Some((fn_name, instance)) =
+            pyrust_builtins::super_bound_builtin::as_super_bound_builtin(&function)
+        {
+            if let Some(dispatch) = crate::builtin_registry::lookup(&fn_name) {
+                let mut combined: Vec<ExpandedCallArg> = Vec::with_capacity(args.len() + 1);
+                combined.push(ExpandedCallArg { name: None, value: instance });
+                combined.extend(args.iter().cloned());
+                return dispatch(self, &combined);
+            }
+        }
+
         if let ValueKind::BuiltinFunction(name) = function.kind()
             && let Some(dispatch) = crate::builtin_registry::lookup(name)
         {

@@ -86,6 +86,17 @@ print(isinstance(ed, dict))       # True
 ed['x'] = 99
 print(ed['x'])                    # 99
 
+# ── super().__init__() with positional iterable arg ───────────────────────────
+
+class MyListWithData(list):
+    def __init__(self, data):
+        super().__init__(data)
+
+ld = MyListWithData([10, 20, 30])
+print(type(ld).__name__)          # MyListWithData
+print(len(ld))                    # 3
+print(ld[0], ld[1], ld[2])       # 10 20 30
+
 # ── super().__init__() with variadic *args pass-through ───────────────────────
 
 class MyList2(list):
@@ -94,3 +105,5 @@ class MyList2(list):
 
 l2 = MyList2([10, 20, 30])
 print(type(l2).__name__)          # MyList2
+print(len(l2))                    # 3
+print(l2[0], l2[1], l2[2])       # 10 20 30
