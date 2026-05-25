@@ -18,6 +18,7 @@ pub mod sequence;
 pub mod set;
 pub mod slice;
 pub mod string;
+pub mod super_bound_builtin;
 pub mod tuple;
 
 /// Look up `BuiltinTypeOps` by stable type-name.  Installed in pyrust-core's

@@ -265,7 +265,23 @@ impl Interpreter {
                             }
                             UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(&f)),
                         },
-                        None => value,
+                        // Issue #988: bind BuiltinFunction sentinels (e.g.
+                        // `list.__init__`) to the instance so that
+                        // `call_function_expanded` prepends `self` before
+                        // calling the registry dispatch.  A plain
+                        // `BuiltinFunction` sentinel carries no self; we wrap
+                        // it in a `super_bound_builtin` BuiltinObject that
+                        // the interpreter intercepts in
+                        // `call_function_expanded` before the registry probe.
+                        None => match value.kind() {
+                            ValueKind::BuiltinFunction(fn_name) => {
+                                pyrust_builtins::super_bound_builtin::super_bound_builtin(
+                                    fn_name.to_string(),
+                                    Value::py_instance(Rc::clone(&instance)),
+                                )
+                            }
+                            _ => value.clone(),
+                        },
                     });
                 }
                 Err(PyError::named(

@@ -2336,6 +2336,104 @@ pyrust_module! {
         };
         Ok(pyrust_builtins::slice::make_slice(start, stop, step))
     }
+
+    /// Issue #988: `list.__init__(self[, iterable])` — resets the backing
+    /// store of a list subclass instance.  With no iterable arg the backing
+    /// is reset to an empty list (matching CPython where `list.__init__(x)`
+    /// clears `x`); with an iterable arg the backing is rebuilt from it.
+    ///
+    /// CPython signature: `list.__init__(self, iterable=())`
+    #[py_name = "list.__init__"]
+    fn list_init(args) -> Result<Value> {
+        let Some(first) = args.first() else {
+            return Ok(Value::none());
+        };
+        let inst_rc = match first.value.kind() {
+            ValueKind::PyInstance(rc) => Rc::clone(rc),
+            _ => return Ok(Value::none()),
+        };
+        if args.len() > 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("list expected at most 1 argument, got {}", args.len() - 1),
+            ));
+        }
+        if instance_builtin_data(&inst_rc).is_some() {
+            let list_dispatch = crate::builtin_registry::lookup("list").ok_or_else(|| {
+                PyError::Runtime("internal: list constructor not in registry".to_string())
+            })?;
+            // Pass the iterable arg if present, or empty args to get an empty list.
+            let new_backing = list_dispatch(_interp, args.get(1).map_or(&[], std::slice::from_ref))?;
+            inst_rc.borrow_mut().attrs.insert("__builtin_data__".to_string(), new_backing);
+        }
+        Ok(Value::none())
+    }
+
+    /// Issue #988: `dict.__init__(self[, mapping_or_iterable][, **kwargs])` —
+    /// resets the backing store of a dict subclass instance.  With no args
+    /// beyond self the backing is reset to an empty dict; with args it is
+    /// rebuilt (matching CPython's `dict.__init__` clearing and re-populating
+    /// behaviour).
+    ///
+    /// CPython signature: `dict.__init__(self, *args, **kwargs)`
+    #[py_name = "dict.__init__"]
+    fn dict_init(args) -> Result<Value> {
+        let Some(first) = args.first() else {
+            return Ok(Value::none());
+        };
+        let inst_rc = match first.value.kind() {
+            ValueKind::PyInstance(rc) => Rc::clone(rc),
+            _ => return Ok(Value::none()),
+        };
+        let pos_count = args[1..].iter().filter(|a| a.name.is_none()).count();
+        if pos_count > 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("dict expected at most 1 argument, got {}", pos_count),
+            ));
+        }
+        if instance_builtin_data(&inst_rc).is_some() {
+            let dict_dispatch = crate::builtin_registry::lookup("dict").ok_or_else(|| {
+                PyError::Runtime("internal: dict constructor not in registry".to_string())
+            })?;
+            // Pass remaining args (positional + kwargs) or nothing for the empty case.
+            let new_backing = dict_dispatch(_interp, &args[1..])?;
+            inst_rc.borrow_mut().attrs.insert("__builtin_data__".to_string(), new_backing);
+        }
+        Ok(Value::none())
+    }
+
+    /// Issue #988: `set.__init__(self[, iterable])` — resets the backing
+    /// store of a set subclass instance.  With no iterable arg the backing
+    /// is reset to an empty set; with an iterable arg the backing is rebuilt
+    /// from it (matching CPython's clearing + re-populating behaviour).
+    ///
+    /// CPython signature: `set.__init__(self, iterable=())`
+    #[py_name = "set.__init__"]
+    fn set_init(args) -> Result<Value> {
+        let Some(first) = args.first() else {
+            return Ok(Value::none());
+        };
+        let inst_rc = match first.value.kind() {
+            ValueKind::PyInstance(rc) => Rc::clone(rc),
+            _ => return Ok(Value::none()),
+        };
+        if args.len() > 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("set expected at most 1 argument, got {}", args.len() - 1),
+            ));
+        }
+        if instance_builtin_data(&inst_rc).is_some() {
+            let set_dispatch = crate::builtin_registry::lookup("set").ok_or_else(|| {
+                PyError::Runtime("internal: set constructor not in registry".to_string())
+            })?;
+            // Pass the iterable arg if present, or empty args to get an empty set.
+            let new_backing = set_dispatch(_interp, args.get(1).map_or(&[], std::slice::from_ref))?;
+            inst_rc.borrow_mut().attrs.insert("__builtin_data__".to_string(), new_backing);
+        }
+        Ok(Value::none())
+    }
 }
 
 /// Integer divmod shared by all `int`/`bool` overload combinations.
