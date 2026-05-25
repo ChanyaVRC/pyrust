@@ -1,11 +1,4 @@
-# Tests for BaseException.add_note() — Python 3.11+ feature (issue #1067).
-#
-# CPython 3.12 semantics:
-#   - add_note(note) appends `note` to self.__notes__ (creating it if absent)
-#   - note must be a str; non-str raises TypeError
-#   - add_note() returns None
-#   - __notes__ does not exist until add_note() is called
-#   - every exception subclass inherits add_note from BaseException
+# BaseException.add_note() — Python 3.11+ feature (issue #1067).
 
 # --- basic append ---
 e = ValueError("test")
