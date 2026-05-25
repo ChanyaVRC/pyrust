@@ -1352,7 +1352,11 @@ result = fact(10)
 
     #[test]
     fn chr_type_error_message_substitutes_type_name() {
-        let err = run_program_expect_error("chr('not an int')\n");
+        // Assign the result so it is not treated as a dead call by the
+        // builtin DCE pass (which correctly drops pure-builtin calls whose
+        // result is never used).  The TypeError still propagates because the
+        // call itself is not eliminated when its result register is live.
+        let err = run_program_expect_error("_x = chr('not an int')\n");
         let msg = err.to_string();
         assert!(
             msg.contains("got type str"),
@@ -1366,10 +1370,12 @@ result = fact(10)
 
     #[test]
     fn bin_oct_hex_type_error_messages_substitute_type_name() {
+        // Assign results to locals to prevent the builtin DCE optimizer pass
+        // from treating these as dead calls and silently dropping them.
         for src in [
-            "bin('s')\n",
-            "oct(3.14)\n",
-            "hex([])\n",
+            "_x = bin('s')\n",
+            "_x = oct(3.14)\n",
+            "_x = hex([])\n",
         ] {
             let err = run_program_expect_error(src);
             let msg = err.to_string();
