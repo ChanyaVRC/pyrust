@@ -1768,10 +1768,16 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__lt__", "__gt__") {
                     return r;
                 }
+                if let Some(r) = set_subset_cmp(&left, &right, BinaryOp::Lt) {
+                    return r;
+                }
                 self.compare(left, right, "<", |o| o.is_lt())
             }
             BinaryOp::Le => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__le__", "__ge__") {
+                    return r;
+                }
+                if let Some(r) = set_subset_cmp(&left, &right, BinaryOp::Le) {
                     return r;
                 }
                 self.compare(left, right, "<=", |o| o.is_le())
@@ -1780,10 +1786,16 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__gt__", "__lt__") {
                     return r;
                 }
+                if let Some(r) = set_subset_cmp(&left, &right, BinaryOp::Gt) {
+                    return r;
+                }
                 self.compare(left, right, ">", |o| o.is_gt())
             }
             BinaryOp::Ge => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__ge__", "__le__") {
+                    return r;
+                }
+                if let Some(r) = set_subset_cmp(&left, &right, BinaryOp::Ge) {
                     return r;
                 }
                 self.compare(left, right, ">=", |o| o.is_ge())
@@ -3036,6 +3048,34 @@ fn set_binary_op(left: &Value, right: &Value, op: SetOp) -> Option<Result<Value>
     } else {
         Value::set(out)
     }))
+}
+
+/// Set/frozenset subset-relation comparison.
+///
+/// Returns `Some(Ok(bool))` when both `left` and `right` are set/frozenset
+/// (or subclasses thereof), `None` otherwise (caller should fall through to
+/// a TypeError).
+///
+/// Semantics match CPython 3.12:
+/// - `a < b`  — proper subset: every element of `a` is in `b` and `a != b`
+/// - `a <= b` — subset: every element of `a` is in `b`
+/// - `a > b`  — proper superset: every element of `b` is in `a` and `a != b`
+/// - `a >= b` — superset: every element of `b` is in `a`
+///
+/// Mixed `set`/`frozenset` comparisons are supported, as in CPython.
+fn set_subset_cmp(left: &Value, right: &Value, op: BinaryOp) -> Option<Result<Value>> {
+    let (a, _) = set_items_from_value(left)?;
+    let (b, _) = set_items_from_value(right)?;
+    let is_subset = a.iter().all(|k| b.contains(k));
+    let is_superset = b.iter().all(|k| a.contains(k));
+    let result = match op {
+        BinaryOp::Lt => is_subset && !is_superset,
+        BinaryOp::Le => is_subset,
+        BinaryOp::Gt => is_superset && !is_subset,
+        BinaryOp::Ge => is_superset,
+        _ => unreachable!("set_subset_cmp called with non-comparison op"),
+    };
+    Some(Ok(Value::bool_(result)))
 }
 
 /// Coerce a numeric value to a `(real, imag)` pair if possible.
