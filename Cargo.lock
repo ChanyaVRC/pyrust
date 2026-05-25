@@ -224,6 +224,7 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "ryu",
+ "unicode-properties",
 ]
 
 [[package]]

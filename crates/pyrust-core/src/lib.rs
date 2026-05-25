@@ -15,6 +15,7 @@ use std::sync::{
 use indexmap::{IndexMap, IndexSet};
 use num_bigint::BigInt;
 use num_traits::{FromPrimitive, ToPrimitive, Zero};
+use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
 pub use num_bigint::BigInt as PyBigInt;
 pub use num_bigint::Sign as PyBigIntSign;
@@ -3563,10 +3564,45 @@ fn escape_str(s: &str, quote: char) -> String {
                 out.push('\\');
                 out.push(c);
             }
+            c if !py_is_printable(c) => {
+                let n = c as u32;
+                if n <= 0xFF {
+                    out.push_str(&format!("\\x{n:02x}"));
+                } else if n <= 0xFFFF {
+                    out.push_str(&format!("\\u{n:04x}"));
+                } else {
+                    out.push_str(&format!("\\U{n:08x}"));
+                }
+            }
             c => out.push(c),
         }
     }
     out
+}
+
+/// Returns `true` when `c` is considered "printable" by Python's
+/// `str.isprintable()` / CPython's `Py_UNICODE_ISPRINTABLE`.
+///
+/// CPython considers a character non-printable when its Unicode general
+/// category is one of: Cc (control), Cf (format), Cs (surrogate),
+/// Co (private-use), Cn (unassigned), Zl/Zp (line/paragraph separators),
+/// or any Zs (space separator) except ASCII space (U+0020).
+#[inline]
+fn py_is_printable(c: char) -> bool {
+    if c == ' ' {
+        return true;
+    }
+    !matches!(
+        c.general_category(),
+        GeneralCategory::Control
+            | GeneralCategory::Format
+            | GeneralCategory::Surrogate
+            | GeneralCategory::PrivateUse
+            | GeneralCategory::Unassigned
+            | GeneralCategory::SpaceSeparator
+            | GeneralCategory::LineSeparator
+            | GeneralCategory::ParagraphSeparator
+    )
 }
 
 pub fn range_len(start: i64, stop: i64, step: i64) -> i64 {
