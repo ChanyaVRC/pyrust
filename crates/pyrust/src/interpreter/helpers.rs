@@ -352,6 +352,22 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
         .borrow_mut()
         .attrs
         .insert("fromhex".to_string(), Value::builtin_function("float.fromhex"));
+    // Issue #988: register `__init__` on dict/list/set so that
+    // `super().__init__()` from a subclass can resolve it via MRO lookup
+    // without raising AttributeError.  The registered dispatch returns None
+    // (no-op) when called from super() with no args, and populates the
+    // backing store when called via invoke_class_method with constructor args.
+    for (cls, type_name) in [
+        (&list_class, "list"),
+        (&dict_class, "dict"),
+        (&set_class, "set"),
+    ] {
+        let sentinel: &'static str =
+            Box::leak(format!("{type_name}.__init__").into_boxed_str());
+        cls.borrow_mut()
+            .attrs
+            .insert("__init__".to_string(), Value::builtin_function(sentinel));
+    }
     // PEP 585: `__class_getitem__` on the five collection types that support
     // `list[int]`-style generic subscripting.  Each gets a
     // `BuiltinFunction("<type>.__class_getitem__")` sentinel so that both

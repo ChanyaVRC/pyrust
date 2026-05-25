@@ -2336,6 +2336,104 @@ pyrust_module! {
         };
         Ok(pyrust_builtins::slice::make_slice(start, stop, step))
     }
+
+    /// Issue #988: `list.__init__(self, iterable=())` — no-op when called from
+    /// `super().__init__()` (the SuperProxy path passes no instance), and
+    /// populates the backing store when called via `invoke_class_method` with
+    /// constructor args (the `class MyList(list): pass; MyList([1,2,3])` path).
+    ///
+    /// CPython signature: `list.__init__(self, iterable=())`
+    #[py_name = "list.__init__"]
+    fn list_init(args) -> Result<Value> {
+        let Some(first) = args.first() else {
+            return Ok(Value::none());
+        };
+        let inst_rc = match first.value.kind() {
+            ValueKind::PyInstance(rc) => Rc::clone(rc),
+            _ => return Ok(Value::none()),
+        };
+        if args.len() > 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("list expected at most 1 argument, got {}", args.len() - 1),
+            ));
+        }
+        if args.len() == 2 {
+            if instance_builtin_data(&inst_rc).is_some() {
+                let list_dispatch = crate::builtin_registry::lookup("list").ok_or_else(|| {
+                    PyError::Runtime("internal: list constructor not in registry".to_string())
+                })?;
+                let new_backing = list_dispatch(_interp, &args[1..=1])?;
+                inst_rc.borrow_mut().attrs.insert("__builtin_data__".to_string(), new_backing);
+            }
+        }
+        Ok(Value::none())
+    }
+
+    /// Issue #988: `dict.__init__(self, mapping_or_iterable=(), **kwargs)` —
+    /// no-op when called from `super().__init__()`, and populates the backing
+    /// store when called via `invoke_class_method` with constructor args.
+    ///
+    /// CPython signature: `dict.__init__(self, *args, **kwargs)`
+    #[py_name = "dict.__init__"]
+    fn dict_init(args) -> Result<Value> {
+        let Some(first) = args.first() else {
+            return Ok(Value::none());
+        };
+        let inst_rc = match first.value.kind() {
+            ValueKind::PyInstance(rc) => Rc::clone(rc),
+            _ => return Ok(Value::none()),
+        };
+        let pos_count = args[1..].iter().filter(|a| a.name.is_none()).count();
+        if pos_count > 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("dict expected at most 1 argument, got {}", pos_count),
+            ));
+        }
+        if args.len() > 1 {
+            if instance_builtin_data(&inst_rc).is_some() {
+                let dict_dispatch = crate::builtin_registry::lookup("dict").ok_or_else(|| {
+                    PyError::Runtime("internal: dict constructor not in registry".to_string())
+                })?;
+                let new_backing = dict_dispatch(_interp, &args[1..])?;
+                inst_rc.borrow_mut().attrs.insert("__builtin_data__".to_string(), new_backing);
+            }
+        }
+        Ok(Value::none())
+    }
+
+    /// Issue #988: `set.__init__(self, iterable=())` — no-op when called from
+    /// `super().__init__()`, and populates the backing store when called via
+    /// `invoke_class_method` with constructor args.
+    ///
+    /// CPython signature: `set.__init__(self, iterable=())`
+    #[py_name = "set.__init__"]
+    fn set_init(args) -> Result<Value> {
+        let Some(first) = args.first() else {
+            return Ok(Value::none());
+        };
+        let inst_rc = match first.value.kind() {
+            ValueKind::PyInstance(rc) => Rc::clone(rc),
+            _ => return Ok(Value::none()),
+        };
+        if args.len() > 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("set expected at most 1 argument, got {}", args.len() - 1),
+            ));
+        }
+        if args.len() == 2 {
+            if instance_builtin_data(&inst_rc).is_some() {
+                let set_dispatch = crate::builtin_registry::lookup("set").ok_or_else(|| {
+                    PyError::Runtime("internal: set constructor not in registry".to_string())
+                })?;
+                let new_backing = set_dispatch(_interp, &args[1..=1])?;
+                inst_rc.borrow_mut().attrs.insert("__builtin_data__".to_string(), new_backing);
+            }
+        }
+        Ok(Value::none())
+    }
 }
 
 /// Integer divmod shared by all `int`/`bool` overload combinations.
