@@ -7,7 +7,8 @@ use crate::ast::{
     Pattern, Stmt, UnaryOp,
 };
 use crate::bytecode::{
-    AttrCacheEntry, CellVar, FnCode, FnParamSpec, FnProto, GLOBAL_CACHE_EMPTY, Insn, Reg,
+    AttrCacheEntry, BinOpCacheEntry, CellVar, FnCode, FnParamSpec, FnProto, GLOBAL_CACHE_EMPTY,
+    Insn, Reg,
 };
 use crate::error::PyError;
 use crate::value::{PyBigInt, PyPow, PyToPrimitive, Value, ValueKind};
@@ -4029,6 +4030,7 @@ impl Compiler {
             is_class_method: self.is_class_method,
             attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; insns_len]),
             global_cache: RefCell::new(vec![(GLOBAL_CACHE_EMPTY, Value::none()); names_len]),
+            binop_cache: RefCell::new(vec![BinOpCacheEntry::Empty; insns_len]),
         })
     }
 

@@ -351,6 +351,43 @@ pub enum AttrCacheEntry {
     Megamorphic,
 }
 
+/// Operand-type tag for the BinOp inline cache.
+///
+/// Classifies a `(lhs, rhs)` pair at a BinOp call site into one of four
+/// categories.  The cache transitions from `Counting` → `Specialized` (after
+/// [`BINOP_SPEC_THRESHOLD`] observations of the same tag) → `Megamorphic`
+/// (on a tag mismatch).  A Megamorphic site permanently bypasses the cache
+/// and falls straight through to `eval_binary`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BinopTypeTag {
+    Int,
+    Float,
+    Str,
+    Other,
+}
+
+/// Adaptive inline-cache state for a single BinOp instruction site.
+///
+/// Indexed by `pc` inside [`FnCode::binop_cache`] — one entry per instruction
+/// position.  Only slots for `BinOp`, `BinOpInPlace`, `BinOpConst`, and
+/// `BinOpImm` instructions are ever advanced past `Empty`; all other positions
+/// remain `Empty` for the lifetime of the `FnCode`.
+#[derive(Debug, Clone)]
+pub(crate) enum BinOpCacheEntry {
+    /// No observation yet.
+    Empty,
+    /// Seen `count` observations all with the same `tag`.
+    Counting { tag: BinopTypeTag, count: u8 },
+    /// Specialised: every observation so far matched `tag`.
+    Specialized(BinopTypeTag),
+    /// Two or more distinct tags observed — skip the cache.
+    Megamorphic,
+}
+
+/// Number of same-type observations required before a BinOp site transitions
+/// from `Counting` to `Specialized`.
+pub(crate) const BINOP_SPEC_THRESHOLD: u8 = 8;
+
 // SAFETY: pyrust's interpreter is single-threaded.  `AttrCacheEntry` is only
 // ever read or written inside `run_bytecode_inner`, which runs on one thread.
 // The raw `class_ptr` is never sent across threads.
@@ -421,6 +458,19 @@ pub struct FnCode {
     /// Shared across all invocations of this function via `Rc<FnCode>` — the
     /// cache is function-granular, not call-granular.
     pub(crate) global_cache: RefCell<Vec<(u32, Value)>>,
+    /// Adaptive inline cache for binary operations (PEP 659 style).
+    ///
+    /// Indexed by instruction position (`pc`) — same length as `insns`.
+    /// Only entries at BinOp-family positions are ever advanced beyond `Empty`.
+    ///
+    /// State machine per entry:
+    ///   `Empty` → first observation → `Counting { tag, count: 1 }`
+    ///   `Counting { tag, count }` + same tag → `count + 1`; if `count + 1 ==
+    ///     BINOP_SPEC_THRESHOLD` → `Specialized(tag)`.
+    ///   `Counting` + different tag → `Megamorphic`.
+    ///   `Specialized(tag)` + same tag → try fast path; mismatch → `Megamorphic`.
+    ///   `Megamorphic` → permanently bypass cache, call `eval_binary` directly.
+    pub(crate) binop_cache: RefCell<Vec<BinOpCacheEntry>>,
 }
 
 /// Initial version stored in every `global_cache` slot at construction
