@@ -205,13 +205,24 @@ pub(crate) fn lookup_class_attr(class: &Rc<RefCell<PyClass>>, name: &str) -> Opt
 }
 
 thread_local! {
-    static OBJECT_CLASS: Rc<RefCell<PyClass>> = Rc::new(RefCell::new(PyClass {
-        name: "object".to_string(),
-        qualname: "object".to_string(),
-        base: None,
-        attrs: IndexMap::new(),
-        mutation_version: std::cell::Cell::new(0),
-    }));
+    static OBJECT_CLASS: Rc<RefCell<PyClass>> = {
+        // Issue #1047: object.__init_subclass__ is a no-op classmethod in
+        // CPython.  Register the builtin sentinel so that
+        // `super().__init_subclass__(**kwargs)` inside user __init_subclass__
+        // methods finds it when the MRO walk reaches `object`.
+        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        attrs.insert(
+            "__init_subclass__".to_string(),
+            Value::builtin_function("object.__init_subclass__"),
+        );
+        Rc::new(RefCell::new(PyClass {
+            name: "object".to_string(),
+            qualname: "object".to_string(),
+            base: None,
+            attrs,
+            mutation_version: std::cell::Cell::new(0),
+        }))
+    };
 
     /// Per-primitive `PyClass` singletons.  Issue #462 — `int`, `str`,
     /// `list`, … are now real `PyClass` values, not `BuiltinFunction(name)`

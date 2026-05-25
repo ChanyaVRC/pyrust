@@ -2540,6 +2540,17 @@ pyrust_module! {
     fn tuple_init(_args) -> Result<Value> {
         Ok(Value::none())
     }
+
+    /// Issue #1047: `object.__init_subclass__` — the default no-op hook.
+    /// CPython (Objects/typeobject.c) registers this on `object` so that
+    /// `super().__init_subclass__(**kwargs)` inside a user-defined
+    /// `__init_subclass__` terminates the MRO walk without error.
+    ///
+    /// CPython signature: `object.__init_subclass__(cls, /, **kwargs)`
+    #[py_name = "object.__init_subclass__"]
+    fn object_init_subclass(_args) -> Result<Value> {
+        Ok(Value::none())
+    }
 }
 
 /// Detect the numeric base and build the digits string to parse when
