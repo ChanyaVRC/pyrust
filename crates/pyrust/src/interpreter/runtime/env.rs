@@ -239,14 +239,14 @@ impl Interpreter {
             ValueKind::SuperProxy { class, instance } => {
                 let class = Rc::clone(class);
                 let instance = Rc::clone(instance);
-                // Look up the method starting from class's parent (skip class itself)
-                let parent = class.borrow().base.clone();
-                let Some(parent_class) = parent else {
-                    return Err(PyError::named(
-                        "AttributeError",
-                        format!("super(): '{}' has no base class", class.borrow().name),
-                    ));
-                };
+                // Look up the method starting from class's parent (skip class itself).
+                // Fall back to the implicit `object` base when no explicit base is set —
+                // every class implicitly inherits from object in CPython (issue #1047).
+                let parent_class = class
+                    .borrow()
+                    .base
+                    .clone()
+                    .unwrap_or_else(object_class_singleton);
                 if let Some(value) = lookup_class_attr(&parent_class, name) {
                     let user_fn = match value.kind() {
                         ValueKind::UserFunction(f) => Some(Rc::clone(f)),
@@ -292,14 +292,14 @@ impl Interpreter {
             ValueKind::SuperProxyClass { class, obj_class } => {
                 let class = Rc::clone(class);
                 let obj_class = Rc::clone(obj_class);
-                // classmethod super(): look up from class's parent and bind to obj_class
-                let parent = class.borrow().base.clone();
-                let Some(parent_class) = parent else {
-                    return Err(PyError::named(
-                        "AttributeError",
-                        format!("super(): '{}' has no base class", class.borrow().name),
-                    ));
-                };
+                // classmethod super(): look up from class's parent and bind to obj_class.
+                // Fall back to the implicit `object` base when no explicit base is set —
+                // every class implicitly inherits from object in CPython (issue #1047).
+                let parent_class = class
+                    .borrow()
+                    .base
+                    .clone()
+                    .unwrap_or_else(object_class_singleton);
                 if let Some(value) = lookup_class_attr(&parent_class, name) {
                     let user_fn = match value.kind() {
                         ValueKind::UserFunction(f) => Some(Rc::clone(f)),

@@ -3565,6 +3565,24 @@ impl Interpreter {
                             attrs.insert(name.clone(), v.clone());
                         }
                     }
+                    // Issue #1047: CPython implicitly wraps `__init_subclass__` as a
+                    // classmethod when defined in a class body without an explicit
+                    // `@classmethod` decorator (Objects/typeobject.c `type_new`).
+                    // Promote a Regular UserFunction to ClassMethod kind here so that
+                    // `super().__init_subclass__(**kwargs)` lookups through
+                    // SuperProxyClass bind `cls` correctly.
+                    let isc_wrapped = attrs.get("__init_subclass__").and_then(|v| {
+                        if let ValueKind::UserFunction(f) = v.kind()
+                            && f.kind == pyrust_core::UserFunctionKind::Regular
+                        {
+                            Some(Value::class_method(Rc::clone(f)))
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(wrapped) = isc_wrapped {
+                        attrs.insert("__init_subclass__".to_string(), wrapped);
+                    }
                     // Issue #553: __qualname__ must NOT live in the class attrs
                     // dict — in CPython it is a descriptor on `type`, not an
                     // entry in the instance dict.  Remove it if the class body
@@ -3647,6 +3665,22 @@ impl Interpreter {
                         .borrow_mut()
                         .values
                         .insert("__class__".to_string(), Value::py_class(Rc::clone(&class)));
+                    // Issue #1047: CPython (Objects/typeobject.c type_new_init_subclass)
+                    // calls __init_subclass__ on the base class after the new class is
+                    // fully constructed.  The hook receives the new subclass as `cls`
+                    // (classmethod semantics: prepended as the first positional argument).
+                    // Look up via the MRO walk so an ancestor that defines the hook is
+                    // reached even if the direct base doesn't override it.
+                    // Skip silently when no base exists (top-level class) or when the
+                    // base MRO has no __init_subclass__ defined.
+                    if let Some(base_rc) = class.borrow().base.clone() {
+                        if let Some(method_val) =
+                            lookup_class_attr(&base_rc, "__init_subclass__")
+                        {
+                            let new_cls = Value::py_class(Rc::clone(&class));
+                            vm_try!(invoke_class_method(self, method_val, new_cls, &[]));
+                        }
+                    }
                     regs[*dst as usize] = Value::py_class(class);
                 }
 
