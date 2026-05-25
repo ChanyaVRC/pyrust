@@ -197,6 +197,119 @@ fn int_int_fast(a: i64, b: i64, op: BinaryOp) -> Option<Value> {
     }
 }
 
+/// Float-float fast path for arithmetic and comparison BinOps.
+///
+/// Returns `None` for:
+/// - Ops that don't apply to floats (e.g. `BitAnd`).
+/// - Cases where the Rust float result would diverge from CPython's
+///   exception-raising behaviour: `Div`/`FloorDiv`/`Mod` by zero, and
+///   `0.0 ** negative` for `Pow`.  The caller falls through to
+///   `eval_binary` which raises the correct `ZeroDivisionError`.
+///
+/// NaN comparisons are handled correctly: Rust float comparisons with NaN
+/// always return `false`, matching CPython's `float('nan') < x == False`.
+#[inline(always)]
+fn float_float_fast(a: f64, b: f64, op: BinaryOp) -> Option<Value> {
+    match op {
+        BinaryOp::Add => Some(Value::float(a + b)),
+        BinaryOp::Sub => Some(Value::float(a - b)),
+        BinaryOp::Mul => Some(Value::float(a * b)),
+        BinaryOp::Div => {
+            if b == 0.0 {
+                // ZeroDivisionError: "float division by zero" — fall through.
+                None
+            } else {
+                Some(Value::float(a / b))
+            }
+        }
+        BinaryOp::FloorDiv => {
+            if b == 0.0 {
+                // ZeroDivisionError — fall through to eval_binary.
+                None
+            } else {
+                Some(Value::float((a / b).floor()))
+            }
+        }
+        BinaryOp::Mod => {
+            if b == 0.0 {
+                None
+            } else {
+                let r = a % b;
+                // CPython sign-adjusts: result has same sign as divisor.
+                let r = if (r > 0.0 && b < 0.0) || (r < 0.0 && b > 0.0) {
+                    r + b
+                } else {
+                    r
+                };
+                Some(Value::float(r))
+            }
+        }
+        BinaryOp::Pow => {
+            // 0.0 ** negative → ZeroDivisionError in CPython; Rust returns ±inf.
+            if a == 0.0 && b < 0.0 {
+                None
+            } else {
+                Some(Value::float(a.powf(b)))
+            }
+        }
+        BinaryOp::Eq => Some(Value::bool_(a == b)),
+        BinaryOp::Ne => Some(Value::bool_(a != b)),
+        BinaryOp::Lt => Some(Value::bool_(a < b)),
+        BinaryOp::Le => Some(Value::bool_(a <= b)),
+        BinaryOp::Gt => Some(Value::bool_(a > b)),
+        BinaryOp::Ge => Some(Value::bool_(a >= b)),
+        _ => None,
+    }
+}
+
+/// String fast path for BinOps that apply to `str`.
+///
+/// Currently handles `Add` (concatenation) and comparison operators.
+/// Returns `None` for any op that doesn't apply to strings.
+#[inline(always)]
+fn str_str_fast(a: &str, b: &str, op: BinaryOp) -> Option<Value> {
+    match op {
+        BinaryOp::Add => {
+            let mut s = String::with_capacity(a.len() + b.len());
+            s.push_str(a);
+            s.push_str(b);
+            Some(Value::string(s))
+        }
+        BinaryOp::Eq => Some(Value::bool_(a == b)),
+        BinaryOp::Ne => Some(Value::bool_(a != b)),
+        BinaryOp::Lt => Some(Value::bool_(a < b)),
+        BinaryOp::Le => Some(Value::bool_(a <= b)),
+        BinaryOp::Gt => Some(Value::bool_(a > b)),
+        BinaryOp::Ge => Some(Value::bool_(a >= b)),
+        _ => None,
+    }
+}
+
+/// Classify two `Value` operands into a `BinopTypeTag` for the inline cache.
+///
+/// `Int` is returned only when both values tag as `TAG_INT` (or `BigInt`
+/// that fits in i64 via `as_int()`).  `Float` requires both to be true floats
+/// (`is_float()`).  `Str` requires both to be strings.  Everything else maps
+/// to `Other`.  The tags are mutually exclusive because `as_int()` returns
+/// `None` for floats and strings.
+#[inline(always)]
+fn classify_binop_tag(a: &Value, b: &Value) -> crate::bytecode::BinopTypeTag {
+    use crate::bytecode::BinopTypeTag;
+    // is_float() is a fast bit-mask check; check it first so Float beats Int
+    // for Bool operands (Bool's tag is TAG_BOOL, not TAG_INT, so as_int won't
+    // fire for bools, and this branch won't trip for them either).
+    if a.is_float() && b.is_float() {
+        return BinopTypeTag::Float;
+    }
+    if a.as_int().is_some() && b.as_int().is_some() {
+        return BinopTypeTag::Int;
+    }
+    if a.is_str() && b.is_str() {
+        return BinopTypeTag::Str;
+    }
+    BinopTypeTag::Other
+}
+
 #[inline(always)]
 fn int_cmp(a: i64, b: i64, op: BinaryOp) -> Option<bool> {
     match op {
@@ -948,13 +1061,15 @@ impl Interpreter {
 
                 // ── Arithmetic / Logic ───────────────────────────────────
                 Insn::BinOp(dst, lhs, op, rhs) => {
+                    use crate::bytecode::{BinOpCacheEntry, BinopTypeTag, BINOP_SPEC_THRESHOLD};
                     // Hot path: `as_int()` is a tagged-u64 check that
                     // bypasses `kind()`'s scoped RefCell borrow for the
                     // List/Dict/Set kinds (#450).  Unlike `Insn::Move`
                     // (where #441 showed the int specialization is a
                     // wash), the BinOp fast path also short-circuits the
                     // entire `eval_binary` dispatch for int–int ops, so
-                    // the savings are real.
+                    // the savings are real.  This check runs unconditionally
+                    // (no cache overhead) so int-int loops pay nothing.
                     if let (Some(a), Some(b)) = (
                         regs[*lhs as usize].as_int(),
                         regs[*rhs as usize].as_int(),
@@ -963,9 +1078,124 @@ impl Interpreter {
                         regs[*dst as usize] = result;
                         continue;
                     }
-                    let l = vm_try!(vm_read(&regs, *lhs, num_locals));
-                    let r = vm_try!(vm_read(&regs, *rhs, num_locals));
-                    regs[*dst as usize] = vm_try!(self.eval_binary(l, *op, r));
+                    // Adaptive inline cache for float / str specialisation.
+                    // Consulted after the int fast path misses, so int-int
+                    // code never pays cache-lookup overhead.
+                    //
+                    // Deopt policy: only deopt (→ Megamorphic) on a *type*
+                    // mismatch.  Edge-case values (e.g. div-by-zero in the
+                    // Float path) fall through to eval_binary while keeping
+                    // the cache Specialized so subsequent calls still hit
+                    // the fast path.
+                    let cache_slot = pc - 1;
+                    let cache_entry = code.binop_cache.borrow()[cache_slot].clone();
+                    match cache_entry {
+                        BinOpCacheEntry::Megamorphic => {
+                            // Permanently polymorphic site: skip classification,
+                            // go straight to eval_binary.
+                            let l = vm_try!(vm_read(&regs, *lhs, num_locals));
+                            let r = vm_try!(vm_read(&regs, *rhs, num_locals));
+                            regs[*dst as usize] = vm_try!(self.eval_binary(l, *op, r));
+                        }
+                        BinOpCacheEntry::Specialized(BinopTypeTag::Float) => {
+                            let lv = &regs[*lhs as usize];
+                            let rv = &regs[*rhs as usize];
+                            if lv.is_float() && rv.is_float() {
+                                let a = lv.as_float_raw();
+                                let b = rv.as_float_raw();
+                                if let Some(result) = float_float_fast(a, b, *op) {
+                                    regs[*dst as usize] = result;
+                                    continue;
+                                }
+                                // Fast path returned None (e.g. div-by-zero,
+                                // unsupported op): site is still Float/Float,
+                                // so keep the Specialized state and fall
+                                // through to eval_binary for this edge case.
+                            } else {
+                                // Actual type mismatch: deopt to Megamorphic.
+                                code.binop_cache.borrow_mut()[cache_slot] =
+                                    BinOpCacheEntry::Megamorphic;
+                            }
+                            let l = vm_try!(vm_read(&regs, *lhs, num_locals));
+                            let r = vm_try!(vm_read(&regs, *rhs, num_locals));
+                            regs[*dst as usize] = vm_try!(self.eval_binary(l, *op, r));
+                        }
+                        BinOpCacheEntry::Specialized(BinopTypeTag::Str) => {
+                            let lv = &regs[*lhs as usize];
+                            let rv = &regs[*rhs as usize];
+                            if lv.is_str() && rv.is_str() {
+                                let a = lv.as_str().unwrap();
+                                let b = rv.as_str().unwrap();
+                                if let Some(result) = str_str_fast(a, b, *op) {
+                                    regs[*dst as usize] = result;
+                                    continue;
+                                }
+                                // Unsupported op for str (e.g. str * str):
+                                // keep Specialized, fall through to eval_binary
+                                // which will raise the proper TypeError.
+                            } else {
+                                // Type mismatch: deopt.
+                                code.binop_cache.borrow_mut()[cache_slot] =
+                                    BinOpCacheEntry::Megamorphic;
+                            }
+                            let l = vm_try!(vm_read(&regs, *lhs, num_locals));
+                            let r = vm_try!(vm_read(&regs, *rhs, num_locals));
+                            regs[*dst as usize] = vm_try!(self.eval_binary(l, *op, r));
+                        }
+                        BinOpCacheEntry::Specialized(BinopTypeTag::Int) => {
+                            // int_int_fast already ran above and returned None
+                            // (overflow or unsupported op such as FloorDiv/Mod/
+                            // Div/Pow).  The types are still correct; keep
+                            // Specialized so the fast path is retried next loop
+                            // iteration.  Fall through to eval_binary for this
+                            // invocation.
+                            let l = vm_try!(vm_read(&regs, *lhs, num_locals));
+                            let r = vm_try!(vm_read(&regs, *rhs, num_locals));
+                            regs[*dst as usize] = vm_try!(self.eval_binary(l, *op, r));
+                        }
+                        BinOpCacheEntry::Specialized(BinopTypeTag::Other) => {
+                            // No fast path for 'Other' types.  If the types are
+                            // still 'Other', stay Specialized (no deopt needed
+                            // since there's no fast path to lose).  Fall through.
+                            let l = vm_try!(vm_read(&regs, *lhs, num_locals));
+                            let r = vm_try!(vm_read(&regs, *rhs, num_locals));
+                            regs[*dst as usize] = vm_try!(self.eval_binary(l, *op, r));
+                        }
+                        BinOpCacheEntry::Counting { tag, count } => {
+                            let observed = classify_binop_tag(
+                                &regs[*lhs as usize],
+                                &regs[*rhs as usize],
+                            );
+                            let new_entry = if observed == tag {
+                                let new_count = count + 1;
+                                if new_count >= BINOP_SPEC_THRESHOLD {
+                                    BinOpCacheEntry::Specialized(tag)
+                                } else {
+                                    BinOpCacheEntry::Counting {
+                                        tag,
+                                        count: new_count,
+                                    }
+                                }
+                            } else {
+                                BinOpCacheEntry::Megamorphic
+                            };
+                            code.binop_cache.borrow_mut()[cache_slot] = new_entry;
+                            let l = vm_try!(vm_read(&regs, *lhs, num_locals));
+                            let r = vm_try!(vm_read(&regs, *rhs, num_locals));
+                            regs[*dst as usize] = vm_try!(self.eval_binary(l, *op, r));
+                        }
+                        BinOpCacheEntry::Empty => {
+                            let observed = classify_binop_tag(
+                                &regs[*lhs as usize],
+                                &regs[*rhs as usize],
+                            );
+                            code.binop_cache.borrow_mut()[cache_slot] =
+                                BinOpCacheEntry::Counting { tag: observed, count: 1 };
+                            let l = vm_try!(vm_read(&regs, *lhs, num_locals));
+                            let r = vm_try!(vm_read(&regs, *rhs, num_locals));
+                            regs[*dst as usize] = vm_try!(self.eval_binary(l, *op, r));
+                        }
+                    }
                 }
                 Insn::BinOpInPlace(dst, lhs, op, rhs) => {
                     if let (Some(a), Some(b)) = (
@@ -4622,7 +4852,7 @@ mod vm_tests {
     use crate::interpreter::Interpreter;
 
     fn empty_code(insns: Vec<Insn>) -> FnCode {
-        use crate::bytecode::{AttrCacheEntry, GLOBAL_CACHE_EMPTY};
+        use crate::bytecode::{AttrCacheEntry, BinOpCacheEntry, GLOBAL_CACHE_EMPTY};
         let n = insns.len();
         FnCode {
             insns,
@@ -4637,6 +4867,7 @@ mod vm_tests {
             is_class_method: false,
             attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; n]),
             global_cache: std::cell::RefCell::new(vec![(GLOBAL_CACHE_EMPTY, Value::none()); 0]),
+            binop_cache: std::cell::RefCell::new(vec![BinOpCacheEntry::Empty; n]),
         }
     }
 

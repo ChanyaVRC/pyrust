@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use crate::bytecode::{AttrCacheEntry, FnCode, FnProto, GLOBAL_CACHE_EMPTY, Insn};
+use crate::bytecode::{AttrCacheEntry, BinOpCacheEntry, FnCode, FnProto, GLOBAL_CACHE_EMPTY, Insn};
 use crate::value::{Value, ValueKind};
 
 /// Optimize a compiled `FnCode` and all nested function prototypes.
@@ -95,6 +95,7 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
         is_class_method: code.is_class_method,
         attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; insns_len]),
         global_cache: RefCell::new(vec![(GLOBAL_CACHE_EMPTY, Value::none()); names_len]),
+        binop_cache: RefCell::new(vec![BinOpCacheEntry::Empty; insns_len]),
     }
 }
 
