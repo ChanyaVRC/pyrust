@@ -221,8 +221,9 @@ impl Interpreter {
                 if is_exception_class(&instance.borrow().class) {
                     Ok(Value::py_instance(instance))
                 } else {
-                    Err(PyError::Runtime(
-                        "exceptions must derive from Exception".to_string(),
+                    Err(PyError::named(
+                        "TypeError",
+                        "exceptions must derive from BaseException".to_string(),
                     ))
                 }
             }
@@ -231,13 +232,15 @@ impl Interpreter {
                 if is_exception_class(&class) {
                     Ok(instantiate_exception(class, Vec::new()))
                 } else {
-                    Err(PyError::Runtime(
-                        "exceptions must derive from Exception".to_string(),
+                    Err(PyError::named(
+                        "TypeError",
+                        "exceptions must derive from BaseException".to_string(),
                     ))
                 }
             }
-            _ => Err(PyError::Runtime(
-                "exceptions must derive from Exception".to_string(),
+            _ => Err(PyError::named(
+                "TypeError",
+                "exceptions must derive from BaseException".to_string(),
             )),
         }
     }
@@ -283,35 +286,55 @@ impl Interpreter {
             ValueKind::PyClass(expected) => {
                 let expected = Rc::clone(expected);
                 if !is_exception_class(&expected) {
-                    return Err(PyError::Runtime(
-                        "except clause must reference an exception class".to_string(),
+                    return Err(PyError::named(
+                        "TypeError",
+                        "catching classes that do not inherit from BaseException is not allowed"
+                            .to_string(),
                     ));
                 }
                 Ok(class_is_subclass_of(&raised_class, &expected))
             }
             ValueKind::Tuple(items) => {
+                // CPython validates the entire tuple before attempting any
+                // match, so we do a validation pass first and then a match
+                // pass.  This ensures `except (GoodClass, 42)` raises
+                // TypeError even when the exception would have matched
+                // GoodClass.
                 for item in items {
                     match item.kind() {
                         ValueKind::PyClass(expected) => {
                             let expected = Rc::clone(expected);
                             if !is_exception_class(&expected) {
-                                return Err(PyError::Runtime(
-                                    "except clause must reference an exception class".to_string(),
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    "catching classes that do not inherit from BaseException is not allowed"
+                                        .to_string(),
                                 ));
                             }
-                            if class_is_subclass_of(&raised_class, &expected) {
-                                return Ok(true);
-                            }
                         }
-                        _ => return Err(PyError::Runtime(
-                            "except clause must reference an exception class".to_string(),
-                        )),
+                        _ => {
+                            return Err(PyError::named(
+                                "TypeError",
+                                "catching classes that do not inherit from BaseException is not allowed"
+                                    .to_string(),
+                            ))
+                        }
+                    }
+                }
+                // All items validated — now check for a match.
+                for item in items {
+                    if let ValueKind::PyClass(expected) = item.kind() {
+                        if class_is_subclass_of(&raised_class, expected) {
+                            return Ok(true);
+                        }
                     }
                 }
                 Ok(false)
             }
-            _ => Err(PyError::Runtime(
-                "except clause must reference an exception class".to_string(),
+            _ => Err(PyError::named(
+                "TypeError",
+                "catching classes that do not inherit from BaseException is not allowed"
+                    .to_string(),
             )),
         }
     }
