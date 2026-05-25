@@ -302,7 +302,7 @@ impl Interpreter {
         // aliasing notes on `Value::as_dict_mut`).
         if target.as_dict().is_some() {
             // Fast path for string keys (issue #506): probe via `StrKey` to
-            // skip the `PyKey::Str(String)` heap allocation.
+            // skip constructing a `PyKey::Str(Value)` (which bumps the RC).
             let lookup = if let Some(s) = index.as_str() {
                 self.dict_str_lookup(&target, s)?
             } else {
@@ -965,10 +965,11 @@ impl Interpreter {
     /// Zero-allocation string key lookup in a dict receiver (issue #506).
     ///
     /// Probes the `IndexMap<PyKey, Value>` using `StrKey`, which hashes
-    /// identically to `PyKey::Str` without allocating a `String`.  Use this
-    /// in place of `dict_lookup(&PyKey::Str(s.to_owned()))` whenever the
-    /// lookup key is already a `&str`.  The `PyKey::Object` slow path is
-    /// omitted: a `&str` can never match an `Object` key.
+    /// identically to `PyKey::Str` without constructing a `PyKey` (zero RC
+    /// bump, zero allocation).  Use this in place of
+    /// `dict_lookup(&PyKey::str_from(s))` whenever the lookup key is already
+    /// a `&str`.  The `PyKey::Object` slow path is omitted: a `&str` can
+    /// never match an `Object` key.
     pub(crate) fn dict_str_lookup(
         &mut self,
         receiver: &Value,

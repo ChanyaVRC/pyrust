@@ -1163,8 +1163,8 @@ mod tests {
         // wrapper inherits the behaviour.
         ensure_iter_registry_installed();
         let mut map = indexmap::IndexMap::new();
-        map.insert(PyKey::Str("a".into()), Value::int(1));
-        map.insert(PyKey::Str("b".into()), Value::int(2));
+        map.insert(PyKey::str_from("a"), Value::int(1));
+        map.insert(PyKey::str_from("b"), Value::int(2));
         let v = Value::dict(map);
         let it = PyIterable::try_from_value(&v, "list", "iterable").unwrap();
         let items = it.into_items();

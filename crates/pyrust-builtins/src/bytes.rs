@@ -1,5 +1,5 @@
 use indexmap::IndexMap;
-use pyrust_core::{PyError, PyKey, Result, Value, ValueKind};
+use pyrust_core::{PyError, PyKey, Result, StrKey, Value, ValueKind};
 
 /// Canonical list of method names dispatched by `call`.
 /// Single source of truth for `has_method` and the drift-guard test.
@@ -249,17 +249,15 @@ fn bytes_decode(bytes: &[u8], args: &[Value], kwargs: &IndexMap<PyKey, Value>) -
     // Signature: decode(encoding='utf-8', errors='strict')
     // Positional args take precedence; keyword args fill in when positional are absent.
     let kw_encoding = kwargs
-        .get(&PyKey::Str("encoding".into()))
+        .get(&StrKey("encoding"))
         .and_then(|v| match v.kind() {
             ValueKind::Str(s) => Some(s.to_owned()),
             _ => None,
         });
-    let kw_errors = kwargs
-        .get(&PyKey::Str("errors".into()))
-        .and_then(|v| match v.kind() {
-            ValueKind::Str(s) => Some(s.to_owned()),
-            _ => None,
-        });
+    let kw_errors = kwargs.get(&StrKey("errors")).and_then(|v| match v.kind() {
+        ValueKind::Str(s) => Some(s.to_owned()),
+        _ => None,
+    });
 
     // Validate that a keyword isn't also supplied positionally.
     if args.first().is_some() && kw_encoding.is_some() {

@@ -1619,8 +1619,8 @@ impl Interpreter {
                             FastResult::DictLookup(dict_val) => {
                                 // Fast path for string keys (issue #506): use
                                 // `dict_str_lookup` so we probe the map with
-                                // `StrKey` and avoid allocating a
-                                // `PyKey::Str(String)`.
+                                // `StrKey` and avoid constructing a
+                                // `PyKey::Str(Value)` (zero RC bump).
                                 let lookup = if let Some(s) = idx_val.as_str() {
                                     vm_try!(self.dict_str_lookup(&dict_val, s))
                                 } else {
@@ -1997,7 +1997,7 @@ impl Interpreter {
                         let me = module_env(&self.env);
                         let in_env = me.borrow_mut().values.remove(&name).is_some();
                         let in_dict = self.module_globals_dict
-                            .dict_shift_remove(&PyKey::Str(name.clone()))
+                            .dict_shift_remove(&PyKey::str_from(&*name))
                             .ok()
                             .flatten()
                             .is_some();
@@ -2046,7 +2046,7 @@ impl Interpreter {
                         let is_module_scope = self.env.borrow().parent.is_none();
                         let in_dict = if is_module_scope {
                             self.module_globals_dict
-                                .dict_shift_remove(&PyKey::Str(name.clone()))
+                                .dict_shift_remove(&PyKey::str_from(&*name))
                                 .ok()
                                 .flatten()
                                 .is_some()
@@ -2107,7 +2107,7 @@ impl Interpreter {
                         let val = regs[*reg as usize].clone();
                         if !val.is_unset() {
                             let _ = self.module_globals_dict.dict_insert(
-                                PyKey::Str(name.to_string()),
+                                PyKey::str_from(name),
                                 val,
                             );
                         }
@@ -2122,7 +2122,7 @@ impl Interpreter {
                     // be cleared when deleted, otherwise they can resurface
                     // through a subsequent globals() lookup (issue #846).
                     let _ = self.module_globals_dict
-                        .dict_shift_remove(&PyKey::Str(name.to_string()));
+                        .dict_shift_remove(&PyKey::str_from(name));
                     // Invalidate the LoadGlobal inline cache.
                     bump_global_env_version(self);
                 }
@@ -3135,7 +3135,7 @@ impl Interpreter {
                             *annots_base + i as u32,
                             num_locals
                         ));
-                        annotations_map.insert(PyKey::Str(key.clone()), val);
+                        annotations_map.insert(PyKey::str_from(key.as_str()), val);
                     }
                     let annotations = Value::dict(annotations_map);
                     // Validate that every nonlocal name resolves to an enclosing local scope.
@@ -3872,17 +3872,18 @@ impl Interpreter {
                 // Intercept list.sort here to support key= (needs interpreter access).
                 if method == "sort" {
                     // StrKey probes (issue #506): zero-alloc borrowed-str lookup
-                    // — no PyKey::Str(String) heap allocation on every sort call,
+                    // — no PyKey::Str(Value) RC bump on every sort call,
                     // superseding the prior LazyLock approach (which still paid
                     // a one-time String allocation per static).
                     for k in kw_map.keys() {
-                        if let PyKey::Str(s) = k
-                            && s != "key" && s != "reverse"
-                        {
-                            return Err(PyError::named(
-                                "TypeError",
-                                format!("sort() got an unexpected keyword argument '{s}'"),
-                            ));
+                        if let PyKey::Str(s) = k {
+                            let s = s.as_str().unwrap_or("");
+                            if s != "key" && s != "reverse" {
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    format!("sort() got an unexpected keyword argument '{s}'"),
+                                ));
+                            }
                         }
                     }
                     let key_fn = kw_map.get(&StrKey("key")).cloned();
@@ -3961,7 +3962,7 @@ impl Interpreter {
                     let mut keyword: Vec<(String, Value)> = Vec::with_capacity(kw_map.len());
                     for (k, v) in &kw_map {
                         if let PyKey::Str(name) = k {
-                            keyword.push((name.clone(), v.clone()));
+                            keyword.push((name.as_str().unwrap_or("").to_owned(), v.clone()));
                         }
                     }
                     let template = regs[obj as usize]
@@ -4017,7 +4018,10 @@ impl Interpreter {
                     .collect();
                 for (k, v) in &kw_map {
                     if let PyKey::Str(name) = k {
-                        expanded.push(ExpandedCallArg { name: Some(name.clone()), value: v.clone() });
+                        expanded.push(ExpandedCallArg {
+                            name: Some(name.as_str().unwrap_or("").to_owned()),
+                            value: v.clone(),
+                        });
                     }
                 }
                 let mut buf = std::mem::take(&mut self.call_arg_buf);
