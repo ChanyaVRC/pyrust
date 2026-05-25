@@ -2961,18 +2961,31 @@ enum SetOp {
     Xor, // symmetric difference
 }
 
-/// Compute a binary set operation when both operands are set/frozenset.
-/// Returns the result wrapped in `Set` if both operands are sets, otherwise
-/// `FrozenSet` (matching CPython: any frozenset operand promotes the result).
+/// Extract a set's items and frozen flag from a value that is a `set`,
+/// `frozenset`, or a `PyInstance` subclass backed by either.  Returns
+/// `None` when the value is none of those.
+fn set_items_from_value(v: &Value) -> Option<(indexmap::IndexSet<PyKey>, bool)> {
+    if let ValueKind::Set(s) = v.kind() {
+        return Some((s.clone(), false));
+    }
+    if let Some(rc) = pyrust_builtins::frozenset::as_items(v) {
+        return Some(((*rc).clone(), true));
+    }
+    if let Some(inst_rc) = v.as_py_instance_rc() {
+        if let Some(backing) = instance_builtin_data(inst_rc) {
+            return set_items_from_value(&backing);
+        }
+    }
+    None
+}
+
+/// Compute a binary set operation when both operands are set/frozenset (or
+/// `PyInstance` subclasses thereof).  Returns `Set` if both backing stores are
+/// mutable sets, otherwise `FrozenSet` (any frozenset operand promotes the
+/// result, matching CPython).
 fn set_binary_op(left: &Value, right: &Value, op: SetOp) -> Option<Result<Value>> {
-    let lhs_items = match left.kind() {
-        ValueKind::Set(s) => Some((s.clone(), false)),
-        _ => pyrust_builtins::frozenset::as_items(left).map(|rc| ((*rc).clone(), true)),
-    }?;
-    let rhs_items = match right.kind() {
-        ValueKind::Set(s) => Some((s.clone(), false)),
-        _ => pyrust_builtins::frozenset::as_items(right).map(|rc| ((*rc).clone(), true)),
-    }?;
+    let lhs_items = set_items_from_value(left)?;
+    let rhs_items = set_items_from_value(right)?;
     let (a, l_frozen) = lhs_items;
     let (b, r_frozen) = rhs_items;
     let mut out = indexmap::IndexSet::new();
