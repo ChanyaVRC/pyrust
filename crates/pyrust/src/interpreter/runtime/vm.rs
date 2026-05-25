@@ -1389,8 +1389,8 @@ impl Interpreter {
                             FastResult::DictLookup(dict_val) => {
                                 // Fast path for string keys (issue #506): use
                                 // `dict_str_lookup` so we probe the map with
-                                // `StrKey` and avoid allocating a
-                                // `PyKey::Str(String)`.
+                                // `StrKey` and avoid constructing a
+                                // `PyKey::Str(Value)` (zero RC bump).
                                 let lookup = if let Some(s) = idx_val.as_str() {
                                     vm_try!(self.dict_str_lookup(&dict_val, s))
                                 } else {
@@ -3642,7 +3642,7 @@ impl Interpreter {
                 // Intercept list.sort here to support key= (needs interpreter access).
                 if method == "sort" {
                     // StrKey probes (issue #506): zero-alloc borrowed-str lookup
-                    // — no PyKey::Str(String) heap allocation on every sort call,
+                    // — no PyKey::Str(Value) RC bump on every sort call,
                     // superseding the prior LazyLock approach (which still paid
                     // a one-time String allocation per static).
                     for k in kw_map.keys() {

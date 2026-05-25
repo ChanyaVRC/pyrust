@@ -522,7 +522,7 @@ impl Hash for PyKey {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// A borrowed `&str` that hashes identically to `PyKey::Str` and can be used
-/// to probe an `IndexMap<PyKey, V>` without allocating a `PyKey::Str(String)`.
+/// to probe an `IndexMap<PyKey, V>` without constructing a `PyKey::Str(Value)`.
 ///
 /// `PyKey::Str` hashes as `2u8.hash(state); s.hash(state)`.  `StrKey` applies
 /// the same sequence, satisfying the `Equivalent` contract (equal keys must
