@@ -2495,6 +2495,15 @@ impl Interpreter {
         // built-in sequence).
         if let ValueKind::PyInstance(inst) = target.kind() {
             let inst_rc = Rc::clone(inst);
+            // Issue #994: if the instance has a backing primitive value
+            // (tuple/frozenset/dict/list/set subclass), delegate slice to it.
+            // eval_index does the same for integer subscripts; without this,
+            // `MyTuple([1,2,3])[1:3]` reaches the __getitem__ branch and
+            // raises TypeError because tuple subclasses don't register a
+            // user-level __getitem__.
+            if let Some(backing) = instance_builtin_data(&inst_rc) {
+                return self.eval_slice(backing, lo, hi, st);
+            }
             let class = Rc::clone(&inst_rc.borrow().class);
             if let Some(method_val) = lookup_class_attr(&class, "__getitem__") {
                 let slice_val = pyrust_builtins::slice::make_slice(lo, hi, st);

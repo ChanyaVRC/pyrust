@@ -65,3 +65,9 @@ print(len(t4))                      # 3
 print(t4[0])                        # 10
 print(t4.label)                     # tuple
 print(type(t4).__name__)            # MyTuple2
+
+# Slice subscripting on tuple subclass.
+t5 = MyTuple([1, 2, 3, 4, 5])
+print(t5[1:3])                      # (2, 3)
+print(t5[::2])                      # (1, 3, 5)
+print(t5[-2:])                      # (4, 5)
