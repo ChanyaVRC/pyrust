@@ -828,6 +828,13 @@ impl Interpreter {
             // review).
             let inst_rc = Rc::clone(inst);
             let class = Rc::clone(&inst_rc.borrow().class);
+            // Check __builtin_data__ before __getitem__: list/dict/set subclasses
+            // with no user-defined __iter__ should iterate the backing primitive.
+            if lookup_class_attr(&class, "__iter__").is_none() {
+                if let Some(backing) = instance_builtin_data(&inst_rc) {
+                    return self.collect_iterable(backing);
+                }
+            }
             let iterator = if let Some(method_val) = lookup_class_attr(&class, "__iter__") {
                 invoke_class_method(
                     self,

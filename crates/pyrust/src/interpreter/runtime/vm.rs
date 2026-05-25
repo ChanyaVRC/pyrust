@@ -3025,6 +3025,11 @@ impl Interpreter {
                                         &[],
                                     ));
                                     IterState::UserDefined(iter_obj)
+                                } else if let Some(backing) = instance_builtin_data(&inst_rc) {
+                                    // list/dict/set subclass with no user-defined __iter__:
+                                    // iterate the backing primitive directly, matching
+                                    // CPython's inherited tp_iter slot behaviour.
+                                    IterState::Materialized(vm_try!(iter_values(backing)), 0)
                                 } else if lookup_class_attr(&class, "__getitem__").is_some() {
                                     let iter_obj = vm_try!(self.make_getitem_iter(inst_rc));
                                     IterState::UserDefined(iter_obj)

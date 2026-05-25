@@ -2755,6 +2755,12 @@ fn coerce_numeric(v: Value) -> Value {
 }
 
 pub(crate) fn iter_values(value: Value) -> Result<Vec<Value>> {
+    // list/dict/set subclass: delegate to the backing primitive value.
+    if let Some(inst_rc) = value.as_py_instance_rc() {
+        if let Some(backing) = instance_builtin_data(inst_rc) {
+            return iter_values(backing);
+        }
+    }
     match value.kind() {
         ValueKind::List(items) => Ok(items.to_vec()),
         ValueKind::Tuple(items) => Ok(items.to_vec()),
