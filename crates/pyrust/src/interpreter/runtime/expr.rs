@@ -2662,7 +2662,13 @@ impl Interpreter {
                     )?;
                     return Ok(Value::bool_(result.truthy()));
                 }
-                // No __contains__: fall back to __iter__ if available.
+                // list/dict/set subclass with no user-defined __contains__:
+                // delegate to the backing primitive, matching CPython's
+                // inherited tp_sq_contains / sq_contains slot behaviour.
+                if let Some(backing) = instance_builtin_data(&inst_rc) {
+                    return self.eval_in(backing, item);
+                }
+                // No __contains__ or __builtin_data__: fall back to __iter__ if available.
                 if let Some(iter_method) = lookup_class_attr(&class, "__iter__") {
                     let iter_obj = invoke_class_method(
                         self,
