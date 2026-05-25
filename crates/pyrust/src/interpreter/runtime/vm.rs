@@ -3344,12 +3344,17 @@ impl Interpreter {
                     }
                     let annotations = Value::dict(annotations_map);
                     // Validate that every nonlocal name resolves to an enclosing local scope.
+                    // This check is also performed at compile time (compiler.rs::compile_def);
+                    // the compile-time check catches all invalid nonlocal declarations before
+                    // any code runs.  This runtime guard is a defensive fallback: if execution
+                    // somehow reaches here with an unresolvable nonlocal, emit SyntaxError
+                    // (the correct class per CPython 3.12) rather than RuntimeError.
                     for name in proto_nonlocal_names.iter() {
                         if !has_local_binding_in_current_or_ancestor(&self.env, name) {
-                            let err = PyError::Runtime(format!(
-                                "no binding for nonlocal '{}' found",
-                                name
-                            ));
+                            let err = PyError::named(
+                                "SyntaxError",
+                                format!("no binding for nonlocal '{}' found", name),
+                            );
                             vm_try!(Err(err));
                         }
                     }
