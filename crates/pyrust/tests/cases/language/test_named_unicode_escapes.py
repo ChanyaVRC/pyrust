@@ -21,6 +21,24 @@ print(len(s2))   # 2
 print(ord(s2[0]))  # 10
 print(ord(s2[1]))  # 97
 
+# NULL character
+print(ord("\N{NULL}"))  # 0
+
+# f-string with \N{name}
+x = 42
+print(ord(f"\N{SNOWMAN}"))            # 9731
+print(f"\N{SNOWMAN}" == "\N{SNOWMAN}")  # True
+
+# f-string: \N{name} followed by an expression
+result = f"\N{SNOWMAN}{x}"
+print(len(result))   # 2
+print(ord(result[0]))  # 9731
+print(result[1])     # 42
+
+# Raw string: \N is literal (no escape)
+print(len(r"\N{SNOWMAN}"))  # 12
+print(r"\N{SNOWMAN}"[0])    # backslash
+
 # Equality check
 print("\N{LATIN SMALL LETTER A}" == "a")  # True
 print("\N{SNOWMAN}" == "☃")           # True
