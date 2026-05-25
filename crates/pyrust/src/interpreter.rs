@@ -395,7 +395,7 @@ impl Default for Interpreter {
 
 /// A raw-pointer view of a VM frame's register file, used by the dispatch loop
 /// in place of `&mut [Value]` to eliminate the LLVM `noalias` UB described in
-/// issue #547 and the Copilot review on PR #646.
+/// issues #547 and #648 and the Copilot review on PR #646.
 ///
 /// # Why not `&mut [Value]`?
 ///
