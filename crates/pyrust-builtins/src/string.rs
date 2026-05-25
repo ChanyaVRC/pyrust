@@ -1255,13 +1255,27 @@ fn str_startswith(s: &str, args: &[Value]) -> Result<Value> {
     let slice = &s[start..end];
     match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(p)) => Ok(Value::bool_(slice.starts_with(p))),
-        Some(ValueKind::Tuple(prefixes)) => Ok(Value::bool_(prefixes.iter().any(|pv| {
-            if let ValueKind::Str(p) = pv.kind() {
-                slice.starts_with(p)
-            } else {
-                false
+        Some(ValueKind::Tuple(prefixes)) => {
+            for pv in prefixes.iter() {
+                match pv.kind() {
+                    ValueKind::Str(p) => {
+                        if slice.starts_with(p) {
+                            return Ok(Value::bool_(true));
+                        }
+                    }
+                    _ => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "tuple for startswith must only contain str, not {}",
+                                builtin_type_name(pv)
+                            ),
+                        ));
+                    }
+                }
             }
-        }))),
+            Ok(Value::bool_(false))
+        }
         Some(_) => Err(PyError::named(
             "TypeError",
             format!(
@@ -1284,13 +1298,27 @@ fn str_endswith(s: &str, args: &[Value]) -> Result<Value> {
     let slice = &s[start..end];
     match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(p)) => Ok(Value::bool_(slice.ends_with(p))),
-        Some(ValueKind::Tuple(suffixes)) => Ok(Value::bool_(suffixes.iter().any(|sv| {
-            if let ValueKind::Str(p) = sv.kind() {
-                slice.ends_with(p)
-            } else {
-                false
+        Some(ValueKind::Tuple(suffixes)) => {
+            for sv in suffixes.iter() {
+                match sv.kind() {
+                    ValueKind::Str(p) => {
+                        if slice.ends_with(p) {
+                            return Ok(Value::bool_(true));
+                        }
+                    }
+                    _ => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "tuple for endswith must only contain str, not {}",
+                                builtin_type_name(sv)
+                            ),
+                        ));
+                    }
+                }
             }
-        }))),
+            Ok(Value::bool_(false))
+        }
         Some(_) => Err(PyError::named(
             "TypeError",
             format!(
