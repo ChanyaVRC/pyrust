@@ -641,11 +641,20 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
     // consume the dot is when the first character of the integer part indicates a
     // non-decimal literal (0x / 0o / 0b) — those are handled above and never
     // reach here.
-    if chars.get(pos) == Some(&'.') {
+    // Consume the dot only when the character immediately after it is a digit,
+    // an exponent marker, an imaginary suffix, or end-of-significant-input.
+    // Specifically, do NOT consume it when the next character is `_`: `1._5` is a
+    // SyntaxError in CPython because an underscore may not follow the decimal point
+    // directly (it must separate digit groups, not start one).
+    if chars.get(pos) == Some(&'.') && !matches!(chars.get(pos + 1), Some(&'_')) {
         pos += 1; // consume the dot
-        // Optional fractional digits
-        while matches!(chars.get(pos), Some('0'..='9' | '_')) {
+        // Optional fractional digits — first character must be a decimal digit, not `_`.
+        // Subsequent characters may include `_` as a group separator.
+        if matches!(chars.get(pos), Some('0'..='9')) {
             pos += 1;
+            while matches!(chars.get(pos), Some('0'..='9' | '_')) {
+                pos += 1;
+            }
         }
         // Optional exponent
         if matches!(chars.get(pos), Some(&'e') | Some(&'E')) {
