@@ -1748,6 +1748,37 @@ impl Interpreter {
                                 // `__eq__`), both of which require `&mut self`.  Compute
                                 // the key first, then take the dict-mut borrow.
                                 let key = vm_try!(self.value_to_pykey(&idx_val));
+                                // Issue #970: detect writes to module_globals_dict so we
+                                // can sync back to the fastlocal register.  At module
+                                // scope `locals()` returns module_globals_dict directly;
+                                // writing through that reference (`locals()["x"] = 99`)
+                                // must update the fastlocal register for `x` so
+                                // `print(x)` sees the new value.
+                                // Detect this early (before `key`/`val_val` are consumed
+                                // by the dict closures below).
+                                let globals_sync_name: Option<String> =
+                                    if self.globals_accessed {
+                                        if let PyKey::Str(name_val) = &key {
+                                            let is_globals = regs[*obj as usize]
+                                                .get_dict_rc()
+                                                .zip(self.module_globals_dict.get_dict_rc())
+                                                .map(|(a, b)| Rc::ptr_eq(a, b))
+                                                .unwrap_or(false);
+                                            if is_globals {
+                                                name_val.as_str().map(|s| s.to_owned())
+                                            } else {
+                                                None
+                                            }
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    };
+                                // Clone the value before it is moved into the dict
+                                // closure; used below only when globals_sync_name is Some.
+                                let val_for_fastlocal: Option<Value> =
+                                    globals_sync_name.as_ref().map(|_| val_val.clone());
                                 // `Object` keys may need `__eq__` dispatch to
                                 // dedup against an existing entry.  `None` keys
                                 // also need it for the cross-variant case
@@ -1806,6 +1837,41 @@ impl Interpreter {
                                     regs[*obj as usize].dict_with_mut(|dict| {
                                         dict.insert(key, val_val);
                                     });
+                                }
+                                // Issue #970: if the dict written is module_globals_dict,
+                                // propagate the new value to the fastlocal register so
+                                // subsequent direct-register reads (compiled as `regs[slot]`
+                                // at module scope) see the updated value.  Also bump the
+                                // LoadGlobal inline cache version to prevent stale hits.
+                                if let (Some(name), Some(synced_val)) =
+                                    (globals_sync_name, val_for_fastlocal)
+                                {
+                                    bump_global_env_version(self);
+                                    if let Some(script_view) = self
+                                        .vm_frame_views
+                                        .iter()
+                                        .find(|v| v.kind == FrameKind::Script)
+                                    {
+                                        if let Some(&slot) =
+                                            script_view.local_index.get(&name)
+                                        {
+                                            let slot = slot as usize;
+                                            if slot < script_view.regs_len {
+                                                // SAFETY: slot < regs_len; regs_ptr is
+                                                // the script frame's register file, valid
+                                                // while the script dispatch loop runs.
+                                                // RegSlice carries no `noalias`, so this
+                                                // write does not violate aliasing rules
+                                                // (issue #547, PR #646).
+                                                unsafe {
+                                                    *script_view
+                                                        .regs_ptr
+                                                        .add(slot)
+                                                        .as_mut() = synced_val;
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             3 => {
@@ -1920,6 +1986,27 @@ impl Interpreter {
                             handled = true;
                         } else if target_kind == 2 {
                             let key = vm_try!(self.value_to_pykey(&idx_val));
+                            // Issue #970: detect deletes from module_globals_dict so we
+                            // can clear the fastlocal register for the name.
+                            let globals_del_name: Option<String> =
+                                if self.globals_accessed {
+                                    if let PyKey::Str(name_val) = &key {
+                                        let is_globals = regs[*obj as usize]
+                                            .get_dict_rc()
+                                            .zip(self.module_globals_dict.get_dict_rc())
+                                            .map(|(a, b)| Rc::ptr_eq(a, b))
+                                            .unwrap_or(false);
+                                        if is_globals {
+                                            name_val.as_str().map(|s| s.to_owned())
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                };
                             // For object keys, resolve via user-eq match first
                             // (Rc-clone the dict Value rather than snapshotting
                             // the IndexMap), then shift-remove by the located
@@ -1939,6 +2026,32 @@ impl Interpreter {
                                 regs[*obj as usize].dict_with_mut(|dict| {
                                     dict.shift_remove(&key);
                                 });
+                            }
+                            // Issue #970: clear the fastlocal register so direct
+                            // register reads at module scope see the deletion.
+                            if let Some(name) = globals_del_name {
+                                bump_global_env_version(self);
+                                if let Some(script_view) = self
+                                    .vm_frame_views
+                                    .iter()
+                                    .find(|v| v.kind == FrameKind::Script)
+                                {
+                                    if let Some(&slot) =
+                                        script_view.local_index.get(&name)
+                                    {
+                                        let slot = slot as usize;
+                                        if slot < script_view.regs_len {
+                                            // SAFETY: same as SetItem case above
+                                            // (issue #547, PR #646).
+                                            unsafe {
+                                                *script_view
+                                                    .regs_ptr
+                                                    .add(slot)
+                                                    .as_mut() = Value::unset();
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             handled = true;
                         } else if target_kind == 3 {
