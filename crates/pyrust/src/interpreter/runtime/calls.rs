@@ -311,23 +311,29 @@ impl Interpreter {
                                 ));
                             }
                         };
-                        // Issue #976: if the resolved method is a primitive
-                        // builtin (e.g. `dict.keys`), and the instance has a
-                        // `__builtin_data__` backing value (set at construction
-                        // time for subclasses of dict/list/set), dispatch on
-                        // the backing value directly.  This avoids the
-                        // `kind_ok` type guard in `call_function_expanded`
-                        // rejecting the PyInstance receiver.
+                        // Issue #976/#994: if the resolved method is a primitive
+                        // builtin (e.g. `dict.keys`, `tuple.count`), and the
+                        // instance has a `__builtin_data__` backing value (set at
+                        // construction time for subclasses of dict/list/set/
+                        // frozenset/tuple), dispatch on the backing value directly.
+                        // This avoids the `kind_ok` type guard in
+                        // `call_function_expanded` rejecting the PyInstance receiver.
                         if let ValueKind::BuiltinFunction(fn_name) = method_val.kind() {
                             if fn_name.split_once('.').is_some_and(|(t, _)| {
-                                matches!(t, "dict" | "list" | "set")
+                                matches!(t, "dict" | "list" | "set" | "frozenset" | "tuple")
                             }) {
                                 if let Some(backing) = instance_builtin_data(&inst) {
-                                    enum BkKind { Dict, List, Set, Other }
+                                    enum BkKind { Dict, List, Set, Frozenset, Tuple, Other }
                                     let bk_kind = match backing.kind() {
                                         ValueKind::Dict(_) => BkKind::Dict,
                                         ValueKind::List(_) => BkKind::List,
                                         ValueKind::Set(_) => BkKind::Set,
+                                        ValueKind::BuiltinObject { ops, .. }
+                                            if ops.type_name() == "frozenset" =>
+                                        {
+                                            BkKind::Frozenset
+                                        }
+                                        ValueKind::Tuple(_) => BkKind::Tuple,
                                         _ => BkKind::Other,
                                     };
                                     let args_vec: Vec<Value> = pos.drain(..).collect();
@@ -347,6 +353,23 @@ impl Interpreter {
                                         BkKind::Set => {
                                             self.call_set_method(method, backing, args_vec)
                                         }
+                                        BkKind::Frozenset => {
+                                            pyrust_builtins::frozenset::call(
+                                                method,
+                                                &backing,
+                                                args_vec,
+                                            )
+                                        }
+                                        BkKind::Tuple => match backing.kind() {
+                                            ValueKind::Tuple(items) => {
+                                                pyrust_builtins::tuple::call(
+                                                    method,
+                                                    items,
+                                                    args_vec,
+                                                )
+                                            }
+                                            _ => unreachable!("BkKind::Tuple guard above"),
+                                        },
                                         BkKind::Other => Err(PyError::Runtime(format!(
                                             "internal: unexpected builtin_data kind for method '{method}'"
                                         ))),
@@ -617,26 +640,27 @@ impl Interpreter {
                         None => pos.push(a.value.clone()),
                     }
                 }
-                // Issue #976: if `self_val` is a PyInstance with a
+                // Issue #976/#994: if `self_val` is a PyInstance with a
                 // `__builtin_data__` backing value (set at construction for
-                // subclasses of dict/list/set), use that backing value as the
-                // effective receiver so the kind_ok check and dispatch below
-                // see the expected primitive type.
-                let self_val = if matches!(type_name, "dict" | "list" | "set") {
-                    // Extract the Rc before kind() drops its borrow.
-                    let maybe_inst = if let ValueKind::PyInstance(inst) = self_val.kind() {
-                        Some(Rc::clone(inst))
-                    } else {
-                        None
-                    };
-                    if let Some(inst) = maybe_inst {
-                        instance_builtin_data(&inst).unwrap_or(self_val)
+                // subclasses of dict/list/set/frozenset/tuple), use that
+                // backing value as the effective receiver so the kind_ok
+                // check and dispatch below see the expected primitive type.
+                let self_val =
+                    if matches!(type_name, "dict" | "list" | "set" | "frozenset" | "tuple") {
+                        // Extract the Rc before kind() drops its borrow.
+                        let maybe_inst = if let ValueKind::PyInstance(inst) = self_val.kind() {
+                            Some(Rc::clone(inst))
+                        } else {
+                            None
+                        };
+                        if let Some(inst) = maybe_inst {
+                            instance_builtin_data(&inst).unwrap_or(self_val)
+                        } else {
+                            self_val
+                        }
                     } else {
                         self_val
-                    }
-                } else {
-                    self_val
-                };
+                    };
                 // Receiver-type guard: validate `self_val`'s kind matches
                 // `type_name` before dispatch — otherwise the per-type call fn
                 // surfaces an internal `"expected dict"` / `"receiver is not a
@@ -1819,6 +1843,21 @@ impl Interpreter {
             }
         }
 
+        // Issue #994: if this class inherits from frozenset/tuple (immutable
+        // primitives), build the backing from the constructor args immediately.
+        // Unlike mutable types, there is no empty pre-initialisation step —
+        // the content is fixed at construction and __init__ cannot change it.
+        let immutable_prim_base = find_immutable_primitive_base(&class);
+        if let Some(prim_name) = immutable_prim_base {
+            if let Some(dispatch) = crate::builtin_registry::lookup(prim_name) {
+                let backing = dispatch(self, args)?;
+                instance
+                    .borrow_mut()
+                    .attrs
+                    .insert(BUILTIN_DATA_ATTR.to_string(), backing);
+            }
+        }
+
         let init = lookup_class_attr(&class, "__init__");
         match init {
             Some(method_val)
@@ -1860,7 +1899,7 @@ impl Interpreter {
                             .attrs
                             .insert(BUILTIN_DATA_ATTR.to_string(), backing);
                     }
-                } else if !args.is_empty() {
+                } else if immutable_prim_base.is_none() && !args.is_empty() {
                     let class_name = class.borrow().name.clone();
                     return Err(PyError::Runtime(format!(
                         "{}() takes no arguments",

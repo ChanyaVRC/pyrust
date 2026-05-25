@@ -1191,13 +1191,31 @@ pyrust_module! {
             },
             ValueKind::PyInstance(inst) => {
                 let inst_rc = Rc::clone(inst);
-                // Issue #976: delegate to backing primitive for dict/list/set
-                // subclasses constructed by call_class_expanded.
+                // Issue #976/#994: delegate to backing primitive for
+                // dict/list/set/frozenset/tuple subclasses constructed by
+                // call_class_expanded.
                 if let Some(backing) = instance_builtin_data(&inst_rc) {
                     match backing.kind() {
                         ValueKind::List(items) => items.len() as i64,
                         ValueKind::Dict(items) => items.len() as i64,
                         ValueKind::Set(items) => items.len() as i64,
+                        ValueKind::Tuple(items) => items.len() as i64,
+                        ValueKind::BuiltinObject { ops, state }
+                            if ops.type_name() == "frozenset" =>
+                        {
+                            match ops.len(state) {
+                                Some(n) => n as i64,
+                                None => {
+                                    return Err(PyError::named(
+                                        "TypeError",
+                                        format!(
+                                            "object of type '{}' has no len()",
+                                            inst_rc.borrow().class.borrow().name,
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
                         _ => {
                             return Err(PyError::named(
                                 "TypeError",
