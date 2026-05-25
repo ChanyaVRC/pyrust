@@ -2803,7 +2803,10 @@ impl Value {
             ValueKind::Int(v) => v.to_string(),
             ValueKind::BigInt(v) => v.to_string(),
             ValueKind::Float(v) => format_float(v),
-            ValueKind::Str(v) => format!("'{}'", escape_str(v)),
+            ValueKind::Str(v) => {
+                let q = repr_quote(v);
+                format!("{}{}{}", q, escape_str(v, q), q)
+            }
             ValueKind::Bool(v) => {
                 if v {
                     "True".to_string()
@@ -3407,7 +3410,11 @@ pub fn key_repr(key: &PyKey) -> String {
         PyKey::Int(v) => v.to_string(),
         PyKey::BigInt(v) => v.to_string(),
         PyKey::Float(v) => format_float(f64::from_bits(*v)),
-        PyKey::Str(v) => format!("'{}'", escape_str(v.as_str().unwrap_or(""))),
+        PyKey::Str(v) => {
+            let s = v.as_str().unwrap_or("");
+            let q = repr_quote(s);
+            format!("{}{}{}", q, escape_str(s, q), q)
+        }
         PyKey::Bool(v) => {
             if *v {
                 "True".to_string()
@@ -3533,12 +3540,33 @@ fn exception_repr(instance: &Rc<RefCell<PyInstance>>) -> String {
     }
 }
 
-fn escape_str(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('\n', "\\n")
-        .replace('\t', "\\t")
-        .replace('\r', "\\r")
-        .replace('\'', "\\'")
+/// Choose the quote character for a string repr.  CPython prefers single
+/// quotes; it switches to double quotes when the string contains a single
+/// quote but no double quote (avoids backslash escapes in the common case).
+fn repr_quote(s: &str) -> char {
+    if s.contains('\'') && !s.contains('"') {
+        '"'
+    } else {
+        '\''
+    }
+}
+
+fn escape_str(s: &str, quote: char) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 pub fn range_len(start: i64, stop: i64, step: i64) -> i64 {
