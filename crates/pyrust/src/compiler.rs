@@ -808,6 +808,83 @@ fn all_fstring_exprs<F: FnMut(&Expr) -> bool>(parts: &[FStringPart], pred: &mut 
     })
 }
 
+/// Collect names bound by walrus (`:=`) inside `expr`, without descending
+/// into nested comprehensions, lambdas, or generator expressions (they create
+/// their own implicit scopes, so their walrus targets don't propagate here).
+fn collect_walrus_writes_in_expr(expr: &Expr, out: &mut HashSet<String>) {
+    match expr {
+        Expr::Named { target, value } => {
+            out.insert(target.clone());
+            collect_walrus_writes_in_expr(value, out);
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_walrus_writes_in_expr(left, out);
+            collect_walrus_writes_in_expr(right, out);
+        }
+        Expr::Unary { expr: e, .. } => collect_walrus_writes_in_expr(e, out),
+        Expr::Compare { left, ops } => {
+            collect_walrus_writes_in_expr(left, out);
+            for (_, e) in ops {
+                collect_walrus_writes_in_expr(e, out);
+            }
+        }
+        Expr::Call { func, args } => {
+            collect_walrus_writes_in_expr(func, out);
+            for a in args {
+                collect_walrus_writes_in_expr(&a.value, out);
+            }
+        }
+        Expr::Ternary { cond, then, else_ } => {
+            collect_walrus_writes_in_expr(cond, out);
+            collect_walrus_writes_in_expr(then, out);
+            collect_walrus_writes_in_expr(else_, out);
+        }
+        Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
+            for e in items {
+                collect_walrus_writes_in_expr(e, out);
+            }
+        }
+        Expr::Dict(items) => {
+            for item in items {
+                match item {
+                    DictItem::Pair(k, v) => {
+                        collect_walrus_writes_in_expr(k, out);
+                        collect_walrus_writes_in_expr(v, out);
+                    }
+                    DictItem::DoubleSplat(e) => collect_walrus_writes_in_expr(e, out),
+                }
+            }
+        }
+        Expr::Index { target, index } => {
+            collect_walrus_writes_in_expr(target, out);
+            collect_walrus_writes_in_expr(index, out);
+        }
+        Expr::Attr { target, .. } => collect_walrus_writes_in_expr(target, out),
+        Expr::Starred(e) => collect_walrus_writes_in_expr(e, out),
+        Expr::Slice {
+            target,
+            lower,
+            upper,
+            step,
+        } => {
+            collect_walrus_writes_in_expr(target, out);
+            for e in [lower, upper, step].iter().flat_map(|o| o.as_deref()) {
+                collect_walrus_writes_in_expr(e, out);
+            }
+        }
+        Expr::FString(parts) => {
+            for_each_fstring_expr(parts, &mut |e| collect_walrus_writes_in_expr(e, out));
+        }
+        // Nested comprehensions/lambdas/genexps create their own scope.
+        Expr::ListComp { .. }
+        | Expr::SetComp { .. }
+        | Expr::DictComp { .. }
+        | Expr::GenExp { .. }
+        | Expr::Lambda { .. } => {}
+        _ => {}
+    }
+}
+
 fn lambda_captures_in_expr(
     expr: &Expr,
     local_index: &HashMap<String, Reg>,
@@ -935,6 +1012,21 @@ fn lambda_captures_in_expr(
                         cells.insert(name);
                     }
                 }
+                // PEP 572: walrus targets in a comprehension body belong to the
+                // enclosing scope. Promote them to cell vars so they're reachable
+                // via the env chain from inside the comprehension's implicit function.
+                let mut walrus_writes: HashSet<String> = HashSet::new();
+                for clause in clauses {
+                    if let Some(c) = &clause.cond {
+                        collect_walrus_writes_in_expr(c, &mut walrus_writes);
+                    }
+                }
+                collect_walrus_writes_in_expr(elt, &mut walrus_writes);
+                for name in walrus_writes {
+                    if !bound.contains(&name) && local_index.contains_key(&name) {
+                        cells.insert(name);
+                    }
+                }
             }
         }
         Expr::DictComp { key, val, clauses } => {
@@ -962,6 +1054,20 @@ fn lambda_captures_in_expr(
                     collect_written_target(&clause.target, &mut bound);
                 }
                 for name in inner_uses {
+                    if !bound.contains(&name) && local_index.contains_key(&name) {
+                        cells.insert(name);
+                    }
+                }
+                // PEP 572: promote walrus write targets to cell vars.
+                let mut walrus_writes: HashSet<String> = HashSet::new();
+                for clause in clauses {
+                    if let Some(c) = &clause.cond {
+                        collect_walrus_writes_in_expr(c, &mut walrus_writes);
+                    }
+                }
+                collect_walrus_writes_in_expr(key, &mut walrus_writes);
+                collect_walrus_writes_in_expr(val, &mut walrus_writes);
+                for name in walrus_writes {
                     if !bound.contains(&name) && local_index.contains_key(&name) {
                         cells.insert(name);
                     }
@@ -7779,6 +7885,142 @@ impl Compiler {
         body
     }
 
+    /// Collect all `Expr::Named` (walrus `:=`) target names from an expression,
+    /// without descending into nested comprehensions or lambdas (those create
+    /// their own implicit scopes, so their walrus targets don't leak here).
+    fn collect_walrus_targets_in_expr(expr: &Expr, out: &mut HashSet<String>) {
+        match expr {
+            Expr::Named { target, value } => {
+                out.insert(target.clone());
+                Self::collect_walrus_targets_in_expr(value, out);
+            }
+            Expr::Binary { left, right, .. } => {
+                Self::collect_walrus_targets_in_expr(left, out);
+                Self::collect_walrus_targets_in_expr(right, out);
+            }
+            Expr::Unary { expr: e, .. } => Self::collect_walrus_targets_in_expr(e, out),
+            Expr::Compare { left, ops } => {
+                Self::collect_walrus_targets_in_expr(left, out);
+                for (_, e) in ops {
+                    Self::collect_walrus_targets_in_expr(e, out);
+                }
+            }
+            Expr::Call { func, args } => {
+                Self::collect_walrus_targets_in_expr(func, out);
+                for a in args {
+                    Self::collect_walrus_targets_in_expr(&a.value, out);
+                }
+            }
+            Expr::Ternary { cond, then, else_ } => {
+                Self::collect_walrus_targets_in_expr(cond, out);
+                Self::collect_walrus_targets_in_expr(then, out);
+                Self::collect_walrus_targets_in_expr(else_, out);
+            }
+            Expr::List(items) | Expr::Tuple(items) | Expr::Set(items) => {
+                for e in items {
+                    Self::collect_walrus_targets_in_expr(e, out);
+                }
+            }
+            Expr::Dict(items) => {
+                for item in items {
+                    match item {
+                        DictItem::Pair(k, v) => {
+                            Self::collect_walrus_targets_in_expr(k, out);
+                            Self::collect_walrus_targets_in_expr(v, out);
+                        }
+                        DictItem::DoubleSplat(e) => {
+                            Self::collect_walrus_targets_in_expr(e, out);
+                        }
+                    }
+                }
+            }
+            Expr::Index { target, index } => {
+                Self::collect_walrus_targets_in_expr(target, out);
+                Self::collect_walrus_targets_in_expr(index, out);
+            }
+            Expr::Attr { target, .. } => Self::collect_walrus_targets_in_expr(target, out),
+            Expr::Starred(e) => Self::collect_walrus_targets_in_expr(e, out),
+            Expr::Slice {
+                target,
+                lower,
+                upper,
+                step,
+            } => {
+                Self::collect_walrus_targets_in_expr(target, out);
+                for e in [lower, upper, step].iter().flat_map(|o| o.as_deref()) {
+                    Self::collect_walrus_targets_in_expr(e, out);
+                }
+            }
+            Expr::FString(parts) => {
+                for_each_fstring_expr(parts, &mut |e| {
+                    Self::collect_walrus_targets_in_expr(e, out);
+                });
+            }
+            // Nested comprehensions/lambdas create their own scope; don't descend.
+            Expr::ListComp { .. }
+            | Expr::SetComp { .. }
+            | Expr::DictComp { .. }
+            | Expr::GenExp { .. }
+            | Expr::Lambda { .. } => {}
+            _ => {}
+        }
+    }
+
+    /// Collect walrus targets from an entire statement list (used to find
+    /// which names a comprehension body writes to the enclosing scope).
+    fn collect_walrus_targets_in_stmts(stmts: &[Stmt], out: &mut HashSet<String>) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Expr(e) | Stmt::Return(Some(e)) | Stmt::AnnAssign { value: Some(e), .. } => {
+                    Self::collect_walrus_targets_in_expr(e, out);
+                }
+                Stmt::Assign(_, e) => {
+                    Self::collect_walrus_targets_in_expr(e, out);
+                }
+                Stmt::AugAssign { expr: e, .. } => {
+                    Self::collect_walrus_targets_in_expr(e, out);
+                }
+                Stmt::If {
+                    branches,
+                    else_branch,
+                } => {
+                    for (cond, body) in branches {
+                        Self::collect_walrus_targets_in_expr(cond, out);
+                        Self::collect_walrus_targets_in_stmts(body, out);
+                    }
+                    if let Some(b) = else_branch {
+                        Self::collect_walrus_targets_in_stmts(b, out);
+                    }
+                }
+                Stmt::For {
+                    iter,
+                    body,
+                    else_branch,
+                    ..
+                } => {
+                    Self::collect_walrus_targets_in_expr(iter, out);
+                    Self::collect_walrus_targets_in_stmts(body, out);
+                    if let Some(b) = else_branch {
+                        Self::collect_walrus_targets_in_stmts(b, out);
+                    }
+                }
+                Stmt::While {
+                    cond,
+                    body,
+                    else_branch,
+                } => {
+                    Self::collect_walrus_targets_in_expr(cond, out);
+                    Self::collect_walrus_targets_in_stmts(body, out);
+                    if let Some(b) = else_branch {
+                        Self::collect_walrus_targets_in_stmts(b, out);
+                    }
+                }
+                // Def/Class create their own scopes; don't descend.
+                _ => {}
+            }
+        }
+    }
+
     /// Compile a comprehension (list/set/dict) as a nested implicit function,
     /// mirroring CPython's scope-isolation behaviour.
     ///
@@ -7807,14 +8049,51 @@ impl Compiler {
             is_positional_only: false,
         }];
 
-        let inner_global = crate::interpreter::collect_global_names(&fn_body);
-        let inner_nonlocal = crate::interpreter::collect_nonlocal_names(&fn_body);
-        let inner_local = crate::interpreter::collect_local_names(
+        // PEP 572: walrus targets inside a comprehension body belong to the
+        // *enclosing* scope, not to the comprehension's implicit inner scope.
+        // Collect them here so we can route writes to the right place:
+        //   - target in enclosing function scope → inject as `nonlocal`
+        //   - target in module/global scope      → inject as `global`
+        let mut walrus_targets: HashSet<String> = HashSet::new();
+        Self::collect_walrus_targets_in_stmts(&fn_body, &mut walrus_targets);
+
+        // Determine which walrus targets live in an enclosing function scope.
+        let walrus_nonlocal: HashSet<String> = walrus_targets
+            .iter()
+            .filter(|name| {
+                self.outer_locals.iter().any(|m| m.contains_key(*name))
+                    || (self.is_function_scope && self.local_index.contains_key(*name))
+            })
+            .cloned()
+            .collect();
+
+        // Walrus targets NOT in any enclosing function scope go through the
+        // global (module) env instead.
+        let walrus_global: HashSet<String> = walrus_targets
+            .difference(&walrus_nonlocal)
+            .cloned()
+            .collect();
+
+        let mut inner_global = crate::interpreter::collect_global_names(&fn_body);
+        inner_global.extend(walrus_global);
+        let mut inner_nonlocal = crate::interpreter::collect_nonlocal_names(&fn_body);
+        inner_nonlocal.extend(walrus_nonlocal);
+
+        // Build inner locals excluding any walrus targets (they belong to the
+        // enclosing scope, not the comprehension's implicit function).
+        let raw_inner_local = crate::interpreter::collect_local_names(
             &params,
             &fn_body,
             &inner_global,
             &inner_nonlocal,
         );
+        // `collect_local_names` already excludes names in inner_global /
+        // inner_nonlocal, but it does NOT know about walrus targets yet
+        // (they were just added above). Filter them out explicitly.
+        let inner_local: indexmap::IndexSet<String> = raw_inner_local
+            .into_iter()
+            .filter(|n| !walrus_targets.contains(n))
+            .collect();
 
         let mut inner_index: HashMap<String, Reg> = HashMap::new();
         let mut slot: Reg = 0;
