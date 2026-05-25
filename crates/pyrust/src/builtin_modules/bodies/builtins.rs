@@ -2452,6 +2452,29 @@ pyrust_module! {
         }
         Ok(Value::none())
     }
+
+    /// Issue #1004: `frozenset.__init__` — no-op.  frozenset is immutable; the
+    /// backing data is fixed at `__new__` time.  Registering this sentinel
+    /// allows `super().__init__()` in a frozenset subclass to resolve without
+    /// AttributeError (matching CPython 3.12 where frozenset inherits
+    /// object.__init__ which ignores all args when __new__ is overridden).
+    ///
+    /// CPython signature: `frozenset.__init__(self, *args, **kwargs)`
+    #[py_name = "frozenset.__init__"]
+    fn frozenset_init(_args) -> Result<Value> {
+        Ok(Value::none())
+    }
+
+    /// Issue #1004: `tuple.__init__` — no-op.  tuple is immutable; the
+    /// backing data is fixed at `__new__` time.  Registering this sentinel
+    /// allows `super().__init__()` in a tuple subclass to resolve without
+    /// AttributeError.
+    ///
+    /// CPython signature: `tuple.__init__(self, *args, **kwargs)`
+    #[py_name = "tuple.__init__"]
+    fn tuple_init(_args) -> Result<Value> {
+        Ok(Value::none())
+    }
 }
 
 /// Integer divmod shared by all `int`/`bool` overload combinations.

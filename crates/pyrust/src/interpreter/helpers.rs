@@ -357,10 +357,15 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
     // without raising AttributeError.  The registered dispatch returns None
     // (no-op) when called from super() with no args, and populates the
     // backing store when called via invoke_class_method with constructor args.
+    // Issue #1004: frozenset and tuple are immutable; their `__init__` is a
+    // true no-op (backing data is set at `__new__` time).  Register sentinels
+    // so that `super().__init__()` in a subclass resolves without AttributeError.
     for (cls, type_name) in [
         (&list_class, "list"),
         (&dict_class, "dict"),
         (&set_class, "set"),
+        (&frozenset_class, "frozenset"),
+        (&tuple_class, "tuple"),
     ] {
         let sentinel: &'static str =
             Box::leak(format!("{type_name}.__init__").into_boxed_str());
