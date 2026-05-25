@@ -2911,16 +2911,19 @@ impl Interpreter {
                     let src_val = vm_try!(vm_read(&regs, *src, num_locals));
                     let items = vm_try!(self.collect_iterable(src_val));
                     if items.len() < *n as usize {
-                        vm_try!(Err::<(), _>(PyError::Runtime(format!(
-                            "not enough values to unpack (expected {}, got {})",
-                            n,
-                            items.len()
-                        ))));
+                        vm_try!(Err::<(), _>(PyError::named(
+                            "ValueError",
+                            format!(
+                                "not enough values to unpack (expected {}, got {})",
+                                n,
+                                items.len()
+                            ),
+                        )));
                     } else if items.len() > *n as usize {
-                        vm_try!(Err::<(), _>(PyError::Runtime(format!(
-                            "too many values to unpack (expected {})",
-                            n
-                        ))));
+                        vm_try!(Err::<(), _>(PyError::named(
+                            "ValueError",
+                            format!("too many values to unpack (expected {})", n),
+                        )));
                     }
                     for (i, v) in items.into_iter().enumerate() {
                         let dst = *base as usize + i;
