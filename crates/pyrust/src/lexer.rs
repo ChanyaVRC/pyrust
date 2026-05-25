@@ -1456,12 +1456,16 @@ fn parse_escape(chars: &[char], pos: usize, content_start: usize) -> Result<(cha
                 end += 1;
             }
             if end >= chars.len() {
-                // Unterminated \N{ — report up to the last char scanned.
-                let end_byte: usize = chars[content_start..end]
+                // Unterminated \N{ — report up to the last name char scanned,
+                // excluding the string-terminating quote/newline that caused us
+                // to overshoot.  Unicode character names never contain quote
+                // chars or newlines, so stopping at any of those is safe.
+                let name_bytes: usize = chars[pos + 2..]
                     .iter()
+                    .take_while(|&&c| c != '}' && c != '\'' && c != '"' && c != '\n' && c != '\r')
                     .map(|c| c.len_utf8())
-                    .sum::<usize>()
-                    .saturating_sub(1);
+                    .sum();
+                let end_byte = bs_byte + 2 + name_bytes;
                 return Err(PyError::Lex(format!(
                     "(unicode error) 'unicodeescape' codec can't decode bytes in position \
                      {bs_byte}-{end_byte}: malformed \\N character escape"
