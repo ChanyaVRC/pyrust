@@ -176,7 +176,11 @@ impl Interpreter {
         // afterwards so the raw pointer never outlives the local `regs`.
         // Capture the raw pointer and length BEFORE constructing RegSlice so
         // both the VmFrameView and the dispatch loop share the same raw pointer
-        // with no &mut [Value] alive (eliminates noalias UB, issue #547).
+        // with no &mut [Value] alive.  This eliminates two related aliasing UB
+        // classes: the suspended-frame case (issue #547, PR #646) and the
+        // active-script-frame case (issue #648): when locals()/globals() reads
+        // VmFrameView::regs_ptr while the dispatch loop is executing, both
+        // accesses go through raw pointers with no noalias assertion in scope.
         let regs_ptr = unsafe { std::ptr::NonNull::new_unchecked(regs.as_mut_ptr()) };
         let regs_len = regs.len();
         self.vm_frame_views.push(VmFrameView {
@@ -196,7 +200,7 @@ impl Interpreter {
         // SAFETY: regs_ptr is valid for regs_len Values for the lifetime of
         // `regs` (a local RegsBuf that outlives this call).  No &mut [Value]
         // referencing `regs` is held while the dispatch loop runs; RegSlice
-        // (raw pointer + len) removes the LLVM noalias constraint (issue #547).
+        // (raw pointer + len) carries no noalias attribute (issues #547, #648).
         let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
         // Issue #712: seed __annotations__ = {} in the module env so that module-level
         // annotated assignments can do LoadGlobal("__annotations__") and SetItem.
