@@ -44,3 +44,19 @@ print("hello".endswith(("lo", 42)))          # True (short-circuits before 42)
 # Empty tuple
 print("hello".startswith(()))                # False
 print("hello".endswith(()))                  # False
+
+# Inverted window (start > end) with non-str element: TypeError still raised.
+# CPython validates element types even when the slice range is inverted.
+try:
+    "hello".startswith((5, "he"), 10, 1)
+except TypeError as e:
+    print(type(e).__name__ + ": " + str(e))
+
+try:
+    "hello".endswith((5, "lo"), 10, 1)
+except TypeError as e:
+    print(type(e).__name__ + ": " + str(e))
+
+# Inverted window with all-str tuple: False (no TypeError, no match possible)
+print("hello".startswith(("he",), 10, 1))   # False
+print("hello".endswith(("lo",), 10, 1))     # False
