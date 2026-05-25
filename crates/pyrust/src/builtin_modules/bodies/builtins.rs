@@ -2678,7 +2678,7 @@ pyrust_module! {
         notes_val
             .list_push(Value::string(note_str))
             .map_err(|_| {
-                PyError::Runtime("BaseException.add_note: __notes__ is not a list".to_string())
+                PyError::named("TypeError", "Cannot add note: __notes__ is not a list".to_string())
             })?;
         Ok(Value::none())
     }
