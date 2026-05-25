@@ -2021,11 +2021,17 @@ impl Interpreter {
                                     regs[*obj as usize].dict_with_mut(|dict| {
                                         dict.shift_remove_index(idx);
                                     });
+                                } else {
+                                    vm_try!(Err(PyError::key_error(idx_val.clone())));
                                 }
                             } else {
-                                regs[*obj as usize].dict_with_mut(|dict| {
-                                    dict.shift_remove(&key);
-                                });
+                                let removed = regs[*obj as usize]
+                                    .dict_with_mut(|dict| dict.shift_remove(&key));
+                                // dict_with_mut returns Option<Option<Value>>:
+                                // Some(Some(_)) = found and removed; Some(None) = absent.
+                                if !matches!(removed, Some(Some(_))) {
+                                    vm_try!(Err(PyError::key_error(idx_val.clone())));
+                                }
                             }
                             // Issue #970: clear the fastlocal register so direct
                             // register reads at module scope see the deletion.
