@@ -369,9 +369,10 @@ pub(crate) enum BinopTypeTag {
 /// Adaptive inline-cache state for a single BinOp instruction site.
 ///
 /// Indexed by `pc` inside [`FnCode::binop_cache`] — one entry per instruction
-/// position.  Only slots for `BinOp`, `BinOpInPlace`, `BinOpConst`, and
-/// `BinOpImm` instructions are ever advanced past `Empty`; all other positions
-/// remain `Empty` for the lifetime of the `FnCode`.
+/// position.  Only slots for `BinOp` instructions are ever advanced past
+/// `Empty`; all other positions remain `Empty` for the lifetime of the
+/// `FnCode`.  (`BinOpInPlace`, `BinOpConst`, and `BinOpImm` use only the
+/// unconditional int-int fast path and do not consult the adaptive cache.)
 #[derive(Debug, Clone)]
 pub(crate) enum BinOpCacheEntry {
     /// No observation yet.
@@ -461,7 +462,9 @@ pub struct FnCode {
     /// Adaptive inline cache for binary operations (PEP 659 style).
     ///
     /// Indexed by instruction position (`pc`) — same length as `insns`.
-    /// Only entries at BinOp-family positions are ever advanced beyond `Empty`.
+    /// Only entries at `BinOp` positions are ever advanced beyond `Empty`;
+    /// `BinOpInPlace`, `BinOpConst`, and `BinOpImm` use only the unconditional
+    /// int-int fast path and leave their cache slots `Empty`.
     ///
     /// State machine per entry:
     ///   `Empty` → first observation → `Counting { tag, count: 1 }`
