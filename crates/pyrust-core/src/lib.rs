@@ -15,6 +15,7 @@ use std::sync::{
 use indexmap::{IndexMap, IndexSet};
 use num_bigint::BigInt;
 use num_traits::{FromPrimitive, ToPrimitive, Zero};
+use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
 pub use num_bigint::BigInt as PyBigInt;
 pub use num_bigint::Sign as PyBigIntSign;
@@ -3583,39 +3584,25 @@ fn escape_str(s: &str, quote: char) -> String {
 /// `str.isprintable()` / CPython's `Py_UNICODE_ISPRINTABLE`.
 ///
 /// CPython considers a character non-printable when its Unicode general
-/// category is one of: Cc (control), Cs (surrogate), Co (private-use),
-/// Cn (unassigned), Zl/Zp (line/paragraph separators), or any Zs (space
-/// separator) except ASCII space (U+0020).
+/// category is one of: Cc (control), Cf (format), Cs (surrogate),
+/// Co (private-use), Cn (unassigned), Zl/Zp (line/paragraph separators),
+/// or any Zs (space separator) except ASCII space (U+0020).
 #[inline]
 fn py_is_printable(c: char) -> bool {
-    let cp = c as u32;
-    // ASCII: printable range is 0x20 (space) through 0x7E (~) inclusive.
-    // 0x00-0x1F are C0 controls; 0x7F is DEL (Cc). All non-printable.
-    // Note: \t, \n, \r are handled before this function is reached.
-    if cp <= 0x7F {
-        return cp >= 0x20 && cp != 0x7F;
-    }
-    // C1 controls U+0080-U+009F (Cc) — non-printable.
-    if cp <= 0x9F {
-        return false;
-    }
-    // U+00A0 NO-BREAK SPACE (Zs) and U+00AD SOFT HYPHEN (Cf) — non-printable.
-    if cp == 0x00A0 || cp == 0x00AD {
-        return false;
-    }
-    // Remaining Latin-1 supplement U+00A1-U+00FF (excluding U+00AD) — printable.
-    if cp <= 0xFF {
+    if c == ' ' {
         return true;
     }
-    // For higher code points, Rust's char::is_control covers Unicode Cc.
-    if c.is_control() {
-        return false;
-    }
-    // Line separator U+2028 (Zl) and paragraph separator U+2029 (Zp).
-    if cp == 0x2028 || cp == 0x2029 {
-        return false;
-    }
-    true
+    !matches!(
+        c.general_category(),
+        GeneralCategory::Control
+            | GeneralCategory::Format
+            | GeneralCategory::Surrogate
+            | GeneralCategory::PrivateUse
+            | GeneralCategory::Unassigned
+            | GeneralCategory::SpaceSeparator
+            | GeneralCategory::LineSeparator
+            | GeneralCategory::ParagraphSeparator
+    )
 }
 
 pub fn range_len(start: i64, stop: i64, step: i64) -> i64 {
