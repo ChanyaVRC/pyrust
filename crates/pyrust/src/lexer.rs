@@ -846,8 +846,9 @@ fn lex_string(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)>
                             pos += 1;
                         }
                     } else {
-                        out.push(map_escape(escaped)?);
-                        pos += 1;
+                        let (ch, next_pos) = parse_escape(chars, pos)?;
+                        out.push(ch);
+                        pos = next_pos;
                     }
                 }
                 Some(&'\r') => {
@@ -892,12 +893,9 @@ fn lex_string(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)>
                 continue;
             }
             pos += 1;
-            let escaped = chars
-                .get(pos)
-                .copied()
-                .ok_or_else(|| PyError::Lex("unterminated escape sequence".to_string()))?;
-            out.push(map_escape(escaped)?);
-            pos += 1;
+            let (ch, next_pos) = parse_escape(chars, pos)?;
+            out.push(ch);
+            pos = next_pos;
             continue;
         }
         out.push(c);
@@ -1004,10 +1002,12 @@ fn lex_fstring(chars: &[char], start: usize, quote: char, raw: bool) -> Result<(
                 // Raw mode: pass backslash and the following character verbatim.
                 literal.push('\\');
                 literal.push(next_ch);
+                pos += 1;
             } else {
-                literal.push(map_escape(next_ch)?);
+                let (ch, next_pos) = parse_escape(chars, pos)?;
+                literal.push(ch);
+                pos = next_pos;
             }
-            pos += 1;
             continue;
         }
 
@@ -1305,19 +1305,40 @@ fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<Vec<FStringPart>> 
     Ok(parts)
 }
 
-fn map_escape(c: char) -> Result<char> {
+/// Parse a string escape sequence starting at `pos` (the character after the
+/// backslash) and return `(resulting_char, next_pos)` where `next_pos` is the
+/// index of the first character not consumed by this escape.
+///
+/// Supports single-character escapes (`\n`, `\t`, ...) and `\xNN` hex escapes
+/// (exactly two hex digits, producing U+0000–U+00FF).
+fn parse_escape(chars: &[char], pos: usize) -> Result<(char, usize)> {
+    let c = *chars
+        .get(pos)
+        .ok_or_else(|| PyError::Lex("unterminated escape sequence".to_string()))?;
     match c {
-        'n' => Ok('\n'),
-        't' => Ok('\t'),
-        'r' => Ok('\r'),
-        '\\' => Ok('\\'),
-        '\'' => Ok('\''),
-        '"' => Ok('"'),
-        '0' => Ok('\0'),
-        'a' => Ok('\x07'),
-        'b' => Ok('\x08'),
-        'f' => Ok('\x0C'),
-        'v' => Ok('\x0B'),
+        'n' => Ok(('\n', pos + 1)),
+        't' => Ok(('\t', pos + 1)),
+        'r' => Ok(('\r', pos + 1)),
+        '\\' => Ok(('\\', pos + 1)),
+        '\'' => Ok(('\'', pos + 1)),
+        '"' => Ok(('"', pos + 1)),
+        '0' => Ok(('\0', pos + 1)),
+        'a' => Ok(('\x07', pos + 1)),
+        'b' => Ok(('\x08', pos + 1)),
+        'f' => Ok(('\x0C', pos + 1)),
+        'v' => Ok(('\x0B', pos + 1)),
+        'x' => {
+            // \xNN — exactly two hex digits; produces U+0000–U+00FF.
+            let hi = chars.get(pos + 1).copied().ok_or_else(|| {
+                PyError::Lex("incomplete \\x escape (need 2 hex digits)".to_string())
+            })?;
+            let lo = chars.get(pos + 2).copied().ok_or_else(|| {
+                PyError::Lex("incomplete \\x escape (need 2 hex digits)".to_string())
+            })?;
+            let v = u8::from_str_radix(&format!("{hi}{lo}"), 16)
+                .map_err(|_| PyError::Lex(format!("invalid \\x escape: \\x{hi}{lo}")))?;
+            Ok((char::from(v), pos + 3))
+        }
         other => Err(PyError::Lex(format!("unsupported escape \\{other}"))),
     }
 }
