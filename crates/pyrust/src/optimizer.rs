@@ -106,9 +106,15 @@ fn optimize_fn_code(code: FnCode) -> FnCode {
 /// itself a `Jump` is redirected to the chain's final non-`Jump` destination.
 /// Conditional jumps have only their taken-branch target threaded; the
 /// fallthrough path is unchanged.  No instructions are removed in this pass.
+///
+/// Only **forward** `Jump`s (offset ≥ 0) are followed in the chain.  Backward
+/// jumps (loop back-edges, offset < 0) are treated as opaque non-`Jump`
+/// instructions and terminate the chain.  Threading through a backward jump
+/// would produce a negative exit offset in `ForCount*` instructions, violating
+/// the invariant that their exit always points past the loop body.
 fn pass_thread_jumps(insns: Vec<Insn>) -> Vec<Insn> {
-    // Follow a chain of unconditional Jumps from `start`, returning the index
-    // of the first instruction that is NOT an unconditional Jump.
+    // Follow a chain of unconditional forward Jumps from `start`, returning the
+    // index of the first instruction that is NOT an unconditional forward Jump.
     // A visited-set guards against infinite loops (self-referential jumps).
     fn follow(insns: &[Insn], start: usize) -> usize {
         let mut pc = start;
@@ -118,7 +124,7 @@ fn pass_thread_jumps(insns: Vec<Insn>) -> Vec<Insn> {
                 break;
             }
             match &insns[pc] {
-                Insn::Jump(k) => pc = (pc as i64 + 1 + *k as i64) as usize,
+                Insn::Jump(k) if *k >= 0 => pc = (pc as i64 + 1 + *k as i64) as usize,
                 _ => break,
             }
         }
@@ -4471,10 +4477,10 @@ fn pass_forcount_unroll(
             _ => continue,
         };
 
-        // Guard: off must be a positive i32 before converting to usize.
-        // A non-positive off would indicate a backward exit (corrupted bytecode
-        // from a prior pass) or a trivially empty loop; skip in both cases.
-        // This check MUST precede the `as usize` cast to avoid wrapping overflow.
+        // off >= 2: at least one body instruction (off-1) plus the back-edge.
+        // off == 1 means an empty body (only the back-edge) — nothing to unroll.
+        // This check also guards the `as usize` cast below against wrapping on
+        // any non-positive value that a future pass might produce.
         if off_i32 < 2 {
             continue;
         }
