@@ -339,6 +339,31 @@ impl Interpreter {
                         None => value,
                     });
                 }
+                // Issue #1275: __module__ and __doc__ on built-in type objects.
+                // Primitive classes (int, str, …) are immutable and cannot store
+                // attrs like user-defined classes do.  Exception classes and the
+                // object singleton share the same gap.  CPython exposes both
+                // attributes on every type object; provide the fallback here so
+                // that builtin and exception classes behave like their CPython
+                // counterparts.
+                //
+                // User-defined classes always have __module__ and __doc__ in their
+                // own attrs dict (set by the VM's MakeClass instruction), so they
+                // are handled by the lookup_class_attr path above and never reach
+                // this fallback.
+                let is_builtin_class = crate::interpreter::is_primitive_class(&class)
+                    || is_exception_class(&class)
+                    || Rc::ptr_eq(&class, &object_class_singleton());
+                if name == "__module__" && is_builtin_class {
+                    return Ok(Value::string("builtins".to_string()));
+                }
+                if name == "__doc__" && is_builtin_class {
+                    let class_name = class.borrow().name.clone();
+                    return Ok(match builtin_class_doc(&class_name) {
+                        Some(doc) => Value::string(doc.to_string()),
+                        None => Value::none(),
+                    });
+                }
                 let class_name = class.borrow().name.clone();
                 Err(PyError::named(
                     "AttributeError",
