@@ -510,6 +510,46 @@ impl Interpreter {
         method: &str,
         rmethod: &str,
     ) -> Option<Result<Value>> {
+        // Subtype priority (mirrors CPython `binary_op1`): when `rmethod` is a
+        // reflected arithmetic slot (e.g. `__radd__`, starts with `__r`) and
+        // `right`'s class is a *proper* subtype of `left`'s class AND `right`'s
+        // class directly defines `rmethod` in its own attr dict (not merely
+        // inherits it), try `right.rmethod(left)` before `left.method(right)`.
+        // Comparison reflected ops (`__gt__`, `__ge__`, …) do not start with
+        // `__r`, so they are unaffected by this check.
+        let right_has_subtype_priority = rmethod.starts_with("__r") && {
+            if let (ValueKind::PyInstance(li), ValueKind::PyInstance(ri)) =
+                (left.kind(), right.kind())
+            {
+                let lc = Rc::clone(&li.borrow().class);
+                let rc_class = Rc::clone(&ri.borrow().class);
+                !Rc::ptr_eq(&lc, &rc_class)
+                    && class_is_subclass_of(&rc_class, &lc)
+                    && rc_class.borrow().attrs.contains_key(rmethod)
+            } else {
+                false
+            }
+        };
+
+        if right_has_subtype_priority {
+            if let ValueKind::PyInstance(inst) = right.kind() {
+                let class = Rc::clone(&inst.borrow().class);
+                if let Some(m) = lookup_class_attr(&class, rmethod)
+                    && is_callable_method(&m)
+                {
+                    let self_val = Value::py_instance(Rc::clone(inst));
+                    let arg = ExpandedCallArg {
+                        name: None,
+                        value: left.clone(),
+                    };
+                    match invoke_class_method(self, m, self_val, &[arg]) {
+                        Ok(v) if is_not_implemented(&v) => {}
+                        result => return Some(result),
+                    }
+                }
+            }
+        }
+
         if let ValueKind::PyInstance(inst) = left.kind() {
             let class = Rc::clone(&inst.borrow().class);
             if let Some(m) = lookup_class_attr(&class, method)
@@ -526,19 +566,22 @@ impl Interpreter {
                 }
             }
         }
-        if let ValueKind::PyInstance(inst) = right.kind() {
-            let class = Rc::clone(&inst.borrow().class);
-            if let Some(m) = lookup_class_attr(&class, rmethod)
-                && is_callable_method(&m)
-            {
-                let self_val = Value::py_instance(Rc::clone(inst));
-                let arg = ExpandedCallArg {
-                    name: None,
-                    value: left.clone(),
-                };
-                match invoke_class_method(self, m, self_val, &[arg]) {
-                    Ok(v) if is_not_implemented(&v) => {}
-                    result => return Some(result),
+
+        if !right_has_subtype_priority {
+            if let ValueKind::PyInstance(inst) = right.kind() {
+                let class = Rc::clone(&inst.borrow().class);
+                if let Some(m) = lookup_class_attr(&class, rmethod)
+                    && is_callable_method(&m)
+                {
+                    let self_val = Value::py_instance(Rc::clone(inst));
+                    let arg = ExpandedCallArg {
+                        name: None,
+                        value: left.clone(),
+                    };
+                    match invoke_class_method(self, m, self_val, &[arg]) {
+                        Ok(v) if is_not_implemented(&v) => {}
+                        result => return Some(result),
+                    }
                 }
             }
         }
