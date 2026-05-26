@@ -3534,9 +3534,22 @@ pyrust_module! {
     /// `super().__init_subclass__(**kwargs)` inside a user-defined
     /// `__init_subclass__` terminates the MRO walk without error.
     ///
-    /// CPython signature: `object.__init_subclass__(cls, /, **kwargs)`
+    /// CPython raises TypeError if any keyword arguments reach this point:
+    /// the expectation is that each level of the MRO consumed its own kwargs
+    /// before forwarding the rest upward with `super().__init_subclass__(**kwargs)`.
+    ///
+    /// CPython signature: `object.__init_subclass__(cls, /)`
     #[py_name = "object.__init_subclass__"]
-    fn object_init_subclass(_args) -> Result<Value> {
+    fn object_init_subclass(args) -> Result<Value> {
+        // Raise TypeError if any keyword arguments reach this point.  Each
+        // level of the MRO should have consumed its own kwargs before calling
+        // super().__init_subclass__(**remaining_kwargs).
+        if args.iter().any(|a| a.name.is_some()) {
+            return Err(PyError::named(
+                "TypeError",
+                "object.__init_subclass__() takes no keyword arguments".to_string(),
+            ));
+        }
         Ok(Value::none())
     }
 
