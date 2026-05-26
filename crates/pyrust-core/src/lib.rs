@@ -3962,17 +3962,20 @@ pub enum PyError {
     /// An `OSError` (or one of its subclasses) raised from an OS-level
     /// operation.  Carries the structured fields that CPython 3.12 sets on
     /// every OS-sourced exception: `errno`, `strerror`, and optionally
-    /// `filename`.
+    /// `filename` and `filename2`.
     ///
     /// The VM materialises this into a `PyInstance` via
     /// `instantiate_os_error`, which populates `errno`, `strerror`,
     /// `filename`, and `filename2` as instance attributes — matching
     /// CPython's `OSError.__init__(errno, strerror[, filename])` behaviour.
+    /// Two-path operations (e.g. `os.rename`) set both `filename` (src) and
+    /// `filename2` (dst).
     OsError {
         class_name: &'static str,
         errno: i64,
         strerror: String,
         filename: Option<String>,
+        filename2: Option<String>,
     },
     Raised(Value),
 }
@@ -4052,6 +4055,17 @@ impl PyError {
     /// where `e.strerror` is `"No such file or directory"` rather than the
     /// decorated form.
     pub fn from_io_error(e: &std::io::Error, filename: Option<&str>) -> Self {
+        Self::from_io_error2(e, filename, None)
+    }
+
+    /// Like [`from_io_error`] but also sets `filename2` for two-path operations
+    /// (e.g. `os.rename(src, dst)` where `filename2` is the destination).
+    /// CPython 3.12 sets `filename2` on the exception for rename/link/symlink.
+    pub fn from_io_error2(
+        e: &std::io::Error,
+        filename: Option<&str>,
+        filename2: Option<&str>,
+    ) -> Self {
         let raw = e.raw_os_error().unwrap_or(0);
         let class_name = Self::io_kind_to_class(e.kind());
         // `std::io::Error::from_raw_os_error(N).to_string()` on Linux produces
@@ -4071,6 +4085,7 @@ impl PyError {
             errno: raw as i64,
             strerror,
             filename: filename.map(|s| s.to_owned()),
+            filename2: filename2.map(|s| s.to_owned()),
         }
     }
 
@@ -4145,6 +4160,7 @@ impl fmt::Display for PyError {
                 errno,
                 strerror,
                 filename,
+                ..
             } => {
                 if let Some(fname) = filename {
                     write!(f, "{class_name}: [Errno {errno}] {strerror}: '{fname}'")

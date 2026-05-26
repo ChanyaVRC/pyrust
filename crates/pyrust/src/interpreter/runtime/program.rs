@@ -258,6 +258,7 @@ impl Interpreter {
                         errno,
                         strerror,
                         filename,
+                        ..
                     } => {
                         if let Some(fname) = filename {
                             format!("{class_name}: [Errno {errno}] {strerror}: '{fname}'")

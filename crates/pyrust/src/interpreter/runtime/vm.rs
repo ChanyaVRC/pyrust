@@ -832,8 +832,11 @@ impl Interpreter {
                 errno,
                 strerror,
                 filename,
+                filename2,
             } => {
-                match self.instantiate_os_error_exception(class_name, errno, strerror, filename) {
+                match self
+                    .instantiate_os_error_exception(class_name, errno, strerror, filename, filename2)
+                {
                     Ok(v) => v,
                     Err(e2) => return Err(e2),
                 }

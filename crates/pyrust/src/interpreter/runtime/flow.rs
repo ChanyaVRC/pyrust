@@ -329,11 +329,12 @@ impl Interpreter {
         errno: i64,
         strerror: String,
         filename: Option<String>,
+        filename2: Option<String>,
     ) -> Result<Value> {
         let class = lookup_exc_class(class_name).ok_or_else(|| {
             PyError::Runtime(format!("built-in exception '{class_name}' is not defined"))
         })?;
-        Ok(instantiate_os_error(class, errno, strerror, filename))
+        Ok(instantiate_os_error(class, errno, strerror, filename, filename2))
     }
 
     fn exception_matches(&self, exception: &Value, kind: &Value) -> Result<bool> {

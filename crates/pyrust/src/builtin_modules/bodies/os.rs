@@ -399,7 +399,7 @@ pyrust_module! {
         let src = require_str(FN_NAME, &args[0].value, "src")?;
         let dst = require_str(FN_NAME, &args[1].value, "dst")?;
         std::fs::rename(&src, &dst)
-            .map_err(|e| PyError::from_io_error(&e, Some(&src)))?;
+            .map_err(|e| PyError::from_io_error2(&e, Some(&src), Some(&dst)))?;
         Ok(Value::none())
     }
 

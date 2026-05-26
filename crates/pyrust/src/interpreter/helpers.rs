@@ -1116,6 +1116,7 @@ pub(crate) fn instantiate_os_error(
     errno: i64,
     strerror: String,
     filename: Option<String>,
+    filename2: Option<String>,
 ) -> Value {
     let mut attrs = IndexMap::new();
     let errno_val = Value::int(errno);
@@ -1130,7 +1131,10 @@ pub(crate) fn instantiate_os_error(
         "filename".to_string(),
         filename.map(Value::string).unwrap_or_else(Value::none),
     );
-    attrs.insert("filename2".to_string(), Value::none());
+    attrs.insert(
+        "filename2".to_string(),
+        filename2.map(Value::string).unwrap_or_else(Value::none),
+    );
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 
