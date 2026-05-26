@@ -983,10 +983,81 @@ pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value
     // Use a name-chain walk so subclasses (e.g. `class MyStop(StopIteration)`) also
     // get the `.value` attribute set — fixes #612.
     let is_stop_iteration = class_chain_contains_name(&class, "StopIteration");
+    let is_syntax_error = class_chain_contains_name(&class, "SyntaxError");
+    // OSError is the canonical name; IOError and EnvironmentError are aliases that
+    // share the same Rc, so checking for "OSError" in the chain suffices.
+    let is_os_error = class_chain_contains_name(&class, "OSError");
     attrs.insert("args".to_string(), Value::tuple(args.clone()));
     if is_stop_iteration {
         let val = args.into_iter().next().unwrap_or_else(Value::none);
         attrs.insert("value".to_string(), val);
+    } else if is_syntax_error {
+        // CPython 3.12 SyntaxError.__init__: always initialise all structured
+        // attributes.  With 1 arg: msg = args[0], rest = None.  With 2 args
+        // where args[1] is a sequence of at least 4 elements, unpack:
+        //   (filename, lineno, offset, text[, end_lineno, end_offset])
+        // CPython accepts any sequence (tuple OR list) for args[1]; it iterates
+        // and unpacks it.  Callers are responsible for raising TypeError when
+        // args[1] is a non-sequence or has the wrong number of elements
+        // (call_class_expanded validates before reaching here).
+        let msg = args.first().cloned().unwrap_or_else(Value::none);
+        let mut filename = Value::none();
+        let mut lineno = Value::none();
+        let mut offset = Value::none();
+        let mut text = Value::none();
+        let mut end_lineno = Value::none();
+        let mut end_offset = Value::none();
+        if args.len() >= 2 {
+            // Accept both tuple and list — CPython's SyntaxError.__init__ iterates
+            // the second argument regardless of its concrete type.
+            let items_opt: Option<Vec<Value>> = args[1]
+                .as_tuple()
+                .map(|s| s.to_vec())
+                .or_else(|| args[1].as_list().map(|s| s.to_vec()));
+            if let Some(items) = items_opt {
+                if items.len() >= 4 {
+                    filename = items[0].clone();
+                    lineno = items[1].clone();
+                    offset = items[2].clone();
+                    text = items[3].clone();
+                }
+                if items.len() >= 6 {
+                    end_lineno = items[4].clone();
+                    end_offset = items[5].clone();
+                }
+            }
+        }
+        attrs.insert("msg".to_string(), msg);
+        attrs.insert("filename".to_string(), filename);
+        attrs.insert("lineno".to_string(), lineno);
+        attrs.insert("offset".to_string(), offset);
+        attrs.insert("text".to_string(), text);
+        attrs.insert("end_lineno".to_string(), end_lineno);
+        attrs.insert("end_offset".to_string(), end_offset);
+        // CPython 3.12 also initialises print_file_and_line (always None for
+        // user-constructed instances; only set by the C compile-phase injector).
+        attrs.insert("print_file_and_line".to_string(), Value::none());
+    } else if is_os_error {
+        // CPython 3.12 OSError.__init__: populate errno/strerror/filename/filename2.
+        // With 0 or 1 args: all None.  With 2 args: errno=args[0], strerror=args[1].
+        // With 3 args: additionally filename=args[2].
+        // With 5 args: args[3]=winerror (ignored on non-Windows), args[4]=filename2.
+        if args.len() >= 2 {
+            attrs.insert("errno".to_string(), args[0].clone());
+            attrs.insert("strerror".to_string(), args[1].clone());
+        } else {
+            attrs.insert("errno".to_string(), Value::none());
+            attrs.insert("strerror".to_string(), Value::none());
+        }
+        attrs.insert(
+            "filename".to_string(),
+            args.get(2).cloned().unwrap_or_else(Value::none),
+        );
+        // filename2 is set by the 5-arg form: OSError(errno, strerror, fname, winerror, fname2)
+        attrs.insert(
+            "filename2".to_string(),
+            args.get(4).cloned().unwrap_or_else(Value::none),
+        );
     }
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
