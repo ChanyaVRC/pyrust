@@ -1498,6 +1498,20 @@ fn bytes_translate(bytes: &[u8], args: &[Value], kwargs: &IndexMap<PyKey, Value>
     // When table is None: just delete bytes in the delete set.
     // When table is provided: map each byte through the table, then delete.
 
+    // CPython counts all arguments (positional + keyword) and raises if the total
+    // exceeds 2 (table + delete).  This fires before the duplicate-delete or
+    // unknown-keyword checks.
+    let total_args = args.len() + kwargs.len();
+    if total_args > 2 {
+        return Err(PyError::named(
+            "TypeError",
+            format!(
+                "translate() takes at most 2 arguments ({} given)",
+                total_args
+            ),
+        ));
+    }
+
     // Reject unrecognised keyword arguments.
     for key in kwargs.keys() {
         if let PyKey::Str(s) = key {
@@ -1514,7 +1528,7 @@ fn bytes_translate(bytes: &[u8], args: &[Value], kwargs: &IndexMap<PyKey, Value>
     let table_val = args.first().ok_or_else(|| {
         PyError::named(
             "TypeError",
-            "bytes.translate() requires at least 1 argument".to_string(),
+            "translate() takes at least 1 positional argument (0 given)".to_string(),
         )
     })?;
     let table: Option<&[u8]> = match table_val.kind() {
@@ -1524,10 +1538,7 @@ fn bytes_translate(bytes: &[u8], args: &[Value], kwargs: &IndexMap<PyKey, Value>
             if s.len() != 256 {
                 return Err(PyError::named(
                     "ValueError",
-                    format!(
-                        "bytes.translate() table must be None or a 256-byte object, got {} bytes",
-                        s.len()
-                    ),
+                    "translation table must be 256 characters long".to_string(),
                 ));
             }
             Some(s)
@@ -1535,27 +1546,28 @@ fn bytes_translate(bytes: &[u8], args: &[Value], kwargs: &IndexMap<PyKey, Value>
         _ => {
             return Err(PyError::named(
                 "TypeError",
-                "bytes.translate() table must be None or a bytes object of length 256".to_string(),
+                format!(
+                    "a bytes-like object is required, not '{}'",
+                    pyrust_core::builtin_type_name(table_val)
+                ),
             ));
         }
     };
 
     // `delete` may come from args[1] (positional) or from the `delete=` keyword argument.
+    // The total-args guard above ensures they can't both be set simultaneously.
     let kw_delete = kwargs.get(&StrKey("delete"));
-    if args.get(1).is_some() && kw_delete.is_some() {
-        return Err(PyError::named(
-            "TypeError",
-            "translate() got multiple values for argument 'delete'".to_string(),
-        ));
-    }
     let delete_val = args.get(1).or(kw_delete);
     let delete: &[u8] = match delete_val.map(|v| v.kind()) {
         None => &[],
         Some(ValueKind::Bytes(rc)) => rc.as_slice(),
-        _ => {
+        Some(_) => {
             return Err(PyError::named(
                 "TypeError",
-                "bytes.translate() delete must be a bytes-like object".to_string(),
+                format!(
+                    "a bytes-like object is required, not '{}'",
+                    pyrust_core::builtin_type_name(delete_val.unwrap())
+                ),
             ));
         }
     };
@@ -1579,4 +1591,61 @@ fn bytes_translate(bytes: &[u8], args: &[Value], kwargs: &IndexMap<PyKey, Value>
         out.push(mapped);
     }
     Ok(Value::bytes(out))
+}
+
+// ---------------------------------------------------------------------------
+// maketrans
+// ---------------------------------------------------------------------------
+
+/// `bytes.maketrans(from_bytes, to_bytes)` — static method.
+///
+/// Builds a 256-byte translation table where each byte value `from_bytes[i]`
+/// maps to `to_bytes[i]`; all other byte values map to themselves.
+/// Both arguments must be bytes of the same length.
+///
+/// CPython implements this as `staticmethod`, so it is callable both as
+/// `bytes.maketrans(...)` and on an instance (`b''.maketrans(...)`).
+pub fn bytes_maketrans(args: &[Value]) -> Result<Value> {
+    if args.len() != 2 {
+        return Err(PyError::named(
+            "TypeError",
+            format!("maketrans expected 2 arguments, got {}", args.len()),
+        ));
+    }
+    let from: &[u8] = match args[0].kind() {
+        ValueKind::Bytes(rc) => rc.as_slice(),
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "a bytes-like object is required, not '{}'",
+                    pyrust_core::builtin_type_name(&args[0])
+                ),
+            ));
+        }
+    };
+    let to: &[u8] = match args[1].kind() {
+        ValueKind::Bytes(rc) => rc.as_slice(),
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "a bytes-like object is required, not '{}'",
+                    pyrust_core::builtin_type_name(&args[1])
+                ),
+            ));
+        }
+    };
+    if from.len() != to.len() {
+        return Err(PyError::named(
+            "ValueError",
+            "maketrans arguments must have same length".to_string(),
+        ));
+    }
+    // Build the identity table then apply the mapping.
+    let mut table: Vec<u8> = (0u8..=255).collect();
+    for (&f, &t) in from.iter().zip(to.iter()) {
+        table[f as usize] = t;
+    }
+    Ok(Value::bytes(table))
 }

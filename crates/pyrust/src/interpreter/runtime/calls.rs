@@ -653,6 +653,20 @@ impl Interpreter {
                 let mapping = rest[0].value.clone();
                 self.format_str_template_map(&template, mapping)
             }
+            // `bytes.maketrans` is a staticmethod: args contains only the two
+            // from/to bytes arguments (no implicit receiver).  Both `bytes.maketrans(f, t)`
+            // and `b''.maketrans(f, t)` resolve to the same unbound BuiltinFunction,
+            // so args is always exactly [from, to] without a prepended receiver.
+            // Must appear before the generic `bytes.*` arm, which expects args[0]
+            // to be the bytes receiver.
+            ValueKind::BuiltinFunction("bytes.maketrans") => {
+                let positional: Vec<Value> = args
+                    .iter()
+                    .filter(|a| a.name.is_none())
+                    .map(|a| a.value.clone())
+                    .collect();
+                pyrust_builtins::bytes::bytes_maketrans(&positional)
+            }
             // #462: class-method-of-primitive dispatch.  When a primitive
             // class's attr is `BuiltinFunction("<type>.<method>")` — populated
             // by `populate_*_methods` in `helpers.rs` — calling it dispatches
@@ -3942,6 +3956,9 @@ fn builtin_method_names(type_name: &str) -> Vec<String> {
     if type_name == "str" {
         out.push("format".to_string());
         out.push("format_map".to_string());
+    }
+    if type_name == "bytes" {
+        out.push("maketrans".to_string());
     }
     out
 }
