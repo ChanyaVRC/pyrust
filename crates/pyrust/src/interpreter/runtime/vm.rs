@@ -3331,6 +3331,7 @@ impl Interpreter {
                     let param_spec = Rc::clone(&proto.param_spec);
                     let annotation_keys = proto.annotation_keys.clone();
                     let is_pure = proto.is_pure;
+                    let proto_doc = proto.docstring.as_ref().map(|s| Value::string(s.clone()));
 
                     let mut params = Vec::with_capacity(param_spec.names.len());
                     let mut def_slot = 0u32;
@@ -3394,10 +3395,9 @@ impl Interpreter {
                         module: std::cell::RefCell::new(Value::string(
                             "__main__".to_string(),
                         )),
-                        // Docstring extraction is not yet implemented at compile time;
-                        // initialise to None (matching CPython for functions without a
-                        // docstring).
-                        doc: std::cell::RefCell::new(Value::none()),
+                        // Initialise __doc__ from the compile-time docstring extracted
+                        // by the compiler (None when no leading string literal in body).
+                        doc: std::cell::RefCell::new(proto_doc.unwrap_or_else(Value::none)),
                         // Lazy: allocated only when first accessed via __dict__
                         // or attribute assignment.  Avoids two heap allocations
                         // per function definition when no attrs are ever set.
@@ -3416,7 +3416,7 @@ impl Interpreter {
                 }
                 Insn::MakeClass(dst, proto_idx, bases_base, bases_n, name_idx) => {
                     let class_name = pool_get!(code.names, *name_idx, "name").clone();
-                    let (class_code, local_index, proto_qualname, proto_global_names, proto_nonlocal_names) = {
+                    let (class_code, local_index, proto_qualname, proto_global_names, proto_nonlocal_names, class_docstring) = {
                         let proto = pool_get!(code.fn_protos, *proto_idx, "fn_proto");
                         (
                             Rc::clone(&proto.code),
@@ -3424,6 +3424,7 @@ impl Interpreter {
                             proto.qualname.clone(),
                             Rc::clone(&proto.global_names),
                             Rc::clone(&proto.nonlocal_names),
+                            proto.docstring.clone(),
                         )
                     };
                     let num_class_regs = class_code.num_regs as usize;
@@ -3657,6 +3658,20 @@ impl Interpreter {
                     attrs
                         .entry("__module__".to_string())
                         .or_insert_with(|| Value::string("__main__".to_string()));
+                    // CPython always places `__doc__` in the class namespace dict
+                    // (Objects/typeobject.c `type_new_set_names`).  When the class
+                    // body started with a string literal it is the docstring; otherwise
+                    // it is None.  Use `entry()` so that an explicit `__doc__ = ...`
+                    // assignment in the body (which flows through store_order above)
+                    // is not overwritten.
+                    attrs
+                        .entry("__doc__".to_string())
+                        .or_insert_with(|| {
+                            class_docstring
+                                .as_ref()
+                                .map(|s| Value::string(s.clone()))
+                                .unwrap_or_else(Value::none)
+                        });
                     // CPython rule (Objects/typeobject.c `type_new_set_slots`):
                     // if a class defines `__eq__` in its own body without also
                     // defining `__hash__`, implicitly set `__hash__ = None` so

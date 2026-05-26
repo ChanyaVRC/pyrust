@@ -51,6 +51,11 @@ pub struct FnProto {
     /// the dict key (parameter name or `"return"`) for `R[annots_base + i]`.
     /// Empty when the function has no annotations.
     pub annotation_keys: Vec<String>,
+    /// Docstring extracted from the first statement of the body if it is a
+    /// bare string literal (`Stmt::Expr(Expr::Str(...))`), matching CPython's
+    /// `co_consts[0]` / `__doc__` extraction.  `None` when no docstring
+    /// is present.
+    pub docstring: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
