@@ -57,6 +57,7 @@ impl Interpreter {
         saved_env: EnvRef,
         local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
         fn_name: std::sync::Arc<str>,
+        qualname: std::sync::Arc<str>,
     ) -> Value {
         let frame = GeneratorFrame {
             code: Rc::clone(code),
@@ -81,6 +82,7 @@ impl Interpreter {
             // Stored so resume_generator_with_exc can name the generator's
             // traceback frame when an exception propagates out (issue #908).
             fn_name,
+            qualname,
         };
         Value::generator(Box::new(frame))
     }
@@ -1777,12 +1779,22 @@ impl Interpreter {
                     // (When `needs_local_env` is false, `gen_env` ==
                     // `function.env` — the GeneratorFrame keeps it alive.)
                     let gen_env = std::mem::replace(&mut self.env, previous_env);
+                    let gen_qualname = std::sync::Arc::from(
+                        function
+                            .user_qualname
+                            .borrow()
+                            .as_deref()
+                            .unwrap_or(&function.qualname)
+                            .to_string()
+                            .as_str(),
+                    );
                     return Ok(Self::build_generator_value(
                         &code,
                         regs,
                         gen_env,
                         Rc::clone(&function.local_index),
                         std::sync::Arc::from(function.name.as_str()),
+                        gen_qualname,
                     ));
                 }
 
@@ -2074,12 +2086,22 @@ impl Interpreter {
             // so the body's `yield` isn't observed as a runtime error.
             if code.is_generator {
                 let gen_env = std::mem::replace(&mut self.env, previous_env);
+                let gen_qualname = std::sync::Arc::from(
+                    function
+                        .user_qualname
+                        .borrow()
+                        .as_deref()
+                        .unwrap_or(&function.qualname)
+                        .to_string()
+                        .as_str(),
+                );
                 return Ok(Self::build_generator_value(
                     &code,
                     regs,
                     gen_env,
                     Rc::clone(&function.local_index),
                     std::sync::Arc::from(function.name.as_str()),
+                    gen_qualname,
                 ));
             }
 
@@ -3925,6 +3947,20 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
         ValueKind::Dict(_) => builtin_method_names("dict"),
         ValueKind::Set(_) => builtin_method_names("set"),
         ValueKind::BuiltinObject { ops, .. } => builtin_method_names(ops.type_name()),
+        ValueKind::Generator(_) => vec![
+            "__class__".to_string(),
+            "__iter__".to_string(),
+            "__name__".to_string(),
+            "__next__".to_string(),
+            "__qualname__".to_string(),
+            "close".to_string(),
+            "gi_code".to_string(),
+            "gi_frame".to_string(),
+            "gi_running".to_string(),
+            "gi_yieldfrom".to_string(),
+            "send".to_string(),
+            "throw".to_string(),
+        ],
         _ => Vec::new(),
     }
 }

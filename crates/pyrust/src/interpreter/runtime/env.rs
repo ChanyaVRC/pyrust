@@ -684,6 +684,49 @@ impl Interpreter {
                     format!("'{type_name}' object has no attribute '{name}'"),
                 ))
             }
+            ValueKind::Generator(state_rc) => {
+                // Generator introspection attributes (issue #1270).
+                // All six attributes exposed by CPython 3.12's generator type:
+                //   __name__, __qualname__, gi_running, gi_yieldfrom, gi_frame, gi_code.
+                let state_rc = Rc::clone(state_rc);
+                let borrow = state_rc.borrow();
+                if let Some(frame) = borrow.downcast_ref::<GeneratorFrame>() {
+                    match name {
+                        "__name__" => return Ok(Value::string(frame.fn_name.as_ref())),
+                        "__qualname__" => return Ok(Value::string(frame.qualname.as_ref())),
+                        // gi_running is always False when accessed from outside the
+                        // generator body (True is only observable from within — pyrust
+                        // does not expose re-entrant generator guards, matching CPython's
+                        // simple "False unless currently on the C call stack" rule).
+                        "gi_running" => return Ok(Value::bool_(false)),
+                        // gi_yieldfrom: the sub-iterator being delegated to via
+                        // `yield from`, or None.  When the generator is suspended at a
+                        // YieldFrom instruction the sub-iterator sits in iter_reg.
+                        // `frame.pc == 0` means the generator body hasn't started yet —
+                        // don't inspect insns[0] in that case (iter_reg unloaded).
+                        "gi_yieldfrom" => {
+                            if !frame.done && frame.pc != 0 {
+                                if let Some(crate::bytecode::Insn::YieldFrom { iter_reg, .. }) =
+                                    frame.code.insns.get(frame.pc)
+                                {
+                                    let sub_iter = frame.regs[*iter_reg as usize].clone();
+                                    return Ok(sub_iter);
+                                }
+                            }
+                            return Ok(Value::none());
+                        }
+                        // gi_frame and gi_code: pyrust does not expose frame/code
+                        // objects; return None to avoid AttributeError (issue #1270).
+                        "gi_frame" => return Ok(Value::none()),
+                        "gi_code" => return Ok(Value::none()),
+                        _ => {}
+                    }
+                }
+                Err(PyError::named(
+                    "AttributeError",
+                    format!("'generator' object has no attribute '{name}'"),
+                ))
+            }
             _ => {
                 // BoundMethod / ClassBoundMethod: delegate __name__ / __qualname__ /
                 // __module__ / __doc__ / __dict__ and arbitrary dynamic attrs to the
@@ -1146,6 +1189,44 @@ impl Interpreter {
                     "AttributeError",
                     format!("'method' object has no attribute '{name}'"),
                 ))
+            }
+            ValueKind::Generator(state_rc) => {
+                // CPython 3.12 allows setting __name__ and __qualname__ on
+                // generator objects (str only; TypeError on non-string).
+                // gi_running, gi_yieldfrom, gi_frame, gi_code are read-only
+                // (AttributeError with "not writable").
+                // Any other attribute gives "has no attribute".
+                match name {
+                    "__name__" | "__qualname__" => {
+                        let s = if let ValueKind::Str(s) = value.kind() {
+                            s.to_string()
+                        } else {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!("{name} must be set to a string object"),
+                            ));
+                        };
+                        let mut borrow = state_rc.borrow_mut();
+                        if let Some(frame) = borrow.downcast_mut::<GeneratorFrame>() {
+                            if name == "__name__" {
+                                frame.fn_name = std::sync::Arc::from(s.as_str());
+                            } else {
+                                frame.qualname = std::sync::Arc::from(s.as_str());
+                            }
+                        }
+                        Ok(())
+                    }
+                    "gi_running" | "gi_yieldfrom" | "gi_frame" | "gi_code" => {
+                        Err(PyError::named(
+                            "AttributeError",
+                            format!("attribute '{name}' of 'generator' objects is not writable"),
+                        ))
+                    }
+                    _ => Err(PyError::named(
+                        "AttributeError",
+                        format!("'generator' object has no attribute '{name}'"),
+                    )),
+                }
             }
             _ => Err(PyError::Runtime(format!(
                 "object has no writable attribute '{}'",
