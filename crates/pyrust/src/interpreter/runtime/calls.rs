@@ -3660,6 +3660,17 @@ static OBJECT_DUNDER_NAMES: &[&str] = &[
     "__subclasshook__",
 ];
 
+/// Pre-allocated `Vec<String>` of `OBJECT_DUNDER_NAMES` so that each
+/// `dir()` call can clone the cached vec rather than allocating 24
+/// `String`s from scratch.
+static OBJECT_DUNDER_NAMES_OWNED: std::sync::LazyLock<Vec<String>> =
+    std::sync::LazyLock::new(|| {
+        OBJECT_DUNDER_NAMES
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect()
+    });
+
 /// Returns the list of attribute/method names that `dir(obj)` should report.
 pub(crate) fn dir_names(value: &Value) -> Vec<String> {
     /// Recursively collect all attribute names from a class and its entire
@@ -3685,7 +3696,9 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
             // Reached the top of the MRO chain.  Append the names that
             // CPython's `object` exposes; the caller's dedup pass removes
             // any that were already collected from a subclass override.
-            names.extend(OBJECT_DUNDER_NAMES.iter().map(|s| (*s).to_string()));
+            // Clone from the pre-allocated static vec to avoid 24 per-call
+            // String allocations.
+            names.extend_from_slice(&OBJECT_DUNDER_NAMES_OWNED);
         }
         for eb in &extra_bases {
             collect_class_names(eb, names);
