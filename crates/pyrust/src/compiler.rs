@@ -22,6 +22,11 @@ pub fn compile_script(
     local_index: Rc<HashMap<String, Reg>>,
     repl_mode: bool,
 ) -> Result<FnCode, PyError> {
+    // Validate global/nonlocal ordering at module scope.  CPython 3.12 raises
+    // SyntaxError for `x = 1; global x` at module level too.
+    if let Some(msg) = crate::interpreter::check_global_nonlocal_order(stmts) {
+        return Err(PyError::Named("SyntaxError".into(), msg));
+    }
     // Script-level code cannot have nonlocal, and nothing captures script
     // locals via nonlocal from a nested scope at this level.
     let cell_vars = collect_cell_vars(stmts, &local_index);
@@ -6473,6 +6478,18 @@ impl Compiler {
         // Detect cell vars for the inner function.
         let inner_cell_vars = collect_cell_vars(body, &inner_index_rc);
 
+        // Validate ordering: global/nonlocal declarations must appear before
+        // any assignment or use of the same name in the function body.
+        // CPython 3.12 raises SyntaxError for `def f(): x = 1; global x`.
+        if let Some(msg) = crate::interpreter::check_global_nonlocal_order(body) {
+            self.failed = true;
+            self.is_syntax_error = true;
+            if self.error_msg.is_none() {
+                self.error_msg = Some(msg);
+            }
+            return;
+        }
+
         // Validate annotation targets against global/nonlocal declarations.
         // CPython 3.12 raises SyntaxError for `def f(): global x; x: int` and
         // `def f(): nonlocal x; x: int` (issue #748 / companion to #770).
@@ -6874,6 +6891,17 @@ impl Compiler {
                 }
                 return;
             }
+        }
+
+        // Validate ordering: global/nonlocal declarations must appear before any
+        // assignment or use of the same name in the class body.
+        if let Some(msg) = crate::interpreter::check_global_nonlocal_order(body) {
+            self.failed = true;
+            self.is_syntax_error = true;
+            if self.error_msg.is_none() {
+                self.error_msg = Some(msg);
+            }
+            return;
         }
 
         let body_local =
