@@ -1,4 +1,4 @@
-# Ellipsis literal (...) — the Ellipsis singleton (PEP 3107 / general Python)
+# Ellipsis literal (...) and the `Ellipsis` builtin name — the singleton (PEP 3107)
 
 # Basic repr and str
 print(...)          # Ellipsis
@@ -54,3 +54,15 @@ a = ...
 a = 42
 print(a)            # 42 (rebinding a does not mutate the singleton)
 print(...)          # Ellipsis (singleton unchanged)
+
+# `Ellipsis` builtin name resolves to the same singleton as the `...` literal
+print(Ellipsis)             # Ellipsis
+print(... is Ellipsis)      # True
+print(type(Ellipsis).__name__)  # ellipsis
+print(repr(Ellipsis))       # Ellipsis
+
+# Ellipsis name is usable everywhere the literal is
+b = Ellipsis
+print(b is ...)             # True
+d2 = {Ellipsis: "name"}
+print(d2[...])              # name
