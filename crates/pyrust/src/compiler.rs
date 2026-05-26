@@ -6132,29 +6132,9 @@ impl Compiler {
                     }
                     self.emit(Insn::Unpack(base, for_dst, n));
                     for (i, t) in (0u32..).zip(targets.iter()) {
-                        match t {
-                            AssignTarget::Name(name) => {
-                                if let Some(reg) = self.local_reg(name) {
-                                    self.emit(Insn::Move(reg, base + i));
-                                    self.maybe_record_class_store(reg);
-                                    // Issue #820: sync into module_globals_dict at module scope.
-                                    if self.is_module_scope {
-                                        let name_idx = self.intern_name(name);
-                                        self.emit(Insn::SyncModuleGlobal(reg, name_idx));
-                                    }
-                                } else {
-                                    let name_idx = self.intern_name(name);
-                                    self.emit(Insn::StoreGlobal(name_idx, base + i));
-                                }
-                            }
-                            _ => {
-                                self.failed = true;
-                                if self.error_msg.is_none() {
-                                    self.error_msg =
-                                        Some("unsupported for-loop unpack target".to_string());
-                                }
-                                return;
-                            }
+                        self.compile_store_unpack_target(t, base + i);
+                        if self.failed {
+                            return;
                         }
                     }
                 }

@@ -939,17 +939,11 @@ impl Parser {
     }
 
     /// Parse a for-loop target, which may be a single name, a tuple of names,
-    /// or a starred-name target like `a, *b, c` or `a, *b`.
+    /// a parenthesized tuple target like `(x, y)`, or a starred-name target
+    /// like `a, *b, c`.
     fn parse_for_target(&mut self) -> Result<AssignTarget> {
-        // Parse the first item; may be starred
-        let (first, first_starred) = if self.is(&Token::Star) {
-            self.bump();
-            let name = self.expect_ident("for loop starred variable")?;
-            (AssignTarget::Name(name), true)
-        } else {
-            let name = self.expect_ident("for loop variable")?;
-            (AssignTarget::Name(name), false)
-        };
+        // Parse the first item (may be starred, a bare name, or a parenthesized tuple)
+        let (first, first_starred) = self.parse_for_target_item()?;
 
         if !self.is(&Token::Comma) {
             if first_starred {
@@ -966,29 +960,50 @@ impl Parser {
         } else {
             first
         };
-        let mut names: Vec<AssignTarget> = vec![first_target];
+        let mut items: Vec<AssignTarget> = vec![first_target];
         let mut star_count = if first_starred { 1 } else { 0 };
 
         while self.is(&Token::Comma) {
             self.bump();
-            if self.is(&Token::In) {
+            if self.is(&Token::In) || self.is(&Token::RParen) {
                 break;
             }
-            if self.is(&Token::Star) {
-                self.bump();
-                let name = self.expect_ident("for loop starred variable")?;
+            let (item, is_starred) = self.parse_for_target_item()?;
+            if is_starred {
                 star_count += 1;
                 if star_count > 1 {
                     return Err(PyError::Parse(
                         "multiple starred expressions in assignment".to_string(),
                     ));
                 }
-                names.push(AssignTarget::Starred(Box::new(AssignTarget::Name(name))));
+                items.push(AssignTarget::Starred(Box::new(item)));
             } else {
-                names.push(AssignTarget::Name(self.expect_ident("for loop variable")?));
+                items.push(item);
             }
         }
-        Ok(AssignTarget::Tuple(names))
+        Ok(AssignTarget::Tuple(items))
+    }
+
+    /// Parse a single for-loop target item: a starred name (`*x`), a
+    /// parenthesized sub-target (`(x, y)`), or a bare name.
+    /// Returns `(target, is_starred)`.
+    fn parse_for_target_item(&mut self) -> Result<(AssignTarget, bool)> {
+        if self.is(&Token::Star) {
+            self.bump();
+            let name = self.expect_ident("for loop starred variable")?;
+            return Ok((AssignTarget::Name(name), true));
+        }
+        if self.is(&Token::LParen) {
+            // Parenthesised target like `(x, y)` or `(x, (y, z))`.
+            // We parse the contents the same way as `parse_for_target` to avoid
+            // consuming `in` as a comparison operator (which `parse_expr` would do).
+            self.bump(); // consume `(`
+            let target = self.parse_for_target()?;
+            self.expect(&Token::RParen)?;
+            return Ok((target, false));
+        }
+        let name = self.expect_ident("for loop variable")?;
+        Ok((AssignTarget::Name(name), false))
     }
 
     fn parse_optional_else(&mut self) -> Result<Option<Vec<Stmt>>> {
