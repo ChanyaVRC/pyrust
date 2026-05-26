@@ -174,7 +174,8 @@ mod tests {
         for name in [
             "print", "open", "input", "str", "bool", "list", "tuple", "sorted", "min", "max",
             // divmod dispatches __divmod__/__rdivmod__ on user instances (#1094).
-            "divmod",
+            "divmod", // ascii dispatches user __repr__ on PyInstance values (#1197).
+            "ascii",
         ] {
             assert!(
                 !is_pure(name),
