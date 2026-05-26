@@ -598,11 +598,54 @@ pyrust_module! {
     /// CPython's `PyNumber_Divmod` (Objects/abstract.c) tries `nb_divmod` on
     /// the left operand first, then the right operand's slot, and only raises
     /// `TypeError` when both return `NotImplemented` or are absent.
+    ///
+    /// Subtype rule (mirrors CPython `binary_op1`): when `b`'s type is a
+    /// *proper* subtype of `a`'s type, try `b.__rdivmod__(a)` first.
     fn divmod(#[positional_only] a: PyValue, #[positional_only] b: PyValue) -> Result<Value> {
+        // Extract classes so we can apply the subtype rule.
+        let a_class = if let ValueKind::PyInstance(inst) = a.0.kind() {
+            Some(Rc::clone(&inst.borrow().class))
+        } else {
+            None
+        };
+        let b_class = if let ValueKind::PyInstance(inst) = b.0.kind() {
+            Some(Rc::clone(&inst.borrow().class))
+        } else {
+            None
+        };
+
+        // Subtype rule (mirrors CPython `binary_op1`): if b's class is a
+        // *proper* subtype of a's class AND b's class *directly defines*
+        // `__rdivmod__` (not merely inherits it), try b.__rdivmod__(a) before
+        // a.__divmod__(b).  CPython gates on `tp_as_number->nb_divmod` slots
+        // being different objects; the equivalent here is checking that bc's
+        // own attr dict contains the key.
+        let b_is_proper_subtype_of_a = match (&a_class, &b_class) {
+            (Some(ac), Some(bc)) => {
+                !Rc::ptr_eq(ac, bc)
+                    && class_is_subclass_of(bc, ac)
+                    && bc.borrow().attrs.contains_key("__rdivmod__")
+            }
+            _ => false,
+        };
+
+        if b_is_proper_subtype_of_a {
+            if let (Some(bc), ValueKind::PyInstance(inst)) = (&b_class, b.0.kind()) {
+                if let Some(m) = lookup_class_attr(bc, "__rdivmod__") {
+                    let self_val = Value::py_instance(Rc::clone(inst));
+                    let arg = ExpandedCallArg { name: None, value: a.0.clone() };
+                    match invoke_class_method(_interp, m, self_val, &[arg]) {
+                        Ok(v) if !matches!(v.kind(), ValueKind::NotImplemented) => return Ok(v),
+                        Err(e) => return Err(e),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
         // Try a.__divmod__(b).
-        if let ValueKind::PyInstance(inst) = a.0.kind() {
-            let class = Rc::clone(&inst.borrow().class);
-            if let Some(m) = lookup_class_attr(&class, "__divmod__") {
+        if let (Some(ac), ValueKind::PyInstance(inst)) = (&a_class, a.0.kind()) {
+            if let Some(m) = lookup_class_attr(ac, "__divmod__") {
                 let self_val = Value::py_instance(Rc::clone(inst));
                 let arg = ExpandedCallArg { name: None, value: b.0.clone() };
                 match invoke_class_method(_interp, m, self_val, &[arg]) {
@@ -612,19 +655,22 @@ pyrust_module! {
                 }
             }
         }
-        // Try b.__rdivmod__(a).
-        if let ValueKind::PyInstance(inst) = b.0.kind() {
-            let class = Rc::clone(&inst.borrow().class);
-            if let Some(m) = lookup_class_attr(&class, "__rdivmod__") {
-                let self_val = Value::py_instance(Rc::clone(inst));
-                let arg = ExpandedCallArg { name: None, value: a.0.clone() };
-                match invoke_class_method(_interp, m, self_val, &[arg]) {
-                    Ok(v) if !matches!(v.kind(), ValueKind::NotImplemented) => return Ok(v),
-                    Err(e) => return Err(e),
-                    _ => {}
+
+        // Try b.__rdivmod__(a) (skipped above if already tried via subtype rule).
+        if !b_is_proper_subtype_of_a {
+            if let (Some(bc), ValueKind::PyInstance(inst)) = (&b_class, b.0.kind()) {
+                if let Some(m) = lookup_class_attr(bc, "__rdivmod__") {
+                    let self_val = Value::py_instance(Rc::clone(inst));
+                    let arg = ExpandedCallArg { name: None, value: a.0.clone() };
+                    match invoke_class_method(_interp, m, self_val, &[arg]) {
+                        Ok(v) if !matches!(v.kind(), ValueKind::NotImplemented) => return Ok(v),
+                        Err(e) => return Err(e),
+                        _ => {}
+                    }
                 }
             }
         }
+
         Err(PyError::named(
             "TypeError",
             format!(
