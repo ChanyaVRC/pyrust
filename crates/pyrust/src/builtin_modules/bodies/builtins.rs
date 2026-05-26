@@ -2245,12 +2245,19 @@ pyrust_module! {
                                     format!("invalid literal for int() with base 0: '{trimmed}'"),
                                 )
                             })?;
-                            i64::from_str_radix(&digits, base).map(Value::int).map_err(|_| {
-                                PyError::named(
-                                    "ValueError",
-                                    format!("invalid literal for int() with base 0: '{trimmed}'"),
-                                )
-                            })
+                            match i64::from_str_radix(&digits, base) {
+                                Ok(v) => Ok(Value::int(v)),
+                                Err(_) => {
+                                    // Overflow: try BigInt before giving up.
+                                    use num_traits::Num as _;
+                                    crate::value::PyBigInt::from_str_radix(&digits, base)
+                                        .map(Value::bigint)
+                                        .map_err(|_| PyError::named(
+                                            "ValueError",
+                                            format!("invalid literal for int() with base 0: '{trimmed}'"),
+                                        ))
+                                }
+                            }
                         } else {
                             let base = base_arg as u32;
                             let stripped = if (base == 16 && (trimmed.starts_with("0x") || trimmed.starts_with("0X")))
