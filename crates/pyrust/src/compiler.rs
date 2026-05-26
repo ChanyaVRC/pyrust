@@ -6580,7 +6580,8 @@ impl Compiler {
             format!("{}.{}", self.qualname_prefix, name)
         };
         sub.qualname_prefix = format!("{fn_qualname}.<locals>");
-        if is_pure {
+        let has_kwonly_params = params.iter().any(|p| p.is_keyword_only);
+        if is_pure && !has_kwonly_params {
             // Seed the inner compiler with the function's own name so that
             // direct self-recursive calls are compiled as CallMemo rather than
             // Call.  This lets the VM return from the fn_cache on repeated
@@ -6588,6 +6589,8 @@ impl Compiler {
             // making recursive pure functions (e.g. fib) substantially faster.
             // This is sound: a pure function calling only itself (and other
             // pure things) is itself pure, satisfying the fixpoint assumption.
+            // Exclude kwonly-param functions: CallMemo keys by raw positional
+            // registers and would bypass keyword-only enforcement on self-calls.
             sub.pure_locals.insert(name.to_string());
         }
         sub.compile_block(body);
@@ -6792,7 +6795,11 @@ impl Compiler {
         if let Some(reg) = self.local_reg(name) {
             self.mark_def(reg);
         }
-        if is_pure && decorators.is_empty() {
+        // Exclude kwonly-param functions from CallMemo optimisation.
+        // CallMemo keys by raw positional arg values; a kwarg-based call stores
+        // a cache entry that an invalid positional-only call could match, bypassing
+        // keyword-only enforcement in call_user_function_expanded.
+        if is_pure && decorators.is_empty() && !has_kwonly_params {
             self.pure_locals.insert(name.to_string());
         }
         self.free_temp(dst);
