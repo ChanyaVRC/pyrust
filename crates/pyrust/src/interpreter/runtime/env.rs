@@ -765,6 +765,16 @@ impl Interpreter {
                         return result;
                     }
                 }
+                // Issue #1198: bare `object()` instances have no __dict__ in
+                // CPython.  Only the object singleton itself is blocked; any
+                // user-defined class (even `class Foo(object): pass`) gets its
+                // own PyClass Rc and is not ptr_eq to the singleton.
+                if Rc::ptr_eq(&class, &object_class_singleton()) {
+                    return Err(PyError::named(
+                        "AttributeError",
+                        format!("'object' object has no attribute '{name}'"),
+                    ));
+                }
                 // PEP 3134: __cause__ and __context__ must be None or a
                 // BaseException subclass instance.  __suppress_context__ must
                 // be a bool.  CPython enforces these in the C slot setters;
