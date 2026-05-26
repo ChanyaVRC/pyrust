@@ -53,3 +53,15 @@ print(hasattr(lambda: 1, '__func__'))   # False
 f = lambda x: x * 2
 sm3 = staticmethod(f)
 print(sm3.__func__(5))         # 10
+
+# ─── del nonexistent attr uses correct type name ──────────────────────────────
+sm4 = staticmethod(lambda: 1)
+cm4 = classmethod(lambda cls: cls)
+try:
+    del sm4.nonexistent
+except AttributeError as e:
+    print(e)    # 'staticmethod' object has no attribute 'nonexistent'
+try:
+    del cm4.nonexistent
+except AttributeError as e:
+    print(e)    # 'classmethod' object has no attribute 'nonexistent'

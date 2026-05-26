@@ -1265,9 +1265,14 @@ impl Interpreter {
                         if removed.is_some() {
                             Ok(())
                         } else {
+                            let type_name = match func.kind {
+                                UserFunctionKind::StaticMethod => "staticmethod",
+                                UserFunctionKind::ClassMethod => "classmethod",
+                                _ => "function",
+                            };
                             Err(PyError::named(
                                 "AttributeError",
-                                format!("'function' object has no attribute '{name}'"),
+                                format!("'{type_name}' object has no attribute '{name}'"),
                             ))
                         }
                     }
