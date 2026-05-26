@@ -2145,6 +2145,21 @@ pyrust_module! {
                         format!("invalid literal for int() with base 10: '{s}'"),
                     )
                 }),
+                ValueKind::Bytes(rc) => {
+                    let repr = args[0].value.repr();
+                    let s = std::str::from_utf8(rc).map_err(|_| {
+                        PyError::named(
+                            "ValueError",
+                            format!("invalid literal for int() with base 10: {repr}"),
+                        )
+                    })?;
+                    s.trim().parse::<i64>().map(Value::int).map_err(|_| {
+                        PyError::named(
+                            "ValueError",
+                            format!("invalid literal for int() with base 10: {repr}"),
+                        )
+                    })
+                }
                 ValueKind::PyInstance(inst) => {
                     let inst_rc = Rc::clone(inst);
                     let class = Rc::clone(&inst_rc.borrow().class);
@@ -2250,6 +2265,54 @@ pyrust_module! {
                                 PyError::named(
                                     "ValueError",
                                     format!("invalid literal for int() with base {base_arg}: '{trimmed}'"),
+                                )
+                            })
+                        }
+                    }
+                    ValueKind::Bytes(rc) => {
+                        let repr = args[0].value.repr();
+                        let s = std::str::from_utf8(rc).map_err(|_| {
+                            PyError::named(
+                                "ValueError",
+                                format!("invalid literal for int() with base {base_arg}: {repr}"),
+                            )
+                        })?;
+                        let trimmed = s.trim();
+                        if base_arg == 0 {
+                            let (base, digits) =
+                                int_parse_base_zero(trimmed).ok_or_else(|| {
+                                    PyError::named(
+                                        "ValueError",
+                                        format!(
+                                            "invalid literal for int() with base 0: {repr}"
+                                        ),
+                                    )
+                                })?;
+                            i64::from_str_radix(&digits, base).map(Value::int).map_err(|_| {
+                                PyError::named(
+                                    "ValueError",
+                                    format!("invalid literal for int() with base 0: {repr}"),
+                                )
+                            })
+                        } else {
+                            let base = base_arg as u32;
+                            let stripped = if (base == 16
+                                && (trimmed.starts_with("0x") || trimmed.starts_with("0X")))
+                                || (base == 2
+                                    && (trimmed.starts_with("0b") || trimmed.starts_with("0B")))
+                                || (base == 8
+                                    && (trimmed.starts_with("0o") || trimmed.starts_with("0O")))
+                            {
+                                &trimmed[2..]
+                            } else {
+                                trimmed
+                            };
+                            i64::from_str_radix(stripped, base).map(Value::int).map_err(|_| {
+                                PyError::named(
+                                    "ValueError",
+                                    format!(
+                                        "invalid literal for int() with base {base_arg}: {repr}"
+                                    ),
                                 )
                             })
                         }
