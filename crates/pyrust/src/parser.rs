@@ -2496,8 +2496,24 @@ fn expr_to_assign_target(expr: &Expr) -> Result<AssignTarget> {
         Expr::Attr { target, name } => Ok(AssignTarget::Attr(target.clone(), name.clone())),
         Expr::Index { target, index } => Ok(AssignTarget::Index(target.clone(), index.clone())),
         Expr::Tuple(items) => {
-            let flags = vec![false; items.len()];
-            let targets = exprs_to_assign_targets(items, &flags)?;
+            // Items that were parsed as `*expr` inside a parenthesised tuple
+            // literal come in as `Expr::Starred`; lift them into starred flags
+            // so the target machinery can handle them correctly.
+            let mut exprs: Vec<Expr> = Vec::with_capacity(items.len());
+            let mut flags: Vec<bool> = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Expr::Starred(inner) => {
+                        exprs.push(*inner.clone());
+                        flags.push(true);
+                    }
+                    other => {
+                        exprs.push(other.clone());
+                        flags.push(false);
+                    }
+                }
+            }
+            let targets = exprs_to_assign_targets(&exprs, &flags)?;
             Ok(AssignTarget::Tuple(targets))
         }
         _ => Err(PyError::Parse(
