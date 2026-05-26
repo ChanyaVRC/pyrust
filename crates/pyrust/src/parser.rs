@@ -1309,6 +1309,10 @@ impl Parser {
         let mut seen_default = false;
         let mut seen_star = false;
         let mut seen_kwargs = false;
+        // Set when a bare `*` separator is consumed; cleared when the first
+        // keyword-only parameter is added.  If still set when `:` is reached,
+        // CPython raises SyntaxError: named arguments must follow bare *.
+        let mut bare_star_needs_kwonly = false;
 
         loop {
             if seen_kwargs {
@@ -1332,7 +1336,8 @@ impl Parser {
                 self.bump();
                 seen_star = true;
                 if self.is(&Token::Comma) || self.is(&Token::Colon) {
-                    // bare * separator: keyword-only follows
+                    // bare * separator: keyword-only params must follow
+                    bare_star_needs_kwonly = true;
                 } else {
                     let name = self.expect_ident("args parameter name")?;
                     params.push(FunctionParam {
@@ -1361,6 +1366,9 @@ impl Parser {
                             }
                             None
                         };
+                        if seen_star {
+                            bare_star_needs_kwonly = false;
+                        }
                         params.push(FunctionParam {
                             name,
                             default,
@@ -1380,10 +1388,20 @@ impl Parser {
             }
 
             if self.is(&Token::Colon) {
+                if bare_star_needs_kwonly {
+                    return Err(PyError::Parse(
+                        "named arguments must follow bare *".to_string(),
+                    ));
+                }
                 break;
             }
             self.expect(&Token::Comma)?;
             if self.is(&Token::Colon) {
+                if bare_star_needs_kwonly {
+                    return Err(PyError::Parse(
+                        "named arguments must follow bare *".to_string(),
+                    ));
+                }
                 break;
             }
         }
