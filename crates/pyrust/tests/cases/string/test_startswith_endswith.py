@@ -1,6 +1,6 @@
-# Parity test: str.startswith() and str.endswith() with tuple arguments.
-# CPython 3.12 raises TypeError if any element in the tuple is not a str,
-# but short-circuits (returns True) if a matching str is found before the bad element.
+# Parity test: str.startswith() and str.endswith() type validation.
+# CPython 3.12 raises TypeError if the first arg is not a str or tuple of str,
+# and if any element in the tuple is not a str.
 
 # Happy path: all-str tuple
 print("hello".startswith(("he", "lo")))      # True
@@ -15,6 +15,38 @@ print("hello".startswith("he"))              # True
 print("hello".startswith("lo"))              # False
 print("hello".endswith("lo"))                # True
 print("hello".endswith("he"))                # False
+
+# TypeError: non-str/tuple first arg
+try:
+    "hello".startswith(42)
+except TypeError as e:
+    print(type(e).__name__ + ": " + str(e))
+
+try:
+    "hello".endswith(None)
+except TypeError as e:
+    print(type(e).__name__ + ": " + str(e))
+
+try:
+    "hello".startswith(b"he")
+except TypeError as e:
+    print(type(e).__name__ + ": " + str(e))
+
+try:
+    "hello".endswith(b"lo")
+except TypeError as e:
+    print(type(e).__name__ + ": " + str(e))
+
+# TypeError: no first argument
+try:
+    "hello".startswith()
+except TypeError as e:
+    print(type(e).__name__ + ": " + str(e))
+
+try:
+    "hello".endswith()
+except TypeError as e:
+    print(type(e).__name__ + ": " + str(e))
 
 # TypeError: non-str element reached before any match
 try:

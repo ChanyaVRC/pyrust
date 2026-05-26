@@ -1281,7 +1281,7 @@ fn str_startswith(s: &str, args: &[Value]) -> Result<Value> {
         )),
         None => Err(PyError::named(
             "TypeError",
-            "startswith first arg must be str or a tuple of str".to_string(),
+            "startswith() takes at least 1 argument (0 given)".to_string(),
         )),
     }
 }
@@ -1331,7 +1331,7 @@ fn str_endswith(s: &str, args: &[Value]) -> Result<Value> {
         )),
         None => Err(PyError::named(
             "TypeError",
-            "endswith first arg must be str or a tuple of str".to_string(),
+            "endswith() takes at least 1 argument (0 given)".to_string(),
         )),
     }
 }
