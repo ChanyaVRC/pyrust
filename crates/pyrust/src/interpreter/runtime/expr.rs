@@ -510,6 +510,54 @@ impl Interpreter {
         method: &str,
         rmethod: &str,
     ) -> Option<Result<Value>> {
+        // Subtype priority (mirrors CPython `binary_op1`): when `rmethod` is a
+        // reflected arithmetic slot (e.g. `__radd__`, starts with `__r`) and
+        // `right`'s class is a *proper* subtype of `left`'s class AND `right`'s
+        // resolved `rmethod` slot (via MRO) differs from `left`'s resolved slot
+        // (one is None, or they're different functions), try
+        // `right.rmethod(left)` before `left.method(right)`.  This mirrors
+        // CPython's `slotw != slotv` check in `binary_op1`: a right type that
+        // inherits a different `__radd__` from an intermediate class gets
+        // priority, not only types that directly define `rmethod` in their own
+        // `__dict__`.  Comparison reflected ops (`__gt__`, `__ge__`, …) do not
+        // start with `__r`, so they are unaffected by this check.
+        let right_has_subtype_priority = rmethod.starts_with("__r") && {
+            if let (ValueKind::PyInstance(li), ValueKind::PyInstance(ri)) =
+                (left.kind(), right.kind())
+            {
+                let lc = Rc::clone(&li.borrow().class);
+                let rc_class = Rc::clone(&ri.borrow().class);
+                if !Rc::ptr_eq(&lc, &rc_class) && class_is_subclass_of(&rc_class, &lc) {
+                    let right_slot = lookup_class_attr(&rc_class, rmethod);
+                    let left_slot = lookup_class_attr(&lc, rmethod);
+                    right_slot.is_some() && right_slot != left_slot
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+
+        if right_has_subtype_priority {
+            if let ValueKind::PyInstance(inst) = right.kind() {
+                let class = Rc::clone(&inst.borrow().class);
+                if let Some(m) = lookup_class_attr(&class, rmethod)
+                    && is_callable_method(&m)
+                {
+                    let self_val = Value::py_instance(Rc::clone(inst));
+                    let arg = ExpandedCallArg {
+                        name: None,
+                        value: left.clone(),
+                    };
+                    match invoke_class_method(self, m, self_val, &[arg]) {
+                        Ok(v) if is_not_implemented(&v) => {}
+                        result => return Some(result),
+                    }
+                }
+            }
+        }
+
         if let ValueKind::PyInstance(inst) = left.kind() {
             let class = Rc::clone(&inst.borrow().class);
             if let Some(m) = lookup_class_attr(&class, method)
@@ -526,19 +574,22 @@ impl Interpreter {
                 }
             }
         }
-        if let ValueKind::PyInstance(inst) = right.kind() {
-            let class = Rc::clone(&inst.borrow().class);
-            if let Some(m) = lookup_class_attr(&class, rmethod)
-                && is_callable_method(&m)
-            {
-                let self_val = Value::py_instance(Rc::clone(inst));
-                let arg = ExpandedCallArg {
-                    name: None,
-                    value: left.clone(),
-                };
-                match invoke_class_method(self, m, self_val, &[arg]) {
-                    Ok(v) if is_not_implemented(&v) => {}
-                    result => return Some(result),
+
+        if !right_has_subtype_priority {
+            if let ValueKind::PyInstance(inst) = right.kind() {
+                let class = Rc::clone(&inst.borrow().class);
+                if let Some(m) = lookup_class_attr(&class, rmethod)
+                    && is_callable_method(&m)
+                {
+                    let self_val = Value::py_instance(Rc::clone(inst));
+                    let arg = ExpandedCallArg {
+                        name: None,
+                        value: left.clone(),
+                    };
+                    match invoke_class_method(self, m, self_val, &[arg]) {
+                        Ok(v) if is_not_implemented(&v) => {}
+                        result => return Some(result),
+                    }
                 }
             }
         }
