@@ -7377,6 +7377,13 @@ impl Compiler {
                 if let Some(var_name) = &handler.name {
                     if let Some(reg) = self.local_reg(var_name) {
                         self.emit(Insn::DeleteLocal(reg, u16::MAX));
+                        // Clear the def_set bit so that subsequent reads of this
+                        // variable emit CheckLocal and raise UnboundLocalError
+                        // (not NameError) — matching CPython's DELETE_FAST semantics
+                        // after `except E as var:` cleanup (issue #1277).
+                        if (reg as usize) < 64 {
+                            self.def_set &= !(1u64 << reg);
+                        }
                     } else {
                         let name_idx = self.intern_name(var_name);
                         self.emit(Insn::DeleteName(name_idx));
