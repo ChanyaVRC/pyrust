@@ -396,6 +396,25 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
             .attrs
             .insert("__init__".to_string(), Value::builtin_function(sentinel));
     }
+    // Issue #1134: register `dict.__getitem__` so that `super().__getitem__(key)`
+    // from a dict subclass resolves via MRO lookup to a BuiltinFunction sentinel
+    // and routes through `super_bound_builtin` → registry dispatch.
+    // The same is done for list/tuple/bytes so that subclasses overriding
+    // `__getitem__` can call `super().__getitem__(key)` without AttributeError.
+    // The sentinels are excluded from the "user override" check in eval_index /
+    // eval_slice — they represent the base-class implementation, not an override.
+    for (cls, type_name) in [
+        (&dict_class, "dict"),
+        (&list_class, "list"),
+        (&tuple_class, "tuple"),
+        (&bytes_class, "bytes"),
+    ] {
+        let sentinel: &'static str =
+            Box::leak(format!("{type_name}.__getitem__").into_boxed_str());
+        cls.borrow_mut()
+            .attrs
+            .insert("__getitem__".to_string(), Value::builtin_function(sentinel));
+    }
     // PEP 585: `__class_getitem__` on the five collection types that support
     // `list[int]`-style generic subscripting.  Each gets a
     // `BuiltinFunction("<type>.__class_getitem__")` sentinel so that both
