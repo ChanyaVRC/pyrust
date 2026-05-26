@@ -4065,6 +4065,14 @@ impl Compiler {
         idx
     }
 
+    fn set_syntax_error(&mut self, msg: &str) {
+        self.failed = true;
+        self.is_syntax_error = true;
+        if self.error_msg.is_none() {
+            self.error_msg = Some(msg.to_string());
+        }
+    }
+
     fn pc(&self) -> usize {
         self.insns.len()
     }
@@ -4302,11 +4310,7 @@ impl Compiler {
             Stmt::Pass => {}
             Stmt::Break => {
                 if self.loops.is_empty() {
-                    self.failed = true;
-                    self.is_syntax_error = true;
-                    if self.error_msg.is_none() {
-                        self.error_msg = Some("'break' outside loop".to_string());
-                    }
+                    self.set_syntax_error("'break' outside loop");
                     return;
                 }
                 let last = self.loops.len() - 1;
@@ -4321,11 +4325,7 @@ impl Compiler {
             }
             Stmt::Continue => {
                 if self.loops.is_empty() {
-                    self.failed = true;
-                    self.is_syntax_error = true;
-                    if self.error_msg.is_none() {
-                        self.error_msg = Some("'continue' not properly in loop".to_string());
-                    }
+                    self.set_syntax_error("'continue' not properly in loop");
                     return;
                 }
                 let last = self.loops.len() - 1;
@@ -4348,11 +4348,7 @@ impl Compiler {
             }
             Stmt::Return(None) => {
                 if !self.is_function_scope {
-                    self.failed = true;
-                    self.is_syntax_error = true;
-                    if self.error_msg.is_none() {
-                        self.error_msg = Some("'return' outside function".to_string());
-                    }
+                    self.set_syntax_error("'return' outside function");
                     return;
                 }
                 self.emit_early_exit_cleanups(0);
@@ -4363,11 +4359,7 @@ impl Compiler {
             }
             Stmt::Return(Some(expr)) => {
                 if !self.is_function_scope {
-                    self.failed = true;
-                    self.is_syntax_error = true;
-                    if self.error_msg.is_none() {
-                        self.error_msg = Some("'return' outside function".to_string());
-                    }
+                    self.set_syntax_error("'return' outside function");
                     return;
                 }
                 let r = self.compile_expr(expr);
@@ -4485,12 +4477,7 @@ impl Compiler {
                 // At module level (not inside any function or class), it is a
                 // SyntaxError — CPython rejects it at compile time.
                 if !self.is_function_scope && !self.is_class_body {
-                    self.failed = true;
-                    self.is_syntax_error = true;
-                    if self.error_msg.is_none() {
-                        self.error_msg =
-                            Some("nonlocal declaration not allowed at module level".to_string());
-                    }
+                    self.set_syntax_error("nonlocal declaration not allowed at module level");
                 }
             }
             Stmt::Raise { expr, cause } => {
@@ -4932,29 +4919,17 @@ impl Compiler {
             match stmt {
                 Stmt::Break => {
                     if !in_loop {
-                        self.failed = true;
-                        self.is_syntax_error = true;
-                        if self.error_msg.is_none() {
-                            self.error_msg = Some("'break' outside loop".to_string());
-                        }
+                        self.set_syntax_error("'break' outside loop");
                     }
                 }
                 Stmt::Continue => {
                     if !in_loop {
-                        self.failed = true;
-                        self.is_syntax_error = true;
-                        if self.error_msg.is_none() {
-                            self.error_msg = Some("'continue' not properly in loop".to_string());
-                        }
+                        self.set_syntax_error("'continue' not properly in loop");
                     }
                 }
                 Stmt::Return(_) => {
                     if !self.is_function_scope {
-                        self.failed = true;
-                        self.is_syntax_error = true;
-                        if self.error_msg.is_none() {
-                            self.error_msg = Some("'return' outside function".to_string());
-                        }
+                        self.set_syntax_error("'return' outside function");
                     }
                 }
                 Stmt::Expr(expr) => {
@@ -4962,13 +4937,7 @@ impl Compiler {
                 }
                 Stmt::Nonlocal(_) => {
                     if !self.is_function_scope && !self.is_class_body {
-                        self.failed = true;
-                        self.is_syntax_error = true;
-                        if self.error_msg.is_none() {
-                            self.error_msg = Some(
-                                "nonlocal declaration not allowed at module level".to_string(),
-                            );
-                        }
+                        self.set_syntax_error("nonlocal declaration not allowed at module level");
                     }
                 }
                 Stmt::If {
@@ -5065,14 +5034,10 @@ impl Compiler {
                             || (self.is_function_scope
                                 && self.local_index.contains_key(nonlocal_name));
                         if !found {
-                            self.failed = true;
-                            self.is_syntax_error = true;
-                            if self.error_msg.is_none() {
-                                self.error_msg = Some(format!(
-                                    "no binding for nonlocal '{}' found",
-                                    nonlocal_name
-                                ));
-                            }
+                            self.set_syntax_error(&format!(
+                                "no binding for nonlocal '{}' found",
+                                nonlocal_name
+                            ));
                             return;
                         }
                     }
@@ -5106,11 +5071,7 @@ impl Compiler {
         match expr {
             Expr::Yield(_) | Expr::YieldFrom(_) => {
                 if !self.is_function_scope {
-                    self.failed = true;
-                    self.is_syntax_error = true;
-                    if self.error_msg.is_none() {
-                        self.error_msg = Some("'yield' outside function".to_string());
-                    }
+                    self.set_syntax_error("'yield' outside function");
                 }
             }
             Expr::Binary { left, right, .. } => {
@@ -6355,20 +6316,11 @@ impl Compiler {
         let def_ann_targets = crate::interpreter::collect_annotation_target_names(body);
         for ann_name in &def_ann_targets {
             if inner_global.contains(ann_name) {
-                self.failed = true;
-                self.is_syntax_error = true;
-                if self.error_msg.is_none() {
-                    self.error_msg = Some(format!("annotated name '{}' can't be global", ann_name));
-                }
+                self.set_syntax_error(&format!("annotated name '{}' can't be global", ann_name));
                 return;
             }
             if inner_nonlocal.contains(ann_name) {
-                self.failed = true;
-                self.is_syntax_error = true;
-                if self.error_msg.is_none() {
-                    self.error_msg =
-                        Some(format!("annotated name '{}' can't be nonlocal", ann_name));
-                }
+                self.set_syntax_error(&format!("annotated name '{}' can't be nonlocal", ann_name));
                 return;
             }
         }
@@ -6392,12 +6344,10 @@ impl Compiler {
                 .any(|m| m.contains_key(nonlocal_name))
                 || (self.is_function_scope && self.local_index.contains_key(nonlocal_name));
             if !found {
-                self.failed = true;
-                self.is_syntax_error = true;
-                if self.error_msg.is_none() {
-                    self.error_msg =
-                        Some(format!("no binding for nonlocal '{}' found", nonlocal_name));
-                }
+                self.set_syntax_error(&format!(
+                    "no binding for nonlocal '{}' found",
+                    nonlocal_name
+                ));
                 return;
             }
         }
@@ -6411,20 +6361,11 @@ impl Compiler {
         sorted_ann.sort();
         for ann_name in sorted_ann {
             if inner_global_rc.contains(ann_name) {
-                self.failed = true;
-                self.is_syntax_error = true;
-                if self.error_msg.is_none() {
-                    self.error_msg = Some(format!("annotated name '{}' can't be global", ann_name));
-                }
+                self.set_syntax_error(&format!("annotated name '{}' can't be global", ann_name));
                 return;
             }
             if inner_nonlocal_rc.contains(ann_name) {
-                self.failed = true;
-                self.is_syntax_error = true;
-                if self.error_msg.is_none() {
-                    self.error_msg =
-                        Some(format!("annotated name '{}' can't be nonlocal", ann_name));
-                }
+                self.set_syntax_error(&format!("annotated name '{}' can't be nonlocal", ann_name));
                 return;
             }
         }
@@ -6691,12 +6632,10 @@ impl Compiler {
                     .any(|m| m.contains_key(nonlocal_name))
                     || (self.is_function_scope && self.local_index.contains_key(nonlocal_name));
                 if !found {
-                    self.failed = true;
-                    self.is_syntax_error = true;
-                    if self.error_msg.is_none() {
-                        self.error_msg =
-                            Some(format!("no binding for nonlocal '{}' found", nonlocal_name));
-                    }
+                    self.set_syntax_error(&format!(
+                        "no binding for nonlocal '{}' found",
+                        nonlocal_name
+                    ));
                     return;
                 }
             }
@@ -6710,20 +6649,11 @@ impl Compiler {
         let ann_targets = crate::interpreter::collect_annotation_target_names(body);
         for ann_name in &ann_targets {
             if body_global.contains(ann_name) {
-                self.failed = true;
-                self.is_syntax_error = true;
-                if self.error_msg.is_none() {
-                    self.error_msg = Some(format!("annotated name '{}' can't be global", ann_name));
-                }
+                self.set_syntax_error(&format!("annotated name '{}' can't be global", ann_name));
                 return;
             }
             if body_nonlocal.contains(ann_name) {
-                self.failed = true;
-                self.is_syntax_error = true;
-                if self.error_msg.is_none() {
-                    self.error_msg =
-                        Some(format!("annotated name '{}' can't be nonlocal", ann_name));
-                }
+                self.set_syntax_error(&format!("annotated name '{}' can't be nonlocal", ann_name));
                 return;
             }
         }
@@ -7657,11 +7587,7 @@ impl Compiler {
 
             Expr::Yield(val_expr) => {
                 if !self.is_function_scope {
-                    self.failed = true;
-                    self.is_syntax_error = true;
-                    if self.error_msg.is_none() {
-                        self.error_msg = Some("'yield' outside function".to_string());
-                    }
+                    self.set_syntax_error("'yield' outside function");
                     return 0;
                 }
                 // Compile the yielded value (or None if bare `yield`).
@@ -7680,11 +7606,7 @@ impl Compiler {
 
             Expr::YieldFrom(iter_expr) => {
                 if !self.is_function_scope {
-                    self.failed = true;
-                    self.is_syntax_error = true;
-                    if self.error_msg.is_none() {
-                        self.error_msg = Some("'yield' outside function".to_string());
-                    }
+                    self.set_syntax_error("'yield' outside function");
                     return 0;
                 }
                 // PEP 380 `yield from` delegation via the single YieldFrom instruction.
@@ -8160,12 +8082,10 @@ impl Compiler {
                 .any(|m| m.contains_key(nonlocal_name))
                 || (self.is_function_scope && self.local_index.contains_key(nonlocal_name));
             if !found {
-                self.failed = true;
-                self.is_syntax_error = true;
-                if self.error_msg.is_none() {
-                    self.error_msg =
-                        Some(format!("no binding for nonlocal '{}' found", nonlocal_name));
-                }
+                self.set_syntax_error(&format!(
+                    "no binding for nonlocal '{}' found",
+                    nonlocal_name
+                ));
                 return 0;
             }
         }
@@ -8482,12 +8402,10 @@ impl Compiler {
                 .any(|m| m.contains_key(nonlocal_name))
                 || (self.is_function_scope && self.local_index.contains_key(nonlocal_name));
             if !found {
-                self.failed = true;
-                self.is_syntax_error = true;
-                if self.error_msg.is_none() {
-                    self.error_msg =
-                        Some(format!("no binding for nonlocal '{}' found", nonlocal_name));
-                }
+                self.set_syntax_error(&format!(
+                    "no binding for nonlocal '{}' found",
+                    nonlocal_name
+                ));
                 return 0;
             }
         }
