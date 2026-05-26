@@ -52,9 +52,15 @@ try:
 except TypeError as e:
     print(e)
 
-# TypeError: argument 2 must be tuple.
+# TypeError: argument 2 must be tuple (string).
 try:
     type("bad", "notuple", {})
+except TypeError as e:
+    print(e)
+
+# TypeError: argument 2 must be tuple (list is also not accepted).
+try:
+    type("bad", [A], {})
 except TypeError as e:
     print(e)
 

@@ -1033,7 +1033,6 @@ pyrust_module! {
             // we work with the Values — see #450).
             let base_values: Vec<Value> = match args[1].value.kind() {
                 ValueKind::Tuple(items) => items.to_vec(),
-                ValueKind::List(items) => items.to_vec(),
                 _ => return Err(PyError::named(
                     "TypeError",
                     format!(
