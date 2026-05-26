@@ -1992,59 +1992,92 @@ impl Interpreter {
         // Copilot review).  They land in the `None` arm of the
         // init match below.
 
-        // `__new__` protocol: if the class declares a `__new__` builtin in
-        // its OWN attrs (not inherited — CPython's `object.__new__` is the
-        // root and we don't emulate the full MRO here), call it as a class
-        // method with `cls` as the first argument.  The return value is the
-        // new instance; if it is a `PyInstance` whose class is a subclass of
-        // `cls`, `__init__` is called on it (CPython parity).  This is the
-        // mechanism that lets `pathlib.Path.__new__` return a `PosixPath`
-        // instance on POSIX platforms (issue #922).
-        let own_new = class.borrow().attrs.get("__new__").cloned();
-        if let Some(new_val) = own_new {
-            if let ValueKind::BuiltinFunction(name) = new_val.kind() {
-                let dispatch = crate::builtin_registry::lookup(name).ok_or_else(|| {
-                    PyError::Runtime(format!(
-                        "internal: __new__ builtin '{name}' not in registry"
-                    ))
-                })?;
-                // Pass cls as args[0], user args follow.
-                let mut combined: Vec<ExpandedCallArg> = Vec::with_capacity(args.len() + 1);
-                combined.push(ExpandedCallArg {
-                    name: None,
-                    value: Value::py_class(Rc::clone(&class)),
-                });
-                combined.extend(args.iter().cloned());
-                let new_result = dispatch(self, &combined)?;
+        // `__new__` protocol: look up `__new__` via the MRO and dispatch it
+        // if a non-default implementation exists.
+        //
+        // Two cases are dispatched here:
+        //   1. A `UserFunction` anywhere in the MRO — user-defined `__new__`
+        //      (singleton pattern, immutable-subclass value override, etc.).
+        //   2. A `BuiltinFunction` in the class's OWN attrs — a builtin
+        //      `__new__` (e.g. for pathlib.Path subclasses, issue #922).
+        //
+        // `object.__new__` (`BuiltinFunction("object.__new__")`) is the
+        // default terminal; it is deliberately excluded so classes that don't
+        // override `__new__` fall through to the existing allocation path
+        // below, preserving all the primitive-subclass backing-data logic.
+        let mro_new = lookup_class_attr(&class, "__new__");
+        let dispatch_new: Option<Value> = match mro_new.as_ref().map(|v| v.kind()) {
+            Some(ValueKind::UserFunction(_)) => mro_new.clone(),
+            Some(ValueKind::BuiltinFunction("object.__new__")) => None,
+            Some(ValueKind::BuiltinFunction(_)) => {
+                // A non-object builtin __new__ in the class's own attrs.
+                if class.borrow().attrs.contains_key("__new__") {
+                    mro_new.clone()
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some(new_val) = dispatch_new {
+            // The cls value is passed as the first argument to __new__.
+            let cls_val = Value::py_class(Rc::clone(&class));
+            let new_result = match new_val.kind() {
+                ValueKind::BuiltinFunction(name) => {
+                    let dispatch = crate::builtin_registry::lookup(name).ok_or_else(|| {
+                        PyError::Runtime(format!(
+                            "internal: __new__ builtin '{name}' not in registry"
+                        ))
+                    })?;
+                    let mut combined: Vec<ExpandedCallArg> = Vec::with_capacity(args.len() + 1);
+                    combined.push(ExpandedCallArg { name: None, value: cls_val });
+                    combined.extend(args.iter().cloned());
+                    dispatch(self, &combined)?
+                }
+                ValueKind::UserFunction(f) => {
+                    let f = Rc::clone(f);
+                    // `__new__` is implicitly a static method in CPython: it
+                    // receives `cls` as its first positional argument whether
+                    // or not the user wrote `@staticmethod`.  Pass `cls` via
+                    // `bound_prefix` for `Regular` functions (the common case).
+                    // For `StaticMethod`, `cls` must already be the first arg
+                    // the caller passes — don't prepend a second copy.
+                    let prefix: &[Value] = match f.kind {
+                        UserFunctionKind::StaticMethod => &[],
+                        _ => &[cls_val],
+                    };
+                    self.call_user_function_expanded(f, args, prefix)?
+                }
+                _ => unreachable!("dispatch_new is only set for UserFunction or BuiltinFunction"),
+            };
 
-                // After `__new__` succeeds, call `__init__` on the result if it
-                // is a PyInstance whose class is equal to or a subclass of `cls`.
-                if let ValueKind::PyInstance(inst_rc) = new_result.kind() {
-                    let inst_class = inst_rc.borrow().class.clone();
-                    if class_is_subclass_of(&inst_class, &class) {
-                        let init = lookup_class_attr(&inst_class, "__init__");
-                        if let Some(init_val) = init {
-                            if matches!(
-                                init_val.kind(),
-                                ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_)
-                            ) {
-                                let result = invoke_class_method(
-                                    self,
-                                    init_val,
-                                    Value::py_instance(Rc::clone(&inst_rc)),
-                                    args,
-                                )?;
-                                if !result.is_none() {
-                                    return Err(PyError::Runtime(
-                                        "__init__() should return None".to_string(),
-                                    ));
-                                }
+            // After `__new__` succeeds, call `__init__` on the result if it
+            // is a PyInstance whose class is equal to or a subclass of `cls`.
+            if let ValueKind::PyInstance(inst_rc) = new_result.kind() {
+                let inst_class = inst_rc.borrow().class.clone();
+                if class_is_subclass_of(&inst_class, &class) {
+                    let init = lookup_class_attr(&inst_class, "__init__");
+                    if let Some(init_val) = init {
+                        if matches!(
+                            init_val.kind(),
+                            ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_)
+                        ) {
+                            let result = invoke_class_method(
+                                self,
+                                init_val,
+                                Value::py_instance(Rc::clone(&inst_rc)),
+                                args,
+                            )?;
+                            if !result.is_none() {
+                                return Err(PyError::Runtime(
+                                    "__init__() should return None".to_string(),
+                                ));
                             }
                         }
                     }
                 }
-                return Ok(new_result);
             }
+            return Ok(new_result);
         }
 
         let instance = Rc::new(RefCell::new(PyInstance {

@@ -220,10 +220,16 @@ thread_local! {
         // CPython.  Register the builtin sentinel so that
         // `super().__init_subclass__(**kwargs)` inside user __init_subclass__
         // methods finds it when the MRO walk reaches `object`.
+        // Issue #1143: object.__new__ is the terminal allocation step for
+        // `super().__new__(cls)` chains in user-defined __new__ methods.
         let mut attrs: IndexMap<String, Value> = IndexMap::new();
         attrs.insert(
             "__init_subclass__".to_string(),
             Value::builtin_function("object.__init_subclass__"),
+        );
+        attrs.insert(
+            "__new__".to_string(),
+            Value::builtin_function("object.__new__"),
         );
         Rc::new(RefCell::new(PyClass {
             name: "object".to_string(),
@@ -395,6 +401,20 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
         cls.borrow_mut()
             .attrs
             .insert("__init__".to_string(), Value::builtin_function(sentinel));
+    }
+    // Issue #1143: register `__new__` on primitive collection classes so that
+    // `super().__new__(cls, ...)` inside a subclass `__new__` resolves without
+    // AttributeError.  Each builtin creates a properly-backed PyInstance.
+    for (cls, sentinel) in [
+        (&list_class, "list.__new__"),
+        (&dict_class, "dict.__new__"),
+        (&set_class, "set.__new__"),
+        (&tuple_class, "tuple.__new__"),
+        (&frozenset_class, "frozenset.__new__"),
+    ] {
+        cls.borrow_mut()
+            .attrs
+            .insert("__new__".to_string(), Value::builtin_function(sentinel));
     }
     // PEP 585: `__class_getitem__` on the five collection types that support
     // `list[int]`-style generic subscripting.  Each gets a

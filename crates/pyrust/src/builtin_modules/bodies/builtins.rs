@@ -3328,6 +3328,244 @@ pyrust_module! {
         Ok(Value::none())
     }
 
+    /// `object.__new__(cls, *args, **kwargs)` — allocate a fresh `PyInstance`
+    /// of `cls`.  This is the terminal of every `super().__new__(cls)` chain
+    /// when no intermediate class overrides `__new__`.
+    ///
+    /// CPython signature: `object.__new__(cls, /, *args, **kwargs)`
+    #[py_name = "object.__new__"]
+    fn object_new(args) -> Result<Value> {
+        // First positional argument must be the class to instantiate.
+        let cls_val = args
+            .iter()
+            .find(|a| a.name.is_none())
+            .map(|a| a.value.clone())
+            .ok_or_else(|| {
+                PyError::named(
+                    "TypeError",
+                    "object.__new__() takes at least one argument (the type to instantiate)",
+                )
+            })?;
+        let class = match cls_val.kind() {
+            ValueKind::PyClass(c) => Rc::clone(c),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "object.__new__(X): X is not a type object",
+                ))
+            }
+        };
+        let instance = Rc::new(RefCell::new(crate::value::PyInstance {
+            class,
+            attrs: indexmap::IndexMap::new(),
+        }));
+        Ok(Value::py_instance(instance))
+    }
+
+    /// `tuple.__new__(cls, iterable=())` — construct a tuple subclass instance.
+    /// Called via `super().__new__(cls, it)` inside a `tuple` subclass `__new__`.
+    /// Creates a `PyInstance` of `cls` whose `__builtin_data__` is the tuple value.
+    ///
+    /// CPython signature: `tuple.__new__(cls, /, iterable=())`
+    #[py_name = "tuple.__new__"]
+    fn tuple_new(args) -> Result<Value> {
+        // args[0] = cls (required), args[1] = iterable (optional)
+        let cls_val = args
+            .iter()
+            .find(|a| a.name.is_none())
+            .map(|a| a.value.clone())
+            .ok_or_else(|| {
+                PyError::named(
+                    "TypeError",
+                    "tuple.__new__() takes at least 1 argument (0 given)",
+                )
+            })?;
+        let class = match cls_val.kind() {
+            ValueKind::PyClass(c) => Rc::clone(c),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "tuple.__new__(X): X is not a type object",
+                ))
+            }
+        };
+        // Build the backing tuple from the optional iterable argument.
+        let tuple_args = &args[1..];
+        let tuple_dispatch = crate::builtin_registry::lookup("tuple").ok_or_else(|| {
+            PyError::Runtime("internal: 'tuple' not in registry".to_string())
+        })?;
+        let backing = tuple_dispatch(_interp, tuple_args)?;
+        let instance = Rc::new(RefCell::new(crate::value::PyInstance {
+            class,
+            attrs: {
+                let mut m = indexmap::IndexMap::new();
+                m.insert(
+                    crate::interpreter::BUILTIN_DATA_ATTR.to_string(),
+                    backing,
+                );
+                m
+            },
+        }));
+        Ok(Value::py_instance(instance))
+    }
+
+    /// `frozenset.__new__(cls, iterable=frozenset())` — construct a frozenset
+    /// subclass instance.  Called via `super().__new__(cls, it)` inside a
+    /// `frozenset` subclass `__new__`.
+    ///
+    /// CPython signature: `frozenset.__new__(cls, /, iterable=frozenset())`
+    #[py_name = "frozenset.__new__"]
+    fn frozenset_new(args) -> Result<Value> {
+        let cls_val = args
+            .iter()
+            .find(|a| a.name.is_none())
+            .map(|a| a.value.clone())
+            .ok_or_else(|| {
+                PyError::named(
+                    "TypeError",
+                    "frozenset.__new__() takes at least 1 argument (0 given)",
+                )
+            })?;
+        let class = match cls_val.kind() {
+            ValueKind::PyClass(c) => Rc::clone(c),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "frozenset.__new__(X): X is not a type object",
+                ))
+            }
+        };
+        let frozenset_args = &args[1..];
+        let frozenset_dispatch = crate::builtin_registry::lookup("frozenset").ok_or_else(|| {
+            PyError::Runtime("internal: 'frozenset' not in registry".to_string())
+        })?;
+        let backing = frozenset_dispatch(_interp, frozenset_args)?;
+        let instance = Rc::new(RefCell::new(crate::value::PyInstance {
+            class,
+            attrs: {
+                let mut m = indexmap::IndexMap::new();
+                m.insert(
+                    crate::interpreter::BUILTIN_DATA_ATTR.to_string(),
+                    backing,
+                );
+                m
+            },
+        }));
+        Ok(Value::py_instance(instance))
+    }
+
+    /// `list.__new__(cls)` — create an empty list-backed `PyInstance` of `cls`.
+    /// Called via `super().__new__(cls)` inside a `list` subclass `__new__`.
+    ///
+    /// CPython signature: `list.__new__(cls, /, iterable=())`
+    #[py_name = "list.__new__"]
+    fn list_new(args) -> Result<Value> {
+        let cls_val = args
+            .iter()
+            .find(|a| a.name.is_none())
+            .map(|a| a.value.clone())
+            .ok_or_else(|| {
+                PyError::named(
+                    "TypeError",
+                    "list.__new__() takes at least 1 argument (0 given)",
+                )
+            })?;
+        let class = match cls_val.kind() {
+            ValueKind::PyClass(c) => Rc::clone(c),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "list.__new__(X): X is not a type object",
+                ))
+            }
+        };
+        // Always create an empty list backing; __init__ populates it later.
+        let backing = Value::list(vec![]);
+        let instance = Rc::new(RefCell::new(crate::value::PyInstance {
+            class,
+            attrs: {
+                let mut m = indexmap::IndexMap::new();
+                m.insert(crate::interpreter::BUILTIN_DATA_ATTR.to_string(), backing);
+                m
+            },
+        }));
+        Ok(Value::py_instance(instance))
+    }
+
+    /// `dict.__new__(cls)` — create an empty dict-backed `PyInstance` of `cls`.
+    /// Called via `super().__new__(cls)` inside a `dict` subclass `__new__`.
+    ///
+    /// CPython signature: `dict.__new__(cls, /, *args, **kwargs)`
+    #[py_name = "dict.__new__"]
+    fn dict_new(args) -> Result<Value> {
+        let cls_val = args
+            .iter()
+            .find(|a| a.name.is_none())
+            .map(|a| a.value.clone())
+            .ok_or_else(|| {
+                PyError::named(
+                    "TypeError",
+                    "dict.__new__() takes at least 1 argument (0 given)",
+                )
+            })?;
+        let class = match cls_val.kind() {
+            ValueKind::PyClass(c) => Rc::clone(c),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "dict.__new__(X): X is not a type object",
+                ))
+            }
+        };
+        let backing = Value::dict(indexmap::IndexMap::new());
+        let instance = Rc::new(RefCell::new(crate::value::PyInstance {
+            class,
+            attrs: {
+                let mut m = indexmap::IndexMap::new();
+                m.insert(crate::interpreter::BUILTIN_DATA_ATTR.to_string(), backing);
+                m
+            },
+        }));
+        Ok(Value::py_instance(instance))
+    }
+
+    /// `set.__new__(cls)` — create an empty set-backed `PyInstance` of `cls`.
+    /// Called via `super().__new__(cls)` inside a `set` subclass `__new__`.
+    ///
+    /// CPython signature: `set.__new__(cls, /, iterable=())`
+    #[py_name = "set.__new__"]
+    fn set_new(args) -> Result<Value> {
+        let cls_val = args
+            .iter()
+            .find(|a| a.name.is_none())
+            .map(|a| a.value.clone())
+            .ok_or_else(|| {
+                PyError::named(
+                    "TypeError",
+                    "set.__new__() takes at least 1 argument (0 given)",
+                )
+            })?;
+        let class = match cls_val.kind() {
+            ValueKind::PyClass(c) => Rc::clone(c),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "set.__new__(X): X is not a type object",
+                ))
+            }
+        };
+        let backing = Value::set(indexmap::IndexSet::<PyKey>::new());
+        let instance = Rc::new(RefCell::new(crate::value::PyInstance {
+            class,
+            attrs: {
+                let mut m = indexmap::IndexMap::new();
+                m.insert(crate::interpreter::BUILTIN_DATA_ATTR.to_string(), backing);
+                m
+            },
+        }));
+        Ok(Value::py_instance(instance))
+    }
+
     /// Issue #1112: `BaseException.__init__(self, *args)` — updates `self.args`
     /// so that `super().__init__(msg)` in an exception subclass sets the correct
     /// `.args` tuple on the already-constructed instance.  Also mirrors the
