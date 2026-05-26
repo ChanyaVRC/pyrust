@@ -2042,4 +2042,70 @@ result = fact(10)
         // must not raise any error.
         let _ = run_program("def k():\n    z: int\nk()\n");
     }
+
+    // ── #1281: global/nonlocal after use or assignment raises SyntaxError ────
+
+    #[test]
+    fn global_after_assignment_is_syntax_error() {
+        expect_syntax_error(
+            "def f():\n    x = 1\n    global x\n",
+            "name 'x' is assigned to before global declaration",
+        );
+    }
+
+    #[test]
+    fn global_after_use_is_syntax_error() {
+        expect_syntax_error(
+            "def f():\n    print(x)\n    global x\n",
+            "name 'x' is used prior to global declaration",
+        );
+    }
+
+    #[test]
+    fn nonlocal_after_assignment_is_syntax_error() {
+        expect_syntax_error(
+            "def outer():\n    y = 0\n    def f():\n        y = 10\n        nonlocal y\n",
+            "name 'y' is assigned to before nonlocal declaration",
+        );
+    }
+
+    #[test]
+    fn nonlocal_after_use_is_syntax_error() {
+        expect_syntax_error(
+            "def outer():\n    y = 0\n    def f():\n        print(y)\n        nonlocal y\n",
+            "name 'y' is used prior to nonlocal declaration",
+        );
+    }
+
+    #[test]
+    fn global_after_for_target_is_syntax_error() {
+        expect_syntax_error(
+            "def f():\n    for x in [1]: pass\n    global x\n",
+            "name 'x' is assigned to before global declaration",
+        );
+    }
+
+    #[test]
+    fn global_after_nested_if_assignment_is_syntax_error() {
+        expect_syntax_error(
+            "def f():\n    if True:\n        x = 1\n    global x\n",
+            "name 'x' is assigned to before global declaration",
+        );
+    }
+
+    #[test]
+    fn global_before_assignment_is_valid() {
+        // global declared BEFORE any assignment is fine.
+        let interp = run_program("g = 0\ndef h():\n    global g\n    g = 7\nh()\n");
+        assert_eq!(interp.lookup_name("g").unwrap(), Some(Value::int(7)));
+    }
+
+    #[test]
+    fn nonlocal_before_assignment_is_valid() {
+        // nonlocal declared BEFORE any assignment is fine.
+        let interp = run_program(
+            "def outer():\n    x = 0\n    def inner():\n        nonlocal x\n        x = 5\n    inner()\n    return x\nresult = outer()\n",
+        );
+        assert_eq!(interp.lookup_name("result").unwrap(), Some(Value::int(5)));
+    }
 }
