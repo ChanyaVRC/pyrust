@@ -1125,12 +1125,69 @@ pub(crate) fn instantiate_import_error(
 /// lock-step.  CPython's `__dict__` is a live mapping; we return a clone —
 /// mutations to the returned dict do not propagate back to the instance.
 /// Tracked as a follow-up to #392 (live-dict semantics).
+///
+/// CPython 3.12: exception C-level slots (`args`, `__cause__`, `__context__`,
+/// and class-specific ones like `value`, `code`, `msg`, `errno`, `name`, etc.)
+/// are never exposed through `__dict__` — they live in dedicated C struct
+/// fields.  We mimic this by filtering them out for BaseException subclasses.
 pub(crate) fn instance_attrs_snapshot(instance: &Rc<RefCell<PyInstance>>) -> Value {
+    let borrow = instance.borrow();
+    let class = &borrow.class;
+    let is_exception = class_chain_contains_name(class, "BaseException");
     let mut dict: IndexMap<PyKey, Value> = IndexMap::new();
-    for (k, v) in instance.borrow().attrs.iter() {
+    for (k, v) in borrow.attrs.iter() {
+        if is_exception && is_exc_c_slot(class, k) {
+            continue;
+        }
         dict.insert(PyKey::str_from(k), v.clone());
     }
     Value::dict(dict)
+}
+
+/// Returns `true` when `name` is a C-level slot on the given exception class
+/// that CPython 3.12 does not expose through `__dict__`.
+///
+/// The universal slots (`args`, `__cause__`, `__context__`,
+/// `__suppress_context__`) apply to every BaseException subclass.  The
+/// remaining slots are class-specific.
+fn is_exc_c_slot(class: &Rc<RefCell<PyClass>>, name: &str) -> bool {
+    // Universal BaseException C-level slots.
+    match name {
+        "args" | "__cause__" | "__context__" | "__suppress_context__" => return true,
+        _ => {}
+    }
+    // Class-specific slots — only exclude when the class actually inherits the
+    // relevant type so that a user-defined Exception subclass that happens to
+    // set `self.value` or `self.code` still sees those attrs in __dict__.
+    if name == "value" && class_chain_contains_name(class, "StopIteration") {
+        return true;
+    }
+    if name == "code" && class_chain_contains_name(class, "SystemExit") {
+        return true;
+    }
+    if matches!(
+        name,
+        "msg"
+            | "filename"
+            | "lineno"
+            | "offset"
+            | "text"
+            | "end_lineno"
+            | "end_offset"
+            | "print_file_and_line"
+    ) && class_chain_contains_name(class, "SyntaxError")
+    {
+        return true;
+    }
+    if matches!(name, "errno" | "strerror" | "filename" | "filename2")
+        && class_chain_contains_name(class, "OSError")
+    {
+        return true;
+    }
+    if matches!(name, "name" | "path") && class_chain_contains_name(class, "ImportError") {
+        return true;
+    }
+    false
 }
 
 /// Ordered list of `(python_name, class_rc)` pairs for all 31 built-in
