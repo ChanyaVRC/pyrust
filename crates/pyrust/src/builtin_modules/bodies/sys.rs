@@ -34,6 +34,23 @@ pyrust_module! {
         // access pattern.
         // <https://docs.python.org/3/library/sys.html#sys.version_info>
         "version_info" => make_version_info(),
+        // CPython: sys.stdout / sys.stderr / sys.stdin — TextIOWrapper
+        // objects wrapping the standard I/O handles.
+        // <https://docs.python.org/3/library/sys.html#sys.stdout>
+        "stdout"       => pyrust_builtins::file::make_stdout(),
+        "stderr"       => pyrust_builtins::file::make_stderr(),
+        "stdin"        => pyrust_builtins::file::make_stdin(),
+        // CPython: sys.path — list of strings that specifies the search path
+        // for modules.  Initialised to [""] (the empty string represents the
+        // current working directory), matching CPython's default when no
+        // PYTHONPATH is set and no site customisation runs.
+        // <https://docs.python.org/3/library/sys.html#sys.path>
+        "path"         => Value::list(vec![Value::string("")]),
+        // CPython: sys.modules — dictionary of already-imported modules.
+        // Starts empty; keeping it in sync with actual imports is out of
+        // scope for this implementation.
+        // <https://docs.python.org/3/library/sys.html#sys.modules>
+        "modules"      => Value::dict(indexmap::IndexMap::new()),
     }
 
     /// CPython: sys.exit([arg]) — raises `SystemExit(arg)`.
