@@ -2544,9 +2544,13 @@ pyrust_module! {
                         ),
                     ))
                 }
-                _ => Err(PyError::Runtime(format!(
-                    "{FN_NAME}() argument must be a number or string",
-                ))),
+                _ => Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "int() argument must be a string, a bytes-like object or a real number, not '{}'",
+                        value_type_name_str(&args[0].value),
+                    ),
+                )),
             },
             2 => {
                 let base_arg = match args[1].value.kind() {
@@ -2652,7 +2656,10 @@ pyrust_module! {
                     )),
                 }
             }
-            _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most two arguments"))),
+            _ => Err(PyError::named(
+                "TypeError",
+                format!("int() takes at most 2 arguments ({} given)", args.len()),
+            )),
         }
     }
 
@@ -2731,11 +2738,18 @@ pyrust_module! {
                         ),
                     ))
                 }
-                _ => Err(PyError::Runtime(format!(
-                    "{FN_NAME}() argument must be a number or string",
-                ))),
+                _ => Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "float() argument must be a string or a real number, not '{}'",
+                        value_type_name_str(&args[0].value),
+                    ),
+                )),
             },
-            _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most one argument"))),
+            _ => Err(PyError::named(
+                "TypeError",
+                format!("float expected at most 1 argument, got {}", args.len()),
+            )),
         }
     }
 
