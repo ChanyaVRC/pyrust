@@ -2919,7 +2919,39 @@ pyrust_module! {
         for value in &print_options.values {
             rendered.push(render_instance_str(_interp, value)?);
         }
-        print!("{}{}", rendered.join(&print_options.sep), print_options.end);
+        if let Some(file_val) = print_options.file {
+            // CPython calls file.write() once per item separated by sep,
+            // then calls file.write(end), then file.flush() if flush=True.
+            let write_fn = _interp.get_attr(file_val.clone(), "write")?;
+            let sep = print_options.sep;
+            let end = print_options.end;
+            for (i, text) in rendered.into_iter().enumerate() {
+                if i > 0 {
+                    _interp.call_function_expanded(
+                        write_fn.clone(),
+                        &[ExpandedCallArg { name: None, value: Value::string(sep.clone()) }],
+                    )?;
+                }
+                _interp.call_function_expanded(
+                    write_fn.clone(),
+                    &[ExpandedCallArg { name: None, value: Value::string(text) }],
+                )?;
+            }
+            _interp.call_function_expanded(
+                write_fn,
+                &[ExpandedCallArg { name: None, value: Value::string(end) }],
+            )?;
+            if print_options.flush {
+                let flush_fn = _interp.get_attr(file_val, "flush")?;
+                _interp.call_function_expanded(flush_fn, &[])?;
+            }
+        } else {
+            print!("{}{}", rendered.join(&print_options.sep), print_options.end);
+            if print_options.flush {
+                use std::io::Write as _;
+                std::io::stdout().flush().ok();
+            }
+        }
         Ok(Value::none())
     }
 

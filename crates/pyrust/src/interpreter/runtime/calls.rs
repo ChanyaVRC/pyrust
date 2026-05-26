@@ -1286,6 +1286,8 @@ impl Interpreter {
         let mut values = Vec::new();
         let mut sep = String::from(" ");
         let mut end = String::from("\n");
+        let mut file: Option<Value> = None;
+        let mut flush = false;
 
         for arg in args {
             let value = arg.value.clone();
@@ -1300,19 +1302,12 @@ impl Interpreter {
                 }
                 Some("file") => {
                     if !value.is_none() {
-                        return Err(PyError::Runtime(
-                            "print() file argument is not supported yet".to_string(),
-                        ));
+                        file = Some(value);
                     }
                 }
-                Some("flush") => match value.kind() {
-                    ValueKind::Bool(_) => {}
-                    _ => {
-                        return Err(PyError::Runtime(
-                            "print() flush must be a boolean".to_string(),
-                        ));
-                    }
-                },
+                Some("flush") => {
+                    flush = self.truthy_value(&value)?;
+                }
                 Some(other) => {
                     return Err(PyError::Runtime(format!(
                         "print() got an unexpected keyword argument '{}'",
@@ -1322,7 +1317,7 @@ impl Interpreter {
             }
         }
 
-        Ok(PrintOptions { values, sep, end })
+        Ok(PrintOptions { values, sep, end, file, flush })
     }
 
     pub(crate) fn call_user_function_expanded(
