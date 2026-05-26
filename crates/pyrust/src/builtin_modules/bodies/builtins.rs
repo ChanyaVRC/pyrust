@@ -1467,20 +1467,10 @@ pyrust_module! {
         #[default(None)]
         ndigits: Option<PyValue>,
     ) -> Result<Value> {
-        let ndigits_i32: Option<i32> = match ndigits {
-            None => None,
-            Some(ref v) => match v.0.kind() {
-                ValueKind::Int(n) => Some(n as i32),
-                ValueKind::Bool(b) => Some(b as i32),
-                ValueKind::None => None,
-                _ => return Err(PyError::named(
-                    "TypeError",
-                    format!("{FN_NAME}() ndigits must be an integer or None"),
-                )),
-            },
-        };
-        // Extract in a scoped block to avoid holding the kind() borrow
-        // across any Rc-cloning below.
+        // Classify x first so we can decide whether to validate ndigits.
+        // CPython forwards any ndigits type to user-defined __round__ without
+        // pre-validating it (round(obj, 3.5) passes 3.5 to __round__), but
+        // raises TypeError for non-int ndigits on all primitive types.
         enum NumKind { Int(i64), Bool(bool), BigInt, Float(f64), Other }
         let num = match x.0.kind() {
             ValueKind::Int(v) => NumKind::Int(v),
@@ -1488,6 +1478,24 @@ pyrust_module! {
             ValueKind::BigInt(_) => NumKind::BigInt,
             ValueKind::Float(v) => NumKind::Float(v),
             _ => NumKind::Other,
+        };
+        // Validate ndigits type for primitive dispatches only.
+        let ndigits_i32: Option<i32> = if matches!(num, NumKind::Other) {
+            // Deferred: for user objects ndigits is passed as-is to __round__.
+            None
+        } else {
+            match ndigits {
+                None => None,
+                Some(ref v) => match v.0.kind() {
+                    ValueKind::Int(n) => Some(n as i32),
+                    ValueKind::Bool(b) => Some(b as i32),
+                    ValueKind::None => None,
+                    _ => return Err(PyError::named(
+                        "TypeError",
+                        format!("{FN_NAME}() ndigits must be an integer or None"),
+                    )),
+                },
+            }
         };
         match num {
             NumKind::Int(v) => Ok(Value::int(v)),
@@ -1514,6 +1522,8 @@ pyrust_module! {
             },
             NumKind::Other => {
                 // Check for user-defined __round__ before raising TypeError.
+                // CPython does not validate the ndigits type for user objects;
+                // ndigits is forwarded as-is to __round__.
                 if let ValueKind::PyInstance(inst) = x.0.kind() {
                     let inst_rc = Rc::clone(inst);
                     let class = Rc::clone(&inst_rc.borrow().class);

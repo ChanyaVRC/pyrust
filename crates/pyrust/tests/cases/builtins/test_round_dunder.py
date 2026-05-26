@@ -67,3 +67,13 @@ class Child(Base):
 
 print(round(Child()))             # 99
 print(round(Child(), 0))          # 100
+
+# Non-int ndigits: CPython forwards any ndigits type to __round__ without
+# pre-validating it. Only primitive types (float, int, BigInt) reject
+# non-integer ndigits.
+class ShowNdigitsType:
+    def __round__(self, ndigits=None):
+        return type(ndigits).__name__
+
+print(round(ShowNdigitsType(), 3.5))    # float
+print(round(ShowNdigitsType(), "hi"))   # str
