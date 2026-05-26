@@ -1357,6 +1357,10 @@ impl Interpreter {
             // `builtins.int is int` and `isinstance(5, builtins.int)`
             // match the global lookup path (issue #462; Copilot review
             // on #463).
+            //
+            // Also insert exception classes (issue #1255): CPython exposes
+            // every built-in exception class as an attribute of the `builtins`
+            // module (`builtins.ValueError`, `builtins.TypeError`, etc.).
             if name == "builtins"
                 && let ValueKind::PyModule(m) = val.kind()
             {
@@ -1370,6 +1374,26 @@ impl Interpreter {
                         m.borrow_mut()
                             .attrs
                             .insert(prim.to_string(), Value::py_class(class));
+                    }
+                }
+                // Insert all built-in exception classes.  Skip names that
+                // contain '.' (e.g. "io.UnsupportedOperation" which belongs
+                // to the `io` module, not `builtins`).  Also skip bare names
+                // that are registered under a dotted alias (e.g.
+                // "UnsupportedOperation" is io-module-only).
+                let exc_map = crate::interpreter::build_exc_class_map();
+                let non_builtin_ptrs: std::collections::HashSet<*const _> = exc_map
+                    .iter()
+                    .filter(|(n, _)| n.contains('.'))
+                    .map(|(_, cls)| Rc::as_ptr(cls))
+                    .collect();
+                for (exc_name, exc_class) in &exc_map {
+                    if !exc_name.contains('.')
+                        && !non_builtin_ptrs.contains(&Rc::as_ptr(exc_class))
+                    {
+                        m.borrow_mut()
+                            .attrs
+                            .insert(exc_name.to_string(), Value::py_class(Rc::clone(exc_class)));
                     }
                 }
             }
