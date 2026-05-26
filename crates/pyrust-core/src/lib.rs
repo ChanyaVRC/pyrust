@@ -3594,6 +3594,38 @@ fn exception_to_string(instance: &Rc<RefCell<PyInstance>>) -> String {
     // `str(KeyError('x'))` returns `"'x'"` (one level of quoting).  All other
     // exception classes use `str()` of the arg (no extra quoting).
     let is_key_error = class_chain_has_name(&instance.borrow().class, "KeyError");
+
+    // CPython's `OSError.__str__` (and all subclasses) formats as
+    // "[Errno N] strerror" or "[Errno N] strerror: repr(filename)" when
+    // the 2- or 3-arg constructor was used (errno and strerror are non-None).
+    // With the 5-arg form, if filename2 is also set: "... -> repr(filename2)".
+    // See `OSError_str` in CPython's Objects/exceptions.c.
+    if class_chain_has_name(&instance.borrow().class, "OSError") && args.len() >= 2 {
+        let borrowed = instance.borrow();
+        let errno_val = borrowed.attrs.get("errno");
+        let strerror_val = borrowed.attrs.get("strerror");
+        let filename_val = borrowed.attrs.get("filename");
+        let filename2_val = borrowed.attrs.get("filename2");
+        match (errno_val, strerror_val) {
+            (Some(errno), Some(strerror)) if !errno.is_none() && !strerror.is_none() => {
+                let base = format!("[Errno {}] {}", errno.to_py_str(), strerror.to_py_str());
+                match filename_val {
+                    Some(fname) if !fname.is_none() => {
+                        let with_fname = format!("{}: {}", base, fname.repr());
+                        match filename2_val {
+                            Some(fname2) if !fname2.is_none() => {
+                                return format!("{} -> {}", with_fname, fname2.repr());
+                            }
+                            _ => return with_fname,
+                        }
+                    }
+                    _ => return base,
+                }
+            }
+            _ => {}
+        }
+    }
+
     format_exception_args(&args, is_key_error)
 }
 
