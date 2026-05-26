@@ -1458,6 +1458,13 @@ pub(crate) fn cached_builtins_module() -> Value {
                         mod_attrs.attrs.insert(prim.to_string(), Value::py_class(class));
                     }
                 }
+                // `object` is the universal base class and must be exposed in builtins
+                // (issue #1313).  It is not in the primitive_class_by_name table because
+                // it has no constructor dispatch or method registry; register it directly.
+                mod_attrs.attrs.insert(
+                    "object".to_string(),
+                    Value::py_class(object_class_singleton()),
+                );
                 // Built-in exception classes (issue #1255).  Skip names with '.'
                 // (e.g. "io.UnsupportedOperation") — those belong to other modules.
                 // Also skip bare names that are registered under a dotted alias
