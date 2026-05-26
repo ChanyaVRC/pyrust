@@ -3935,6 +3935,7 @@ fn builtin_method_names(type_name: &str) -> Vec<String> {
         "dict" => pyrust_builtins::dict::METHODS,
         "set" => pyrust_builtins::set::METHODS,
         "frozenset" => pyrust_builtins::frozenset::METHODS,
+        "slice" => pyrust_builtins::slice::METHODS,
         _ => &[],
     };
     let mut out: Vec<String> = names.iter().map(|s| (*s).to_string()).collect();
