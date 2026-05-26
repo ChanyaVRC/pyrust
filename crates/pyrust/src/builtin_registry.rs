@@ -173,6 +173,8 @@ mod tests {
         //    via `richcmp_order`) and had `#[pure]` removed in #544.
         for name in [
             "print", "open", "input", "str", "bool", "list", "tuple", "sorted", "min", "max",
+            // divmod dispatches __divmod__/__rdivmod__ on user instances (#1094).
+            "divmod",
         ] {
             assert!(
                 !is_pure(name),
