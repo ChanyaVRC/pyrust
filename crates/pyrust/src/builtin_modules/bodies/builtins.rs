@@ -3815,8 +3815,17 @@ fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result
     };
     let inst_rc = Rc::clone(&inst);
     let class = Rc::clone(&inst_rc.borrow().class);
+    // For exception instances, fall back to built-in exception formatting only
+    // when the class has no user-defined __str__.  A user-defined __str__ is
+    // one whose resolved value is not a BuiltinFunction — i.e. it was declared
+    // in user code, not registered as a Rust built-in.
     if is_exception_class(&class) {
-        return Ok(value.to_py_str());
+        let has_user_str = lookup_class_attr(&class, "__str__")
+            .map(|v| !matches!(v.kind(), ValueKind::BuiltinFunction(_)))
+            .unwrap_or(false);
+        if !has_user_str {
+            return Ok(value.to_py_str());
+        }
     }
     for dunder in &["__str__", "__repr__"] {
         if let Some(method_val) = lookup_class_attr(&class, dunder) {
