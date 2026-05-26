@@ -2152,10 +2152,12 @@ pyrust_module! {
                     // CPython 3.12 dispatch: __int__ → __index__ → __trunc__
                     if let Some(method) = lookup_class_attr(&class, "__int__") {
                         let result = invoke_class_method(_interp, method, self_val, &[])?;
-                        let ok = matches!(
-                            result.kind(),
-                            ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
-                        );
+                        // CPython normalises bool → int for __int__ return (bool is a
+                        // subclass of int, but int() must always return a plain int).
+                        if let ValueKind::Bool(b) = result.kind() {
+                            return Ok(Value::int(if b { 1 } else { 0 }));
+                        }
+                        let ok = matches!(result.kind(), ValueKind::Int(_) | ValueKind::BigInt(_));
                         if ok {
                             return Ok(result);
                         }
@@ -2166,10 +2168,12 @@ pyrust_module! {
                     }
                     if let Some(method) = lookup_class_attr(&class, "__index__") {
                         let result = invoke_class_method(_interp, method, self_val, &[])?;
-                        let ok = matches!(
-                            result.kind(),
-                            ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
-                        );
+                        // Same normalisation as __int__: bool is a valid __index__ return
+                        // type (it's an int subclass) but int() must return a plain int.
+                        if let ValueKind::Bool(b) = result.kind() {
+                            return Ok(Value::int(if b { 1 } else { 0 }));
+                        }
+                        let ok = matches!(result.kind(), ValueKind::Int(_) | ValueKind::BigInt(_));
                         if ok {
                             return Ok(result);
                         }
