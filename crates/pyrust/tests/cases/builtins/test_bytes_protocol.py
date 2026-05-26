@@ -43,6 +43,23 @@ try:
 except TypeError as e:
     print(e)
 
+# Bools are ints: True==1, False==0; must be accepted in the iterable path.
+class BoolIter:
+    def __iter__(self):
+        return iter([True, False, True])
+
+print(bytes(BoolIter()))
+
+# Inherited __bytes__ via MRO.
+class BytesBase:
+    def __bytes__(self):
+        return b'inherited'
+
+class BytesChild(BytesBase):
+    pass
+
+print(bytes(BytesChild()))
+
 # Regression: built-in forms of bytes() must still work.
 print(bytes())
 print(bytes(5))

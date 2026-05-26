@@ -1800,6 +1800,7 @@ pyrust_module! {
                     for v in &items {
                         match v.kind() {
                             ValueKind::Int(n) if (0..=255).contains(&n) => out.push(n as u8),
+                            ValueKind::Bool(b) => out.push(b as u8),
                             ValueKind::Int(_) | ValueKind::BigInt(_) => {
                                 return Err(PyError::named(
                                     "ValueError",
