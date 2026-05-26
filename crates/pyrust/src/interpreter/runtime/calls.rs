@@ -3422,24 +3422,31 @@ fn format_float_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -
             (format!("{s}%"), "")
         }
         _ => {
-            // No type: like 'g' but with at least one digit after the decimal
-            // point and a shortest-roundtrip-ish repr.  We approximate by
-            // calling Python's default via `to_py_str` for the magnitude.
-            let s = match value.kind() {
-                ValueKind::Float(_) => {
-                    let raw = Value::float(abs_f).to_py_str();
-                    if !raw.contains('.') && !raw.contains('e') && !raw.contains('n') {
-                        format!("{raw}.0")
-                    } else {
-                        raw
+            // No explicit type char.  When precision is given, CPython treats
+            // this identically to 'g' with that precision (e.g. `{:.3}` on a
+            // float gives the same result as `{:.3g}`).  Without precision, use
+            // a shortest-roundtrip-ish repr (at least one digit after the
+            // decimal point).
+            let s = if let Some(prec) = fs.precision {
+                let prec = if prec == 0 { 1 } else { prec };
+                format_g(abs_f, prec, false)
+            } else {
+                match value.kind() {
+                    ValueKind::Float(_) => {
+                        let raw = Value::float(abs_f).to_py_str();
+                        if !raw.contains('.') && !raw.contains('e') && !raw.contains('n') {
+                            format!("{raw}.0")
+                        } else {
+                            raw
+                        }
                     }
+                    ValueKind::Int(n) => {
+                        let n = if n < 0 { -n } else { n };
+                        format!("{n}.0")
+                    }
+                    ValueKind::Bool(b) => if b { "1.0" } else { "0.0" }.to_string(),
+                    _ => format!("{abs_f}"),
                 }
-                ValueKind::Int(n) => {
-                    let n = if n < 0 { -n } else { n };
-                    format!("{n}.0")
-                }
-                ValueKind::Bool(b) => if b { "1.0" } else { "0.0" }.to_string(),
-                _ => format!("{abs_f}"),
             };
             (s, "")
         }
