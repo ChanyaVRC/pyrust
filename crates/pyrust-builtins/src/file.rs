@@ -90,16 +90,8 @@ pub fn open(path: &str, mode: &str) -> Result<Value> {
 
     let mut content = String::new();
     if is_read {
-        content = std::fs::read_to_string(path).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                PyError::named(
-                    "FileNotFoundError",
-                    format!("[Errno 2] No such file or directory: '{path}'"),
-                )
-            } else {
-                PyError::named("OSError", e.to_string())
-            }
-        })?;
+        content =
+            std::fs::read_to_string(path).map_err(|e| PyError::from_io_error(&e, Some(path)))?;
     }
     let state = FileState {
         path: path.to_string(),
@@ -309,16 +301,16 @@ fn close_file(state: &BuiltinState) -> Result<()> {
     }
     if s.is_write {
         std::fs::write(&s.path, &s.write_buf)
-            .map_err(|e| PyError::named("OSError", e.to_string()))?;
+            .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
     } else if s.is_append {
         use std::io::Write;
         let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&s.path)
-            .map_err(|e| PyError::named("OSError", e.to_string()))?;
+            .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
         f.write_all(s.write_buf.as_bytes())
-            .map_err(|e| PyError::named("OSError", e.to_string()))?;
+            .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
     }
     s.closed = true;
     s.write_buf.clear();

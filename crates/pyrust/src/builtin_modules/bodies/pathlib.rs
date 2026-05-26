@@ -556,14 +556,7 @@ pyrust_module! {
         let p = get_path(&inst, FN_NAME)?;
         match std::fs::read_to_string(&p) {
             Ok(contents) => Ok(Value::string(contents)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(PyError::named(
-                "FileNotFoundError",
-                format!("[Errno 2] No such file or directory: '{p}'"),
-            )),
-            Err(e) => Err(PyError::named(
-                "OSError",
-                format!("[Errno {}] {}: '{p}'", e.raw_os_error().unwrap_or(0), e),
-            )),
+            Err(e) => Err(PyError::from_io_error(&e, Some(&p))),
         }
     }
 
@@ -595,19 +588,8 @@ pyrust_module! {
         // CPython 3.10+ write_text() returns the number of characters
         // (code points) written, not None.
         let char_count = data.chars().count();
-        std::fs::write(&p, data.as_bytes()).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                PyError::named(
-                    "FileNotFoundError",
-                    format!("[Errno 2] No such file or directory: '{p}'"),
-                )
-            } else {
-                PyError::named(
-                    "OSError",
-                    format!("[Errno {}] {}: '{p}'", e.raw_os_error().unwrap_or(0), e),
-                )
-            }
-        })?;
+        std::fs::write(&p, data.as_bytes())
+            .map_err(|e| PyError::from_io_error(&e, Some(&p)))?;
         Ok(Value::int(char_count as i64))
     }
 
@@ -708,14 +690,7 @@ pyrust_module! {
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && exist_ok => {
                 Ok(Value::none())
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(PyError::named(
-                "FileExistsError",
-                format!("[Errno 17] File exists: '{p}'"),
-            )),
-            Err(e) => Err(PyError::named(
-                "OSError",
-                format!("[Errno {}] {}: '{p}'", e.raw_os_error().unwrap_or(0), e),
-            )),
+            Err(e) => Err(PyError::from_io_error(&e, Some(&p))),
         }
     }
 }

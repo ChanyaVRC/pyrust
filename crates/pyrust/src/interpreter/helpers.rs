@@ -1104,6 +1104,36 @@ pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 
+/// Instantiate an `OSError` (or subclass) with the structured attributes that
+/// CPython 3.12 sets when an OS error is raised from a real OS operation:
+/// `errno`, `strerror`, `filename` (and `filename2 = None`).
+///
+/// The `args` tuple is set to `(errno, strerror)` to match CPython 3.12
+/// behaviour (the 2-arg form).  The `class` must already be the correct
+/// subclass (`FileNotFoundError`, `PermissionError`, etc.).
+pub(crate) fn instantiate_os_error(
+    class: Rc<RefCell<PyClass>>,
+    errno: i64,
+    strerror: String,
+    filename: Option<String>,
+) -> Value {
+    let mut attrs = IndexMap::new();
+    let errno_val = Value::int(errno);
+    let strerror_val = Value::string(strerror);
+    attrs.insert(
+        "args".to_string(),
+        Value::tuple(vec![errno_val.clone(), strerror_val.clone()]),
+    );
+    attrs.insert("errno".to_string(), errno_val);
+    attrs.insert("strerror".to_string(), strerror_val);
+    attrs.insert(
+        "filename".to_string(),
+        filename.map(Value::string).unwrap_or_else(Value::none),
+    );
+    attrs.insert("filename2".to_string(), Value::none());
+    Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
+}
+
 /// Instantiate an `ImportError` or `ModuleNotFoundError` with `.name` and
 /// `.path` instance attributes, matching CPython 3.12 `ImportError.__init__`.
 ///

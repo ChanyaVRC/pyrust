@@ -253,6 +253,18 @@ impl Interpreter {
                     PyError::ImportError { class_name, message, .. } => {
                         format!("{class_name}: {message}")
                     }
+                    PyError::OsError {
+                        class_name,
+                        errno,
+                        strerror,
+                        filename,
+                    } => {
+                        if let Some(fname) = filename {
+                            format!("{class_name}: [Errno {errno}] {strerror}: '{fname}'")
+                        } else {
+                            format!("{class_name}: [Errno {errno}] {strerror}")
+                        }
+                    }
                     PyError::Raised(value) => match value.kind() {
                         ValueKind::PyInstance(inst) => {
                             let class_name = inst.borrow().class.borrow().name.clone();

@@ -320,6 +320,22 @@ impl Interpreter {
         Ok(instantiate_import_error(class, message, module_name))
     }
 
+    /// Instantiate an `OSError` (or subclass) with `errno`, `strerror`, and
+    /// `filename` instance attributes set, matching CPython 3.12's behaviour
+    /// when raising OS errors from real filesystem operations.
+    fn instantiate_os_error_exception(
+        &self,
+        class_name: &str,
+        errno: i64,
+        strerror: String,
+        filename: Option<String>,
+    ) -> Result<Value> {
+        let class = lookup_exc_class(class_name).ok_or_else(|| {
+            PyError::Runtime(format!("built-in exception '{class_name}' is not defined"))
+        })?;
+        Ok(instantiate_os_error(class, errno, strerror, filename))
+    }
+
     fn exception_matches(&self, exception: &Value, kind: &Value) -> Result<bool> {
         let instance = match exception.kind() {
             ValueKind::PyInstance(i) => Rc::clone(i),
