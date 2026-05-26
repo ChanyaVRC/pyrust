@@ -2151,15 +2151,18 @@ fn check_global_nonlocal_order_block(
         match stmt {
             Stmt::Global(names) => {
                 for name in names {
-                    if assigned.contains(name) {
-                        return Some(format!(
-                            "name '{}' is assigned to before global declaration",
-                            name
-                        ));
-                    }
+                    // CPython checks "used" before "assigned": when both sets
+                    // contain the name (e.g. `x = 1; print(x); global x`),
+                    // CPython always reports "used prior to global declaration".
                     if used.contains(name) {
                         return Some(format!(
                             "name '{}' is used prior to global declaration",
+                            name
+                        ));
+                    }
+                    if assigned.contains(name) {
+                        return Some(format!(
+                            "name '{}' is assigned to before global declaration",
                             name
                         ));
                     }
@@ -2167,15 +2170,16 @@ fn check_global_nonlocal_order_block(
             }
             Stmt::Nonlocal(names) => {
                 for name in names {
-                    if assigned.contains(name) {
-                        return Some(format!(
-                            "name '{}' is assigned to before nonlocal declaration",
-                            name
-                        ));
-                    }
+                    // Same priority: "used" wins over "assigned" (matches CPython).
                     if used.contains(name) {
                         return Some(format!(
                             "name '{}' is used prior to nonlocal declaration",
+                            name
+                        ));
+                    }
+                    if assigned.contains(name) {
+                        return Some(format!(
+                            "name '{}' is assigned to before nonlocal declaration",
                             name
                         ));
                     }

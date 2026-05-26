@@ -2094,6 +2094,16 @@ result = fact(10)
     }
 
     #[test]
+    fn global_after_assign_and_use_reports_used_prior() {
+        // When x is both assigned AND used before `global x`, CPython 3.12
+        // always reports "used prior to" (not "assigned to").
+        expect_syntax_error(
+            "def f():\n    x = 1\n    print(x)\n    global x\n",
+            "name 'x' is used prior to global declaration",
+        );
+    }
+
+    #[test]
     fn global_before_assignment_is_valid() {
         // global declared BEFORE any assignment is fine.
         let interp = run_program("g = 0\ndef h():\n    global g\n    g = 7\nh()\n");
