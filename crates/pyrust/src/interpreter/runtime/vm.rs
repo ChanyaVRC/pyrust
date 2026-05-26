@@ -3313,13 +3313,25 @@ impl Interpreter {
                     // mis-fire on legitimate `x = None` followed by a read.
                     if regs[*reg as usize].is_unset() {
                         let name = pool_get!(code.names, *name_idx, "name");
-                        vm_try!(Err::<(), _>(crate::error::PyError::named(
-                            "UnboundLocalError",
-                            format!(
-                                "cannot access local variable '{}' where it is not associated with a value",
-                                name
-                            ),
-                        )));
+                        // At module/class scope (current_fn_id == None) a
+                        // missing name is NameError ("name 'x' is not defined").
+                        // Inside a function it is UnboundLocalError ("cannot
+                        // access local variable 'x' where it is not associated
+                        // with a value").
+                        if current_fn_id.is_none() {
+                            vm_try!(Err::<(), _>(crate::error::PyError::named(
+                                "NameError",
+                                format!("name '{}' is not defined", name),
+                            )));
+                        } else {
+                            vm_try!(Err::<(), _>(crate::error::PyError::named(
+                                "UnboundLocalError",
+                                format!(
+                                    "cannot access local variable '{}' where it is not associated with a value",
+                                    name
+                                ),
+                            )));
+                        }
                     }
                 }
 
