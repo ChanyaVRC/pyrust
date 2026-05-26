@@ -2149,8 +2149,12 @@ impl Interpreter {
                 ValueKind::Int(v) => ints.push(v),
                 ValueKind::Bool(b) => ints.push(b as i64),
                 _ => {
-                    return Err(PyError::Runtime(
-                        "range arguments must be integers".to_string(),
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "'{}' object cannot be interpreted as an integer",
+                            pyrust_core::builtin_type_name(&arg.value)
+                        ),
                     ));
                 }
             }
