@@ -5278,13 +5278,16 @@ impl Compiler {
         for idx in end_patches {
             self.patch_jump(idx);
         }
-        // Variables defined in every branch (including else) are definitely bound after.
-        // Without an else, control may skip all branches so no new defs can be assumed.
+        // A variable is definitely bound after the if/elif/else iff it is bound
+        // on every possible exit path.
+        // With an else: exactly one branch executes, so intersect all branches.
+        // Without an else: control may skip all branches (pre_def_set path) or
+        // take one branch (branch_def_sets[i] path).  Intersect everything.
         if has_else && !branch_def_sets.is_empty() {
-            let all_define = branch_def_sets.iter().fold(!0u64, |acc, &s| acc & s);
-            self.def_set = pre_def_set | all_define;
+            self.def_set = branch_def_sets.iter().fold(!0u64, |acc, &s| acc & s);
         } else {
-            self.def_set = pre_def_set;
+            // Include the "no branch taken" path (pre_def_set) in the intersection.
+            self.def_set = branch_def_sets.iter().fold(pre_def_set, |acc, &s| acc & s);
         }
     }
 
@@ -6205,6 +6208,14 @@ impl Compiler {
                     // UnboundLocalError when the register was never assigned.
                     let name_idx = self.intern_name(name);
                     self.emit(Insn::DeleteLocal(reg, name_idx));
+                    // Clear the definitely-bound bit so that any subsequent
+                    // read of this name emits CheckLocal and raises the correct
+                    // exception (UnboundLocalError at function scope, NameError
+                    // at module scope) rather than falling through to vm_read's
+                    // generic "local variable referenced before assignment" path.
+                    if (reg as usize) < 64 {
+                        self.def_set &= !(1u64 << reg);
+                    }
                     self.maybe_record_class_del(reg);
                     // Issue #820: at module scope, also remove the name from
                     // env.values and module_globals_dict so that LoadGlobal
