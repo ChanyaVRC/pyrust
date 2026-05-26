@@ -994,11 +994,13 @@ pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value
         attrs.insert("value".to_string(), val);
     } else if is_system_exit {
         // CPython 3.12 SystemExit.__init__: code = args[0] if 1 arg, tuple(args) if
-        // multiple args, None if no args.
+        // multiple args, None if no args.  For the multi-arg case CPython sets
+        // self.code = self.args (the same object), so clone the already-inserted
+        // args tuple to share the same obj_id and preserve `e.code is e.args`.
         let code = match args.len() {
             0 => Value::none(),
             1 => args[0].clone(),
-            _ => Value::tuple(args),
+            _ => attrs["args"].clone(),
         };
         attrs.insert("code".to_string(), code);
     } else if is_syntax_error {
