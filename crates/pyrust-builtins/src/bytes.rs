@@ -113,7 +113,7 @@ pub fn call(
         "ljust" => bytes_ljust(bytes, args),
         "rjust" => bytes_rjust(bytes, args),
         "zfill" => bytes_zfill(bytes, args),
-        "translate" => bytes_translate(bytes, args),
+        "translate" => bytes_translate(bytes, args, kwargs),
         _ => Err(PyError::named(
             "AttributeError",
             format!("'bytes' object has no attribute '{method}'"),
@@ -1432,11 +1432,25 @@ fn bytes_zfill(bytes: &[u8], args: &[Value]) -> Result<Value> {
 // translate
 // ---------------------------------------------------------------------------
 
-fn bytes_translate(bytes: &[u8], args: &[Value]) -> Result<Value> {
+fn bytes_translate(bytes: &[u8], args: &[Value], kwargs: &IndexMap<PyKey, Value>) -> Result<Value> {
     // CPython signature: bytes.translate(table, /, delete=b'')
     // table may be None or a 256-byte mapping (bytes).
     // When table is None: just delete bytes in the delete set.
     // When table is provided: map each byte through the table, then delete.
+
+    // Reject unrecognised keyword arguments.
+    for key in kwargs.keys() {
+        if let PyKey::Str(s) = key {
+            let name = s.as_str().unwrap_or("");
+            if name != "delete" {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("'{name}' is an invalid keyword argument for translate()"),
+                ));
+            }
+        }
+    }
+
     let table_val = args.first().ok_or_else(|| {
         PyError::named(
             "TypeError",
@@ -1466,7 +1480,16 @@ fn bytes_translate(bytes: &[u8], args: &[Value]) -> Result<Value> {
         }
     };
 
-    let delete: &[u8] = match args.get(1).map(|v| v.kind()) {
+    // `delete` may come from args[1] (positional) or from the `delete=` keyword argument.
+    let kw_delete = kwargs.get(&StrKey("delete"));
+    if args.get(1).is_some() && kw_delete.is_some() {
+        return Err(PyError::named(
+            "TypeError",
+            "translate() got multiple values for argument 'delete'".to_string(),
+        ));
+    }
+    let delete_val = args.get(1).or(kw_delete);
+    let delete: &[u8] = match delete_val.map(|v| v.kind()) {
         None => &[],
         Some(ValueKind::Bytes(rc)) => rc.as_slice(),
         _ => {
