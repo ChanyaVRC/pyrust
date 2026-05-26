@@ -4753,9 +4753,8 @@ impl Compiler {
                             self.free_temp(obj);
                         }
                         AssignTarget::Tuple(_) => {
-                            // Nested tuple unpack — compile recursively
-                            let tmp = base + i;
-                            self.compile_assign(t, &Expr::Var(format!("__unpack_{}", tmp)));
+                            // Nested tuple unpack — compile recursively from the temp register
+                            self.compile_store_unpack_target(t, base + i);
                         }
                         AssignTarget::Starred(_) => {
                             // Should not happen (handled above); treat as error
@@ -4873,10 +4872,74 @@ impl Compiler {
                 self.free_temp(idx);
                 self.free_temp(obj);
             }
-            AssignTarget::Tuple(_) | AssignTarget::Starred(_) => {
-                // Nested unpack — compile recursively using a temp var name trick
-                let tmp_name = format!("__unpack_{}", src_reg);
-                self.compile_assign(target, &Expr::Var(tmp_name));
+            AssignTarget::Tuple(targets) => {
+                // Nested unpack — unpack directly from src_reg into sub-targets.
+                let star_pos = targets
+                    .iter()
+                    .position(|t| matches!(t, AssignTarget::Starred(_)));
+                if let Some(star_idx) = star_pos {
+                    // Extended unpack: (a, *b, c) = src_reg
+                    let before = star_idx as u8;
+                    let after = (targets.len() - star_idx - 1) as u8;
+                    let total = targets.len() as u32;
+                    let base = self.next_temp;
+                    if base.checked_add(total).is_none() {
+                        self.failed = true;
+                        if self.error_msg.is_none() {
+                            self.error_msg = Some(format!("too many unpack targets ({})", total));
+                        }
+                        return;
+                    }
+                    self.next_temp = base + total;
+                    if self.next_temp - 1 > self.max_reg {
+                        self.max_reg = self.next_temp - 1;
+                    }
+                    self.emit(Insn::UnpackEx {
+                        src: src_reg,
+                        before,
+                        after,
+                        dst_base: base,
+                    });
+                    for (i, t) in (0u32..).zip(targets.iter()) {
+                        let inner = match t {
+                            AssignTarget::Starred(inner) => inner.as_ref(),
+                            other => other,
+                        };
+                        self.compile_store_unpack_target(inner, base + i);
+                    }
+                    self.next_temp = base;
+                } else {
+                    // Simple unpack: (a, b, c) = src_reg
+                    let n = targets.len() as u32;
+                    if n == 0 {
+                        return;
+                    }
+                    let base = self.next_temp;
+                    if base.checked_add(n).is_none() {
+                        self.failed = true;
+                        if self.error_msg.is_none() {
+                            self.error_msg = Some(format!("too many unpack targets ({})", n));
+                        }
+                        return;
+                    }
+                    self.next_temp = base + n;
+                    if self.next_temp - 1 > self.max_reg {
+                        self.max_reg = self.next_temp - 1;
+                    }
+                    self.emit(Insn::Unpack(base, src_reg, n));
+                    for (i, t) in (0u32..).zip(targets.iter()) {
+                        self.compile_store_unpack_target(t, base + i);
+                    }
+                    self.next_temp = base;
+                }
+            }
+            AssignTarget::Starred(_) => {
+                // Bare starred outside a tuple — should not reach here
+                self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg =
+                        Some("starred assignment target must be in a list or tuple".to_string());
+                }
             }
         }
     }
