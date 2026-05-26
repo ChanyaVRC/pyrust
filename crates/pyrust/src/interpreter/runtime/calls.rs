@@ -3241,25 +3241,15 @@ fn format_bigint_value(b: &PyBigInt, fs: &FormatSpec, type_char: Option<char>) -
                 "Cannot specify ',' or '_', sign, or '#' with 'c'.".to_string(),
             ));
         }
-        // BigInt out of [0, 0x10FFFF] → OverflowError (same as Int path).
-        let zero = PyBigInt::from(0u32);
-        let max_cp = PyBigInt::from(0x10FFFFu32);
-        if b < &zero || b > &max_cp {
-            return Err(PyError::named(
-                "OverflowError",
-                "%c arg not in range(0x110000)".to_string(),
-            ));
-        }
-        // Safe: we just confirmed 0 ≤ b ≤ 0x10FFFF which fits in u32.
-        use num_traits::ToPrimitive;
-        let cp = b.to_u32().unwrap_or(u32::MAX);
-        let ch = char::from_u32(cp).ok_or_else(|| {
-            PyError::named(
-                "OverflowError",
-                "%c arg not in range(0x110000)".to_string(),
-            )
-        })?;
-        return Ok(pad_value(&ch.to_string(), fs, '<', fs.fill));
+        // A BigInt is by definition outside the C long range (> i64::MAX or
+        // < i64::MIN), so it can never be a valid chr() argument.  CPython
+        // raises "Python int too large to convert to C long" for such values
+        // rather than the "%c arg not in range(0x110000)" it uses for
+        // in-range negative integers.
+        return Err(PyError::named(
+            "OverflowError",
+            "Python int too large to convert to C long".to_string(),
+        ));
     }
 
     // 'n' = same as 'd' for now (no locale-aware grouping).

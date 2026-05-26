@@ -47,6 +47,17 @@ print("{:*>50d}".format(n))
 # 'n' type code (locale-neutral decimal, same as 'd' in pyrust)
 print("{:n}".format(n))
 
+# 'c': BigInt is always beyond C long range → OverflowError with CPython message
+try:
+    print("{:c}".format(10**30))
+except OverflowError as e:
+    print(type(e).__name__ + ": " + str(e))
+
+try:
+    print("{:c}".format(-(10**30)))
+except OverflowError as e:
+    print(type(e).__name__ + ": " + str(e))
+
 # Regression: small integers still work
 print("{:d}".format(42))
 print("{:d}".format(-42))
