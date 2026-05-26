@@ -473,6 +473,12 @@ impl Lexer {
                     line_continued = true;
                     pos += 1;
                 }
+                Some(c) if c.is_alphabetic() => {
+                    // Unicode ID_Start character (non-ASCII): dispatch to identifier lexer.
+                    let (tok, next) = lex_ident_or_keyword(chars, pos);
+                    self.tokens.push(tok);
+                    pos = next;
+                }
                 Some(c) => return Err(PyError::Lex(format!("unexpected character '{c}'"))),
             }
         }
@@ -725,10 +731,10 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
 
 fn lex_ident_or_keyword(chars: &[char], start: usize) -> (Token, usize) {
     let mut pos = start;
-    while matches!(
-        chars.get(pos),
-        Some('a'..='z' | 'A'..='Z' | '0'..='9' | '_')
-    ) {
+    while chars
+        .get(pos)
+        .map_or(false, |&c| c.is_alphanumeric() || c == '_')
+    {
         pos += 1;
     }
 
