@@ -694,8 +694,23 @@ pyrust_module! {
     /// for `PyInstance` values, which may invoke arbitrary user code.
     fn pow(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() < 2 || args.len() > 3 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes 2 or 3 arguments")));
+        if args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() missing required argument 'base' (pos 1)"),
+            ));
+        }
+        if args.len() == 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() missing required argument 'exp' (pos 2)"),
+            ));
+        }
+        if args.len() > 3 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes at most 3 arguments ({} given)", args.len()),
+            ));
         }
         if args.len() == 3 {
             let base_val = &args[0].value;
@@ -1217,8 +1232,17 @@ pyrust_module! {
     /// collapses both into Rust None, which breaks the default=None case.
     fn next(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.is_empty() || args.len() > 2 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes 1 or 2 arguments")));
+        if args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME} expected at least 1 argument, got 0"),
+            ));
+        }
+        if args.len() > 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME} expected at most 2 arguments, got {}", args.len()),
+            ));
         }
         let gen_val = args[0].value.clone();
         let default_val = if args.len() == 2 {
@@ -1235,7 +1259,10 @@ pyrust_module! {
     fn issubclass(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 2 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly 2 arguments")));
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME} expected 2 arguments, got {}", args.len()),
+            ));
         }
         // `cls` may be either a user-defined class (`PyClass`) or a
         // built-in type token (`BuiltinFunction("int")` etc.); anything
@@ -1274,7 +1301,10 @@ pyrust_module! {
     fn isinstance(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 2 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly 2 arguments")));
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME} expected 2 arguments, got {}", args.len()),
+            ));
         }
         let result = isinstance_check(FN_NAME, &args[0].value, &args[1].value)?;
         Ok(Value::bool_(result))
@@ -1366,9 +1396,10 @@ pyrust_module! {
             }))));
         }
         if args.len() != 1 {
-            return Err(PyError::Runtime(format!(
-                "{FN_NAME}() takes exactly 1 argument (or 3 for type creation)",
-            )));
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes 1 or 3 arguments"),
+            ));
         }
         let obj = &args[0].value;
         // For user-defined class instances return the actual Rc so that
@@ -1431,7 +1462,10 @@ pyrust_module! {
     fn hasattr(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 2 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly 2 arguments")));
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME} expected 2 arguments, got {}", args.len()),
+            ));
         }
         let name = match args[1].value.kind() {
             ValueKind::Str(s) => s.to_string(),
@@ -1452,8 +1486,17 @@ pyrust_module! {
     /// <https://docs.python.org/3/library/functions.html#getattr>
     fn getattr(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
-        if args.len() < 2 || args.len() > 3 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes 2 or 3 arguments")));
+        if args.len() < 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME} expected at least 2 arguments, got {}", args.len()),
+            ));
+        }
+        if args.len() > 3 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME} expected at most 3 arguments, got {}", args.len()),
+            ));
         }
         let name = match args[1].value.kind() {
             ValueKind::Str(s) => s.to_string(),
@@ -1611,7 +1654,10 @@ pyrust_module! {
     fn len(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 1 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly one argument ({} given)", args.len()),
+            ));
         }
         let value = args[0].value.clone();
         let size = match value.kind() {
@@ -1724,7 +1770,10 @@ pyrust_module! {
     /// function which can execute arbitrary user code.
     fn sorted(args) -> Result<Value> {
         if args.is_empty() {
-            return Err(PyError::Runtime(format!("{FN_NAME}() requires at least one argument")));
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME} expected 1 argument, got 0"),
+            ));
         }
         // `reverse=` is dispatched through `__bool__` (with `__len__`
         // fallback and default-truthy for instances without either) —
@@ -1745,9 +1794,10 @@ pyrust_module! {
             .filter(|a| a.name.is_none())
             .collect();
         if positional.len() != 1 {
-            return Err(PyError::Runtime(format!(
-                "{FN_NAME}() takes exactly one positional argument",
-            )));
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME} expected 1 argument, got {}", positional.len()),
+            ));
         }
         let mut items = _interp.collect_iterable(positional[0].value.clone())?;
         if let Some(kfn) = key_fn {
@@ -1957,7 +2007,10 @@ pyrust_module! {
         match args.len() {
             0 => Ok(Value::list(vec![])),
             1 => Ok(Value::list(_interp.collect_iterable(args[0].value.clone())?)),
-            _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most one argument"))),
+            _ => Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME} expected at most 1 argument, got {}", args.len()),
+            )),
         }
     }
 
@@ -1973,7 +2026,10 @@ pyrust_module! {
         match args.len() {
             0 => Ok(Value::tuple(vec![])),
             1 => Ok(Value::tuple(_interp.collect_iterable(args[0].value.clone())?)),
-            _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most one argument"))),
+            _ => Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME} expected at most 1 argument, got {}", args.len()),
+            )),
         }
     }
 
@@ -2479,7 +2535,10 @@ pyrust_module! {
                     Ok(Value::complex(cr, dr))
                 }
             }
-            _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most 2 arguments"))),
+            _ => Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes at most 2 arguments ({} given)", args.len()),
+            )),
         }
     }
 
@@ -2503,7 +2562,10 @@ pyrust_module! {
                 }
                 Ok(Value::set(set))
             }
-            _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most one argument"))),
+            _ => Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME} expected at most 1 argument, got {}", args.len()),
+            )),
         }
     }
 
@@ -2531,7 +2593,10 @@ pyrust_module! {
                 }
                 Ok(pyrust_builtins::frozenset::frozenset(set))
             }
-            _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most one argument"))),
+            _ => Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME} expected at most 1 argument, got {}", args.len()),
+            )),
         }
     }
 
@@ -3235,11 +3300,21 @@ pyrust_module! {
     fn classmethod(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 1 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME} expected 1 argument, got {}", args.len()),
+            ));
         }
         match args[0].value.kind() {
             ValueKind::UserFunction(f) => Ok(Value::class_method(Rc::clone(f))),
-            _ => Err(PyError::Runtime(format!("{FN_NAME}() argument must be a function"))),
+            // CPython 3.12 accepts any object as a classmethod descriptor, but
+            // Value::class_method requires an Rc<UserFunction>.  Supporting
+            // non-function descriptors needs a Value variant change (follow-up
+            // issue #1315).
+            _ => Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() argument must be a function"),
+            )),
         }
     }
 
@@ -3248,11 +3323,21 @@ pyrust_module! {
     fn staticmethod(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 1 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes exactly one argument")));
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME} expected 1 argument, got {}", args.len()),
+            ));
         }
         match args[0].value.kind() {
             ValueKind::UserFunction(f) => Ok(Value::static_method(Rc::clone(f))),
-            _ => Err(PyError::Runtime(format!("{FN_NAME}() argument must be a function"))),
+            // CPython 3.12 accepts any object as a staticmethod descriptor, but
+            // Value::static_method requires an Rc<UserFunction>.  Supporting
+            // non-function descriptors needs a Value variant change (follow-up
+            // issue #1315).
+            _ => Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() argument must be a function"),
+            )),
         }
     }
 
@@ -3261,7 +3346,10 @@ pyrust_module! {
     fn property(args) -> Result<Value> {
         // Accept up to 4 positional args (fget, fset, fdel, doc) or keyword args.
         if args.len() > 4 {
-            return Err(PyError::Runtime(format!("{FN_NAME}() takes at most 4 arguments")));
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes at most 4 arguments ({} given)", args.len()),
+            ));
         }
         let mut fget = Value::none();
         let mut fset = Value::none();
@@ -3274,9 +3362,10 @@ pyrust_module! {
                 Some("fset") => 1,
                 Some("fdel") => 2,
                 Some("doc") => 3,
-                Some(k) => return Err(PyError::Runtime(format!(
-                    "{FN_NAME}() got unexpected keyword argument '{k}'",
-                ))),
+                Some(k) => return Err(PyError::named(
+                    "TypeError",
+                    format!("'{k}' is an invalid keyword argument for {FN_NAME}()"),
+                )),
             };
             match idx {
                 0 => fget = arg.value.clone(),
@@ -3306,16 +3395,20 @@ pyrust_module! {
         } else if args.len() == 2 {
             (args[0].value.clone(), args[1].value.clone())
         } else {
-            return Err(PyError::Runtime(format!(
-                "{FN_NAME}() takes at most 2 arguments ({} given)",
-                args.len()
-            )));
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() expected at most 2 arguments, got {}", args.len()),
+            ));
         };
         let class = match cls_val.kind() {
             ValueKind::PyClass(c) => Rc::clone(c),
-            _ => return Err(PyError::Runtime(format!(
-                "{FN_NAME}() first argument must be a class",
-            ))),
+            _ => return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "{FN_NAME}() argument 1 must be a type, not {}",
+                    value_type_name_str(&cls_val),
+                ),
+            )),
         };
         match inst_val.kind() {
             ValueKind::PyInstance(i) => {
@@ -3340,9 +3433,10 @@ pyrust_module! {
                 }
                 Ok(Value::super_proxy_class(class, obj_class))
             }
-            _ => Err(PyError::Runtime(format!(
-                "{FN_NAME}() second argument must be a class instance",
-            ))),
+            _ => Err(PyError::named(
+                "TypeError",
+                "super(type, obj): obj must be an instance or subtype of type".to_string(),
+            )),
         }
     }
 
@@ -3814,8 +3908,12 @@ pyrust_module! {
 
         // Mutate self.__notes__ in place.
         let ValueKind::PyInstance(inst_rc) = self_val.kind() else {
-            return Err(PyError::Runtime(
-                "BaseException.add_note() requires a BaseException instance".to_string(),
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "descriptor 'add_note' for 'BaseException' objects doesn't apply to a '{}' object",
+                    value_type_name_str(self_val),
+                ),
             ));
         };
         // If __notes__ is absent, insert a fresh empty list so we can
