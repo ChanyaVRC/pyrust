@@ -434,6 +434,13 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
             .attrs
             .insert("__class_getitem__".to_string(), Value::builtin_function(sentinel));
     }
+    // `bytes.maketrans` is a staticmethod: register it in bytes_class.attrs so
+    // that both `bytes.maketrans(f, t)` and `b''.maketrans(f, t)` resolve to
+    // the same `BuiltinFunction("bytes.maketrans")` sentinel.
+    bytes_class
+        .borrow_mut()
+        .attrs
+        .insert("maketrans".to_string(), Value::builtin_function("bytes.maketrans"));
     PrimitiveClasses {
         bytes_class,
         complex_class,
