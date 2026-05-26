@@ -994,10 +994,15 @@ impl Parser {
             return Ok((AssignTarget::Name(name), true));
         }
         if self.is(&Token::LParen) {
-            // Parenthesised target like `(x, y)` or `(x, (y, z))`.
+            // Parenthesised target like `(x, y)`, `(x, (y, z))`, or `()` (empty tuple).
             // We parse the contents the same way as `parse_for_target` to avoid
             // consuming `in` as a comparison operator (which `parse_expr` would do).
             self.bump(); // consume `(`
+            if self.is(&Token::RParen) {
+                // Empty tuple target: `for () in ...`
+                self.bump(); // consume `)`
+                return Ok((AssignTarget::Tuple(vec![]), false));
+            }
             let target = self.parse_for_target()?;
             self.expect(&Token::RParen)?;
             return Ok((target, false));
