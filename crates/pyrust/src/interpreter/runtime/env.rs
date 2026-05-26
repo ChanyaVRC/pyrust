@@ -1586,11 +1586,35 @@ impl Interpreter {
                     &[],
                 )?;
                 return match result.kind() {
-                    ValueKind::Int(n) => Ok(n != 0),
+                    ValueKind::Int(n) if n >= 0 => Ok(n != 0),
+                    ValueKind::Int(_) => Err(PyError::named(
+                        "ValueError",
+                        "__len__() should return >= 0".to_string(),
+                    )),
                     ValueKind::Bool(b) => Ok(b),
+                    ValueKind::BigInt(big) => match big.sign() {
+                        PyBigIntSign::Minus => Err(PyError::named(
+                            "ValueError",
+                            "__len__() should return >= 0".to_string(),
+                        )),
+                        PyBigIntSign::NoSign => Ok(false),
+                        PyBigIntSign::Plus => {
+                            if big.to_usize().is_none() {
+                                Err(PyError::named(
+                                    "OverflowError",
+                                    "cannot fit 'int' into an index-sized integer".to_string(),
+                                ))
+                            } else {
+                                Ok(true)
+                            }
+                        }
+                    },
                     _ => Err(PyError::named(
                         "TypeError",
-                        "__len__ returned non-int".to_string(),
+                        format!(
+                            "'{}' object cannot be interpreted as an integer",
+                            pyrust_core::builtin_type_name(&result),
+                        ),
                     )),
                 };
             }
