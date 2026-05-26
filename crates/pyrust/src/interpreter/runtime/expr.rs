@@ -2936,9 +2936,12 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
     if name == "object" {
         return Some(Value::py_class(object_class_singleton()));
     }
-    // NotImplemented is a singleton constant, not a callable.
+    // Singleton constants that are not callable.
     if name == "NotImplemented" {
         return Some(Value::not_implemented());
+    }
+    if name == "Ellipsis" {
+        return Some(Value::ellipsis());
     }
     // Built-in exception classes — resolved lazily via `EXC_CLASS_CACHE`
     // (built once per thread on first access).  Exception classes are no
