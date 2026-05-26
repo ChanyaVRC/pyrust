@@ -28,6 +28,12 @@ print(isinstance(list.__doc__, str))  # True
 print(isinstance(float.__doc__, str)) # True
 print(isinstance(bool.__doc__, str))  # True
 
+# Spot-check exact first line of selected docstrings (catches truncation bugs)
+print(int.__doc__.split('\n')[0])     # int([x]) -> integer
+print(str.__doc__.split('\n')[0])     # str(object='') -> str
+print(dict.__doc__.split('\n')[0])    # dict() -> new empty dictionary
+print(tuple.__doc__.split('\n')[0])   # Built-in immutable sequence.
+
 # __doc__ on exception classes must be a non-None string
 print(isinstance(ValueError.__doc__, str))   # True
 print(isinstance(TypeError.__doc__, str))    # True
