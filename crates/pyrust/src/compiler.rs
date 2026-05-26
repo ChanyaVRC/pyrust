@@ -3753,8 +3753,25 @@ enum EarlyExitCleanup {
     /// Early exit must emit `PopExcept` then optionally inline the finally block.
     TryBody { finally_stmts: Option<Vec<Stmt>> },
     /// Inside an except-handler body where `active_exception` is set.
-    /// Early exit must emit `EndExcept` then optionally inline the finally block.
-    ExceptBody { finally_stmts: Option<Vec<Stmt>> },
+    /// Early exit must emit the PEP 3110 as-var delete (if any), then
+    /// `EndExcept`, then optionally inline the finally block.
+    ExceptBody {
+        finally_stmts: Option<Vec<Stmt>>,
+        /// PEP 3110: how to delete the `except E as var` binding on early exit.
+        /// `Local(reg)` \u2192 `DeleteLocal(reg, u16::MAX)` (var lives in a register).
+        /// `Name(name_idx)` \u2192 `DeleteName(name_idx)` (var lives in env).
+        /// `None` \u2192 no `as VAR` clause.
+        as_var_delete: Option<ExceptAsVarDel>,
+    },
+}
+
+/// Describes how to emit the PEP 3110 except-as variable deletion on early exit.
+#[derive(Clone)]
+enum ExceptAsVarDel {
+    /// Variable lives in a fastlocal register; emit `DeleteLocal(reg, u16::MAX)`.
+    Local(Reg),
+    /// Variable lives in env (no local slot); emit `DeleteName(name_idx)`.
+    Name(u16),
 }
 
 struct Compiler {
@@ -4208,7 +4225,21 @@ impl Compiler {
                         self.compile_block(&stmts);
                     }
                 }
-                EarlyExitCleanup::ExceptBody { finally_stmts } => {
+                EarlyExitCleanup::ExceptBody {
+                    finally_stmts,
+                    as_var_delete,
+                } => {
+                    // PEP 3110: delete the `as VAR` binding before EndExcept,
+                    // matching the normal (non-early-exit) handler exit path.
+                    match as_var_delete {
+                        Some(ExceptAsVarDel::Local(reg)) => {
+                            self.emit(Insn::DeleteLocal(reg, u16::MAX));
+                        }
+                        Some(ExceptAsVarDel::Name(name_idx)) => {
+                            self.emit(Insn::DeleteName(name_idx));
+                        }
+                        None => {}
+                    }
                     self.emit(Insn::EndExcept);
                     if let Some(stmts) = finally_stmts {
                         self.compile_block(&stmts);
@@ -7355,10 +7386,21 @@ impl Compiler {
                 }
 
                 // Register an except-body cleanup so that early exits from the
-                // handler body (break/continue/return) emit EndExcept and inline
-                // the finally block before jumping.
+                // handler body (break/continue/return) emit the PEP 3110 as-var
+                // deletion, EndExcept, and the inlined finally block before jumping.
+                let as_var_delete = if let Some(var_name) = &handler.name {
+                    if let Some(reg) = self.local_reg(var_name) {
+                        Some(ExceptAsVarDel::Local(reg))
+                    } else {
+                        let name_idx = self.intern_name(var_name);
+                        Some(ExceptAsVarDel::Name(name_idx))
+                    }
+                } else {
+                    None
+                };
                 self.except_cleanups.push(EarlyExitCleanup::ExceptBody {
                     finally_stmts: finally_branch.map(|s| s.to_vec()),
+                    as_var_delete,
                 });
 
                 self.compile_block(&handler.body);
