@@ -1,5 +1,5 @@
 use indexmap::IndexMap;
-use pyrust_core::{PyError, PyKey, Result, StrKey, Value, ValueKind};
+use pyrust_core::{PyError, PyKey, Result, StrKey, Value, ValueKind, builtin_type_name};
 
 /// Canonical list of method names dispatched by `call`.
 /// Single source of truth for `has_method` and the drift-guard test.
@@ -145,18 +145,44 @@ fn bytes_hex(bytes: &[u8], args: &[Value]) -> Result<Value> {
 
     // args[0] = sep (str or bytes), args[1] = bytes_per_sep (int, default 1)
     //
-    // CPython 3.12 accepts either a str or a bytes object as the separator.
-    // The separator must be exactly one character/byte and must be ASCII.
+    // CPython 3.12 validation order (from Objects/bytesobject.c):
+    //   1. len(sep) — raises TypeError "object of type 'X' has no len()" if
+    //      the type has no __len__.
+    //   2. len != 1 → ValueError "sep must be length 1."
+    //   3. not str/bytes → TypeError "sep must be str or bytes."
+    //   4. non-ASCII → ValueError "sep must be ASCII."
     let sep_buf: String;
-    let sep: &str = match args[0].kind() {
+    let sep_arg = &args[0];
+    // Step 1: determine the static len for sized container types.  For types
+    // that have no concept of length (int, float, …) raise the same TypeError
+    // CPython does via PyObject_Length → PySequence_Length.
+    let sep_len: usize = match sep_arg.kind() {
+        ValueKind::Str(s) => s.chars().count(),
+        ValueKind::Bytes(rc) => rc.len(),
+        ValueKind::List(v) => v.len(),
+        ValueKind::Tuple(rc) => rc.len(),
+        ValueKind::Dict(v) => v.len(),
+        ValueKind::Set(v) => v.len(),
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "object of type '{}' has no len()",
+                    builtin_type_name(sep_arg)
+                ),
+            ));
+        }
+    };
+    // Step 2: length check.
+    if sep_len != 1 {
+        return Err(PyError::named(
+            "ValueError",
+            "sep must be length 1.".to_string(),
+        ));
+    }
+    // Step 3 + 4: type check then ASCII check.
+    let sep: &str = match sep_arg.kind() {
         ValueKind::Str(s) => {
-            // Validate length first (matches CPython order).
-            if s.chars().count() != 1 {
-                return Err(PyError::named(
-                    "ValueError",
-                    "sep must be length 1.".to_string(),
-                ));
-            }
             if !s.is_ascii() {
                 return Err(PyError::named(
                     "ValueError",
@@ -166,13 +192,6 @@ fn bytes_hex(bytes: &[u8], args: &[Value]) -> Result<Value> {
             s
         }
         ValueKind::Bytes(rc) => {
-            // bytes separator: must be exactly one byte and that byte must be ASCII.
-            if rc.len() != 1 {
-                return Err(PyError::named(
-                    "ValueError",
-                    "sep must be length 1.".to_string(),
-                ));
-            }
             let byte = rc[0];
             if !byte.is_ascii() {
                 return Err(PyError::named(
@@ -184,6 +203,7 @@ fn bytes_hex(bytes: &[u8], args: &[Value]) -> Result<Value> {
             &sep_buf
         }
         _ => {
+            // len == 1 but not str or bytes (e.g. a one-element list).
             return Err(PyError::named(
                 "TypeError",
                 "sep must be str or bytes.".to_string(),

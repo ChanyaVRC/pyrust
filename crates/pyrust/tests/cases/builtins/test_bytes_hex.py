@@ -69,3 +69,21 @@ try:
     b'hello'.hex('')
 except ValueError as e:
     print("ValueError:", e)
+
+# int separator has no len() → TypeError
+try:
+    b'hello'.hex(42)
+except TypeError as e:
+    print("TypeError:", e)
+
+# list separator with len 0 → ValueError (same path as empty str/bytes)
+try:
+    b'hello'.hex([])
+except ValueError as e:
+    print("ValueError:", e)
+
+# list separator with len 1 → TypeError: sep must be str or bytes.
+try:
+    b'hello'.hex([45])
+except TypeError as e:
+    print("TypeError:", e)
