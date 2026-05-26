@@ -474,39 +474,33 @@ pyrust_module! {
     ///    so these return integer results (not float).
     ///  - `(float, float)`, `(float, int)`, `(float, bool)`, `(int, float)`,
     ///    `(bool, float)` — any mix involving a `float` returns floats.
-    ///  - `(PyValue, PyValue)` catch-all raises `TypeError` with CPython's exact
-    ///    `"unsupported operand type(s) for divmod(): 'X' and 'Y'"` wording.
+    ///  - `(PyValue, PyValue)` catch-all consults `__divmod__`/`__rdivmod__` first
+    ///    (CPython's `PyNumber_Divmod` protocol), then raises `TypeError`.
     ///
     /// The `BigInt` arm inside each int-family overload promotes both operands via
     /// `to_bigint()` when either is `Big`, mirroring PR #485's cross-type arms in
     /// `expr.rs`.
-    #[pure]
     fn divmod(#[positional_only] a: PyInt, #[positional_only] b: PyInt) -> Result<Value> {
         divmod_int_int(a, b)
     }
 
-    #[pure]
     fn divmod(#[positional_only] a: PyBool, #[positional_only] b: PyInt) -> Result<Value> {
         // bool coerces to int: `True → 1`, `False → 0`.
         divmod_int_int(PyInt::from(a.0 as i64), b)
     }
 
-    #[pure]
     fn divmod(#[positional_only] a: PyInt, #[positional_only] b: PyBool) -> Result<Value> {
         divmod_int_int(a, PyInt::from(b.0 as i64))
     }
 
-    #[pure]
     fn divmod(#[positional_only] a: PyBool, #[positional_only] b: PyBool) -> Result<Value> {
         divmod_int_int(PyInt::from(a.0 as i64), PyInt::from(b.0 as i64))
     }
 
-    #[pure]
     fn divmod(#[positional_only] a: PyFloat, #[positional_only] b: PyFloat) -> Result<Value> {
         divmod_float_float(*a, *b)
     }
 
-    #[pure]
     fn divmod(#[positional_only] a: PyFloat, #[positional_only] b: PyInt) -> Result<Value> {
         // int→float coercion for the mixed arm.  BigInt may overflow f64 —
         // CPython raises `OverflowError` in that case.  For BigInt values that
@@ -515,25 +509,51 @@ pyrust_module! {
         divmod_float_float(*a, bf)
     }
 
-    #[pure]
     fn divmod(#[positional_only] a: PyFloat, #[positional_only] b: PyBool) -> Result<Value> {
         divmod_float_float(*a, if b.0 { 1.0 } else { 0.0 })
     }
 
-    #[pure]
     fn divmod(#[positional_only] a: PyInt, #[positional_only] b: PyFloat) -> Result<Value> {
         let af = pyint_to_f64(&a)?;
         divmod_float_float(af, *b)
     }
 
-    #[pure]
     fn divmod(#[positional_only] a: PyBool, #[positional_only] b: PyFloat) -> Result<Value> {
         divmod_float_float(if a.0 { 1.0 } else { 0.0 }, *b)
     }
 
-    /// Catch-all: any type combination not covered above → TypeError.
-    #[pure]
+    /// Catch-all: consult `__divmod__` / `__rdivmod__` before raising TypeError.
+    ///
+    /// CPython's `PyNumber_Divmod` (Objects/abstract.c) tries `nb_divmod` on
+    /// the left operand first, then the right operand's slot, and only raises
+    /// `TypeError` when both return `NotImplemented` or are absent.
     fn divmod(#[positional_only] a: PyValue, #[positional_only] b: PyValue) -> Result<Value> {
+        // Try a.__divmod__(b).
+        if let ValueKind::PyInstance(inst) = a.0.kind() {
+            let class = Rc::clone(&inst.borrow().class);
+            if let Some(m) = lookup_class_attr(&class, "__divmod__") {
+                let self_val = Value::py_instance(Rc::clone(inst));
+                let arg = ExpandedCallArg { name: None, value: b.0.clone() };
+                match invoke_class_method(_interp, m, self_val, &[arg]) {
+                    Ok(v) if !matches!(v.kind(), ValueKind::NotImplemented) => return Ok(v),
+                    Err(e) => return Err(e),
+                    _ => {}
+                }
+            }
+        }
+        // Try b.__rdivmod__(a).
+        if let ValueKind::PyInstance(inst) = b.0.kind() {
+            let class = Rc::clone(&inst.borrow().class);
+            if let Some(m) = lookup_class_attr(&class, "__rdivmod__") {
+                let self_val = Value::py_instance(Rc::clone(inst));
+                let arg = ExpandedCallArg { name: None, value: a.0.clone() };
+                match invoke_class_method(_interp, m, self_val, &[arg]) {
+                    Ok(v) if !matches!(v.kind(), ValueKind::NotImplemented) => return Ok(v),
+                    Err(e) => return Err(e),
+                    _ => {}
+                }
+            }
+        }
         Err(PyError::named(
             "TypeError",
             format!(
