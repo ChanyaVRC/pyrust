@@ -3308,6 +3308,21 @@ fn format_float_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -
         ));
     }
 
+    // str.__format__ rejects float format codes with ValueError (matching
+    // CPython's "Unknown format code 'f' for object of type 'str'").  The
+    // generic `fmt_value_to_float` would raise TypeError instead, so we
+    // intercept str values here before the conversion attempt.
+    if matches!(value.kind(), ValueKind::Str(_)) {
+        let code = type_char.unwrap_or('\0');
+        return Err(PyError::named(
+            "ValueError",
+            format!(
+                "Unknown format code '{code}' for object of type '{}'",
+                value_type_name_str(value)
+            ),
+        ));
+    }
+
     let f = fmt_value_to_float(value)?;
     let t = type_char.unwrap_or('\0'); // '\0' = no type, use shortest repr-ish
 
