@@ -2249,7 +2249,7 @@ impl Interpreter {
                 let base =
                     self.eval_index(mapping.clone(), Value::string(head.to_string()))?;
 
-                let value = apply_field_accessors(base, rest)?;
+                let value = apply_field_accessors(self, base, rest)?;
                 let value = match conversion {
                     Some('r') => Value::string(value.repr()),
                     Some('s') => Value::string(value.to_py_str()),
@@ -3663,8 +3663,8 @@ fn format_str_template(
                     .ok_or_else(|| PyError::key_error(Value::string(head.to_string())))?
             };
 
-            // Apply field accessors (`.attr` / `[key]`) — limited support.
-            let value = apply_field_accessors(base, rest)?;
+            // Apply field accessors (`.attr` / `[key]`) for any subscriptable type.
+            let value = apply_field_accessors(self, base, rest)?;
 
             // Apply conversion (`!r`, `!s`, `!a`).
             // `!s` dispatches `__str__` on user instances (mirrors `str(x)`).
@@ -3765,7 +3765,11 @@ fn split_head_and_accessors(name: &str) -> (&str, &str) {
 }
 
 /// Applies a chain of `.attr` / `[key]` accessors to a value.
-fn apply_field_accessors(mut value: Value, mut rest: &str) -> Result<Value> {
+fn apply_field_accessors(
+    interp: &mut Interpreter,
+    mut value: Value,
+    mut rest: &str,
+) -> Result<Value> {
     while !rest.is_empty() {
         let bytes = rest.as_bytes();
         if bytes[0] == b'.' {
@@ -3791,12 +3795,21 @@ fn apply_field_accessors(mut value: Value, mut rest: &str) -> Result<Value> {
             })?;
             // Look up the attribute: instance dict first, then class MRO.
             let class = Rc::clone(&inst.borrow().class);
-            let v = inst.borrow().attrs.get(attr).cloned().or_else(|| {
-                lookup_class_attr(&class, attr)
-            }).ok_or_else(|| PyError::named(
-                "AttributeError",
-                format!("'{}' object has no attribute '{attr}'", class.borrow().name),
-            ))?;
+            let v = inst
+                .borrow()
+                .attrs
+                .get(attr)
+                .cloned()
+                .or_else(|| lookup_class_attr(&class, attr))
+                .ok_or_else(|| {
+                    PyError::named(
+                        "AttributeError",
+                        format!(
+                            "'{}' object has no attribute '{attr}'",
+                            class.borrow().name
+                        ),
+                    )
+                })?;
             value = v;
         } else if bytes[0] == b'[' {
             let end = bytes
@@ -3808,69 +3821,24 @@ fn apply_field_accessors(mut value: Value, mut rest: &str) -> Result<Value> {
                 ))?;
             let key_str = &rest[1..end];
             rest = &rest[end + 1..];
-            // Try integer index first; fall back to string key.
-            let next = if let Ok(idx) = key_str.parse::<i64>() {
-                // Extract the indexed item in a scoped block so any
-                // `kind()` Ref drops before we may construct a new
-                // Value (#450).  List/Tuple snapshot to an owned Vec;
-                // Dict pulls the keyed value.
-                enum SeqGet {
-                    Sequence(Vec<Value>),
-                    DictMatch(Value),
-                    NotSubscriptable,
+            // Per CPython 3.12: a subscript that parses as a non-negative
+            // integer is passed as `int` to __getitem__; anything else
+            // (non-numeric or negative like "-1") is passed as `str`.
+            // CPython rejects numbers > i64::MAX with "Too many decimal
+            // digits in format string" (matching CPython's internal
+            // Py_ssize_t overflow check in _PyObject_GetMethod).
+            let key = if let Ok(idx) = key_str.parse::<u64>() {
+                if idx > i64::MAX as u64 {
+                    return Err(PyError::named(
+                        "ValueError",
+                        "Too many decimal digits in format string".to_string(),
+                    ));
                 }
-                let snap = match value.kind() {
-                    ValueKind::List(items) => SeqGet::Sequence(items.clone()),
-                    ValueKind::Tuple(items) => SeqGet::Sequence(items.to_vec()),
-                    ValueKind::Dict(map) => match map.get(&PyKey::Int(idx)).cloned() {
-                        Some(v) => SeqGet::DictMatch(v),
-                        None => {
-                            return Err(PyError::key_error(Value::int(idx)));
-                        }
-                    },
-                    _ => SeqGet::NotSubscriptable,
-                };
-                match snap {
-                    SeqGet::Sequence(items) => {
-                        let len = items.len() as i64;
-                        let i = if idx < 0 { idx + len } else { idx };
-                        if i < 0 || i >= len {
-                            return Err(PyError::named(
-                                "IndexError",
-                                "list index out of range".to_string(),
-                            ));
-                        }
-                        items[i as usize].clone()
-                    }
-                    SeqGet::DictMatch(v) => v,
-                    SeqGet::NotSubscriptable => {
-                        return Err(PyError::named(
-                            "TypeError",
-                            "object is not subscriptable".to_string(),
-                        ));
-                    }
-                }
+                Value::int(idx as i64)
             } else {
-                match value.kind() {
-                    ValueKind::Dict(map) => map
-                        .get(&StrKey(key_str))
-                        .cloned()
-                        .ok_or_else(|| PyError::key_error(Value::string(key_str.to_string())))?,
-                    ValueKind::List(_) | ValueKind::Tuple(_) => {
-                        return Err(PyError::named(
-                            "TypeError",
-                            "list indices must be integers or slices, not str".to_string(),
-                        ));
-                    }
-                    _ => {
-                        return Err(PyError::named(
-                            "TypeError",
-                            "object is not subscriptable".to_string(),
-                        ));
-                    }
-                }
+                Value::string(key_str.to_string())
             };
-            value = next;
+            value = interp.eval_index(value, key)?;
         } else {
             return Err(PyError::named(
                 "ValueError",
