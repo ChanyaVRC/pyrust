@@ -31,7 +31,7 @@ use crate::interpreter::{
     sync_module_env_to_globals_dict,
     value_to_float, value_type_name_str,
 };
-use crate::value::{PyClass, PyKey, PyToPrimitive, PyZero, Value, ValueKind, range_len};
+use crate::value::{PyClass, PyKey, PyToPrimitive, PyZero, UserFunctionKind, Value, ValueKind, range_len};
 use pyrust_derive::pyrust_module;
 
 pyrust_module! {
@@ -1423,8 +1423,15 @@ pyrust_module! {
             ValueKind::PyClass(_) => Ok(Value::builtin_function("type")),
             ValueKind::None => Ok(Value::builtin_function("NoneType")),
             ValueKind::Range { .. } => Ok(Value::builtin_function("range")),
-            ValueKind::UserFunction(_)
-            | ValueKind::BoundMethod { .. }
+            ValueKind::UserFunction(f) => {
+                let type_name = match f.kind {
+                    UserFunctionKind::StaticMethod => "staticmethod",
+                    UserFunctionKind::ClassMethod => "classmethod",
+                    _ => "function",
+                };
+                Ok(Value::builtin_function(type_name))
+            }
+            ValueKind::BoundMethod { .. }
             | ValueKind::ClassBoundMethod { .. } => Ok(Value::builtin_function("function")),
             ValueKind::BuiltinFunction(_) => Ok(Value::builtin_function("builtin_function_or_method")),
             ValueKind::PyModule(_) => Ok(Value::builtin_function("module")),
@@ -4588,6 +4595,12 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
         (ValueKind::None, ValueKind::BuiltinFunction("NoneType")) => true,
         (ValueKind::NotImplemented, ValueKind::BuiltinFunction("NotImplementedType")) => true,
         (ValueKind::Ellipsis, ValueKind::BuiltinFunction("ellipsis")) => true,
+        (ValueKind::UserFunction(f), ValueKind::BuiltinFunction("staticmethod")) => {
+            f.kind == UserFunctionKind::StaticMethod
+        }
+        (ValueKind::UserFunction(f), ValueKind::BuiltinFunction("classmethod")) => {
+            f.kind == UserFunctionKind::ClassMethod
+        }
         (ValueKind::BuiltinObject { ops, .. }, ValueKind::BuiltinFunction(name)) => {
             ops.type_name() == name
         }
