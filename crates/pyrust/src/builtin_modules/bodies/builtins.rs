@@ -833,8 +833,9 @@ pyrust_module! {
     ///   2. `__len__` + `__getitem__` — collect via sequence protocol, reverse.
     ///   3. Otherwise: TypeError "'X' object is not reversible".
     ///
-    /// For non-PyInstance values (list, range, tuple, …) the existing
-    /// materialize-then-reverse path is used unchanged.
+    /// For non-PyInstance values only sequences (list, tuple, str, bytes) and
+    /// range are reversible; all other types (Generator, BuiltinObject
+    /// iterators, …) raise TypeError.
     fn reversed(#[positional_only] seq: PyValue) -> Result<Value> {
         if let ValueKind::PyInstance(inst) = seq.0.kind() {
             let inst_rc = Rc::clone(inst);
@@ -907,9 +908,27 @@ pyrust_module! {
                 format!("'{}' object is not reversible", class.borrow().name),
             ));
         }
-        // Non-PyInstance: materialize then reverse (list, range, tuple, …).
-        let source = materialize_user_iter(_interp, seq.0)?;
-        Ok(pyrust_builtins::iter_helpers::reversed(source))
+        // Non-PyInstance: only sequence types and Range are reversible.
+        // Generators (including list_iterator, set_iterator, filter, map, …)
+        // and all BuiltinObject iterator types are not sequences and must
+        // raise TypeError, matching CPython 3.12's check for __reversed__ /
+        // (__len__ + __getitem__).
+        let is_reversible = matches!(
+            seq.0.kind(),
+            ValueKind::List(_)
+                | ValueKind::Tuple(_)
+                | ValueKind::Str(_)
+                | ValueKind::Bytes(_)
+                | ValueKind::Range { .. }
+        );
+        if !is_reversible {
+            let type_name = value_type_name_str(&seq.0);
+            return Err(PyError::named(
+                "TypeError",
+                format!("'{}' object is not reversible", type_name),
+            ));
+        }
+        Ok(pyrust_builtins::iter_helpers::reversed(seq.0))
     }
 
     /// CPython: map(func, *iterables) — apply func to corresponding elements
