@@ -1336,6 +1336,11 @@ impl Parser {
                 });
                 seen_kwargs = true;
             } else if self.is(&Token::Star) {
+                if seen_star {
+                    return Err(PyError::Parse(
+                        "* argument may appear only once".to_string(),
+                    ));
+                }
                 self.bump();
                 seen_star = true;
                 if self.is(&Token::Comma) || self.is(&Token::Colon) {
