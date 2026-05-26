@@ -453,13 +453,24 @@ pyrust_module! {
     ///
     /// Migrated to the typed-signature dialect (#400).  `PyValue` as
     /// `iterable` so user-defined iterables (PyInstance with `__iter__`)
-    /// reach `collect_iterable` rather than the registry-only path.
+    /// reach the iter protocol rather than the registry-only path.
+    /// Iterates lazily so it short-circuits on the first truthy value
+    /// without consuming the rest of the iterator (fixes #1224).
     #[pure]
     fn any(#[positional_only] iterable: PyValue) -> Result<Value> {
-        let items = _interp.collect_iterable(iterable.0)?;
-        for item in items {
-            if _interp.truthy_value(&item)? {
-                return Ok(Value::bool_(true));
+        let iter = _interp.call_function_expanded(
+            Value::builtin_function("iter"),
+            &[ExpandedCallArg { name: None, value: iterable.0 }],
+        )?;
+        loop {
+            match _interp.call_next(iter.clone(), None) {
+                Ok(item) => {
+                    if _interp.truthy_value(&item)? {
+                        return Ok(Value::bool_(true));
+                    }
+                }
+                Err(ref e) if e.class_name_is("StopIteration") => break,
+                Err(e) => return Err(e),
             }
         }
         Ok(Value::bool_(false))
@@ -470,12 +481,23 @@ pyrust_module! {
     ///
     /// Migrated to the typed-signature dialect (#400).  `PyValue` as
     /// `iterable` — same rationale as `any`.
+    /// Iterates lazily so it short-circuits on the first falsy value
+    /// without consuming the rest of the iterator (fixes #1224).
     #[pure]
     fn all(#[positional_only] iterable: PyValue) -> Result<Value> {
-        let items = _interp.collect_iterable(iterable.0)?;
-        for item in items {
-            if !_interp.truthy_value(&item)? {
-                return Ok(Value::bool_(false));
+        let iter = _interp.call_function_expanded(
+            Value::builtin_function("iter"),
+            &[ExpandedCallArg { name: None, value: iterable.0 }],
+        )?;
+        loop {
+            match _interp.call_next(iter.clone(), None) {
+                Ok(item) => {
+                    if !_interp.truthy_value(&item)? {
+                        return Ok(Value::bool_(false));
+                    }
+                }
+                Err(ref e) if e.class_name_is("StopIteration") => break,
+                Err(e) => return Err(e),
             }
         }
         Ok(Value::bool_(true))
