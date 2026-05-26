@@ -143,32 +143,53 @@ fn bytes_hex(bytes: &[u8], args: &[Value]) -> Result<Value> {
         return Ok(Value::string(out));
     }
 
-    // args[0] = sep (str), args[1] = bytes_per_sep (int, default 1)
+    // args[0] = sep (str or bytes), args[1] = bytes_per_sep (int, default 1)
+    //
+    // CPython 3.12 accepts either a str or a bytes object as the separator.
+    // The separator must be exactly one character/byte and must be ASCII.
+    let sep_buf: String;
     let sep: &str = match args[0].kind() {
-        ValueKind::Str(s) => s,
+        ValueKind::Str(s) => {
+            // Validate length first (matches CPython order).
+            if s.chars().count() != 1 {
+                return Err(PyError::named(
+                    "ValueError",
+                    "sep must be length 1.".to_string(),
+                ));
+            }
+            if !s.is_ascii() {
+                return Err(PyError::named(
+                    "ValueError",
+                    "sep must be ASCII.".to_string(),
+                ));
+            }
+            s
+        }
+        ValueKind::Bytes(rc) => {
+            // bytes separator: must be exactly one byte and that byte must be ASCII.
+            if rc.len() != 1 {
+                return Err(PyError::named(
+                    "ValueError",
+                    "sep must be length 1.".to_string(),
+                ));
+            }
+            let byte = rc[0];
+            if !byte.is_ascii() {
+                return Err(PyError::named(
+                    "ValueError",
+                    "sep must be ASCII.".to_string(),
+                ));
+            }
+            sep_buf = (byte as char).to_string();
+            &sep_buf
+        }
         _ => {
             return Err(PyError::named(
                 "TypeError",
-                "bytes.hex() separator must be a str".to_string(),
+                "sep must be str or bytes.".to_string(),
             ));
         }
     };
-
-    // Validate separator: CPython requires exactly one ASCII character.
-    let sep_chars = sep.chars().count();
-    if sep_chars != 1 {
-        return Err(PyError::named(
-            "ValueError",
-            "sep must be length 1.".to_string(),
-        ));
-    }
-    // CPython 3.12 also requires the separator to be ASCII.
-    if !sep.is_ascii() {
-        return Err(PyError::named(
-            "ValueError",
-            "sep must be ASCII.".to_string(),
-        ));
-    }
 
     let bytes_per_sep: i64 = match args.get(1).map(|v| v.kind()) {
         None => 1,
