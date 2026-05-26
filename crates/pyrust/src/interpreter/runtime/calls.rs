@@ -3829,7 +3829,16 @@ fn apply_field_accessors(
             // Per CPython 3.12: a subscript that parses as a non-negative
             // integer is passed as `int` to __getitem__; anything else
             // (non-numeric or negative like "-1") is passed as `str`.
+            // CPython rejects numbers > i64::MAX with "Too many decimal
+            // digits in format string" (matching CPython's internal
+            // Py_ssize_t overflow check in _PyObject_GetMethod).
             let key = if let Ok(idx) = key_str.parse::<u64>() {
+                if idx > i64::MAX as u64 {
+                    return Err(PyError::named(
+                        "ValueError",
+                        "Too many decimal digits in format string".to_string(),
+                    ));
+                }
                 Value::int(idx as i64)
             } else {
                 Value::string(key_str.to_string())

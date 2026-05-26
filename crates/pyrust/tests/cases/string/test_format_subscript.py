@@ -59,6 +59,12 @@ class Obj:
 
 print("{0.name}".format(Obj()))            # Bob
 
+# --- overflow: subscript > i64::MAX raises ValueError ---
+try:
+    "{0[9223372036854775808]}".format([1])  # 2^63 overflows -> ValueError
+except ValueError as e:
+    print(type(e).__name__, "big_subscript")
+
 # --- regression: basic positional and keyword ---
 print("{}".format(42))                    # 42
 print("{0}".format("hello"))              # hello
