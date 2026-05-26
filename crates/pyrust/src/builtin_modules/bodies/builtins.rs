@@ -2559,7 +2559,10 @@ pyrust_module! {
                         "ValueError",
                         format!("int() base must be >= 2 and <= 36, or 0, not {b}"),
                     )),
-                    _ => return Err(PyError::Runtime(format!("{FN_NAME}() base must be an integer"))),
+                    _ => return Err(PyError::named(
+                        "TypeError",
+                        format!("'{}' object cannot be interpreted as an integer", value_type_name_str(&args[1].value)),
+                    )),
                 };
                 match args[0].value.kind() {
                     ValueKind::Str(s) => {
