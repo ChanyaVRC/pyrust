@@ -535,6 +535,18 @@ impl Interpreter {
                         // CPython: `f.__annotations__ is f.__annotations__` is True.
                         return Ok(func.annotations.borrow().clone());
                     }
+                    "__func__" if matches!(
+                        func.kind,
+                        UserFunctionKind::StaticMethod | UserFunctionKind::ClassMethod
+                    ) => {
+                        // `staticmethod.__func__` and `classmethod.__func__` return
+                        // the wrapped plain function.  Reset the kind tag to Regular
+                        // so the returned value is a normal callable.
+                        return Ok(Value::with_function_kind(
+                            Rc::clone(func),
+                            UserFunctionKind::Regular,
+                        ));
+                    }
                     _ => {}
                 }
                 // Fall through to arbitrary dynamic attrs.
@@ -544,9 +556,14 @@ impl Interpreter {
                         return Ok(v);
                     }
                 }
+                let type_name = match func.kind {
+                    UserFunctionKind::StaticMethod => "staticmethod",
+                    UserFunctionKind::ClassMethod => "classmethod",
+                    _ => "function",
+                };
                 Err(PyError::named(
                     "AttributeError",
-                    format!("'function' object has no attribute '{name}'"),
+                    format!("'{type_name}' object has no attribute '{name}'"),
                 ))
             }
             ValueKind::BuiltinFunction(func_name) => {
@@ -1021,6 +1038,17 @@ impl Interpreter {
                         "AttributeError",
                         "readonly attribute".to_string(),
                     )),
+                    "__func__"
+                        if matches!(
+                            func.kind,
+                            UserFunctionKind::StaticMethod | UserFunctionKind::ClassMethod
+                        ) =>
+                    {
+                        Err(PyError::named(
+                            "AttributeError",
+                            "readonly attribute".to_string(),
+                        ))
+                    }
                     _ => {
                         // Arbitrary dynamic attribute — insert into the live dict,
                         // initialising attrs lazily if this is the first write.
@@ -1209,6 +1237,17 @@ impl Interpreter {
                         "AttributeError",
                         "readonly attribute".to_string(),
                     )),
+                    "__func__"
+                        if matches!(
+                            func.kind,
+                            UserFunctionKind::StaticMethod | UserFunctionKind::ClassMethod
+                        ) =>
+                    {
+                        Err(PyError::named(
+                            "AttributeError",
+                            "readonly attribute".to_string(),
+                        ))
+                    }
                     // CPython allows `del f.__defaults__` / `del f.__kwdefaults__`
                     // (they reset to None).  Since pyrust doesn't implement these slots
                     // yet, silently succeed — the state the caller intended (unset)

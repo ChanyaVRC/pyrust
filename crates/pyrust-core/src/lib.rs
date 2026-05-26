@@ -3390,9 +3390,13 @@ pub fn builtin_type_name(value: &Value) -> Cow<'static, str> {
         ValueKind::Bytes(_) => Cow::Borrowed("bytes"),
         ValueKind::Complex(_, _) => Cow::Borrowed("complex"),
         ValueKind::BuiltinFunction(_)
-        | ValueKind::UserFunction(_)
         | ValueKind::BoundMethod { .. }
         | ValueKind::ClassBoundMethod { .. } => Cow::Borrowed("function"),
+        ValueKind::UserFunction(f) => match f.kind {
+            UserFunctionKind::StaticMethod => Cow::Borrowed("staticmethod"),
+            UserFunctionKind::ClassMethod => Cow::Borrowed("classmethod"),
+            _ => Cow::Borrowed("function"),
+        },
         ValueKind::PyClass(_) => Cow::Borrowed("type"),
         ValueKind::PyInstance(inst) => Cow::Owned(inst.borrow().class.borrow().name.clone()),
         ValueKind::PyModule(_) => Cow::Borrowed("module"),
