@@ -1453,11 +1453,23 @@ pub(crate) fn cached_builtins_module() -> Value {
                 }
                 // Built-in exception classes (issue #1255).  Skip names with '.'
                 // (e.g. "io.UnsupportedOperation") — those belong to other modules.
-                for (exc_name, exc_class) in build_exc_class_map() {
-                    if !exc_name.contains('.') {
+                // Also skip bare names that are registered under a dotted alias
+                // (e.g. "UnsupportedOperation" is an io-module class even though
+                // its short key has no dot); detect this by checking whether any
+                // dotted key in the map points to the same Rc allocation.
+                let exc_map = build_exc_class_map();
+                let non_builtin_ptrs: std::collections::HashSet<*const _> = exc_map
+                    .iter()
+                    .filter(|(n, _)| n.contains('.'))
+                    .map(|(_, cls)| Rc::as_ptr(cls))
+                    .collect();
+                for (exc_name, exc_class) in &exc_map {
+                    if !exc_name.contains('.')
+                        && !non_builtin_ptrs.contains(&Rc::as_ptr(exc_class))
+                    {
                         mod_attrs.attrs.insert(
                             exc_name.to_string(),
-                            Value::py_class(exc_class),
+                            Value::py_class(Rc::clone(exc_class)),
                         );
                     }
                 }
