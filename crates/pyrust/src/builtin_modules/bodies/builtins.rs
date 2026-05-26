@@ -1340,11 +1340,19 @@ pyrust_module! {
             ));
         }
         if args.is_empty() {
-            let mut dict: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
-            for (k, v) in _interp.env.borrow().values.iter() {
-                dict.insert(PyKey::str_from(k), v.clone());
+            // vars() with no args == locals(): return a snapshot of the current
+            // frame's local namespace.  At module scope that is module globals
+            // (CPython parity: vars() is locals() is globals() at top level).
+            let is_module_scope = _interp
+                .vm_frame_views
+                .last()
+                .map(|v| v.kind == crate::interpreter::FrameKind::Script)
+                .unwrap_or(true);
+            if is_module_scope {
+                sync_module_env_to_globals_dict(_interp);
+                return Ok(_interp.module_globals_dict.clone());
             }
-            return Ok(Value::dict(dict));
+            return Ok(Value::dict(snapshot_current_locals(_interp)));
         }
         match args[0].value.kind() {
             ValueKind::PyInstance(instance) => Ok(instance_attrs_snapshot(instance)),
