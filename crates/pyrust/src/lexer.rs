@@ -1146,9 +1146,24 @@ fn lex_string(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)>
                 continue;
             }
             pos += 1;
-            let (ch, next_pos) = parse_escape(chars, pos, content_start)?;
-            out.push(ch);
-            pos = next_pos;
+            let escaped = chars
+                .get(pos)
+                .copied()
+                .ok_or_else(|| PyError::Lex("EOL while scanning string literal".to_string()))?;
+            // \<newline>: line continuation — consume backslash and newline, add nothing.
+            // Also handle CRLF: \<CR><LF> drops all three characters.
+            if escaped == '\n' {
+                pos += 1;
+            } else if escaped == '\r' {
+                pos += 1;
+                if chars.get(pos) == Some(&'\n') {
+                    pos += 1;
+                }
+            } else {
+                let (ch, next_pos) = parse_escape(chars, pos, content_start)?;
+                out.push(ch);
+                pos = next_pos;
+            }
             continue;
         }
         out.push(c);
@@ -1257,9 +1272,21 @@ fn lex_fstring(chars: &[char], start: usize, quote: char, raw: bool) -> Result<(
                 literal.push(next_ch);
                 pos += 1;
             } else {
-                let (ch, next_pos) = parse_escape(chars, pos, content_start)?;
-                literal.push(ch);
-                pos = next_pos;
+                // \<newline>: line continuation — consume backslash and newline, add nothing.
+                // Also handle CRLF: \<CR><LF> drops all three characters.
+                // At this point `pos` points at next_ch (the char after the backslash).
+                if next_ch == '\n' {
+                    pos += 1; // skip the newline
+                } else if next_ch == '\r' {
+                    pos += 1; // skip \r
+                    if chars.get(pos) == Some(&'\n') {
+                        pos += 1; // skip \n of CRLF
+                    }
+                } else {
+                    let (ch, next_pos) = parse_escape(chars, pos, content_start)?;
+                    literal.push(ch);
+                    pos = next_pos;
+                }
             }
             continue;
         }
