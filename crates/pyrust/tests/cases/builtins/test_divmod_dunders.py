@@ -97,3 +97,11 @@ class Sub2(Base):
         return NotImplemented
 
 print(divmod(Base(), Sub2()))        # ('base_divmod', 'Sub2')
+
+# Subtype does NOT override __rdivmod__ (inherits it): priority rule does NOT
+# apply, so a.__divmod__(b) is tried first (CPython binary_op1 behaviour).
+class Sub3(Base):
+    def __divmod__(self, other):
+        return ("sub3_divmod", type(other).__name__)
+
+print(divmod(Base(), Sub3()))        # ('base_divmod', 'Sub3')

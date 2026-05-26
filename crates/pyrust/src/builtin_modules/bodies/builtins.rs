@@ -614,10 +614,18 @@ pyrust_module! {
             None
         };
 
-        // Subtype rule: if b's class is a proper subtype of a's class, try
-        // b.__rdivmod__(a) before a.__divmod__(b).
+        // Subtype rule (mirrors CPython `binary_op1`): if b's class is a
+        // *proper* subtype of a's class AND b's class *directly defines*
+        // `__rdivmod__` (not merely inherits it), try b.__rdivmod__(a) before
+        // a.__divmod__(b).  CPython gates on `tp_as_number->nb_divmod` slots
+        // being different objects; the equivalent here is checking that bc's
+        // own attr dict contains the key.
         let b_is_proper_subtype_of_a = match (&a_class, &b_class) {
-            (Some(ac), Some(bc)) => !Rc::ptr_eq(ac, bc) && class_is_subclass_of(bc, ac),
+            (Some(ac), Some(bc)) => {
+                !Rc::ptr_eq(ac, bc)
+                    && class_is_subclass_of(bc, ac)
+                    && bc.borrow().attrs.contains_key("__rdivmod__")
+            }
             _ => false,
         };
 
