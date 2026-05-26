@@ -20,7 +20,8 @@ use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
-    CallableIter, NativeIterFrame, apply_format_spec, ascii_repr, bigint_divmod_floor, class_is_subclass_of,
+    CallableIter, NativeIterFrame, apply_format_spec, ascii_repr, bigint_divmod_floor,
+    class_chain_contains_name, class_is_subclass_of,
     compare_values, compare_values_with_op, dir_names, instance_attrs_snapshot,
     instance_builtin_data,
     int_pow_promoting, invoke_class_method,
@@ -2667,6 +2668,46 @@ pyrust_module! {
     /// CPython signature: `object.__init_subclass__(cls, /, **kwargs)`
     #[py_name = "object.__init_subclass__"]
     fn object_init_subclass(_args) -> Result<Value> {
+        Ok(Value::none())
+    }
+
+    /// Issue #1112: `BaseException.__init__(self, *args)` — updates `self.args`
+    /// so that `super().__init__(msg)` in an exception subclass sets the correct
+    /// `.args` tuple on the already-constructed instance.  Also mirrors the
+    /// `StopIteration.value` special-case from `instantiate_exception`.
+    ///
+    /// CPython signature: `BaseException.__init__(self, *args)`
+    #[py_name = "BaseException.__init__"]
+    fn base_exception_init(args) -> Result<Value> {
+        let Some(first) = args.first() else {
+            return Ok(Value::none());
+        };
+        let inst_rc = match first.value.kind() {
+            ValueKind::PyInstance(rc) => Rc::clone(rc),
+            _ => return Ok(Value::none()),
+        };
+        let exc_args: Vec<Value> = args[1..]
+            .iter()
+            .filter(|a| a.name.is_none())
+            .map(|a| a.value.clone())
+            .collect();
+        // Update .args on the existing instance.
+        inst_rc
+            .borrow_mut()
+            .attrs
+            .insert("args".to_string(), Value::tuple(exc_args.clone()));
+        // Mirror the StopIteration.value special-case.
+        let is_stop_iteration = {
+            let class = Rc::clone(&inst_rc.borrow().class);
+            class_chain_contains_name(&class, "StopIteration")
+        };
+        if is_stop_iteration {
+            let val = exc_args.into_iter().next().unwrap_or_else(Value::none);
+            inst_rc
+                .borrow_mut()
+                .attrs
+                .insert("value".to_string(), val);
+        }
         Ok(Value::none())
     }
 

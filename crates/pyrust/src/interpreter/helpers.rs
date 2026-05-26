@@ -962,7 +962,7 @@ pub(crate) fn is_exception_class(class: &Rc<RefCell<PyClass>>) -> bool {
 /// Walk the class base chain and return `true` if any class in the chain has
 /// the given `name`.  Used to check subclass relationships by class name when
 /// the `Rc` singleton for the expected class is not in scope.
-fn class_chain_contains_name(class: &Rc<RefCell<PyClass>>, name: &str) -> bool {
+pub(crate) fn class_chain_contains_name(class: &Rc<RefCell<PyClass>>, name: &str) -> bool {
     let (class_name, base, extra_bases) = {
         let borrowed = class.borrow();
         (borrowed.name.clone(), borrowed.base.clone(), borrowed.extra_bases.clone())
@@ -1141,6 +1141,13 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
             Value::builtin_function(*ADD_NOTE_NAME),
         );
     }
+    // Issue #1112: install `BaseException.__init__` so that `super().__init__(…)`
+    // in a user-defined exception subclass resolves via MRO lookup and updates
+    // `.args` (and `.value` for StopIteration) on the already-constructed instance.
+    base_exception
+        .borrow_mut()
+        .attrs
+        .insert("__init__".to_string(), Value::builtin_function("BaseException.__init__"));
     let exception = mk("Exception", Some(Rc::clone(&base_exception)));
     let arithmetic_error = mk("ArithmeticError", Some(Rc::clone(&exception)));
     let lookup_error = mk("LookupError", Some(Rc::clone(&exception)));
