@@ -150,20 +150,39 @@ pyrust_module! {
     /// Bignums not yet supported; raises `OverflowError` if `x` doesn't
     /// fit in i64 (deliberate divergence from CPython, tracked as
     /// follow-up under #400).
-    #[pure]
     fn bin(#[positional_only] x: PyInt) -> Result<Value> {
         let v = x.expect_i64(FN_NAME, "x")?;
         Ok(Value::string(format_bin_i64(v)))
     }
 
-    #[pure]
     fn bin(#[positional_only] x: PyBool) -> Result<Value> {
         // CPython: `bin(True) == '0b1'`, `bin(False) == '0b0'`.
         Ok(Value::string(format_bin_i64(if x.0 { 1 } else { 0 })))
     }
 
-    #[pure]
     fn bin(#[positional_only] x: PyValue) -> Result<Value> {
+        if let ValueKind::PyInstance(inst) = x.0.kind() {
+            let inst_rc = Rc::clone(inst);
+            let class = Rc::clone(&inst_rc.borrow().class);
+            let self_val = Value::py_instance(Rc::clone(&inst_rc));
+            if let Some(method) = lookup_class_attr(&class, "__index__") {
+                let result = invoke_class_method(_interp, method, self_val, &[])?;
+                if let ValueKind::Bool(b) = result.kind() {
+                    return Ok(Value::string(format_bin_i64(if b { 1 } else { 0 })));
+                }
+                return match result.kind() {
+                    ValueKind::Int(v) => Ok(Value::string(format_bin_i64(v))),
+                    ValueKind::BigInt(b) => Ok(Value::string(format_bigint_radix(b, 2, "0b"))),
+                    _ => Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "__index__ returned non-int (type {})",
+                            value_type_name_str(&result),
+                        ),
+                    )),
+                };
+            }
+        }
         Err(PyError::named(
             "TypeError",
             format!(
@@ -184,20 +203,39 @@ pyrust_module! {
     /// Bignums not yet supported; raises `OverflowError` if `x` doesn't
     /// fit in i64 (deliberate divergence from CPython, tracked as
     /// follow-up under #400).
-    #[pure]
     fn oct(#[positional_only] x: PyInt) -> Result<Value> {
         let v = x.expect_i64(FN_NAME, "x")?;
         Ok(Value::string(format_oct_i64(v)))
     }
 
-    #[pure]
     fn oct(#[positional_only] x: PyBool) -> Result<Value> {
         // CPython: `oct(True) == '0o1'`, `oct(False) == '0o0'`.
         Ok(Value::string(format_oct_i64(if x.0 { 1 } else { 0 })))
     }
 
-    #[pure]
     fn oct(#[positional_only] x: PyValue) -> Result<Value> {
+        if let ValueKind::PyInstance(inst) = x.0.kind() {
+            let inst_rc = Rc::clone(inst);
+            let class = Rc::clone(&inst_rc.borrow().class);
+            let self_val = Value::py_instance(Rc::clone(&inst_rc));
+            if let Some(method) = lookup_class_attr(&class, "__index__") {
+                let result = invoke_class_method(_interp, method, self_val, &[])?;
+                if let ValueKind::Bool(b) = result.kind() {
+                    return Ok(Value::string(format_oct_i64(if b { 1 } else { 0 })));
+                }
+                return match result.kind() {
+                    ValueKind::Int(v) => Ok(Value::string(format_oct_i64(v))),
+                    ValueKind::BigInt(b) => Ok(Value::string(format_bigint_radix(b, 8, "0o"))),
+                    _ => Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "__index__ returned non-int (type {})",
+                            value_type_name_str(&result),
+                        ),
+                    )),
+                };
+            }
+        }
         Err(PyError::named(
             "TypeError",
             format!(
@@ -221,20 +259,39 @@ pyrust_module! {
     /// canonical message — preserved verbatim from the legacy body).
     /// Genuine bignums raise `OverflowError` via `expect_i64`; that's
     /// a deliberate divergence from CPython, tracked as follow-up.
-    #[pure]
     fn hex(#[positional_only] x: PyInt) -> Result<Value> {
         let v = x.expect_i64(FN_NAME, "x")?;
         Ok(Value::string(format_hex_i64(v)))
     }
 
-    #[pure]
     fn hex(#[positional_only] x: PyBool) -> Result<Value> {
         // CPython: `hex(True) == '0x1'`, `hex(False) == '0x0'`.
         Ok(Value::string(format_hex_i64(if x.0 { 1 } else { 0 })))
     }
 
-    #[pure]
     fn hex(#[positional_only] x: PyValue) -> Result<Value> {
+        if let ValueKind::PyInstance(inst) = x.0.kind() {
+            let inst_rc = Rc::clone(inst);
+            let class = Rc::clone(&inst_rc.borrow().class);
+            let self_val = Value::py_instance(Rc::clone(&inst_rc));
+            if let Some(method) = lookup_class_attr(&class, "__index__") {
+                let result = invoke_class_method(_interp, method, self_val, &[])?;
+                if let ValueKind::Bool(b) = result.kind() {
+                    return Ok(Value::string(format_hex_i64(if b { 1 } else { 0 })));
+                }
+                return match result.kind() {
+                    ValueKind::Int(v) => Ok(Value::string(format_hex_i64(v))),
+                    ValueKind::BigInt(b) => Ok(Value::string(format_bigint_radix(b, 16, "0x"))),
+                    _ => Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "__index__ returned non-int (type {})",
+                            value_type_name_str(&result),
+                        ),
+                    )),
+                };
+            }
+        }
         Err(PyError::named(
             "TypeError",
             format!(
@@ -3884,6 +3941,19 @@ fn format_hex_i64(v: i64) -> String {
         format!("-0x{:x}", -(v as i128))
     } else {
         format!("0x{:x}", v)
+    }
+}
+
+/// Format a `PyBigInt` as Python's `hex()`/`oct()`/`bin()` output.
+/// `prefix` is `"0x"`, `"0o"`, or `"0b"`; `radix` is 16, 8, or 2.
+/// Negative values get a `-` prepended: `"-0x2a"` etc.
+fn format_bigint_radix(b: &crate::value::PyBigInt, radix: u32, prefix: &str) -> String {
+    use num_bigint::Sign;
+    let (sign, digits) = (b.sign(), b.magnitude().to_str_radix(radix));
+    if sign == Sign::Minus {
+        format!("-{prefix}{digits}")
+    } else {
+        format!("{prefix}{digits}")
     }
 }
 
