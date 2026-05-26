@@ -453,19 +453,10 @@ fn str_rpartition(s: &str, sep: &str) -> Result<Value> {
 }
 
 fn str_splitlines(s: &str, args: &[Value]) -> Result<Value> {
-    // CPython accepts any truthy value for keepends (bool, int, str, etc.)
-    let keepends = match args.first().map(|v| v.kind()) {
-        None => false,
-        Some(ValueKind::Bool(b)) => b,
-        Some(ValueKind::Int(n)) => n != 0,
-        Some(ValueKind::Float(f)) => f != 0.0,
-        Some(ValueKind::None) => false,
-        Some(ValueKind::Str(s)) => !s.is_empty(),
-        Some(ValueKind::List(items)) => !items.is_empty(),
-        Some(ValueKind::Tuple(items)) => !items.is_empty(),
-        Some(ValueKind::Bytes(b)) => !b.is_empty(),
-        Some(_) => true,
-    };
+    // CPython coerces keepends via the standard truth protocol — any value is
+    // accepted.  Delegate to Value::truthy() which covers all ValueKind arms
+    // (including Dict, Set, BigInt, Range, Complex, BuiltinObject, etc.).
+    let keepends = args.first().map_or(false, |v| v.truthy());
     let mut lines: Vec<Value> = Vec::new();
     let bytes = s.as_bytes();
     let len = bytes.len();
