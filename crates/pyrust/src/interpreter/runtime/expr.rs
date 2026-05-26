@@ -1715,6 +1715,51 @@ impl Interpreter {
         pyrust_builtins::string::call(method, &receiver, args)
     }
 
+    /// Dispatch `bytes.join()` with support for generators and arbitrary iterables.
+    /// All other bytes methods are handled directly by `pyrust_builtins::bytes::call`.
+    pub(crate) fn call_bytes_join(
+        &mut self,
+        receiver: Value,
+        args: Vec<Value>,
+    ) -> Result<Value> {
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "bytes.join() takes exactly one argument ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        let iterable = args.into_iter().next().unwrap();
+        let needs_collect = !matches!(
+            iterable.kind(),
+            ValueKind::List(_) | ValueKind::Tuple(_)
+        );
+        let iterable = if needs_collect {
+            let items = self.collect_iterable(iterable).map_err(|e| {
+                let is_not_iterable = e.class_name_is("TypeError")
+                    && matches!(&e,
+                        PyError::Named(_, msg) | PyError::Class(_, msg)
+                            if msg.contains("is not iterable"));
+                if is_not_iterable {
+                    PyError::named("TypeError", "can only join an iterable".to_string())
+                } else {
+                    e
+                }
+            })?;
+            Value::list(items)
+        } else {
+            iterable
+        };
+        pyrust_builtins::bytes::call(
+            "join",
+            &receiver,
+            &[iterable],
+            &indexmap::IndexMap::new(),
+        )
+    }
+
     pub(crate) fn eval_binary(&mut self, left: Value, op: BinaryOp, right: Value) -> Result<Value> {
         match op {
             BinaryOp::Add => {

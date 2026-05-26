@@ -221,7 +221,14 @@ impl Interpreter {
                         };
                         pyrust_builtins::float::call(method, f, &pos)
                     }
-                    Kind::Bytes => pyrust_builtins::bytes::call(method, &receiver, &pos, &kw),
+                    Kind::Bytes => {
+                        if method == "join" {
+                            let args_vec: Vec<Value> = pos.drain(..).collect();
+                            self.call_bytes_join(receiver, args_vec)
+                        } else {
+                            pyrust_builtins::bytes::call(method, &receiver, &pos, &kw)
+                        }
+                    }
                     Kind::Str => {
                         // `format` needs kwargs threaded into the template.
                         // Intercept before `call_str_method`, which only receives
