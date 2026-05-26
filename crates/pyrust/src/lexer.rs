@@ -856,6 +856,20 @@ fn lex_bytes(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> 
                     v
                 }
                 other => {
+                    // \<newline> (and \<CR> / \<CR><LF>) is a line continuation:
+                    // both characters are dropped, matching CPython 3.12 behaviour.
+                    if other == '\n' {
+                        pos += 1;
+                        continue;
+                    }
+                    if other == '\r' {
+                        pos += 1;
+                        // Skip the \n of a CRLF pair if present.
+                        if chars.get(pos) == Some(&'\n') {
+                            pos += 1;
+                        }
+                        continue;
+                    }
                     // Unrecognised escape: CPython 3.12 keeps the backslash and
                     // the character verbatim (emitting a SyntaxWarning which pyrust
                     // omits for now).
