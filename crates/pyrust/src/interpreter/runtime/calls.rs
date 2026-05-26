@@ -2446,7 +2446,7 @@ impl Interpreter {
                 let value = match conversion {
                     Some('r') => Value::string(value.repr()),
                     Some('s') => Value::string(value.to_py_str()),
-                    Some('a') => Value::string(ascii_repr(&value)),
+                    Some('a') => Value::string(ascii_repr_interp(self, &value)?),
                     Some(c) => {
                         return Err(PyError::named(
                             "ValueError",
@@ -3917,7 +3917,7 @@ fn format_str_template(
             let value = match conversion {
                 Some('r') => Value::string(render_instance_repr(self, &value)?),
                 Some('s') => Value::string(self.render_value_as_str(&value)?),
-                Some('a') => Value::string(ascii_repr(&value)),
+                Some('a') => Value::string(ascii_repr_interp(self, &value)?),
                 Some(c) => {
                     return Err(PyError::named(
                         "ValueError",
@@ -4309,11 +4309,11 @@ fn render_instance_repr(interp: &mut Interpreter, value: &Value) -> Result<Strin
     Ok(value.repr())
 }
 
-/// Returns the ASCII-escaped repr of a value (like the built-in `ascii()`).
-pub(crate) fn ascii_repr(value: &Value) -> String {
-    value
-        .repr()
-        .chars()
+/// Escapes all non-ASCII characters in `s` using Python's `\xNN`, `\uNNNN`,
+/// or `\UNNNNNNNN` notation.  This is the pure string-transformation step
+/// used by `ascii_repr_interp`.
+fn ascii_escape_str(s: &str) -> String {
+    s.chars()
         .flat_map(|c| {
             if c.is_ascii() {
                 vec![c]
@@ -4329,6 +4329,15 @@ pub(crate) fn ascii_repr(value: &Value) -> String {
             }
         })
         .collect()
+}
+
+/// Interpreter-aware `ascii()` implementation.  Dispatches user `__repr__` for
+/// `PyInstance` values (matching the behaviour of the `repr()` builtin), then
+/// applies ASCII escaping to the resulting string.  Raises `TypeError` if
+/// `__repr__` returns a non-string.
+pub(crate) fn ascii_repr_interp(interp: &mut Interpreter, value: &Value) -> Result<String> {
+    let repr_str = render_instance_repr(interp, value)?;
+    Ok(ascii_escape_str(&repr_str))
 }
 
 /// Merge keyword arguments into the positional `pos` buffer for str methods,
