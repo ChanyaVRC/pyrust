@@ -3262,6 +3262,64 @@ pyrust_module! {
         Ok(Value::none())
     }
 
+    /// Issue #1134: `dict.__getitem__(self, key)` — native dict subscript for
+    /// dict subclasses.  Called via `super().__getitem__(key)` when the
+    /// subclass routes through the SuperProxy mechanism.  Performs the raw
+    /// backing-dict lookup and honours `__missing__` when the key is absent.
+    ///
+    /// CPython signature: `dict.__getitem__(self, key)`
+    #[py_name = "dict.__getitem__"]
+    fn dict_getitem(args) -> Result<Value> {
+        let (inst_rc, key) = match (args.first(), args.get(1)) {
+            (Some(self_arg), Some(key_arg)) => {
+                let inst_rc = match self_arg.value.kind() {
+                    ValueKind::PyInstance(rc) => Rc::clone(rc),
+                    _ => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            "descriptor '__getitem__' requires a 'dict' object".to_string(),
+                        ));
+                    }
+                };
+                (inst_rc, key_arg.value.clone())
+            }
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "dict.__getitem__ expected 2 arguments".to_string(),
+                ));
+            }
+        };
+        let backing = instance_builtin_data(&inst_rc).ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "descriptor '__getitem__' requires a 'dict' object".to_string(),
+            )
+        })?;
+        let lookup = if let Some(s) = key.as_str() {
+            _interp.dict_str_lookup(&backing, s)?
+        } else {
+            let py_key = _interp.value_to_pykey(&key)?;
+            _interp.dict_lookup(&backing, &py_key)?
+        };
+        match lookup {
+            Some((_, v)) => Ok(v),
+            None => {
+                let class = Rc::clone(&inst_rc.borrow().class);
+                if let Some(missing_fn) = lookup_class_attr(&class, "__missing__") {
+                    invoke_class_method(
+                        _interp,
+                        missing_fn,
+                        Value::py_instance(inst_rc),
+                        &[ExpandedCallArg { name: None, value: key }],
+                    )
+                } else {
+                    Err(PyError::key_error(key))
+                }
+            }
+        }
+    }
+
     /// Issue #988: `set.__init__(self[, iterable])` — resets the backing
     /// store of a set subclass instance.  With no iterable arg the backing
     /// is reset to an empty set; with an iterable arg the backing is rebuilt

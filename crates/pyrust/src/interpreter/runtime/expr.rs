@@ -413,13 +413,20 @@ impl Interpreter {
             }
             ValueKind::PyInstance(inst) => {
                 let inst_rc = Rc::clone(inst);
-                // Issue #976: if the instance has a backing primitive value
-                // (dict / list / set subclass), delegate subscript to it.
-                if let Some(backing) = instance_builtin_data(&inst_rc) {
-                    return self.eval_index(backing, index);
-                }
                 let class = Rc::clone(&inst_rc.borrow().class);
-                if let Some(method_val) = lookup_class_attr(&class, "__getitem__") {
+                // Issue #1134: check for a user-defined __getitem__ on the
+                // class *before* falling back to the backing primitive fast
+                // path.  A dict subclass that overrides __getitem__ must have
+                // the override called, not the raw backing-dict lookup.
+                // The BuiltinFunction sentinel `dict.__getitem__` registered
+                // on the dict base class itself is excluded — it is the base
+                // implementation, not an override.  Any other __getitem__
+                // (UserFunction from user code, or BuiltinFunction from a
+                // builtin class like Counter) is treated as an override.
+                let user_getitem = lookup_class_attr(&class, "__getitem__").filter(|v| {
+                    !matches!(v.kind(), ValueKind::BuiltinFunction("dict.__getitem__"))
+                });
+                if let Some(method_val) = user_getitem {
                     return invoke_class_method(
                         self,
                         method_val,
@@ -429,6 +436,40 @@ impl Interpreter {
                             value: index,
                         }],
                     );
+                }
+                // No user __getitem__: delegate to the backing primitive when
+                // present.  For dict backing, also honour __missing__ on a
+                // missing key (issue #1134).
+                if let Some(backing) = instance_builtin_data(&inst_rc) {
+                    if backing.as_dict().is_some() {
+                        let lookup = if let Some(s) = index.as_str() {
+                            self.dict_str_lookup(&backing, s)?
+                        } else {
+                            let key = self.value_to_pykey(&index)?;
+                            self.dict_lookup(&backing, &key)?
+                        };
+                        return match lookup {
+                            Some((_, v)) => Ok(v),
+                            None => {
+                                if let Some(missing_fn) =
+                                    lookup_class_attr(&class, "__missing__")
+                                {
+                                    invoke_class_method(
+                                        self,
+                                        missing_fn,
+                                        Value::py_instance(inst_rc),
+                                        &[ExpandedCallArg {
+                                            name: None,
+                                            value: index,
+                                        }],
+                                    )
+                                } else {
+                                    Err(PyError::key_error(index))
+                                }
+                            }
+                        };
+                    }
+                    return self.eval_index(backing, index);
                 }
                 Err(PyError::named(
                     "TypeError",
@@ -2573,11 +2614,14 @@ impl Interpreter {
             // `MyTuple([1,2,3])[1:3]` reaches the __getitem__ branch and
             // raises TypeError because tuple subclasses don't register a
             // user-level __getitem__.
-            if let Some(backing) = instance_builtin_data(&inst_rc) {
-                return self.eval_slice(backing, lo, hi, st);
-            }
+            // Issue #1134: check user __getitem__ before backing fast path,
+            // matching the same ordering fix in eval_index.  The builtin
+            // sentinel `dict.__getitem__` is not an override.
             let class = Rc::clone(&inst_rc.borrow().class);
-            if let Some(method_val) = lookup_class_attr(&class, "__getitem__") {
+            let user_getitem = lookup_class_attr(&class, "__getitem__").filter(|v| {
+                !matches!(v.kind(), ValueKind::BuiltinFunction("dict.__getitem__"))
+            });
+            if let Some(method_val) = user_getitem {
                 let slice_val = pyrust_builtins::slice::make_slice(lo, hi, st);
                 return invoke_class_method(
                     self,
@@ -2588,6 +2632,9 @@ impl Interpreter {
                         value: slice_val,
                     }],
                 );
+            }
+            if let Some(backing) = instance_builtin_data(&inst_rc) {
+                return self.eval_slice(backing, lo, hi, st);
             }
             return Err(PyError::named(
                 "TypeError",

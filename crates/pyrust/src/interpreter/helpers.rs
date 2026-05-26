@@ -396,6 +396,13 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
             .attrs
             .insert("__init__".to_string(), Value::builtin_function(sentinel));
     }
+    // Issue #1134: register `dict.__getitem__` so that `super().__getitem__(key)`
+    // from a dict subclass resolves via MRO lookup to a BuiltinFunction sentinel
+    // and routes through `super_bound_builtin` → registry dispatch.
+    dict_class
+        .borrow_mut()
+        .attrs
+        .insert("__getitem__".to_string(), Value::builtin_function("dict.__getitem__"));
     // PEP 585: `__class_getitem__` on the five collection types that support
     // `list[int]`-style generic subscripting.  Each gets a
     // `BuiltinFunction("<type>.__class_getitem__")` sentinel so that both
