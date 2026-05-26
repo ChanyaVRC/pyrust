@@ -6748,11 +6748,15 @@ impl Compiler {
             }
         }
 
-        // Apply decorators (outermost first in reverse declaration order).
+        // Evaluate decorator expressions top-to-bottom, then apply bottom-to-top.
+        // CPython evaluates decorators in declaration order (top first) but applies
+        // them innermost-first (bottom first): fn = d1(d2(d3(fn))).
         let mut val_reg = dst;
-        for deco_expr in decorators.iter().rev() {
-            let frame = self.next_temp;
-            if frame.checked_add(2).is_none() {
+        if !decorators.is_empty() {
+            let n = decorators.len() as u32;
+            let deco_base = self.next_temp;
+            // Need n slots for the callables plus 1 extra arg slot for the first call.
+            if deco_base.checked_add(n + 1).is_none() {
                 self.failed = true;
                 if self.error_msg.is_none() {
                     self.error_msg =
@@ -6760,17 +6764,28 @@ impl Compiler {
                 }
                 return;
             }
-            self.next_temp = frame + 2;
-            if frame + 1 > self.max_reg {
-                self.max_reg = frame + 1;
+            // Reserve n + 1 registers (n callables + 1 arg slot for the first application).
+            self.next_temp = deco_base + n + 1;
+            if deco_base + n > self.max_reg {
+                self.max_reg = deco_base + n;
             }
-            let saved = self.next_temp;
-            self.compile_expr_into(deco_expr, frame);
-            self.next_temp = saved;
-            self.emit(Insn::Move(frame + 1, val_reg));
-            self.emit(Insn::Call(frame, 1));
-            self.next_temp = frame + 1;
-            val_reg = frame;
+            // Evaluate each decorator expression top-to-bottom into consecutive registers.
+            for (i, deco_expr) in decorators.iter().enumerate() {
+                let saved = self.next_temp;
+                self.compile_expr_into(deco_expr, deco_base + i as u32);
+                self.next_temp = saved;
+            }
+            // Apply decorators bottom-to-top (innermost first).
+            for i in (0..n).rev() {
+                let frame = deco_base + i;
+                // frame+1 is the argument slot; for i == n-1 this is deco_base+n
+                // (the extra slot reserved above); for smaller i it reuses the
+                // register freed by the previous application result.
+                self.emit(Insn::Move(frame + 1, val_reg));
+                self.emit(Insn::Call(frame, 1));
+                val_reg = frame;
+            }
+            self.next_temp = deco_base + 1;
         }
 
         self.compile_store_name(name, val_reg);
@@ -7138,10 +7153,12 @@ impl Compiler {
             self.next_temp = dst + 1;
         }
 
+        // Evaluate decorator expressions top-to-bottom, then apply bottom-to-top.
         let mut val_reg = dst;
-        for deco_expr in decorators.iter().rev() {
-            let frame = self.next_temp;
-            if frame.checked_add(2).is_none() {
+        if !decorators.is_empty() {
+            let n = decorators.len() as u32;
+            let deco_base = self.next_temp;
+            if deco_base.checked_add(n + 1).is_none() {
                 self.failed = true;
                 if self.error_msg.is_none() {
                     self.error_msg =
@@ -7149,17 +7166,22 @@ impl Compiler {
                 }
                 return;
             }
-            self.next_temp = frame + 2;
-            if frame + 1 > self.max_reg {
-                self.max_reg = frame + 1;
+            self.next_temp = deco_base + n + 1;
+            if deco_base + n > self.max_reg {
+                self.max_reg = deco_base + n;
             }
-            let saved = self.next_temp;
-            self.compile_expr_into(deco_expr, frame);
-            self.next_temp = saved;
-            self.emit(Insn::Move(frame + 1, val_reg));
-            self.emit(Insn::Call(frame, 1));
-            self.next_temp = frame + 1;
-            val_reg = frame;
+            for (i, deco_expr) in decorators.iter().enumerate() {
+                let saved = self.next_temp;
+                self.compile_expr_into(deco_expr, deco_base + i as u32);
+                self.next_temp = saved;
+            }
+            for i in (0..n).rev() {
+                let frame = deco_base + i;
+                self.emit(Insn::Move(frame + 1, val_reg));
+                self.emit(Insn::Call(frame, 1));
+                val_reg = frame;
+            }
+            self.next_temp = deco_base + 1;
         }
 
         self.compile_store_name(name, val_reg);
