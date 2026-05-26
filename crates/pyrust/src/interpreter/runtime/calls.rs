@@ -1287,6 +1287,7 @@ impl Interpreter {
         let mut sep = String::from(" ");
         let mut end = String::from("\n");
         let mut file: Option<Value> = None;
+        let mut flush = false;
 
         for arg in args {
             let value = arg.value.clone();
@@ -1305,7 +1306,7 @@ impl Interpreter {
                     }
                 }
                 Some("flush") => {
-                    // flush is accepted but ignored (we always flush stdout implicitly).
+                    flush = self.truthy_value(&value)?;
                 }
                 Some(other) => {
                     return Err(PyError::Runtime(format!(
@@ -1316,7 +1317,7 @@ impl Interpreter {
             }
         }
 
-        Ok(PrintOptions { values, sep, end, file })
+        Ok(PrintOptions { values, sep, end, file, flush })
     }
 
     pub(crate) fn call_user_function_expanded(

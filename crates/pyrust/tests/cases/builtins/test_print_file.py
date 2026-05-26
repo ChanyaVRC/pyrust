@@ -43,3 +43,28 @@ try:
     print("x", file=42)
 except AttributeError as e:
     print("AttributeError:", e)
+
+# flush=True calls file.flush() after writing
+class Flusher:
+    def __init__(self):
+        self.calls = []
+    def write(self, s):
+        self.calls.append(("write", s))
+    def flush(self):
+        self.calls.append(("flush",))
+
+wf = Flusher()
+print("hi", file=wf, flush=True)
+print(wf.calls)
+
+# flush=False does NOT call file.flush()
+wf2 = Flusher()
+print("hi", file=wf2, flush=False)
+print(wf2.calls)
+
+# flush=True with no flush method raises AttributeError
+try:
+    print("x", file=Collector(), flush=True)
+    print("no error")
+except AttributeError:
+    print("AttributeError: no flush")

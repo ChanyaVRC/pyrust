@@ -751,6 +751,8 @@ pub(crate) struct PrintOptions {
     pub(crate) end: String,
     /// `None` means write to stdout; `Some(v)` means call `v.write(...)`.
     pub(crate) file: Option<Value>,
+    /// When true and `file` is `Some`, call `file.flush()` after writing.
+    pub(crate) flush: bool,
 }
 
 #[derive(Debug, Clone)]
