@@ -2969,8 +2969,19 @@ impl Value {
                 UserFunctionKind::Builtin(name) => format!("<built-in function {name}>"),
             },
             ValueKind::PyClass(class) => {
-                let name = class.borrow().name.clone();
-                format!("<class '{name}'>")
+                let (qualname, module) = {
+                    let c = class.borrow();
+                    let qualname = c.qualname.clone();
+                    let module = c
+                        .attrs
+                        .get("__module__")
+                        .and_then(|v| v.as_str().map(|s| s.to_string()));
+                    (qualname, module)
+                };
+                match module.as_deref() {
+                    Some("builtins") | None => format!("<class '{qualname}'>"),
+                    Some(m) => format!("<class '{m}.{qualname}'>"),
+                }
             }
             ValueKind::PyInstance(instance) => {
                 if is_exception_instance(instance) {
