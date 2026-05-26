@@ -467,14 +467,26 @@ fn call_stdio_method(state: &BuiltinState, method: &str, args: &[Value]) -> Resu
     };
     match method {
         "write" => {
-            let s = args
-                .first()
+            let first = args.first();
+            let s = first
                 .and_then(|v| match v.kind() {
                     ValueKind::Str(s) => Some(s.to_string()),
                     _ => None,
                 })
                 .ok_or_else(|| {
-                    PyError::named("TypeError", "write() argument must be str".to_string())
+                    // CPython's C implementation uses tp_name, which for NoneType
+                    // is "NoneType" yet the error prints "None".  Mirror that by
+                    // mapping NoneType→None in the error message.
+                    let type_name = first
+                        .map(|v| match v.kind() {
+                            ValueKind::None => "None".to_string(),
+                            _ => pyrust_core::builtin_type_name(v).into_owned(),
+                        })
+                        .unwrap_or_else(|| "str".to_string());
+                    PyError::named(
+                        "TypeError",
+                        format!("write() argument must be str, not {type_name}"),
+                    )
                 })?;
             let n = s.chars().count() as i64;
             match kind {
