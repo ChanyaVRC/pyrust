@@ -80,7 +80,7 @@ class SuppressCtx:
         return "token"
 
     def __exit__(self, exc_type, exc, tb):
-        print("with-exit", exc_type is not None, exc is not None, tb is None)
+        print("with-exit", exc_type is not None, exc is not None, tb is not exc)
         return True
 
 
