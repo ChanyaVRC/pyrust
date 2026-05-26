@@ -56,6 +56,10 @@ pub struct FnProto {
     /// `co_consts[0]` / `__doc__` extraction.  `None` when no docstring
     /// is present.
     pub docstring: Option<String>,
+    /// PEP 487 keyword argument names from the class header (e.g. `key` in
+    /// `class Foo(Base, key=val)`).  Parallel to the kwarg value registers in
+    /// `MakeClass` (`kwarg_base..kwarg_base+kwarg_n`).  Empty for functions.
+    pub class_kwarg_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -233,7 +237,9 @@ pub enum Insn {
     /// Clear active_exception (end of except handler).
     EndExcept,
     /// R[dst] = create class(fn_protos[proto_idx], bases R[bases_base..+bases_n], name=names[name_idx])
-    MakeClass(Reg, u8, Reg, u8, u16),
+    /// PEP 487: kwarg_n keyword arg values are in R[kwarg_base..kwarg_base+kwarg_n];
+    /// names come from fn_protos[proto_idx].class_kwarg_names.
+    MakeClass(Reg, u8, Reg, u8, u16, Reg, u8),
     /// Print R[src] if not None (REPL expression output).
     PrintExpr(Reg),
     /// R[set].insert(R[val])  — in-place add for set comprehension construction

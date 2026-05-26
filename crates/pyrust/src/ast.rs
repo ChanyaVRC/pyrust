@@ -82,6 +82,10 @@ pub enum Stmt {
         /// `metaclass(name, bases_tuple, namespace_dict)` instead of the
         /// default `type(...)` constructor.
         metaclass: Option<Expr>,
+        /// PEP 487 keyword arguments in the class header other than `metaclass`.
+        /// Forwarded to `__init_subclass__` of the base class.
+        /// E.g. `class Foo(Base, key=val)` -> `keywords = [("key", val_expr)]`.
+        keywords: Vec<(String, Expr)>,
         body: Vec<Stmt>,
         decorators: Vec<Expr>,
     },
