@@ -214,7 +214,7 @@ impl Interpreter {
         borrow.attrs.insert("__context__".to_string(), ctx.clone());
     }
 
-    fn coerce_to_exception(&self, value: Value) -> Result<Value> {
+    fn coerce_to_exception(&mut self, value: Value) -> Result<Value> {
         match value.kind() {
             ValueKind::PyInstance(instance) => {
                 let instance = Rc::clone(instance);
@@ -230,7 +230,10 @@ impl Interpreter {
             ValueKind::PyClass(class) => {
                 let class = Rc::clone(class);
                 if is_exception_class(&class) {
-                    Ok(instantiate_exception(class, Vec::new()))
+                    // Use call_class_expanded so that user-defined __init__ is
+                    // invoked (e.g. `raise MyError` where MyError.__init__ has
+                    // default args).  Mirrors CPython's do_raise behaviour.
+                    self.call_class_expanded(class, &[])
                 } else {
                     Err(PyError::named(
                         "TypeError",
@@ -251,7 +254,7 @@ impl Interpreter {
     /// subclass as cause.  A class is auto-instantiated with no args, matching
     /// CPython's `ceval.c::do_raise`.  Anything else raises
     /// `TypeError: exception causes must derive from BaseException`.
-    fn coerce_to_exception_cause(&self, value: Value) -> Result<Value> {
+    fn coerce_to_exception_cause(&mut self, value: Value) -> Result<Value> {
         if value.is_none() {
             return Ok(value);
         }
@@ -270,7 +273,9 @@ impl Interpreter {
             ValueKind::PyClass(class) => {
                 let class = Rc::clone(class);
                 if is_exception_class(&class) {
-                    Ok(instantiate_exception(class, Vec::new()))
+                    // Use call_class_expanded so that user-defined __init__ is
+                    // invoked when a class is used as a cause.
+                    self.call_class_expanded(class, &[])
                 } else {
                     Err(PyError::named(
                         "TypeError",
