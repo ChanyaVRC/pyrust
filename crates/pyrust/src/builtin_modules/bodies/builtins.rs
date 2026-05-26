@@ -3806,17 +3806,27 @@ fn min_max_impl(
 ///
 /// Shared by `print` and `str(x)` — both want the same dunder-aware
 /// rendering, just wrapped differently (`print` collects into a `Vec<String>`,
-/// `str(x)` returns a `Value::string(...)`).  Exception instances bypass
-/// the dunder lookup and use the built-in `Value::to_py_str()` formatting,
-/// matching CPython's special-cased `BaseException.__str__`.
+/// `str(x)` returns a `Value::string(...)`).  Exception instances without a
+/// user-defined `__str__` fall back to `Value::to_py_str()` (matching
+/// CPython's `BaseException.__str__`); those with a user-defined `__str__`
+/// call it via the normal dunder dispatch loop.
 fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result<String> {
     let ValueKind::PyInstance(inst) = value.kind() else {
         return Ok(value.to_py_str());
     };
     let inst_rc = Rc::clone(&inst);
     let class = Rc::clone(&inst_rc.borrow().class);
+    // For exception instances, fall back to built-in exception formatting only
+    // when the class has no user-defined __str__.  A user-defined __str__ is
+    // one whose resolved value is not a BuiltinFunction — i.e. it was declared
+    // in user code, not registered as a Rust built-in.
     if is_exception_class(&class) {
-        return Ok(value.to_py_str());
+        let has_user_str = lookup_class_attr(&class, "__str__")
+            .map(|v| !matches!(v.kind(), ValueKind::BuiltinFunction(_)))
+            .unwrap_or(false);
+        if !has_user_str {
+            return Ok(value.to_py_str());
+        }
     }
     for dunder in &["__str__", "__repr__"] {
         if let Some(method_val) = lookup_class_attr(&class, dunder) {
