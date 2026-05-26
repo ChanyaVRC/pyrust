@@ -74,3 +74,32 @@ class Named:
 
 print(Named.r.name)        # r
 print(Named.r.owner_name)  # Named
+
+# __set_name__ runs before __init_subclass__ (PEP 487 ordering guarantee).
+set_name_order = []
+
+class OrderDesc:
+    def __set_name__(self, owner, name):
+        set_name_order.append("set_name:" + name)
+
+class OrderBase:
+    def __init_subclass__(cls, **kw):
+        set_name_order.append("init_subclass:" + cls.__name__)
+
+class OrderSub(OrderBase):
+    x = OrderDesc()
+
+print(set_name_order)  # ['set_name:x', 'init_subclass:OrderSub']
+
+# Inherited __set_name__ works (descriptor subclass that doesn't override it).
+class BaseDesc:
+    def __set_name__(self, owner, name):
+        self.name = name
+
+class SubDesc(BaseDesc):
+    pass  # inherits __set_name__ from BaseDesc
+
+class C5:
+    x = SubDesc()
+
+print(C5.x.name)  # x
