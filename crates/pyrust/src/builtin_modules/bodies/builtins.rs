@@ -4921,6 +4921,44 @@ fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) -> Result<S
             }
             Ok(format!("{{{}}}", parts.join(", ")))
         }
+        // Frozenset is stored as a BuiltinObject; its elements are PyKey so
+        // they need render_key_repr to dispatch __repr__ on PyKey::Object.
+        ValueKind::BuiltinObject { ops, .. }
+            if ops.type_name() == pyrust_builtins::frozenset::TYPE_NAME =>
+        {
+            let items = match pyrust_builtins::frozenset::as_items(value) {
+                Some(rc) => rc,
+                None => return Ok(value.repr()),
+            };
+            if items.is_empty() {
+                return Ok("frozenset()".to_string());
+            }
+            let id = value.value_id();
+            let already_in = id.map_or(false, |id| {
+                REPR_IN_PROGRESS.with(|c| c.borrow().contains(&id))
+            });
+            if already_in {
+                return Ok("{...}".to_string());
+            }
+            if let Some(id) = id {
+                REPR_IN_PROGRESS.with(|c| c.borrow_mut().push(id));
+            }
+            let snapshot: Vec<PyKey> = items.iter().cloned().collect();
+            drop(items);
+            let mut parts = Vec::with_capacity(snapshot.len());
+            for k in &snapshot {
+                parts.push(render_key_repr(interp, k)?);
+            }
+            if let Some(id) = id {
+                REPR_IN_PROGRESS.with(|c| {
+                    let mut v = c.borrow_mut();
+                    if let Some(pos) = v.iter().rposition(|&x| x == id) {
+                        v.remove(pos);
+                    }
+                });
+            }
+            Ok(format!("frozenset({{{}}})", parts.join(", ")))
+        }
         // For all other value types (int, float, str, bool, None, …), the
         // pure `Value::repr()` is correct and needs no interpreter.
         _ => Ok(value.repr()),
@@ -4929,13 +4967,38 @@ fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) -> Result<S
 
 /// Render a `PyKey` dict key or set element to its repr string, honouring
 /// `__repr__` on user instances stored as `PyKey::Object`.
+///
+/// Also recurses into `PyKey::Tuple` and `PyKey::FrozenSet` so that nested
+/// user objects inside hashable compound keys get their `__repr__` called.
 fn render_key_repr(interp: &mut crate::Interpreter, key: &PyKey) -> Result<String> {
-    // Only `PyKey::Object` can hold a user instance that has `__repr__`.
-    // All other PyKey variants are primitive types whose repr is pure.
-    if let PyKey::Object { value, .. } = key {
-        return render_value_repr(interp, value);
+    match key {
+        PyKey::Object { value, .. } => render_value_repr(interp, value),
+        PyKey::Tuple(items) => {
+            if items.is_empty() {
+                return Ok("()".to_string());
+            }
+            let mut parts = Vec::with_capacity(items.len());
+            for item in items.iter() {
+                parts.push(render_key_repr(interp, item)?);
+            }
+            if items.len() == 1 {
+                Ok(format!("({},)", parts[0]))
+            } else {
+                Ok(format!("({})", parts.join(", ")))
+            }
+        }
+        PyKey::FrozenSet(items) => {
+            if items.is_empty() {
+                return Ok("frozenset()".to_string());
+            }
+            let mut parts = Vec::with_capacity(items.len());
+            for item in items.iter() {
+                parts.push(render_key_repr(interp, item)?);
+            }
+            Ok(format!("frozenset({{{}}})", parts.join(", ")))
+        }
+        _ => Ok(pyrust_core::key_repr(key)),
     }
-    Ok(pyrust_core::key_repr(key))
 }
 
 /// Render `value` to its Python-string form, honouring `__str__` / `__repr__`
@@ -4958,6 +5021,13 @@ fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result
             | ValueKind::Tuple(_)
             | ValueKind::Dict(_)
             | ValueKind::Set(_) => render_value_repr(interp, value),
+            // frozenset: str() == repr() in CPython; delegate to
+            // render_value_repr so nested user instances get __repr__.
+            ValueKind::BuiltinObject { ops, .. }
+                if ops.type_name() == pyrust_builtins::frozenset::TYPE_NAME =>
+            {
+                render_value_repr(interp, value)
+            }
             _ => Ok(value.to_py_str()),
         };
     };

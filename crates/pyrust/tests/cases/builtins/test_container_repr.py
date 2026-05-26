@@ -139,3 +139,50 @@ class PlainExc(Exception):
 p = PlainExc("msg")
 print(repr(p))  # PlainExc('msg')
 print(repr([p]))  # [PlainExc('msg')]
+
+
+# frozenset with a hashable user instance — __repr__ must be dispatched
+class FH:
+    def __repr__(self):
+        return "FH"
+
+    def __hash__(self):
+        return 1
+
+    def __eq__(self, other):
+        return type(other) is FH
+
+
+fh = FH()
+print(repr(frozenset({fh})))   # frozenset({FH})
+print(str(frozenset({fh})))    # frozenset({FH})
+print(frozenset({fh}))         # frozenset({FH})
+
+# frozenset inside a list
+print(repr([frozenset({fh})]))  # [frozenset({FH})]
+
+# frozenset as a dict key
+d_fs = {frozenset({fh}): "v"}
+print(repr(d_fs))  # {frozenset({FH}): 'v'}
+
+# tuple as a dict key where an element is a user instance
+class TK:
+    def __repr__(self):
+        return "TK"
+
+    def __hash__(self):
+        return 42
+
+    def __eq__(self, other):
+        return type(other) is TK
+
+
+tk = TK()
+d_tk = {(tk, 1): "v"}
+print(repr(d_tk))  # {(TK, 1): 'v'}
+
+# PyKey::FrozenSet nested inside a PyKey::FrozenSet key (edge case)
+# frozenset of frozensets — inner frozenset contains a user obj
+inner_fs = frozenset({fh})
+outer_d = {frozenset({inner_fs}): "w"}
+print(repr(outer_d))  # {frozenset({frozenset({FH})}): 'w'}
