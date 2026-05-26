@@ -13,7 +13,7 @@ print(π)           # 3.14159
 class Θ:
     pass
 
-print(Θ.__name__)  # Θ
+print(Θ.__name__ == 'Θ')  # True
 
 # Unicode function name and parameter
 def φ(x):
