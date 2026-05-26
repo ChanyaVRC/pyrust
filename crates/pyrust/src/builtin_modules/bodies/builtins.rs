@@ -1022,7 +1022,10 @@ pyrust_module! {
                 ValueKind::Str(s) => s.to_string(),
                 _ => return Err(PyError::named(
                     "TypeError",
-                    format!("{FN_NAME}() argument 1 must be a str"),
+                    format!(
+                        "type.__new__() argument 1 must be str, not {}",
+                        value_type_name_str(&args[0].value),
+                    ),
                 )),
             };
             // Extract all bases from the bases sequence.  Collect into a Vec
@@ -1033,7 +1036,10 @@ pyrust_module! {
                 ValueKind::List(items) => items.to_vec(),
                 _ => return Err(PyError::named(
                     "TypeError",
-                    format!("{FN_NAME}() argument 2 must be a tuple"),
+                    format!(
+                        "type.__new__() argument 2 must be tuple, not {}",
+                        value_type_name_str(&args[1].value),
+                    ),
                 )),
             };
             // Validate each entry and split into primary base + extra bases.
@@ -1077,7 +1083,10 @@ pyrust_module! {
                 }
                 _ => return Err(PyError::named(
                     "TypeError",
-                    format!("{FN_NAME}() argument 3 must be a dict"),
+                    format!(
+                        "type.__new__() argument 3 must be dict, not {}",
+                        value_type_name_str(&args[2].value),
+                    ),
                 )),
             }
             return Ok(Value::py_class(Rc::new(RefCell::new(PyClass {
