@@ -29,7 +29,23 @@ class Base:
 class Child(Base):
     pass  # inherits __radd__, does not directly define it
 
-print(Base() + Child())   # base_add (Child has no directly-defined __radd__)
+print(Base() + Child())   # base_add (Child inherits same __radd__ slot as Base, no priority)
+
+# --- Child inherits a DIFFERENT __radd__ from an intermediate class ---
+# CPython slot check: slotw != slotv even though Child doesn't directly define __radd__
+
+class GrandBase:
+    def __add__(self, other):
+        return "grandbase_add"
+
+class Mid(GrandBase):
+    def __radd__(self, other):
+        return "mid_radd"
+
+class Leaf(Mid):
+    pass  # inherits __radd__ from Mid, which differs from GrandBase's (None)
+
+print(GrandBase() + Leaf())   # mid_radd (Leaf's inherited slot differs from GrandBase's None)
 
 # --- Child with directly-defined __radd__ DOES get priority ---
 
