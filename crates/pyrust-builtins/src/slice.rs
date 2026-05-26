@@ -8,10 +8,16 @@
 
 use std::any::Any;
 
-use pyrust_core::{BuiltinState, BuiltinTypeOps, PyError, Value};
+use indexmap::IndexMap;
+use pyrust_core::{
+    BuiltinState, BuiltinTypeOps, PyBigIntSign, PyError, PyToPrimitive, Result, Value, ValueKind,
+};
 
 pub const TYPE_NAME: &str = "slice";
 pub const SLICE_OPS: &SliceOps = &SliceOps;
+
+/// Method names exposed by `slice` for `dir()`.
+pub const METHODS: &[&str] = &["indices"];
 
 pub struct SliceState {
     pub start: Value,
@@ -94,11 +100,56 @@ impl BuiltinTypeOps for SliceOps {
     // use `interp.value_to_pykey()` in PR #905, closing the parity gap
     // that was documented here.
 
-    fn setattr(&self, _state: &BuiltinState, name: &str, _value: Value) -> Result<(), PyError> {
+    fn setattr(&self, _state: &BuiltinState, name: &str, _value: Value) -> Result<()> {
         Err(PyError::named(
             "AttributeError",
             format!("readonly attribute '{name}'"),
         ))
+    }
+
+    fn has_method(&self, name: &str) -> bool {
+        name == "indices"
+    }
+
+    fn call_method(
+        &self,
+        state: &BuiltinState,
+        name: &str,
+        args: Vec<Value>,
+        _kwargs: &IndexMap<String, Value>,
+    ) -> Result<Value> {
+        if name != "indices" {
+            return Err(PyError::named(
+                "AttributeError",
+                format!("'slice' object has no attribute '{name}'"),
+            ));
+        }
+        let borrow = state.borrow();
+        let s = borrow
+            .downcast_ref::<SliceState>()
+            .expect("SliceOps::call_method: bad state");
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "slice.indices() takes exactly one argument ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        let length = slice_index_from_value(&args[0])?;
+        if length < 0 {
+            return Err(PyError::named(
+                "ValueError",
+                "length should not be negative".to_string(),
+            ));
+        }
+        let (start, stop, step) = compute_indices(length, &s.start, &s.stop, &s.step)?;
+        Ok(Value::tuple(vec![
+            Value::int(start),
+            Value::int(stop),
+            Value::int(step),
+        ]))
     }
 }
 
@@ -112,4 +163,97 @@ pub fn make_slice(start: Option<Value>, stop: Option<Value>, step: Option<Value>
     let step = step.unwrap_or_else(Value::none);
     let state: Box<dyn Any> = Box::new(SliceState { start, stop, step });
     Value::builtin_object(SLICE_OPS, state)
+}
+
+/// Convert the `length` argument of `slice.indices()` to an `i64`.
+///
+/// Accepts `int`, `bool` (as 0/1), and `BigInt` (clamped to `i64` range).
+/// Any other type raises `TypeError` with the `__index__`-style message,
+/// matching CPython's `PyArg_ParseTuple` behaviour for the length argument.
+fn slice_index_from_value(value: &Value) -> Result<i64> {
+    match value.kind() {
+        ValueKind::Int(i) => Ok(i),
+        ValueKind::Bool(b) => Ok(if b { 1 } else { 0 }),
+        ValueKind::BigInt(big) => Ok(match PyToPrimitive::to_i64(big) {
+            Some(i) => i,
+            None => match big.sign() {
+                PyBigIntSign::Minus => i64::MIN,
+                _ => i64::MAX,
+            },
+        }),
+        _ => Err(PyError::named(
+            "TypeError",
+            format!(
+                "'{}' object cannot be interpreted as an integer",
+                pyrust_core::builtin_type_name(value)
+            ),
+        )),
+    }
+}
+
+/// Convert a slice-bound value (start, stop, or step) to an `i64`.
+///
+/// Same integer coercion as `slice_index_from_value`, but raises the
+/// CPython-matching error message from `_PyEval_SliceIndex` when the
+/// value is not an integer type:
+/// `"slice indices must be integers or None or have an __index__ method"`
+fn slice_bound_from_value(value: &Value) -> Result<i64> {
+    match value.kind() {
+        ValueKind::Int(i) => Ok(i),
+        ValueKind::Bool(b) => Ok(if b { 1 } else { 0 }),
+        ValueKind::BigInt(big) => Ok(match PyToPrimitive::to_i64(big) {
+            Some(i) => i,
+            None => match big.sign() {
+                PyBigIntSign::Minus => i64::MIN,
+                _ => i64::MAX,
+            },
+        }),
+        _ => Err(PyError::named(
+            "TypeError",
+            "slice indices must be integers or None or have an __index__ method".to_string(),
+        )),
+    }
+}
+
+/// Compute `(start, stop, step)` for `slice.indices(length)`.
+///
+/// Implements the same algorithm as CPython's `PySlice_Unpack` +
+/// `PySlice_AdjustIndices` (`Objects/sliceobject.c`).  `length` must be
+/// non-negative (caller's responsibility).
+fn compute_indices(length: i64, lo: &Value, hi: &Value, st: &Value) -> Result<(i64, i64, i64)> {
+    // Step.
+    let step = if st.is_none() {
+        1
+    } else {
+        let s = slice_bound_from_value(st)?;
+        if s == 0 {
+            return Err(PyError::named(
+                "ValueError",
+                "slice step cannot be zero".to_string(),
+            ));
+        }
+        s
+    };
+
+    // Resolve a bound value and clamp it to the valid range for this step direction.
+    // For step > 0: valid range is [0, length].
+    // For step < 0: valid range is [-1, length-1].
+    let clamp_bound = |v: &Value, default_pos: i64, default_neg: i64| -> Result<i64> {
+        if v.is_none() {
+            return Ok(if step > 0 { default_pos } else { default_neg });
+        }
+        let raw = slice_bound_from_value(v)?;
+        // Resolve negative index relative to length.
+        let resolved = if raw < 0 { raw + length } else { raw };
+        Ok(if step > 0 {
+            resolved.clamp(0, length)
+        } else {
+            resolved.clamp(-1, length - 1)
+        })
+    };
+
+    let start = clamp_bound(lo, 0, length - 1)?;
+    let stop = clamp_bound(hi, length, -1)?;
+
+    Ok((start, stop, step))
 }
