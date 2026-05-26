@@ -3963,6 +3963,24 @@ pub enum PyError {
         message: String,
         module_name: Option<String>,
     },
+    /// An `OSError` (or one of its subclasses) raised from an OS-level
+    /// operation.  Carries the structured fields that CPython 3.12 sets on
+    /// every OS-sourced exception: `errno`, `strerror`, and optionally
+    /// `filename` and `filename2`.
+    ///
+    /// The VM materialises this into a `PyInstance` via
+    /// `instantiate_os_error`, which populates `errno`, `strerror`,
+    /// `filename`, and `filename2` as instance attributes — matching
+    /// CPython's `OSError.__init__(errno, strerror[, filename])` behaviour.
+    /// Two-path operations (e.g. `os.rename`) set both `filename` (src) and
+    /// `filename2` (dst).
+    OsError {
+        class_name: &'static str,
+        errno: i64,
+        strerror: String,
+        filename: Option<String>,
+        filename2: Option<String>,
+    },
     Raised(Value),
 }
 
@@ -4016,6 +4034,65 @@ impl PyError {
         }
     }
 
+    /// Map a `std::io::ErrorKind` to the most-derived Python OSError subclass
+    /// name following CPython 3.12's errno-to-subclass mapping.
+    fn io_kind_to_class(kind: std::io::ErrorKind) -> &'static str {
+        use std::io::ErrorKind::*;
+        match kind {
+            NotFound => "FileNotFoundError",
+            PermissionDenied => "PermissionError",
+            AlreadyExists => "FileExistsError",
+            IsADirectory => "IsADirectoryError",
+            NotADirectory => "NotADirectoryError",
+            Interrupted => "InterruptedError",
+            WouldBlock => "BlockingIOError",
+            TimedOut => "TimeoutError",
+            _ => "OSError",
+        }
+    }
+
+    /// Convert a `std::io::Error` into a Python `OSError` (or subclass),
+    /// attaching `filename` when provided.
+    ///
+    /// The `strerror` stored on the exception is the OS-provided message
+    /// stripped of any file-path decoration, matching CPython's behaviour
+    /// where `e.strerror` is `"No such file or directory"` rather than the
+    /// decorated form.
+    pub fn from_io_error(e: &std::io::Error, filename: Option<&str>) -> Self {
+        Self::from_io_error2(e, filename, None)
+    }
+
+    /// Like [`from_io_error`] but also sets `filename2` for two-path operations
+    /// (e.g. `os.rename(src, dst)` where `filename2` is the destination).
+    /// CPython 3.12 sets `filename2` on the exception for rename/link/symlink.
+    pub fn from_io_error2(
+        e: &std::io::Error,
+        filename: Option<&str>,
+        filename2: Option<&str>,
+    ) -> Self {
+        let raw = e.raw_os_error().unwrap_or(0);
+        let class_name = Self::io_kind_to_class(e.kind());
+        // `std::io::Error::from_raw_os_error(N).to_string()` on Linux produces
+        // "strerror(N) (os error N)" — strip the Rust-added trailer.
+        let strerror = if raw != 0 {
+            let full = std::io::Error::from_raw_os_error(raw).to_string();
+            if let Some(pos) = full.rfind(" (os error ") {
+                full[..pos].to_owned()
+            } else {
+                full
+            }
+        } else {
+            e.to_string()
+        };
+        PyError::OsError {
+            class_name,
+            errno: raw as i64,
+            strerror,
+            filename: filename.map(|s| s.to_owned()),
+            filename2: filename2.map(|s| s.to_owned()),
+        }
+    }
+
     /// Returns `true` when `self` is a `Named`, `Class`, `KeyError`, or `Raised` error
     /// whose exception class name equals `name`.
     ///
@@ -4037,6 +4114,24 @@ impl PyError {
                 // for a ModuleNotFoundError variant too.
                 *class_name == name
                     || (name == "ImportError" && *class_name == "ModuleNotFoundError")
+            }
+            PyError::OsError { class_name, .. } => {
+                // All OSError subclasses also match "OSError" for the fast-path check.
+                *class_name == name
+                    || (name == "OSError"
+                        && matches!(
+                            *class_name,
+                            "FileNotFoundError"
+                                | "PermissionError"
+                                | "FileExistsError"
+                                | "IsADirectoryError"
+                                | "NotADirectoryError"
+                                | "InterruptedError"
+                                | "BlockingIOError"
+                                | "ChildProcessError"
+                                | "ProcessLookupError"
+                                | "TimeoutError"
+                        ))
             }
             PyError::Raised(exc) => match exc.kind() {
                 ValueKind::PyInstance(inst) => class_chain_has_name(&inst.borrow().class, name),
@@ -4063,6 +4158,19 @@ impl fmt::Display for PyError {
                 ..
             } => {
                 write!(f, "{class_name}: {message}")
+            }
+            PyError::OsError {
+                class_name,
+                errno,
+                strerror,
+                filename,
+                ..
+            } => {
+                if let Some(fname) = filename {
+                    write!(f, "{class_name}: [Errno {errno}] {strerror}: '{fname}'")
+                } else {
+                    write!(f, "{class_name}: [Errno {errno}] {strerror}")
+                }
             }
             PyError::Raised(value) => write!(f, "Uncaught exception: {}", value.repr()),
         }

@@ -108,7 +108,7 @@ pyrust_module! {
             ));
         }
         let cwd = std::env::current_dir()
-            .map_err(|e| PyError::named("OSError", e.to_string()))?;
+            .map_err(|e| PyError::from_io_error(&e, None))?;
         Ok(Value::string(cwd.to_string_lossy()))
     }
 
@@ -117,7 +117,7 @@ pyrust_module! {
     fn chdir(args) -> Result<Value> {
         let path = single_path_arg(FN_NAME, args)?;
         std::env::set_current_dir(&path)
-            .map_err(|e| PyError::named("OSError", e.to_string()))?;
+            .map_err(|e| PyError::from_io_error(&e, Some(&path)))?;
         Ok(Value::none())
     }
 
@@ -225,10 +225,10 @@ pyrust_module! {
             None => ".".to_string(),
         };
         let entries = std::fs::read_dir(&path)
-            .map_err(|e| PyError::named("OSError", e.to_string()))?;
+            .map_err(|e| PyError::from_io_error(&e, Some(&path)))?;
         let mut names: Vec<String> = Vec::new();
         for entry in entries {
-            let entry = entry.map_err(|e| PyError::named("OSError", e.to_string()))?;
+            let entry = entry.map_err(|e| PyError::from_io_error(&e, Some(&path)))?;
             names.push(entry.file_name().to_string_lossy().into_owned());
         }
         Ok(Value::list(names.into_iter().map(Value::string).collect()))
@@ -257,7 +257,7 @@ pyrust_module! {
             require_int(FN_NAME, &m.value, "mode")?;
         }
         std::fs::create_dir(&path)
-            .map_err(|e| PyError::named("OSError", e.to_string()))?;
+            .map_err(|e| PyError::from_io_error(&e, Some(&path)))?;
         Ok(Value::none())
     }
 
@@ -349,11 +349,11 @@ pyrust_module! {
             // success rather than fabricating an error.
             return match std::fs::create_dir(&path) {
                 Ok(()) => Ok(Value::none()),
-                Err(e) => Err(PyError::named("OSError", e.to_string())),
+                Err(e) => Err(PyError::from_io_error(&e, Some(&path))),
             };
         }
         std::fs::create_dir_all(&path)
-            .map_err(|e| PyError::named("OSError", e.to_string()))?;
+            .map_err(|e| PyError::from_io_error(&e, Some(&path)))?;
         Ok(Value::none())
     }
 
@@ -364,7 +364,7 @@ pyrust_module! {
     fn remove(args) -> Result<Value> {
         let path = single_path_arg(FN_NAME, args)?;
         std::fs::remove_file(&path)
-            .map_err(|e| PyError::named("OSError", e.to_string()))?;
+            .map_err(|e| PyError::from_io_error(&e, Some(&path)))?;
         Ok(Value::none())
     }
 
@@ -373,7 +373,7 @@ pyrust_module! {
     fn unlink(args) -> Result<Value> {
         let path = single_path_arg(FN_NAME, args)?;
         std::fs::remove_file(&path)
-            .map_err(|e| PyError::named("OSError", e.to_string()))?;
+            .map_err(|e| PyError::from_io_error(&e, Some(&path)))?;
         Ok(Value::none())
     }
 
@@ -382,7 +382,7 @@ pyrust_module! {
     fn rmdir(args) -> Result<Value> {
         let path = single_path_arg(FN_NAME, args)?;
         std::fs::remove_dir(&path)
-            .map_err(|e| PyError::named("OSError", e.to_string()))?;
+            .map_err(|e| PyError::from_io_error(&e, Some(&path)))?;
         Ok(Value::none())
     }
 
@@ -399,7 +399,7 @@ pyrust_module! {
         let src = require_str(FN_NAME, &args[0].value, "src")?;
         let dst = require_str(FN_NAME, &args[1].value, "dst")?;
         std::fs::rename(&src, &dst)
-            .map_err(|e| PyError::named("OSError", e.to_string()))?;
+            .map_err(|e| PyError::from_io_error2(&e, Some(&src), Some(&dst)))?;
         Ok(Value::none())
     }
 
@@ -708,13 +708,13 @@ fn walk_collect(dir: &str, out: &mut Vec<Value>) -> Result<()> {
     let mut subdirs: Vec<String> = Vec::new();
     let mut files: Vec<String> = Vec::new();
     let entries =
-        std::fs::read_dir(dir).map_err(|e| PyError::named("OSError", e.to_string()))?;
+        std::fs::read_dir(dir).map_err(|e| PyError::from_io_error(&e, Some(dir)))?;
     for entry in entries {
-        let entry = entry.map_err(|e| PyError::named("OSError", e.to_string()))?;
+        let entry = entry.map_err(|e| PyError::from_io_error(&e, Some(dir)))?;
         let name = entry.file_name().to_string_lossy().into_owned();
         let ft = entry
             .file_type()
-            .map_err(|e| PyError::named("OSError", e.to_string()))?;
+            .map_err(|e| PyError::from_io_error(&e, Some(dir)))?;
         if ft.is_dir() {
             subdirs.push(name);
         } else {

@@ -830,6 +830,20 @@ impl Interpreter {
                     Err(e2) => return Err(e2),
                 }
             }
+            PyError::OsError {
+                class_name,
+                errno,
+                strerror,
+                filename,
+                filename2,
+            } => {
+                match self
+                    .instantiate_os_error_exception(class_name, errno, strerror, filename, filename2)
+                {
+                    Ok(v) => v,
+                    Err(e2) => return Err(e2),
+                }
+            }
             other => return Err(other),
         };
         self.attach_implicit_context(&exc_val);
