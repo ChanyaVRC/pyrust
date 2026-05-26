@@ -728,49 +728,39 @@ impl Interpreter {
                 ))
             }
             _ => {
-                // BoundMethod / ClassBoundMethod: delegate __name__ / __qualname__ /
-                // __module__ / __doc__ / __dict__ and arbitrary dynamic attrs to the
-                // underlying function, matching CPython's method proxy semantics.
+                // BoundMethod / ClassBoundMethod: expose __func__, __self__, and
+                // forward __name__ / __qualname__ / __module__ / __doc__ /
+                // __dict__ / __annotations__ / __defaults__ / __kwdefaults__
+                // from the underlying function, matching CPython's method proxy
+                // semantics.  __self__ differs between variants (instance vs
+                // class), so each has its own arm; shared attrs live in the
+                // bound_method_common_attr helper.
                 match target.kind() {
-                    ValueKind::BoundMethod { function, .. }
-                    | ValueKind::ClassBoundMethod { function, .. } => match name {
-                        "__name__" => {
-                            let n = function
-                                .user_name
-                                .borrow()
-                                .as_deref()
-                                .unwrap_or(&function.name)
-                                .to_string();
-                            return Ok(Value::string(n));
+                    ValueKind::BoundMethod {
+                        function,
+                        receiver,
+                    } => {
+                        if name == "__func__" {
+                            return Ok(Value::user_function(Rc::clone(function)));
                         }
-                        "__qualname__" => {
-                            let q = function
-                                .user_qualname
-                                .borrow()
-                                .as_deref()
-                                .unwrap_or(&function.qualname)
-                                .to_string();
-                            return Ok(Value::string(q));
+                        if name == "__self__" {
+                            return Ok(Value::py_instance(Rc::clone(receiver)));
                         }
-                        "__module__" => return Ok(function.module.borrow().clone()),
-                        "__doc__" => return Ok(function.doc.borrow().clone()),
-                        "__dict__" => {
-                            // Live dict object — same semantics as UserFunction.
-                            let attrs_rc = func_attrs_rc(function);
-                            return Ok(attrs_rc.borrow().clone());
+                        if let Some(v) = bound_method_common_attr(function, name) {
+                            return v;
                         }
-                        _ => {
-                            // Arbitrary dynamic attrs delegate to the underlying function.
-                            // Short-circuit without initialising if no attrs set yet.
-                            if let Some(rc) = function.attrs.borrow().as_ref().map(Rc::clone) {
-                                if let Some(v) =
-                                    rc.borrow().as_dict().and_then(|d| d.get(&StrKey(name)).cloned())
-                                {
-                                    return Ok(v);
-                                }
-                            }
+                    }
+                    ValueKind::ClassBoundMethod { function, class } => {
+                        if name == "__func__" {
+                            return Ok(Value::user_function(Rc::clone(function)));
                         }
-                    },
+                        if name == "__self__" {
+                            return Ok(Value::py_class(Rc::clone(class)));
+                        }
+                        if let Some(v) = bound_method_common_attr(function, name) {
+                            return v;
+                        }
+                    }
                     _ => {}
                 }
                 // Complex .real / .imag attribute access.
@@ -1810,6 +1800,91 @@ fn func_attrs_rc(func: &UserFunction) -> Rc<RefCell<Value>> {
         *slot = Some(Rc::new(RefCell::new(Value::dict(IndexMap::new()))));
     }
     Rc::clone(slot.as_ref().unwrap())
+}
+
+/// Handle attribute lookup on a bound method for attributes that are shared
+/// between `BoundMethod` and `ClassBoundMethod` (everything except `__func__`
+/// and `__self__` which differ between the two variants).
+///
+/// Returns `Some(Ok(v))` when the attribute was found, `Some(Err(_))` if it
+/// raised, or `None` to signal fall-through to the caller's error path.
+fn bound_method_common_attr(function: &UserFunction, name: &str) -> Option<crate::error::Result<Value>> {
+    match name {
+        "__name__" => {
+            let n = function
+                .user_name
+                .borrow()
+                .as_deref()
+                .unwrap_or(&function.name)
+                .to_string();
+            Some(Ok(Value::string(n)))
+        }
+        "__qualname__" => {
+            let q = function
+                .user_qualname
+                .borrow()
+                .as_deref()
+                .unwrap_or(&function.qualname)
+                .to_string();
+            Some(Ok(Value::string(q)))
+        }
+        "__module__" => Some(Ok(function.module.borrow().clone())),
+        "__doc__" => Some(Ok(function.doc.borrow().clone())),
+        "__dict__" => {
+            let attrs_rc = func_attrs_rc(function);
+            Some(Ok(attrs_rc.borrow().clone()))
+        }
+        "__annotations__" => Some(Ok(function.annotations.borrow().clone())),
+        "__defaults__" => {
+            // Collect defaults for positional-or-keyword params (not *args,
+            // **kwargs, or keyword-only).  Returns None if no defaults exist,
+            // matching CPython's `f.__defaults__` semantics.
+            let defaults: Vec<Value> = function
+                .params
+                .iter()
+                .filter(|p| !p.is_args && !p.is_kwargs && !p.is_keyword_only)
+                .filter_map(|p| p.default.clone())
+                .collect();
+            if defaults.is_empty() {
+                Some(Ok(Value::none()))
+            } else {
+                Some(Ok(Value::tuple(defaults)))
+            }
+        }
+        "__kwdefaults__" => {
+            // Collect defaults for keyword-only params.  Returns None if none
+            // exist, matching CPython's `f.__kwdefaults__` semantics.
+            let kwdefaults: IndexMap<PyKey, Value> = function
+                .params
+                .iter()
+                .filter(|p| p.is_keyword_only)
+                .filter_map(|p| {
+                    p.default
+                        .as_ref()
+                        .map(|v| (PyKey::str_from(&p.name), v.clone()))
+                })
+                .collect();
+            if kwdefaults.is_empty() {
+                Some(Ok(Value::none()))
+            } else {
+                Some(Ok(Value::dict(kwdefaults)))
+            }
+        }
+        _ => {
+            // Arbitrary dynamic attrs delegate to the underlying function.
+            // Short-circuit without initialising if no attrs set yet.
+            if let Some(rc) = function.attrs.borrow().as_ref().map(Rc::clone) {
+                if let Some(v) = rc
+                    .borrow()
+                    .as_dict()
+                    .and_then(|d| d.get(&StrKey(name)).cloned())
+                {
+                    return Some(Ok(v));
+                }
+            }
+            None
+        }
+    }
 }
 
 /// Increment `Interpreter::global_env_version`, skipping the sentinel
