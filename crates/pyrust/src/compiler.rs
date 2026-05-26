@@ -7798,6 +7798,23 @@ impl Compiler {
                             self.next_temp = frame + 1;
                             frame
                         }
+                        Some('s') => {
+                            // str(val) — calls __str__ on user instances
+                            let frame = self.next_temp;
+                            if frame + 1 > self.max_reg {
+                                self.max_reg = frame + 1;
+                            }
+                            self.next_temp = frame + 2;
+                            let str_idx = self.intern_name("str");
+                            self.emit(Insn::LoadGlobal(frame, str_idx));
+                            if val_r != frame + 1 {
+                                self.emit(Insn::Move(frame + 1, val_r));
+                            }
+                            self.free_temp(val_r);
+                            self.emit(Insn::Call(frame, 1));
+                            self.next_temp = frame + 1;
+                            frame
+                        }
                         Some('a') => {
                             // ascii(val) — repr with non-ASCII chars escaped
                             let frame = self.next_temp;
