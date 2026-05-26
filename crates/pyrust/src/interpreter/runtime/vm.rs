@@ -61,6 +61,33 @@ pub(crate) struct CallableIter {
     pub(crate) done: bool,
 }
 
+/// Lazy iterator for `map(func, iter1, iter2, ...)`.
+///
+/// Sources are materialised eagerly on the first `step_map_iter` call
+/// (matching the lazy-on-first-use semantics of the other helpers).
+/// `func` is invoked once per row via `call_function_expanded`.
+pub(crate) struct MapIter {
+    pub(crate) func: Value,
+    pub(crate) sources: Vec<Value>,
+    /// Materialised columns; `None` until first step.
+    pub(crate) columns: Option<Vec<Vec<Value>>>,
+    /// Shortest column length (set alongside `columns`).
+    pub(crate) len: usize,
+    pub(crate) pos: usize,
+}
+
+/// Lazy iterator for `filter(func, iterable)`.
+///
+/// Source is materialised eagerly on the first `step_filter_iter` call.
+/// `func` is `None` when the Python caller passed `None` (identity test).
+pub(crate) struct FilterIter {
+    pub(crate) func: Option<Value>,
+    pub(crate) source: Value,
+    /// Materialised items; `None` until first step.
+    pub(crate) items: Option<Vec<Value>>,
+    pub(crate) pos: usize,
+}
+
 /// Heap-allocated execution state for a suspended generator.
 /// Stored type-erased inside `Value::generator()` via `Box<dyn Any>`.
 pub(crate) struct GeneratorFrame {
@@ -3179,6 +3206,34 @@ impl Interpreter {
                                                 Err(e) => Err(e),
                                             })
                                         } else {
+                                        let is_map_iter = state_rc
+                                            .borrow()
+                                            .downcast_ref::<MapIter>()
+                                            .is_some();
+                                        if is_map_iter {
+                                            Some(match self.step_map_iter(&state_rc) {
+                                                Ok(Some(v)) => Ok(v),
+                                                Ok(None) => Err(PyError::named(
+                                                    "StopIteration",
+                                                    String::new(),
+                                                )),
+                                                Err(e) => Err(e),
+                                            })
+                                        } else {
+                                        let is_filter_iter = state_rc
+                                            .borrow()
+                                            .downcast_ref::<FilterIter>()
+                                            .is_some();
+                                        if is_filter_iter {
+                                            Some(match self.step_filter_iter(&state_rc) {
+                                                Ok(Some(v)) => Ok(v),
+                                                Ok(None) => Err(PyError::named(
+                                                    "StopIteration",
+                                                    String::new(),
+                                                )),
+                                                Err(e) => Err(e),
+                                            })
+                                        } else {
                                         let mut borrow = state_rc.borrow_mut();
                                         if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
                                             // Built-in iterator created by iter().
@@ -3207,7 +3262,9 @@ impl Interpreter {
                                                 "invalid generator state".to_string(),
                                             )))
                                         }
-                                        }
+                                        }   // closes else { let mut borrow = ...
+                                        }   // closes is_filter_iter else
+                                        }   // closes is_map_iter else
                                     }
                                 } else if let ValueKind::PyInstance(inst) = iter_val.kind() {
                                     let inst_rc = Rc::clone(inst);

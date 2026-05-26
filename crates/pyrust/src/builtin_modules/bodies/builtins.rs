@@ -20,7 +20,7 @@ use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
-    CallableIter, NativeIterFrame, apply_format_spec, ascii_repr, bigint_divmod_floor,
+    CallableIter, FilterIter, MapIter, NativeIterFrame, apply_format_spec, ascii_repr, bigint_divmod_floor,
     class_chain_contains_name, class_is_subclass_of,
     compare_values, compare_values_with_op, dir_names, instance_attrs_snapshot,
     instance_builtin_data,
@@ -906,57 +906,53 @@ pyrust_module! {
         Ok(pyrust_builtins::iter_helpers::reversed(source))
     }
 
-    /// CPython: map(func, iterable) — apply func to each element.
+    /// CPython: map(func, *iterables) — apply func to corresponding elements
+    /// from all iterables in lockstep; stops at the shortest iterable.
+    /// Returns a lazy `map` iterator object, not a list.
     /// <https://docs.python.org/3/library/functions.html#map>
-    ///
-    /// Migrated to the typed-signature dialect (#400).  Both parameters
-    /// use `PyValue`: `func` is a callable (any value), `iterable` is any
-    /// iterable including user-defined PyInstance.
-    fn map(
-        #[positional_only] func: PyValue,
-        #[positional_only] iterable: PyValue,
-    ) -> Result<Value> {
-        let items = _interp.collect_iterable(iterable.0)?;
-        let mut result = Vec::with_capacity(items.len());
-        for item in items {
-            let mapped = _interp.call_function_expanded(
-                func.0.clone(),
-                &[ExpandedCallArg { name: None, value: item }],
-            )?;
-            result.push(mapped);
+    fn map(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() < 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() must have at least two arguments."),
+            ));
         }
-        Ok(Value::list(result))
+        let func = args[0].value.clone();
+        // Pre-materialise any Generator/PyInstance sources so that
+        // iter_values_via_registry can reach them inside MapIter.
+        let sources: Result<Vec<Value>> = args[1..]
+            .iter()
+            .map(|a| materialize_user_iter(_interp, a.value.clone()))
+            .collect();
+        let sources = sources?;
+        Ok(Value::generator(Box::new(MapIter {
+            func,
+            sources,
+            columns: None,
+            len: 0,
+            pos: 0,
+        })))
     }
 
     /// CPython: filter(func, iterable) — keep elements where func is truthy.
+    /// Returns a lazy `filter` iterator object, not a list.
+    /// `func` may be `None` for identity truthiness testing.
     /// <https://docs.python.org/3/library/functions.html#filter>
-    ///
-    /// Migrated to the typed-signature dialect (#400).  `func` and
-    /// `iterable` are both `PyValue`: `func` may be `None` (identity
-    /// truthiness test) or any callable; `iterable` may be any iterable
-    /// including user-defined PyInstance.
     fn filter(
         #[positional_only] func: PyValue,
         #[positional_only] iterable: PyValue,
     ) -> Result<Value> {
-        let items = _interp.collect_iterable(iterable.0)?;
-        let use_identity = func.0.is_none();
-        let mut result = Vec::new();
-        for item in items {
-            let keep = if use_identity {
-                _interp.truthy_value(&item)?
-            } else {
-                let test = _interp.call_function_expanded(
-                    func.0.clone(),
-                    &[ExpandedCallArg { name: None, value: item.clone() }],
-                )?;
-                _interp.truthy_value(&test)?
-            };
-            if keep {
-                result.push(item);
-            }
-        }
-        Ok(Value::list(result))
+        // Pre-materialise Generator/PyInstance so iter_values_via_registry
+        // can reach items from FilterIter without an interpreter handle.
+        let source = materialize_user_iter(_interp, iterable.0)?;
+        let func_opt = if func.0.is_none() { None } else { Some(func.0) };
+        Ok(Value::generator(Box::new(FilterIter {
+            func: func_opt,
+            source,
+            items: None,
+            pos: 0,
+        })))
     }
 
     /// CPython: iter(obj) / iter(callable, sentinel) — return an iterator.
@@ -1250,7 +1246,16 @@ pyrust_module! {
             ValueKind::BuiltinFunction(_) => Ok(Value::builtin_function("builtin_function_or_method")),
             ValueKind::PyModule(_) => Ok(Value::builtin_function("module")),
             ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => Ok(Value::builtin_function("super")),
-            ValueKind::Generator(_) => Ok(Value::builtin_function("generator")),
+            ValueKind::Generator(state_rc) => {
+                let borrow = state_rc.borrow();
+                if borrow.downcast_ref::<MapIter>().is_some() {
+                    Ok(Value::builtin_function("map"))
+                } else if borrow.downcast_ref::<FilterIter>().is_some() {
+                    Ok(Value::builtin_function("filter"))
+                } else {
+                    Ok(Value::builtin_function("generator"))
+                }
+            }
             ValueKind::NotImplemented => Ok(Value::builtin_function("NotImplementedType")),
             ValueKind::Ellipsis => Ok(Value::builtin_function("ellipsis")),
             ValueKind::BuiltinObject { ops, .. } => {

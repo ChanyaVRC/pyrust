@@ -929,6 +929,36 @@ impl Interpreter {
                 }
             }
 
+            // MapIter path: drive map() to exhaustion.
+            {
+                let is_map_iter = state_rc.borrow().downcast_ref::<MapIter>().is_some();
+                if is_map_iter {
+                    let mut items = Vec::new();
+                    loop {
+                        match self.step_map_iter(&state_rc)? {
+                            Some(v) => items.push(v),
+                            None => break,
+                        }
+                    }
+                    return Ok(items);
+                }
+            }
+
+            // FilterIter path: drive filter() to exhaustion.
+            {
+                let is_filter_iter = state_rc.borrow().downcast_ref::<FilterIter>().is_some();
+                if is_filter_iter {
+                    let mut items = Vec::new();
+                    loop {
+                        match self.step_filter_iter(&state_rc)? {
+                            Some(v) => items.push(v),
+                            None => break,
+                        }
+                    }
+                    return Ok(items);
+                }
+            }
+
             // GeneratorFrame path: drive the generator to exhaustion.
             let mut items = Vec::new();
             loop {
@@ -1134,6 +1164,115 @@ impl Interpreter {
         }
     }
 
+    /// One step of the lazy `map(func, *iterables)` iterator.
+    ///
+    /// On the first call the sources are materialised via
+    /// `iter_values_via_registry` (eagerly per source, lazy across sources).
+    /// Subsequent calls invoke `func` with one argument drawn from each
+    /// column at the current position and advance the position.
+    ///
+    /// `Ok(Some(v))` → next mapped value; `Ok(None)` → exhausted (shortest
+    /// source ran out); `Err(e)` → error from materialisation or `func`.
+    pub(crate) fn step_map_iter(
+        &mut self,
+        state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
+    ) -> Result<Option<Value>> {
+        // Materialise sources on first call.
+        {
+            let mut borrow = state_rc.borrow_mut();
+            let s = borrow
+                .downcast_mut::<MapIter>()
+                .ok_or_else(|| PyError::Runtime("step_map_iter on non-MapIter state".to_string()))?;
+            if s.columns.is_none() {
+                let mut cols: Vec<Vec<Value>> = Vec::with_capacity(s.sources.len());
+                for src in &s.sources {
+                    cols.push(pyrust_core::iter_values_via_registry(src)?);
+                }
+                let len = cols.iter().map(|c| c.len()).min().unwrap_or(0);
+                s.len = len;
+                s.columns = Some(cols);
+            }
+        }
+        // Extract row at current position (borrow released before calling func).
+        let snapshot: Option<(Value, Vec<Value>)> = {
+            let borrow = state_rc.borrow();
+            let s = borrow.downcast_ref::<MapIter>().unwrap();
+            if s.pos >= s.len {
+                None
+            } else {
+                let cols = s.columns.as_ref().unwrap();
+                let row: Vec<Value> = cols.iter().map(|c| c[s.pos].clone()).collect();
+                Some((s.func.clone(), row))
+            }
+        };
+        match snapshot {
+            None => Ok(None),
+            Some((func, row)) => {
+                let args: Vec<ExpandedCallArg> =
+                    row.into_iter().map(|v| ExpandedCallArg { name: None, value: v }).collect();
+                let result = self.call_function_expanded(func, &args)?;
+                state_rc.borrow_mut().downcast_mut::<MapIter>().unwrap().pos += 1;
+                Ok(Some(result))
+            }
+        }
+    }
+
+    /// One step of the lazy `filter(func, iterable)` iterator.
+    ///
+    /// On the first call the source is materialised.  Each subsequent call
+    /// scans forward from `pos` for the next item that passes the predicate.
+    ///
+    /// `Ok(Some(v))` → next passing value; `Ok(None)` → exhausted;
+    /// `Err(e)` → error from materialisation or `func`.
+    pub(crate) fn step_filter_iter(
+        &mut self,
+        state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
+    ) -> Result<Option<Value>> {
+        // Materialise source on first call.
+        {
+            let mut borrow = state_rc.borrow_mut();
+            let s = borrow.downcast_mut::<FilterIter>().ok_or_else(|| {
+                PyError::Runtime("step_filter_iter on non-FilterIter state".to_string())
+            })?;
+            if s.items.is_none() {
+                let items = pyrust_core::iter_values_via_registry(&s.source)?;
+                s.items = Some(items);
+            }
+        }
+        loop {
+            // Snapshot next candidate (release borrow before calling func).
+            let candidate: Option<(Option<Value>, Value)> = {
+                let borrow = state_rc.borrow();
+                let s = borrow.downcast_ref::<FilterIter>().unwrap();
+                let items = s.items.as_ref().unwrap();
+                if s.pos >= items.len() {
+                    None
+                } else {
+                    Some((s.func.clone(), items[s.pos].clone()))
+                }
+            };
+            match candidate {
+                None => return Ok(None),
+                Some((func_opt, item)) => {
+                    state_rc.borrow_mut().downcast_mut::<FilterIter>().unwrap().pos += 1;
+                    let keep = if let Some(func) = func_opt {
+                        let test = self.call_function_expanded(
+                            func,
+                            &[ExpandedCallArg { name: None, value: item.clone() }],
+                        )?;
+                        self.truthy_value(&test)?
+                    } else {
+                        self.truthy_value(&item)?
+                    };
+                    if keep {
+                        return Ok(Some(item));
+                    }
+                    // else continue to next candidate
+                }
+            }
+        }
+    }
+
     /// Call next() on a generator or any object with __next__.
     pub(crate) fn call_next(&mut self, val: Value, default: Option<Value>) -> Result<Value> {
         if let ValueKind::Generator(state_rc) = val.kind() {
@@ -1186,6 +1325,40 @@ impl Interpreter {
                     .is_some();
                 if is_callable_iter {
                     return match self.step_callable_iter(&state_rc)? {
+                        Some(v) => Ok(v),
+                        None => {
+                            if let Some(d) = default {
+                                Ok(d)
+                            } else {
+                                Err(PyError::named("StopIteration", String::new()))
+                            }
+                        }
+                    };
+                }
+            }
+
+            // MapIter path: apply func to one row of columns per step.
+            {
+                let is_map_iter = state_rc.borrow().downcast_ref::<MapIter>().is_some();
+                if is_map_iter {
+                    return match self.step_map_iter(&state_rc)? {
+                        Some(v) => Ok(v),
+                        None => {
+                            if let Some(d) = default {
+                                Ok(d)
+                            } else {
+                                Err(PyError::named("StopIteration", String::new()))
+                            }
+                        }
+                    };
+                }
+            }
+
+            // FilterIter path: scan forward for next passing element.
+            {
+                let is_filter_iter = state_rc.borrow().downcast_ref::<FilterIter>().is_some();
+                if is_filter_iter {
+                    return match self.step_filter_iter(&state_rc)? {
                         Some(v) => Ok(v),
                         None => {
                             if let Some(d) = default {
