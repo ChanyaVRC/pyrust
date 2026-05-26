@@ -903,8 +903,14 @@ fn lambda_captures_in_expr(
             if !is_class_scope {
                 let mut uses = HashSet::new();
                 collect_free_var_reads_in_expr(body, &mut uses);
+                // Default expressions are evaluated in the enclosing scope.
                 for param in params {
-                    uses.remove(param);
+                    if let Some(d) = &param.default {
+                        collect_free_var_reads_in_expr(d, &mut uses);
+                    }
+                }
+                for param in params {
+                    uses.remove(&param.name);
                 }
                 for name in uses {
                     if local_index.contains_key(&name) {
@@ -1405,8 +1411,15 @@ fn collect_class_lambda_outer_refs_in_expr(
             let mut uses: HashSet<String> = HashSet::new();
             collect_free_var_reads_in_expr(body, &mut uses);
             collect_transitive_free_vars_in_expr(body, &mut uses);
+            // Default expressions are evaluated in the enclosing scope.
             for p in params {
-                uses.remove(p);
+                if let Some(d) = &p.default {
+                    collect_free_var_reads_in_expr(d, &mut uses);
+                    collect_transitive_free_vars_in_expr(d, &mut uses);
+                }
+            }
+            for p in params {
+                uses.remove(&p.name);
             }
             // Promote any name that the lambda reads from the enclosing function.
             // Note: we do NOT filter out class-body locals here.  Python class
@@ -1790,7 +1803,15 @@ fn collect_free_var_reads_in_expr(expr: &Expr, uses: &mut HashSet<String>) {
             collect_free_var_reads_in_expr(then, uses);
             collect_free_var_reads_in_expr(else_, uses);
         }
-        Expr::Lambda { body, .. } => collect_free_var_reads_in_expr(body, uses),
+        Expr::Lambda { params, body } => {
+            // Default expressions are evaluated in the enclosing scope.
+            for p in params {
+                if let Some(d) = &p.default {
+                    collect_free_var_reads_in_expr(d, uses);
+                }
+            }
+            collect_free_var_reads_in_expr(body, uses);
+        }
         Expr::Named { value, .. } => collect_free_var_reads_in_expr(value, uses),
         Expr::FString(parts) => {
             for_each_fstring_expr(parts, &mut |e| collect_free_var_reads_in_expr(e, uses));
@@ -2082,8 +2103,15 @@ fn collect_transitive_free_vars_in_expr(expr: &Expr, uses: &mut HashSet<String>)
             let mut inner_uses: HashSet<String> = HashSet::new();
             collect_free_var_reads_in_expr(body, &mut inner_uses);
             collect_transitive_free_vars_in_expr(body, &mut inner_uses);
+            // Default expressions are evaluated in the enclosing scope.
             for p in params {
-                inner_uses.remove(p);
+                if let Some(d) = &p.default {
+                    collect_free_var_reads_in_expr(d, &mut inner_uses);
+                    collect_transitive_free_vars_in_expr(d, &mut inner_uses);
+                }
+            }
+            for p in params {
+                inner_uses.remove(&p.name);
             }
             for n in inner_uses {
                 uses.insert(n);
@@ -3425,7 +3453,13 @@ fn expr_reads_var(expr: &Expr, name: &str) -> bool {
                         || c.cond.as_ref().is_some_and(|x| expr_reads_var(x, name))
                 })
         }
-        Expr::Lambda { body, .. } => expr_reads_var(body, name),
+        Expr::Lambda { params, body } => {
+            params
+                .iter()
+                .filter_map(|p| p.default.as_ref())
+                .any(|d| expr_reads_var(d, name))
+                || expr_reads_var(body, name)
+        }
         Expr::Named { value, .. } => expr_reads_var(value, name),
         Expr::Yield(Some(e)) => expr_reads_var(e, name),
         Expr::Yield(None) => false,
@@ -7601,21 +7635,7 @@ impl Compiler {
                 self.patch_jump(jmp_end);
                 dst
             }
-            Expr::Lambda { params, body } => {
-                let fp: Vec<FunctionParam> = params
-                    .iter()
-                    .map(|n| FunctionParam {
-                        name: n.clone(),
-                        default: None,
-                        annotation: None,
-                        is_args: false,
-                        is_kwargs: false,
-                        is_keyword_only: false,
-                        is_positional_only: false,
-                    })
-                    .collect();
-                self.compile_lambda(&fp, body)
-            }
+            Expr::Lambda { params, body } => self.compile_lambda(params, body),
             Expr::ListComp { elt, clauses } => self.compile_list_comp(elt, clauses),
             Expr::DictComp { key, val, clauses } => self.compile_dict_comp(key, val, clauses),
             Expr::SetComp { elt, clauses } => self.compile_set_comp(elt, clauses),

@@ -1302,18 +1302,120 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_lambda(&mut self) -> Result<Expr> {
-        self.expect(&Token::Lambda)?;
+    /// Parse lambda parameter list, terminated by `:` instead of `)`.
+    /// Lambda params cannot have type annotations (CPython 3.12).
+    fn parse_lambda_params(&mut self) -> Result<Vec<FunctionParam>> {
         let mut params = Vec::new();
-        if !self.is(&Token::Colon) {
-            loop {
-                params.push(self.expect_ident("lambda parameter")?);
-                if !self.is(&Token::Comma) {
-                    break;
-                }
+        let mut seen_default = false;
+        let mut seen_star = false;
+        let mut seen_kwargs = false;
+        // Set when a bare `*` separator is consumed; cleared when the first
+        // keyword-only parameter is added.  If still set when `:` is reached,
+        // CPython raises SyntaxError: named arguments must follow bare *.
+        let mut bare_star_needs_kwonly = false;
+
+        loop {
+            if seen_kwargs {
+                return Err(PyError::Parse("parameter after **kwargs".to_string()));
+            }
+
+            if self.is(&Token::StarStar) {
                 self.bump();
+                let name = self.expect_ident("kwargs parameter name")?;
+                params.push(FunctionParam {
+                    name,
+                    default: None,
+                    annotation: None,
+                    is_args: false,
+                    is_kwargs: true,
+                    is_keyword_only: false,
+                    is_positional_only: false,
+                });
+                seen_kwargs = true;
+            } else if self.is(&Token::Star) {
+                self.bump();
+                seen_star = true;
+                if self.is(&Token::Comma) || self.is(&Token::Colon) {
+                    // bare * separator: keyword-only params must follow
+                    bare_star_needs_kwonly = true;
+                } else {
+                    let name = self.expect_ident("args parameter name")?;
+                    params.push(FunctionParam {
+                        name,
+                        default: None,
+                        annotation: None,
+                        is_args: true,
+                        is_kwargs: false,
+                        is_keyword_only: false,
+                        is_positional_only: false,
+                    });
+                }
+            } else {
+                match self.current().cloned() {
+                    Some(Token::Ident(name)) => {
+                        self.bump();
+                        let default = if self.is(&Token::Assign) {
+                            self.bump();
+                            seen_default = true;
+                            Some(self.parse_expr()?)
+                        } else {
+                            if seen_default && !seen_star {
+                                return Err(PyError::Parse(
+                                    "non-default argument follows default argument".to_string(),
+                                ));
+                            }
+                            None
+                        };
+                        if seen_star {
+                            bare_star_needs_kwonly = false;
+                        }
+                        params.push(FunctionParam {
+                            name,
+                            default,
+                            annotation: None,
+                            is_args: false,
+                            is_kwargs: false,
+                            is_keyword_only: seen_star,
+                            is_positional_only: false,
+                        });
+                    }
+                    other => {
+                        return Err(PyError::Parse(format!(
+                            "expected lambda parameter, found {other:?}"
+                        )));
+                    }
+                }
+            }
+
+            if self.is(&Token::Colon) {
+                if bare_star_needs_kwonly {
+                    return Err(PyError::Parse(
+                        "named arguments must follow bare *".to_string(),
+                    ));
+                }
+                break;
+            }
+            self.expect(&Token::Comma)?;
+            if self.is(&Token::Colon) {
+                if bare_star_needs_kwonly {
+                    return Err(PyError::Parse(
+                        "named arguments must follow bare *".to_string(),
+                    ));
+                }
+                break;
             }
         }
+
+        Ok(params)
+    }
+
+    fn parse_lambda(&mut self) -> Result<Expr> {
+        self.expect(&Token::Lambda)?;
+        let params = if self.is(&Token::Colon) {
+            Vec::new()
+        } else {
+            self.parse_lambda_params()?
+        };
         self.expect(&Token::Colon)?;
         let body = self.parse_expr()?;
         Ok(Expr::Lambda {
