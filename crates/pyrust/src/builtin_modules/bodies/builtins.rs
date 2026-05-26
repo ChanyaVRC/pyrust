@@ -719,6 +719,26 @@ pyrust_module! {
             }
 
             // Fall through to built-in integer modpow.
+            //
+            // CPython distinguishes two TypeError messages for 3-arg pow:
+            //   - If any argument is a user-defined type (PyInstance): the
+            //     "unsupported operand type(s)" format (three type names).
+            //   - Otherwise (e.g. float args): "3rd argument not allowed unless
+            //     all arguments are integers".
+            let any_instance = matches!(base_val.kind(), ValueKind::PyInstance(_))
+                || matches!(exp_val.kind(), ValueKind::PyInstance(_))
+                || matches!(mod_val.kind(), ValueKind::PyInstance(_));
+            if any_instance {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "unsupported operand type(s) for ** or pow(): '{}', '{}', '{}'",
+                        value_type_name_str(base_val),
+                        value_type_name_str(exp_val),
+                        value_type_name_str(mod_val),
+                    ),
+                ));
+            }
             let three_arg_type_error = || PyError::named(
                 "TypeError",
                 "pow() 3rd argument not allowed unless all arguments are integers".to_string(),

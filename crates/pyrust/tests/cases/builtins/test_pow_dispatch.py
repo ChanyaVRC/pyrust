@@ -85,16 +85,31 @@ assert pow(-2, 3) == -8
 import math
 assert abs(pow(2.0, 0.5) - math.sqrt(2)) < 1e-10
 
-# 3-arg TypeError for non-integers
-try:
-    pow(2.0, 3, 5)
-except TypeError as e:
-    print("pow(2.0,3,5) TypeError:", e)
+# 3-arg TypeError for non-integers (built-in types: "3rd argument not allowed")
+def test_type_err(label, fn):
+    try:
+        fn()
+    except TypeError as e:
+        print(label, "TypeError:", e)
 
-try:
-    pow(2, 3.0, 5)
-except TypeError as e:
-    print("pow(2,3.0,5) TypeError:", e)
+test_type_err("pow(2.0,3,5)", lambda: pow(2.0, 3, 5))
+test_type_err("pow(2,3.0,5)", lambda: pow(2, 3.0, 5))
+
+# 3-arg TypeError for PyInstance args: "unsupported operand type(s)" with 3 names
+
+class NoOp:
+    pass
+
+test_type_err("pow(NoOp,3,5)", lambda: pow(NoOp(), 3, 5))
+test_type_err("pow(2,NoOp,5)", lambda: pow(2, NoOp(), 5))
+test_type_err("pow(2,3,NoOp)", lambda: pow(2, 3, NoOp()))
+
+# 3-arg with __pow__ returning NotImplemented → "unsupported operand" message
+class NoPow:
+    def __pow__(self, exp, mod=None):
+        return NotImplemented
+
+test_type_err("pow(NoPow,3,5)", lambda: pow(NoPow(), 3, 5))
 
 # 3-arg ValueError: modulus 0
 try:
