@@ -987,10 +987,22 @@ pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value
     // OSError is the canonical name; IOError and EnvironmentError are aliases that
     // share the same Rc, so checking for "OSError" in the chain suffices.
     let is_os_error = class_chain_contains_name(&class, "OSError");
+    let is_system_exit = class_chain_contains_name(&class, "SystemExit");
     attrs.insert("args".to_string(), Value::tuple(args.clone()));
     if is_stop_iteration {
         let val = args.into_iter().next().unwrap_or_else(Value::none);
         attrs.insert("value".to_string(), val);
+    } else if is_system_exit {
+        // CPython 3.12 SystemExit.__init__: code = args[0] if 1 arg, tuple(args) if
+        // multiple args, None if no args.  For the multi-arg case CPython sets
+        // self.code = self.args (the same object), so clone the already-inserted
+        // args tuple to share the same obj_id and preserve `e.code is e.args`.
+        let code = match args.len() {
+            0 => Value::none(),
+            1 => args[0].clone(),
+            _ => attrs["args"].clone(),
+        };
+        attrs.insert("code".to_string(), code);
     } else if is_syntax_error {
         // CPython 3.12 SyntaxError.__init__: always initialise all structured
         // attributes.  With 1 arg: msg = args[0], rest = None.  With 2 args
