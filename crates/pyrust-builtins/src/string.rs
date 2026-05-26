@@ -1034,7 +1034,7 @@ fn rsplit(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
     let (sep, maxsplit) = split_args(args)?;
     let parts: Vec<Value> = match sep {
         None => {
-            // For rsplit with no sep, reverse the whitespace split
+            // No sep: rsplit with no maxsplit is identical to split (left-to-right).
             if maxsplit < 0 {
                 let mut parts = Vec::with_capacity(s.len() / 4 + 1);
                 for p in s.split_whitespace() {
@@ -1086,7 +1086,6 @@ fn rsplit(src: &Value, s: &str, args: &[Value]) -> Result<Value> {
                     let off = subslice_offset(s, p);
                     parts.push(src.string_slice(off, off + p.len()));
                 }
-                parts.reverse();
                 parts
             } else {
                 let mut parts: Vec<Value> = s
