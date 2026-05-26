@@ -689,36 +689,54 @@ pyrust_module! {
 
     /// CPython: pow(base, exp[, mod]) — exponentiation, optionally modular.
     /// <https://docs.python.org/3/library/functions.html#pow>
-    #[pure]
+    ///
+    /// Not marked `#[pure]` because it dispatches user `__pow__` / `__rpow__`
+    /// for `PyInstance` values, which may invoke arbitrary user code.
     fn pow(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() < 2 || args.len() > 3 {
             return Err(PyError::Runtime(format!("{FN_NAME}() takes 2 or 3 arguments")));
         }
         if args.len() == 3 {
-            let base = match args[0].value.kind() {
+            let base_val = &args[0].value;
+            let exp_val = &args[1].value;
+            let mod_val = &args[2].value;
+
+            // User-defined type as base: dispatch __pow__(exp, mod) first.
+            if let ValueKind::PyInstance(inst) = base_val.kind() {
+                let inst_rc = Rc::clone(inst);
+                let class = Rc::clone(&inst_rc.borrow().class);
+                if let Some(method) = lookup_class_attr(&class, "__pow__") {
+                    let self_val = Value::py_instance(inst_rc);
+                    let exp_arg = ExpandedCallArg { name: None, value: exp_val.clone() };
+                    let mod_arg = ExpandedCallArg { name: None, value: mod_val.clone() };
+                    match invoke_class_method(_interp, method, self_val, &[exp_arg, mod_arg]) {
+                        Ok(v) if !matches!(v.kind(), ValueKind::NotImplemented) => return Ok(v),
+                        Err(e) => return Err(e),
+                        _ => {}
+                    }
+                }
+            }
+
+            // Fall through to built-in integer modpow.
+            let three_arg_type_error = || PyError::named(
+                "TypeError",
+                "pow() 3rd argument not allowed unless all arguments are integers".to_string(),
+            );
+            let base = match base_val.kind() {
                 ValueKind::Int(v) => v,
                 ValueKind::Bool(b) => b as i64,
-                _ => return Err(PyError::named(
-                    "TypeError",
-                    "pow() 3-argument form requires integers".to_string(),
-                )),
+                _ => return Err(three_arg_type_error()),
             };
-            let exp = match args[1].value.kind() {
+            let exp = match exp_val.kind() {
                 ValueKind::Int(v) => v,
                 ValueKind::Bool(b) => b as i64,
-                _ => return Err(PyError::named(
-                    "TypeError",
-                    "pow() 3-argument form requires integers".to_string(),
-                )),
+                _ => return Err(three_arg_type_error()),
             };
-            let modulus = match args[2].value.kind() {
+            let modulus = match mod_val.kind() {
                 ValueKind::Int(v) => v,
                 ValueKind::Bool(b) => b as i64,
-                _ => return Err(PyError::named(
-                    "TypeError",
-                    "pow() 3-argument form requires integers".to_string(),
-                )),
+                _ => return Err(three_arg_type_error()),
             };
             if modulus == 0 {
                 return Err(PyError::named(
@@ -735,16 +753,105 @@ pyrust_module! {
             let result = modpow_i64(base, exp as u64, modulus);
             Ok(Value::int(result))
         } else {
-            match (args[0].value.kind(), args[1].value.kind()) {
+            let base_val = &args[0].value;
+            let exp_val = &args[1].value;
+
+            // Extract classes for the subtype rule (mirrors CPython `binary_op1`).
+            let base_class = if let ValueKind::PyInstance(inst) = base_val.kind() {
+                Some(Rc::clone(&inst.borrow().class))
+            } else {
+                None
+            };
+            let exp_class = if let ValueKind::PyInstance(inst) = exp_val.kind() {
+                Some(Rc::clone(&inst.borrow().class))
+            } else {
+                None
+            };
+
+            // Subtype rule: if exp's class is a proper subtype of base's class
+            // AND directly defines __rpow__, try exp.__rpow__(base) first.
+            let exp_is_proper_subtype_of_base = match (&base_class, &exp_class) {
+                (Some(bc), Some(ec)) => {
+                    !Rc::ptr_eq(bc, ec)
+                        && class_is_subclass_of(ec, bc)
+                        && ec.borrow().attrs.contains_key("__rpow__")
+                }
+                _ => false,
+            };
+
+            if exp_is_proper_subtype_of_base {
+                if let (Some(ec), ValueKind::PyInstance(inst)) = (&exp_class, exp_val.kind()) {
+                    if let Some(m) = lookup_class_attr(ec, "__rpow__") {
+                        let self_val = Value::py_instance(Rc::clone(inst));
+                        let arg = ExpandedCallArg { name: None, value: base_val.clone() };
+                        match invoke_class_method(_interp, m, self_val, &[arg]) {
+                            Ok(v) if !matches!(v.kind(), ValueKind::NotImplemented) => return Ok(v),
+                            Err(e) => return Err(e),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
+            // Try base.__pow__(exp).
+            if let (Some(bc), ValueKind::PyInstance(inst)) = (&base_class, base_val.kind()) {
+                if let Some(m) = lookup_class_attr(bc, "__pow__") {
+                    let self_val = Value::py_instance(Rc::clone(inst));
+                    let arg = ExpandedCallArg { name: None, value: exp_val.clone() };
+                    match invoke_class_method(_interp, m, self_val, &[arg]) {
+                        Ok(v) if !matches!(v.kind(), ValueKind::NotImplemented) => return Ok(v),
+                        Err(e) => return Err(e),
+                        _ => {}
+                    }
+                }
+            }
+
+            // Try exp.__rpow__(base), but only when:
+            //   - the subtype rule didn't already try it, AND
+            //   - the types differ (when type(exp) is type(base), CPython skips __rpow__).
+            let types_differ = match (&base_class, &exp_class) {
+                (Some(bc), Some(ec)) => !Rc::ptr_eq(bc, ec),
+                // exp is a PyInstance but base is not: types clearly differ.
+                (None, Some(_)) => true,
+                // base is PyInstance but exp is not, or both non-instance: skip reflected.
+                _ => false,
+            };
+            if !exp_is_proper_subtype_of_base && types_differ {
+                if let (Some(ec), ValueKind::PyInstance(inst)) = (&exp_class, exp_val.kind()) {
+                    if let Some(m) = lookup_class_attr(ec, "__rpow__") {
+                        let self_val = Value::py_instance(Rc::clone(inst));
+                        let arg = ExpandedCallArg { name: None, value: base_val.clone() };
+                        match invoke_class_method(_interp, m, self_val, &[arg]) {
+                            Ok(v) if !matches!(v.kind(), ValueKind::NotImplemented) => return Ok(v),
+                            Err(e) => return Err(e),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
+            // Fall through to built-in numeric pow.
+            match (base_val.kind(), exp_val.kind()) {
                 (ValueKind::Int(a), ValueKind::Int(b)) if b >= 0 => {
                     Ok(int_pow_promoting(a, b))
                 }
                 (ValueKind::Bool(a), ValueKind::Int(b)) if b >= 0 => {
                     Ok(int_pow_promoting(a as i64, b))
                 }
+                _ if base_class.is_some() || exp_class.is_some() => {
+                    // At least one PyInstance — neither __pow__ nor __rpow__ succeeded.
+                    Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "unsupported operand type(s) for ** or pow(): '{}' and '{}'",
+                            value_type_name_str(base_val),
+                            value_type_name_str(exp_val),
+                        ),
+                    ))
+                }
                 _ => {
-                    let a = value_to_float(&args[0].value, FN_NAME)?;
-                    let b = value_to_float(&args[1].value, FN_NAME)?;
+                    let a = value_to_float(base_val, FN_NAME)?;
+                    let b = value_to_float(exp_val, FN_NAME)?;
                     Ok(Value::float(a.powf(b)))
                 }
             }
