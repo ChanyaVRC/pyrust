@@ -1513,17 +1513,29 @@ impl Interpreter {
             // Number of params that can accept positional arguments (excludes keyword-only).
             let positional_param_count =
                 function.params.iter().filter(|p| !p.is_keyword_only).count();
+            let required_positional_count = function
+                .params
+                .iter()
+                .filter(|p| !p.is_keyword_only && p.default.is_none())
+                .count();
             let total_positional_given = positional_count + bound_prefix.len();
             if total_positional_given > positional_param_count {
-                let arg_word =
-                    if positional_param_count == 1 { "argument" } else { "arguments" };
                 let given_word = if total_positional_given == 1 { "was" } else { "were" };
+                let (takes_str, arg_word) = if required_positional_count == positional_param_count {
+                    let arg_word =
+                        if positional_param_count == 1 { "argument" } else { "arguments" };
+                    (format!("{positional_param_count}"), arg_word)
+                } else {
+                    (
+                        format!("from {required_positional_count} to {positional_param_count}"),
+                        "arguments",
+                    )
+                };
                 return Err(PyError::named(
                     "TypeError",
                     format!(
-                        "{}() takes {} positional {arg_word} but {} {given_word} given",
+                        "{}() takes {takes_str} positional {arg_word} but {} {given_word} given",
                         function.name,
-                        positional_param_count,
                         total_positional_given,
                     ),
                 ));
@@ -1583,16 +1595,29 @@ impl Interpreter {
                     if positional_index >= bound_args.len()
                         || function.params[positional_index].is_keyword_only
                     {
-                        let arg_word =
-                            if positional_param_count == 1 { "argument" } else { "arguments" };
                         let given_word =
                             if total_positional_given == 1 { "was" } else { "were" };
+                        let (takes_str, arg_word) =
+                            if required_positional_count == positional_param_count {
+                                let arg_word = if positional_param_count == 1 {
+                                    "argument"
+                                } else {
+                                    "arguments"
+                                };
+                                (format!("{positional_param_count}"), arg_word)
+                            } else {
+                                (
+                                    format!(
+                                        "from {required_positional_count} to {positional_param_count}"
+                                    ),
+                                    "arguments",
+                                )
+                            };
                         return Err(PyError::named(
                             "TypeError",
                             format!(
-                                "{}() takes {} positional {arg_word} but {} {given_word} given",
+                                "{}() takes {takes_str} positional {arg_word} but {} {given_word} given",
                                 function.name,
-                                positional_param_count,
                                 total_positional_given,
                             ),
                         ));
@@ -1843,15 +1868,28 @@ impl Interpreter {
                 .iter()
                 .filter(|p| !p.is_keyword_only && !p.is_args && !p.is_kwargs)
                 .count();
+            let required_positional_count = function
+                .params
+                .iter()
+                .filter(|p| !p.is_keyword_only && !p.is_args && !p.is_kwargs && p.default.is_none())
+                .count();
             if positional_vals.len() > positional_param_count {
-                let arg_word =
-                    if positional_param_count == 1 { "argument" } else { "arguments" };
                 let given_word = if positional_vals.len() == 1 { "was" } else { "were" };
+                let (takes_str, arg_word) = if required_positional_count == positional_param_count {
+                    let arg_word =
+                        if positional_param_count == 1 { "argument" } else { "arguments" };
+                    (format!("{positional_param_count}"), arg_word)
+                } else {
+                    (
+                        format!("from {required_positional_count} to {positional_param_count}"),
+                        "arguments",
+                    )
+                };
                 return Err(PyError::named(
                     "TypeError",
                     format!(
-                        "{}() takes {} positional {arg_word} but {} {given_word} given",
-                        function.name, positional_param_count, positional_vals.len(),
+                        "{}() takes {takes_str} positional {arg_word} but {} {given_word} given",
+                        function.name, positional_vals.len(),
                     ),
                 ));
             }
