@@ -3320,6 +3320,114 @@ pyrust_module! {
         }
     }
 
+    /// Issue #1134 (review): `list.__getitem__(self, key)` — native list subscript
+    /// for list subclasses.  Called via `super().__getitem__(key)` from a list
+    /// subclass override.  Delegates to `eval_index` on the backing primitive.
+    ///
+    /// CPython signature: `list.__getitem__(self, key)`
+    #[py_name = "list.__getitem__"]
+    fn list_getitem(args) -> Result<Value> {
+        let (inst_rc, key) = match (args.first(), args.get(1)) {
+            (Some(self_arg), Some(key_arg)) => {
+                let inst_rc = match self_arg.value.kind() {
+                    ValueKind::PyInstance(rc) => Rc::clone(rc),
+                    _ => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            "descriptor '__getitem__' requires a 'list' object".to_string(),
+                        ));
+                    }
+                };
+                (inst_rc, key_arg.value.clone())
+            }
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "list.__getitem__ expected 2 arguments".to_string(),
+                ));
+            }
+        };
+        let backing = instance_builtin_data(&inst_rc).ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "descriptor '__getitem__' requires a 'list' object".to_string(),
+            )
+        })?;
+        _interp.eval_index(backing, key)
+    }
+
+    /// Issue #1134 (review): `tuple.__getitem__(self, key)` — native tuple subscript
+    /// for tuple subclasses.  Called via `super().__getitem__(key)` from a tuple
+    /// subclass override.  Delegates to `eval_index` on the backing primitive.
+    ///
+    /// CPython signature: `tuple.__getitem__(self, key)`
+    #[py_name = "tuple.__getitem__"]
+    fn tuple_getitem(args) -> Result<Value> {
+        let (inst_rc, key) = match (args.first(), args.get(1)) {
+            (Some(self_arg), Some(key_arg)) => {
+                let inst_rc = match self_arg.value.kind() {
+                    ValueKind::PyInstance(rc) => Rc::clone(rc),
+                    _ => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            "descriptor '__getitem__' requires a 'tuple' object".to_string(),
+                        ));
+                    }
+                };
+                (inst_rc, key_arg.value.clone())
+            }
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "tuple.__getitem__ expected 2 arguments".to_string(),
+                ));
+            }
+        };
+        let backing = instance_builtin_data(&inst_rc).ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "descriptor '__getitem__' requires a 'tuple' object".to_string(),
+            )
+        })?;
+        _interp.eval_index(backing, key)
+    }
+
+    /// Issue #1134 (review): `bytes.__getitem__(self, key)` — native bytes subscript
+    /// for bytes subclasses.  Called via `super().__getitem__(key)` from a bytes
+    /// subclass override.  Delegates to `eval_index` on the backing primitive.
+    ///
+    /// CPython signature: `bytes.__getitem__(self, key)`
+    #[py_name = "bytes.__getitem__"]
+    fn bytes_getitem(args) -> Result<Value> {
+        let (inst_rc, key) = match (args.first(), args.get(1)) {
+            (Some(self_arg), Some(key_arg)) => {
+                let inst_rc = match self_arg.value.kind() {
+                    ValueKind::PyInstance(rc) => Rc::clone(rc),
+                    _ => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            "descriptor '__getitem__' requires a 'bytes' object".to_string(),
+                        ));
+                    }
+                };
+                (inst_rc, key_arg.value.clone())
+            }
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "bytes.__getitem__ expected 2 arguments".to_string(),
+                ));
+            }
+        };
+        let backing = instance_builtin_data(&inst_rc).ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "descriptor '__getitem__' requires a 'bytes' object".to_string(),
+            )
+        })?;
+        _interp.eval_index(backing, key)
+    }
+
     /// Issue #988: `set.__init__(self[, iterable])` — resets the backing
     /// store of a set subclass instance.  With no iterable arg the backing
     /// is reset to an empty set; with an iterable arg the backing is rebuilt

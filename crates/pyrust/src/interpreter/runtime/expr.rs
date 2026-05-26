@@ -263,7 +263,7 @@ impl Interpreter {
     fn unsupported_binary_operand(op: &str) -> PyError {
         PyError::named("TypeError", format!("unsupported operand type(s) for {op}"))
     }
-    fn eval_index(&mut self, target: Value, index: Value) -> Result<Value> {
+    pub(crate) fn eval_index(&mut self, target: Value, index: Value) -> Result<Value> {
         // If the index is a `slice` object (built by `eval_slice` and passed
         // into a `__getitem__` call, which then subscripts a built-in sequence
         // with it), extract the bounds and delegate to `eval_slice` so that
@@ -424,7 +424,15 @@ impl Interpreter {
                 // (UserFunction from user code, or BuiltinFunction from a
                 // builtin class like Counter) is treated as an override.
                 let user_getitem = lookup_class_attr(&class, "__getitem__").filter(|v| {
-                    !matches!(v.kind(), ValueKind::BuiltinFunction("dict.__getitem__"))
+                    !matches!(
+                        v.kind(),
+                        ValueKind::BuiltinFunction(
+                            "dict.__getitem__"
+                                | "list.__getitem__"
+                                | "tuple.__getitem__"
+                                | "bytes.__getitem__"
+                        )
+                    )
                 });
                 if let Some(method_val) = user_getitem {
                     return invoke_class_method(
@@ -2616,10 +2624,18 @@ impl Interpreter {
             // user-level __getitem__.
             // Issue #1134: check user __getitem__ before backing fast path,
             // matching the same ordering fix in eval_index.  The builtin
-            // sentinel `dict.__getitem__` is not an override.
+            // sentinels for the base types are not overrides.
             let class = Rc::clone(&inst_rc.borrow().class);
             let user_getitem = lookup_class_attr(&class, "__getitem__").filter(|v| {
-                !matches!(v.kind(), ValueKind::BuiltinFunction("dict.__getitem__"))
+                !matches!(
+                    v.kind(),
+                    ValueKind::BuiltinFunction(
+                        "dict.__getitem__"
+                            | "list.__getitem__"
+                            | "tuple.__getitem__"
+                            | "bytes.__getitem__"
+                    )
+                )
             });
             if let Some(method_val) = user_getitem {
                 let slice_val = pyrust_builtins::slice::make_slice(lo, hi, st);
