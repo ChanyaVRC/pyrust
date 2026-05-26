@@ -3630,10 +3630,45 @@ fn trim_g_trailing_zeros(s: String) -> String {
     }
 }
 
+/// The set of names that CPython's `object` exposes via `dir(object)`.
+/// These are included in `dir(instance)` for every user-defined class
+/// instance because every class implicitly inherits from `object` (#1225).
+static OBJECT_DUNDER_NAMES: &[&str] = &[
+    "__class__",
+    "__delattr__",
+    "__dir__",
+    "__doc__",
+    "__eq__",
+    "__format__",
+    "__ge__",
+    "__getattribute__",
+    "__getstate__",
+    "__gt__",
+    "__hash__",
+    "__init__",
+    "__init_subclass__",
+    "__le__",
+    "__lt__",
+    "__ne__",
+    "__new__",
+    "__reduce__",
+    "__reduce_ex__",
+    "__repr__",
+    "__setattr__",
+    "__sizeof__",
+    "__str__",
+    "__subclasshook__",
+];
+
 /// Returns the list of attribute/method names that `dir(obj)` should report.
 pub(crate) fn dir_names(value: &Value) -> Vec<String> {
     /// Recursively collect all attribute names from a class and its entire
     /// MRO (primary base then extra_bases, depth-first).
+    ///
+    /// When the chain terminates (base == None and the class is not the
+    /// object singleton itself), append the standard object dunder names
+    /// so that inherited names from `object` appear in `dir()` output,
+    /// matching CPython's behaviour (#1225).
     fn collect_class_names(class: &Rc<RefCell<PyClass>>, names: &mut Vec<String>) {
         let (own_keys, base, extra_bases): (Vec<String>, _, _) = {
             let borrowed = class.borrow();
@@ -3646,6 +3681,11 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
         names.extend(own_keys);
         if let Some(b) = base {
             collect_class_names(&b, names);
+        } else {
+            // Reached the top of the MRO chain.  Append the names that
+            // CPython's `object` exposes; the caller's dedup pass removes
+            // any that were already collected from a subclass override.
+            names.extend(OBJECT_DUNDER_NAMES.iter().map(|s| (*s).to_string()));
         }
         for eb in &extra_bases {
             collect_class_names(eb, names);
