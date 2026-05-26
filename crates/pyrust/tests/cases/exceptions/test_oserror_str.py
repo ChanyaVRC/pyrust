@@ -21,10 +21,14 @@ print(str(PermissionError(13, "Permission denied")))
 # Filename with single quotes uses double-quote repr
 print(str(OSError(2, "No such file or directory", "path'with'quotes")))
 
-# 5-arg form: errno, strerror, filename, winerror, filename2
-# Both filenames set: "[Errno N] strerror: repr(filename) -> repr(filename2)"
-print(str(OSError(2, "Not found", "/src", 0, "/dst")))
-# Only filename2, filename=None: no filename in output
-print(str(OSError(2, "Not found", None, 0, "/dst")))
-# filename set, filename2=None: just filename
-print(str(OSError(2, "Not found", "/path", 0, None)))
+import sys
+
+# 5-arg form with winerror: output differs on Windows ([WinError N] vs [Errno N])
+# Only test on non-Windows where CPython uses [Errno N] format like pyrust.
+if sys.platform != "win32":
+    # Both filenames set: "[Errno N] strerror: repr(filename) -> repr(filename2)"
+    print(str(OSError(2, "Not found", "/src", 0, "/dst")))
+    # Only filename2, filename=None: no filename in output
+    print(str(OSError(2, "Not found", None, 0, "/dst")))
+    # filename set, filename2=None: just filename
+    print(str(OSError(2, "Not found", "/path", 0, None)))
