@@ -731,10 +731,9 @@ fn lex_number(chars: &[char], start: usize) -> Result<(Token, usize)> {
 
 fn lex_ident_or_keyword(chars: &[char], start: usize) -> (Token, usize) {
     let mut pos = start;
-    while chars
-        .get(pos)
-        .map_or(false, |&c| c.is_alphanumeric() || c == '_')
-    {
+    while chars.get(pos).map_or(false, |&c| {
+        c.is_alphabetic() || c.is_ascii_digit() || c == '_'
+    }) {
         pos += 1;
     }
 
