@@ -13,57 +13,67 @@ impl Interpreter {
                     return Ok(instance_attrs_snapshot(&instance));
                 }
 
-                // Check the class first for data descriptors (Property).  A data
-                // descriptor takes priority over instance __dict__ — matching CPython.
+                // General descriptor protocol (CPython Data Model §3.3.2):
+                //
+                // Step 1: Walk the class MRO for a data descriptor (has
+                // __set__ OR __delete__).  Data descriptors take priority
+                // over instance __dict__.
+                //
+                // If __get__ raises AttributeError, CPython's
+                // slot_tp_getattr_hook falls through to __getattr__ (if
+                // defined) rather than propagating immediately — only
+                // non-AttributeError exceptions propagate without __getattr__.
                 let class = { Rc::clone(&instance.borrow().class) };
-                if let Some(class_val) = lookup_class_attr(&class, name)
-                    && let Some((fget, partial_slot)) =
-                        pyrust_builtins::property::with_property(&class_val, |s| {
-                            (Rc::clone(&s.fget), s.partial_slot)
-                        })
-                    && partial_slot.is_none()
-                {
-                    return if fget.is_none() {
-                        Err(PyError::named(
-                            "AttributeError",
-                            format!("property '{}' has no getter", name),
-                        ))
-                    } else {
-                        let getter = (*fget).clone();
-                        self.call_function_expanded(
-                            getter,
-                            &[ExpandedCallArg {
-                                name: None,
-                                value: Value::py_instance(Rc::clone(&instance)),
-                            }],
-                        )
-                    };
+                if let Some(class_val) = lookup_class_attr(&class, name) {
+                    if is_data_descriptor(&class_val) {
+                        let desc_result = call_descriptor_get(
+                            self,
+                            &class_val,
+                            Value::py_instance(Rc::clone(&instance)),
+                            Value::py_class(Rc::clone(&class)),
+                            name,
+                        );
+                        match desc_result {
+                            Ok(v) => return Ok(v),
+                            Err(ref e) if e.class_name_is("AttributeError") => {
+                                // __get__ raised AttributeError: try __getattr__ if
+                                // defined, otherwise re-raise the original error
+                                // (CPython slot_tp_getattr_hook behaviour).
+                                if let Some(getattr_val) =
+                                    lookup_class_attr(&class, "__getattr__")
+                                {
+                                    return invoke_class_method(
+                                        self,
+                                        getattr_val,
+                                        Value::py_instance(Rc::clone(&instance)),
+                                        &[ExpandedCallArg {
+                                            name: None,
+                                            value: Value::string(name.to_string()),
+                                        }],
+                                    );
+                                }
+                            }
+                            Err(_) => {}
+                        }
+                        return desc_result;
+                    }
                 }
 
+                // Step 2: Instance __dict__.
                 if let Some(value) = instance.borrow().attrs.get(name).cloned() {
                     return Ok(value);
                 }
 
-                // Single MRO walk for the remaining cases.  Two things need
-                // to happen here, and we don't want to walk the MRO twice in
-                // the common (regular method/attr) path:
-                //
-                //   1. `cached_property` — non-data descriptor: only fires
-                //      when the instance __dict__ doesn't already have the
-                //      attribute (checked above).  Once it runs, the result
-                //      is stashed into `instance.attrs` under the descriptor's
-                //      own `attr_name` (set via `__set_name__`, or defaulted
-                //      to the wrapped function's `__name__` at decoration
-                //      time).  This matches CPython's
-                //      `cached_property.__get__` semantics — the cache slot
-                //      is whatever name `__set_name__` recorded, not the
-                //      access-site name.  If `attr_name` differs from the
-                //      access-site name the next access still hits the
-                //      descriptor and recomputes (also matching CPython).
-                //
-                //   2. Regular dispatch — UserFunction → BoundMethod,
-                //      BuiltinFunction → bound builtin, etc.
+                // Step 3: Non-data descriptor or plain class attribute.
+                // `cached_property` and user-defined non-data descriptors
+                // (has __get__ but NOT __set__/__delete__) fire here;
+                // regular UserFunction / BuiltinFunction attrs bind to the
+                // instance as before.
                 if let Some(value) = lookup_class_attr(&class, name) {
+                    // cached_property: non-data descriptor with caching.
+                    // Must come before the general __get__ check because
+                    // cached_property's result is stored back into
+                    // instance.attrs for subsequent accesses.
                     if let Some((func, attr_name)) =
                         pyrust_builtins::cached_property::with_cached_property(&value, |s| {
                             (s.func.clone(), s.attr_name.clone())
@@ -82,6 +92,40 @@ impl Interpreter {
                             .insert(attr_name, result.clone());
                         return Ok(result);
                     }
+                    // General non-data descriptor: has __get__ but no __set__/__delete__.
+                    // Same AttributeError fallthrough to __getattr__ applies.
+                    if is_non_data_descriptor(&value) {
+                        let desc_result = call_descriptor_get(
+                            self,
+                            &value,
+                            Value::py_instance(Rc::clone(&instance)),
+                            Value::py_class(Rc::clone(&class)),
+                            name,
+                        );
+                        match desc_result {
+                            Ok(v) => return Ok(v),
+                            Err(ref e) if e.class_name_is("AttributeError") => {
+                                // __get__ raised AttributeError: try __getattr__ if
+                                // defined, otherwise re-raise the original error.
+                                if let Some(getattr_val) =
+                                    lookup_class_attr(&class, "__getattr__")
+                                {
+                                    return invoke_class_method(
+                                        self,
+                                        getattr_val,
+                                        Value::py_instance(Rc::clone(&instance)),
+                                        &[ExpandedCallArg {
+                                            name: None,
+                                            value: Value::string(name.to_string()),
+                                        }],
+                                    );
+                                }
+                            }
+                            Err(_) => {}
+                        }
+                        return desc_result;
+                    }
+                    // Plain class attribute: bind functions to the instance.
                     // Probe kind tag in a scoped block so the `kind()` Ref
                     // drops before the `_ => value` arm may move `value`
                     // (#450).
@@ -133,6 +177,20 @@ impl Interpreter {
                     } else {
                         Value::none()
                     });
+                }
+
+                // Step 4: __getattr__ fallback — called when normal lookup
+                // finds nothing (CPython slot_tp_getattr_hook).
+                if let Some(getattr_val) = lookup_class_attr(&class, "__getattr__") {
+                    return invoke_class_method(
+                        self,
+                        getattr_val,
+                        Value::py_instance(Rc::clone(&instance)),
+                        &[ExpandedCallArg {
+                            name: None,
+                            value: Value::string(name.to_string()),
+                        }],
+                    );
                 }
 
                 let class_name = class.borrow().name.clone();
@@ -243,6 +301,24 @@ impl Interpreter {
                     return Ok(empty);
                 }
                 if let Some(value) = lookup_class_attr(&class, name) {
+                    // Descriptor protocol for class-level access: if the class
+                    // attribute is a user-defined descriptor (PyInstance with
+                    // __get__), call __get__(None, cls) — CPython Data Model
+                    // §3.3.2.  property is handled by its own match arm (above
+                    // this ValueKind::PyClass arm) and returns itself on class
+                    // access, so we only check PyInstance here.
+                    if let ValueKind::PyInstance(desc_inst) = value.kind() {
+                        let desc_class = Rc::clone(&desc_inst.borrow().class);
+                        if lookup_class_attr(&desc_class, "__get__").is_some() {
+                            return call_descriptor_get(
+                                self,
+                                &value,
+                                Value::none(),
+                                Value::py_class(Rc::clone(&class)),
+                                name,
+                            );
+                        }
+                    }
                     // Drop the kind() Ref before the `_ => value` arm
                     // may move `value` (#450).
                     let user_fn = match value.kind() {
@@ -661,41 +737,10 @@ impl Interpreter {
     pub(crate) fn assign_attr(&mut self, target: Value, name: &str, value: Value) -> Result<()> {
         match target.kind() {
             ValueKind::PyInstance(instance) => {
-                // Check for a property descriptor in the class chain.
                 let class = { Rc::clone(&instance.borrow().class) };
-                if let Some(class_val) = lookup_class_attr(&class, name)
-                    && let Some((fset, partial_slot)) =
-                        pyrust_builtins::property::with_property(&class_val, |s| {
-                            (Rc::clone(&s.fset), s.partial_slot)
-                        })
-                    && partial_slot.is_none()
-                {
-                    return if fset.is_none() {
-                        Err(PyError::named(
-                            "AttributeError",
-                            format!("property '{}' has no setter", name),
-                        ))
-                    } else {
-                        let setter = (*fset).clone();
-                        self.call_function_expanded(
-                            setter,
-                            &[
-                                ExpandedCallArg {
-                                    name: None,
-                                    value: Value::py_instance(Rc::clone(instance)),
-                                },
-                                ExpandedCallArg { name: None, value },
-                            ],
-                        )?;
-                        Ok(())
-                    };
-                }
-                // Check for a `__setattr__` on the class chain.  CPython calls
-                // it for every attribute assignment on instances that define it.
-                // We skip this for property descriptors (handled above) and
-                // only check when the class has an explicit `__setattr__`
-                // (not `object.__setattr__`, which we don't model as a class
-                // method).
+                // Check for `__setattr__` first — CPython dispatches
+                // __setattr__ before the descriptor protocol (object.__setattr__
+                // is what does the descriptor lookup by default).
                 if let Some(setattr_val) = lookup_class_attr(&class, "__setattr__") {
                     return invoke_class_method(
                         self,
@@ -710,6 +755,15 @@ impl Interpreter {
                         ],
                     )
                     .map(|_| ());
+                }
+                // General data descriptor protocol: if the class (or MRO) has
+                // a data descriptor (has __set__) for this name, call __set__.
+                if let Some(class_val) = lookup_class_attr(&class, name) {
+                    if let Some(result) =
+                        call_descriptor_set(self, &class_val, Value::py_instance(Rc::clone(instance)), value.clone(), name)?
+                    {
+                        return result;
+                    }
                 }
                 // PEP 3134: __cause__ and __context__ must be None or a
                 // BaseException subclass instance.  __suppress_context__ must
@@ -1041,29 +1095,28 @@ impl Interpreter {
         match target.kind() {
             ValueKind::PyInstance(instance) => {
                 let class = { Rc::clone(&instance.borrow().class) };
-                if let Some(class_val) = lookup_class_attr(&class, name)
-                    && let Some((fdel, partial_slot)) =
-                        pyrust_builtins::property::with_property(&class_val, |s| {
-                            (Rc::clone(&s.fdel), s.partial_slot)
-                        })
-                    && partial_slot.is_none()
-                {
-                    return if fdel.is_none() {
-                        Err(PyError::named(
-                            "AttributeError",
-                            format!("property '{}' has no deleter", name),
-                        ))
-                    } else {
-                        let deleter = (*fdel).clone();
-                        self.call_function_expanded(
-                            deleter,
-                            &[ExpandedCallArg {
-                                name: None,
-                                value: Value::py_instance(Rc::clone(instance)),
-                            }],
-                        )?;
-                        Ok(())
-                    };
+                // Check for `__delattr__` first — symmetric with __setattr__
+                // in assign_attr (issue #1174).
+                if let Some(delattr_val) = lookup_class_attr(&class, "__delattr__") {
+                    return invoke_class_method(
+                        self,
+                        delattr_val,
+                        Value::py_instance(Rc::clone(instance)),
+                        &[ExpandedCallArg {
+                            name: None,
+                            value: Value::string(name.to_string()),
+                        }],
+                    )
+                    .map(|_| ());
+                }
+                // General data descriptor protocol: if the class (or MRO)
+                // has a descriptor with __delete__ for this name, call it.
+                if let Some(class_val) = lookup_class_attr(&class, name) {
+                    if let Some(result) =
+                        call_descriptor_delete(self, &class_val, Value::py_instance(Rc::clone(instance)), name)?
+                    {
+                        return result;
+                    }
                 }
                 // `shift_remove` keeps the remaining entries in their
                 // original insertion order so `vars(obj)` after `del obj.x`
@@ -1562,6 +1615,218 @@ fn bump_global_env_version(interp: &Interpreter) {
     // Skip GLOBAL_CACHE_EMPTY (u32::MAX - 1); wrap back to 0.
     let v = if v == GLOBAL_CACHE_EMPTY { 0 } else { v };
     interp.global_env_version.set(v);
+}
+
+/// Returns `true` if `val` is a data descriptor: it defines `__set__` or
+/// `__delete__` on its type.  Data descriptors take priority over instance
+/// `__dict__` in CPython's attribute lookup (PEP 3107 / Data Model §3.3.2).
+///
+/// For `property` (a BuiltinObject), it is always a data descriptor.
+/// For user `PyInstance` values, we look up `__set__` or `__delete__` on the
+/// instance's class.  Other value kinds are never descriptors.
+fn is_data_descriptor(val: &Value) -> bool {
+    // property is always a data descriptor (has fget/fset/fdel slots).
+    if pyrust_builtins::property::property_partial_slot(val) == Some(None) {
+        return true;
+    }
+    if let ValueKind::PyInstance(inst) = val.kind() {
+        let class = Rc::clone(&inst.borrow().class);
+        return lookup_class_attr(&class, "__set__").is_some()
+            || lookup_class_attr(&class, "__delete__").is_some();
+    }
+    false
+}
+
+/// Returns `true` if `val` is a non-data descriptor: defines `__get__` on
+/// its type but NOT `__set__` or `__delete__`.  Non-data descriptors are
+/// checked after instance `__dict__` in CPython's lookup order.
+///
+/// `cached_property` is already handled before this path so we don't need
+/// to special-case it here — it would return `true` but is intercepted
+/// earlier.
+fn is_non_data_descriptor(val: &Value) -> bool {
+    if let ValueKind::PyInstance(inst) = val.kind() {
+        let class = Rc::clone(&inst.borrow().class);
+        return lookup_class_attr(&class, "__get__").is_some()
+            && lookup_class_attr(&class, "__set__").is_none()
+            && lookup_class_attr(&class, "__delete__").is_none();
+    }
+    false
+}
+
+/// Call `descriptor.__get__(instance, owner)` and return the result.
+///
+/// Handles both `property` (BuiltinObject with fget) and user-defined
+/// descriptors (PyInstance with a class `__get__` method).
+fn call_descriptor_get(
+    interp: &mut Interpreter,
+    descriptor: &Value,
+    instance: Value,
+    owner: Value,
+    attr_name: &str,
+) -> Result<Value> {
+    // property special-case: use the stored fget directly.
+    if let Some((fget, partial_slot)) =
+        pyrust_builtins::property::with_property(descriptor, |s| {
+            (Rc::clone(&s.fget), s.partial_slot)
+        })
+        && partial_slot.is_none()
+    {
+        return if fget.is_none() {
+            Err(PyError::named(
+                "AttributeError",
+                format!("property '{}' has no getter", attr_name),
+            ))
+        } else {
+            let getter = (*fget).clone();
+            interp.call_function_expanded(
+                getter,
+                &[ExpandedCallArg {
+                    name: None,
+                    value: instance,
+                }],
+            )
+        };
+    }
+    // General user-defined descriptor: look up __get__ on the descriptor's class.
+    if let ValueKind::PyInstance(inst) = descriptor.kind() {
+        let desc_class = Rc::clone(&inst.borrow().class);
+        if let Some(get_fn) = lookup_class_attr(&desc_class, "__get__") {
+            return invoke_class_method(
+                interp,
+                get_fn,
+                descriptor.clone(),
+                &[
+                    ExpandedCallArg {
+                        name: None,
+                        value: instance,
+                    },
+                    ExpandedCallArg {
+                        name: None,
+                        value: owner,
+                    },
+                ],
+            );
+        }
+    }
+    // Fallback: return the descriptor itself (shouldn't happen if callers
+    // check is_data_descriptor / is_non_data_descriptor first, but be safe).
+    Ok(descriptor.clone())
+}
+
+/// Try to call `descriptor.__set__(instance, value)` for a data descriptor.
+///
+/// Returns `Some(Ok(()))` if the descriptor handled the set,
+/// `Some(Err(_))` if it raised, or `None` if the class attribute is not a
+/// data descriptor (caller should fall through to instance dict write).
+fn call_descriptor_set(
+    interp: &mut Interpreter,
+    class_val: &Value,
+    instance: Value,
+    value: Value,
+    attr_name: &str,
+) -> Result<Option<Result<()>>> {
+    // property special-case.
+    if let Some((fset, partial_slot)) =
+        pyrust_builtins::property::with_property(class_val, |s| {
+            (Rc::clone(&s.fset), s.partial_slot)
+        })
+        && partial_slot.is_none()
+    {
+        return Ok(Some(if fset.is_none() {
+            Err(PyError::named(
+                "AttributeError",
+                format!("property '{}' has no setter", attr_name),
+            ))
+        } else {
+            let setter = (*fset).clone();
+            interp.call_function_expanded(
+                setter,
+                &[
+                    ExpandedCallArg {
+                        name: None,
+                        value: instance,
+                    },
+                    ExpandedCallArg { name: None, value },
+                ],
+            )?;
+            Ok(())
+        }));
+    }
+    // General user-defined data descriptor: look up __set__ on the descriptor's class.
+    if let ValueKind::PyInstance(inst) = class_val.kind() {
+        let desc_class = Rc::clone(&inst.borrow().class);
+        if let Some(set_fn) = lookup_class_attr(&desc_class, "__set__") {
+            let result = invoke_class_method(
+                interp,
+                set_fn,
+                class_val.clone(),
+                &[
+                    ExpandedCallArg {
+                        name: None,
+                        value: instance,
+                    },
+                    ExpandedCallArg { name: None, value },
+                ],
+            );
+            return Ok(Some(result.map(|_| ())));
+        }
+    }
+    Ok(None)
+}
+
+/// Try to call `descriptor.__delete__(instance)` for a data descriptor.
+///
+/// Returns `Some(Ok(()))` if handled, `Some(Err(_))` if it raised, or
+/// `None` if no `__delete__` is found (caller falls through to instance
+/// dict removal).
+fn call_descriptor_delete(
+    interp: &mut Interpreter,
+    class_val: &Value,
+    instance: Value,
+    attr_name: &str,
+) -> Result<Option<Result<()>>> {
+    // property special-case.
+    if let Some((fdel, partial_slot)) =
+        pyrust_builtins::property::with_property(class_val, |s| {
+            (Rc::clone(&s.fdel), s.partial_slot)
+        })
+        && partial_slot.is_none()
+    {
+        return Ok(Some(if fdel.is_none() {
+            Err(PyError::named(
+                "AttributeError",
+                format!("property '{}' has no deleter", attr_name),
+            ))
+        } else {
+            let deleter = (*fdel).clone();
+            interp.call_function_expanded(
+                deleter,
+                &[ExpandedCallArg {
+                    name: None,
+                    value: instance,
+                }],
+            )?;
+            Ok(())
+        }));
+    }
+    // General user-defined data descriptor: look up __delete__ on the descriptor's class.
+    if let ValueKind::PyInstance(inst) = class_val.kind() {
+        let desc_class = Rc::clone(&inst.borrow().class);
+        if let Some(del_fn) = lookup_class_attr(&desc_class, "__delete__") {
+            let result = invoke_class_method(
+                interp,
+                del_fn,
+                class_val.clone(),
+                &[ExpandedCallArg {
+                    name: None,
+                    value: instance,
+                }],
+            );
+            return Ok(Some(result.map(|_| ())));
+        }
+    }
+    Ok(None)
 }
 
 /// Returns `true` if `name` is a built-in method on `target`'s type.
