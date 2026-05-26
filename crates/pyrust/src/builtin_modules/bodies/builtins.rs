@@ -3046,6 +3046,12 @@ pyrust_module! {
                     ))
                 };
             }
+            // No user __format__: for an empty spec, CPython's object.__format__
+            // delegates to str(self), which dispatches __str__.  Mirror that here
+            // so that format(exc, "") and f"{exc}" call the user-defined __str__.
+            if spec.is_empty() {
+                return Ok(Value::string(render_instance_str(_interp, value)?));
+            }
         }
         apply_format_spec(value, spec)
     }
