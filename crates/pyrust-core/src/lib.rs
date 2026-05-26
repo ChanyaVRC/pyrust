@@ -3593,7 +3593,7 @@ fn exception_to_string(instance: &Rc<RefCell<PyInstance>>) -> String {
     // CPython's `KeyError.__str__` always uses repr of the single arg, so
     // `str(KeyError('x'))` returns `"'x'"` (one level of quoting).  All other
     // exception classes use `str()` of the arg (no extra quoting).
-    let is_key_error = instance.borrow().class.borrow().name == "KeyError";
+    let is_key_error = class_chain_has_name(&instance.borrow().class, "KeyError");
     format_exception_args(&args, is_key_error)
 }
 
