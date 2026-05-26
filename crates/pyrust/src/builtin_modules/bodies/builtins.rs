@@ -20,7 +20,7 @@ use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
-    CallableIter, FilterIter, MapIter, NativeIterFrame, apply_format_spec, ascii_repr, bigint_divmod_floor,
+    CallableIter, FilterIter, MapIter, NativeIterFrame, apply_format_spec, ascii_repr_interp, bigint_divmod_floor,
     class_chain_contains_name, class_is_subclass_of,
     compare_values, compare_values_with_op, dir_names, instance_attrs_snapshot,
     instance_builtin_data,
@@ -310,10 +310,10 @@ pyrust_module! {
     ///
     /// Migrated to the typed-signature dialect (#400): like `repr`,
     /// `ascii` accepts every Python object, so `PyValue` is the natural
-    /// wrapper.  The body just delegates to the existing helper.
-    #[pure]
+    /// wrapper.  Not marked `#[pure]` because it dispatches user `__repr__`
+    /// for `PyInstance` values, which may invoke arbitrary user code.
     fn ascii(#[positional_only] obj: PyValue) -> Result<Value> {
-        Ok(Value::string(ascii_repr(&obj.0)))
+        Ok(Value::string(ascii_repr_interp(_interp, &obj.0)?))
     }
 
     /// CPython: id(object) — identity (CPython returns memory address).
