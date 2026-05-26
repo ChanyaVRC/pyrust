@@ -1412,10 +1412,59 @@ thread_local! {
             .unwrap_or_else(Value::none);
 }
 
-/// Return a clone of the thread-local `builtins` module.  O(1) — clones
-/// the `Rc<RefCell<PyModule>>` reference; the attrs map is shared.
+/// Return a clone of the thread-local `builtins` module.  O(1) on subsequent
+/// calls — clones the `Rc<RefCell<PyModule>>` reference (attrs map is shared).
+///
+/// On the very first call per thread, applies post-processing to populate
+/// the module attrs with:
+///   - Primitive type `PyClass` singletons (`int`, `str`, `list`, …), replacing
+///     the `BuiltinFunction(name)` tokens that `pyrust_module!` emits.
+///   - Built-in exception class `PyClass` singletons (`ValueError`, `TypeError`,
+///     …), which CPython exposes as attributes of the `builtins` module
+///     (issue #1255).
+///
+/// The mutation is applied once and is shared by all future callers because
+/// every `Value::clone` of a `PyModule` shares the same `Rc<RefCell<PyModule>>`.
 pub(crate) fn cached_builtins_module() -> Value {
-    BUILTINS_MODULE_CACHE.with(Value::clone)
+    BUILTINS_MODULE_CACHE.with(|module| {
+        // Lazily apply post-processing on first access: replace auto-generated
+        // `BuiltinFunction("int")` tokens with real `PyClass` singletons, and
+        // insert exception classes missing from the auto-generated module.
+        // Guard: if "int" is already a PyClass, post-processing already ran.
+        let already_processed = if let ValueKind::PyModule(m) = module.kind() {
+            matches!(
+                m.borrow().attrs.get("int").map(|v| v.kind()),
+                Some(ValueKind::PyClass(_))
+            )
+        } else {
+            true
+        };
+        if !already_processed {
+            if let ValueKind::PyModule(m) = module.kind() {
+                let mut mod_attrs = m.borrow_mut();
+                // Primitive types.
+                for prim in [
+                    "bool", "bytes", "complex", "dict", "float", "frozenset",
+                    "int", "list", "set", "str", "tuple",
+                ] {
+                    if let Some(class) = primitive_class_by_name(prim) {
+                        mod_attrs.attrs.insert(prim.to_string(), Value::py_class(class));
+                    }
+                }
+                // Built-in exception classes (issue #1255).  Skip names with '.'
+                // (e.g. "io.UnsupportedOperation") — those belong to other modules.
+                for (exc_name, exc_class) in build_exc_class_map() {
+                    if !exc_name.contains('.') {
+                        mod_attrs.attrs.insert(
+                            exc_name.to_string(),
+                            Value::py_class(exc_class),
+                        );
+                    }
+                }
+            }
+        }
+        Value::clone(module)
+    })
 }
 
 /// Look up a built-in exception class by name, using the thread-local cache.

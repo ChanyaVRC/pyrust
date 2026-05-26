@@ -1357,6 +1357,10 @@ impl Interpreter {
             // `builtins.int is int` and `isinstance(5, builtins.int)`
             // match the global lookup path (issue #462; Copilot review
             // on #463).
+            //
+            // Also insert exception classes (issue #1255): CPython exposes
+            // every built-in exception class as an attribute of the `builtins`
+            // module (`builtins.ValueError`, `builtins.TypeError`, etc.).
             if name == "builtins"
                 && let ValueKind::PyModule(m) = val.kind()
             {
@@ -1370,6 +1374,18 @@ impl Interpreter {
                         m.borrow_mut()
                             .attrs
                             .insert(prim.to_string(), Value::py_class(class));
+                    }
+                }
+                // Insert all built-in exception classes.  Skip names that
+                // contain '.' (e.g. "io.UnsupportedOperation" which belongs
+                // to the `io` module, not `builtins`).
+                for (exc_name, exc_class) in
+                    crate::interpreter::build_exc_class_map()
+                {
+                    if !exc_name.contains('.') {
+                        m.borrow_mut()
+                            .attrs
+                            .insert(exc_name.to_string(), Value::py_class(exc_class));
                     }
                 }
             }
