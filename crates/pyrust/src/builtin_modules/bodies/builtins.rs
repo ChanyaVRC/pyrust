@@ -3307,7 +3307,10 @@ pyrust_module! {
         }
         match args[0].value.kind() {
             ValueKind::UserFunction(f) => Ok(Value::class_method(Rc::clone(f))),
-            // CPython 3.12 accepts any object as a classmethod descriptor.
+            // CPython 3.12 accepts any object as a classmethod descriptor, but
+            // Value::class_method requires an Rc<UserFunction>.  Supporting
+            // non-function descriptors needs a Value variant change (follow-up
+            // issue #1315).
             _ => Err(PyError::named(
                 "TypeError",
                 format!("{FN_NAME}() argument must be a function"),
@@ -3327,7 +3330,10 @@ pyrust_module! {
         }
         match args[0].value.kind() {
             ValueKind::UserFunction(f) => Ok(Value::static_method(Rc::clone(f))),
-            // CPython 3.12 accepts any object as a staticmethod descriptor.
+            // CPython 3.12 accepts any object as a staticmethod descriptor, but
+            // Value::static_method requires an Rc<UserFunction>.  Supporting
+            // non-function descriptors needs a Value variant change (follow-up
+            // issue #1315).
             _ => Err(PyError::named(
                 "TypeError",
                 format!("{FN_NAME}() argument must be a function"),
