@@ -1887,6 +1887,33 @@ impl Interpreter {
         args: &[ExpandedCallArg],
     ) -> Result<Value> {
         if is_exception_class(&class) {
+            // Issue #1112: if the class has a user-defined __init__ (UserFunction in
+            // the MRO), create the instance via instantiate_exception first (which sets
+            // .args and any special attrs like StopIteration.value from the constructor
+            // args), then call the user's __init__ so it can override .args via
+            // super().__init__(...) and set its own instance attributes.
+            let user_init = lookup_class_attr(&class, "__init__")
+                .filter(|v| matches!(v.kind(), ValueKind::UserFunction(_)));
+            if let Some(init_val) = user_init {
+                let values: Vec<Value> = args
+                    .iter()
+                    .filter(|a| a.name.is_none())
+                    .map(|a| a.value.clone())
+                    .collect();
+                let instance = instantiate_exception(Rc::clone(&class), values);
+                let result = invoke_class_method(self, init_val, instance.clone(), args)?;
+                if !result.is_none() {
+                    return Err(PyError::named(
+                        "TypeError",
+                        &format!(
+                            "__init__() should return None, not '{}'",
+                            pyrust_core::builtin_type_name(&result),
+                        ),
+                    ));
+                }
+                return Ok(instance);
+            }
+
             reject_keyword_args_expanded(&class.borrow().name, args)?;
             let mut values = Vec::with_capacity(args.len());
             for arg in args {
