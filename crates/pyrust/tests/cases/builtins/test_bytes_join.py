@@ -36,3 +36,9 @@ try:
     b",".join(42)
 except TypeError as e:
     print(f"TypeError: {e}")
+
+# TypeError: keyword arguments are not accepted
+try:
+    b",".join(iterable=[b"a", b"b"])
+except TypeError as e:
+    print(f"TypeError: {e}")

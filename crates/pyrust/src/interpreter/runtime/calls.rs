@@ -223,6 +223,12 @@ impl Interpreter {
                     }
                     Kind::Bytes => {
                         if method == "join" {
+                            if !kw.is_empty() {
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    "bytes.join() takes no keyword arguments".to_string(),
+                                ));
+                            }
                             let args_vec: Vec<Value> = pos.drain(..).collect();
                             self.call_bytes_join(receiver, args_vec)
                         } else {
