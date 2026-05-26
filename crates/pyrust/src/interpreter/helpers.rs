@@ -898,14 +898,24 @@ fn normalize_index_inner(index: &Value, len: usize, label: &str, oor_msg: &str) 
     let mut value = match index.kind() {
         ValueKind::Int(v) => v,
         ValueKind::Bool(b) => b as i64,
+        // BigInt is a valid integer type but almost certainly out of range for
+        // any realistic sequence length.  Try to narrow to i64; if it doesn't
+        // fit, report IndexError (CPython: "cannot fit '...' into an
+        // index-sized integer" when __index__ returns a large int — the
+        // nearest equivalent here is IndexError for an unreachable index).
+        ValueKind::BigInt(big) => match big.to_i64() {
+            Some(v) => v,
+            None => return Err(PyError::named("IndexError", oor_msg)),
+        },
         _ => {
-            return Err(PyError::named(
-                "TypeError",
-                format!(
-                    "{label} indices must be integers or slices, not {}",
-                    value_type_name_str(index)
-                ),
-            ))
+            // CPython uses a different message format for string vs other sequences.
+            let type_name = value_type_name_str(index);
+            let msg = if label == "string" {
+                format!("string indices must be integers, not '{type_name}'")
+            } else {
+                format!("{label} indices must be integers or slices, not {type_name}")
+            };
+            return Err(PyError::named("TypeError", msg));
         }
     };
     if value < 0 {

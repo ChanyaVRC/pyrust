@@ -314,6 +314,21 @@ impl Interpreter {
                 None => Err(PyError::key_error(index)),
             };
         }
+        // Resolve the __index__ protocol for sequence targets before the borrow
+        // from target.kind() is held across the match arms (which call &mut self
+        // helpers that cannot coexist with an active kind() borrow).
+        let seq_label: Option<&'static str> = match target.kind() {
+            ValueKind::List(_) => Some("list"),
+            ValueKind::Tuple(_) => Some("tuple"),
+            ValueKind::Str(_) => Some("string"),
+            ValueKind::Bytes(_) => Some("bytes"),
+            _ => None,
+        };
+        let index = if let Some(label) = seq_label {
+            self.call_index_protocol(index, label)?
+        } else {
+            index
+        };
         match target.kind() {
             ValueKind::List(items) => {
                 let idx = normalize_index(&index, items.len(), "list")?;
