@@ -75,3 +75,37 @@ e10 = EnvironmentError(13, 'permission denied', '/etc/shadow')
 print(repr(e10.errno))     # 13
 print(repr(e10.strerror))  # 'permission denied'
 print(repr(e10.filename))  # '/etc/shadow'
+
+# OSError 5-arg form: filename2 = args[4] (args[3] is winerror)
+e11 = OSError(1, 'cross-device link', 'src.txt', None, 'dst.txt')
+print(repr(e11.filename))   # 'src.txt'
+print(repr(e11.filename2))  # 'dst.txt'
+
+# SyntaxError 2-arg with list (not tuple) — CPython accepts any sequence
+e12 = SyntaxError('bad', ['file.py', 2, 1, 'x='])
+print(repr(e12.filename))  # 'file.py'
+print(repr(e12.lineno))    # 2
+
+# SyntaxError 2-arg: too few elements in sequence raises TypeError
+try:
+    SyntaxError('bad', ('f.py', 1))
+except TypeError as ex:
+    print(type(ex).__name__)  # TypeError
+
+# SyntaxError 2-arg: exactly 5 elements raises TypeError (end_offset required)
+try:
+    SyntaxError('bad', ('f.py', 1, 5, 'x=;', 2))
+except TypeError as ex:
+    print(type(ex).__name__)  # TypeError
+
+# SyntaxError 2-arg: more than 6 elements raises TypeError
+try:
+    SyntaxError('bad', ('f.py', 1, 5, 'x=;', 2, 8, 'extra'))
+except TypeError as ex:
+    print(type(ex).__name__)  # TypeError
+
+# SyntaxError 2-arg: non-iterable second arg raises TypeError
+try:
+    SyntaxError('bad', 42)
+except TypeError as ex:
+    print(type(ex).__name__)  # TypeError

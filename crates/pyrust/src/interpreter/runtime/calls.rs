@@ -1877,6 +1877,53 @@ impl Interpreter {
             for arg in args {
                 values.push(arg.value.clone());
             }
+            // CPython 3.12 SyntaxError.__init__ validates args[1] if present:
+            // it must be an iterable that yields exactly 4 or 6 elements.
+            // Non-iterables raise TypeError; the wrong number raises TypeError.
+            if class_chain_contains_name(&class, "SyntaxError") && values.len() >= 2 {
+                let second = &values[1];
+                let items_opt: Option<Vec<Value>> = second
+                    .as_tuple()
+                    .map(|s| s.to_vec())
+                    .or_else(|| second.as_list().map(|s| s.to_vec()));
+                match items_opt {
+                    None => {
+                        // args[1] is not a sequence — CPython raises TypeError
+                        return Err(PyError::named(
+                            "TypeError",
+                            &format!(
+                                "'{}' object is not iterable",
+                                pyrust_core::builtin_type_name(second)
+                            ),
+                        ));
+                    }
+                    Some(ref items) if items.len() < 4 => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            &format!(
+                                "function takes at least 4 arguments ({} given)",
+                                items.len()
+                            ),
+                        ));
+                    }
+                    Some(ref items) if items.len() == 5 => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            "end_offset must be provided when end_lineno is provided",
+                        ));
+                    }
+                    Some(ref items) if items.len() > 6 => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            &format!(
+                                "function takes at most 6 arguments ({} given)",
+                                items.len()
+                            ),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
             return Ok(instantiate_exception(class, values));
         }
 
