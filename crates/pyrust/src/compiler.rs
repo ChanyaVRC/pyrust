@@ -3812,6 +3812,11 @@ struct Compiler {
     /// after `globals()` has been called.  Child compilers for functions and
     /// class bodies set this to false — they write to fastlocals only.
     is_module_scope: bool,
+    /// True once we have compiled a statement that is neither a module docstring
+    /// nor a `from __future__ import ...`.  After this point any `from __future__`
+    /// import must be rejected with
+    /// `SyntaxError: from __future__ imports must occur at the beginning of the file`.
+    past_future_zone: bool,
 }
 
 fn class_body_has_annotations(body: &[Stmt]) -> bool {
@@ -3878,6 +3883,7 @@ impl Compiler {
             is_function_scope: false,
             is_syntax_error: false,
             is_module_scope: false,
+            past_future_zone: false,
         }
     }
 
@@ -4137,9 +4143,21 @@ impl Compiler {
                 && let Some(rewritten) = try_rewrite_while_index_to_for(stmts, idx)
             {
                 self.compile_stmt(&rewritten);
+                // A rewritten while-to-for is not a __future__ directive.
+                if self.is_module_scope {
+                    self.past_future_zone = true;
+                }
                 continue;
             }
             self.compile_stmt(stmt);
+            // Track whether we have moved past the zone where `from __future__`
+            // imports are valid (module-level, before any non-__future__ statement
+            // other than the module docstring which is peeled off by compile_script).
+            if self.is_module_scope
+                && !matches!(stmt, Stmt::ImportFrom { module, .. } if module == "__future__")
+            {
+                self.past_future_zone = true;
+            }
         }
     }
 
@@ -6290,6 +6308,20 @@ impl Compiler {
         // nothing (no-op).  Unrecognised names or star-imports are SyntaxErrors
         // (matching CPython 3.12 behaviour).
         if module == "__future__" {
+            // CPython 3.12: `from __future__` is only legal at the top of a
+            // module — not inside functions, class bodies, or after any
+            // non-__future__ statement (other than the module docstring).
+            if !self.is_module_scope || self.past_future_zone {
+                self.failed = true;
+                self.is_syntax_error = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some(
+                        "from __future__ imports must occur at the beginning of the file"
+                            .to_string(),
+                    );
+                }
+                return;
+            }
             const VALID: &[&str] = &[
                 "nested_scopes",
                 "generators",
