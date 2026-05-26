@@ -2193,7 +2193,54 @@ pyrust_module! {
         match args.len() {
             0 => Ok(Value::string(String::new())),
             1 => Ok(Value::string(render_instance_str(_interp, &args[0].value)?)),
-            _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most one argument"))),
+            2 | 3 => {
+                // str(object, encoding[, errors]) — bytes-to-string decoding form.
+                let bytes = match args[0].value.kind() {
+                    ValueKind::Bytes(rc) => rc.as_slice().to_vec(),
+                    ValueKind::Str(_) => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            "decoding str is not supported".to_string(),
+                        ));
+                    }
+                    _ => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "decoding to str: need a bytes-like object, {} found",
+                                pyrust_core::builtin_type_name(&args[0].value)
+                            ),
+                        ));
+                    }
+                };
+                let encoding = match args[1].value.kind() {
+                    ValueKind::Str(s) => s.to_owned(),
+                    _ => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!("{FN_NAME}() argument 2 (encoding) must be a str"),
+                        ));
+                    }
+                };
+                let errors = if args.len() == 3 {
+                    match args[2].value.kind() {
+                        ValueKind::Str(s) => s.to_owned(),
+                        _ => {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!("{FN_NAME}() argument 3 (errors) must be a str"),
+                            ));
+                        }
+                    }
+                } else {
+                    "strict".to_owned()
+                };
+                pyrust_builtins::bytes::decode_bytes(&bytes, &encoding, &errors)
+            }
+            _ => Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes at most 3 arguments ({} given)", args.len()),
+            )),
         }
     }
 
