@@ -2137,9 +2137,22 @@ impl Interpreter {
 
     pub(crate) fn call_range_expanded(&mut self, args: &[ExpandedCallArg]) -> Result<Value> {
         reject_keyword_args_expanded("range", args)?;
-        if args.is_empty() || args.len() > 3 {
-            return Err(PyError::Runtime(
-                "range expected 1 to 3 arguments".to_string(),
+        if args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "range expected at least 1 argument, got {}",
+                    args.len()
+                ),
+            ));
+        }
+        if args.len() > 3 {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "range expected at most 3 arguments, got {}",
+                    args.len()
+                ),
             ));
         }
 

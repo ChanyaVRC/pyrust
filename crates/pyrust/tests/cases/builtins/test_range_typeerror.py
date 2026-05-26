@@ -27,6 +27,23 @@ try:
 except ValueError as e:
     print(type(e).__name__ + ":", e)
 
+# TypeError for wrong argument count
+try:
+    range()
+except TypeError as e:
+    print(type(e).__name__ + ":", e)
+
+try:
+    range(1, 2, 3, 4)
+except TypeError as e:
+    print(type(e).__name__ + ":", e)
+
+# TypeError for NoneType argument
+try:
+    range(None)
+except TypeError as e:
+    print(type(e).__name__ + ":", e)
+
 # Happy path: valid range still works
 print(list(range(0, 10, 2)))
 print(list(range(5)))
