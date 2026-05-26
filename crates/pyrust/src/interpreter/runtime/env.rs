@@ -1162,6 +1162,44 @@ impl Interpreter {
                     format!("'method' object has no attribute '{name}'"),
                 ))
             }
+            ValueKind::Generator(state_rc) => {
+                // CPython 3.12 allows setting __name__ and __qualname__ on
+                // generator objects (str only; TypeError on non-string).
+                // gi_running, gi_yieldfrom, gi_frame, gi_code are read-only
+                // (AttributeError with "not writable").
+                // Any other attribute gives "has no attribute".
+                match name {
+                    "__name__" | "__qualname__" => {
+                        let s = if let ValueKind::Str(s) = value.kind() {
+                            s.to_string()
+                        } else {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!("{name} must be set to a string object"),
+                            ));
+                        };
+                        let mut borrow = state_rc.borrow_mut();
+                        if let Some(frame) = borrow.downcast_mut::<GeneratorFrame>() {
+                            if name == "__name__" {
+                                frame.fn_name = std::sync::Arc::from(s.as_str());
+                            } else {
+                                frame.qualname = std::sync::Arc::from(s.as_str());
+                            }
+                        }
+                        Ok(())
+                    }
+                    "gi_running" | "gi_yieldfrom" | "gi_frame" | "gi_code" => {
+                        Err(PyError::named(
+                            "AttributeError",
+                            format!("attribute '{name}' of 'generator' objects is not writable"),
+                        ))
+                    }
+                    _ => Err(PyError::named(
+                        "AttributeError",
+                        format!("'generator' object has no attribute '{name}'"),
+                    )),
+                }
+            }
             _ => Err(PyError::Runtime(format!(
                 "object has no writable attribute '{}'",
                 name
