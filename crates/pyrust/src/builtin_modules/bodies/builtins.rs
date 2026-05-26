@@ -147,12 +147,13 @@ pyrust_module! {
     /// CPython's `bool ⊆ int` subtyping, and a trailing `PyValue`
     /// catch-all reproduces CPython's exact "'X' object cannot be
     /// interpreted as an integer" TypeError wording verbatim.
-    /// Bignums not yet supported; raises `OverflowError` if `x` doesn't
-    /// fit in i64 (deliberate divergence from CPython, tracked as
-    /// follow-up under #400).
+    /// Both small (`i64`) and BigInt arguments are handled (#1226).
     fn bin(#[positional_only] x: PyInt) -> Result<Value> {
-        let v = x.expect_i64(FN_NAME, "x")?;
-        Ok(Value::string(format_bin_i64(v)))
+        if let Some(v) = x.as_i64() {
+            Ok(Value::string(format_bin_i64(v)))
+        } else {
+            Ok(Value::string(format_bigint_radix(&x.to_bigint(), 2, "0b")))
+        }
     }
 
     fn bin(#[positional_only] x: PyBool) -> Result<Value> {
@@ -200,12 +201,13 @@ pyrust_module! {
     /// CPython's `bool ⊆ int` subtyping, and a trailing `PyValue`
     /// catch-all reproduces CPython's exact "'X' object cannot be
     /// interpreted as an integer" TypeError wording verbatim.
-    /// Bignums not yet supported; raises `OverflowError` if `x` doesn't
-    /// fit in i64 (deliberate divergence from CPython, tracked as
-    /// follow-up under #400).
+    /// Both small (`i64`) and BigInt arguments are handled (#1226).
     fn oct(#[positional_only] x: PyInt) -> Result<Value> {
-        let v = x.expect_i64(FN_NAME, "x")?;
-        Ok(Value::string(format_oct_i64(v)))
+        if let Some(v) = x.as_i64() {
+            Ok(Value::string(format_oct_i64(v)))
+        } else {
+            Ok(Value::string(format_bigint_radix(&x.to_bigint(), 8, "0o")))
+        }
     }
 
     fn oct(#[positional_only] x: PyBool) -> Result<Value> {
@@ -257,11 +259,13 @@ pyrust_module! {
     /// interpreted as an integer" TypeError wording (the macro's own
     /// "unsupported argument type(s)" fallback would drift from the
     /// canonical message — preserved verbatim from the legacy body).
-    /// Genuine bignums raise `OverflowError` via `expect_i64`; that's
-    /// a deliberate divergence from CPython, tracked as follow-up.
+    /// Both small (`i64`) and BigInt arguments are handled (#1226).
     fn hex(#[positional_only] x: PyInt) -> Result<Value> {
-        let v = x.expect_i64(FN_NAME, "x")?;
-        Ok(Value::string(format_hex_i64(v)))
+        if let Some(v) = x.as_i64() {
+            Ok(Value::string(format_hex_i64(v)))
+        } else {
+            Ok(Value::string(format_bigint_radix(&x.to_bigint(), 16, "0x")))
+        }
     }
 
     fn hex(#[positional_only] x: PyBool) -> Result<Value> {
