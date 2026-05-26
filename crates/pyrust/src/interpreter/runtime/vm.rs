@@ -3757,6 +3757,18 @@ impl Interpreter {
                     if attrs.contains_key("__eq__") && !attrs.contains_key("__hash__") {
                         attrs.insert("__hash__".to_string(), Value::none());
                     }
+                    // Issue #1225: CPython adds `__dict__` and `__weakref__`
+                    // descriptors to every new class (Objects/typeobject.c
+                    // `type_new_descriptors`).  Add sentinel entries so that
+                    // `dir(instance)` includes them via the class attrs walk.
+                    // `get_attr("__dict__")` is intercepted before reaching the
+                    // class attrs, so these entries only affect `dir()`.
+                    attrs
+                        .entry("__dict__".to_string())
+                        .or_insert_with(Value::none);
+                    attrs
+                        .entry("__weakref__".to_string())
+                        .or_insert_with(Value::none);
                     // Collect all bases: first into `base` (primary), rest into
                     // `extra_bases_vec`.  The compiler stores bases in consecutive
                     // registers starting at `bases_base` with count `bases_n`.
