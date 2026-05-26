@@ -2257,8 +2257,15 @@ impl Interpreter {
                                         )
                                     })?
                                     + ss;
-                                let inner = &spec[ss..se];
+                                // PEP 3101: inner fields cannot have a nested spec; if the
+                                // user wrote `{name:spec}` inside a format spec, CPython
+                                // treats everything before `:` as the field name.
+                                let inner_raw = &spec[ss..se];
                                 si = se + 1;
+                                let inner = inner_raw
+                                    .split_once(':')
+                                    .map(|(name, _)| name)
+                                    .unwrap_or(inner_raw);
                                 if inner.is_empty() || inner.parse::<usize>().is_ok() {
                                     return Err(PyError::named(
                                         "ValueError",
@@ -3881,8 +3888,15 @@ fn expand_format_spec_positional(
                         )
                     })?
                     + start;
-                let inner = &spec[start..end];
+                // PEP 3101: inner fields cannot have a nested spec; if the user
+                // wrote `{name:spec}` inside a format spec, CPython treats
+                // everything before `:` as the field name.
+                let inner_raw = &spec[start..end];
                 i = end + 1;
+                let inner = inner_raw
+                    .split_once(':')
+                    .map(|(name, _)| name)
+                    .unwrap_or(inner_raw);
 
                 // Inner fields do not support '!' conversion or nested ':' spec.
                 let value = if inner.is_empty() {
