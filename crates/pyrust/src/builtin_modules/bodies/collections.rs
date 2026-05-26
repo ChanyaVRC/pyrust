@@ -1505,6 +1505,7 @@ fn key_to_value(key: PyKey) -> Value {
             pyrust_builtins::frozenset::frozenset(items.into_iter().collect())
         }
         PyKey::Tuple(items) => Value::tuple(items.into_iter().map(key_to_value).collect()),
+        PyKey::Bytes(rc) => Value::bytes((*rc).clone()),
         PyKey::Object { value, .. } => value,
     }
 }

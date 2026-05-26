@@ -288,6 +288,10 @@ pub enum PyKey {
     /// `hash((1, 2))`).  Unlike `FrozenSet`, ordering is significant —
     /// `(1, 2) != (2, 1)` — so we preserve insertion order.
     Tuple(Vec<PyKey>),
+    /// Bytes key.  `bytes` objects are immutable and therefore hashable in
+    /// CPython.  Holds the backing `Rc<Vec<u8>>` directly to avoid
+    /// re-allocation on the hot dict/set lookup path.
+    Bytes(Rc<Vec<u8>>),
     /// Key constructed for a user-defined `PyInstance` (or any non-builtin
     /// Value that defines `__hash__`).  The `hash` is precomputed by the
     /// caller — pyrust-core has no interpreter reference, so dispatching
@@ -419,6 +423,7 @@ impl PartialEq for PyKey {
             (PyKey::Ellipsis, PyKey::Ellipsis) => true,
             (PyKey::FrozenSet(a), PyKey::FrozenSet(b)) => a == b,
             (PyKey::Tuple(a), PyKey::Tuple(b)) => a == b,
+            (PyKey::Bytes(a), PyKey::Bytes(b)) => a.as_ref() == b.as_ref(),
             (PyKey::Object { value: a, .. }, PyKey::Object { value: b, .. }) => a == b,
             _ => false,
         }
@@ -517,6 +522,10 @@ impl Hash for PyKey {
                 for k in items {
                     k.hash(state);
                 }
+            }
+            PyKey::Bytes(b) => {
+                6u8.hash(state);
+                b.as_ref().hash(state);
             }
             PyKey::Object { hash, .. } => hash.hash(state),
         }
@@ -721,6 +730,17 @@ pub fn py_hash_pykey(key: &PyKey) -> i64 {
             h = h.wrapping_mul(69069u64).wrapping_add(907133923u64);
             let result = h as i64;
             if result == -1 { 590923713 } else { result }
+        }
+        PyKey::Bytes(b) => {
+            // FNV-1a over the raw byte content — matches the hash_value Bytes
+            // arm in builtins.rs so that py_hash_pykey(key) == hash(value).
+            let mut h: u64 = 14695981039346656037u64;
+            for byte in b.as_ref().iter() {
+                h ^= *byte as u64;
+                h = h.wrapping_mul(1099511628211u64);
+            }
+            let result = h as i64;
+            if result == -1 { -2 } else { result }
         }
         PyKey::Object { hash, .. } => *hash as i64,
     }
@@ -3029,6 +3049,7 @@ impl Value {
             ValueKind::Bool(v) => Some(PyKey::Bool(v)),
             ValueKind::None => Some(PyKey::None),
             ValueKind::Ellipsis => Some(PyKey::Ellipsis),
+            ValueKind::Bytes(rc) => Some(PyKey::Bytes(Rc::clone(rc))),
             ValueKind::BuiltinObject { ops, state } => ops.to_key(state),
             ValueKind::Tuple(items) => {
                 // Recursively hash each element.  If any element is itself
@@ -3498,6 +3519,7 @@ pub fn key_repr(key: &PyKey) -> String {
                 format!("({inner})")
             }
         }
+        PyKey::Bytes(b) => bytes_repr(b),
         PyKey::Object { value, .. } => value.repr(),
     }
 }
