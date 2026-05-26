@@ -4016,6 +4016,17 @@ fn hash_value(value: &Value) -> Result<i64> {
             }
             Ok(h as i64)
         }
+        ValueKind::Bytes(rc) => {
+            // FNV-1a over the raw byte content, matching PyKey::Bytes hashing
+            // so that py_hash_pykey(v.to_key()) == hash(v) for bytes values.
+            let mut h: u64 = 14695981039346656037u64;
+            for b in rc.iter() {
+                h ^= *b as u64;
+                h = h.wrapping_mul(1099511628211u64);
+            }
+            let result = h as i64;
+            Ok(if result == -1 { -2 } else { result })
+        }
         ValueKind::None => Ok(pyrust_core::py_hash_none()),
         ValueKind::NotImplemented => Ok(pyrust_core::py_hash_not_implemented()),
         ValueKind::Ellipsis => Ok(pyrust_core::py_hash_ellipsis()),
