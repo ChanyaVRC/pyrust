@@ -6469,6 +6469,12 @@ impl Compiler {
             .map(|p| p.name.clone())
             .chain(return_annotation.map(|_| "return".to_string()))
             .collect();
+        // Extract docstring: if the first statement in the body is a bare
+        // string literal, capture it as the function's __doc__ (CPython parity).
+        let fn_docstring = match body {
+            [Stmt::Expr(Expr::Str(s)), ..] => Some(s.clone()),
+            _ => None,
+        };
         self.fn_protos.push(FnProto {
             name: name.to_string(),
             qualname: fn_qualname,
@@ -6487,6 +6493,7 @@ impl Compiler {
             nonlocal_names: inner_nonlocal_rc,
             is_pure,
             annotation_keys,
+            docstring: fn_docstring,
         });
 
         // Compile default values (right-to-left in declaration, left-to-right in slots).
@@ -6790,6 +6797,12 @@ impl Compiler {
         }
         let proto_idx = self.fn_protos.len() as u8;
         let local_names = Rc::new(body_index_rc.keys().cloned().collect::<HashSet<_>>());
+        // Extract docstring: if the first statement in the class body is a bare
+        // string literal, capture it as the class's __doc__ (CPython parity).
+        let class_docstring = match body {
+            [Stmt::Expr(Expr::Str(s)), ..] => Some(s.clone()),
+            _ => None,
+        };
         self.fn_protos.push(FnProto {
             name: name.to_string(),
             qualname: class_qualname,
@@ -6808,6 +6821,7 @@ impl Compiler {
             nonlocal_names: body_nonlocal_rc,
             is_pure: false,
             annotation_keys: Vec::new(),
+            docstring: class_docstring,
         });
 
         // Compile base class expressions.
@@ -8189,6 +8203,7 @@ impl Compiler {
             nonlocal_names: inner_nonlocal_rc,
             is_pure,
             annotation_keys: Vec::new(),
+            docstring: None,
         });
 
         // Emit MakeFunction + Call, same layout as compile_gen_exp.
@@ -8510,6 +8525,7 @@ impl Compiler {
             nonlocal_names: inner_nonlocal_rc,
             is_pure,
             annotation_keys: Vec::new(),
+            docstring: None,
         });
 
         // Allocate a temp for the function value, emit MakeFunction (no
