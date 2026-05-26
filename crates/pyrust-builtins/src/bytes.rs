@@ -295,6 +295,17 @@ fn bytes_decode(bytes: &[u8], args: &[Value], kwargs: &IndexMap<PyKey, Value>) -
         None => kw_errors.as_deref().unwrap_or("strict"),
     };
 
+    decode_bytes(bytes, encoding, errors)
+}
+
+/// Decode `bytes` using the given `encoding` and `errors` handler.
+///
+/// Shared implementation for `bytes.decode()` and the 2/3-arg form of
+/// `str(bytes, encoding[, errors])`.
+///
+/// Supported encodings: `utf-8` (and aliases), `latin-1` (and aliases), `ascii`.
+/// Supported error handlers: `strict`, `replace`, `ignore`.
+pub fn decode_bytes(bytes: &[u8], encoding: &str, errors: &str) -> Result<Value> {
     // Normalise encoding name (strip hyphens/underscores, lowercase).
     let enc_norm: String = encoding
         .to_ascii_lowercase()
