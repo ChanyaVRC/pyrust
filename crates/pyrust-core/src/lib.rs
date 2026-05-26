@@ -3597,32 +3597,34 @@ fn exception_to_string(instance: &Rc<RefCell<PyInstance>>) -> String {
 
     // CPython's `OSError.__str__` (and all subclasses) formats as
     // "[Errno N] strerror" or "[Errno N] strerror: repr(filename)" when
-    // the 2- or 3-arg constructor was used (errno and strerror are non-None).
-    // With the 5-arg form, if filename2 is also set: "... -> repr(filename2)".
-    // See `OSError_str` in CPython's Objects/exceptions.c.
+    // the instance was constructed with 2+ args (i.e. errno/strerror C slots
+    // were initialised by `OSError.__init__`).  The format is used regardless
+    // of whether those attributes were subsequently set to None from Python —
+    // CPython's `OSError_str` (Objects/exceptions.c) checks the C member
+    // pointers for NULL (never-initialised) rather than for Py_None
+    // (explicitly-set-to-None), and `args.len() >= 2` is the pyrust proxy for
+    // "the C slots were initialised".
+    // With the 5-arg form, if filename2 is also non-None: "... -> repr(filename2)".
     if class_chain_has_name(&instance.borrow().class, "OSError") && args.len() >= 2 {
         let borrowed = instance.borrow();
         let errno_val = borrowed.attrs.get("errno");
         let strerror_val = borrowed.attrs.get("strerror");
         let filename_val = borrowed.attrs.get("filename");
         let filename2_val = borrowed.attrs.get("filename2");
-        match (errno_val, strerror_val) {
-            (Some(errno), Some(strerror)) if !errno.is_none() && !strerror.is_none() => {
-                let base = format!("[Errno {}] {}", errno.to_py_str(), strerror.to_py_str());
-                match filename_val {
-                    Some(fname) if !fname.is_none() => {
-                        let with_fname = format!("{}: {}", base, fname.repr());
-                        match filename2_val {
-                            Some(fname2) if !fname2.is_none() => {
-                                return format!("{} -> {}", with_fname, fname2.repr());
-                            }
-                            _ => return with_fname,
+        if let (Some(errno), Some(strerror)) = (errno_val, strerror_val) {
+            let base = format!("[Errno {}] {}", errno.to_py_str(), strerror.to_py_str());
+            match filename_val {
+                Some(fname) if !fname.is_none() => {
+                    let with_fname = format!("{}: {}", base, fname.repr());
+                    match filename2_val {
+                        Some(fname2) if !fname2.is_none() => {
+                            return format!("{} -> {}", with_fname, fname2.repr());
                         }
+                        _ => return with_fname,
                     }
-                    _ => return base,
                 }
+                _ => return base,
             }
-            _ => {}
         }
     }
 
