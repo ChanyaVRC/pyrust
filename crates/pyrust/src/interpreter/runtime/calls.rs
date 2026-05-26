@@ -3412,18 +3412,27 @@ impl Interpreter {
     /// Renders a value to a string using the same priority as `str(x)`:
     /// `__str__` first, then `__repr__`, then the default object repr.
     /// For non-PyInstance values falls back to `Value::to_py_str()`.
-    /// Exception instances bypass dunder dispatch (matching CPython's
-    /// `BaseException.__str__` special-casing) and use `to_py_str()`.
-    /// Used by `str.format` for the `!s` conversion and the empty-spec path.
+    /// Exception instances without a user-defined `__str__` use the built-in
+    /// `to_py_str()` fallback (matching CPython's `BaseException.__str__`
+    /// special-casing).  When a user-defined `__str__` exists, it is called
+    /// normally.  Used by `str.format` for the `!s` conversion and the
+    /// empty-spec path.
     fn render_value_as_str(&mut self, value: &Value) -> Result<String> {
         let ValueKind::PyInstance(inst) = value.kind() else {
             return Ok(value.to_py_str());
         };
         let inst_rc = Rc::clone(inst);
         let class = Rc::clone(&inst_rc.borrow().class);
-        // Exception instances use the built-in formatting (CPython special-case).
+        // For exception instances, fall back to built-in formatting only when
+        // the class has no user-defined __str__ (i.e. not registered as a
+        // plain Rust BuiltinFunction).
         if is_exception_class(&class) {
-            return Ok(value.to_py_str());
+            let has_user_str = lookup_class_attr(&class, "__str__")
+                .map(|v| !matches!(v.kind(), ValueKind::BuiltinFunction(_)))
+                .unwrap_or(false);
+            if !has_user_str {
+                return Ok(value.to_py_str());
+            }
         }
         for dunder in &["__str__", "__repr__"] {
             if let Some(method_val) = lookup_class_attr(&class, dunder) {

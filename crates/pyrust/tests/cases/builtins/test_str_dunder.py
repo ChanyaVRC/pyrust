@@ -37,3 +37,10 @@ class MyOSError(OSError):
         return "os: " + str(self.args[0])
 
 print(str(MyOSError("file")))  # os: file
+
+# str.format() must also call user __str__ on exception subclasses.
+class MyFmtError(Exception):
+    def __str__(self):
+        return "fmt: " + str(self.args[0])
+
+print("{}".format(MyFmtError("msg")))  # fmt: msg
