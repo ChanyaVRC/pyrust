@@ -7439,7 +7439,7 @@ impl Compiler {
         self.emit(Insn::GetAttr(exit_frame2, ctx_reg, exit_name_idx));
         self.emit(Insn::GetAttr(exit_frame2 + 1, exc_tmp, class_name_idx)); // exc_type
         self.emit(Insn::Move(exit_frame2 + 2, exc_tmp));
-        self.emit(Insn::Move(exit_frame2 + 3, exc_tmp)); // traceback (non-None placeholder)
+        self.emit(Insn::LoadNone(exit_frame2 + 3)); // traceback: None (pyrust has no traceback objects)
         self.emit(Insn::Call(exit_frame2, 3));
         let suppress_reg = exit_frame2;
         self.next_temp = exit_frame2 + 1;
