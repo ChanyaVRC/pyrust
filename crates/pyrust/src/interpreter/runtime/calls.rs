@@ -2978,7 +2978,9 @@ fn render_format_spec(value: &Value, fs: &FormatSpec) -> Result<String> {
     // No type code and a non-string value: route by value kind.
     if fs.type_char.is_none() {
         match value.kind() {
-            ValueKind::Int(_) | ValueKind::Bool(_) => return format_int_value(value, fs, None),
+            ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => {
+                return format_int_value(value, fs, None)
+            }
             ValueKind::Float(_) => return format_float_value(value, fs, None),
             // Complex with no explicit type code: render via complex_repr
             // (matching CPython's `format(1+2j)` -> "(1+2j)") and then apply
@@ -3075,6 +3077,23 @@ fn int_body(magnitude: u64, type_char: char) -> String {
     }
 }
 
+/// Produce the digit-only body of a BigInt formatting (no sign / prefix).
+fn bigint_body(magnitude: &PyBigInt, type_char: char) -> String {
+    let radix = match type_char {
+        'b' => 2,
+        'o' => 8,
+        'x' | 'X' => 16,
+        _ => 10,
+    };
+    // magnitude is always non-negative here (callers strip the sign).
+    let s = magnitude.to_str_radix(radix);
+    if type_char == 'X' {
+        s.to_uppercase()
+    } else {
+        s
+    }
+}
+
 fn prefix_for(type_char: char, alt: bool) -> &'static str {
     if !alt {
         return "";
@@ -3089,6 +3108,11 @@ fn prefix_for(type_char: char, alt: bool) -> &'static str {
 }
 
 fn format_int_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -> Result<String> {
+    // BigInt is handled via a separate path that avoids the i128 narrowing.
+    if let ValueKind::BigInt(b) = value.kind() {
+        return format_bigint_value(b, fs, type_char);
+    }
+
     let n: i128 = match value.kind() {
         ValueKind::Int(n) => n as i128,
         ValueKind::Bool(b) => {
@@ -3191,6 +3215,81 @@ fn format_int_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -> 
         body,
         fs,
         // Numeric default alignment is right.
+        '>',
+        group_size,
+    ))
+}
+
+/// Format a `BigInt` value according to an integer `FormatSpec`.
+/// Mirrors `format_int_value` but uses `bigint_body` instead of the
+/// `u64`-based `int_body` to avoid narrowing large values.
+fn format_bigint_value(b: &PyBigInt, fs: &FormatSpec, type_char: Option<char>) -> Result<String> {
+    if fs.precision.is_some() {
+        return Err(PyError::named(
+            "ValueError",
+            "Precision not allowed in integer format specifier".to_string(),
+        ));
+    }
+
+    let t = type_char.unwrap_or('d');
+
+    // 'c': a BigInt is almost certainly out of range, but check correctly.
+    if t == 'c' {
+        if fs.sign.is_some() || fs.alt || fs.grouping.is_some() {
+            return Err(PyError::named(
+                "ValueError",
+                "Cannot specify ',' or '_', sign, or '#' with 'c'.".to_string(),
+            ));
+        }
+        // A BigInt is by definition outside the C long range (> i64::MAX or
+        // < i64::MIN), so it can never be a valid chr() argument.  CPython
+        // raises "Python int too large to convert to C long" for such values
+        // rather than the "%c arg not in range(0x110000)" it uses for
+        // in-range negative integers.
+        return Err(PyError::named(
+            "OverflowError",
+            "Python int too large to convert to C long".to_string(),
+        ));
+    }
+
+    // 'n' = same as 'd' for now (no locale-aware grouping).
+    let effective_t = if t == 'n' { 'd' } else { t };
+
+    // Validate grouping vs type.
+    if let Some(g) = fs.grouping {
+        let ok = match (g, effective_t) {
+            (',', 'd') => true,
+            (',', _) => false,
+            ('_', 'd' | 'b' | 'o' | 'x' | 'X') => true,
+            _ => false,
+        };
+        if !ok {
+            return Err(PyError::named(
+                "ValueError",
+                format!("Cannot specify '{g}' with '{effective_t}'."),
+            ));
+        }
+    }
+
+    use num_bigint::Sign;
+    let negative = b.sign() == Sign::Minus;
+    // magnitude: absolute value used for digit conversion.
+    let magnitude = if negative { -b.clone() } else { b.clone() };
+
+    let sign_prefix = sign_prefix_for(negative, fs.sign);
+    let alt_prefix = prefix_for(effective_t, fs.alt);
+    let mut body = bigint_body(&magnitude, effective_t);
+
+    let group_size = if effective_t == 'd' { 3 } else { 4 };
+    if let Some(g) = fs.grouping {
+        body = group_digits(&body, g, group_size);
+    }
+
+    Ok(assemble_numeric(
+        sign_prefix,
+        alt_prefix,
+        body,
+        fs,
         '>',
         group_size,
     ))
