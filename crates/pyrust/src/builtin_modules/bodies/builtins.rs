@@ -511,33 +511,13 @@ pyrust_module! {
     /// binds `obj` as a typed local.  `PyValue` is the catch-all wrapper
     /// — `repr` accepts every Python object, so type-checking the input
     /// is exactly the prelude's "validate arity / reject kwargs" job.
-    #[pure]
+    ///
+    /// Not marked `#[pure]` because it dispatches user `__repr__` for
+    /// `PyInstance` values (and transitively for instances inside containers),
+    /// which may invoke arbitrary user code.
     fn repr(#[positional_only] obj: PyValue) -> Result<Value> {
-        let obj = obj.0;
-        if let ValueKind::PyInstance(instance) = obj.kind() {
-            let instance_rc = Rc::clone(instance);
-            let class = Rc::clone(&instance_rc.borrow().class);
-            if let Some(method_val) = lookup_class_attr(&class, "__repr__") {
-                let result = invoke_class_method(
-                    _interp,
-                    method_val,
-                    Value::py_instance(instance_rc),
-                    &[],
-                )?;
-                return if matches!(result.kind(), ValueKind::Str(_)) {
-                    Ok(result)
-                } else {
-                    Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "__repr__ returned non-string (type {})",
-                            pyrust_core::builtin_type_name(&result)
-                        ),
-                    ))
-                };
-            }
-        }
-        Ok(Value::string(obj.repr()))
+        let s = render_value_repr(_interp, &obj.0)?;
+        Ok(Value::string(s))
     }
 
     /// CPython: hash(object) — hash value if hashable.
@@ -4763,6 +4743,201 @@ fn min_max_impl(
     }
 }
 
+/// Render `value` to its Python repr string, honouring `__repr__` on user
+/// instances and recursing into containers (list/tuple/dict/set) with the same
+/// interpreter-aware dispatch on each element.
+///
+/// Shared by the `repr()` builtin and `render_instance_str` (for the container
+/// case, where `str(list)` is defined as `repr(list)` in CPython).
+///
+/// Cycle detection mirrors `Value::repr()`: a per-call-stack thread-local
+/// tracks which container object ids are currently being formatted; a second
+/// visit short-circuits to the CPython placeholder (`[...]` / `(...)` /
+/// `{...}`).
+fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) -> Result<String> {
+    // Dispatch __repr__ for user instances.
+    if let ValueKind::PyInstance(instance) = value.kind() {
+        let instance_rc = Rc::clone(instance);
+        let class = Rc::clone(&instance_rc.borrow().class);
+        if let Some(method_val) = lookup_class_attr(&class, "__repr__") {
+            let result = invoke_class_method(
+                interp,
+                method_val,
+                Value::py_instance(instance_rc),
+                &[],
+            )?;
+            return if matches!(result.kind(), ValueKind::Str(_)) {
+                Ok(result.as_str().unwrap_or("").to_string())
+            } else {
+                Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "__repr__ returned non-string (type {})",
+                        pyrust_core::builtin_type_name(&result)
+                    ),
+                ))
+            };
+        }
+        // No __repr__ defined — fall back to default object repr (handles
+        // exception instances via exception_repr() and plain instances via
+        // the address-based format).
+        return Ok(value.repr());
+    }
+
+    // For containers, we need to recurse with interpreter access on each
+    // element.  Use a thread-local cycle-detection stack identical in spirit
+    // to the one in `Value::repr()`.
+    thread_local! {
+        static REPR_IN_PROGRESS: RefCell<Vec<i64>> = const { RefCell::new(Vec::new()) };
+    }
+
+    match value.kind() {
+        ValueKind::List(items) => {
+            let id = value.value_id();
+            let already_in = id.map_or(false, |id| {
+                REPR_IN_PROGRESS.with(|c| c.borrow().contains(&id))
+            });
+            if already_in {
+                return Ok("[...]".to_string());
+            }
+            if let Some(id) = id {
+                REPR_IN_PROGRESS.with(|c| c.borrow_mut().push(id));
+            }
+            // Snapshot items so we can drop the `Ref` guard before calling
+            // the interpreter (which may re-borrow the list).
+            let snapshot: Vec<Value> = items.iter().cloned().collect();
+            drop(items);
+            let mut parts = Vec::with_capacity(snapshot.len());
+            for item in &snapshot {
+                parts.push(render_value_repr(interp, item)?);
+            }
+            if let Some(id) = id {
+                REPR_IN_PROGRESS.with(|c| {
+                    let mut v = c.borrow_mut();
+                    if let Some(pos) = v.iter().rposition(|&x| x == id) {
+                        v.remove(pos);
+                    }
+                });
+            }
+            Ok(format!("[{}]", parts.join(", ")))
+        }
+        ValueKind::Tuple(items) => {
+            let id = value.value_id();
+            let already_in = id.map_or(false, |id| {
+                REPR_IN_PROGRESS.with(|c| c.borrow().contains(&id))
+            });
+            if already_in {
+                return Ok("(...)".to_string());
+            }
+            if let Some(id) = id {
+                REPR_IN_PROGRESS.with(|c| c.borrow_mut().push(id));
+            }
+            // Tuple items are `&[Value]` — no Ref guard to drop.
+            let snapshot: Vec<Value> = items.iter().cloned().collect();
+            let mut parts = Vec::with_capacity(snapshot.len());
+            for item in &snapshot {
+                parts.push(render_value_repr(interp, item)?);
+            }
+            if let Some(id) = id {
+                REPR_IN_PROGRESS.with(|c| {
+                    let mut v = c.borrow_mut();
+                    if let Some(pos) = v.iter().rposition(|&x| x == id) {
+                        v.remove(pos);
+                    }
+                });
+            }
+            let inner = parts.join(", ");
+            if snapshot.len() == 1 {
+                Ok(format!("({inner},)"))
+            } else {
+                Ok(format!("({inner})"))
+            }
+        }
+        ValueKind::Dict(items) => {
+            let id = value.value_id();
+            let already_in = id.map_or(false, |id| {
+                REPR_IN_PROGRESS.with(|c| c.borrow().contains(&id))
+            });
+            if already_in {
+                return Ok("{...}".to_string());
+            }
+            if let Some(id) = id {
+                REPR_IN_PROGRESS.with(|c| c.borrow_mut().push(id));
+            }
+            // Snapshot key-value pairs before dropping the guard.
+            let snapshot: Vec<(PyKey, Value)> = items
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            drop(items);
+            let mut out = String::new();
+            out.push('{');
+            for (i, (k, v)) in snapshot.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&render_key_repr(interp, k)?);
+                out.push_str(": ");
+                out.push_str(&render_value_repr(interp, v)?);
+            }
+            out.push('}');
+            if let Some(id) = id {
+                REPR_IN_PROGRESS.with(|c| {
+                    let mut v = c.borrow_mut();
+                    if let Some(pos) = v.iter().rposition(|&x| x == id) {
+                        v.remove(pos);
+                    }
+                });
+            }
+            Ok(out)
+        }
+        ValueKind::Set(items) => {
+            if items.is_empty() {
+                return Ok("set()".to_string());
+            }
+            let id = value.value_id();
+            let already_in = id.map_or(false, |id| {
+                REPR_IN_PROGRESS.with(|c| c.borrow().contains(&id))
+            });
+            if already_in {
+                return Ok("{...}".to_string());
+            }
+            if let Some(id) = id {
+                REPR_IN_PROGRESS.with(|c| c.borrow_mut().push(id));
+            }
+            let snapshot: Vec<PyKey> = items.iter().cloned().collect();
+            drop(items);
+            let mut parts = Vec::with_capacity(snapshot.len());
+            for k in &snapshot {
+                parts.push(render_key_repr(interp, k)?);
+            }
+            if let Some(id) = id {
+                REPR_IN_PROGRESS.with(|c| {
+                    let mut v = c.borrow_mut();
+                    if let Some(pos) = v.iter().rposition(|&x| x == id) {
+                        v.remove(pos);
+                    }
+                });
+            }
+            Ok(format!("{{{}}}", parts.join(", ")))
+        }
+        // For all other value types (int, float, str, bool, None, …), the
+        // pure `Value::repr()` is correct and needs no interpreter.
+        _ => Ok(value.repr()),
+    }
+}
+
+/// Render a `PyKey` dict key or set element to its repr string, honouring
+/// `__repr__` on user instances stored as `PyKey::Object`.
+fn render_key_repr(interp: &mut crate::Interpreter, key: &PyKey) -> Result<String> {
+    // Only `PyKey::Object` can hold a user instance that has `__repr__`.
+    // All other PyKey variants are primitive types whose repr is pure.
+    if let PyKey::Object { value, .. } = key {
+        return render_value_repr(interp, value);
+    }
+    Ok(pyrust_core::key_repr(key))
+}
+
 /// Render `value` to its Python-string form, honouring `__str__` / `__repr__`
 /// on user instances (in that priority order) and falling back to
 /// `<ClassName object>` for instances of classes that define neither.
@@ -4775,7 +4950,16 @@ fn min_max_impl(
 /// call it via the normal dunder dispatch loop.
 fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result<String> {
     let ValueKind::PyInstance(inst) = value.kind() else {
-        return Ok(value.to_py_str());
+        // For containers, str() is defined as repr() in CPython.  Route
+        // through render_value_repr so that PyInstance elements inside a
+        // list/tuple/dict/set get their __repr__ called.
+        return match value.kind() {
+            ValueKind::List(_)
+            | ValueKind::Tuple(_)
+            | ValueKind::Dict(_)
+            | ValueKind::Set(_) => render_value_repr(interp, value),
+            _ => Ok(value.to_py_str()),
+        };
     };
     let inst_rc = Rc::clone(&inst);
     let class = Rc::clone(&inst_rc.borrow().class);
