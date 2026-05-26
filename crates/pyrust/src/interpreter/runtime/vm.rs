@@ -3737,6 +3737,51 @@ impl Interpreter {
                         .borrow_mut()
                         .values
                         .insert("__class__".to_string(), Value::py_class(Rc::clone(&class)));
+                    // Issue #1048: PEP 487 / CPython type_new_set_names().
+                    // For each value in the class namespace, if its *type*
+                    // (not the value itself) defines __set_name__, call
+                    // __set_name__(owner=cls, name=attr_name) immediately
+                    // after the class object is constructed.  This lets
+                    // descriptors record the attribute name they were
+                    // assigned under (e.g. ORM column fields, typed
+                    // attributes).  The lookup must be on the type
+                    // (lookup_class_attr on the instance's class) to match
+                    // CPython's requirement that __set_name__ be a class
+                    // attribute rather than an instance attribute.
+                    // Must happen before __init_subclass__ (CPython order).
+                    {
+                        let cls_val = Value::py_class(Rc::clone(&class));
+                        let attrs_snapshot: Vec<(String, Value)> = class
+                            .borrow()
+                            .attrs
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        for (attr_name, attr_val) in &attrs_snapshot {
+                            if let ValueKind::PyInstance(inst) = attr_val.kind() {
+                                let inst_class = Rc::clone(&inst.borrow().class);
+                                if let Some(set_name_fn) =
+                                    lookup_class_attr(&inst_class, "__set_name__")
+                                {
+                                    vm_try!(invoke_class_method(
+                                        self,
+                                        set_name_fn,
+                                        attr_val.clone(),
+                                        &[
+                                            ExpandedCallArg {
+                                                name: None,
+                                                value: cls_val.clone(),
+                                            },
+                                            ExpandedCallArg {
+                                                name: None,
+                                                value: Value::string(attr_name.clone()),
+                                            },
+                                        ],
+                                    ));
+                                }
+                            }
+                        }
+                    }
                     // Issue #1047: CPython (Objects/typeobject.c type_new_init_subclass)
                     // calls __init_subclass__ on the base class after the new class is
                     // fully constructed.  The hook receives the new subclass as `cls`
