@@ -125,9 +125,9 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
             str_rpartition(s, sep)
         }
         // Stripping
-        "strip" => Ok(Value::string(strip_chars(s, args, true, true))),
-        "lstrip" => Ok(Value::string(strip_chars(s, args, true, false))),
-        "rstrip" => Ok(Value::string(strip_chars(s, args, false, true))),
+        "strip" => Ok(Value::string(strip_chars(s, args, true, true, "strip")?)),
+        "lstrip" => Ok(Value::string(strip_chars(s, args, true, false, "lstrip")?)),
+        "rstrip" => Ok(Value::string(strip_chars(s, args, false, true, "rstrip")?)),
         // Prefix/suffix removal
         "removeprefix" => {
             expect_arg_count(args, 1, 1, "removeprefix")?;
@@ -1349,13 +1349,18 @@ fn capitalize(s: &str) -> String {
     }
 }
 
-fn strip_chars(s: &str, args: &[Value], left: bool, right: bool) -> String {
+fn strip_chars(s: &str, args: &[Value], left: bool, right: bool, method: &str) -> Result<String> {
     let chars_arg: Option<&str> = match args.first().map(|v| v.kind()) {
         Some(ValueKind::Str(c)) => Some(c),
         Some(ValueKind::None) | None => None,
-        _ => None,
+        Some(_) => {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{method} arg must be None or str"),
+            ));
+        }
     };
-    match chars_arg {
+    Ok(match chars_arg {
         None => {
             let mut result = s;
             if left {
@@ -1376,7 +1381,7 @@ fn strip_chars(s: &str, args: &[Value], left: bool, right: bool) -> String {
             }
             result.to_string()
         }
-    }
+    })
 }
 
 /// Parse (sep, maxsplit) from split/rsplit args.
