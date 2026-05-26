@@ -1461,7 +1461,6 @@ pyrust_module! {
     /// `ndigits` so the body can dispatch on `ValueKind` for full CPython
     /// parity: `bool ⊆ int` (both round unchanged), `float` uses
     /// half-even rounding, and everything else raises `TypeError`.
-    #[pure]
     fn round(
         #[positional_only] x: PyValue,
         #[positional_only]
@@ -1513,10 +1512,36 @@ pyrust_module! {
                     }
                 }
             },
-            NumKind::Other => Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}() argument must be a number"),
-            )),
+            NumKind::Other => {
+                // Check for user-defined __round__ before raising TypeError.
+                if let ValueKind::PyInstance(inst) = x.0.kind() {
+                    let inst_rc = Rc::clone(inst);
+                    let class = Rc::clone(&inst_rc.borrow().class);
+                    if let Some(method_val) = lookup_class_attr(&class, "__round__") {
+                        // CPython: __round__() is called with no args when ndigits
+                        // is absent or None; otherwise the original ndigits value
+                        // (which may be a bool) is forwarded as-is.
+                        let call_args: Vec<ExpandedCallArg> = match ndigits {
+                            None => vec![],
+                            Some(ref v) if matches!(v.0.kind(), ValueKind::None) => vec![],
+                            Some(ref v) => vec![ExpandedCallArg {
+                                name: None,
+                                value: v.0.clone(),
+                            }],
+                        };
+                        return invoke_class_method(
+                            _interp,
+                            method_val,
+                            Value::py_instance(inst_rc),
+                            &call_args,
+                        );
+                    }
+                }
+                Err(PyError::named(
+                    "TypeError",
+                    format!("{FN_NAME}() argument must be a number"),
+                ))
+            }
         }
     }
 
