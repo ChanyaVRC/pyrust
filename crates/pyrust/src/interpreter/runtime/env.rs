@@ -18,16 +18,44 @@ impl Interpreter {
                 // Step 1: Walk the class MRO for a data descriptor (has
                 // __set__ OR __delete__).  Data descriptors take priority
                 // over instance __dict__.
+                //
+                // If __get__ raises AttributeError, CPython's
+                // slot_tp_getattr_hook falls through to __getattr__ (if
+                // defined) rather than propagating immediately — only
+                // non-AttributeError exceptions propagate without __getattr__.
                 let class = { Rc::clone(&instance.borrow().class) };
                 if let Some(class_val) = lookup_class_attr(&class, name) {
                     if is_data_descriptor(&class_val) {
-                        return call_descriptor_get(
+                        let desc_result = call_descriptor_get(
                             self,
                             &class_val,
                             Value::py_instance(Rc::clone(&instance)),
                             Value::py_class(Rc::clone(&class)),
                             name,
                         );
+                        match desc_result {
+                            Ok(v) => return Ok(v),
+                            Err(ref e) if e.class_name_is("AttributeError") => {
+                                // __get__ raised AttributeError: try __getattr__ if
+                                // defined, otherwise re-raise the original error
+                                // (CPython slot_tp_getattr_hook behaviour).
+                                if let Some(getattr_val) =
+                                    lookup_class_attr(&class, "__getattr__")
+                                {
+                                    return invoke_class_method(
+                                        self,
+                                        getattr_val,
+                                        Value::py_instance(Rc::clone(&instance)),
+                                        &[ExpandedCallArg {
+                                            name: None,
+                                            value: Value::string(name.to_string()),
+                                        }],
+                                    );
+                                }
+                            }
+                            Err(_) => {}
+                        }
+                        return desc_result;
                     }
                 }
 
@@ -65,14 +93,37 @@ impl Interpreter {
                         return Ok(result);
                     }
                     // General non-data descriptor: has __get__ but no __set__/__delete__.
+                    // Same AttributeError fallthrough to __getattr__ applies.
                     if is_non_data_descriptor(&value) {
-                        return call_descriptor_get(
+                        let desc_result = call_descriptor_get(
                             self,
                             &value,
                             Value::py_instance(Rc::clone(&instance)),
                             Value::py_class(Rc::clone(&class)),
                             name,
                         );
+                        match desc_result {
+                            Ok(v) => return Ok(v),
+                            Err(ref e) if e.class_name_is("AttributeError") => {
+                                // __get__ raised AttributeError: try __getattr__ if
+                                // defined, otherwise re-raise the original error.
+                                if let Some(getattr_val) =
+                                    lookup_class_attr(&class, "__getattr__")
+                                {
+                                    return invoke_class_method(
+                                        self,
+                                        getattr_val,
+                                        Value::py_instance(Rc::clone(&instance)),
+                                        &[ExpandedCallArg {
+                                            name: None,
+                                            value: Value::string(name.to_string()),
+                                        }],
+                                    );
+                                }
+                            }
+                            Err(_) => {}
+                        }
+                        return desc_result;
                     }
                     // Plain class attribute: bind functions to the instance.
                     // Probe kind tag in a scoped block so the `kind()` Ref
@@ -250,6 +301,24 @@ impl Interpreter {
                     return Ok(empty);
                 }
                 if let Some(value) = lookup_class_attr(&class, name) {
+                    // Descriptor protocol for class-level access: if the class
+                    // attribute is a user-defined descriptor (PyInstance with
+                    // __get__), call __get__(None, cls) — CPython Data Model
+                    // §3.3.2.  property is handled by its own match arm (above
+                    // this ValueKind::PyClass arm) and returns itself on class
+                    // access, so we only check PyInstance here.
+                    if let ValueKind::PyInstance(desc_inst) = value.kind() {
+                        let desc_class = Rc::clone(&desc_inst.borrow().class);
+                        if lookup_class_attr(&desc_class, "__get__").is_some() {
+                            return call_descriptor_get(
+                                self,
+                                &value,
+                                Value::none(),
+                                Value::py_class(Rc::clone(&class)),
+                                name,
+                            );
+                        }
+                    }
                     // Drop the kind() Ref before the `_ => value` arm
                     // may move `value` (#450).
                     let user_fn = match value.kind() {

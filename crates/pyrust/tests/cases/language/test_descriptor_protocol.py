@@ -92,3 +92,18 @@ class D:
 d = D()
 print(d.z)      # del_only — __get__
 del d.z         # deleted — __delete__
+
+# --- Class-level access: __get__(None, cls) must be called ---
+# CPython calls __get__(None, owner) when accessed on the class directly.
+class ClassAccess:
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            return f"class:{objtype.__name__}"
+        return f"instance:{type(obj).__name__}"
+
+class E:
+    ca = ClassAccess()
+
+e = E()
+print(E.ca)   # class:E  — __get__(None, E) called
+print(e.ca)   # instance:E — __get__(e, E) called
