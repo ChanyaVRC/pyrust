@@ -271,7 +271,7 @@ pub enum Expr {
         else_: Box<Expr>,
     },
     Lambda {
-        params: Vec<String>,
+        params: Vec<FunctionParam>,
         body: Box<Expr>,
     },
     Call {
