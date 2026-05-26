@@ -85,7 +85,7 @@ except TypeError as e:
 print(str(b"hello", "utf-8", "bad-handler"))   # hello
 print(str(b"hello", "ascii", "bad-handler"))    # hello
 # latin-1 never fails, so handler is never called
-print(str(bytes([0xff]), "latin-1", "bad-handler"))  # ÿ
+print(ord(str(bytes([0xff]), "latin-1", "bad-handler")))  # 255 (U+00FF)
 
 # invalid bytes + unknown handler -> LookupError (handler is called)
 try:
