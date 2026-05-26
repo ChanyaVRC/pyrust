@@ -2036,17 +2036,13 @@ impl Interpreter {
                 }
                 ValueKind::UserFunction(f) => {
                     let f = Rc::clone(f);
-                    // `__new__` is implicitly a static method in CPython: it
-                    // receives `cls` as its first positional argument whether
-                    // or not the user wrote `@staticmethod`.  Pass `cls` via
-                    // `bound_prefix` for `Regular` functions (the common case).
-                    // For `StaticMethod`, `cls` must already be the first arg
-                    // the caller passes — don't prepend a second copy.
-                    let prefix: &[Value] = match f.kind {
-                        UserFunctionKind::StaticMethod => &[],
-                        _ => &[cls_val],
-                    };
-                    self.call_user_function_expanded(f, args, prefix)?
+                    // CPython's `type.__call__` always injects `cls` as the
+                    // first argument to `__new__`, regardless of whether the
+                    // user decorated it with `@staticmethod`.  The
+                    // `@staticmethod` marker only suppresses the descriptor
+                    // auto-bind during attribute lookup — it does NOT change
+                    // what `type.__call__` passes.  Always prepend `cls`.
+                    self.call_user_function_expanded(f, args, &[cls_val])?
                 }
                 _ => unreachable!("dispatch_new is only set for UserFunction or BuiltinFunction"),
             };
@@ -2162,10 +2158,10 @@ impl Interpreter {
                     }
                 } else if immutable_prim_base.is_none() && !args.is_empty() {
                     let class_name = class.borrow().name.clone();
-                    return Err(PyError::Runtime(format!(
-                        "{}() takes no arguments",
-                        class_name
-                    )));
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("{}() takes no arguments", class_name),
+                    ));
                 }
             }
         }
