@@ -1903,8 +1903,12 @@ impl Interpreter {
                 let instance = instantiate_exception(Rc::clone(&class), values);
                 let result = invoke_class_method(self, init_val, instance.clone(), args)?;
                 if !result.is_none() {
-                    return Err(PyError::Runtime(
-                        "__init__() should return None".to_string(),
+                    return Err(PyError::named(
+                        "TypeError",
+                        &format!(
+                            "__init__() should return None, not '{}'",
+                            pyrust_core::builtin_type_name(&result),
+                        ),
                     ));
                 }
                 return Ok(instance);
