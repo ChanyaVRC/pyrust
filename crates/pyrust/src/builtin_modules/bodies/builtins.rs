@@ -372,6 +372,19 @@ pyrust_module! {
             None => Value::int(0),
             Some(v) => v.0,
         };
+        // CPython rejects str/bytes as the accumulator before entering the loop.
+        if acc.is_str() {
+            return Err(PyError::named(
+                "TypeError",
+                "sum() can't sum strings [use ''.join(seq) instead]",
+            ));
+        }
+        if matches!(acc.kind(), ValueKind::Bytes(_)) {
+            return Err(PyError::named(
+                "TypeError",
+                "sum() can't sum bytes [use b''.join(seq) instead]",
+            ));
+        }
         for item in items {
             acc = _interp.eval_binary(acc, BinaryOp::Add, item)?;
         }
