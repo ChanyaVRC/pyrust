@@ -29,6 +29,12 @@ class FloatLen:
 class StrLen:
     def __len__(self): return "hello"
 
+class IntBool:
+    def __bool__(self): return 1
+
+class FloatBool:
+    def __bool__(self): return 1.5
+
 # Happy path: zero is falsy, positive is truthy.
 try:
     print(bool(ZeroLen()))
@@ -108,3 +114,14 @@ try:
     print(all([obj]))
 except ValueError as e:
     print('all ValueError:', e)
+
+# __bool__ returning non-bool raises TypeError with CPython's message format.
+try:
+    bool(IntBool())
+except TypeError as e:
+    print('TypeError:', e)
+
+try:
+    bool(FloatBool())
+except TypeError as e:
+    print('TypeError:', e)

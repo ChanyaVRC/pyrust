@@ -1567,13 +1567,12 @@ impl Interpreter {
                 )?;
                 return match result.kind() {
                     ValueKind::Bool(b) => Ok(b),
-                    ValueKind::Int(_) => Err(PyError::named(
-                        "TypeError",
-                        "__bool__ should return bool, not int".to_string(),
-                    )),
                     _ => Err(PyError::named(
                         "TypeError",
-                        "__bool__ should return bool".to_string(),
+                        format!(
+                            "__bool__ should return bool, returned {}",
+                            pyrust_core::builtin_type_name(&result),
+                        ),
                     )),
                 };
             }
