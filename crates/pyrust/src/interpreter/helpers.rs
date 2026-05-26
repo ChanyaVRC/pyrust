@@ -1250,6 +1250,11 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
     let encoding_warning = mk("EncodingWarning", Some(Rc::clone(&warning)));
     let unicode_encode_error = mk("UnicodeEncodeError", Some(Rc::clone(&unicode_error)));
     let unicode_decode_error = mk("UnicodeDecodeError", Some(Rc::clone(&unicode_error)));
+    let unicode_translate_error = mk("UnicodeTranslateError", Some(Rc::clone(&unicode_error)));
+    let buffer_error = mk("BufferError", Some(Rc::clone(&exception)));
+    let reference_error = mk("ReferenceError", Some(Rc::clone(&exception)));
+    let system_error = mk("SystemError", Some(Rc::clone(&exception)));
+    let stop_async_iteration = mk("StopAsyncIteration", Some(Rc::clone(&exception)));
     let eof_error = mk("EOFError", Some(Rc::clone(&exception)));
     let system_exit = mk("SystemExit", Some(Rc::clone(&base_exception)));
     let generator_exit = mk("GeneratorExit", Some(Rc::clone(&base_exception)));
@@ -1284,6 +1289,11 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
         ("UnicodeError", unicode_error),
         ("UnicodeEncodeError", unicode_encode_error),
         ("UnicodeDecodeError", unicode_decode_error),
+        ("UnicodeTranslateError", unicode_translate_error),
+        ("BufferError", buffer_error),
+        ("ReferenceError", reference_error),
+        ("SystemError", system_error),
+        ("StopAsyncIteration", stop_async_iteration),
         ("OSError", os_error),
         ("IOError", io_error),
         ("EnvironmentError", environment_error),
