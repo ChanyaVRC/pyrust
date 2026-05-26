@@ -568,7 +568,7 @@ impl Parser {
                         "starred expression is not valid in this context".to_string(),
                     ));
                 }
-                rhs = if next_items.len() == 1 {
+                rhs = if next_items.len() == 1 && !next_had_comma {
                     next_items.into_iter().next().unwrap()
                 } else {
                     Expr::Tuple(next_items)
