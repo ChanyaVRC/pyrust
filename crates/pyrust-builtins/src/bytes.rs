@@ -314,71 +314,79 @@ pub fn decode_bytes(bytes: &[u8], encoding: &str, errors: &str) -> Result<Value>
         .collect();
 
     match enc_norm.as_str() {
-        "utf8" => match errors {
-            "strict" => match std::str::from_utf8(bytes) {
+        "utf8" => {
+            // Fast path: if all bytes are valid UTF-8 the error handler is never
+            // invoked, so we must not validate its name (CPython is lazy here).
+            match std::str::from_utf8(bytes) {
                 Ok(s) => Ok(Value::string(s)),
-                Err(e) => Err(PyError::named(
-                    "UnicodeDecodeError",
-                    format!(
-                        "'utf-8' codec can't decode byte 0x{:02x} in position {}: invalid start byte",
-                        bytes[e.valid_up_to()],
-                        e.valid_up_to()
-                    ),
-                )),
-            },
-            "ignore" => {
-                let s = bytes_decode_utf8_ignore(bytes);
-                Ok(Value::string(&s))
+                Err(e) => {
+                    // Decoding failed — now the error handler matters.
+                    match errors {
+                        "strict" => Err(PyError::named(
+                            "UnicodeDecodeError",
+                            format!(
+                                "'utf-8' codec can't decode byte 0x{:02x} in position {}: invalid start byte",
+                                bytes[e.valid_up_to()],
+                                e.valid_up_to()
+                            ),
+                        )),
+                        "ignore" => Ok(Value::string(&bytes_decode_utf8_ignore(bytes))),
+                        "replace" => Ok(Value::string(String::from_utf8_lossy(bytes).as_ref())),
+                        _ => Err(PyError::named(
+                            "LookupError",
+                            format!("unknown error handler name '{errors}'"),
+                        )),
+                    }
+                }
             }
-            "replace" => Ok(Value::string(String::from_utf8_lossy(bytes).as_ref())),
-            _ => Err(PyError::named(
-                "LookupError",
-                format!("unknown error handler name '{errors}'"),
-            )),
-        },
+        }
         "latin1" | "iso88591" | "iso8859" => {
             // Latin-1: byte N maps directly to Unicode code point N.
+            // This encoding never fails, so the error handler is never invoked.
             let s: String = bytes.iter().map(|&b| b as char).collect();
             Ok(Value::string(&s))
         }
         "ascii" => {
-            match errors {
-                "strict" => {
-                    // Every byte must be in 0x00..=0x7F.
-                    for (i, &b) in bytes.iter().enumerate() {
-                        if b > 0x7F {
-                            return Err(PyError::named(
-                                "UnicodeDecodeError",
-                                format!(
-                                    "'ascii' codec can't decode byte 0x{b:02x} in position {i}: ordinal not in range(128)"
-                                ),
-                            ));
-                        }
-                    }
-                    // SAFETY: all bytes validated as ASCII.
+            // Find the first non-ASCII byte, if any.
+            let first_bad = bytes.iter().enumerate().find(|&(_, &b)| b > 0x7F);
+            match first_bad {
+                None => {
+                    // All bytes are valid ASCII; error handler is never invoked.
+                    // SAFETY: all bytes validated as ASCII (≤ 0x7F, valid UTF-8).
                     Ok(Value::string(unsafe {
                         std::str::from_utf8_unchecked(bytes)
                     }))
                 }
-                "ignore" => {
-                    let s: String = bytes
-                        .iter()
-                        .filter(|&&b| b <= 0x7F)
-                        .map(|&b| b as char)
-                        .collect();
-                    Ok(Value::string(&s))
+                Some((i, &b)) => {
+                    // At least one bad byte — now the error handler matters.
+                    match errors {
+                        "strict" => Err(PyError::named(
+                            "UnicodeDecodeError",
+                            format!(
+                                "'ascii' codec can't decode byte 0x{b:02x} in position {i}: ordinal not in range(128)"
+                            ),
+                        )),
+                        "ignore" => {
+                            let s: String = bytes
+                                .iter()
+                                .filter(|&&b| b <= 0x7F)
+                                .map(|&b| b as char)
+                                .collect();
+                            Ok(Value::string(&s))
+                        }
+                        "replace" => {
+                            let s: String = bytes
+                                .iter()
+                                .map(|&b| if b <= 0x7F { b as char } else { '\u{FFFD}' })
+                                .collect();
+                            Ok(Value::string(&s))
+                        }
+                        _ => Err(PyError::named(
+                            "LookupError",
+                            format!("unknown error handler name '{errors}'"),
+                        )),
+                    }
                 }
-                "replace" => {
-                    let s: String = bytes
-                        .iter()
-                        .map(|&b| if b <= 0x7F { b as char } else { '\u{FFFD}' })
-                        .collect();
-                    Ok(Value::string(&s))
-                }
-                _ => Err(PyError::named(
-                    "LookupError",
-                    format!("unknown error handler name '{errors}'"),
-                )),
             }
         }
         _ => Err(PyError::named(

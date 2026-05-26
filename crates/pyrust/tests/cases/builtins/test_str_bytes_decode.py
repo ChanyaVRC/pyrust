@@ -80,6 +80,24 @@ try:
 except TypeError as e:
     print("TypeError for 4 args:", e)
 
+# error handler is only validated when it is actually invoked (lazy, like CPython)
+# valid bytes + unknown handler -> succeeds (handler never called)
+print(str(b"hello", "utf-8", "bad-handler"))   # hello
+print(str(b"hello", "ascii", "bad-handler"))    # hello
+# latin-1 never fails, so handler is never called
+print(str(bytes([0xff]), "latin-1", "bad-handler"))  # ÿ
+
+# invalid bytes + unknown handler -> LookupError (handler is called)
+try:
+    str(bytes([0xff]), "utf-8", "bad-handler")
+except LookupError as e:
+    print("LookupError utf-8:", e)
+
+try:
+    str(bytes([0x80]), "ascii", "bad-handler")
+except LookupError as e:
+    print("LookupError ascii:", e)
+
 # no regression: 0/1-arg forms still work
 print(str())
 print(str(42))
