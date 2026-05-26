@@ -1920,26 +1920,108 @@ impl Parser {
             }
             Some(Token::Str(v)) => {
                 self.bump();
-                // Adjacent string literal concatenation
-                let mut s = v;
-                while let Some(Token::Str(next)) = self.current().cloned() {
-                    self.bump();
-                    s.push_str(&next);
+                // Adjacent string literal concatenation (CPython 3.12 semantics).
+                // If any adjacent token is an FString the whole result is an FString;
+                // a Bytes literal mixed with str/fstring is a SyntaxError.
+                let mut plain = v;
+                let mut fstring_parts: Option<Vec<FStringPart>> = None;
+                loop {
+                    match self.current().cloned() {
+                        Some(Token::Str(next)) => {
+                            self.bump();
+                            match fstring_parts {
+                                None => plain.push_str(&next),
+                                Some(ref mut parts) => {
+                                    // Append to the last Literal part, or push a new one.
+                                    match parts.last_mut() {
+                                        Some(FStringPart::Literal(s)) => s.push_str(&next),
+                                        _ => parts.push(FStringPart::Literal(next)),
+                                    }
+                                }
+                            }
+                        }
+                        Some(Token::FString(lex_parts)) => {
+                            self.bump();
+                            // Promote: flush accumulated plain text as a Literal part.
+                            let parts = fstring_parts.get_or_insert_with(Vec::new);
+                            if !plain.is_empty() {
+                                match parts.last_mut() {
+                                    Some(FStringPart::Literal(s)) => s.push_str(&plain),
+                                    _ => parts.push(FStringPart::Literal(plain.clone())),
+                                }
+                                plain.clear();
+                            }
+                            parts.extend(self.parse_fstring_parts(lex_parts)?);
+                        }
+                        Some(Token::Bytes(_)) => {
+                            return Err(PyError::Parse(
+                                "cannot mix bytes and nonbytes literals".to_string(),
+                            ));
+                        }
+                        _ => break,
+                    }
                 }
-                Ok(Expr::Str(s))
+                match fstring_parts {
+                    None => Ok(Expr::Str(plain)),
+                    Some(mut parts) => {
+                        // Any remaining plain text (if the last token was a Str, not FString)
+                        // has already been folded into `parts` inside the loop.
+                        // But if fstring_parts was just promoted and plain was already flushed,
+                        // this is always empty. Guard for safety.
+                        if !plain.is_empty() {
+                            match parts.last_mut() {
+                                Some(FStringPart::Literal(s)) => s.push_str(&plain),
+                                _ => parts.push(FStringPart::Literal(plain)),
+                            }
+                        }
+                        Ok(Expr::FString(parts))
+                    }
+                }
             }
             Some(Token::Bytes(v)) => {
                 self.bump();
                 let mut bs = v;
-                while let Some(Token::Bytes(next)) = self.current().cloned() {
-                    self.bump();
-                    bs.extend_from_slice(&next);
+                loop {
+                    match self.current().cloned() {
+                        Some(Token::Bytes(next)) => {
+                            self.bump();
+                            bs.extend_from_slice(&next);
+                        }
+                        Some(Token::Str(_)) | Some(Token::FString(_)) => {
+                            return Err(PyError::Parse(
+                                "cannot mix bytes and nonbytes literals".to_string(),
+                            ));
+                        }
+                        _ => break,
+                    }
                 }
                 Ok(Expr::Bytes(bs))
             }
             Some(Token::FString(lex_parts)) => {
                 self.bump();
-                let parts = self.parse_fstring_parts(lex_parts)?;
+                let mut parts = self.parse_fstring_parts(lex_parts)?;
+                // Adjacent string/f-string literal concatenation.
+                loop {
+                    match self.current().cloned() {
+                        Some(Token::FString(next_lex)) => {
+                            self.bump();
+                            parts.extend(self.parse_fstring_parts(next_lex)?);
+                        }
+                        Some(Token::Str(next)) => {
+                            self.bump();
+                            match parts.last_mut() {
+                                Some(FStringPart::Literal(s)) => s.push_str(&next),
+                                _ => parts.push(FStringPart::Literal(next)),
+                            }
+                        }
+                        Some(Token::Bytes(_)) => {
+                            return Err(PyError::Parse(
+                                "cannot mix bytes and nonbytes literals".to_string(),
+                            ));
+                        }
+                        _ => break,
+                    }
+                }
                 Ok(Expr::FString(parts))
             }
             Some(Token::True) => {
