@@ -1,6 +1,10 @@
-# Parity fixture for input() — error cases that don't require interactive stdin.
+# Parity fixture for input() — tests that don't require interactive stdin.
 # The parity harness runs scripts with stdin closed (EOF), so happy-path tests
 # that need real input are exercised manually (see commit body).
+
+# Basic identity checks — verify input is a callable builtin.
+print(callable(input))
+print(type(input).__name__)
 
 # Too many positional arguments.
 try:
