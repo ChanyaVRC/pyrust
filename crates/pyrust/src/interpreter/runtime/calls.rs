@@ -2227,6 +2227,71 @@ impl Interpreter {
                     }
                     None => value,
                 };
+                // Expand any `{name}` references inside the format spec
+                // (PEP 3101 one-level nesting).  Only named fields are allowed;
+                // positional fields in the spec raise ValueError.
+                let expanded_spec;
+                let spec = if spec.contains('{') {
+                    let mut spec_out = String::new();
+                    let sbytes = spec.as_bytes();
+                    let mut si = 0;
+                    while si < sbytes.len() {
+                        match sbytes[si] {
+                            b'{' if si + 1 < sbytes.len() && sbytes[si + 1] == b'{' => {
+                                spec_out.push('{');
+                                si += 2;
+                            }
+                            b'}' if si + 1 < sbytes.len() && sbytes[si + 1] == b'}' => {
+                                spec_out.push('}');
+                                si += 2;
+                            }
+                            b'{' => {
+                                let ss = si + 1;
+                                let se = sbytes[ss..]
+                                    .iter()
+                                    .position(|&b| b == b'}')
+                                    .ok_or_else(|| {
+                                        PyError::named(
+                                            "ValueError",
+                                            "Single '{' encountered in format string".to_string(),
+                                        )
+                                    })?
+                                    + ss;
+                                let inner = &spec[ss..se];
+                                si = se + 1;
+                                if inner.is_empty() || inner.parse::<usize>().is_ok() {
+                                    return Err(PyError::named(
+                                        "ValueError",
+                                        "Format string contains positional fields".to_string(),
+                                    ));
+                                }
+                                let sv = self.eval_index(
+                                    mapping.clone(),
+                                    Value::string(inner.to_string()),
+                                )?;
+                                spec_out.push_str(&sv.to_py_str());
+                            }
+                            b'}' => {
+                                return Err(PyError::named(
+                                    "ValueError",
+                                    "Single '}' encountered in format string".to_string(),
+                                ));
+                            }
+                            _ => {
+                                let ch_s = si;
+                                si += 1;
+                                while si < sbytes.len() && (sbytes[si] & 0xC0) == 0x80 {
+                                    si += 1;
+                                }
+                                spec_out.push_str(&spec[ch_s..si]);
+                            }
+                        }
+                    }
+                    expanded_spec = spec_out;
+                    expanded_spec.as_str()
+                } else {
+                    spec
+                };
                 let formatted = apply_format_spec(&value, spec)?;
                 if let ValueKind::Str(s) = formatted.kind() {
                     out.push_str(s);
@@ -3574,6 +3639,22 @@ fn format_str_template(
                 None => value,
             };
 
+            // Expand any `{field}` references inside the format spec before
+            // applying it (PEP 3101 one-level nesting, e.g. `"{:{width}}"`).
+            let expanded_spec;
+            let spec = if spec.contains('{') {
+                expanded_spec = expand_format_spec_positional(
+                    spec,
+                    positional,
+                    keyword,
+                    &mut auto_idx,
+                    &mut saw_manual,
+                )?;
+                expanded_spec.as_str()
+            } else {
+                spec
+            };
+
             // Apply the format spec.  When the spec is empty and the value is a
             // PyInstance, dispatch `__str__` the same way `str(x)` would — the
             // default `to_py_str()` falls through to repr instead of __str__.
@@ -3756,6 +3837,111 @@ fn apply_field_accessors(mut value: Value, mut rest: &str) -> Result<Value> {
         }
     }
     Ok(value)
+}
+
+/// Expands `{field_name}` references within a format spec string (the part
+/// after `:` in a replacement field).  Per PEP 3101, only one level of
+/// nesting is allowed — the inner fields cannot have a conversion or a
+/// further nested spec.
+///
+/// `auto_idx` and `saw_manual` are the same counters used by the enclosing
+/// `format_str_template` call; the spec fields advance the same auto-number
+/// sequence as top-level fields.
+fn expand_format_spec_positional(
+    spec: &str,
+    positional: &[Value],
+    keyword: &[(String, Value)],
+    auto_idx: &mut Option<usize>,
+    saw_manual: &mut bool,
+) -> Result<String> {
+    let bytes = spec.as_bytes();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' if i + 1 < bytes.len() && bytes[i + 1] == b'{' => {
+                out.push('{');
+                i += 2;
+            }
+            b'}' if i + 1 < bytes.len() && bytes[i + 1] == b'}' => {
+                out.push('}');
+                i += 2;
+            }
+            b'{' => {
+                // Find the matching '}'.  No further nesting is allowed inside
+                // a format spec's inner field.
+                let start = i + 1;
+                let end = bytes[start..]
+                    .iter()
+                    .position(|&b| b == b'}')
+                    .ok_or_else(|| {
+                        PyError::named(
+                            "ValueError",
+                            "Single '{' encountered in format string".to_string(),
+                        )
+                    })?
+                    + start;
+                let inner = &spec[start..end];
+                i = end + 1;
+
+                // Inner fields do not support '!' conversion or nested ':' spec.
+                let value = if inner.is_empty() {
+                    // Auto-numbered
+                    if *saw_manual {
+                        return Err(PyError::named(
+                            "ValueError",
+                            "cannot switch from manual field specification to automatic field numbering".to_string(),
+                        ));
+                    }
+                    let Some(idx) = *auto_idx else { unreachable!() };
+                    *auto_idx = Some(idx + 1);
+                    positional.get(idx).cloned().ok_or_else(|| {
+                        PyError::named(
+                            "IndexError",
+                            format!("Replacement index {idx} out of range for positional args tuple"),
+                        )
+                    })?
+                } else if let Ok(n) = inner.parse::<usize>() {
+                    if auto_idx.is_some() && *auto_idx != Some(0) {
+                        return Err(PyError::named(
+                            "ValueError",
+                            "cannot switch from automatic field numbering to manual field specification".to_string(),
+                        ));
+                    }
+                    *saw_manual = true;
+                    *auto_idx = None;
+                    positional.get(n).cloned().ok_or_else(|| {
+                        PyError::named(
+                            "IndexError",
+                            format!("Replacement index {n} out of range for positional args tuple"),
+                        )
+                    })?
+                } else {
+                    keyword
+                        .iter()
+                        .find(|(k, _)| k == inner)
+                        .map(|(_, v)| v.clone())
+                        .ok_or_else(|| PyError::key_error(Value::string(inner.to_string())))?
+                };
+                out.push_str(&value.to_py_str());
+            }
+            b'}' => {
+                return Err(PyError::named(
+                    "ValueError",
+                    "Single '}' encountered in format string".to_string(),
+                ));
+            }
+            _ => {
+                let ch_start = i;
+                i += 1;
+                while i < bytes.len() && (bytes[i] & 0xC0) == 0x80 {
+                    i += 1;
+                }
+                out.push_str(&spec[ch_start..i]);
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Does `err` signal end-of-sequence for the legacy `__getitem__`
