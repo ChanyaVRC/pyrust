@@ -67,3 +67,33 @@ except TypeError as e:
 print(divmod(10, 3))                 # (3, 1)
 print(divmod(10.5, 3.0))            # (3.0, 1.5)
 print(divmod(True, 2))              # (0, 1)
+
+
+# ── Subtype rule: b.__rdivmod__ tried first when b is a proper subtype of a ───
+
+class Base:
+    def __divmod__(self, other):
+        return ("base_divmod", type(other).__name__)
+
+    def __rdivmod__(self, other):
+        return ("base_rdivmod", type(other).__name__)
+
+
+class Sub(Base):
+    def __rdivmod__(self, other):
+        return ("sub_rdivmod", type(other).__name__)
+
+
+# Sub is a proper subtype of Base: Sub.__rdivmod__ is tried first.
+print(divmod(Base(), Sub()))         # ('sub_rdivmod', 'Base')
+# Sub as left operand: __divmod__ (inherited from Base) is tried first.
+print(divmod(Sub(), Base()))         # ('base_divmod', 'Base')
+# Same type: normal left-first order applies.
+print(divmod(Base(), Base()))        # ('base_divmod', 'Base')
+
+# Subtype's __rdivmod__ returns NotImplemented: falls back to a.__divmod__.
+class Sub2(Base):
+    def __rdivmod__(self, other):
+        return NotImplemented
+
+print(divmod(Base(), Sub2()))        # ('base_divmod', 'Sub2')
