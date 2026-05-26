@@ -1127,8 +1127,17 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
     //       RuntimeError → RecursionError, NotImplementedError
     //       TypeError, NameError → UnboundLocalError
     //       AssertionError, AttributeError, EOFError, StopIteration, SyntaxError
+    //         → IndentationError → TabError
     //       MemoryError, ImportError → ModuleNotFoundError
-    //       OSError → FileNotFoundError, FileExistsError
+    //       OSError → BlockingIOError, ChildProcessError, FileExistsError,
+    //                 FileNotFoundError, InterruptedError, IsADirectoryError,
+    //                 NotADirectoryError, PermissionError, ProcessLookupError,
+    //                 TimeoutError
+    //                 ConnectionError → BrokenPipeError, ConnectionAbortedError,
+    //                                   ConnectionRefusedError, ConnectionResetError
+    //       Warning → UserWarning, DeprecationWarning, PendingDeprecationWarning,
+    //                 RuntimeWarning, SyntaxWarning, ResourceWarning, FutureWarning,
+    //                 ImportWarning, UnicodeWarning, BytesWarning, EncodingWarning
     //     SystemExit, GeneratorExit, KeyboardInterrupt (direct BaseException children)
     let mk = |name: &str, base: Option<Rc<RefCell<PyClass>>>| {
         Rc::new(RefCell::new(PyClass {
@@ -1186,9 +1195,36 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
     let module_not_found_error = mk("ModuleNotFoundError", Some(Rc::clone(&import_error)));
     let file_not_found_error = mk("FileNotFoundError", Some(Rc::clone(&os_error)));
     let file_exists_error = mk("FileExistsError", Some(Rc::clone(&os_error)));
+    let blocking_io_error = mk("BlockingIOError", Some(Rc::clone(&os_error)));
+    let child_process_error = mk("ChildProcessError", Some(Rc::clone(&os_error)));
+    let interrupted_error = mk("InterruptedError", Some(Rc::clone(&os_error)));
+    let is_a_directory_error = mk("IsADirectoryError", Some(Rc::clone(&os_error)));
+    let not_a_directory_error = mk("NotADirectoryError", Some(Rc::clone(&os_error)));
+    let permission_error = mk("PermissionError", Some(Rc::clone(&os_error)));
+    let process_lookup_error = mk("ProcessLookupError", Some(Rc::clone(&os_error)));
+    let timeout_error = mk("TimeoutError", Some(Rc::clone(&os_error)));
+    let connection_error = mk("ConnectionError", Some(Rc::clone(&os_error)));
+    let broken_pipe_error = mk("BrokenPipeError", Some(Rc::clone(&connection_error)));
+    let connection_aborted_error = mk("ConnectionAbortedError", Some(Rc::clone(&connection_error)));
+    let connection_refused_error = mk("ConnectionRefusedError", Some(Rc::clone(&connection_error)));
+    let connection_reset_error = mk("ConnectionResetError", Some(Rc::clone(&connection_error)));
     // Python 3.3+: IOError and EnvironmentError are aliases for OSError.
     let io_error = Rc::clone(&os_error);
     let environment_error = Rc::clone(&os_error);
+    let indentation_error = mk("IndentationError", Some(Rc::clone(&syntax_error)));
+    let tab_error = mk("TabError", Some(Rc::clone(&indentation_error)));
+    let warning = mk("Warning", Some(Rc::clone(&exception)));
+    let user_warning = mk("UserWarning", Some(Rc::clone(&warning)));
+    let deprecation_warning = mk("DeprecationWarning", Some(Rc::clone(&warning)));
+    let pending_deprecation_warning = mk("PendingDeprecationWarning", Some(Rc::clone(&warning)));
+    let runtime_warning = mk("RuntimeWarning", Some(Rc::clone(&warning)));
+    let syntax_warning = mk("SyntaxWarning", Some(Rc::clone(&warning)));
+    let resource_warning = mk("ResourceWarning", Some(Rc::clone(&warning)));
+    let future_warning = mk("FutureWarning", Some(Rc::clone(&warning)));
+    let import_warning = mk("ImportWarning", Some(Rc::clone(&warning)));
+    let unicode_warning = mk("UnicodeWarning", Some(Rc::clone(&warning)));
+    let bytes_warning = mk("BytesWarning", Some(Rc::clone(&warning)));
+    let encoding_warning = mk("EncodingWarning", Some(Rc::clone(&warning)));
     let unicode_encode_error = mk("UnicodeEncodeError", Some(Rc::clone(&unicode_error)));
     let unicode_decode_error = mk("UnicodeDecodeError", Some(Rc::clone(&unicode_error)));
     let eof_error = mk("EOFError", Some(Rc::clone(&exception)));
@@ -1217,6 +1253,8 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
         ("StopIteration", stop_iteration),
         ("AttributeError", attribute_error),
         ("SyntaxError", syntax_error),
+        ("IndentationError", indentation_error),
+        ("TabError", tab_error),
         ("MemoryError", memory_error),
         ("ImportError", import_error),
         ("ModuleNotFoundError", module_not_found_error),
@@ -1228,6 +1266,31 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
         ("EnvironmentError", environment_error),
         ("FileNotFoundError", file_not_found_error),
         ("FileExistsError", file_exists_error),
+        ("BlockingIOError", blocking_io_error),
+        ("ChildProcessError", child_process_error),
+        ("InterruptedError", interrupted_error),
+        ("IsADirectoryError", is_a_directory_error),
+        ("NotADirectoryError", not_a_directory_error),
+        ("PermissionError", permission_error),
+        ("ProcessLookupError", process_lookup_error),
+        ("TimeoutError", timeout_error),
+        ("ConnectionError", connection_error),
+        ("BrokenPipeError", broken_pipe_error),
+        ("ConnectionAbortedError", connection_aborted_error),
+        ("ConnectionRefusedError", connection_refused_error),
+        ("ConnectionResetError", connection_reset_error),
+        ("Warning", warning),
+        ("UserWarning", user_warning),
+        ("DeprecationWarning", deprecation_warning),
+        ("PendingDeprecationWarning", pending_deprecation_warning),
+        ("RuntimeWarning", runtime_warning),
+        ("SyntaxWarning", syntax_warning),
+        ("ResourceWarning", resource_warning),
+        ("FutureWarning", future_warning),
+        ("ImportWarning", import_warning),
+        ("UnicodeWarning", unicode_warning),
+        ("BytesWarning", bytes_warning),
+        ("EncodingWarning", encoding_warning),
         ("SystemExit", system_exit),
         ("GeneratorExit", generator_exit),
         ("KeyboardInterrupt", keyboard_interrupt),
@@ -1235,7 +1298,7 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
 }
 
 thread_local! {
-    /// Per-thread cache of all 32 built-in exception class `Rc`s.
+    /// Per-thread cache of all built-in exception class `Rc`s.
     /// Built once per thread; each `Interpreter::default()` call clones the
     /// `Rc`s (O(1) reference-count bumps) instead of allocating fresh
     /// `Rc<RefCell<PyClass>>` objects for the full hierarchy.
