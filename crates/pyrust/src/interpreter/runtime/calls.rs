@@ -1510,20 +1510,21 @@ impl Interpreter {
 
         if !has_args_param && !has_kwargs_param {
             // Fast path: no variadic params - original logic
-            let required_params = function
-                .params
-                .iter()
-                .filter(|param| param.default.is_none())
-                .count();
-            if positional_count + bound_prefix.len() > function.params.len() {
+            // Number of params that can accept positional arguments (excludes keyword-only).
+            let positional_param_count =
+                function.params.iter().filter(|p| !p.is_keyword_only).count();
+            let total_positional_given = positional_count + bound_prefix.len();
+            if total_positional_given > positional_param_count {
+                let arg_word =
+                    if positional_param_count == 1 { "argument" } else { "arguments" };
+                let given_word = if total_positional_given == 1 { "was" } else { "were" };
                 return Err(PyError::named(
                     "TypeError",
                     format!(
-                        "{}() takes from {} to {} arguments but {} were given",
+                        "{}() takes {} positional {arg_word} but {} {given_word} given",
                         function.name,
-                        required_params,
-                        function.params.len(),
-                        positional_count + bound_prefix.len()
+                        positional_param_count,
+                        total_positional_given,
                     ),
                 ));
             }
@@ -1572,18 +1573,27 @@ impl Interpreter {
                     }
                     bound_args[param_index] = Some(value);
                 } else {
-                    while positional_index < bound_args.len() && bound_args[positional_index].is_some() {
+                    // Skip already-bound slots and keyword-only params.
+                    while positional_index < bound_args.len()
+                        && (bound_args[positional_index].is_some()
+                            || function.params[positional_index].is_keyword_only)
+                    {
                         positional_index += 1;
                     }
-                    if positional_index >= bound_args.len() {
+                    if positional_index >= bound_args.len()
+                        || function.params[positional_index].is_keyword_only
+                    {
+                        let arg_word =
+                            if positional_param_count == 1 { "argument" } else { "arguments" };
+                        let given_word =
+                            if total_positional_given == 1 { "was" } else { "were" };
                         return Err(PyError::named(
                             "TypeError",
                             format!(
-                                "{}() takes from {} to {} arguments but {} were given",
+                                "{}() takes {} positional {arg_word} but {} {given_word} given",
                                 function.name,
-                                required_params,
-                                function.params.len(),
-                                positional_count + bound_prefix.len()
+                                positional_param_count,
+                                total_positional_given,
                             ),
                         ));
                     }
@@ -1825,6 +1835,28 @@ impl Interpreter {
             }
         }
 
+        // Pre-check: reject excess positional arguments before binding when
+        // there is no *args to absorb them. This matches CPython's error ordering.
+        if !has_args_param {
+            let positional_param_count = function
+                .params
+                .iter()
+                .filter(|p| !p.is_keyword_only && !p.is_args && !p.is_kwargs)
+                .count();
+            if positional_vals.len() > positional_param_count {
+                let arg_word =
+                    if positional_param_count == 1 { "argument" } else { "arguments" };
+                let given_word = if positional_vals.len() == 1 { "was" } else { "were" };
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "{}() takes {} positional {arg_word} but {} {given_word} given",
+                        function.name, positional_param_count, positional_vals.len(),
+                    ),
+                ));
+            }
+        }
+
         let has_kwargs = function.params.iter().any(|p| p.is_kwargs);
         let mut consumed_keywords = std::collections::HashSet::new();
         let mut pos_idx = 0;
@@ -1853,7 +1885,7 @@ impl Interpreter {
                 if let Some(ki) = kw_pos {
                     consumed_keywords.insert(keyword_vals[ki].0.clone());
                     keyword_vals[ki].1.clone()
-                } else if pos_idx < positional_vals.len() {
+                } else if !param.is_keyword_only && pos_idx < positional_vals.len() {
                     let v = positional_vals[pos_idx].clone();
                     pos_idx += 1;
                     v
