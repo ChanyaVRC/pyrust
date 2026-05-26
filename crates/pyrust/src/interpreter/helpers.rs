@@ -749,6 +749,8 @@ pub(crate) struct PrintOptions {
     pub(crate) values: Vec<Value>,
     pub(crate) sep: String,
     pub(crate) end: String,
+    /// `None` means write to stdout; `Some(v)` means call `v.write(...)`.
+    pub(crate) file: Option<Value>,
 }
 
 #[derive(Debug, Clone)]
