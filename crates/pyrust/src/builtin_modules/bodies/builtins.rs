@@ -2664,8 +2664,12 @@ pyrust_module! {
             }
         };
         let ValueKind::PyInstance(inst_rc) = self_val.kind() else {
-            return Err(PyError::Runtime(
-                "BaseException.add_note() requires a BaseException instance".to_string(),
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "descriptor 'add_note' for 'BaseException' objects doesn't apply to a '{}' object",
+                    value_type_name_str(self_val)
+                ),
             ));
         };
         let notes_val = {
