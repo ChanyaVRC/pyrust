@@ -719,12 +719,86 @@ pyrust_module! {
     /// CPython: reversed(seq) — reverse iterator.
     /// <https://docs.python.org/3/library/functions.html#reversed>
     ///
-    /// Migrated to the typed-signature dialect (#400).  `PyValue` accepts
-    /// any object so that PyInstance / generator sources reach
-    /// `materialize_user_iter` before handing off to the helper.
-    #[pure]
+    /// CPython's protocol (in order):
+    ///   1. `__reversed__` — call it, return the iterator it produces.
+    ///   2. `__len__` + `__getitem__` — collect via sequence protocol, reverse.
+    ///   3. Otherwise: TypeError "'X' object is not reversible".
+    ///
+    /// For non-PyInstance values (list, range, tuple, …) the existing
+    /// materialize-then-reverse path is used unchanged.
     fn reversed(#[positional_only] seq: PyValue) -> Result<Value> {
-        // Pre-materialise PyInstance sources (see `enumerate` for rationale).
+        if let ValueKind::PyInstance(inst) = seq.0.kind() {
+            let inst_rc = Rc::clone(inst);
+            let class = Rc::clone(&inst_rc.borrow().class);
+            // Protocol step 1: __reversed__
+            if let Some(method_val) = lookup_class_attr(&class, "__reversed__") {
+                return invoke_class_method(
+                    _interp,
+                    method_val,
+                    Value::py_instance(inst_rc),
+                    &[],
+                );
+            }
+            // Protocol step 2: __getitem__ + __len__ (sequence protocol).
+            // CPython checks __getitem__ first; if present but __len__ is
+            // absent it raises "no len()" rather than "not reversible".
+            if let Some(getitem_method) = lookup_class_attr(&class, "__getitem__") {
+                let len_method = match lookup_class_attr(&class, "__len__") {
+                    Some(m) => m,
+                    None => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "object of type '{}' has no len()",
+                                class.borrow().name,
+                            ),
+                        ))
+                    }
+                };
+                let len_val = invoke_class_method(
+                    _interp,
+                    len_method,
+                    Value::py_instance(Rc::clone(&inst_rc)),
+                    &[],
+                )?;
+                let n = match len_val.kind() {
+                    ValueKind::Int(n) if n >= 0 => n,
+                    ValueKind::Bool(b) => if b { 1 } else { 0 },
+                    ValueKind::Int(_) => {
+                        return Err(PyError::named(
+                            "ValueError",
+                            "__len__() should return >= 0".to_string(),
+                        ))
+                    }
+                    _ => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            "__len__ returned non-int".to_string(),
+                        ))
+                    }
+                };
+                let obj = Value::py_instance(inst_rc);
+                let mut items = Vec::with_capacity(n as usize);
+                for i in 0..n {
+                    let arg = ExpandedCallArg { name: None, value: Value::int(i) };
+                    let item = invoke_class_method(
+                        _interp,
+                        getitem_method.clone(),
+                        obj.clone(),
+                        &[arg],
+                    )?;
+                    items.push(item);
+                }
+                let source = Value::list(items);
+                return Ok(pyrust_builtins::iter_helpers::reversed(source));
+            }
+            // Protocol step 3: not reversible
+            return Err(PyError::named(
+                "TypeError",
+                format!("'{}' object is not reversible", class.borrow().name),
+            ));
+        }
+        // Non-PyInstance: materialize then reverse (list, range, tuple, …).
         let source = materialize_user_iter(_interp, seq.0)?;
         Ok(pyrust_builtins::iter_helpers::reversed(source))
     }
