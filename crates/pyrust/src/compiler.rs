@@ -6285,6 +6285,37 @@ impl Compiler {
     }
 
     fn compile_import_from(&mut self, module: &str, names: &[(String, Option<String>)]) {
+        // `from __future__ import X` is a compiler directive in CPython — no
+        // runtime import is performed.  Validate the feature name(s) and emit
+        // nothing (no-op).  Unrecognised names or star-imports are SyntaxErrors
+        // (matching CPython 3.12 behaviour).
+        if module == "__future__" {
+            const VALID: &[&str] = &[
+                "nested_scopes",
+                "generators",
+                "division",
+                "absolute_import",
+                "with_statement",
+                "print_function",
+                "unicode_literals",
+                "barry_as_FLUFL",
+                "generator_stop",
+                "annotations",
+            ];
+            for (name, _alias) in names {
+                if !VALID.contains(&name.as_str()) {
+                    self.failed = true;
+                    self.is_syntax_error = true;
+                    if self.error_msg.is_none() {
+                        self.error_msg = Some(format!("future feature {} is not defined", name));
+                    }
+                    return;
+                }
+            }
+            // All names are valid; emit nothing — the features are no-ops here.
+            return;
+        }
+
         let mod_idx = self.intern_name(module);
         let mod_reg = self.alloc_temp();
         self.emit(Insn::ImportModule(mod_reg, mod_idx));
