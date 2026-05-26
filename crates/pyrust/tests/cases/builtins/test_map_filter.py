@@ -99,3 +99,26 @@ def gen2():
     yield 2
 
 print(list(filter(None, gen2())))
+
+# --- map: func raises mid-iteration; iterator advances past the bad element ---
+def raise_on_two(x):
+    if x == 2:
+        raise ValueError('bad')
+    return x
+
+m = map(raise_on_two, [1, 2, 3])
+print(next(m))
+try:
+    next(m)
+except ValueError:
+    print('ValueError')
+print(next(m))
+
+# --- filter: func raises mid-iteration; iterator advances past the bad element ---
+f = filter(raise_on_two, [1, 2, 3])
+print(next(f))
+try:
+    next(f)
+except ValueError:
+    print('ValueError')
+print(next(f))

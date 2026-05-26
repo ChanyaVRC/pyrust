@@ -1208,10 +1208,13 @@ impl Interpreter {
         match snapshot {
             None => Ok(None),
             Some((func, row)) => {
+                // Advance pos before calling func so that if func raises the
+                // exception propagates to the caller but the next next() call
+                // moves on to the following element (CPython behaviour).
+                state_rc.borrow_mut().downcast_mut::<MapIter>().unwrap().pos += 1;
                 let args: Vec<ExpandedCallArg> =
                     row.into_iter().map(|v| ExpandedCallArg { name: None, value: v }).collect();
                 let result = self.call_function_expanded(func, &args)?;
-                state_rc.borrow_mut().downcast_mut::<MapIter>().unwrap().pos += 1;
                 Ok(Some(result))
             }
         }
