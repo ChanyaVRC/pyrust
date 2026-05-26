@@ -221,8 +221,9 @@ impl Interpreter {
                 if is_exception_class(&instance.borrow().class) {
                     Ok(Value::py_instance(instance))
                 } else {
-                    Err(PyError::Runtime(
-                        "exceptions must derive from Exception".to_string(),
+                    Err(PyError::named(
+                        "TypeError",
+                        "exceptions must derive from BaseException".to_string(),
                     ))
                 }
             }
@@ -231,13 +232,55 @@ impl Interpreter {
                 if is_exception_class(&class) {
                     Ok(instantiate_exception(class, Vec::new()))
                 } else {
-                    Err(PyError::Runtime(
-                        "exceptions must derive from Exception".to_string(),
+                    Err(PyError::named(
+                        "TypeError",
+                        "exceptions must derive from BaseException".to_string(),
                     ))
                 }
             }
-            _ => Err(PyError::Runtime(
-                "exceptions must derive from Exception".to_string(),
+            _ => Err(PyError::named(
+                "TypeError",
+                "exceptions must derive from BaseException".to_string(),
+            )),
+        }
+    }
+
+    /// Validate and coerce a `raise X from Y` cause value.
+    ///
+    /// CPython accepts `None` (clears cause) or any `BaseException` instance/
+    /// subclass as cause.  A class is auto-instantiated with no args, matching
+    /// CPython's `ceval.c::do_raise`.  Anything else raises
+    /// `TypeError: exception causes must derive from BaseException`.
+    fn coerce_to_exception_cause(&self, value: Value) -> Result<Value> {
+        if value.is_none() {
+            return Ok(value);
+        }
+        match value.kind() {
+            ValueKind::PyInstance(instance) => {
+                let instance = Rc::clone(instance);
+                if is_exception_class(&instance.borrow().class) {
+                    Ok(Value::py_instance(instance))
+                } else {
+                    Err(PyError::named(
+                        "TypeError",
+                        "exception causes must derive from BaseException".to_string(),
+                    ))
+                }
+            }
+            ValueKind::PyClass(class) => {
+                let class = Rc::clone(class);
+                if is_exception_class(&class) {
+                    Ok(instantiate_exception(class, Vec::new()))
+                } else {
+                    Err(PyError::named(
+                        "TypeError",
+                        "exception causes must derive from BaseException".to_string(),
+                    ))
+                }
+            }
+            _ => Err(PyError::named(
+                "TypeError",
+                "exception causes must derive from BaseException".to_string(),
             )),
         }
     }

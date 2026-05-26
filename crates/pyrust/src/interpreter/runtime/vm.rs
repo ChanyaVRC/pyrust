@@ -2497,15 +2497,21 @@ impl Interpreter {
                 }
                 Insn::RaiseFrom(src, cause_reg) => {
                     let val = vm_try!(vm_read(&regs, *src, num_locals));
-                    let cause = vm_try!(vm_read(&regs, *cause_reg, num_locals));
+                    let cause_raw = vm_try!(vm_read(&regs, *cause_reg, num_locals));
                     let exc = vm_try!(self.coerce_to_exception(val));
+                    // PEP 3134: validate cause before storing.  CPython accepts
+                    // `None` or a BaseException instance/subclass; anything else
+                    // is a TypeError.  A class cause is auto-instantiated.
+                    let cause = vm_try!(self.coerce_to_exception_cause(cause_raw));
                     // PEP 3134: `raise X from Y` sets `__cause__` AND
                     // `__suppress_context__`, but `__context__` is still
                     // populated so that the chain is observable.
                     self.attach_implicit_context(&exc);
                     if let ValueKind::PyInstance(inst) = exc.kind() {
                         inst.borrow_mut().attrs.insert("__cause__".to_string(), cause);
-                        inst.borrow_mut().attrs.insert("__suppress_context__".to_string(), Value::bool_(true));
+                        inst.borrow_mut()
+                            .attrs
+                            .insert("__suppress_context__".to_string(), Value::bool_(true));
                     }
                     vm_try!(Err::<(), _>(PyError::Raised(exc)));
                 }
@@ -4607,14 +4613,9 @@ impl Interpreter {
         // Convert `exc` argument into a concrete exception instance so we can
         // hand it to the VM via `PyError::Raised`.  Accepts the same shapes as
         // a `raise` statement: an exception class (auto-instantiates) or an
-        // exception instance.  CPython raises `TypeError` (not `RuntimeError`)
-        // when the argument is neither, so remap that specific case here.
-        let exc_val = self.coerce_to_exception(exc).map_err(|e| match e {
-            PyError::Runtime(ref msg) if msg.contains("exceptions must derive") => {
-                PyError::named("TypeError", msg.clone())
-            }
-            other => other,
-        })?;
+        // exception instance.  coerce_to_exception already raises TypeError for
+        // non-exception values, matching CPython's generator.throw() behaviour.
+        let exc_val = self.coerce_to_exception(exc)?;
 
         // Re-entrancy guard: see generator_close for rationale.
         {
