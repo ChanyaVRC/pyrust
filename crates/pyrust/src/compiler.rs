@@ -1915,6 +1915,7 @@ fn collect_transitive_free_vars_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>)
             body: nested_body,
             bases,
             metaclass,
+            keywords,
             decorators,
             ..
         } => {
@@ -1930,6 +1931,11 @@ fn collect_transitive_free_vars_in_stmt(stmt: &Stmt, uses: &mut HashSet<String>)
             if let Some(m) = metaclass {
                 collect_transitive_free_vars_in_expr(m, uses);
                 collect_free_var_reads_in_expr(m, uses);
+            }
+            // PEP 487 keyword arg expressions also evaluate in the enclosing scope.
+            for (_, v) in keywords {
+                collect_transitive_free_vars_in_expr(v, uses);
+                collect_free_var_reads_in_expr(v, uses);
             }
             // Class body itself: methods read enclosing scope (skipping class scope).
             // We approximate the class scope conservatively by collecting class-level
@@ -4541,10 +4547,11 @@ impl Compiler {
                 name,
                 bases,
                 metaclass,
+                keywords,
                 body,
                 decorators,
             } => {
-                self.compile_class(name, bases, metaclass.as_ref(), body, decorators);
+                self.compile_class(name, bases, metaclass.as_ref(), keywords, body, decorators);
             }
             Stmt::Try {
                 body,
@@ -6602,6 +6609,7 @@ impl Compiler {
             is_pure,
             annotation_keys,
             docstring: fn_docstring,
+            class_kwarg_names: Vec::new(),
         });
 
         // Compile default values (right-to-left in declaration, left-to-right in slots).
@@ -6737,6 +6745,7 @@ impl Compiler {
         name: &str,
         bases: &[Expr],
         metaclass: Option<&Expr>,
+        keywords: &[(String, Expr)],
         body: &[Stmt],
         decorators: &[Expr],
     ) {
@@ -6930,6 +6939,7 @@ impl Compiler {
             is_pure: false,
             annotation_keys: Vec::new(),
             docstring: class_docstring,
+            class_kwarg_names: keywords.iter().map(|(k, _)| k.clone()).collect(),
         });
 
         // Compile base class expressions.
@@ -6957,10 +6967,36 @@ impl Compiler {
             }
         }
 
+        // Compile PEP 487 keyword arg values into consecutive registers.
+        // These are forwarded to __init_subclass__; names are stored in FnProto.
+        let kwarg_n = keywords.len() as u8;
+        let kwarg_base = self.next_temp;
+        if kwarg_n > 0 {
+            if self.next_temp.checked_add(Reg::from(kwarg_n)).is_none() {
+                self.failed = true;
+                if self.error_msg.is_none() {
+                    self.error_msg = Some("too many class keyword registers".to_string());
+                }
+                return;
+            }
+            self.next_temp += Reg::from(kwarg_n);
+            if self.next_temp - 1 > self.max_reg {
+                self.max_reg = self.next_temp - 1;
+            }
+            for (i, (_, val_expr)) in (0u32..).zip(keywords.iter()) {
+                let saved = self.next_temp;
+                let r = self.compile_expr(val_expr);
+                if r != kwarg_base + i {
+                    self.emit(Insn::Move(kwarg_base + i, r));
+                }
+                self.next_temp = saved;
+            }
+        }
+
         let name_idx = self.intern_name(name);
         let dst = self.alloc_temp();
         self.emit(Insn::MakeClass(
-            dst, proto_idx, bases_base, bases_n, name_idx,
+            dst, proto_idx, bases_base, bases_n, name_idx, kwarg_base, kwarg_n,
         ));
         if bases_n > 0 && metaclass.is_none() {
             // Without metaclass, the base registers are dead after MakeClass.
@@ -8315,6 +8351,7 @@ impl Compiler {
             is_pure,
             annotation_keys: Vec::new(),
             docstring: None,
+            class_kwarg_names: Vec::new(),
         });
 
         // Emit MakeFunction + Call, same layout as compile_gen_exp.
@@ -8637,6 +8674,7 @@ impl Compiler {
             is_pure,
             annotation_keys: Vec::new(),
             docstring: None,
+            class_kwarg_names: Vec::new(),
         });
 
         // Allocate a temp for the function value, emit MakeFunction (no

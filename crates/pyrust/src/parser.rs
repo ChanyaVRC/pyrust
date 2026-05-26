@@ -809,6 +809,7 @@ impl Parser {
 
         let mut bases = Vec::new();
         let mut metaclass: Option<Expr> = None;
+        let mut keywords: Vec<(String, Expr)> = Vec::new();
         if self.is(&Token::LParen) {
             self.bump();
             if !self.is(&Token::RParen) {
@@ -827,9 +828,10 @@ impl Parser {
                                 ));
                             }
                             metaclass = Some(value);
+                        } else {
+                            // PEP 487: forward other kwargs to __init_subclass__.
+                            keywords.push((key, value));
                         }
-                        // Other keyword args (e.g. PEP 487 __init_subclass__ kwargs)
-                        // are accepted by the parser but discarded for now.
                     } else {
                         bases.push(self.parse_expr()?);
                     }
@@ -851,6 +853,7 @@ impl Parser {
             name,
             bases,
             metaclass,
+            keywords,
             body,
             decorators,
         })

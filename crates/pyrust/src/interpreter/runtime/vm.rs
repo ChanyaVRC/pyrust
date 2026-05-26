@@ -3432,9 +3432,9 @@ impl Interpreter {
                     });
                     regs[*dst as usize] = Value::user_function(func);
                 }
-                Insn::MakeClass(dst, proto_idx, bases_base, bases_n, name_idx) => {
+                Insn::MakeClass(dst, proto_idx, bases_base, bases_n, name_idx, kwarg_base, _kwarg_n) => {
                     let class_name = pool_get!(code.names, *name_idx, "name").clone();
-                    let (class_code, local_index, proto_qualname, proto_global_names, proto_nonlocal_names, class_docstring) = {
+                    let (class_code, local_index, proto_qualname, proto_global_names, proto_nonlocal_names, class_docstring, class_kwarg_names) = {
                         let proto = pool_get!(code.fn_protos, *proto_idx, "fn_proto");
                         (
                             Rc::clone(&proto.code),
@@ -3443,6 +3443,7 @@ impl Interpreter {
                             Rc::clone(&proto.global_names),
                             Rc::clone(&proto.nonlocal_names),
                             proto.docstring.clone(),
+                            proto.class_kwarg_names.clone(),
                         )
                     };
                     let num_class_regs = class_code.num_regs as usize;
@@ -3807,7 +3808,25 @@ impl Interpreter {
                             lookup_class_attr(&base_rc, "__init_subclass__")
                         {
                             let new_cls = Value::py_class(Rc::clone(&class));
-                            vm_try!(invoke_class_method(self, method_val, new_cls, &[]));
+                            // Build the PEP 487 keyword args from the registers
+                            // and the kwarg names stored in the class proto.
+                            let kwarg_args: Vec<ExpandedCallArg> = class_kwarg_names
+                                .iter()
+                                .enumerate()
+                                .map(|(i, key)| {
+                                    let reg = (*kwarg_base as usize + i) as crate::bytecode::Reg;
+                                    ExpandedCallArg {
+                                        name: Some(key.clone()),
+                                        value: regs[reg as usize].clone(),
+                                    }
+                                })
+                                .collect();
+                            vm_try!(invoke_class_method(
+                                self,
+                                method_val,
+                                new_cls,
+                                &kwarg_args,
+                            ));
                         }
                     }
                     regs[*dst as usize] = Value::py_class(class);

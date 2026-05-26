@@ -850,7 +850,7 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | MakeFunction(r, _, _, _, _, _)
         | ImportModule(r, _)
         | LoadExc(r)
-        | MakeClass(r, _, _, _, _) => Some(*r),
+        | MakeClass(r, _, _, _, _, _, _) => Some(*r),
         CallMethod { dst, .. } | CallMethodExpanded { dst, .. } | Concat { dst, .. } => Some(*dst),
         // Loop instructions write to their first register on each iteration.
         // Without these arms, pass_const_fold would fail to invalidate the
@@ -1661,8 +1661,9 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
             (r >= *defs_base && r < *defs_base + *defs_n as u32)
                 || (*annots_n > 0 && r >= *annots_base && r < *annots_base + *annots_n as u32)
         }
-        MakeClass(_, _, bases_base, bases_n, _) => {
-            r >= *bases_base && r < *bases_base + *bases_n as u32
+        MakeClass(_, _, bases_base, bases_n, _, kwarg_base, kwarg_n) => {
+            (r >= *bases_base && r < *bases_base + *bases_n as u32)
+                || (*kwarg_n > 0 && r >= *kwarg_base && r < *kwarg_base + *kwarg_n as u32)
         }
 
         // Yield reads src and writes dst.
@@ -1821,8 +1822,11 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
                 }
             }
         }
-        MakeClass(_, _, bases_base, bases_n, _) => {
+        MakeClass(_, _, bases_base, bases_n, _, kwarg_base, kwarg_n) => {
             for r in *bases_base..*bases_base + *bases_n as u32 {
+                reads.insert(r);
+            }
+            for r in *kwarg_base..*kwarg_base + *kwarg_n as u32 {
                 reads.insert(r);
             }
         }
@@ -2386,7 +2390,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | LoadExc(r)
         | ImportModule(r, _)
         | MakeFunction(r, _, _, _, _, _)
-        | MakeClass(r, _, _, _, _)
+        | MakeClass(r, _, _, _, _, _, _)
         | BuildList(r, _, _)
         | BuildTuple(r, _, _)
         | BuildSlice(r, _)
@@ -5646,8 +5650,11 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
                 }
             }
         }
-        MakeClass(_, _, bases_base, bases_n, _) => {
+        MakeClass(_, _, bases_base, bases_n, _, kwarg_base, kwarg_n) => {
             for r in *bases_base..*bases_base + *bases_n as u32 {
+                f(r);
+            }
+            for r in *kwarg_base..*kwarg_base + *kwarg_n as u32 {
                 f(r);
             }
         }
