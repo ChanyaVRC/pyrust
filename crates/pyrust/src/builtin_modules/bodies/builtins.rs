@@ -1806,12 +1806,16 @@ pyrust_module! {
         }
     }
 
-    /// CPython: complex(real=0, imag=0) — complex number.
+    /// CPython: complex(real=0, imag=0) — complex constructor.
     /// <https://docs.python.org/3/library/functions.html#complex>
-    #[pure]
+    /// Not marked `#[pure]` because it dispatches user `__complex__`,
+    /// `__float__`, and `__index__` on user-defined objects.
     fn complex(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
-        let to_f64 = |v: &Value, what: &str| -> Result<f64> {
+
+        // Convert a primitive (non-PyInstance) Value to f64.
+        // `type_err_msg` is the full TypeError message to emit for unrecognised kinds.
+        let prim_to_f64 = |v: &Value, type_err_msg: &str| -> Result<f64> {
             match v.kind() {
                 ValueKind::Int(n) => Ok(n as f64),
                 ValueKind::Float(f) => Ok(f),
@@ -1829,10 +1833,11 @@ pyrust_module! {
                 }
                 _ => Err(PyError::named(
                     "TypeError",
-                    format!("complex() {what} argument must be a number"),
+                    format!("{type_err_msg}, not '{}'", value_type_name_str(v)),
                 )),
             }
         };
+
         match args.len() {
             0 => Ok(Value::complex(0.0, 0.0)),
             1 => match args[0].value.kind() {
@@ -1843,7 +1848,77 @@ pyrust_module! {
                     })?;
                     Ok(Value::complex(re, im))
                 }
-                _ => Ok(Value::complex(to_f64(&args[0].value, "real")?, 0.0)),
+                ValueKind::PyInstance(inst) => {
+                    let inst_rc = Rc::clone(inst);
+                    let class = Rc::clone(&inst_rc.borrow().class);
+                    let self_val = Value::py_instance(Rc::clone(&inst_rc));
+                    // CPython 3.12 dispatch: __complex__ → __float__ → __index__
+                    if let Some(method) = lookup_class_attr(&class, "__complex__") {
+                        let result = invoke_class_method(_interp, method, self_val, &[])?;
+                        return if matches!(result.kind(), ValueKind::Complex(_, _)) {
+                            Ok(result)
+                        } else {
+                            Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "__complex__ returned non-complex (type {})",
+                                    value_type_name_str(&result)
+                                ),
+                            ))
+                        };
+                    }
+                    if let Some(method) = lookup_class_attr(&class, "__float__") {
+                        let result = invoke_class_method(_interp, method, self_val, &[])?;
+                        return if let ValueKind::Float(f) = result.kind() {
+                            Ok(Value::complex(f, 0.0))
+                        } else {
+                            Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "{}.__float__ returned non-float (type {})",
+                                    class.borrow().name,
+                                    value_type_name_str(&result),
+                                ),
+                            ))
+                        };
+                    }
+                    if let Some(method) = lookup_class_attr(&class, "__index__") {
+                        let result = invoke_class_method(_interp, method, self_val, &[])?;
+                        return match result.kind() {
+                            ValueKind::Int(n) => Ok(Value::complex(n as f64, 0.0)),
+                            ValueKind::Bool(b) => Ok(Value::complex(if b { 1.0 } else { 0.0 }, 0.0)),
+                            ValueKind::BigInt(b) => {
+                                let f = b.to_f64().unwrap_or(f64::INFINITY);
+                                if f.is_finite() {
+                                    Ok(Value::complex(f, 0.0))
+                                } else {
+                                    Err(PyError::named(
+                                        "OverflowError",
+                                        "int too large to convert to float",
+                                    ))
+                                }
+                            }
+                            _ => Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "__index__ returned non-int (type {})",
+                                    value_type_name_str(&result)
+                                ),
+                            )),
+                        };
+                    }
+                    Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "complex() first argument must be a string or a number, not '{}'",
+                            class.borrow().name
+                        ),
+                    ))
+                }
+                _ => Ok(Value::complex(
+                    prim_to_f64(&args[0].value, "complex() first argument must be a string or a number")?,
+                    0.0,
+                )),
             },
             2 => {
                 if matches!(args[0].value.kind(), ValueKind::Str(_)) {
@@ -1858,31 +1933,129 @@ pyrust_module! {
                         "complex() second arg can't be a string",
                     ));
                 }
+                // Resolve each arg to a (re, im) pair.
+                // First arg: __complex__ yields (re, im); __float__/__index__ → scalar.
+                // Second arg: __float__/__index__ only (CPython ignores __complex__ there).
+                let first_val = args[0].value.clone();
+                let second_val = args[1].value.clone();
+
+                // Helper: call __float__ then __index__ on a PyInstance and return f64.
+                // $no_conv_msg is the prefix of the TypeError when no suitable dunder is found;
+                // the class name is appended as ", not '<name>'".
+                macro_rules! inst_to_f64 {
+                    ($inst_rc:expr, $class:expr, $self_val:expr, $no_conv_msg:literal) => {{
+                        if let Some(method) = lookup_class_attr(&$class, "__float__") {
+                            let result = invoke_class_method(_interp, method, $self_val, &[])?;
+                            if let ValueKind::Float(f) = result.kind() {
+                                f
+                            } else {
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    format!(
+                                        "{}.__float__ returned non-float (type {})",
+                                        $class.borrow().name,
+                                        value_type_name_str(&result),
+                                    ),
+                                ));
+                            }
+                        } else if let Some(method) = lookup_class_attr(&$class, "__index__") {
+                            let result = invoke_class_method(_interp, method, $self_val, &[])?;
+                            match result.kind() {
+                                ValueKind::Int(n) => n as f64,
+                                ValueKind::Bool(b) => if b { 1.0 } else { 0.0 },
+                                ValueKind::BigInt(b) => {
+                                    let f = b.to_f64().unwrap_or(f64::INFINITY);
+                                    if f.is_finite() {
+                                        f
+                                    } else {
+                                        return Err(PyError::named(
+                                            "OverflowError",
+                                            "int too large to convert to float",
+                                        ));
+                                    }
+                                }
+                                _ => return Err(PyError::named(
+                                    "TypeError",
+                                    format!(
+                                        "__index__ returned non-int (type {})",
+                                        value_type_name_str(&result)
+                                    ),
+                                )),
+                            }
+                        } else {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!("{}, not '{}'", $no_conv_msg, $class.borrow().name),
+                            ));
+                        }
+                    }};
+                }
+
+                // Resolve first arg to (re, im) pair.
+                let (cr, ci, first_is_complex) = if let ValueKind::Complex(re, im) = first_val.kind() {
+                    (re, im, true)
+                } else if let ValueKind::PyInstance(inst) = first_val.kind() {
+                    let inst_rc = Rc::clone(inst);
+                    let class = Rc::clone(&inst_rc.borrow().class);
+                    let self_val = Value::py_instance(Rc::clone(&inst_rc));
+                    if let Some(method) = lookup_class_attr(&class, "__complex__") {
+                        let result = invoke_class_method(_interp, method, self_val, &[])?;
+                        if let ValueKind::Complex(re, im) = result.kind() {
+                            (re, im, true)
+                        } else {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "__complex__ returned non-complex (type {})",
+                                    value_type_name_str(&result)
+                                ),
+                            ));
+                        }
+                    } else {
+                        let f = inst_to_f64!(
+                            inst_rc,
+                            class,
+                            self_val,
+                            "complex() first argument must be a string or a number"
+                        );
+                        (f, 0.0, false)
+                    }
+                } else {
+                    let f = prim_to_f64(
+                        &first_val,
+                        "complex() first argument must be a string or a number",
+                    )?;
+                    (f, 0.0, false)
+                };
+
+                // Resolve second arg to (re, im) pair (no __complex__ for second arg).
+                let (dr, di, second_is_complex) = if let ValueKind::Complex(re, im) = second_val.kind() {
+                    (re, im, true)
+                } else if let ValueKind::PyInstance(inst) = second_val.kind() {
+                    let inst_rc = Rc::clone(inst);
+                    let class = Rc::clone(&inst_rc.borrow().class);
+                    let self_val = Value::py_instance(Rc::clone(&inst_rc));
+                    let f = inst_to_f64!(
+                        inst_rc,
+                        class,
+                        self_val,
+                        "complex() second argument must be a number"
+                    );
+                    (f, 0.0, false)
+                } else {
+                    let f = prim_to_f64(&second_val, "complex() second argument must be a number")?;
+                    (f, 0.0, false)
+                };
+
                 // CPython decomposition formula (Objects/complexobject.c):
                 // When at least one arg is complex, apply:
                 //   result.real = cr - di
                 //   result.imag = ci + dr
-                // where cr/ci are the real/imag parts of the first arg,
-                // and dr/di are the real/imag parts of the second arg.
-                // When neither arg is complex, assign real and imag directly
-                // (preserving -0.0 sign, which the formula would lose via
-                // 0.0 + (-0.0) = 0.0 in IEEE 754).
-                let real_is_complex = matches!(args[0].value.kind(), ValueKind::Complex(_, _));
-                let imag_is_complex = matches!(args[1].value.kind(), ValueKind::Complex(_, _));
-                if real_is_complex || imag_is_complex {
-                    let (cr, ci) = match args[0].value.kind() {
-                        ValueKind::Complex(re, im) => (re, im),
-                        _ => (to_f64(&args[0].value, "real")?, 0.0),
-                    };
-                    let (dr, di) = match args[1].value.kind() {
-                        ValueKind::Complex(re, im) => (re, im),
-                        _ => (to_f64(&args[1].value, "imag")?, 0.0),
-                    };
+                // When neither is complex, assign directly (preserving -0.0 sign).
+                if first_is_complex || second_is_complex {
                     Ok(Value::complex(cr - di, ci + dr))
                 } else {
-                    let re = to_f64(&args[0].value, "real")?;
-                    let im = to_f64(&args[1].value, "imag")?;
-                    Ok(Value::complex(re, im))
+                    Ok(Value::complex(cr, dr))
                 }
             }
             _ => Err(PyError::Runtime(format!("{FN_NAME}() takes at most 2 arguments"))),
@@ -1956,7 +2129,8 @@ pyrust_module! {
 
     /// CPython: int(x=0, base=10) — integer constructor.
     /// <https://docs.python.org/3/library/functions.html#int>
-    #[pure]
+    /// Not marked `#[pure]` because it dispatches user `__int__`, `__index__`,
+    /// and `__trunc__` on user-defined objects.
     fn int(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         match args.len() {
@@ -1971,6 +2145,64 @@ pyrust_module! {
                         format!("invalid literal for int() with base 10: '{s}'"),
                     )
                 }),
+                ValueKind::PyInstance(inst) => {
+                    let inst_rc = Rc::clone(inst);
+                    let class = Rc::clone(&inst_rc.borrow().class);
+                    let self_val = Value::py_instance(Rc::clone(&inst_rc));
+                    // CPython 3.12 dispatch: __int__ → __index__ → __trunc__
+                    if let Some(method) = lookup_class_attr(&class, "__int__") {
+                        let result = invoke_class_method(_interp, method, self_val, &[])?;
+                        let ok = matches!(
+                            result.kind(),
+                            ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+                        );
+                        if ok {
+                            return Ok(result);
+                        }
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!("__int__ returned non-int (type {})", value_type_name_str(&result)),
+                        ));
+                    }
+                    if let Some(method) = lookup_class_attr(&class, "__index__") {
+                        let result = invoke_class_method(_interp, method, self_val, &[])?;
+                        let ok = matches!(
+                            result.kind(),
+                            ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+                        );
+                        if ok {
+                            return Ok(result);
+                        }
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!("__index__ returned non-int (type {})", value_type_name_str(&result)),
+                        ));
+                    }
+                    if let Some(method) = lookup_class_attr(&class, "__trunc__") {
+                        // Deprecated since 3.11 but still works in 3.12; call int() on the result.
+                        let trunc_result = invoke_class_method(_interp, method, self_val, &[])?;
+                        return match trunc_result.kind() {
+                            ValueKind::Int(v) => Ok(Value::int(v)),
+                            ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
+                            ValueKind::BigInt(_) => Ok(trunc_result.clone()),
+                            ValueKind::Float(v) => Ok(Value::int(v as i64)),
+                            _ => Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "__trunc__ returned non-Integral (type {})",
+                                    value_type_name_str(&trunc_result)
+                                ),
+                            )),
+                        };
+                    }
+                    Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "int() argument must be a string, a bytes-like object or a real number, not '{}'",
+                            class.borrow().name
+                        ),
+                    ))
+                }
                 _ => Err(PyError::Runtime(format!(
                     "{FN_NAME}() argument must be a number or string",
                 ))),
@@ -2030,7 +2262,8 @@ pyrust_module! {
 
     /// CPython: float(x=0.0) — float constructor.
     /// <https://docs.python.org/3/library/functions.html#float>
-    #[pure]
+    /// Not marked `#[pure]` because it dispatches user `__float__` and
+    /// `__index__` on user-defined objects.
     fn float(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         match args.len() {
@@ -2055,6 +2288,53 @@ pyrust_module! {
                         format!("could not convert string to float: '{s}'"),
                     )
                 }),
+                ValueKind::PyInstance(inst) => {
+                    let inst_rc = Rc::clone(inst);
+                    let class = Rc::clone(&inst_rc.borrow().class);
+                    let self_val = Value::py_instance(Rc::clone(&inst_rc));
+                    // CPython 3.12 dispatch: __float__ → __index__
+                    if let Some(method) = lookup_class_attr(&class, "__float__") {
+                        let result = invoke_class_method(_interp, method, self_val, &[])?;
+                        let ok = matches!(result.kind(), ValueKind::Float(_));
+                        if ok {
+                            return Ok(result);
+                        }
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "{}.__float__ returned non-float (type {})",
+                                class.borrow().name,
+                                value_type_name_str(&result),
+                            ),
+                        ));
+                    }
+                    if let Some(method) = lookup_class_attr(&class, "__index__") {
+                        let result = invoke_class_method(_interp, method, self_val, &[])?;
+                        return match result.kind() {
+                            ValueKind::Int(v) => Ok(Value::float(v as f64)),
+                            ValueKind::Bool(b) => Ok(Value::float(if b { 1.0 } else { 0.0 })),
+                            ValueKind::BigInt(b) => {
+                                let f = b.to_f64().unwrap_or(f64::INFINITY);
+                                if f.is_finite() {
+                                    Ok(Value::float(f))
+                                } else {
+                                    Err(PyError::named("OverflowError", "int too large to convert to float"))
+                                }
+                            }
+                            _ => Err(PyError::named(
+                                "TypeError",
+                                format!("__index__ returned non-int (type {})", value_type_name_str(&result)),
+                            )),
+                        };
+                    }
+                    Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "float() argument must be a string or a real number, not '{}'",
+                            class.borrow().name
+                        ),
+                    ))
+                }
                 _ => Err(PyError::Runtime(format!(
                     "{FN_NAME}() argument must be a number or string",
                 ))),
