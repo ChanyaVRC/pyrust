@@ -137,6 +137,9 @@ pub(crate) struct GeneratorFrame {
     /// `Arc<str>` so `.clone()` in `resume_generator_with_exc` is a
     /// reference-count bump rather than a heap allocation on every resume.
     pub(crate) fn_name: std::sync::Arc<str>,
+    /// Fully-qualified name of the generator function (issue #1270).
+    /// Exposed as `g.__qualname__`.
+    pub(crate) qualname: std::sync::Arc<str>,
 }
 
 /// Explicit suspension state for a generator frame.
