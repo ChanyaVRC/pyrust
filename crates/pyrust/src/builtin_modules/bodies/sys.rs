@@ -286,8 +286,8 @@ fn vi_as_fields(val: &Value) -> Result<ViFields> {
 
 /// Extract `(lhs_as_tuple, rhs_as_tuple)` for a comparison call.
 /// `args[0]` is `self` (version_info instance), `args[1]` is the other operand.
-/// Returns `Ok(None)` when the right-hand side is not a tuple, which the
-/// callers convert to `Value::not_implemented()`.
+/// Returns `Ok(None)` when the right-hand side is neither a tuple nor another
+/// version_info instance, which the callers convert to `Value::not_implemented()`.
 fn vi_cmp_args(args: &[ExpandedCallArg]) -> Result<Option<(Vec<Value>, Vec<Value>)>> {
     if args.len() < 2 {
         return Err(PyError::Runtime(
@@ -298,6 +298,14 @@ fn vi_cmp_args(args: &[ExpandedCallArg]) -> Result<Option<(Vec<Value>, Vec<Value
     let lhs = fields.as_tuple();
     let rhs = match args[1].value.kind() {
         ValueKind::Tuple(items) => items.to_vec(),
+        ValueKind::PyInstance(_) => {
+            // Allow version_info op version_info comparisons — CPython's
+            // named-tuple semantics permit comparing two version_info objects.
+            match vi_as_fields(&args[1].value) {
+                Ok(rhs_fields) => rhs_fields.as_tuple(),
+                Err(_) => return Ok(None),
+            }
+        }
         _ => return Ok(None),
     };
     Ok(Some((lhs, rhs)))
