@@ -1763,6 +1763,63 @@ pyrust_module! {
                     "OverflowError",
                     "cannot fit 'int' into an index-sized integer".to_string(),
                 )),
+                ValueKind::PyInstance(inst) => {
+                    // CPython 3.12: check __bytes__ before falling through to the
+                    // iterable path. __bytes__ takes priority over __iter__.
+                    let inst_rc = Rc::clone(inst);
+                    let class = Rc::clone(&inst_rc.borrow().class);
+                    let self_val = Value::py_instance(Rc::clone(&inst_rc));
+                    if let Some(method) = lookup_class_attr(&class, "__bytes__") {
+                        let result = invoke_class_method(_interp, method, self_val, &[])?;
+                        return if matches!(result.kind(), ValueKind::Bytes(_)) {
+                            Ok(result)
+                        } else {
+                            Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "__bytes__ returned non-bytes (type {})",
+                                    value_type_name_str(&result)
+                                ),
+                            ))
+                        };
+                    }
+                    // No __bytes__: fall through to the iterable path.
+                    let type_name = value_type_name_str(&args[0].value).to_string();
+                    let items =
+                        _interp.collect_iterable(args[0].value.clone()).map_err(|e| {
+                            if e.class_name_is("TypeError") {
+                                PyError::named(
+                                    "TypeError",
+                                    format!("cannot convert '{type_name}' object to bytes"),
+                                )
+                            } else {
+                                e
+                            }
+                        })?;
+                    let mut out = Vec::with_capacity(items.len());
+                    for v in &items {
+                        match v.kind() {
+                            ValueKind::Int(n) if (0..=255).contains(&n) => out.push(n as u8),
+                            ValueKind::Bool(b) => out.push(b as u8),
+                            ValueKind::Int(_) | ValueKind::BigInt(_) => {
+                                return Err(PyError::named(
+                                    "ValueError",
+                                    "bytes must be in range(0, 256)".to_string(),
+                                ))
+                            }
+                            _ => {
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    format!(
+                                        "'{}' object cannot be interpreted as an integer",
+                                        pyrust_core::builtin_type_name(v),
+                                    ),
+                                ))
+                            }
+                        }
+                    }
+                    Ok(Value::bytes(out))
+                }
                 _ => {
                     // General iterable fallback: any object supporting __iter__ /
                     // __next__ (range, generators, user-defined iterables, etc.).
