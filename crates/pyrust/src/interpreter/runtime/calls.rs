@@ -611,6 +611,16 @@ impl Interpreter {
                             }
                         }
                     }
+                    // Issue #1413: generator bound-methods (__iter__, __next__,
+                    // send, close, throw) captured via get_attr route here.
+                    // Delegate to call_generator_method which holds all the VM
+                    // logic for these operations.  Clone the receiver to release
+                    // the borrow held by the outer `match receiver.kind()`.
+                    ValueKind::Generator(_) => {
+                        let gen_val = receiver.clone();
+                        let args_vec: Vec<Value> = pos.drain(..).collect();
+                        self.call_generator_method(gen_val, method, args_vec)
+                    }
                     _ => Err(PyError::named(
                         "TypeError",
                         format!("'{}' object has no method '{method}'", pyrust_core::builtin_type_name(&receiver)),
@@ -710,6 +720,36 @@ impl Interpreter {
                     }
                 };
                 pyrust_builtins::float::fromhex(&s).map(Value::float)
+            }
+            // Issue #1413: generator type descriptor methods.
+            // `type(gen).__iter__(g)`, `type(gen).__next__(g)`, etc.
+            // These are unbound BuiltinFunction sentinels returned by
+            // get_attr on BuiltinFunction("generator").  Dispatch to
+            // call_generator_method with args[0] as the receiver.
+            ValueKind::BuiltinFunction(name)
+                if name.split_once('.').is_some_and(|(t, _)| t == "generator") =>
+            {
+                let (_, method) = name.split_once('.').unwrap();
+                let self_val = args
+                    .first()
+                    .map(|a| a.value.clone())
+                    .ok_or_else(|| {
+                        PyError::named(
+                            "TypeError",
+                            format!("descriptor '{method}' of 'generator' object needs an argument"),
+                        )
+                    })?;
+                if !matches!(self_val.kind(), ValueKind::Generator(_)) {
+                    let actual = pyrust_core::builtin_type_name(&self_val);
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "descriptor '{method}' requires a 'generator' object but received a '{actual}'",
+                        ),
+                    ));
+                }
+                let pos: Vec<Value> = args[1..].iter().filter(|a| a.name.is_none()).map(|a| a.value.clone()).collect();
+                self.call_generator_method(self_val, method, pos)
             }
             // float instance methods via descriptor call: `float.is_integer(x)`.
             // The float call fn takes an `f64` receiver directly, so this arm

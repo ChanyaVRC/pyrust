@@ -509,6 +509,21 @@ impl Interpreter {
                     }
                     return Ok(Value::string("builtins"));
                 }
+                if func_name == "generator" {
+                    // Issue #1413: type(gen).__iter__ and type(gen).__next__.
+                    // CPython exposes these as slot wrappers on the generator
+                    // type.  Return unbound BuiltinFunction descriptors so that
+                    // hasattr(type(gen), '__iter__') is True and calling
+                    // type(gen).__iter__(g) works via call_function_expanded.
+                    match name {
+                        "__iter__" => return Ok(Value::builtin_function("generator.__iter__")),
+                        "__next__" => return Ok(Value::builtin_function("generator.__next__")),
+                        "send"     => return Ok(Value::builtin_function("generator.send")),
+                        "close"    => return Ok(Value::builtin_function("generator.close")),
+                        "throw"    => return Ok(Value::builtin_function("generator.throw")),
+                        _ => {}
+                    }
+                }
                 if func_name == "str" {
                     match name {
                         "lower"      => Ok(Value::builtin_function("str.lower")),
@@ -598,6 +613,21 @@ impl Interpreter {
                 // Generator introspection attributes (issue #1270).
                 // All six attributes exposed by CPython 3.12's generator type:
                 //   __name__, __qualname__, gi_running, gi_yieldfrom, gi_frame, gi_code.
+                //
+                // Issue #1413: also expose the iteration protocol methods as
+                // bound-method values so that hasattr/getattr see them.
+                // These apply to all generator subtypes (GeneratorFrame,
+                // NativeIterFrame, CallableIter, …), so they are checked
+                // before the downcast.
+                match name {
+                    "__iter__" | "__next__" | "send" | "close" | "throw" => {
+                        return Ok(pyrust_builtins::bound_method::bound_method(
+                            name.to_string(),
+                            target.clone(),
+                        ));
+                    }
+                    _ => {}
+                }
                 let state_rc = Rc::clone(state_rc);
                 let borrow = state_rc.borrow();
                 if let Some(frame) = borrow.downcast_ref::<GeneratorFrame>() {
