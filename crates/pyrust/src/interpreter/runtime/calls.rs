@@ -744,7 +744,7 @@ impl Interpreter {
                     return Err(PyError::named(
                         "TypeError",
                         format!(
-                            "descriptor '{method}' for 'generator' objects doesn't apply to a '{actual}' object",
+                            "descriptor '{method}' requires a 'generator' object but received a '{actual}'",
                         ),
                     ));
                 }
