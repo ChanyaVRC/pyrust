@@ -567,10 +567,12 @@ const LIST_METHODS: &[&str] = &[
 
 const TUPLE_METHODS: &[&str] = &["index", "count"];
 
-// `fromkeys` is a classmethod in CPython and isn't implemented by
-// `dict::call`/`call_dict_method`; leaving it out until it lands.
+// `fromkeys` is a classmethod registered via `populate_primitive_methods`
+// so that `BuiltinFunction("dict.fromkeys")` ends up in the dict class
+// attrs.  It is dispatched through the builtin registry (see
+// `builtins.rs::dict_fromkeys`), NOT via `dict::call` / `call_dict_method`.
 const DICT_METHODS: &[&str] = &[
-    "get", "keys", "values", "items", "update", "pop", "popitem", "clear",
+    "fromkeys", "get", "keys", "values", "items", "update", "pop", "popitem", "clear",
     "setdefault", "copy",
 ];
 

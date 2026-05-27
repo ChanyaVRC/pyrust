@@ -4345,6 +4345,9 @@ fn builtin_method_names(type_name: &str) -> Vec<String> {
     if type_name == "bytes" {
         out.push("maketrans".to_string());
     }
+    if type_name == "dict" {
+        out.push("fromkeys".to_string());
+    }
     out
 }
 

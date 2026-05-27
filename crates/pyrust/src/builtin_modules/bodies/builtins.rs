@@ -4576,6 +4576,66 @@ pyrust_module! {
         }
     }
 
+    /// Issue #1390: `dict.fromkeys(iterable[, value])` — classmethod that creates a
+    /// new dict with keys from `iterable` and all values set to `value` (default
+    /// `None`).
+    ///
+    /// CPython rules (3.12):
+    ///   - At most two positional arguments; no keyword arguments.
+    ///   - Duplicate keys: the first occurrence wins for insertion order.
+    ///   - Unhashable keys raise `TypeError`.
+    ///
+    /// Subclass dispatch (`MyDict.fromkeys(...)` returning a `MyDict`) is not
+    /// yet implemented; this always returns a plain `dict`.
+    #[py_name = "dict.fromkeys"]
+    fn dict_fromkeys(args) -> Result<Value> {
+        let has_kw = args.iter().any(|a| a.name.is_some());
+        if has_kw {
+            return Err(PyError::named(
+                "TypeError",
+                "dict.fromkeys() takes no keyword arguments".to_string(),
+            ));
+        }
+        // Filter out any leading PyClass arg (guard for safety; not normally present).
+        let user_args: Vec<&ExpandedCallArg> = args
+            .iter()
+            .filter(|a| !matches!(a.value.kind(), ValueKind::PyClass(_)))
+            .collect();
+        if user_args.len() > 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "fromkeys expected at most 2 arguments, got {}",
+                    user_args.len()
+                ),
+            ));
+        }
+        let iterable = match user_args.first() {
+            Some(a) => a.value.clone(),
+            None => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "fromkeys expected at least 1 argument, got 0".to_string(),
+                ));
+            }
+        };
+        let default_val = user_args
+            .get(1)
+            .map(|a| a.value.clone())
+            .unwrap_or_else(Value::none);
+
+        let keys = _interp.collect_iterable(iterable)?;
+        let mut map: indexmap::IndexMap<PyKey, Value> =
+            indexmap::IndexMap::with_capacity(keys.len());
+        for key in keys {
+            let py_key = _interp.value_to_pykey(&key)?;
+            // Insert only if absent — preserves first-occurrence order for
+            // duplicate keys, matching CPython.
+            map.entry(py_key).or_insert_with(|| default_val.clone());
+        }
+        Ok(Value::dict(map))
+    }
+
     /// Issue #1256: `set.__len__(self)`
     #[py_name = "set.__len__"]
     fn set_len_dunder(args) -> Result<Value> {
