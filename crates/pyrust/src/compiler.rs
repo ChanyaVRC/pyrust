@@ -3999,24 +3999,6 @@ impl Compiler {
         idx
     }
 
-    fn try_literal_const_idx(&mut self, expr: &Expr) -> Option<u16> {
-        match expr {
-            Expr::Int(v) => Some(self.intern_const(Value::int(*v))),
-            Expr::BigInt(s) => {
-                let n = s.parse::<PyBigInt>().ok()?;
-                Some(self.intern_const(Value::bigint(n)))
-            }
-            Expr::Float(v) => Some(self.intern_const(Value::float(*v))),
-            Expr::Str(s) => Some(self.intern_const(Value::string(s.clone()))),
-            Expr::Bytes(b) => Some(self.intern_const(Value::bytes(b.clone()))),
-            Expr::Complex(re, im) => Some(self.intern_const(Value::complex(*re, *im))),
-            Expr::Bool(b) => Some(self.intern_const(Value::bool_(*b))),
-            Expr::None => Some(self.intern_const(Value::none())),
-            Expr::Ellipsis => Some(self.intern_const(Value::ellipsis())),
-            _ => fold_constant(expr).map(|v| self.intern_const(v)),
-        }
-    }
-
     /// Emit `R[dst] = R[lhs] op n` using `BinOpImm` when `n` fits in `i16`,
     /// or `BinOpConst` with a pool entry otherwise.
     fn emit_int_binop(&mut self, dst: Reg, lhs: Reg, op: BinaryOp, n: i64) {
@@ -7633,9 +7615,11 @@ impl Compiler {
     fn emit_aug_binop(&mut self, reg: Reg, op: BinaryOp, expr: &Expr) {
         if let Some(imm) = Self::try_imm_i16(expr) {
             self.emit(Insn::BinOpImm(reg, reg, op, imm));
-        } else if let Some(const_idx) = self.try_literal_const_idx(expr) {
-            self.emit(Insn::BinOpConst(reg, reg, op, const_idx));
         } else {
+            // Always use BinOpInPlace (not BinOpConst) so that the VM's
+            // try_inplace_op fast path fires for mutable built-in containers
+            // (list += / list *= / set |= etc.) regardless of whether the RHS
+            // is a compile-time constant.  BinOpConst bypasses try_inplace_op.
             let rhs = self.compile_expr(expr);
             self.emit(Insn::BinOpInPlace(reg, reg, op, rhs));
             self.free_temp(rhs);

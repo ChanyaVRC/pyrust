@@ -2117,6 +2117,26 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__or__", "__ror__") {
                     return r;
                 }
+                // PEP 584: dict | dict → new merged dict (right wins on key collision).
+                // Only plain dicts reach here; PyInstance subclasses go through the dunder
+                // path above.
+                if matches!(left.kind(), ValueKind::Dict(_)) {
+                    let right_type = value_type_name_str(&right);
+                    let rhs_entries = right.dict_with(|d| {
+                        d.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>()
+                    });
+                    let Some(rhs_entries) = rhs_entries else {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!("unsupported operand type(s) for |: 'dict' and '{right_type}'"),
+                        ));
+                    };
+                    let mut merged = left.dict_with(|d| d.clone()).unwrap();
+                    for (k, v) in rhs_entries {
+                        merged.insert(k, v);
+                    }
+                    return Ok(Value::dict(merged));
+                }
                 if let Some(r) = set_binary_op(&left, &right, SetOp::Or) {
                     return r;
                 }
@@ -2558,6 +2578,90 @@ impl Interpreter {
         op: BinaryOp,
         right: Value,
     ) -> Result<Option<Value>> {
+        // Fast paths for built-in mutable containers: mutate in-place and
+        // return the *same* Value (same Rc pointer) so that aliases see the
+        // update.  This implements the Python guarantee that `a += b` on a
+        // list or set does not rebind aliases.
+        let is_list = matches!(left.kind(), ValueKind::List(_));
+        let is_set = matches!(left.kind(), ValueKind::Set(_));
+        if is_list {
+            match op {
+                BinaryOp::Add => {
+                    // list += iterable  =>  list.extend(iterable)
+                    let items = self.collect_iterable(right)?;
+                    left.list_extend(items)?;
+                    return Ok(Some(left));
+                }
+                BinaryOp::Mul => {
+                    // list *= n  =>  repeat in-place
+                    let n = match right.kind() {
+                        ValueKind::Int(n) => n,
+                        ValueKind::Bool(b) => b as i64,
+                        _ => return Ok(None), // fall through to TypeError
+                    };
+                    left.list_with_mut(|items| {
+                        if n <= 0 {
+                            items.clear();
+                        } else {
+                            let orig = items.clone();
+                            for _ in 1..n {
+                                items.extend_from_slice(&orig);
+                            }
+                        }
+                    });
+                    return Ok(Some(left));
+                }
+                _ => {}
+            }
+        } else if is_set {
+            match op {
+                BinaryOp::BitOr | BinaryOp::BitAnd | BinaryOp::Sub | BinaryOp::BitXor => {
+                    // set |= / &= / -= / ^= require RHS to be a set or frozenset.
+                    // If RHS is neither, return None so eval_binary produces TypeError.
+                    let rhs_items = match set_items_from_value(&right) {
+                        Some((items, _)) => items,
+                        None => return Ok(None),
+                    };
+                    left.set_with_mut(|lhs| match op {
+                        BinaryOp::BitOr => {
+                            for k in &rhs_items {
+                                lhs.insert(k.clone());
+                            }
+                        }
+                        BinaryOp::BitAnd => {
+                            lhs.retain(|k| rhs_items.contains(k));
+                        }
+                        BinaryOp::Sub => {
+                            for k in &rhs_items {
+                                lhs.shift_remove(k);
+                            }
+                        }
+                        BinaryOp::BitXor => {
+                            let mut to_add: Vec<PyKey> = Vec::new();
+                            for k in &rhs_items {
+                                if !lhs.contains(k) {
+                                    to_add.push(k.clone());
+                                }
+                            }
+                            lhs.retain(|k| !rhs_items.contains(k));
+                            for k in to_add {
+                                lhs.insert(k);
+                            }
+                        }
+                        _ => unreachable!(),
+                    });
+                    return Ok(Some(left));
+                }
+                _ => {}
+            }
+        } else if matches!(left.kind(), ValueKind::Dict(_)) && op == BinaryOp::BitOr {
+            // PEP 584: dict |= other → in-place update (same semantics as dict.update()).
+            // Mutate the dict through its Rc and return the same Value so aliases are
+            // preserved (`d2 = d; d |= x` keeps `d is d2`).
+            pyrust_builtins::dict::call("update", &left, vec![right])?;
+            return Ok(Some(left));
+        }
+
         let dunder = match op {
             BinaryOp::Add => "__iadd__",
             BinaryOp::Sub => "__isub__",
