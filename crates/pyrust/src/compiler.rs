@@ -3999,24 +3999,6 @@ impl Compiler {
         idx
     }
 
-    fn try_literal_const_idx(&mut self, expr: &Expr) -> Option<u16> {
-        match expr {
-            Expr::Int(v) => Some(self.intern_const(Value::int(*v))),
-            Expr::BigInt(s) => {
-                let n = s.parse::<PyBigInt>().ok()?;
-                Some(self.intern_const(Value::bigint(n)))
-            }
-            Expr::Float(v) => Some(self.intern_const(Value::float(*v))),
-            Expr::Str(s) => Some(self.intern_const(Value::string(s.clone()))),
-            Expr::Bytes(b) => Some(self.intern_const(Value::bytes(b.clone()))),
-            Expr::Complex(re, im) => Some(self.intern_const(Value::complex(*re, *im))),
-            Expr::Bool(b) => Some(self.intern_const(Value::bool_(*b))),
-            Expr::None => Some(self.intern_const(Value::none())),
-            Expr::Ellipsis => Some(self.intern_const(Value::ellipsis())),
-            _ => fold_constant(expr).map(|v| self.intern_const(v)),
-        }
-    }
-
     /// Emit `R[dst] = R[lhs] op n` using `BinOpImm` when `n` fits in `i16`,
     /// or `BinOpConst` with a pool entry otherwise.
     fn emit_int_binop(&mut self, dst: Reg, lhs: Reg, op: BinaryOp, n: i64) {
@@ -7633,8 +7615,13 @@ impl Compiler {
     fn emit_aug_binop(&mut self, reg: Reg, op: BinaryOp, expr: &Expr) {
         if let Some(imm) = Self::try_imm_i16(expr) {
             self.emit(Insn::BinOpImm(reg, reg, op, imm));
-        } else if let Some(const_idx) = self.try_literal_const_idx(expr) {
-            self.emit(Insn::BinOpConst(reg, reg, op, const_idx));
+        } else if let Some(val) = fold_constant(expr) {
+            // BinOpConst is safe for augmented assignment: the VM's BinOpConst
+            // handler now calls try_inplace_op before eval_binary, so mutable
+            // containers (list *= / list += / set |= etc.) still get the
+            // in-place fast path even when the RHS is a folded constant.
+            let idx = self.intern_const(val);
+            self.emit(Insn::BinOpConst(reg, reg, op, idx));
         } else {
             let rhs = self.compile_expr(expr);
             self.emit(Insn::BinOpInPlace(reg, reg, op, rhs));
