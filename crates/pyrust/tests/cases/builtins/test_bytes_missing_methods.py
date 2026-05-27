@@ -82,6 +82,14 @@ try:
     bytes.fromhex(123)
 except TypeError as e:
     print("TypeError:", e)
+try:
+    bytes.fromhex()
+except TypeError as e:
+    print("TypeError:", e)
+try:
+    bytes.fromhex("48", "extra")
+except TypeError as e:
+    print("TypeError:", e)
 
 # fromhex accessible on instance too
 print(b"".fromhex("48656c6c6f"))

@@ -888,13 +888,13 @@ impl Interpreter {
                 if n_payload == 0 {
                     return Err(PyError::named(
                         "TypeError",
-                        "fromhex() takes exactly one argument (0 given)",
+                        "bytes.fromhex() takes exactly one argument (0 given)",
                     ));
                 }
                 if n_payload > 1 {
                     return Err(PyError::named(
                         "TypeError",
-                        format!("fromhex() takes exactly one argument ({n_payload} given)"),
+                        format!("bytes.fromhex() takes exactly one argument ({n_payload} given)"),
                     ));
                 }
                 let s_val = if positional_args.is_empty() {
@@ -905,7 +905,7 @@ impl Interpreter {
                 .ok_or_else(|| {
                     PyError::named(
                         "TypeError",
-                        "fromhex() takes exactly one argument (0 given)",
+                        "bytes.fromhex() takes exactly one argument (0 given)",
                     )
                 })?;
                 let s = match s_val.kind() {
