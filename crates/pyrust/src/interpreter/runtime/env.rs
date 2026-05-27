@@ -1852,12 +1852,12 @@ impl Interpreter {
             let class = Rc::clone(&inst_rc.borrow().class);
             // Try __bool__ first.
             if let Some(method_val) = lookup_class_attr(&class, "__bool__") {
-                let result = invoke_class_method(
-                    self,
-                    method_val,
-                    Value::py_instance(Rc::clone(&inst_rc)),
-                    &[],
-                )?;
+                let self_val = if matches!(method_val.kind(), ValueKind::BuiltinFunction(_)) {
+                    coerce_numeric(value.clone())
+                } else {
+                    Value::py_instance(Rc::clone(&inst_rc))
+                };
+                let result = invoke_class_method(self, method_val, self_val, &[])?;
                 return match result.kind() {
                     ValueKind::Bool(b) => Ok(b),
                     _ => Err(PyError::named(
@@ -1871,12 +1871,12 @@ impl Interpreter {
             }
             // Fall back to __len__.
             if let Some(method_val) = lookup_class_attr(&class, "__len__") {
-                let result = invoke_class_method(
-                    self,
-                    method_val,
-                    Value::py_instance(inst_rc),
-                    &[],
-                )?;
+                let self_val = if matches!(method_val.kind(), ValueKind::BuiltinFunction(_)) {
+                    coerce_numeric(value.clone())
+                } else {
+                    Value::py_instance(Rc::clone(&inst_rc))
+                };
+                let result = invoke_class_method(self, method_val, self_val, &[])?;
                 return match result.kind() {
                     ValueKind::Int(n) if n >= 0 => Ok(n != 0),
                     ValueKind::Int(_) => Err(PyError::named(

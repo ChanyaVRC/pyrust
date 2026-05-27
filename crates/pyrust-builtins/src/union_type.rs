@@ -110,7 +110,15 @@ impl BuiltinTypeOps for UnionTypeOps {
 /// For a nested UnionType we recursively repr it.
 pub fn repr_type_component(v: &Value) -> String {
     match v.kind() {
-        ValueKind::PyClass(rc) => rc.borrow().qualname.clone(),
+        ValueKind::PyClass(rc) => {
+            let name = rc.borrow().qualname.clone();
+            // `NoneType` displays as `None` in union repr (CPython: `int | None`).
+            if name == "NoneType" {
+                "None".to_string()
+            } else {
+                name
+            }
+        }
         ValueKind::BuiltinFunction("NoneType") => "None".to_string(),
         ValueKind::BuiltinObject { ops, state } if ops.type_name() == TYPE_NAME => ops.repr(state),
         _ => v.repr(),
