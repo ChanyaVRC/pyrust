@@ -1167,6 +1167,13 @@ pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value
         if args.len() >= 2 {
             attrs.insert("errno".to_string(), args[0].clone());
             attrs.insert("strerror".to_string(), args[1].clone());
+            // CPython 3.12: OSError.__init__ always sets self.args = (errno, strerror)
+            // regardless of how many positional arguments were supplied.  The filename
+            // (and filename2) are stored as dedicated instance attributes, not in args.
+            attrs.insert(
+                "args".to_string(),
+                Value::tuple(vec![args[0].clone(), args[1].clone()]),
+            );
         } else {
             attrs.insert("errno".to_string(), Value::none());
             attrs.insert("strerror".to_string(), Value::none());
