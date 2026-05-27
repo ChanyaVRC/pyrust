@@ -20,7 +20,7 @@ use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
-    CallableIter, EnumerateIter, FilterIter, MapIter, NativeIterFrame, ZipIter, apply_format_spec, ascii_repr_interp, bigint_divmod_floor,
+    CallableIter, EnumerateIter, FilterIter, IterSrcBuf, MapIter, NativeIterFrame, ZipIter, apply_format_spec, ascii_repr_interp, bigint_divmod_floor,
     class_chain_contains_name, class_is_subclass_of,
     compare_values, compare_values_with_op, coerce_numeric, dir_names,
     instance_builtin_data,
@@ -1110,7 +1110,7 @@ pyrust_module! {
         // Convert each iterable argument to an iterator object without
         // consuming any elements.  Elements are pulled lazily by
         // step_map_iter via call_next.
-        let sources: Result<Vec<Value>> = args[1..]
+        let sources: Result<IterSrcBuf> = args[1..]
             .iter()
             .map(|a| make_iterator(_interp, a.value.clone()))
             .collect();

@@ -10,6 +10,15 @@ pub(crate) const VM_REGS_INLINE: usize = 16;
 /// Per-frame register file backing for the VM.
 pub(crate) type RegsBuf = smallvec::SmallVec<[Value; VM_REGS_INLINE]>;
 
+// SmallVec-backed types for per-frame collections.
+// Most Python functions have ≤2 for-loops and ≤2 nested try/except blocks,
+// so inline storage eliminates heap allocations for the common case.
+pub(crate) type ItersBuf = smallvec::SmallVec<[Option<IterState>; 2]>;
+pub(crate) type ExcHandlersBuf = smallvec::SmallVec<[usize; 2]>;
+pub(crate) type HandledExcBuf = smallvec::SmallVec<[Value; 2]>;
+pub(crate) type IterCacheBuf = smallvec::SmallVec<[Option<Value>; 4]>;
+pub(crate) type IterSrcBuf = smallvec::SmallVec<[Value; 2]>;
+
 /// Heap-allocated state for a built-in iterable wrapped by `iter()`.
 /// Stored type-erased inside `Value::generator()` via `Box<dyn Any>`,
 /// the same slot used for GeneratorFrame.  resume_generator() checks
@@ -77,7 +86,8 @@ pub(crate) struct CallableIter {
 pub(crate) struct MapIter {
     pub(crate) func: Value,
     /// Already-converted iterators (one per positional argument after `func`).
-    pub(crate) sources: Vec<Value>,
+    /// `IterSrcBuf` avoids a heap allocation for the common 1- or 2-argument case.
+    pub(crate) sources: IterSrcBuf,
     /// Set to `true` once any source raises `StopIteration`.
     pub(crate) done: bool,
 }
@@ -136,8 +146,8 @@ pub(crate) struct ZipIter {
 pub(crate) struct GeneratorFrame {
     pub(crate) code: Rc<crate::bytecode::FnCode>,
     pub(crate) regs: RegsBuf,
-    pub(crate) iters: Vec<Option<IterState>>,
-    pub(crate) exc_handlers: Vec<usize>,
+    pub(crate) iters: ItersBuf,
+    pub(crate) exc_handlers: ExcHandlersBuf,
     /// Program counter for the NEXT instruction to execute on resumption.
     pub(crate) pc: usize,
     pub(crate) done: bool,
@@ -150,7 +160,7 @@ pub(crate) struct GeneratorFrame {
     /// Without this, a generator that yields while inside an
     /// `except` / `finally` body would leak its handled-exception context
     /// onto the caller's `Interpreter` between `next()` calls.
-    pub(crate) handled_exc_slice: Vec<Value>,
+    pub(crate) handled_exc_slice: HandledExcBuf,
     /// The interpreter's `active_exception` at the moment of yield.
     /// Saved and restored alongside `handled_exc_slice` so that resume
     /// can re-establish the suspended frame's exception view without
@@ -191,10 +201,10 @@ pub(crate) struct GeneratorFrame {
 /// All suspension state is now carried as a struct field in `FrameOutcome::Yielded`
 /// rather than smuggled through a side-channel.
 pub(crate) struct GenSaveState {
-    pub(crate) iters: Vec<Option<IterState>>,
-    pub(crate) exc_handlers: Vec<usize>,
+    pub(crate) iters: ItersBuf,
+    pub(crate) exc_handlers: ExcHandlersBuf,
     pub(crate) pc: usize,
-    pub(crate) handled_exc_slice: Vec<Value>,
+    pub(crate) handled_exc_slice: HandledExcBuf,
     pub(crate) active_exception: Option<Value>,
     /// Destination register of the `Yield` that produced this suspension.
     /// Carried here so `resume_generator_with_exc` can persist it onto
@@ -475,12 +485,12 @@ impl Interpreter {
         match self.run_bytecode_inner(
             code,
             regs,
-            vec![None; code.num_iters as usize],
-            Vec::new(),
+            smallvec::smallvec![None; code.num_iters as usize],
+            ExcHandlersBuf::new(),
             0,
             None,
             None,
-            Vec::new(),
+            HandledExcBuf::new(),
             None,
         )? {
             FrameOutcome::Returned(v) => Ok(v),
@@ -502,12 +512,12 @@ impl Interpreter {
         match self.run_bytecode_inner(
             code,
             regs,
-            vec![None; code.num_iters as usize],
-            Vec::new(),
+            smallvec::smallvec![None; code.num_iters as usize],
+            ExcHandlersBuf::new(),
             0,
             Some(fn_id),
             None,
-            Vec::new(),
+            HandledExcBuf::new(),
             None,
         )? {
             FrameOutcome::Returned(v) => Ok(v),
@@ -762,8 +772,8 @@ impl Interpreter {
         &mut self,
         code: &crate::bytecode::FnCode,
         regs: RegSlice,
-        iters_init: Vec<Option<IterState>>,
-        exc_handlers_init: Vec<usize>,
+        iters_init: ItersBuf,
+        exc_handlers_init: ExcHandlersBuf,
         start_pc: usize,
         current_fn_id: Option<u64>,
         // When `Some`, dispatched through the existing exception-handler stack
@@ -777,9 +787,9 @@ impl Interpreter {
         // wrapper pushes the slice onto `self.handled_exc_stack` AFTER
         // capturing the caller's base depth, so the slice is treated as
         // belonging to this frame; the next yield re-captures it via
-        // `split_off(exc_ctx_frame_base)`.  Pass `Vec::new()` and `None`
+        // `split_off(exc_ctx_frame_base)`.  Pass `HandledExcBuf::new()` and `None`
         // for fresh, non-generator invocations.
-        gen_handled_slice: Vec<Value>,
+        gen_handled_slice: HandledExcBuf,
         gen_active_exception: Option<Value>,
     ) -> Result<FrameOutcome> {
         // Record per-frame exception state at entry.  On any exit path
@@ -834,7 +844,7 @@ impl Interpreter {
     fn handle_vm_error(
         &mut self,
         e: PyError,
-        exc_handlers: &mut Vec<usize>,
+        exc_handlers: &mut ExcHandlersBuf,
         exc_ctx_frame_base: usize,
     ) -> std::result::Result<usize, PyError> {
         let Some(h) = exc_handlers.pop() else {
@@ -907,24 +917,24 @@ impl Interpreter {
         &mut self,
         code: &crate::bytecode::FnCode,
         mut regs: RegSlice,
-        iters_init: Vec<Option<IterState>>,
-        exc_handlers_init: Vec<usize>,
+        iters_init: ItersBuf,
+        exc_handlers_init: ExcHandlersBuf,
         start_pc: usize,
         current_fn_id: Option<u64>,
         inject_exc: Option<PyError>,
         // Generator-only: persisted slice + active to push AFTER we've
         // captured `exc_ctx_frame_base`, so they sit strictly above the
         // caller's stack entries and are owned by this frame.
-        gen_handled_slice: Vec<Value>,
+        gen_handled_slice: HandledExcBuf,
         gen_active_exception: Option<Value>,
     ) -> Result<FrameOutcome> {
         use crate::bytecode::Insn;
-        
+
         let num_locals = code.num_locals;
 
-        let mut iters: Vec<Option<IterState>> = iters_init;
-        let mut iter_next_cache: Vec<Option<Value>> = vec![None; iters.len()];
-        let mut exc_handlers: Vec<usize> = exc_handlers_init;
+        let mut iters: ItersBuf = iters_init;
+        let mut iter_next_cache: IterCacheBuf = smallvec::smallvec![None; iters.len()];
+        let mut exc_handlers: ExcHandlersBuf = exc_handlers_init;
         let mut pc: usize = start_pc;
         // Counts self-tail-call iterations so that infinite tail recursion
         // eventually raises RecursionError instead of looping forever.
@@ -3008,14 +3018,14 @@ impl Interpreter {
                     // so the caller's frame sees only its own entries.  The
                     // generator's `active_exception` is likewise stashed and
                     // its slot cleared.  Both are re-installed on resume.
-                    let saved_handled_slice: Vec<Value> =
-                        self.handled_exc_stack.split_off(exc_ctx_frame_base);
+                    let saved_handled_slice: HandledExcBuf =
+                        self.handled_exc_stack.split_off(exc_ctx_frame_base).into();
                     let saved_active = self.active_exception.take();
                     // Return an explicit FrameOutcome::Yielded rather than
                     // using the old GEN_SAVE thread-local side-channel.
                     // Use mem::take to move iters and exc_handlers into the
                     // saved state rather than cloning them.  The local
-                    // variables are left as empty Vecs, which are then
+                    // variables are left as empty SmallVecs, which are then
                     // dropped for free when the function returns.  On resume,
                     // resume_generator_with_exc moves them back via
                     // std::mem::take on frame.iters / frame.exc_handlers.
@@ -3048,8 +3058,8 @@ impl Interpreter {
                             // Set yield_dst = *sent_reg so resume_generator_with_exc
                             // writes the next sent value there.
                             regs[*sent_reg as usize] = Value::none();
-                            let saved_handled_slice: Vec<Value> =
-                                self.handled_exc_stack.split_off(exc_ctx_frame_base);
+                            let saved_handled_slice: HandledExcBuf =
+                                self.handled_exc_stack.split_off(exc_ctx_frame_base).into();
                             let saved_active = self.active_exception.take();
                             return Ok(FrameOutcome::Yielded {
                                 value: yielded,
