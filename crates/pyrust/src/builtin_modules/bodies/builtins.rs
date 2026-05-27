@@ -4728,14 +4728,25 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
 }
 
 /// `isinstance(obj, classinfo)` — accept a class *or* an
-/// arbitrarily-nested tuple of classes, matching CPython's recursive
-/// contract.  Raises `TypeError` if a leaf is neither a class nor a
+/// arbitrarily-nested tuple of classes or `UnionType`, matching CPython's
+/// recursive contract.  Raises `TypeError` if a leaf is neither a class nor a
 /// tuple.  See <https://docs.python.org/3/library/functions.html#isinstance>.
 fn isinstance_check(fn_name: &str, obj: &Value, cls: &Value) -> Result<bool> {
     if let ValueKind::Tuple(items) = cls.kind() {
         for item in items {
             if isinstance_check(fn_name, obj, item)? {
                 return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+    // PEP 604: `isinstance(x, int | str)` — unwrap UnionType to its __args__.
+    if let Some(args) = pyrust_builtins::union_type::union_type_args(cls) {
+        if let ValueKind::Tuple(items) = args.kind() {
+            for item in items {
+                if isinstance_check(fn_name, obj, item)? {
+                    return Ok(true);
+                }
             }
         }
         return Ok(false);
@@ -4756,6 +4767,17 @@ fn issubclass_check(fn_name: &str, cls: &Value, classinfo: &Value) -> Result<boo
         for item in items {
             if issubclass_check(fn_name, cls, item)? {
                 return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+    // PEP 604: `issubclass(X, int | str)` — unwrap UnionType to its __args__.
+    if let Some(args) = pyrust_builtins::union_type::union_type_args(classinfo) {
+        if let ValueKind::Tuple(items) = args.kind() {
+            for item in items {
+                if issubclass_check(fn_name, cls, item)? {
+                    return Ok(true);
+                }
             }
         }
         return Ok(false);

@@ -2120,6 +2120,14 @@ impl Interpreter {
                 if let Some(r) = set_binary_op(&left, &right, SetOp::Or) {
                     return r;
                 }
+                // PEP 604: `type | type` (and `None | type`, `type | None`,
+                // `UnionType | type`, etc.) creates a `types.UnionType`.
+                // `None` is coerced to `NoneType` as the union component.
+                if is_union_operand(&left) && is_union_operand(&right) {
+                    let lhs = coerce_none_to_nonetype(left);
+                    let rhs = coerce_none_to_nonetype(right);
+                    return Ok(pyrust_builtins::union_type::make_union_type(lhs, rhs));
+                }
                 if matches!(left.kind(), ValueKind::BigInt(_)) || matches!(right.kind(), ValueKind::BigInt(_)) {
                     let a = value_to_bigint(&left).ok_or_else(|| {
                         PyError::named("TypeError", "bitwise op requires integer".to_string())
@@ -3600,4 +3608,28 @@ fn complex_pow(zr: f64, zi: f64, wr: f64, wi: f64) -> Result<Value> {
     }
     let at = wr * t + wi * ln_r;
     Ok(Value::complex(len * at.cos(), len * at.sin()))
+}
+
+/// True if `v` can serve as an operand in `X | Y` (PEP 604).
+/// Valid operands: `PyClass`, `BuiltinFunction` type tokens (like `NoneType`),
+/// `None` itself (coerced to `NoneType`), and existing `UnionType` values.
+fn is_union_operand(v: &Value) -> bool {
+    match v.kind() {
+        ValueKind::PyClass(_) | ValueKind::BuiltinFunction(_) | ValueKind::None => true,
+        ValueKind::BuiltinObject { ops, .. } => {
+            ops.type_name() == pyrust_builtins::union_type::TYPE_NAME
+        }
+        _ => false,
+    }
+}
+
+/// Convert `None` to the `NoneType` builtin function token, leaving all other
+/// values unchanged.  Used when assembling union components so that
+/// `int | None` stores `NoneType` as the component (matching CPython).
+fn coerce_none_to_nonetype(v: Value) -> Value {
+    if v.is_none() {
+        Value::builtin_function("NoneType")
+    } else {
+        v
+    }
 }
