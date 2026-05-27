@@ -266,7 +266,7 @@ impl Interpreter {
                     return Ok(Value::tuple(items));
                 }
                 if name == "__mro__" {
-                    return Ok(Value::tuple(class_mro_items(&class)));
+                    return Ok(Value::tuple(class_mro_items(&class)?));
                 }
                 if name == "mro" {
                     return Ok(pyrust_builtins::bound_method::bound_method(
@@ -400,50 +400,69 @@ impl Interpreter {
             ValueKind::SuperProxy { class, instance } => {
                 let class = Rc::clone(class);
                 let instance = Rc::clone(instance);
-                // Look up the method starting from class's parent (skip class itself).
-                // Fall back to the implicit `object` base when no explicit base is set —
-                // every class implicitly inherits from object in CPython (issue #1047).
-                let parent_class = class
-                    .borrow()
-                    .base
-                    .clone()
-                    .unwrap_or_else(object_class_singleton);
-                if let Some(value) = lookup_class_attr(&parent_class, name) {
-                    let user_fn = match value.kind() {
-                        ValueKind::UserFunction(f) => Some(Rc::clone(f)),
-                        _ => None,
+                // CPython super() semantics: look up `name` in the MRO of
+                // type(instance), starting from the class *after* `class`.
+                // This is necessary for cooperative multiple inheritance: when
+                // B.method calls super().method, the next in D's MRO is C (not
+                // A), so super() must walk D's full MRO rather than just B.base.
+                let instance_class = Rc::clone(&instance.borrow().class);
+                let mro = class_mro_items(&instance_class)?;
+                let class_ptr = Rc::as_ptr(&class);
+                // Find `class` in the MRO, then search from the next entry.
+                let start = mro
+                    .iter()
+                    .position(|v| {
+                        if let ValueKind::PyClass(c) = v.kind() {
+                            Rc::as_ptr(c) == class_ptr
+                        } else {
+                            false
+                        }
+                    })
+                    .map(|i| i + 1)
+                    .unwrap_or(0);
+                for mro_entry in mro.iter().skip(start) {
+                    let entry_class = match mro_entry.kind() {
+                        ValueKind::PyClass(c) => Rc::clone(c),
+                        _ => continue,
                     };
-                    return Ok(match user_fn {
-                        Some(f) => match f.kind {
-                            UserFunctionKind::Regular => {
-                                Value::bound_method(Rc::clone(&f), instance)
-                            }
-                            UserFunctionKind::ClassMethod => {
-                                Value::class_bound_method(Rc::clone(&f), parent_class)
-                            }
-                            UserFunctionKind::StaticMethod => {
-                                Value::user_function(Rc::clone(&f))
-                            }
-                            UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(&f)),
-                        },
-                        // Issue #988: bind BuiltinFunction sentinels (e.g.
-                        // `list.__init__`) to the instance so that
-                        // `call_function_expanded` prepends `self` before
-                        // calling the registry dispatch.  A plain
-                        // `BuiltinFunction` sentinel carries no self; we wrap
-                        // it in a `super_bound_builtin` BuiltinObject that
-                        // the interpreter intercepts in
-                        // `call_function_expanded` before the registry probe.
-                        None => match value.kind() {
-                            ValueKind::BuiltinFunction(fn_name) => {
-                                pyrust_builtins::super_bound_builtin::super_bound_builtin(
-                                    fn_name.to_string(),
-                                    Value::py_instance(Rc::clone(&instance)),
-                                )
-                            }
-                            _ => value.clone(),
-                        },
-                    });
+                    let value = entry_class.borrow().attrs.get(name).cloned();
+                    if let Some(value) = value {
+                        let user_fn = match value.kind() {
+                            ValueKind::UserFunction(f) => Some(Rc::clone(f)),
+                            _ => None,
+                        };
+                        return Ok(match user_fn {
+                            Some(f) => match f.kind {
+                                UserFunctionKind::Regular => {
+                                    Value::bound_method(Rc::clone(&f), instance)
+                                }
+                                UserFunctionKind::ClassMethod => {
+                                    Value::class_bound_method(Rc::clone(&f), entry_class)
+                                }
+                                UserFunctionKind::StaticMethod => {
+                                    Value::user_function(Rc::clone(&f))
+                                }
+                                UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(&f)),
+                            },
+                            // Issue #988: bind BuiltinFunction sentinels (e.g.
+                            // `list.__init__`) to the instance so that
+                            // `call_function_expanded` prepends `self` before
+                            // calling the registry dispatch.  A plain
+                            // `BuiltinFunction` sentinel carries no self; we wrap
+                            // it in a `super_bound_builtin` BuiltinObject that
+                            // the interpreter intercepts in
+                            // `call_function_expanded` before the registry probe.
+                            None => match value.kind() {
+                                ValueKind::BuiltinFunction(fn_name) => {
+                                    pyrust_builtins::super_bound_builtin::super_bound_builtin(
+                                        fn_name.to_string(),
+                                        Value::py_instance(Rc::clone(&instance)),
+                                    )
+                                }
+                                _ => value.clone(),
+                            },
+                        });
+                    }
                 }
                 Err(PyError::named(
                     "AttributeError",
@@ -453,34 +472,47 @@ impl Interpreter {
             ValueKind::SuperProxyClass { class, obj_class } => {
                 let class = Rc::clone(class);
                 let obj_class = Rc::clone(obj_class);
-                // classmethod super(): look up from class's parent and bind to obj_class.
-                // Fall back to the implicit `object` base when no explicit base is set —
-                // every class implicitly inherits from object in CPython (issue #1047).
-                let parent_class = class
-                    .borrow()
-                    .base
-                    .clone()
-                    .unwrap_or_else(object_class_singleton);
-                if let Some(value) = lookup_class_attr(&parent_class, name) {
-                    let user_fn = match value.kind() {
-                        ValueKind::UserFunction(f) => Some(Rc::clone(f)),
-                        _ => None,
+                // classmethod super(): use MRO of obj_class, start after `class`.
+                let mro = class_mro_items(&obj_class)?;
+                let class_ptr = Rc::as_ptr(&class);
+                let start = mro
+                    .iter()
+                    .position(|v| {
+                        if let ValueKind::PyClass(c) = v.kind() {
+                            Rc::as_ptr(c) == class_ptr
+                        } else {
+                            false
+                        }
+                    })
+                    .map(|i| i + 1)
+                    .unwrap_or(0);
+                for mro_entry in mro.iter().skip(start) {
+                    let entry_class = match mro_entry.kind() {
+                        ValueKind::PyClass(c) => Rc::clone(c),
+                        _ => continue,
                     };
-                    return Ok(match user_fn {
-                        Some(f) => match f.kind {
-                            UserFunctionKind::Regular => {
-                                Value::user_function(Rc::clone(&f))
-                            }
-                            UserFunctionKind::ClassMethod => {
-                                Value::class_bound_method(Rc::clone(&f), obj_class)
-                            }
-                            UserFunctionKind::StaticMethod => {
-                                Value::user_function(Rc::clone(&f))
-                            }
-                            UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(&f)),
-                        },
-                        None => value,
-                    });
+                    let value = entry_class.borrow().attrs.get(name).cloned();
+                    if let Some(value) = value {
+                        let user_fn = match value.kind() {
+                            ValueKind::UserFunction(f) => Some(Rc::clone(f)),
+                            _ => None,
+                        };
+                        return Ok(match user_fn {
+                            Some(f) => match f.kind {
+                                UserFunctionKind::Regular => {
+                                    Value::user_function(Rc::clone(&f))
+                                }
+                                UserFunctionKind::ClassMethod => {
+                                    Value::class_bound_method(Rc::clone(&f), Rc::clone(&obj_class))
+                                }
+                                UserFunctionKind::StaticMethod => {
+                                    Value::user_function(Rc::clone(&f))
+                                }
+                                UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(&f)),
+                            },
+                            None => value,
+                        });
+                    }
                 }
                 Err(PyError::named(
                     "AttributeError",
@@ -2164,46 +2196,121 @@ fn call_descriptor_delete(
     Ok(None)
 }
 
-/// Compute the MRO (method resolution order) for a class as a `Vec<Value>`.
+/// Compute the MRO (method resolution order) for a class using C3 linearization.
 ///
-/// Performs a depth-first walk over the base chain (primary base first, then
-/// extra_bases in order), deduplicating by pointer identity, and appending
-/// the synthetic `object` singleton at the end when it was not already
-/// visited.  This matches CPython's linearization for the common case and
-/// simple diamond hierarchies; full C3 is not yet implemented.
+/// Implements the C3 superclass linearization algorithm as used by CPython:
+///
+///   L[C(B1, B2, ...)] = C + merge(L[B1], L[B2], ..., [B1, B2, ...])
+///
+/// The merge operation repeatedly selects the head of the first list whose
+/// head does not appear in the tail of any other list.  If no such head
+/// exists the bases are inconsistent and a TypeError is returned.
 ///
 /// Used by both `__mro__` (returns a tuple) and `mro()` (returns a list).
-fn class_mro_items(class: &Rc<RefCell<PyClass>>) -> Vec<Value> {
-    fn mro_walk(
+fn class_mro_items(class: &Rc<RefCell<PyClass>>) -> Result<Vec<Value>> {
+    /// Compute L[c] recursively.  Returns a `Vec` of class pointers in MRO
+    /// order; the first element is always `c` itself.
+    fn c3_linearize(
         c: &Rc<RefCell<PyClass>>,
-        items: &mut Vec<Value>,
-        seen: &mut Vec<*const RefCell<PyClass>>,
-    ) {
-        let ptr = Rc::as_ptr(c);
-        if seen.contains(&ptr) {
-            return;
-        }
-        seen.push(ptr);
-        items.push(Value::py_class(Rc::clone(c)));
+        obj_ptr: *const RefCell<PyClass>,
+    ) -> Result<Vec<Rc<RefCell<PyClass>>>> {
         let (base, extra_bases) = {
             let borrowed = c.borrow();
             (borrowed.base.clone(), borrowed.extra_bases.clone())
         };
-        if let Some(b) = base {
-            mro_walk(&b, items, seen);
+
+        // Collect all direct bases in declaration order.
+        let mut all_bases: Vec<Rc<RefCell<PyClass>>> = Vec::new();
+        if let Some(ref b) = base {
+            all_bases.push(Rc::clone(b));
         }
         for eb in &extra_bases {
-            mro_walk(eb, items, seen);
+            all_bases.push(Rc::clone(eb));
         }
+
+        if all_bases.is_empty() {
+            // No explicit bases: just [c].  The object singleton will be
+            // appended by the outer function after the merge.
+            return Ok(vec![Rc::clone(c)]);
+        }
+
+        // Build the lists to merge: L[B1], L[B2], ..., [B1, B2, ...]
+        let mut lists: Vec<Vec<Rc<RefCell<PyClass>>>> = Vec::new();
+        for b in &all_bases {
+            lists.push(c3_linearize(b, obj_ptr)?);
+        }
+        // The final list is the sequence of direct bases.
+        lists.push(all_bases.clone());
+
+        // C3 merge.
+        let mut result: Vec<Rc<RefCell<PyClass>>> = vec![Rc::clone(c)];
+        loop {
+            // Remove all empty lists.
+            lists.retain(|l| !l.is_empty());
+            if lists.is_empty() {
+                break;
+            }
+
+            // Find a good head: first element of some list that does not
+            // appear in the tail of any other list.
+            let mut chosen: Option<Rc<RefCell<PyClass>>> = None;
+            'outer: for list in &lists {
+                let head_ptr = Rc::as_ptr(&list[0]);
+                // Check that head_ptr does not appear in the tail of any list.
+                for other in &lists {
+                    for tail_item in other.iter().skip(1) {
+                        if Rc::as_ptr(tail_item) == head_ptr {
+                            continue 'outer;
+                        }
+                    }
+                }
+                chosen = Some(Rc::clone(&list[0]));
+                break;
+            }
+
+            let chosen = match chosen {
+                Some(c) => c,
+                None => {
+                    // No consistent linearization exists.
+                    // Collect base names for the error message (skip object).
+                    let base_names: Vec<String> = all_bases
+                        .iter()
+                        .filter(|b| Rc::as_ptr(b) != obj_ptr)
+                        .map(|b| b.borrow().name.clone())
+                        .collect();
+                    let bases_str = base_names.join(", ");
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "Cannot create a consistent method resolution\norder (MRO) for bases {bases_str}"
+                        ),
+                    ));
+                }
+            };
+
+            let chosen_ptr = Rc::as_ptr(&chosen);
+            result.push(chosen);
+            // Remove chosen from the front of every list where it appears.
+            for list in &mut lists {
+                if !list.is_empty() && Rc::as_ptr(&list[0]) == chosen_ptr {
+                    list.remove(0);
+                }
+            }
+        }
+
+        Ok(result)
     }
-    let mut items: Vec<Value> = Vec::new();
-    let mut seen: Vec<*const RefCell<PyClass>> = Vec::new();
-    mro_walk(class, &mut items, &mut seen);
+
     let obj = object_class_singleton();
-    if !seen.contains(&Rc::as_ptr(&obj)) {
-        items.push(Value::py_class(obj));
+    let obj_ptr = Rc::as_ptr(&obj);
+    let mut mro = c3_linearize(class, obj_ptr)?;
+
+    // Append the `object` singleton if it is not already present.
+    if !mro.iter().any(|c| Rc::as_ptr(c) == obj_ptr) {
+        mro.push(obj);
     }
-    items
+
+    Ok(mro.into_iter().map(Value::py_class).collect())
 }
 
 /// Returns the list of direct subclasses of `class`, pruning stale weak refs.
