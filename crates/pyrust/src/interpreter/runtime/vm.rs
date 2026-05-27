@@ -3591,6 +3591,7 @@ impl Interpreter {
                         env: Rc::clone(&self.env),
                         is_pure,
                         precompiled_code: Some(proto_code),
+                        wrapped_func: None,
                     });
                     regs[*dst as usize] = Value::user_function(func);
                 }

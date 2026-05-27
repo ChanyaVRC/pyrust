@@ -861,6 +861,11 @@ pub struct UserFunction {
     pub env: EnvRef,
     pub is_pure: bool,
     pub precompiled_code: Option<Rc<dyn Any>>,
+    /// When `kind` is `StaticMethod` or `ClassMethod`, holds the original
+    /// wrapped function `Rc` so that `sm.__func__` can return the exact same
+    /// object that was passed to `staticmethod(f)` / `classmethod(f)`, preserving
+    /// `sm.__func__ is f` identity.  `None` for `Regular` and `Builtin` functions.
+    pub wrapped_func: Option<Rc<UserFunction>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1978,6 +1983,7 @@ impl Value {
                 env: Environment::new(None),
                 is_pure: false,
                 precompiled_code: None,
+                wrapped_func: None,
             });
             c.borrow_mut().insert(name, Rc::clone(&f));
             f
@@ -2033,10 +2039,26 @@ impl Value {
     /// identical (the kind tag only affects attribute-lookup-time binding,
     /// not execution), so cache hits across forms are correct.  See #303.
     pub fn with_function_kind(f: Rc<UserFunction>, kind: UserFunctionKind) -> Self {
-        // Fast path: kind already matches — reuse the Rc directly.
-        if f.kind == kind {
+        // Fast path: kind already matches and is not a wrapper kind — reuse the Rc
+        // directly.  Wrapper kinds (StaticMethod/ClassMethod) must always produce a
+        // new Rc so that `staticmethod(sm)` gives a fresh object distinct from `sm`
+        // (matching CPython identity semantics where each `staticmethod(x)` call
+        // returns a new object regardless of whether `x` is already a staticmethod).
+        let is_wrapper_kind = matches!(
+            kind,
+            UserFunctionKind::StaticMethod | UserFunctionKind::ClassMethod
+        );
+        if f.kind == kind && !is_wrapper_kind {
             return Value::opaque(Opaque::UserFunction(f));
         }
+        // When wrapping as staticmethod/classmethod, record `f` directly so
+        // `sm.__func__` returns the exact same Rc that was passed in, preserving
+        // object identity (`sm.__func__ is f`).
+        let wrapped_func = if is_wrapper_kind {
+            Some(Rc::clone(&f))
+        } else {
+            None
+        };
         let new_fn = UserFunction {
             id: f.id,
             kind,
@@ -2056,6 +2078,7 @@ impl Value {
             env: Rc::clone(&f.env),
             is_pure: f.is_pure,
             precompiled_code: f.precompiled_code.clone(),
+            wrapped_func,
         };
         Value::opaque(Opaque::UserFunction(Rc::new(new_fn)))
     }
@@ -4547,6 +4570,7 @@ mod tests {
             env: Environment::new(None),
             is_pure: false,
             precompiled_code: None,
+            wrapped_func: None,
         })
     }
 
