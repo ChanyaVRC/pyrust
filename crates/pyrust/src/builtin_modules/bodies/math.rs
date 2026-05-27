@@ -16,6 +16,21 @@ use crate::interpreter::{
 use crate::value::{PyBigInt, PyToPrimitive, Value, ValueKind};
 use pyrust_derive::pyrust_module;
 
+/// Check for a unary dunder method (`__floor__`, `__ceil__`, `__trunc__`) on
+/// a `PyInstance` value, calling it if present, or returning `None` so the
+/// caller can fall back to the numeric conversion path.
+///
+/// This mirrors CPython's `Modules/mathmodule.c` protocol for those three
+/// functions: dunder dispatch is attempted first; if the method is absent the
+/// float-coercion path is used instead.
+fn try_math_dunder(
+    interp: &mut crate::Interpreter,
+    val: &Value,
+    method: &str,
+) -> Option<Result<Value>> {
+    interp.try_dunder_unary(val, method)
+}
+
 pyrust_module! {
     constants {
         "pi"  => Value::float(std::f64::consts::PI),
@@ -26,9 +41,32 @@ pyrust_module! {
     }
 
     /// CPython: math.floor(x) → int.  <https://docs.python.org/3/library/math.html#math.floor>
-    #[pure]
+    ///
+    /// Protocol: first try `type(x).__floor__(x)`; if absent, fall back to
+    /// float coercion and apply `f64::floor`.  Mirrors CPython's
+    /// `math_floor_impl` in `Modules/mathmodule.c`.
     fn floor(args) -> Result<Value> {
-        let x = single_float(FN_NAME, args)?;
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly one argument"),
+            ));
+        }
+        let val = &args[0].value;
+        if let Some(r) = try_math_dunder(_interp, val, "__floor__") {
+            return r;
+        }
+        // int.__floor__ returns self unchanged — no float coercion needed and
+        // coercing a large int to f64 would silently lose precision (e.g.
+        // math.floor(2**53+1) must return 2**53+1, not 2**53).
+        match val.kind() {
+            ValueKind::Int(n) => return Ok(Value::int(n)),
+            ValueKind::BigInt(b) => return Ok(Value::bigint(b.clone())),
+            ValueKind::Bool(b) => return Ok(Value::int(b as i64)),
+            _ => {}
+        }
+        let x = math_coerce_float(val)?;
         let f = x.floor();
         if f > i64::MAX as f64 || f < i64::MIN as f64 {
             Ok(float_to_bigint(f))
@@ -38,14 +76,82 @@ pyrust_module! {
     }
 
     /// CPython: math.ceil(x) → int.  <https://docs.python.org/3/library/math.html#math.ceil>
-    #[pure]
+    ///
+    /// Protocol: first try `type(x).__ceil__(x)`; if absent, fall back to
+    /// float coercion and apply `f64::ceil`.  Mirrors CPython's
+    /// `math_ceil_impl` in `Modules/mathmodule.c`.
     fn ceil(args) -> Result<Value> {
-        let x = single_float(FN_NAME, args)?;
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly one argument"),
+            ));
+        }
+        let val = &args[0].value;
+        if let Some(r) = try_math_dunder(_interp, val, "__ceil__") {
+            return r;
+        }
+        // int.__ceil__ returns self unchanged — same precision reasoning as
+        // floor above.
+        match val.kind() {
+            ValueKind::Int(n) => return Ok(Value::int(n)),
+            ValueKind::BigInt(b) => return Ok(Value::bigint(b.clone())),
+            ValueKind::Bool(b) => return Ok(Value::int(b as i64)),
+            _ => {}
+        }
+        let x = math_coerce_float(val)?;
         let f = x.ceil();
         if f > i64::MAX as f64 || f < i64::MIN as f64 {
             Ok(float_to_bigint(f))
         } else {
             Ok(Value::int(f as i64))
+        }
+    }
+
+    /// CPython: math.trunc(x) → Integral.  <https://docs.python.org/3/library/math.html#math.trunc>
+    ///
+    /// Protocol: first try `type(x).__trunc__(x)`.  For `int` / `bool` the
+    /// value is returned unchanged (CPython's numeric tower: int.__trunc__
+    /// returns self).  For `float` the fractional part is discarded and the
+    /// result is an `int`.  For any other type without `__trunc__`, raises
+    /// `TypeError: type X doesn't define __trunc__ method`.
+    fn trunc(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() takes exactly one argument"),
+            ));
+        }
+        let val = &args[0].value;
+        // Try user-defined __trunc__ first (covers PyInstance and any class
+        // that defines the dunder).
+        if let Some(r) = try_math_dunder(_interp, val, "__trunc__") {
+            return r;
+        }
+        match val.kind() {
+            // int and bool: trunc(x) == x (already an integer).
+            ValueKind::Int(n) => Ok(Value::int(n)),
+            ValueKind::BigInt(b) => Ok(Value::bigint(b.clone())),
+            ValueKind::Bool(b) => Ok(Value::int(b as i64)),
+            // float: truncate toward zero.
+            ValueKind::Float(f) => {
+                let t = f.trunc();
+                if t > i64::MAX as f64 || t < i64::MIN as f64 {
+                    Ok(float_to_bigint(t))
+                } else {
+                    Ok(Value::int(t as i64))
+                }
+            }
+            // Everything else: raise CPython's exact TypeError message.
+            _ => Err(PyError::named(
+                "TypeError",
+                format!(
+                    "type {} doesn't define __trunc__ method",
+                    value_type_name_str(val)
+                ),
+            )),
         }
     }
 
@@ -443,6 +549,21 @@ pyrust_module! {
 }
 
 // ── Helpers used by the macro-generated bodies ───────────────────────────────
+
+/// Coerce `val` to `f64` for the `math.floor` / `math.ceil` fallback path.
+///
+/// CPython's error text for non-real types in those functions is
+/// `"must be real number, not {type}"`, which differs from the
+/// `"math.floor: a float is required, not …"` text that `value_to_float`
+/// emits.  We call `value_to_float` and remap any error to the CPython form.
+fn math_coerce_float(val: &Value) -> Result<f64> {
+    value_to_float(val, "__SENTINEL__").map_err(|_| {
+        PyError::named(
+            "TypeError",
+            format!("must be real number, not {}", value_type_name_str(val)),
+        )
+    })
+}
 
 /// Reject kwargs and demand exactly one positional float-coercible arg.
 fn single_float(fn_name: &str, args: &[ExpandedCallArg]) -> Result<f64> {
