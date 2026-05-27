@@ -2567,7 +2567,7 @@ impl Interpreter {
                 }
                 Insn::RaiseReRaise => {
                     let exc = vm_try!(self.active_exception.clone().ok_or_else(|| {
-                        PyError::Runtime("no active exception to re-raise".to_string())
+                        PyError::Runtime("No active exception to reraise".to_string())
                     }));
                     // RaiseReRaise is emitted by the compiler at three
                     // logical "exit-this-handler" points: bare `raise`
