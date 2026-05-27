@@ -39,6 +39,12 @@ pub const METHODS: &[&str] = &[
     "rjust",
     "zfill",
     "translate",
+    // Added in #1425
+    "partition",
+    "rpartition",
+    "swapcase",
+    "isascii",
+    "istitle",
 ];
 
 /// Returns `true` if `method` is the name of a built-in `bytes` method.
@@ -114,6 +120,25 @@ pub fn call(
         "rjust" => bytes_rjust(bytes, args),
         "zfill" => bytes_zfill(bytes, args),
         "translate" => bytes_translate(bytes, args, kwargs),
+        // Added in #1425
+        "partition" => bytes_partition(bytes, args, false),
+        "rpartition" => bytes_partition(bytes, args, true),
+        "swapcase" => Ok(Value::bytes(
+            bytes
+                .iter()
+                .map(|&b| {
+                    if b.is_ascii_uppercase() {
+                        b.to_ascii_lowercase()
+                    } else if b.is_ascii_lowercase() {
+                        b.to_ascii_uppercase()
+                    } else {
+                        b
+                    }
+                })
+                .collect(),
+        )),
+        "isascii" => Ok(Value::bool_(bytes.iter().all(|&b| b < 128))),
+        "istitle" => Ok(Value::bool_(bytes_istitle(bytes))),
         _ => Err(PyError::named(
             "AttributeError",
             format!("'bytes' object has no attribute '{method}'"),
@@ -1609,6 +1634,146 @@ fn bytes_translate(bytes: &[u8], args: &[Value], kwargs: &IndexMap<PyKey, Value>
         out.push(mapped);
     }
     Ok(Value::bytes(out))
+}
+
+// ---------------------------------------------------------------------------
+// partition / rpartition
+// ---------------------------------------------------------------------------
+
+fn bytes_partition(bytes: &[u8], args: &[Value], reverse: bool) -> Result<Value> {
+    let sep_val = args.first().ok_or_else(|| {
+        let name = if reverse { "rpartition" } else { "partition" };
+        PyError::named(
+            "TypeError",
+            format!("bytes.{name}() requires exactly 1 argument"),
+        )
+    })?;
+    let sep: &[u8] = match sep_val.kind() {
+        ValueKind::Bytes(rc) => rc.as_slice(),
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "a bytes-like object is required, not '{}'",
+                    pyrust_core::builtin_type_name(sep_val)
+                ),
+            ));
+        }
+    };
+    if sep.is_empty() {
+        return Err(PyError::named("ValueError", "empty separator".to_string()));
+    }
+    let found = if reverse {
+        rfind_subsequence(bytes, sep)
+    } else {
+        find_subsequence(bytes, sep)
+    };
+    let parts = match found {
+        Some(pos) => {
+            let before = Value::bytes(bytes[..pos].to_vec());
+            let mid = Value::bytes(sep.to_vec());
+            let after = Value::bytes(bytes[pos + sep.len()..].to_vec());
+            vec![before, mid, after]
+        }
+        None => {
+            if reverse {
+                // rpartition not found: (b'', b'', original)
+                vec![
+                    Value::bytes(vec![]),
+                    Value::bytes(vec![]),
+                    Value::bytes(bytes.to_vec()),
+                ]
+            } else {
+                // partition not found: (original, b'', b'')
+                vec![
+                    Value::bytes(bytes.to_vec()),
+                    Value::bytes(vec![]),
+                    Value::bytes(vec![]),
+                ]
+            }
+        }
+    };
+    Ok(Value::tuple(parts))
+}
+
+// ---------------------------------------------------------------------------
+// istitle
+// ---------------------------------------------------------------------------
+
+fn bytes_istitle(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    // A byte sequence is titlecased if each word (sequence of alpha bytes) starts
+    // with an uppercase letter and the rest are lowercase.  Non-alpha bytes act as
+    // word separators.
+    let mut prev_was_alpha = false;
+    let mut has_alpha = false;
+    for &b in bytes {
+        if b.is_ascii_alphabetic() {
+            has_alpha = true;
+            if prev_was_alpha {
+                // Continuation of a word — must be lowercase.
+                if b.is_ascii_uppercase() {
+                    return false;
+                }
+            } else {
+                // Start of a new word — must be uppercase.
+                if b.is_ascii_lowercase() {
+                    return false;
+                }
+            }
+            prev_was_alpha = true;
+        } else {
+            prev_was_alpha = false;
+        }
+    }
+    has_alpha
+}
+
+// ---------------------------------------------------------------------------
+// fromhex
+// ---------------------------------------------------------------------------
+
+/// `bytes.fromhex(string)` — classmethod.
+///
+/// Decodes a hex string to bytes.  Whitespace between hex pairs is allowed
+/// (including leading and trailing whitespace); whitespace within a pair is
+/// not.  Raises `ValueError` for invalid hex digits or odd-length non-empty
+/// tokens; raises `TypeError` for non-string input.
+pub fn bytes_fromhex(s: &str) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() / 2);
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c.is_ascii_whitespace() {
+            continue;
+        }
+        // First hex digit of a pair.
+        let hi = c.to_digit(16).ok_or_else(|| {
+            PyError::named(
+                "ValueError",
+                format!("non-hexadecimal number found in fromhex() arg at position {i}"),
+            )
+        })?;
+        // Second hex digit of the pair — must follow immediately (no whitespace allowed mid-pair).
+        let (j, c2) = chars.next().ok_or_else(|| {
+            PyError::named(
+                "ValueError",
+                format!(
+                    "non-hexadecimal number found in fromhex() arg at position {}",
+                    i + 1
+                ),
+            )
+        })?;
+        let lo = c2.to_digit(16).ok_or_else(|| {
+            PyError::named(
+                "ValueError",
+                format!("non-hexadecimal number found in fromhex() arg at position {j}"),
+            )
+        })?;
+        out.push((hi * 16 + lo) as u8);
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------

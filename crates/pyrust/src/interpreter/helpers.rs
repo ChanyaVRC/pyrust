@@ -508,6 +508,13 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
         .borrow_mut()
         .attrs
         .insert("maketrans".to_string(), Value::builtin_function("bytes.maketrans"));
+    // `bytes.fromhex` is a classmethod: register it in bytes_class.attrs so
+    // that both `bytes.fromhex(s)` and `b''.fromhex(s)` resolve to the same
+    // `BuiltinFunction("bytes.fromhex")` sentinel.
+    bytes_class
+        .borrow_mut()
+        .attrs
+        .insert("fromhex".to_string(), Value::builtin_function("bytes.fromhex"));
     // Issue #1256: expose dunder methods on primitive class objects so that
     // `hasattr(int, '__add__')` returns True and `int.__add__(1, 2)` works.
     // Each sentinel registers as `BuiltinFunction("<type>.<dunder>")` in the
