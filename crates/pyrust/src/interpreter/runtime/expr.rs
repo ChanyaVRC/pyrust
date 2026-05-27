@@ -2117,6 +2117,26 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__or__", "__ror__") {
                     return r;
                 }
+                // PEP 584: dict | dict → new merged dict (right wins on key collision).
+                // Only plain dicts reach here; PyInstance subclasses go through the dunder
+                // path above.
+                if matches!(left.kind(), ValueKind::Dict(_)) {
+                    let right_type = value_type_name_str(&right);
+                    let rhs_entries = right.dict_with(|d| {
+                        d.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>()
+                    });
+                    let Some(rhs_entries) = rhs_entries else {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!("unsupported operand type(s) for |: 'dict' and '{right_type}'"),
+                        ));
+                    };
+                    let mut merged = left.dict_with(|d| d.clone()).unwrap();
+                    for (k, v) in rhs_entries {
+                        merged.insert(k, v);
+                    }
+                    return Ok(Value::dict(merged));
+                }
                 if let Some(r) = set_binary_op(&left, &right, SetOp::Or) {
                     return r;
                 }
@@ -2558,6 +2578,13 @@ impl Interpreter {
         op: BinaryOp,
         right: Value,
     ) -> Result<Option<Value>> {
+        // PEP 584: dict |= other → in-place update (same semantics as dict.update()).
+        // Mutate the dict through its Rc and return the same Value so aliases are
+        // preserved (`d2 = d; d |= x` keeps `d is d2`).
+        if op == BinaryOp::BitOr && matches!(left.kind(), ValueKind::Dict(_)) {
+            pyrust_builtins::dict::call("update", &left, vec![right])?;
+            return Ok(Some(left));
+        }
         let dunder = match op {
             BinaryOp::Add => "__iadd__",
             BinaryOp::Sub => "__isub__",
