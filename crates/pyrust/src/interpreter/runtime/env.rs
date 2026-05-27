@@ -1456,7 +1456,7 @@ impl Interpreter {
         }
     }
 
-    fn load_module(&mut self, name: &str) -> Result<Value> {
+    pub(crate) fn load_module(&mut self, name: &str) -> Result<Value> {
         if let Some(cached) = self.module_cache.borrow().get(name).cloned() {
             return Ok(cached);
         }
