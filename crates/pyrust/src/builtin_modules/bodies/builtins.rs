@@ -5243,6 +5243,14 @@ fn hash_value(value: &Value) -> Result<i64> {
                 format!("unhashable type: '{class_name}'"),
             ))
         }
+        // Class objects are hashable by identity in CPython (type.__hash__
+        // returns id(cls) >> 4, but pointer identity is what matters for
+        // correctness).  Use the Rc pointer as the hash value, applying the
+        // -1 → -2 sentinel remap matching CPython's tp_hash sentinel rule.
+        ValueKind::PyClass(rc) => {
+            let ptr = Rc::as_ptr(rc) as i64;
+            Ok(if ptr == -1 { -2 } else { ptr })
+        }
         _ => Err(PyError::named(
             "TypeError",
             format!(

@@ -925,6 +925,18 @@ impl Interpreter {
                 value: value.clone(),
             });
         }
+        // Class objects are hashable by identity (CPython: type.__hash__).
+        // Both user-defined classes and built-in primitive classes (`int`,
+        // `str`, etc.) are `ValueKind::PyClass`, so this arm covers all of
+        // them.  The hash is the Rc pointer, matching the `id()` value and
+        // giving stable, unique hashes for distinct class objects.
+        if let ValueKind::PyClass(class_rc) = value.kind() {
+            let ptr = Rc::as_ptr(class_rc) as usize as u64;
+            return Ok(PyKey::Object {
+                hash: ptr,
+                value: value.clone(),
+            });
+        }
         let type_name = value_type_name_str(value);
         Err(PyError::named(
             "TypeError",
