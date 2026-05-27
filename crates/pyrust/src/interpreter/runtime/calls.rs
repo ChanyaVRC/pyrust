@@ -459,39 +459,70 @@ impl Interpreter {
                                 // the self argument (unbound descriptor form).  When
                                 // the receiver is any other class, mro() takes no
                                 // extra arguments.
-                                let n = pos.len() + kw.len();
                                 let receiver_is_type =
                                     Rc::ptr_eq(&class, &type_class_singleton());
                                 let target_class: Rc<RefCell<PyClass>> = if receiver_is_type {
                                     // Unbound descriptor call: type.mro(B).
-                                    // Requires exactly one positional arg that is a type.
-                                    if pos.len() == 1 && kw.is_empty() {
-                                        let maybe_class = match pos[0].kind() {
-                                            ValueKind::PyClass(c) => Some(Rc::clone(c)),
-                                            _ => None,
-                                        };
-                                        match maybe_class {
-                                            Some(c) => c,
-                                            None => {
-                                                self.bound_method_pos_buf = pos;
-                                                return Err(PyError::named(
-                                                    "TypeError",
-                                                    "descriptor 'mro' for 'type' objects doesn't apply to a non-type argument".to_string(),
-                                                ));
-                                            }
-                                        }
-                                    } else {
+                                    // Requires exactly one positional arg that is a type,
+                                    // with no extra positional or keyword arguments.
+                                    if pos.is_empty() {
                                         self.bound_method_pos_buf = pos;
                                         return Err(PyError::named(
                                             "TypeError",
                                             "unbound method type.mro() needs an argument".to_string(),
                                         ));
                                     }
-                                } else if n == 0 {
+                                    // pos[0] is the self (type) argument.
+                                    let maybe_class = match pos[0].kind() {
+                                        ValueKind::PyClass(c) => Some(Rc::clone(c)),
+                                        _ => None,
+                                    };
+                                    let target = match maybe_class {
+                                        Some(c) => c,
+                                        None => {
+                                            let type_name = pyrust_core::builtin_type_name(&pos[0]).to_string();
+                                            self.bound_method_pos_buf = pos;
+                                            return Err(PyError::named(
+                                                "TypeError",
+                                                format!(
+                                                    "descriptor 'mro' for 'type' objects doesn't apply to a '{type_name}' object",
+                                                ),
+                                            ));
+                                        }
+                                    };
+                                    // After resolving self, no extra positional args or kwargs allowed.
+                                    if !kw.is_empty() {
+                                        self.bound_method_pos_buf = pos;
+                                        return Err(PyError::named(
+                                            "TypeError",
+                                            "type.mro() takes no keyword arguments".to_string(),
+                                        ));
+                                    }
+                                    if pos.len() > 1 {
+                                        let extra = pos.len() - 1;
+                                        self.bound_method_pos_buf = pos;
+                                        return Err(PyError::named(
+                                            "TypeError",
+                                            format!(
+                                                "type.mro() takes no arguments ({extra} given)",
+                                            ),
+                                        ));
+                                    }
+                                    target
+                                } else if pos.is_empty() && kw.is_empty() {
                                     // Bound call: B.mro()
                                     class
+                                } else if !kw.is_empty() {
+                                    // Keyword arguments are never accepted.
+                                    let class_name = class.borrow().name.clone();
+                                    self.bound_method_pos_buf = pos;
+                                    return Err(PyError::named(
+                                        "TypeError",
+                                        format!("{class_name}.mro() takes no keyword arguments"),
+                                    ));
                                 } else {
-                                    // Too many arguments.
+                                    // Too many positional arguments.
+                                    let n = pos.len();
                                     let class_name = class.borrow().name.clone();
                                     self.bound_method_pos_buf = pos;
                                     return Err(PyError::named(
