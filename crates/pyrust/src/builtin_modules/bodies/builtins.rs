@@ -3981,6 +3981,10 @@ pyrust_module! {
                 ));
             }
         };
+        // CPython raises ValueError for an empty module name.
+        if name.is_empty() {
+            return Err(PyError::named("ValueError", "Empty module name".to_string()));
+        }
         // Arg index 3 is `fromlist`; also accept as a keyword arg.
         let fromlist: Option<&Value> = args.get(3).map(|a| &a.value).or_else(|| {
             args.iter()
