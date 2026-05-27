@@ -2080,10 +2080,51 @@ pyrust_module! {
                             &call_args,
                         );
                     }
+                    // No user-defined __round__ found: if this is an int/float
+                    // subclass, coerce to the backing primitive and re-dispatch
+                    // using the same rounding logic as the primitive arms above.
+                    // This matches CPython's inherited int.__round__ / float.__round__
+                    // behaviour for subclasses that don't override __round__.
+                    let coerced = coerce_numeric(x.0.clone());
+                    let ndigits_i32_coerced: Option<i32> = match ndigits {
+                        None => None,
+                        Some(ref v) => match v.0.kind() {
+                            ValueKind::Int(n) => Some(n as i32),
+                            ValueKind::Bool(b) => Some(b as i32),
+                            ValueKind::None => None,
+                            _ => return Err(PyError::named(
+                                "TypeError",
+                                format!("{FN_NAME}() ndigits must be an integer or None"),
+                            )),
+                        },
+                    };
+                    match coerced.kind() {
+                        ValueKind::Int(v) => return match ndigits_i32_coerced {
+                            Some(n) if n < 0 => Ok(round_bigint_neg_ndigits(PyBigInt::from(v), (-n) as u32)),
+                            _ => Ok(Value::int(v)),
+                        },
+                        ValueKind::BigInt(b) => return match ndigits_i32_coerced {
+                            Some(n) if n < 0 => Ok(round_bigint_neg_ndigits(b.clone(), (-n) as u32)),
+                            _ => Ok(Value::bigint(b.clone())),
+                        },
+                        ValueKind::Float(v) => return match ndigits_i32_coerced {
+                            None => Ok(Value::int(py_round_half_even(v))),
+                            Some(n) => {
+                                if n >= 0 {
+                                    let factor = 10f64.powi(n);
+                                    Ok(Value::float(py_round_half_even_f64(v * factor) / factor))
+                                } else {
+                                    let factor = 10f64.powi(-n);
+                                    Ok(Value::float(py_round_half_even_f64(v / factor) * factor))
+                                }
+                            }
+                        },
+                        _ => {}
+                    }
                 }
                 Err(PyError::named(
                     "TypeError",
-                    format!("{FN_NAME}() argument must be a number"),
+                    format!("type {} doesn't define __round__ method", value_type_name_str(&x.0)),
                 ))
             }
         }
