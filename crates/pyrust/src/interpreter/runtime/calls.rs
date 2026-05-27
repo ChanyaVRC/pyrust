@@ -2493,19 +2493,8 @@ impl Interpreter {
 
         let mut ints = Vec::with_capacity(args.len());
         for arg in args {
-            match arg.value.kind() {
-                ValueKind::Int(v) => ints.push(v),
-                ValueKind::Bool(b) => ints.push(b as i64),
-                _ => {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "'{}' object cannot be interpreted as an integer",
-                            pyrust_core::builtin_type_name(&arg.value)
-                        ),
-                    ));
-                }
-            }
+            let v = self.coerce_range_arg(arg.value.clone())?;
+            ints.push(v);
         }
 
         let (start, stop, step) = match ints.as_slice() {
@@ -2712,6 +2701,84 @@ impl Interpreter {
             }
         }
         Ok(Value::string(out))
+    }
+
+    /// Coerce a single `range()` argument to `i64` through the `__index__`
+    /// protocol, matching CPython 3.12 semantics.
+    ///
+    /// - `Int` / `Bool`: returned directly as `i64`.
+    /// - `BigInt`: converted to `i64`; raises `OverflowError` if out of range.
+    /// - `PyInstance` with `__index__`: the method is called; its result is
+    ///   then coerced recursively (must be `Int`/`Bool`/`BigInt`).
+    /// - Anything else: `TypeError: 'X' object cannot be interpreted as an integer`.
+    fn coerce_range_arg(&mut self, val: Value) -> Result<i64> {
+        use crate::value::PyToPrimitive;
+        enum Tag {
+            Int(i64),
+            BigIntI64(Option<i64>),
+            Instance(Rc<RefCell<PyInstance>>),
+            Other,
+        }
+        // Probe inside a scoped block so the borrow from val.kind() drops
+        // before any mutable self borrow in the Instance arm.
+        let tag = {
+            match val.kind() {
+                ValueKind::Int(v) => Tag::Int(v),
+                ValueKind::Bool(b) => Tag::Int(b as i64),
+                ValueKind::BigInt(b) => Tag::BigIntI64(b.to_i64()),
+                ValueKind::PyInstance(inst) => Tag::Instance(Rc::clone(inst)),
+                _ => Tag::Other,
+            }
+        };
+        match tag {
+            Tag::Int(v) => Ok(v),
+            Tag::BigIntI64(Some(v)) => Ok(v),
+            Tag::BigIntI64(None) => Err(PyError::named(
+                "OverflowError",
+                "Python int too large to convert to C ssize_t".to_string(),
+            )),
+            Tag::Instance(inst_rc) => {
+                let class = Rc::clone(&inst_rc.borrow().class);
+                if let Some(method_val) = lookup_class_attr(&class, "__index__") {
+                    let result = invoke_class_method(
+                        self,
+                        method_val,
+                        Value::py_instance(Rc::clone(&inst_rc)),
+                        &[],
+                    )?;
+                    let result_ok = matches!(
+                        result.kind(),
+                        ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+                    );
+                    if result_ok {
+                        self.coerce_range_arg(result)
+                    } else {
+                        Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "__index__ returned non-int (type {})",
+                                value_type_name_str(&result),
+                            ),
+                        ))
+                    }
+                } else {
+                    Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "'{}' object cannot be interpreted as an integer",
+                            value_type_name_str(&Value::py_instance(inst_rc)),
+                        ),
+                    ))
+                }
+            }
+            Tag::Other => Err(PyError::named(
+                "TypeError",
+                format!(
+                    "'{}' object cannot be interpreted as an integer",
+                    pyrust_core::builtin_type_name(&val),
+                ),
+            )),
+        }
     }
 
     /// Resolve a single start/stop argument for `list.index` / `tuple.index`
