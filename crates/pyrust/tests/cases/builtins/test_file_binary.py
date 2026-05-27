@@ -24,8 +24,8 @@ with open(TMP, "rb") as f:
 
 # ── binary readline / readlines ───────────────────────────────────────────────
 
-with open(TMP, "w") as f:
-    f.write("line1\nline2\nline3")
+with open(TMP, "wb") as f:
+    f.write(b"line1\nline2\nline3")
 
 with open(TMP, "rb") as f:
     line = f.readline()
