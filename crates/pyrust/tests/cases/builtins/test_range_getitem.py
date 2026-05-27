@@ -122,7 +122,7 @@ print(r[-100:100]) # range(0, 10)
 print(r[100:200])  # range(10, 10)  — empty
 
 # Empty forward slice (start > stop with default step)
-print(r[5:3])    # range(5, 5)
+print(r[5:3])    # range(5, 3)
 
 # Negative-step slices on range(10)
 print(r[8:2:-1])   # range(8, 2, -1)
