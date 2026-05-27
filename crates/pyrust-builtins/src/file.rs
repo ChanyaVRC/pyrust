@@ -15,12 +15,16 @@ pub struct FileState {
     pub path: String,
     pub mode: String,
     pub closed: bool,
-    /// For read modes: the full file contents; we read eagerly at open time.
+    /// For text read modes: the full file contents; we read eagerly at open time.
     pub content: String,
-    /// Read cursor into `content` (in bytes).
+    /// For binary read modes: the full file contents as raw bytes.
+    pub content_bytes: Vec<u8>,
+    /// Read cursor (in bytes for both text and binary mode).
     pub pos: usize,
-    /// For write modes: buffered bytes to flush on `close()`.
+    /// For text write modes: buffered text to flush on `close()`.
     pub write_buf: String,
+    /// For binary write modes: buffered bytes to flush on `close()`.
+    pub write_buf_bytes: Vec<u8>,
     pub is_write: bool,
     pub is_append: bool,
     /// Whether the file was opened in binary mode (`'b'` in mode string).
@@ -64,7 +68,7 @@ impl BuiltinTypeOps for FileOps {
     }
 
     fn iter_next(&self, state: &BuiltinState) -> Result<Option<Value>> {
-        Ok(read_line_or_none(state)?.map(Value::string))
+        read_line_value(state)
     }
 
     fn is_iterable(&self) -> bool {
@@ -121,17 +125,25 @@ pub fn open(path: &str, mode: &str) -> Result<Value> {
     let is_binary = mode.contains('b');
 
     let mut content = String::new();
+    let mut content_bytes = Vec::new();
     if is_read {
-        content =
-            std::fs::read_to_string(path).map_err(|e| PyError::from_io_error(&e, Some(path)))?;
+        if is_binary {
+            content_bytes =
+                std::fs::read(path).map_err(|e| PyError::from_io_error(&e, Some(path)))?;
+        } else {
+            content = std::fs::read_to_string(path)
+                .map_err(|e| PyError::from_io_error(&e, Some(path)))?;
+        }
     }
     let state = FileState {
         path: path.to_string(),
         mode: mode.to_string(),
         closed: false,
         content,
+        content_bytes,
         pos: 0,
         write_buf: String::new(),
+        write_buf_bytes: Vec::new(),
         is_write,
         is_append,
         is_binary,
@@ -148,13 +160,10 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
             Ok(Value::none())
         }
         "__iter__" => Ok(Value::builtin_object_shared(FILE_OPS, Rc::clone(state))),
-        "__next__" => {
-            let line = read_line_or_none(state)?;
-            match line {
-                Some(s) => Ok(Value::string(s)),
-                None => Err(PyError::named("StopIteration", String::new())),
-            }
-        }
+        "__next__" => match read_line_value(state)? {
+            Some(v) => Ok(v),
+            None => Err(PyError::named("StopIteration", String::new())),
+        },
         "close" => {
             close_file(state)?;
             Ok(Value::none())
@@ -185,6 +194,8 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
             }
             let pos = if s.is_readable() {
                 s.pos
+            } else if s.is_binary {
+                s.write_buf_bytes.len()
             } else {
                 s.write_buf.len()
             };
@@ -218,49 +229,98 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
                 ));
             }
             if s.is_readable() {
-                let content_len = s.content.len();
-                let new_pos = match whence {
-                    0 => {
-                        if offset < 0 {
+                let content_len = if s.is_binary {
+                    s.content_bytes.len()
+                } else {
+                    s.content.len()
+                };
+                let new_pos = if s.is_binary {
+                    // Binary mode allows all seek forms with nonzero offsets
+                    match whence {
+                        0 => {
+                            if offset < 0 {
+                                return Err(PyError::named(
+                                    "ValueError",
+                                    format!("negative seek position {offset}"),
+                                ));
+                            }
+                            (offset as usize).min(content_len)
+                        }
+                        1 => {
+                            let new = s.pos as i64 + offset;
+                            if new < 0 {
+                                return Err(PyError::named(
+                                    "ValueError",
+                                    format!("negative seek position {new}"),
+                                ));
+                            }
+                            (new as usize).min(content_len)
+                        }
+                        2 => {
+                            let new = content_len as i64 + offset;
+                            if new < 0 {
+                                return Err(PyError::named(
+                                    "ValueError",
+                                    format!("negative seek position {new}"),
+                                ));
+                            }
+                            (new as usize).min(content_len)
+                        }
+                        _ => {
                             return Err(PyError::named(
                                 "ValueError",
-                                format!("negative seek position {offset}"),
+                                format!("invalid whence ({whence}, should be 0, 1 or 2)"),
                             ));
                         }
-                        (offset as usize).min(content_len)
                     }
-                    1 => {
-                        // Text mode only allows seek(0, 1)
-                        if offset != 0 {
+                } else {
+                    match whence {
+                        0 => {
+                            if offset < 0 {
+                                return Err(PyError::named(
+                                    "ValueError",
+                                    format!("negative seek position {offset}"),
+                                ));
+                            }
+                            (offset as usize).min(content_len)
+                        }
+                        1 => {
+                            // Text mode only allows seek(0, 1)
+                            if offset != 0 {
+                                return Err(PyError::named(
+                                    "io.UnsupportedOperation",
+                                    "can't do nonzero cur-relative seeks".to_string(),
+                                ));
+                            }
+                            s.pos
+                        }
+                        2 => {
+                            // Text mode only allows seek(0, 2)
+                            if offset != 0 {
+                                return Err(PyError::named(
+                                    "io.UnsupportedOperation",
+                                    "can't do nonzero end-relative seeks".to_string(),
+                                ));
+                            }
+                            content_len
+                        }
+                        _ => {
                             return Err(PyError::named(
-                                "io.UnsupportedOperation",
-                                "can't do nonzero cur-relative seeks".to_string(),
+                                "ValueError",
+                                format!("invalid whence ({whence}, should be 0, 1 or 2)"),
                             ));
                         }
-                        s.pos
-                    }
-                    2 => {
-                        // Text mode only allows seek(0, 2)
-                        if offset != 0 {
-                            return Err(PyError::named(
-                                "io.UnsupportedOperation",
-                                "can't do nonzero end-relative seeks".to_string(),
-                            ));
-                        }
-                        content_len
-                    }
-                    _ => {
-                        return Err(PyError::named(
-                            "ValueError",
-                            format!("invalid whence ({whence}, should be 0, 1 or 2)"),
-                        ));
                     }
                 };
                 s.pos = new_pos;
                 Ok(Value::int(new_pos as i64))
             } else {
                 // Write / append mode: track position in write_buf
-                let buf_len = s.write_buf.len();
+                let buf_len = if s.is_binary {
+                    s.write_buf_bytes.len()
+                } else {
+                    s.write_buf.len()
+                };
                 let new_pos = match whence {
                     0 => {
                         if offset < 0 {
@@ -296,8 +356,12 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
                         ));
                     }
                 };
-                // Truncate write_buf to new_pos (seek in write mode discards future bytes)
-                s.write_buf.truncate(new_pos);
+                // Truncate write buffer to new_pos (seek in write mode discards future bytes)
+                if s.is_binary {
+                    s.write_buf_bytes.truncate(new_pos);
+                } else {
+                    s.write_buf.truncate(new_pos);
+                }
                 Ok(Value::int(new_pos as i64))
             }
         }
@@ -321,6 +385,16 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
                     "io.UnsupportedOperation",
                     "not readable".to_string(),
                 ));
+            }
+            if s.is_binary {
+                let remaining = &s.content_bytes[s.pos..];
+                let take = match n {
+                    Some(n) if n >= 0 => remaining.len().min(n as usize),
+                    _ => remaining.len(),
+                };
+                let out = remaining[..take].to_vec();
+                s.pos += take;
+                return Ok(Value::bytes(out));
             }
             let bytes = s.content.as_bytes();
             let remaining = &bytes[s.pos..];
@@ -355,24 +429,26 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
             Ok(Value::string(out))
         }
         "readline" => {
-            let line = read_line_or_none(state)?;
-            Ok(Value::string(line.unwrap_or_default()))
+            let v = read_line_value(state)?;
+            Ok(v.unwrap_or_else(|| {
+                // EOF: return empty bytes or empty str depending on mode
+                let borrow = state.borrow();
+                if let Some(s) = borrow.downcast_ref::<FileState>() {
+                    if s.is_binary {
+                        return Value::bytes(Vec::new());
+                    }
+                }
+                Value::string(String::new())
+            }))
         }
         "readlines" => {
             let mut out = Vec::new();
-            while let Some(line) = read_line_or_none(state)? {
-                out.push(Value::string(line));
+            while let Some(v) = read_line_value(state)? {
+                out.push(v);
             }
             Ok(Value::list(out))
         }
         "write" => {
-            let s = args
-                .first()
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .ok_or_else(|| {
-                    PyError::named("TypeError", "write() argument must be str".to_string())
-                })?;
-            let len = s.chars().count();
             let mut borrow = state.borrow_mut();
             let st = borrow
                 .downcast_mut::<FileState>()
@@ -389,8 +465,43 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
                     "not writable".to_string(),
                 ));
             }
-            st.write_buf.push_str(&s);
-            Ok(Value::int(len as i64))
+            if st.is_binary {
+                // Binary mode: accept bytes, reject str
+                match args.first().map(|v| v.kind()) {
+                    Some(ValueKind::Bytes(rc)) => {
+                        let data = rc.as_slice().to_vec();
+                        let len = data.len() as i64;
+                        st.write_buf_bytes.extend_from_slice(&data);
+                        Ok(Value::int(len))
+                    }
+                    _ => Err(PyError::named(
+                        "TypeError",
+                        "a bytes-like object is required, not 'str'".to_string(),
+                    )),
+                }
+            } else {
+                // Text mode: accept str, reject bytes
+                let arg = args.first();
+                match arg.map(|v| v.kind()) {
+                    Some(ValueKind::Bytes(_)) => Err(PyError::named(
+                        "TypeError",
+                        "write() argument must be str, not bytes".to_string(),
+                    )),
+                    _ => {
+                        let s = arg
+                            .and_then(|v| v.as_str().map(|s| s.to_string()))
+                            .ok_or_else(|| {
+                                PyError::named(
+                                    "TypeError",
+                                    "write() argument must be str".to_string(),
+                                )
+                            })?;
+                        let len = s.chars().count() as i64;
+                        st.write_buf.push_str(&s);
+                        Ok(Value::int(len))
+                    }
+                }
+            }
         }
         "writelines" => {
             let lines = match args.first().map(|v| v.kind()) {
@@ -413,14 +524,28 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
                     "I/O operation on closed file.".to_string(),
                 ));
             }
-            for v in lines {
-                match v.kind() {
-                    ValueKind::Str(s) => st.write_buf.push_str(s),
-                    _ => {
-                        return Err(PyError::named(
-                            "TypeError",
-                            "writelines() requires str items".to_string(),
-                        ));
+            if st.is_binary {
+                for v in lines {
+                    match v.kind() {
+                        ValueKind::Bytes(rc) => st.write_buf_bytes.extend_from_slice(rc.as_slice()),
+                        _ => {
+                            return Err(PyError::named(
+                                "TypeError",
+                                "a bytes-like object is required, not 'str'".to_string(),
+                            ));
+                        }
+                    }
+                }
+            } else {
+                for v in lines {
+                    match v.kind() {
+                        ValueKind::Str(s) => st.write_buf.push_str(s),
+                        _ => {
+                            return Err(PyError::named(
+                                "TypeError",
+                                "writelines() requires str items".to_string(),
+                            ));
+                        }
                     }
                 }
             }
@@ -433,7 +558,9 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
     }
 }
 
-fn read_line_or_none(state: &BuiltinState) -> Result<Option<String>> {
+/// Read the next line from a file and return it as the appropriate Value type
+/// (`bytes` in binary mode, `str` in text mode).  Returns `None` at EOF.
+fn read_line_value(state: &BuiltinState) -> Result<Option<Value>> {
     let mut borrow = state.borrow_mut();
     let s = borrow
         .downcast_mut::<FileState>()
@@ -450,20 +577,37 @@ fn read_line_or_none(state: &BuiltinState) -> Result<Option<String>> {
             "not readable".to_string(),
         ));
     }
-    let bytes = s.content.as_bytes();
-    if s.pos >= bytes.len() {
-        return Ok(None);
+    if s.is_binary {
+        let bytes = &s.content_bytes;
+        if s.pos >= bytes.len() {
+            return Ok(None);
+        }
+        let mut end = s.pos;
+        while end < bytes.len() && bytes[end] != b'\n' {
+            end += 1;
+        }
+        if end < bytes.len() {
+            end += 1;
+        }
+        let line = bytes[s.pos..end].to_vec();
+        s.pos = end;
+        Ok(Some(Value::bytes(line)))
+    } else {
+        let bytes = s.content.as_bytes();
+        if s.pos >= bytes.len() {
+            return Ok(None);
+        }
+        let mut end = s.pos;
+        while end < bytes.len() && bytes[end] != b'\n' {
+            end += 1;
+        }
+        if end < bytes.len() {
+            end += 1;
+        }
+        let line = s.content[s.pos..end].to_string();
+        s.pos = end;
+        Ok(Some(Value::string(line)))
     }
-    let mut end = s.pos;
-    while end < bytes.len() && bytes[end] != b'\n' {
-        end += 1;
-    }
-    if end < bytes.len() {
-        end += 1;
-    }
-    let line = s.content[s.pos..end].to_string();
-    s.pos = end;
-    Ok(Some(line))
 }
 
 fn close_file(state: &BuiltinState) -> Result<()> {
@@ -475,8 +619,13 @@ fn close_file(state: &BuiltinState) -> Result<()> {
         return Ok(());
     }
     if s.is_write {
-        std::fs::write(&s.path, &s.write_buf)
-            .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
+        if s.is_binary {
+            std::fs::write(&s.path, &s.write_buf_bytes)
+                .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
+        } else {
+            std::fs::write(&s.path, &s.write_buf)
+                .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
+        }
     } else if s.is_append {
         use std::io::Write;
         let mut f = std::fs::OpenOptions::new()
@@ -484,11 +633,17 @@ fn close_file(state: &BuiltinState) -> Result<()> {
             .append(true)
             .open(&s.path)
             .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
-        f.write_all(s.write_buf.as_bytes())
-            .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
+        if s.is_binary {
+            f.write_all(&s.write_buf_bytes)
+                .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
+        } else {
+            f.write_all(s.write_buf.as_bytes())
+                .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
+        }
     }
     s.closed = true;
     s.write_buf.clear();
+    s.write_buf_bytes.clear();
     Ok(())
 }
 
