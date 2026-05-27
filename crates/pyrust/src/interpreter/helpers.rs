@@ -347,11 +347,14 @@ pub(crate) struct PrimitiveClasses {
     pub(crate) bytes_class: Rc<RefCell<PyClass>>,
     pub(crate) complex_class: Rc<RefCell<PyClass>>,
     pub(crate) dict_class: Rc<RefCell<PyClass>>,
+    pub(crate) ellipsis_class: Rc<RefCell<PyClass>>,
     pub(crate) float_class: Rc<RefCell<PyClass>>,
     pub(crate) frozenset_class: Rc<RefCell<PyClass>>,
     pub(crate) int_class: Rc<RefCell<PyClass>>,
     pub(crate) list_class: Rc<RefCell<PyClass>>,
     pub(crate) mappingproxy_class: Rc<RefCell<PyClass>>,
+    pub(crate) none_class: Rc<RefCell<PyClass>>,
+    pub(crate) notimplemented_class: Rc<RefCell<PyClass>>,
     pub(crate) set_class: Rc<RefCell<PyClass>>,
     pub(crate) str_class: Rc<RefCell<PyClass>>,
     pub(crate) tuple_class: Rc<RefCell<PyClass>>,
@@ -523,10 +526,13 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
         bytes_class,
         complex_class,
         dict_class,
+        ellipsis_class: make("ellipsis", None),
         float_class,
         frozenset_class,
         list_class,
         mappingproxy_class: make("mappingproxy", None),
+        none_class: make("NoneType", None),
+        notimplemented_class: make("NotImplementedType", None),
         set_class,
         str_class,
         tuple_class,
@@ -643,11 +649,14 @@ pub(crate) fn primitive_class_by_name(name: &str) -> Option<Rc<RefCell<PyClass>>
             "bytes" => &c.bytes_class,
             "complex" => &c.complex_class,
             "dict" => &c.dict_class,
+            "ellipsis" => &c.ellipsis_class,
             "float" => &c.float_class,
             "frozenset" => &c.frozenset_class,
             "int" => &c.int_class,
             "list" => &c.list_class,
             "mappingproxy" => &c.mappingproxy_class,
+            "NoneType" => &c.none_class,
+            "NotImplementedType" => &c.notimplemented_class,
             "set" => &c.set_class,
             "str" => &c.str_class,
             "tuple" => &c.tuple_class,
@@ -672,6 +681,9 @@ pub(crate) fn primitive_class_for_value(v: &Value) -> Option<Rc<RefCell<PyClass>
         ValueKind::Set(_) => "set",
         ValueKind::Bytes(_) => "bytes",
         ValueKind::Complex(_, _) => "complex",
+        ValueKind::None => "NoneType",
+        ValueKind::NotImplemented => "NotImplementedType",
+        ValueKind::Ellipsis => "ellipsis",
         ValueKind::BuiltinObject { ops, .. } if ops.type_name() == "frozenset" => "frozenset",
         ValueKind::BuiltinObject { ops, .. }
             if ops.type_name() == pyrust_builtins::mapping_proxy::TYPE_NAME =>
@@ -773,6 +785,15 @@ pub(crate) fn primitive_class_isinstance_fast(
                 ValueKind::BuiltinObject { ops, .. }
                     if ops.type_name() == pyrust_builtins::mapping_proxy::TYPE_NAME
             ));
+        }
+        if cls_ptr == Rc::as_ptr(&c.none_class) {
+            return Some(matches!(obj.kind(), ValueKind::None));
+        }
+        if cls_ptr == Rc::as_ptr(&c.notimplemented_class) {
+            return Some(matches!(obj.kind(), ValueKind::NotImplemented));
+        }
+        if cls_ptr == Rc::as_ptr(&c.ellipsis_class) {
+            return Some(matches!(obj.kind(), ValueKind::Ellipsis));
         }
         None
     })
