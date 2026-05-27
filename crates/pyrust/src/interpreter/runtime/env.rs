@@ -1491,6 +1491,16 @@ impl Interpreter {
                             .insert(prim.to_string(), Value::py_class(class));
                     }
                 }
+                // `type` metaclass (issue #1312): must display as `<class 'type'>`.
+                m.borrow_mut().attrs.insert(
+                    "type".to_string(),
+                    Value::py_class(crate::interpreter::type_class_singleton()),
+                );
+                // `object` (issue #1313): must display as `<class 'object'>`.
+                m.borrow_mut().attrs.insert(
+                    "object".to_string(),
+                    Value::py_class(crate::interpreter::object_class_singleton()),
+                );
                 // Insert all built-in exception classes.  Skip names that
                 // contain '.' (e.g. "io.UnsupportedOperation" which belongs
                 // to the `io` module, not `builtins`).  Also skip bare names

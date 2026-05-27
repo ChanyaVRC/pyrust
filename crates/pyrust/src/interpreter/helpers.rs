@@ -253,6 +253,19 @@ thread_local! {
     /// metadata + dispatch routing.
     static PRIMITIVE_CLASSES: PrimitiveClasses = build_primitive_classes();
 
+    /// Per-thread metaclass singleton for `type`.  In CPython, `type` is
+    /// both a callable and a class — `type(int)` returns `<class 'type'>`,
+    /// and `isinstance(int, type)` is True.  Mirrors the `OBJECT_CLASS`
+    /// pattern (issue #1312).
+    static TYPE_CLASS: Rc<RefCell<PyClass>> = Rc::new(RefCell::new(PyClass {
+        name: "type".to_string(),
+        qualname: "type".to_string(),
+        base: None,
+        extra_bases: vec![],
+        attrs: IndexMap::new(),
+        mutation_version: std::cell::Cell::new(0),
+    }));
+
     /// O(1) dispatch table for primitive classes (#462 perf): maps the
     /// `Rc<RefCell<PyClass>>` identity (by raw pointer) to the registry's
     /// `BuiltinDispatchFn` for the corresponding constructor.  Populated
@@ -271,7 +284,7 @@ thread_local! {
                 crate::builtin_registry::BuiltinDispatchFn,
             >,
         > = {
-        let cell = std::cell::RefCell::new(std::collections::HashMap::with_capacity(11));
+        let cell = std::cell::RefCell::new(std::collections::HashMap::with_capacity(12));
         PRIMITIVE_CLASSES.with(|c| {
             let mut m = cell.borrow_mut();
             for (class, name) in [
@@ -290,6 +303,15 @@ thread_local! {
                 if let Some(dispatch) = crate::builtin_registry::lookup(name) {
                     m.insert(Rc::as_ptr(class), dispatch);
                 }
+            }
+        });
+        // `type` metaclass: every `PyClass` value is an instance of `type`
+        // in CPython.  Register the TYPE_CLASS singleton here so that
+        // calling `type(x)` dispatches to the existing "type" registry entry
+        // without going through `call_class_expanded` (issue #1312).
+        TYPE_CLASS.with(|t| {
+            if let Some(dispatch) = crate::builtin_registry::lookup("type") {
+                cell.borrow_mut().insert(Rc::as_ptr(t), dispatch);
             }
         });
         cell
@@ -544,6 +566,14 @@ fn populate_primitive_methods(
 /// `A.__mro__[-1] is B.__mro__[-1]` holds, matching CPython.
 pub(crate) fn object_class_singleton() -> Rc<RefCell<PyClass>> {
     OBJECT_CLASS.with(|c| Rc::clone(c))
+}
+
+/// Returns the singleton `type` metaclass.  In CPython `type(int)` returns
+/// `<class 'type'>` and `isinstance(int, type)` is `True` because every class
+/// is an instance of `type` (the metaclass).  Using a per-thread singleton
+/// mirrors the `object_class_singleton` pattern (issue #1312).
+pub(crate) fn type_class_singleton() -> Rc<RefCell<PyClass>> {
+    TYPE_CLASS.with(|c| Rc::clone(c))
 }
 
 /// Look up the per-primitive `PyClass` singleton for one of the 11 migrated
@@ -1492,6 +1522,16 @@ pub(crate) fn cached_builtins_module() -> Value {
                         mod_attrs.attrs.insert(prim.to_string(), Value::py_class(class));
                     }
                 }
+                // `type` metaclass (issue #1312): must display as `<class 'type'>`.
+                mod_attrs.attrs.insert(
+                    "type".to_string(),
+                    Value::py_class(type_class_singleton()),
+                );
+                // `object` (issue #1313): must display as `<class 'object'>`.
+                mod_attrs.attrs.insert(
+                    "object".to_string(),
+                    Value::py_class(object_class_singleton()),
+                );
                 // Built-in exception classes (issue #1255).  Skip names with '.'
                 // (e.g. "io.UnsupportedOperation") — those belong to other modules.
                 // Also skip bare names that are registered under a dotted alias

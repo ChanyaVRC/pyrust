@@ -28,7 +28,7 @@ use crate::interpreter::{
     is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_hash_bigint, py_hash_float,
     py_hash_int, py_mod_i64, py_round_half_even, py_round_half_even_f64,
     reject_keyword_args_expanded, resolve_zero_arg_super, snapshot_current_locals,
-    sync_module_env_to_globals_dict,
+    sync_module_env_to_globals_dict, type_class_singleton,
     value_to_float, value_type_name_str,
 };
 use crate::value::{PyClass, PyKey, PyToPrimitive, PyZero, UserFunctionKind, Value, ValueKind, range_len};
@@ -1420,7 +1420,11 @@ pyrust_module! {
             return Ok(Value::py_class(class));
         }
         match obj.kind() {
-            ValueKind::PyClass(_) => Ok(Value::builtin_function("type")),
+            // Every class is an instance of `type` in CPython: `type(int) is type`.
+            // Return the per-thread `type` metaclass singleton so the result
+            // displays as `<class 'type'>` and `isinstance(cls, type)` works
+            // through the standard class machinery (issue #1312).
+            ValueKind::PyClass(_) => Ok(Value::py_class(type_class_singleton())),
             ValueKind::None => Ok(Value::builtin_function("NoneType")),
             ValueKind::Range { .. } => Ok(Value::builtin_function("range")),
             ValueKind::UserFunction(f) => {
@@ -4568,6 +4572,12 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
         // `isinstance(print, object)`, etc. all return `True`.
         if Rc::ptr_eq(expected, &crate::interpreter::object_class_singleton()) {
             return true;
+        }
+        // Fast path: `type` is the metaclass — every class is an instance of
+        // `type` in CPython: `isinstance(int, type)` is True,
+        // `isinstance(42, type)` is False (issue #1312).
+        if Rc::ptr_eq(expected, &type_class_singleton()) {
+            return matches!(obj.kind(), ValueKind::PyClass(_));
         }
         // Fast path: if `expected` is one of the 11 primitive class
         // singletons, do a direct `ValueKind` tag check.  Skips the
