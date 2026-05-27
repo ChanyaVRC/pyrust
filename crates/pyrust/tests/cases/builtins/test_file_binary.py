@@ -1,8 +1,8 @@
 """Parity tests for binary file I/O modes ('rb', 'wb', 'ab')."""
 import os
 
-TMP = "/tmp/_pyrust_test_file_binary.bin"
-TMP2 = "/tmp/_pyrust_test_file_binary2.bin"
+TMP = "_pyrust_test_file_binary.bin"
+TMP2 = "_pyrust_test_file_binary2.bin"
 
 # ── binary read ───────────────────────────────────────────────────────────────
 

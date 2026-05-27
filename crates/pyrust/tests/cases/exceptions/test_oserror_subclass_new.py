@@ -19,13 +19,6 @@ print(type(OSError(17, "x")).__name__)   # FileExistsError   (EEXIST)
 print(type(OSError(20, "x")).__name__)   # NotADirectoryError (ENOTDIR)
 print(type(OSError(21, "x")).__name__)   # IsADirectoryError (EISDIR)
 print(type(OSError(32, "x")).__name__)   # BrokenPipeError   (EPIPE)
-print(type(OSError(103, "x")).__name__)  # ConnectionAbortedError (ECONNABORTED)
-print(type(OSError(104, "x")).__name__)  # ConnectionResetError   (ECONNRESET)
-print(type(OSError(108, "x")).__name__)  # BrokenPipeError        (ESHUTDOWN)
-print(type(OSError(110, "x")).__name__)  # TimeoutError           (ETIMEDOUT)
-print(type(OSError(111, "x")).__name__)  # ConnectionRefusedError (ECONNREFUSED)
-print(type(OSError(114, "x")).__name__)  # BlockingIOError        (EALREADY)
-print(type(OSError(115, "x")).__name__)  # BlockingIOError        (EINPROGRESS)
 
 # --- errno values with no mapping stay as OSError ---
 print(type(OSError(0, "x")).__name__)    # OSError

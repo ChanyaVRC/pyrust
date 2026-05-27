@@ -5,7 +5,7 @@
 # forms.  This fixture exercises both the OS-raised path and manual
 # construction.
 
-import os
+import os, sys
 
 # ── OS-raised path: FileNotFoundError from open() ───────────────────────────
 
@@ -14,7 +14,7 @@ try:
 except FileNotFoundError as e:
     print(type(e).__name__)
     print(e.errno)
-    print(e.strerror)
+    # strerror text is platform-specific for OS-raised errors.
     print(e.filename)
 
 # ── OS-raised path: FileNotFoundError from os.remove() ──────────────────────
@@ -24,7 +24,7 @@ try:
 except FileNotFoundError as e:
     print(type(e).__name__)
     print(e.errno)
-    print(e.strerror)
+    # strerror is platform-specific for OS-raised errors.
     print(e.filename)
 
 # ── OS-raised path: FileNotFoundError from os.rmdir() ───────────────────────
@@ -34,7 +34,7 @@ try:
 except FileNotFoundError as e:
     print(type(e).__name__)
     print(e.errno)
-    print(e.strerror)
+    # strerror is platform-specific for OS-raised errors.
     print(e.filename)
 
 # ── Manual construction: 3-arg form ─────────────────────────────────────────
@@ -79,7 +79,7 @@ except FileNotFoundError as e:
     # str(e) produces "[Errno N] message: 'filename'"
     s = str(e)
     print(s.startswith("[Errno 2]"))
-    print("No such file or directory" in s)
+    # strerror is platform-specific; only check the stable parts.
     print("/no_such_file_str_test_abc" in s)
 
 # repr() of a 3-arg FileNotFoundError shows only (errno, strerror) — no filename
