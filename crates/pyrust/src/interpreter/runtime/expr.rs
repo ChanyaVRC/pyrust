@@ -322,6 +322,7 @@ impl Interpreter {
             ValueKind::Tuple(_) => Some("tuple"),
             ValueKind::Str(_) => Some("string"),
             ValueKind::Bytes(_) => Some("bytes"),
+            ValueKind::Range { .. } => Some("range"),
             _ => None,
         };
         let index = if let Some(label) = seq_label {
@@ -346,6 +347,31 @@ impl Interpreter {
             ValueKind::Bytes(rc) => {
                 let idx = normalize_index(&index, rc.len(), "bytes")?;
                 Ok(Value::int(rc[idx] as i64))
+            }
+            ValueKind::Range { start, stop, step } => {
+                let len = range_len(start, stop, step);
+                // call_index_protocol (via seq_label) has already resolved any
+                // __index__ on the subscript; the value is now Int/Bool/BigInt.
+                // Cannot use normalize_index because its error message is
+                // "range index out of range", but CPython says
+                // "range object index out of range".
+                let mut i = match index.kind() {
+                    ValueKind::Int(v) => v,
+                    ValueKind::Bool(b) => b as i64,
+                    // BigInt is a valid integer but will always be out of range
+                    // for any realistic range length.
+                    ValueKind::BigInt(_) => {
+                        return Err(PyError::named("IndexError", "range object index out of range".to_string()));
+                    }
+                    _ => unreachable!("call_index_protocol guarantees an integer"),
+                };
+                if i < 0 {
+                    i += len;
+                }
+                if i < 0 || i >= len {
+                    return Err(PyError::named("IndexError", "range object index out of range".to_string()));
+                }
+                Ok(Value::int(start + i * step))
             }
             ValueKind::Dict(_) => unreachable!("handled above"),
             ValueKind::BuiltinObject { ops, state } => {
@@ -2813,6 +2839,28 @@ impl Interpreter {
         if let ValueKind::BuiltinObject { ops, state } = target.kind() {
             let slice_val = pyrust_builtins::slice::make_slice(lo, hi, st);
             return ops.get_item(state, &slice_val);
+        }
+
+        // Range slicing: compute the result range arithmetically, matching
+        // CPython's range.__getitem__ for slice arguments.  Handled before
+        // the general built-in sequence path so we never materialise elements.
+        //
+        // CPython's algorithm (Objects/rangeobject.c):
+        //   (sl_start, sl_stop, sl_step) = slice.indices(len(r))
+        //   new_start = r.start + sl_start * r.step
+        //   new_stop  = r.start + sl_stop  * r.step  ← note: uses r.start, not new_start
+        //   new_step  = r.step  * sl_step
+        if let ValueKind::Range { start: r_start, stop: r_stop, step: r_step } = target.kind() {
+            let lo = self.resolve_slice_bound_val(lo)?;
+            let hi = self.resolve_slice_bound_val(hi)?;
+            let st = self.resolve_slice_bound_val(st)?;
+            let r_len = range_len(r_start, r_stop, r_step);
+            let (sl_start, sl_stop, sl_step) =
+                Self::resolve_slice_bounds(r_len, lo.as_ref(), hi.as_ref(), st.as_ref())?;
+            let new_start = r_start + sl_start * r_step;
+            let new_stop  = r_start + sl_stop  * r_step;
+            let new_step  = r_step  * sl_step;
+            return Ok(Value::range(new_start, new_stop, new_step));
         }
 
         // Built-in sequences: resolve bounds through __index__ before applying
