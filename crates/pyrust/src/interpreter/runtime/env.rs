@@ -3,227 +3,54 @@ impl Interpreter {
         match target.kind() {
             ValueKind::PyInstance(instance) => {
                 let instance = Rc::clone(instance);
-                if name == "__class__" {
-                    return Ok(Value::py_class(Rc::clone(&instance.borrow().class)));
-                }
-                if name == "__dict__" {
-                    // Return a live mutable proxy so that writes to
-                    // `obj.__dict__['key'] = val` propagate back to the
-                    // instance's actual attrs map.  Required for the data-
-                    // descriptor `__set__` protocol (issues #1271 / #1272).
-                    let is_exc = is_exception_class(&instance.borrow().class);
-                    return Ok(pyrust_builtins::instance_dict::instance_dict(
-                        Rc::clone(&instance),
-                        is_exc,
-                    ));
-                }
-
-                // General descriptor protocol (CPython Data Model §3.3.2):
-                //
-                // Step 1: Walk the class MRO for a data descriptor (has
-                // __set__ OR __delete__).  Data descriptors take priority
-                // over instance __dict__.
-                //
-                // If __get__ raises AttributeError, CPython's
-                // slot_tp_getattr_hook falls through to __getattr__ (if
-                // defined) rather than propagating immediately — only
-                // non-AttributeError exceptions propagate without __getattr__.
-                let class = { Rc::clone(&instance.borrow().class) };
-                if let Some(class_val) = lookup_class_attr(&class, name) {
-                    if is_data_descriptor(&class_val) {
-                        let desc_result = call_descriptor_get(
-                            self,
-                            &class_val,
-                            Value::py_instance(Rc::clone(&instance)),
-                            Value::py_class(Rc::clone(&class)),
-                            name,
-                        );
-                        match desc_result {
-                            Ok(v) => return Ok(v),
-                            Err(ref e) if e.class_name_is("AttributeError") => {
-                                // __get__ raised AttributeError: try __getattr__ if
-                                // defined, otherwise re-raise the original error
-                                // (CPython slot_tp_getattr_hook behaviour).
-                                if let Some(getattr_val) =
-                                    lookup_class_attr(&class, "__getattr__")
-                                {
-                                    return invoke_class_method(
-                                        self,
-                                        getattr_val,
-                                        Value::py_instance(Rc::clone(&instance)),
-                                        &[ExpandedCallArg {
-                                            name: None,
-                                            value: Value::string(name.to_string()),
-                                        }],
-                                    );
-                                }
-                            }
-                            Err(_) => {}
-                        }
-                        return desc_result;
-                    }
-                }
-
-                // Step 2: Instance __dict__.
-                if let Some(value) = instance.borrow().attrs.get(name).cloned() {
-                    return Ok(value);
-                }
-
-                // Step 3: Non-data descriptor or plain class attribute.
-                // `cached_property` and user-defined non-data descriptors
-                // (has __get__ but NOT __set__/__delete__) fire here;
-                // regular UserFunction / BuiltinFunction attrs bind to the
-                // instance as before.
-                if let Some(value) = lookup_class_attr(&class, name) {
-                    // cached_property: non-data descriptor with caching.
-                    // Must come before the general __get__ check because
-                    // cached_property's result is stored back into
-                    // instance.attrs for subsequent accesses.
-                    if let Some((func, attr_name)) =
-                        pyrust_builtins::cached_property::with_cached_property(&value, |s| {
-                            (s.func.clone(), s.attr_name.clone())
-                        })
-                    {
-                        let result = self.call_function_expanded(
-                            func,
-                            &[ExpandedCallArg {
-                                name: None,
-                                value: Value::py_instance(Rc::clone(&instance)),
-                            }],
-                        )?;
-                        instance
-                            .borrow_mut()
-                            .attrs
-                            .insert(attr_name, result.clone());
-                        return Ok(result);
-                    }
-                    // General non-data descriptor: has __get__ but no __set__/__delete__.
-                    // Same AttributeError fallthrough to __getattr__ applies.
-                    if is_non_data_descriptor(&value) {
-                        let desc_result = call_descriptor_get(
-                            self,
-                            &value,
-                            Value::py_instance(Rc::clone(&instance)),
-                            Value::py_class(Rc::clone(&class)),
-                            name,
-                        );
-                        match desc_result {
-                            Ok(v) => return Ok(v),
-                            Err(ref e) if e.class_name_is("AttributeError") => {
-                                // __get__ raised AttributeError: try __getattr__ if
-                                // defined, otherwise re-raise the original error.
-                                if let Some(getattr_val) =
-                                    lookup_class_attr(&class, "__getattr__")
-                                {
-                                    return invoke_class_method(
-                                        self,
-                                        getattr_val,
-                                        Value::py_instance(Rc::clone(&instance)),
-                                        &[ExpandedCallArg {
-                                            name: None,
-                                            value: Value::string(name.to_string()),
-                                        }],
-                                    );
-                                }
-                            }
-                            Err(_) => {}
-                        }
-                        return desc_result;
-                    }
-                    // Plain class attribute: bind functions to the instance.
-                    // Probe kind tag in a scoped block so the `kind()` Ref
-                    // drops before the `_ => value` arm may move `value`
-                    // (#450).
-                    enum AttrKind {
-                        UserFunction(Rc<UserFunction>),
-                        BuiltinFunction,
-                        ClassMethodAny(Value),
-                        StaticMethodAny(Value),
-                        Other,
-                    }
-                    let tag = match value.kind() {
-                        ValueKind::UserFunction(f) => AttrKind::UserFunction(Rc::clone(f)),
-                        ValueKind::BuiltinFunction(_) => AttrKind::BuiltinFunction,
-                        _ => {
-                            if let Some(w) =
-                                pyrust_builtins::classmethod::as_class_method_any(&value)
-                            {
-                                AttrKind::ClassMethodAny(w)
-                            } else if let Some(w) =
-                                pyrust_builtins::classmethod::as_static_method_any(&value)
-                            {
-                                AttrKind::StaticMethodAny(w)
-                            } else {
-                                AttrKind::Other
-                            }
-                        }
-                    };
-                    return Ok(match tag {
-                        AttrKind::UserFunction(f) => match f.kind {
-                            UserFunctionKind::Regular => {
-                                Value::bound_method(Rc::clone(&f), instance)
-                            }
-                            UserFunctionKind::ClassMethod => {
-                                Value::class_bound_method(Rc::clone(&f), Rc::clone(&class))
-                            }
-                            UserFunctionKind::StaticMethod => {
-                                Value::user_function(Rc::clone(&f))
-                            }
-                            UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(&f)),
-                        },
-                        AttrKind::BuiltinFunction => {
-                            pyrust_builtins::bound_method::bound_method(
-                                name.to_string(),
-                                Value::py_instance(Rc::clone(&instance)),
-                            )
-                        }
-                        // classmethod/staticmethod wrapping a non-function: apply
-                        // descriptor protocol same as class-level access (§3.3.2).
-                        // classmethod returns the wrapped value (best approximation;
-                        // CPython returns a method object for non-callables but that
-                        // requires a new Value variant); staticmethod returns directly.
-                        AttrKind::ClassMethodAny(w) => w,
-                        AttrKind::StaticMethodAny(w) => w,
-                        AttrKind::Other => value,
-                    });
-                }
-
-                // PEP 3134 attributes on exception instances default to
-                // `None` when not yet set by the raise machinery.  This
-                // mirrors CPython, where `BaseException.__context__` and
-                // `BaseException.__cause__` are initialised to `None` on
-                // every exception instance.
-                if (name == "__context__"
-                    || name == "__cause__"
-                    || name == "__suppress_context__")
-                    && is_exception_class(&class)
+                // CPython: before any other lookup, check whether type(obj) defines a
+                // custom __getattribute__ (anything other than the builtin default on
+                // `object`).  If so, call it.  The builtin default
+                // (object.__getattribute__) is a BuiltinFunction; user-defined overrides
+                // are UserFunction values — so dispatching only for UserFunction covers
+                // exactly the "customised" case with no overhead on the common path.
                 {
-                    return Ok(if name == "__suppress_context__" {
-                        Value::bool_(false)
-                    } else {
-                        Value::none()
-                    });
+                    let class = { Rc::clone(&instance.borrow().class) };
+                    if let Some(getattribute_val) =
+                        lookup_class_attr(&class, "__getattribute__")
+                    {
+                        if matches!(getattribute_val.kind(), ValueKind::UserFunction(_)) {
+                            let result = invoke_class_method(
+                                self,
+                                getattribute_val,
+                                Value::py_instance(Rc::clone(&instance)),
+                                &[ExpandedCallArg {
+                                    name: None,
+                                    value: Value::string(name.to_string()),
+                                }],
+                            );
+                            return match result {
+                                Err(ref e) if e.class_name_is("AttributeError") => {
+                                    // __getattribute__ raised AttributeError: fall
+                                    // through to __getattr__ if defined (CPython
+                                    // slot_tp_getattr_hook behaviour).
+                                    if let Some(getattr_val) =
+                                        lookup_class_attr(&class, "__getattr__")
+                                    {
+                                        invoke_class_method(
+                                            self,
+                                            getattr_val,
+                                            Value::py_instance(Rc::clone(&instance)),
+                                            &[ExpandedCallArg {
+                                                name: None,
+                                                value: Value::string(name.to_string()),
+                                            }],
+                                        )
+                                    } else {
+                                        result
+                                    }
+                                }
+                                other => other,
+                            };
+                        }
+                    }
                 }
-
-                // Step 4: __getattr__ fallback — called when normal lookup
-                // finds nothing (CPython slot_tp_getattr_hook).
-                if let Some(getattr_val) = lookup_class_attr(&class, "__getattr__") {
-                    return invoke_class_method(
-                        self,
-                        getattr_val,
-                        Value::py_instance(Rc::clone(&instance)),
-                        &[ExpandedCallArg {
-                            name: None,
-                            value: Value::string(name.to_string()),
-                        }],
-                    );
-                }
-
-                let class_name = class.borrow().name.clone();
-                Err(PyError::named(
-                    "AttributeError",
-                    format!("'{}' object has no attribute '{}'", class_name, name),
-                ))
+                self.get_attr_instance_raw(instance, name)
             }
             ValueKind::PyClass(class) => {
                 let class = Rc::clone(class);
@@ -882,6 +709,223 @@ impl Interpreter {
                 ))
             }
         }
+    }
+
+    /// Standard attribute lookup for a `PyInstance` — the body of
+    /// CPython's `object.__getattribute__`.  Called by `get_attr` when no
+    /// user-defined `__getattribute__` is in the MRO, and directly by the
+    /// `object.__getattribute__` builtin to avoid recursive dispatch.
+    pub(crate) fn get_attr_instance_raw(
+        &mut self,
+        instance: Rc<RefCell<PyInstance>>,
+        name: &str,
+    ) -> Result<Value> {
+        if name == "__class__" {
+            return Ok(Value::py_class(Rc::clone(&instance.borrow().class)));
+        }
+        if name == "__dict__" {
+            // Return a live mutable proxy so that writes to
+            // `obj.__dict__['key'] = val` propagate back to the
+            // instance's actual attrs map.  Required for the data-
+            // descriptor `__set__` protocol (issues #1271 / #1272).
+            let is_exc = is_exception_class(&instance.borrow().class);
+            return Ok(pyrust_builtins::instance_dict::instance_dict(
+                Rc::clone(&instance),
+                is_exc,
+            ));
+        }
+
+        // General descriptor protocol (CPython Data Model §3.3.2):
+        //
+        // Step 1: Walk the class MRO for a data descriptor (has
+        // __set__ OR __delete__).  Data descriptors take priority
+        // over instance __dict__.
+        //
+        // If __get__ raises AttributeError, CPython's
+        // slot_tp_getattr_hook falls through to __getattr__ (if
+        // defined) rather than propagating immediately — only
+        // non-AttributeError exceptions propagate without __getattr__.
+        let class = { Rc::clone(&instance.borrow().class) };
+        if let Some(class_val) = lookup_class_attr(&class, name) {
+            if is_data_descriptor(&class_val) {
+                let desc_result = call_descriptor_get(
+                    self,
+                    &class_val,
+                    Value::py_instance(Rc::clone(&instance)),
+                    Value::py_class(Rc::clone(&class)),
+                    name,
+                );
+                match desc_result {
+                    Ok(v) => return Ok(v),
+                    Err(ref e) if e.class_name_is("AttributeError") => {
+                        // __get__ raised AttributeError: try __getattr__ if
+                        // defined, otherwise re-raise the original error
+                        // (CPython slot_tp_getattr_hook behaviour).
+                        if let Some(getattr_val) = lookup_class_attr(&class, "__getattr__") {
+                            return invoke_class_method(
+                                self,
+                                getattr_val,
+                                Value::py_instance(Rc::clone(&instance)),
+                                &[ExpandedCallArg {
+                                    name: None,
+                                    value: Value::string(name.to_string()),
+                                }],
+                            );
+                        }
+                    }
+                    Err(_) => {}
+                }
+                return desc_result;
+            }
+        }
+
+        // Step 2: Instance __dict__.
+        if let Some(value) = instance.borrow().attrs.get(name).cloned() {
+            return Ok(value);
+        }
+
+        // Step 3: Non-data descriptor or plain class attribute.
+        // `cached_property` and user-defined non-data descriptors
+        // (has __get__ but NOT __set__/__delete__) fire here;
+        // regular UserFunction / BuiltinFunction attrs bind to the
+        // instance as before.
+        if let Some(value) = lookup_class_attr(&class, name) {
+            // cached_property: non-data descriptor with caching.
+            // Must come before the general __get__ check because
+            // cached_property's result is stored back into
+            // instance.attrs for subsequent accesses.
+            if let Some((func, attr_name)) =
+                pyrust_builtins::cached_property::with_cached_property(&value, |s| {
+                    (s.func.clone(), s.attr_name.clone())
+                })
+            {
+                let result = self.call_function_expanded(
+                    func,
+                    &[ExpandedCallArg {
+                        name: None,
+                        value: Value::py_instance(Rc::clone(&instance)),
+                    }],
+                )?;
+                instance.borrow_mut().attrs.insert(attr_name, result.clone());
+                return Ok(result);
+            }
+            // General non-data descriptor: has __get__ but no __set__/__delete__.
+            // Same AttributeError fallthrough to __getattr__ applies.
+            if is_non_data_descriptor(&value) {
+                let desc_result = call_descriptor_get(
+                    self,
+                    &value,
+                    Value::py_instance(Rc::clone(&instance)),
+                    Value::py_class(Rc::clone(&class)),
+                    name,
+                );
+                match desc_result {
+                    Ok(v) => return Ok(v),
+                    Err(ref e) if e.class_name_is("AttributeError") => {
+                        // __get__ raised AttributeError: try __getattr__ if
+                        // defined, otherwise re-raise the original error.
+                        if let Some(getattr_val) = lookup_class_attr(&class, "__getattr__") {
+                            return invoke_class_method(
+                                self,
+                                getattr_val,
+                                Value::py_instance(Rc::clone(&instance)),
+                                &[ExpandedCallArg {
+                                    name: None,
+                                    value: Value::string(name.to_string()),
+                                }],
+                            );
+                        }
+                    }
+                    Err(_) => {}
+                }
+                return desc_result;
+            }
+            // Plain class attribute: bind functions to the instance.
+            // Probe kind tag in a scoped block so the `kind()` Ref
+            // drops before the `_ => value` arm may move `value`
+            // (#450).
+            enum AttrKind {
+                UserFunction(Rc<UserFunction>),
+                BuiltinFunction,
+                ClassMethodAny(Value),
+                StaticMethodAny(Value),
+                Other,
+            }
+            let tag = match value.kind() {
+                ValueKind::UserFunction(f) => AttrKind::UserFunction(Rc::clone(f)),
+                ValueKind::BuiltinFunction(_) => AttrKind::BuiltinFunction,
+                _ => {
+                    if let Some(w) = pyrust_builtins::classmethod::as_class_method_any(&value) {
+                        AttrKind::ClassMethodAny(w)
+                    } else if let Some(w) =
+                        pyrust_builtins::classmethod::as_static_method_any(&value)
+                    {
+                        AttrKind::StaticMethodAny(w)
+                    } else {
+                        AttrKind::Other
+                    }
+                }
+            };
+            return Ok(match tag {
+                AttrKind::UserFunction(f) => match f.kind {
+                    UserFunctionKind::Regular => Value::bound_method(Rc::clone(&f), instance),
+                    UserFunctionKind::ClassMethod => {
+                        Value::class_bound_method(Rc::clone(&f), Rc::clone(&class))
+                    }
+                    UserFunctionKind::StaticMethod => Value::user_function(Rc::clone(&f)),
+                    UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(&f)),
+                },
+                AttrKind::BuiltinFunction => pyrust_builtins::bound_method::bound_method(
+                    name.to_string(),
+                    Value::py_instance(Rc::clone(&instance)),
+                ),
+                // classmethod/staticmethod wrapping a non-function: apply
+                // descriptor protocol same as class-level access (§3.3.2).
+                // classmethod returns the wrapped value (best approximation;
+                // CPython returns a method object for non-callables but that
+                // requires a new Value variant); staticmethod returns directly.
+                AttrKind::ClassMethodAny(w) => w,
+                AttrKind::StaticMethodAny(w) => w,
+                AttrKind::Other => value,
+            });
+        }
+
+        // PEP 3134 attributes on exception instances default to
+        // `None` when not yet set by the raise machinery.  This
+        // mirrors CPython, where `BaseException.__context__` and
+        // `BaseException.__cause__` are initialised to `None` on
+        // every exception instance.
+        if (name == "__context__"
+            || name == "__cause__"
+            || name == "__suppress_context__")
+            && is_exception_class(&class)
+        {
+            return Ok(if name == "__suppress_context__" {
+                Value::bool_(false)
+            } else {
+                Value::none()
+            });
+        }
+
+        // Step 4: __getattr__ fallback — called when normal lookup
+        // finds nothing (CPython slot_tp_getattr_hook).
+        if let Some(getattr_val) = lookup_class_attr(&class, "__getattr__") {
+            return invoke_class_method(
+                self,
+                getattr_val,
+                Value::py_instance(Rc::clone(&instance)),
+                &[ExpandedCallArg {
+                    name: None,
+                    value: Value::string(name.to_string()),
+                }],
+            );
+        }
+
+        let class_name = class.borrow().name.clone();
+        Err(PyError::named(
+            "AttributeError",
+            format!("'{}' object has no attribute '{}'", class_name, name),
+        ))
     }
 
     pub(crate) fn assign_attr(&mut self, target: Value, name: &str, value: Value) -> Result<()> {

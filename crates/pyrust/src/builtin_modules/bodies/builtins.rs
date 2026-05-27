@@ -4539,6 +4539,53 @@ pyrust_module! {
         }
     }
 
+    /// Issue #1254: `object.__getattribute__(self, name)` — the default
+    /// attribute lookup used by all instances that do not override
+    /// `__getattribute__`.  Performs the standard descriptor protocol (data
+    /// descriptor -> instance dict -> non-data descriptor / class attr ->
+    /// __getattr__ fallback) without re-invoking the `__getattribute__`
+    /// dispatch, so `object.__getattribute__(self, name)` inside a custom
+    /// `__getattribute__` terminates the MRO walk cleanly.
+    ///
+    /// CPython signature: `object.__getattribute__(self, name, /)`
+    #[py_name = "object.__getattribute__"]
+    fn object_getattribute(args) -> Result<Value> {
+        // CPython error messages for argument count mismatches:
+        //   0 args: "descriptor '__getattribute__' of 'object' object needs an argument"
+        //   1 arg (self only, 0 name args): "expected 1 argument, got 0"
+        //   3+ args: "expected 1 argument, got N" where N = args.len() - 1
+        if args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                "descriptor '__getattribute__' of 'object' object needs an argument".to_string(),
+            ));
+        }
+        if args.len() != 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("expected 1 argument, got {}", args.len() - 1),
+            ));
+        }
+        let name = match args[1].value.kind() {
+            ValueKind::Str(s) => s.to_string(),
+            _ => {
+                // CPython: "attribute name must be string, not 'TYPE'"
+                let type_name = value_type_name_str(&args[1].value);
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("attribute name must be string, not '{type_name}'"),
+                ));
+            }
+        };
+        let instance_rc = match args[0].value.kind() {
+            ValueKind::PyInstance(rc) => Rc::clone(rc),
+            _ => {
+                return _interp.get_attr(args[0].value.clone(), &name);
+            }
+        };
+        _interp.get_attr_instance_raw(instance_rc, &name)
+    }
+
     /// Issue #1112: `BaseException.__init__(self, *args)` — updates `self.args`
     /// so that `super().__init__(msg)` in an exception subclass sets the correct
     /// `.args` tuple on the already-constructed instance.  Also mirrors the
