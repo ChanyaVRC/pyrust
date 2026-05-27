@@ -100,6 +100,19 @@ inst = object.__new__(Bare)
 print(type(inst).__name__)      # Bare
 print(isinstance(inst, Bare))   # True
 
+# --- object.__new__ error cases ---
+
+try:
+    object.__new__()
+except TypeError as e:
+    print(type(e).__name__)     # TypeError
+    print(str(e))               # object.__new__(): not enough arguments
+
+try:
+    object.__new__(42)
+except TypeError as e:
+    print(type(e).__name__)     # TypeError
+
 # --- __new__ without __init__ ---
 
 class NoInit:
