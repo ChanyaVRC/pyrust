@@ -21,6 +21,7 @@ pub mod set;
 pub mod slice;
 pub mod string;
 pub mod super_bound_builtin;
+pub mod traceback;
 pub mod tuple;
 pub mod union_type;
 
@@ -49,6 +50,7 @@ pub fn lookup_ops(type_name: &str) -> Option<&'static dyn pyrust_core::BuiltinTy
         classmethod::STATIC_TYPE_NAME => Some(classmethod::STATIC_METHOD_ANY_OPS),
         classmethod::CLASS_BINDER_TYPE_NAME => Some(classmethod::CLASS_METHOD_GET_BINDER_OPS),
         classmethod::STATIC_BINDER_TYPE_NAME => Some(classmethod::STATIC_METHOD_GET_BINDER_OPS),
+        traceback::TYPE_NAME => Some(traceback::TRACEBACK_OPS),
         union_type::TYPE_NAME => Some(union_type::UNION_TYPE_OPS),
         _ => None,
     }
