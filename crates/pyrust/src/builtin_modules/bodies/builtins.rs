@@ -1102,19 +1102,18 @@ pyrust_module! {
             ));
         }
         let func = args[0].value.clone();
-        // Pre-materialise any Generator/PyInstance sources so that
-        // iter_values_via_registry can reach them inside MapIter.
+        // Convert each iterable argument to an iterator object without
+        // consuming any elements.  Elements are pulled lazily by
+        // step_map_iter via call_next.
         let sources: Result<Vec<Value>> = args[1..]
             .iter()
-            .map(|a| materialize_user_iter(_interp, a.value.clone()))
+            .map(|a| make_iterator(_interp, a.value.clone()))
             .collect();
         let sources = sources?;
         Ok(Value::generator(Box::new(MapIter {
             func,
             sources,
-            columns: None,
-            len: 0,
-            pos: 0,
+            done: false,
         })))
     }
 
@@ -1126,15 +1125,14 @@ pyrust_module! {
         #[positional_only] func: PyValue,
         #[positional_only] iterable: PyValue,
     ) -> Result<Value> {
-        // Pre-materialise Generator/PyInstance so iter_values_via_registry
-        // can reach items from FilterIter without an interpreter handle.
-        let source = materialize_user_iter(_interp, iterable.0)?;
+        // Convert the iterable to an iterator without consuming any elements.
+        // Elements are pulled lazily by step_filter_iter via call_next.
+        let source = make_iterator(_interp, iterable.0)?;
         let func_opt = if func.0.is_none() { None } else { Some(func.0) };
         Ok(Value::generator(Box::new(FilterIter {
             func: func_opt,
             source,
-            items: None,
-            pos: 0,
+            done: false,
         })))
     }
 
@@ -5077,6 +5075,83 @@ pub(super) fn materialize_user_iter(
     }
 }
 
+/// Convert an arbitrary Python iterable value into an iterator object without
+/// consuming any elements.
+///
+/// Mirrors the single-argument `iter()` builtin logic:
+/// - `Generator` values (already-created iterators: map, filter, enumerate,
+///   generator objects, etc.) are returned as-is.
+/// - `PyInstance` values with `__iter__` have it called; the resulting iterator
+///   object is returned.  `PyInstance` values with only `__getitem__` are
+///   wrapped in a `GetItemIter`.
+/// - All other values (lists, tuples, ranges, dict views, …) are wrapped in a
+///   `NativeIterFrame` so they can be advanced one element at a time without
+///   materialising the entire sequence upfront.
+///
+/// Used by `map()` and `filter()` to avoid eagerly exhausting generator sources
+/// at construction time (issue #1388).
+pub(super) fn make_iterator(interp: &mut crate::Interpreter, v: Value) -> Result<Value> {
+    enum IterKind {
+        Generator,
+        PyInstance(Rc<RefCell<crate::value::PyInstance>>),
+        Other,
+    }
+    let kind = match v.kind() {
+        ValueKind::Generator(_) => IterKind::Generator,
+        ValueKind::PyInstance(inst) => IterKind::PyInstance(Rc::clone(inst)),
+        _ => IterKind::Other,
+    };
+    match kind {
+        IterKind::Generator => Ok(v),
+        IterKind::PyInstance(inst_rc) => {
+            let class = Rc::clone(&inst_rc.borrow().class);
+            if let Some(method_val) = lookup_class_attr(&class, "__iter__") {
+                let iter_obj =
+                    invoke_class_method(interp, method_val, Value::py_instance(inst_rc), &[])?;
+                let is_valid_iter = match iter_obj.kind() {
+                    ValueKind::Generator(_) => true,
+                    ValueKind::PyInstance(it) => {
+                        let it_class = Rc::clone(&it.borrow().class);
+                        lookup_class_attr(&it_class, "__next__").is_some()
+                    }
+                    ValueKind::BuiltinObject { ops, .. } => ops.is_iterable(),
+                    _ => false,
+                };
+                if !is_valid_iter {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "iter() returned non-iterator of type '{}'",
+                            value_type_name_str(&iter_obj),
+                        ),
+                    ));
+                }
+                Ok(iter_obj)
+            } else if lookup_class_attr(&class, "__getitem__").is_some() {
+                interp.make_getitem_iter(inst_rc)
+            } else {
+                Err(PyError::named(
+                    "TypeError",
+                    format!("'{}' object is not iterable", class.borrow().name),
+                ))
+            }
+        }
+        IterKind::Other => {
+            let iter_type_name = builtin_iter_type_name(&v);
+            let items = iter_values(v.clone()).map_err(|_| {
+                PyError::named(
+                    "TypeError",
+                    format!("'{}' object is not iterable", value_type_name_str(&v)),
+                )
+            })?;
+            Ok(Value::generator(Box::new(NativeIterFrame {
+                items,
+                pos: 0,
+                type_name: iter_type_name,
+            })))
+        }
+    }
+}
 
 // `int_hash` and `bigint_hash` were previously defined here.  They are now
 // shared helpers (`py_hash_int` / `py_hash_bigint`) in
