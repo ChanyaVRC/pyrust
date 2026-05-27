@@ -1,8 +1,6 @@
 # Parity fixture: iter() error message when __iter__ returns a non-iterator.
 # CPython 3.12: TypeError: iter() returned non-iterator of type '<typename>'
 
-import sys
-
 
 # Case 1: __iter__ returns a plain int (no __next__).
 class BadIterInt:
