@@ -227,6 +227,7 @@ thread_local! {
         let mut attrs: IndexMap<String, Value> = IndexMap::new();
         for dunder in &[
             "__init_subclass__",
+            "__getattribute__",
             "__str__",
             "__repr__",
             "__eq__",
