@@ -5901,7 +5901,7 @@ fn min_max_impl(
 /// tracks which container object ids are currently being formatted; a second
 /// visit short-circuits to the CPython placeholder (`[...]` / `(...)` /
 /// `{...}`).
-fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) -> Result<String> {
+pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) -> Result<String> {
     // Dispatch __repr__ for user instances.
     if let ValueKind::PyInstance(instance) = value.kind() {
         let instance_rc = Rc::clone(instance);

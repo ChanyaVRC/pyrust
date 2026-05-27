@@ -4397,17 +4397,20 @@ impl Interpreter {
         // Issue #1205: no __str__ or __repr__ in MRO — delegate to the
         // backing container so that list/dict/tuple/set subclasses render
         // their contents rather than the generic object repr.
+        // Use render_value_repr (interp-aware) so that PyInstance elements
+        // inside the backing container have their __repr__ called correctly.
         if let Some(backing) = instance_builtin_data(&inst_rc) {
             match backing.kind() {
                 ValueKind::List(_) | ValueKind::Dict(_) | ValueKind::Tuple(_) => {
-                    return Ok(backing.repr());
+                    return crate::builtin_modules::builtins::render_value_repr(self, &backing);
                 }
                 ValueKind::Set(items) => {
                     let class_name = class.borrow().name.clone();
                     if items.is_empty() {
                         return Ok(format!("{class_name}()"));
                     }
-                    let inner = backing.repr();
+                    let inner =
+                        crate::builtin_modules::builtins::render_value_repr(self, &backing)?;
                     return Ok(format!("{class_name}({inner})"));
                 }
                 ValueKind::BuiltinObject { ops, .. }
@@ -4931,17 +4934,20 @@ fn render_instance_repr(interp: &mut Interpreter, value: &Value) -> Result<Strin
     // Issue #1205: no __repr__ in MRO — delegate to backing container so
     // that list/dict/tuple/set subclasses render their contents rather than
     // the generic `<ClassName object at 0x...>` object repr.
+    // Use render_value_repr (interp-aware) so that PyInstance elements
+    // inside the backing container have their __repr__ called correctly.
     if let Some(backing) = instance_builtin_data(&inst_rc) {
         match backing.kind() {
             ValueKind::List(_) | ValueKind::Dict(_) | ValueKind::Tuple(_) => {
-                return Ok(backing.repr());
+                return crate::builtin_modules::builtins::render_value_repr(interp, &backing);
             }
             ValueKind::Set(items) => {
                 let class_name = class.borrow().name.clone();
                 if items.is_empty() {
                     return Ok(format!("{class_name}()"));
                 }
-                let inner = backing.repr();
+                let inner =
+                    crate::builtin_modules::builtins::render_value_repr(interp, &backing)?;
                 return Ok(format!("{class_name}({inner})"));
             }
             ValueKind::BuiltinObject { ops, .. }
