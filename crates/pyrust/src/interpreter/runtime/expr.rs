@@ -1674,6 +1674,21 @@ impl Interpreter {
                     _ => unreachable!(),
                 }
             }
+            // `fromkeys` is a classmethod: ignore the dict receiver and call
+            // the registry dispatch directly with the user-supplied args.
+            "fromkeys" => {
+                let dispatch = crate::builtin_registry::lookup("dict.fromkeys")
+                    .ok_or_else(|| {
+                        PyError::Runtime(
+                            "internal: dict.fromkeys not in registry".to_string(),
+                        )
+                    })?;
+                let expanded: Vec<ExpandedCallArg> = args
+                    .into_iter()
+                    .map(|v| ExpandedCallArg { name: None, value: v })
+                    .collect();
+                dispatch(self, &expanded)
+            }
             _ => pyrust_builtins::dict::call(method, &receiver, args),
         }
     }
