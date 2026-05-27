@@ -1881,6 +1881,28 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__mul__", "__rmul__") {
                     return r;
                 }
+                // Before raising TypeError, try __index__ on the count operand
+                // when one side is a built-in sequence.  CPython calls
+                // PyNumber_AsSsize_t (which invokes __index__) before failing.
+                let is_seq = |v: &Value| {
+                    matches!(
+                        v.kind(),
+                        ValueKind::Str(_)
+                            | ValueKind::List(_)
+                            | ValueKind::Tuple(_)
+                            | ValueKind::Bytes(_)
+                    )
+                };
+                let is_py_instance =
+                    |v: &Value| matches!(v.kind(), ValueKind::PyInstance(_));
+                if is_seq(&left) && is_py_instance(&right) {
+                    let right = self.try_index_for_seq_repeat(right)?;
+                    return self.mul(left, right);
+                }
+                if is_seq(&right) && is_py_instance(&left) {
+                    let left = self.try_index_for_seq_repeat(left)?;
+                    return self.mul(left, right);
+                }
                 self.mul(left, right)
             }
             BinaryOp::MatMul => {
@@ -2289,6 +2311,80 @@ impl Interpreter {
                 Ok(Value::float(a - bigint_to_float_or_overflow(&b)?))
             }
             _ => Err(Self::unsupported_binary_operand("-")),
+        }
+    }
+
+    /// Resolve a sequence repetition count through `__index__` when the value
+    /// is a PyInstance.  Returns the original value for int/bool/bigint.
+    /// Raises `TypeError` if `__index__` returns non-int, or if the instance
+    /// has no `__index__` at all, matching CPython 3.12 sequence repetition.
+    fn try_index_for_seq_repeat(&mut self, val: Value) -> Result<Value> {
+        // Use a Tag enum so the Ref guard from val.kind() drops before we
+        // need to move `val` (same pattern as resolve_index_arg in calls.rs).
+        enum Tag {
+            Int,
+            Instance(Rc<RefCell<PyInstance>>),
+            Other,
+        }
+        let type_name_for_err = value_type_name_str(&val).to_string();
+        let tag = match val.kind() {
+            ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => Tag::Int,
+            ValueKind::PyInstance(inst) => Tag::Instance(Rc::clone(inst)),
+            _ => Tag::Other,
+        };
+        match tag {
+            Tag::Int => Ok(val),
+            Tag::Other => Err(PyError::named(
+                "TypeError",
+                format!("can't multiply sequence by non-int of type '{type_name_for_err}'"),
+            )),
+            Tag::Instance(inst_rc) => {
+                let class = Rc::clone(&inst_rc.borrow().class);
+                let Some(method_val) = lookup_class_attr(&class, "__index__") else {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "can't multiply sequence by non-int of type '{type_name_for_err}'"
+                        ),
+                    ));
+                };
+                let result = invoke_class_method(
+                    self,
+                    method_val,
+                    Value::py_instance(Rc::clone(&inst_rc)),
+                    &[],
+                )?;
+                // Classify the result before consuming it so the borrow on
+                // result.kind() ends before we move `result` into Ok(_).
+                enum ResultTag {
+                    SmallInt,
+                    BigInt,
+                    Other,
+                }
+                let result_type_name = value_type_name_str(&result).to_string();
+                let result_tag = match result.kind() {
+                    ValueKind::Int(_) | ValueKind::Bool(_) => ResultTag::SmallInt,
+                    ValueKind::BigInt(_) => ResultTag::BigInt,
+                    _ => ResultTag::Other,
+                };
+                match result_tag {
+                    ResultTag::SmallInt => Ok(result),
+                    ResultTag::BigInt => {
+                        // CPython's PyNumber_AsSsize_t raises OverflowError using
+                        // the *original* object's type name, not "int".
+                        Err(PyError::named(
+                            "OverflowError",
+                            format!(
+                                "cannot fit '{type_name_for_err}' into an index-sized integer"
+                            ),
+                        ))
+                    }
+                    ResultTag::Other => Err(PyError::named(
+                        "TypeError",
+                        format!("__index__ returned non-int (type {result_type_name})"),
+                    )),
+                }
+            }
         }
     }
 
