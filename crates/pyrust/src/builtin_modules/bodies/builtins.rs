@@ -2897,26 +2897,10 @@ pyrust_module! {
                             ValueKind::Int(v) => Ok(Value::int(v)),
                             ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
                             ValueKind::BigInt(_) => Ok(trunc_result.clone()),
-                            ValueKind::Float(v) => {
-                                if v.is_nan() {
-                                    Err(PyError::named(
-                                        "ValueError",
-                                        "cannot convert float NaN to integer".to_string(),
-                                    ))
-                                } else if v.is_infinite() {
-                                    Err(PyError::named(
-                                        "OverflowError",
-                                        "cannot convert float infinity to integer".to_string(),
-                                    ))
-                                } else {
-                                    let t = v.trunc();
-                                    if t > i64::MAX as f64 || t < i64::MIN as f64 {
-                                        float_to_bigint(t)
-                                    } else {
-                                        Ok(Value::int(t as i64))
-                                    }
-                                }
-                            }
+                            // CPython 3.12: float is not an Integral type — any float returned
+                            // from __trunc__ (including inf/nan) raises TypeError, not
+                            // OverflowError/ValueError.  The inf/nan guards belong only in the
+                            // direct float-to-int conversion paths, not here.
                             _ => Err(PyError::named(
                                 "TypeError",
                                 format!(
