@@ -2009,8 +2009,11 @@ fn collect_local_names_from_block(
 ) {
     for stmt in body {
         match stmt {
-            Stmt::Assign(target, _) => {
+            Stmt::Assign(target, rhs) => {
                 collect_assign_target_names(target, names, global_names, nonlocal_names);
+                // Walrus targets inside comprehensions on the RHS escape to this
+                // function's scope (PEP 572).
+                collect_walrus_targets_in_expr(rhs, names, global_names, nonlocal_names);
             }
             Stmt::AttrAssign { .. } => {}
             Stmt::Def { name, .. } => {
@@ -2050,7 +2053,7 @@ fn collect_local_names_from_block(
                     }
                 }
             }
-            Stmt::AnnAssign { name, .. } => {
+            Stmt::AnnAssign { name, value, .. } => {
                 // Both `x: T = v` (value = Some) and `x: T` (value = None) declare
                 // a local slot.  At function scope the bare form causes UnboundLocalError
                 // on read (matching CPython); at class scope the slot is allocated but
@@ -2058,15 +2061,33 @@ fn collect_local_names_from_block(
                 if !global_names.contains(name) && !nonlocal_names.contains(name) {
                     names.insert(name.clone());
                 }
+                // Walrus targets inside a comprehension on the RHS escape to this
+                // function's scope (PEP 572).
+                if let Some(v) = value {
+                    collect_walrus_targets_in_expr(v, names, global_names, nonlocal_names);
+                }
             }
-            Stmt::AugAssign { .. }
-            | Stmt::IndexAssign { .. }
-            | Stmt::SliceAssign { .. }
-            | Stmt::Delete(_)
-            | Stmt::Raise { .. }
-            | Stmt::Break
-            | Stmt::Continue
-            | Stmt::Pass => {}
+            Stmt::AugAssign { expr, .. } => {
+                // Walrus targets inside a comprehension on the RHS escape to this
+                // function's scope (PEP 572).
+                collect_walrus_targets_in_expr(expr, names, global_names, nonlocal_names);
+            }
+            Stmt::IndexAssign { expr, .. } | Stmt::SliceAssign { expr, .. } => {
+                // Walrus targets inside a comprehension on the RHS escape to this
+                // function's scope (PEP 572).
+                collect_walrus_targets_in_expr(expr, names, global_names, nonlocal_names);
+            }
+            Stmt::Raise { expr, cause } => {
+                // Walrus targets inside a comprehension in the raise expression or
+                // cause escape to this function's scope (PEP 572).
+                if let Some(e) = expr {
+                    collect_walrus_targets_in_expr(e, names, global_names, nonlocal_names);
+                }
+                if let Some(c) = cause {
+                    collect_walrus_targets_in_expr(c, names, global_names, nonlocal_names);
+                }
+            }
+            Stmt::Delete(_) | Stmt::Break | Stmt::Continue | Stmt::Pass => {}
             // Walk expressions for walrus operator targets.
             Stmt::Expr(e) => {
                 collect_walrus_targets_in_expr(e, names, global_names, nonlocal_names);
@@ -2937,6 +2958,34 @@ fn collect_walrus_targets_in_expr(
                 }
             }
             walk(parts, names, global_names, nonlocal_names);
+        }
+        // Walrus targets inside a comprehension escape to the nearest enclosing
+        // non-comprehension scope (PEP 572). Descend into the element/value
+        // expressions and filter conditions so their walrus targets are recorded
+        // as locals of the enclosing function.  Do NOT descend into Lambda nodes
+        // (they create a true new scope).
+        Expr::ListComp { elt, clauses }
+        | Expr::SetComp { elt, clauses }
+        | Expr::GenExp { elt, clauses } => {
+            collect_walrus_targets_in_expr(elt, names, global_names, nonlocal_names);
+            for clause in clauses {
+                if let Some(c) = &clause.cond {
+                    collect_walrus_targets_in_expr(c, names, global_names, nonlocal_names);
+                }
+                // Inner clause iters also run in the comprehension scope and can
+                // contain walrus expressions that escape outward.
+                collect_walrus_targets_in_expr(&clause.iter, names, global_names, nonlocal_names);
+            }
+        }
+        Expr::DictComp { key, val, clauses } => {
+            collect_walrus_targets_in_expr(key, names, global_names, nonlocal_names);
+            collect_walrus_targets_in_expr(val, names, global_names, nonlocal_names);
+            for clause in clauses {
+                if let Some(c) = &clause.cond {
+                    collect_walrus_targets_in_expr(c, names, global_names, nonlocal_names);
+                }
+                collect_walrus_targets_in_expr(&clause.iter, names, global_names, nonlocal_names);
+            }
         }
         _ => {}
     }

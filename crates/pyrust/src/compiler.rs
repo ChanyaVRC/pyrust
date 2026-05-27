@@ -880,12 +880,32 @@ fn collect_walrus_writes_in_expr(expr: &Expr, out: &mut HashSet<String>) {
         Expr::FString(parts) => {
             for_each_fstring_expr(parts, &mut |e| collect_walrus_writes_in_expr(e, out));
         }
-        // Nested comprehensions/lambdas/genexps create their own scope.
-        Expr::ListComp { .. }
-        | Expr::SetComp { .. }
-        | Expr::DictComp { .. }
-        | Expr::GenExp { .. }
-        | Expr::Lambda { .. } => {}
+        // Walrus targets inside comprehensions escape to the nearest enclosing
+        // non-comprehension scope (PEP 572), so they may need to be promoted to
+        // cell vars of an enclosing function. Descend into elt/key/val/cond.
+        // Lambda creates a true new scope; stop there.
+        Expr::ListComp { elt, clauses }
+        | Expr::SetComp { elt, clauses }
+        | Expr::GenExp { elt, clauses } => {
+            collect_walrus_writes_in_expr(elt, out);
+            for clause in clauses {
+                if let Some(c) = &clause.cond {
+                    collect_walrus_writes_in_expr(c, out);
+                }
+                collect_walrus_writes_in_expr(&clause.iter, out);
+            }
+        }
+        Expr::DictComp { key, val, clauses } => {
+            collect_walrus_writes_in_expr(key, out);
+            collect_walrus_writes_in_expr(val, out);
+            for clause in clauses {
+                if let Some(c) = &clause.cond {
+                    collect_walrus_writes_in_expr(c, out);
+                }
+                collect_walrus_writes_in_expr(&clause.iter, out);
+            }
+        }
+        Expr::Lambda { .. } => {}
         _ => {}
     }
 }
@@ -8266,12 +8286,32 @@ impl Compiler {
                     Self::collect_walrus_targets_in_expr(e, out);
                 });
             }
-            // Nested comprehensions/lambdas create their own scope; don't descend.
-            Expr::ListComp { .. }
-            | Expr::SetComp { .. }
-            | Expr::DictComp { .. }
-            | Expr::GenExp { .. }
-            | Expr::Lambda { .. } => {}
+            // Walrus targets inside nested comprehensions still escape to the
+            // nearest non-comprehension scope (PEP 572). Descend so that the
+            // outer comprehension's compile_collection_comp_impl can route them
+            // as nonlocal/global correctly.  Lambda creates a true new scope.
+            Expr::ListComp { elt, clauses }
+            | Expr::SetComp { elt, clauses }
+            | Expr::GenExp { elt, clauses } => {
+                Self::collect_walrus_targets_in_expr(elt, out);
+                for clause in clauses {
+                    if let Some(c) = &clause.cond {
+                        Self::collect_walrus_targets_in_expr(c, out);
+                    }
+                    Self::collect_walrus_targets_in_expr(&clause.iter, out);
+                }
+            }
+            Expr::DictComp { key, val, clauses } => {
+                Self::collect_walrus_targets_in_expr(key, out);
+                Self::collect_walrus_targets_in_expr(val, out);
+                for clause in clauses {
+                    if let Some(c) = &clause.cond {
+                        Self::collect_walrus_targets_in_expr(c, out);
+                    }
+                    Self::collect_walrus_targets_in_expr(&clause.iter, out);
+                }
+            }
+            Expr::Lambda { .. } => {}
             _ => {}
         }
     }
@@ -8323,6 +8363,17 @@ impl Compiler {
                     Self::collect_walrus_targets_in_stmts(body, out);
                     if let Some(b) = else_branch {
                         Self::collect_walrus_targets_in_stmts(b, out);
+                    }
+                }
+                Stmt::IndexAssign { expr: e, .. } | Stmt::SliceAssign { expr: e, .. } => {
+                    Self::collect_walrus_targets_in_expr(e, out);
+                }
+                Stmt::Raise { expr, cause } => {
+                    if let Some(e) = expr {
+                        Self::collect_walrus_targets_in_expr(e, out);
+                    }
+                    if let Some(c) = cause {
+                        Self::collect_walrus_targets_in_expr(c, out);
                     }
                 }
                 // Def/Class create their own scopes; don't descend.
