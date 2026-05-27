@@ -55,3 +55,24 @@ class WithDivmod(int):
 
 
 print(divmod(WithDivmod(10), 3))     # ('custom', 'divmod')
+
+# ── bool mixed with int subclass ──────────────────────────────────────────────
+
+print(divmod(True, MyInt(3)))        # (0, 1)  — bool is subtype of int
+print(divmod(MyInt(5), True))        # (5, 0)
+
+# ── TypeError still raised for non-numeric operands ──────────────────────────
+
+try:
+    divmod(MyInt(10), "hello")
+except TypeError:
+    print("TypeError")
+
+# ── __rdivmod__ returning NotImplemented falls through to coercion ────────────
+
+class NotImplRDivmod(int):
+    def __rdivmod__(self, other):
+        return NotImplemented
+
+
+print(divmod(MyInt(10), NotImplRDivmod(3)))  # (3, 1)
