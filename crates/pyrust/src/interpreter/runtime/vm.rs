@@ -890,6 +890,15 @@ impl Interpreter {
             other => return Err(other),
         };
         self.attach_implicit_context(&exc_val);
+        // Issue #1441: set __traceback__ on the exception instance when it is
+        // caught.  Only PyInstance values (all normal exceptions) have an attrs
+        // dict to write to.
+        if let ValueKind::PyInstance(inst_rc) = exc_val.kind() {
+            inst_rc
+                .borrow_mut()
+                .attrs
+                .insert("__traceback__".to_string(), pyrust_builtins::traceback::make_traceback());
+        }
         if self.handled_exc_stack.len() > exc_ctx_frame_base
             && let Some(top) = self.handled_exc_stack.last()
             && let Some(active) = self.active_exception.as_ref()

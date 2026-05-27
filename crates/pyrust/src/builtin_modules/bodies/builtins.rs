@@ -5085,6 +5085,56 @@ pyrust_module! {
         Ok(Value::none())
     }
 
+    /// Issue #1441: `BaseException.with_traceback(tb)` — sets `self.__traceback__`
+    /// to `tb` and returns `self`.
+    ///
+    /// CPython 3.12: `tb` must be a traceback object or `None`; anything else
+    /// raises `TypeError: __traceback__ must be a traceback or None`.
+    ///
+    /// CPython signature: `BaseException.with_traceback(self, tb, /)`
+    #[py_name = "BaseException.with_traceback"]
+    fn base_exception_with_traceback(args) -> Result<Value> {
+        if args.len() != 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "BaseException.with_traceback() takes exactly one argument ({} given)",
+                    args.len().saturating_sub(1)
+                ),
+            ));
+        }
+        let self_val = &args[0].value;
+        let tb_val = &args[1].value;
+        // tb must be None or a traceback object.
+        let ok = match tb_val.kind() {
+            ValueKind::None => true,
+            ValueKind::BuiltinObject { ops, .. } => {
+                ops.type_name() == pyrust_builtins::traceback::TYPE_NAME
+            }
+            _ => false,
+        };
+        if !ok {
+            return Err(PyError::named(
+                "TypeError",
+                "__traceback__ must be a traceback or None".to_string(),
+            ));
+        }
+        let ValueKind::PyInstance(inst_rc) = self_val.kind() else {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "descriptor 'with_traceback' for 'BaseException' objects doesn't apply to a '{}' object",
+                    value_type_name_str(self_val),
+                ),
+            ));
+        };
+        inst_rc
+            .borrow_mut()
+            .attrs
+            .insert("__traceback__".to_string(), tb_val.clone());
+        Ok(self_val.clone())
+    }
+
     /// CPython: __import__(name, globals=None, locals=None, fromlist=(), level=0)
     /// <https://docs.python.org/3/library/functions.html#import__>
     ///

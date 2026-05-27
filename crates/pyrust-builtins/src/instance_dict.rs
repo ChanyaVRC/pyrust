@@ -566,7 +566,7 @@ fn is_exc_hidden_slot(name: &str) -> bool {
     // Universal BaseException C-level slots — always hidden for any exception.
     matches!(
         name,
-        "args" | "__cause__" | "__context__" | "__suppress_context__"
+        "args" | "__cause__" | "__context__" | "__suppress_context__" | "__traceback__"
     )
 }
 

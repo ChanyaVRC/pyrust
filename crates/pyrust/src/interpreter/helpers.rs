@@ -1227,6 +1227,10 @@ pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value
     let is_os_error = class_chain_contains_name(&class, "OSError");
     let is_system_exit = class_chain_contains_name(&class, "SystemExit");
     attrs.insert("args".to_string(), Value::tuple(args.clone()));
+    // CPython 3.12: every BaseException instance has __traceback__ initialised
+    // to None at __new__ time.  The VM's handle_vm_error overwrites it with a
+    // real traceback object once the exception propagates through a frame.
+    attrs.insert("__traceback__".to_string(), Value::none());
     if is_stop_iteration {
         let val = args.into_iter().next().unwrap_or_else(Value::none);
         attrs.insert("value".to_string(), val);
@@ -1455,6 +1459,12 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
         .borrow_mut()
         .attrs
         .insert("__init__".to_string(), Value::builtin_function("BaseException.__init__"));
+    // Issue #1441: install `with_traceback` on BaseException so every exception
+    // subclass inherits it.  Sets __traceback__ and returns self.
+    base_exception.borrow_mut().attrs.insert(
+        "with_traceback".to_string(),
+        Value::builtin_function("BaseException.with_traceback"),
+    );
     let exception = mk("Exception", Some(Rc::clone(&base_exception)));
     let arithmetic_error = mk("ArithmeticError", Some(Rc::clone(&exception)));
     let lookup_error = mk("LookupError", Some(Rc::clone(&exception)));

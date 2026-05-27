@@ -1040,6 +1040,23 @@ impl Interpreter {
                                 ));
                             }
                         }
+                        // Issue #1441: __traceback__ must be None or a traceback
+                        // object.  CPython raises TypeError for any other value.
+                        "__traceback__" => {
+                            let ok = match value.kind() {
+                                ValueKind::None => true,
+                                ValueKind::BuiltinObject { ops, .. } => {
+                                    ops.type_name() == pyrust_builtins::traceback::TYPE_NAME
+                                }
+                                _ => false,
+                            };
+                            if !ok {
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    "__traceback__ must be a traceback or None".to_string(),
+                                ));
+                            }
+                        }
                         _ => {}
                     }
                 }
