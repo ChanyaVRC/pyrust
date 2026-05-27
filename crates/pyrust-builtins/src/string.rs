@@ -76,6 +76,7 @@ pub const METHODS: &[&str] = &[
     "isascii",
     "isidentifier",
     "isprintable",
+    "encode",
 ];
 
 /// Returns `true` if `method` is the name of a built-in `str` method.
@@ -276,6 +277,7 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
         } else {
             s.chars().all(is_printable)
         })),
+        "encode" => str_encode(s, args),
         // `format` is intercepted by the bound-method dispatch in `calls.rs`
         // and routed through `format_str_template` (which handles kwargs).
         // This arm exists solely to satisfy the drift-guard test that verifies
@@ -1514,5 +1516,163 @@ fn normalise_char_idx(idx: i64, len: usize) -> usize {
         len.saturating_sub(from_end)
     } else {
         idx as usize
+    }
+}
+
+// ---------------------------------------------------------------------------
+// encode
+// ---------------------------------------------------------------------------
+
+/// `str.encode(encoding='utf-8', errors='strict')`
+///
+/// Positional args have the same semantics as keyword args; the caller
+/// (`str_merge_kwargs`) normalises keyword forms into positional slots
+/// before this function is reached.
+fn str_encode(s: &str, args: &[Value]) -> Result<Value> {
+    if args.len() > 2 {
+        return Err(PyError::named(
+            "TypeError",
+            format!("encode() takes at most 2 arguments ({} given)", args.len()),
+        ));
+    }
+    let encoding: &str = match args.first() {
+        None => "utf-8",
+        Some(v) => match v.kind() {
+            ValueKind::Str(s) => s,
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "encode() argument 'encoding' must be str, not {}",
+                        builtin_type_name(v)
+                    ),
+                ));
+            }
+        },
+    };
+    let errors: &str = match args.get(1) {
+        None => "strict",
+        Some(v) => match v.kind() {
+            ValueKind::Str(s) => s,
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "encode() argument 'errors' must be str, not {}",
+                        builtin_type_name(v)
+                    ),
+                ));
+            }
+        },
+    };
+    encode_str_to_bytes(s, encoding, errors)
+}
+
+/// Format a single Unicode codepoint the way CPython does in
+/// `UnicodeEncodeError` messages: `\xXX` for `< 0x100`, `\uXXXX` for
+/// `< 0x10000`, otherwise `\UXXXXXXXX`.
+fn format_codepoint_repr(cp: u32) -> String {
+    if cp < 0x100 {
+        format!("\\x{:02x}", cp)
+    } else if cp < 0x10000 {
+        format!("\\u{:04x}", cp)
+    } else {
+        format!("\\U{:08x}", cp)
+    }
+}
+
+/// Encode a Python `str` to `bytes`.
+///
+/// Supports `utf-8`, `ascii`, `latin-1` (and CPython aliases).
+/// Other encoding names raise `LookupError: unknown encoding: <name>`.
+///
+/// `errors="strict"` raises `UnicodeEncodeError` on unencodable characters;
+/// `"ignore"` silently drops them; `"replace"` substitutes `b'?'`.
+pub fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result<Value> {
+    fn normalize(name: &str) -> String {
+        name.to_ascii_lowercase().replace('_', "-")
+    }
+    let canonical = normalize(encoding);
+
+    enum Handler {
+        Strict,
+        Ignore,
+        Replace,
+    }
+
+    fn resolve_handler(errors: &str) -> Result<Handler> {
+        match errors {
+            "strict" => Ok(Handler::Strict),
+            "ignore" => Ok(Handler::Ignore),
+            "replace" => Ok(Handler::Replace),
+            other => Err(PyError::named(
+                "LookupError",
+                format!("unknown error handler name '{other}'"),
+            )),
+        }
+    }
+
+    fn encode_single_byte_codec(
+        source: &str,
+        codec_name: &str,
+        fits: impl Fn(u32) -> bool,
+        range_label: &str,
+        errors: &str,
+    ) -> Result<Value> {
+        let chars: Vec<char> = source.chars().collect();
+        let mut out = Vec::with_capacity(source.len());
+        let mut idx = 0usize;
+        while idx < chars.len() {
+            let cp = chars[idx] as u32;
+            if fits(cp) {
+                out.push(cp as u8);
+                idx += 1;
+            } else {
+                match resolve_handler(errors)? {
+                    Handler::Ignore => {
+                        idx += 1;
+                    }
+                    Handler::Replace => {
+                        out.push(b'?');
+                        idx += 1;
+                    }
+                    Handler::Strict => {
+                        let run_start = idx;
+                        let mut run_end = idx + 1;
+                        while run_end < chars.len() && !fits(chars[run_end] as u32) {
+                            run_end += 1;
+                        }
+                        let run_len = run_end - run_start;
+                        let msg = if run_len == 1 {
+                            format!(
+                                "'{codec_name}' codec can't encode character '{}' in position {run_start}: ordinal not in range({range_label})",
+                                format_codepoint_repr(cp),
+                            )
+                        } else {
+                            format!(
+                                "'{codec_name}' codec can't encode characters in position {run_start}-{}: ordinal not in range({range_label})",
+                                run_end - 1,
+                            )
+                        };
+                        return Err(PyError::named("UnicodeEncodeError", msg));
+                    }
+                }
+            }
+        }
+        Ok(Value::bytes(out))
+    }
+
+    match canonical.as_str() {
+        "utf-8" | "utf8" | "u8" | "utf" => Ok(Value::bytes(source.as_bytes().to_vec())),
+        "ascii" | "us-ascii" | "646" => {
+            encode_single_byte_codec(source, "ascii", |cp| cp < 0x80, "128", errors)
+        }
+        "latin-1" | "iso-8859-1" | "8859" | "cp819" | "latin1" | "l1" => {
+            encode_single_byte_codec(source, "latin-1", |cp| cp < 0x100, "256", errors)
+        }
+        _ => Err(PyError::named(
+            "LookupError",
+            format!("unknown encoding: {encoding}"),
+        )),
     }
 }
