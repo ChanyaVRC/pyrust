@@ -1498,6 +1498,10 @@ pyrust_module! {
                     Ok(Value::builtin_function("map"))
                 } else if borrow.downcast_ref::<FilterIter>().is_some() {
                     Ok(Value::builtin_function("filter"))
+                } else if borrow.downcast_ref::<EnumerateIter>().is_some() {
+                    Ok(Value::builtin_function("enumerate"))
+                } else if borrow.downcast_ref::<ZipIter>().is_some() {
+                    Ok(Value::builtin_function("zip"))
                 } else if let Some(native) = borrow.downcast_ref::<NativeIterFrame>() {
                     Ok(Value::builtin_function(native.type_name))
                 } else {
