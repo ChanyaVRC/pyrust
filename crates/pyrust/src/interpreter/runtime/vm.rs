@@ -3025,7 +3025,7 @@ impl Interpreter {
                     // using the old GEN_SAVE thread-local side-channel.
                     // Use mem::take to move iters and exc_handlers into the
                     // saved state rather than cloning them.  The local
-                    // variables are left as empty Vecs, which are then
+                    // variables are left as empty SmallVecs, which are then
                     // dropped for free when the function returns.  On resume,
                     // resume_generator_with_exc moves them back via
                     // std::mem::take on frame.iters / frame.exc_handlers.
