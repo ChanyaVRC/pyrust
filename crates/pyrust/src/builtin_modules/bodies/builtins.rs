@@ -18,7 +18,7 @@ use std::rc::Rc;
 use crate::ast::BinaryOp;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
-use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
+use crate::interpreter::builtin_args::{FromValue, PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
     CallableIter, EnumerateIter, FilterIter, MapIter, NativeIterFrame, ZipIter, apply_format_spec, ascii_repr_interp, bigint_divmod_floor,
     class_chain_contains_name, class_is_subclass_of,
@@ -690,6 +690,72 @@ pyrust_module! {
                         _ => {}
                     }
                 }
+            }
+        }
+
+        // Issue #1433: if no user-defined dunder was found (or all returned
+        // NotImplemented), coerce int/float subclass instances to their primitive
+        // backing and try the numeric helpers.  This handles `divmod(MyInt(10), 3)`
+        // where `MyInt` does not define its own `__divmod__` — CPython delegates
+        // through the `nb_divmod` slot inherited from `int`; pyrust mirrors that
+        // with explicit coercion here.
+        let ca = coerce_numeric(a.0.clone());
+        let cb = coerce_numeric(b.0.clone());
+        let a_is_numeric = matches!(
+            ca.kind(),
+            ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Float(_) | ValueKind::Bool(_)
+        );
+        let b_is_numeric = matches!(
+            cb.kind(),
+            ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Float(_) | ValueKind::Bool(_)
+        );
+        if a_is_numeric && b_is_numeric {
+            let a_is_float = matches!(ca.kind(), ValueKind::Float(_));
+            let b_is_float = matches!(cb.kind(), ValueKind::Float(_));
+            if a_is_float || b_is_float {
+                // At least one is float — promote both to f64.
+                let af = match ca.kind() {
+                    ValueKind::Float(f) => f,
+                    ValueKind::Int(n) => n as f64,
+                    ValueKind::Bool(b) => b as i64 as f64,
+                    ValueKind::BigInt(_) => {
+                        let pi = PyInt::try_from_value(&ca, "divmod", "a")?;
+                        pyint_to_f64(&pi)?
+                    }
+                    _ => unreachable!(),
+                };
+                let bf = match cb.kind() {
+                    ValueKind::Float(f) => f,
+                    ValueKind::Int(n) => n as f64,
+                    ValueKind::Bool(b) => b as i64 as f64,
+                    ValueKind::BigInt(_) => {
+                        let pi = PyInt::try_from_value(&cb, "divmod", "b")?;
+                        pyint_to_f64(&pi)?
+                    }
+                    _ => unreachable!(),
+                };
+                return divmod_float_float(af, bf);
+            } else {
+                // Promote Bool → Int so PyInt::try_from_value can match
+                // (Bool is not accepted by PyInt::matches).  Use nested blocks
+                // so the borrow from kind() is dropped before ca/cb are moved.
+                let ca = {
+                    if let ValueKind::Bool(b) = ca.kind() {
+                        Value::int(b as i64)
+                    } else {
+                        ca
+                    }
+                };
+                let cb = {
+                    if let ValueKind::Bool(b) = cb.kind() {
+                        Value::int(b as i64)
+                    } else {
+                        cb
+                    }
+                };
+                let ia = PyInt::try_from_value(&ca, "divmod", "a")?;
+                let ib = PyInt::try_from_value(&cb, "divmod", "b")?;
+                return divmod_int_int(ia, ib);
             }
         }
 
