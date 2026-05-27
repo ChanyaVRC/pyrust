@@ -872,8 +872,18 @@ impl Interpreter {
             {
                 let func = pyrust_builtins::classmethod::as_class_method_get_binder(&function)
                     .expect("guard checked above");
-                // args[1] is the owner class; args[0] is the instance (ignored).
+                // args[0] = instance, args[1] = owner class.
+                // CPython 3.12: __get__(None, None) is invalid.
+                let instance = args.first().map(|a| a.value.clone()).unwrap_or_else(Value::none);
                 let owner = args.get(1).map(|a| a.value.clone()).unwrap_or_else(Value::none);
+                if matches!(instance.kind(), ValueKind::None)
+                    && matches!(owner.kind(), ValueKind::None)
+                {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "__get__(None, None) is invalid".to_string(),
+                    ));
+                }
                 let class_rc = match owner.kind() {
                     ValueKind::PyClass(c) => Some(Rc::clone(c)),
                     _ => None,
@@ -892,6 +902,17 @@ impl Interpreter {
             {
                 let func = pyrust_builtins::classmethod::as_static_method_get_binder(&function)
                     .expect("guard checked above");
+                // CPython 3.12: __get__(None, None) is invalid.
+                let instance = args.first().map(|a| a.value.clone()).unwrap_or_else(Value::none);
+                let owner = args.get(1).map(|a| a.value.clone()).unwrap_or_else(Value::none);
+                if matches!(instance.kind(), ValueKind::None)
+                    && matches!(owner.kind(), ValueKind::None)
+                {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "__get__(None, None) is invalid".to_string(),
+                    ));
+                }
                 Ok(Value::with_function_kind(func, pyrust_core::UserFunctionKind::Regular))
             }
 

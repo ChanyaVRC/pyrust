@@ -82,9 +82,18 @@ impl BuiltinTypeOps for StaticMethodAnyOps {
                 format!("'staticmethod' object has no attribute '{name}'"),
             ));
         }
+        // CPython 3.12: __get__(None, None) is invalid — instance and owner
+        // cannot both be None.
+        let instance = args.first().cloned().unwrap_or_else(Value::none);
+        let owner = args.get(1).cloned().unwrap_or_else(Value::none);
+        if matches!(instance.kind(), ValueKind::None) && matches!(owner.kind(), ValueKind::None) {
+            return Err(PyError::named(
+                "TypeError",
+                "__get__(None, None) is invalid".to_string(),
+            ));
+        }
         // staticmethod.__get__(instance, owner) — returns the wrapped value
         // directly, ignoring both arguments (CPython Data Model §3.3.2).
-        let _ = args;
         let borrow = state.borrow();
         let s = borrow
             .downcast_ref::<StaticMethodAnyState>()
@@ -178,15 +187,24 @@ impl BuiltinTypeOps for ClassMethodAnyOps {
         // classmethod.__get__(instance, owner)
         // args[0] = instance (None or PyInstance — ignored for classmethod)
         // args[1] = owner (the owning class)
+        //
+        // CPython 3.12: __get__(None, None) is invalid — instance and owner
+        // cannot both be None.
+        let instance = args.first().cloned().unwrap_or_else(Value::none);
+        let owner = args.get(1).cloned().unwrap_or_else(Value::none);
+        if matches!(instance.kind(), ValueKind::None) && matches!(owner.kind(), ValueKind::None) {
+            return Err(PyError::named(
+                "TypeError",
+                "__get__(None, None) is invalid".to_string(),
+            ));
+        }
+
         let borrow = state.borrow();
         let s = borrow
             .downcast_ref::<ClassMethodAnyState>()
             .expect("ClassMethodAnyState");
         let wrapped = s.wrapped.clone();
         drop(borrow);
-
-        // Extract the owner class from args[1].
-        let owner = args.get(1).cloned().unwrap_or_else(Value::none);
         let class_rc = match owner.kind() {
             ValueKind::PyClass(c) => Some(Rc::clone(c)),
             _ => None,
