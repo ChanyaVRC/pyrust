@@ -155,10 +155,19 @@ mod tests {
 
         // 2. Module-namespaced pure builtins — the headline win of
         //    #433: the legacy hardcoded list couldn't reach these.
-        for name in ["math.sqrt", "math.sin", "math.floor"] {
+        for name in ["math.sqrt", "math.sin"] {
             assert!(
                 is_pure(name),
                 "{name:?} must be registered as pure (module-namespaced)"
+            );
+        }
+
+        // math.floor / math.ceil / math.trunc dispatch user dunders
+        // (__floor__, __ceil__, __trunc__) and are therefore impure (#1399).
+        for name in ["math.floor", "math.ceil", "math.trunc"] {
+            assert!(
+                !is_pure(name),
+                "{name:?} must NOT be marked pure (dispatches user dunders)"
             );
         }
 
