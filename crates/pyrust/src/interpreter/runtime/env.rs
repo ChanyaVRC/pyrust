@@ -178,7 +178,17 @@ impl Interpreter {
                                 Value::class_bound_method(Rc::clone(&f), Rc::clone(&class))
                             }
                             UserFunctionKind::StaticMethod => {
-                                Value::user_function(Rc::clone(&f))
+                                // CPython __get__ returns the underlying function directly.
+                                // Prefer `wrapped_func` to preserve object identity
+                                // (`sm.__get__(None, C) is fn` when `sm = staticmethod(fn)`).
+                                if let Some(inner) = f.wrapped_func.as_ref() {
+                                    Value::user_function(Rc::clone(inner))
+                                } else {
+                                    Value::with_function_kind(
+                                        Rc::clone(&f),
+                                        UserFunctionKind::Regular,
+                                    )
+                                }
                             }
                             UserFunctionKind::Regular => value,
                             UserFunctionKind::Builtin(_) => value,
@@ -267,7 +277,14 @@ impl Interpreter {
                                     Value::class_bound_method(Rc::clone(&f), entry_class)
                                 }
                                 UserFunctionKind::StaticMethod => {
-                                    Value::user_function(Rc::clone(&f))
+                                    if let Some(inner) = f.wrapped_func.as_ref() {
+                                        Value::user_function(Rc::clone(inner))
+                                    } else {
+                                        Value::with_function_kind(
+                                            Rc::clone(&f),
+                                            UserFunctionKind::Regular,
+                                        )
+                                    }
                                 }
                                 UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(&f)),
                             },
@@ -333,7 +350,14 @@ impl Interpreter {
                                     Value::class_bound_method(Rc::clone(&f), Rc::clone(&obj_class))
                                 }
                                 UserFunctionKind::StaticMethod => {
-                                    Value::user_function(Rc::clone(&f))
+                                    if let Some(inner) = f.wrapped_func.as_ref() {
+                                        Value::user_function(Rc::clone(inner))
+                                    } else {
+                                        Value::with_function_kind(
+                                            Rc::clone(&f),
+                                            UserFunctionKind::Regular,
+                                        )
+                                    }
                                 }
                                 UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(&f)),
                             },
@@ -910,7 +934,13 @@ impl Interpreter {
                     UserFunctionKind::ClassMethod => {
                         Value::class_bound_method(Rc::clone(&f), Rc::clone(&class))
                     }
-                    UserFunctionKind::StaticMethod => Value::user_function(Rc::clone(&f)),
+                    UserFunctionKind::StaticMethod => {
+                        if let Some(inner) = f.wrapped_func.as_ref() {
+                            Value::user_function(Rc::clone(inner))
+                        } else {
+                            Value::with_function_kind(Rc::clone(&f), UserFunctionKind::Regular)
+                        }
+                    }
                     UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(&f)),
                 },
                 AttrKind::BuiltinFunction => pyrust_builtins::bound_method::bound_method(
@@ -1037,6 +1067,23 @@ impl Interpreter {
                                 return Err(PyError::named(
                                     "TypeError",
                                     "attribute value type must be bool",
+                                ));
+                            }
+                        }
+                        // Issue #1441: __traceback__ must be None or a traceback
+                        // object.  CPython raises TypeError for any other value.
+                        "__traceback__" => {
+                            let ok = match value.kind() {
+                                ValueKind::None => true,
+                                ValueKind::BuiltinObject { ops, .. } => {
+                                    ops.type_name() == pyrust_builtins::traceback::TYPE_NAME
+                                }
+                                _ => false,
+                            };
+                            if !ok {
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    "__traceback__ must be a traceback or None".to_string(),
                                 ));
                             }
                         }

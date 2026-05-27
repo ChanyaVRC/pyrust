@@ -1491,7 +1491,16 @@ impl Interpreter {
                                         Tag::ClassMethod(f) => {
                                             Value::class_bound_method(f, class_rc)
                                         }
-                                        Tag::StaticMethod(f) => Value::user_function(f),
+                                        Tag::StaticMethod(f) => {
+                                            if let Some(inner) = f.wrapped_func.as_ref() {
+                                                Value::user_function(Rc::clone(inner))
+                                            } else {
+                                                Value::with_function_kind(
+                                                    f,
+                                                    pyrust_core::UserFunctionKind::Regular,
+                                                )
+                                            }
+                                        }
                                         Tag::Builtin => {
                                             // name_opt is Some here: no_shadow was true,
                                             // which requires name_opt.is_some().
