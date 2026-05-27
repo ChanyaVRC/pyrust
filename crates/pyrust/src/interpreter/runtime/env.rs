@@ -1866,7 +1866,14 @@ impl Interpreter {
                     )),
                 };
             }
-            // No __bool__ or __len__: always truthy.
+            // Issue #1204: no __bool__ or __len__ in the user class.
+            // For scalar primitive subclasses (MyInt, MyFloat, MyStr,
+            // MyBytes), delegate truthiness to the backing value so that
+            // `bool(MyInt(0))` returns False as CPython does.
+            if let Some(backing) = instance_builtin_data(&inst_rc) {
+                return Ok(backing.truthy());
+            }
+            // Non-primitive PyInstance with no __bool__ / __len__: always truthy.
             return Ok(true);
         }
         Ok(value.truthy())

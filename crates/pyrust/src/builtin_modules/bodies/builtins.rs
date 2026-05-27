@@ -397,6 +397,22 @@ pyrust_module! {
                     &[],
                 );
             }
+            // Issue #1204: fall through to the scalar backing value for
+            // primitive subclasses (MyInt, MyFloat, …) that have no user
+            // __abs__ defined.
+            if let Some(backing) = instance_builtin_data(&inst_rc) {
+                match backing.kind() {
+                    ValueKind::Int(v) => return Ok(Value::int(v.abs())),
+                    ValueKind::BigInt(v) => {
+                        let zero: crate::value::PyBigInt = 0i64.into();
+                        let abs = if v < &zero { -v.clone() } else { v.clone() };
+                        return Ok(Value::bigint(abs));
+                    }
+                    ValueKind::Float(v) => return Ok(Value::float(v.abs())),
+                    ValueKind::Bool(b) => return Ok(Value::int(if b { 1 } else { 0 })),
+                    _ => {}
+                }
+            }
             return Err(PyError::named(
                 "TypeError",
                 format!("bad operand type for abs(): '{}'", class.borrow().name),
@@ -1748,6 +1764,8 @@ pyrust_module! {
                 // call_class_expanded.
                 if let Some(backing) = instance_builtin_data(&inst_rc) {
                     match backing.kind() {
+                        ValueKind::Str(text) => text.chars().count() as i64,
+                        ValueKind::Bytes(rc) => rc.len() as i64,
                         ValueKind::List(items) => items.len() as i64,
                         ValueKind::Dict(items) => items.len() as i64,
                         ValueKind::Set(items) => items.len() as i64,
@@ -5331,6 +5349,29 @@ fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result
             .unwrap_or(false);
         if !has_user_str {
             return Ok(value.to_py_str());
+        }
+    }
+    // Issue #1204: if this instance subclasses a scalar primitive (str/int/
+    // float/bytes) and has no user-defined __str__ / __repr__, delegate
+    // str() to the backing primitive value so that print(MyStr("hello"))
+    // outputs "hello" instead of the default object repr.
+    let user_str_or_repr = lookup_class_attr(&class, "__str__")
+        .filter(|v| matches!(v.kind(), ValueKind::UserFunction(_)))
+        .or_else(|| {
+            lookup_class_attr(&class, "__repr__")
+                .filter(|v| matches!(v.kind(), ValueKind::UserFunction(_)))
+        });
+    if user_str_or_repr.is_none() {
+        if let Some(backing) = instance_builtin_data(&inst_rc) {
+            match backing.kind() {
+                ValueKind::Str(_)
+                | ValueKind::Int(_)
+                | ValueKind::BigInt(_)
+                | ValueKind::Bool(_)
+                | ValueKind::Float(_)
+                | ValueKind::Bytes(_) => return Ok(backing.to_py_str()),
+                _ => {}
+            }
         }
     }
     for dunder in &["__str__", "__repr__"] {

@@ -794,6 +794,39 @@ pub(crate) fn find_immutable_primitive_base(
     base.and_then(|b| find_immutable_primitive_base(&b))
 }
 
+/// Walk the base chain of `class` and return the name of the first scalar
+/// (non-container) primitive builtin base found (`"str"`, `"int"`, `"float"`,
+/// or `"bytes"`), or `None` if the class does not inherit from any of these.
+///
+/// Issue #1204: these types require the same `__builtin_data__` backing-store
+/// approach used by the container primitives (`dict`/`list`/`set`), so that
+/// subclass instances can delegate method dispatch to the underlying primitive
+/// value.  Like `find_immutable_primitive_base`, the backing is populated at
+/// construction time from the constructor args and is fixed thereafter.
+pub(crate) fn find_scalar_primitive_base(
+    class: &Rc<RefCell<PyClass>>,
+) -> Option<&'static str> {
+    let (name, base) = {
+        let borrowed = class.borrow();
+        (borrowed.name.clone(), borrowed.base.clone())
+    };
+    match name.as_str() {
+        "str" | "int" | "float" | "bytes" => {
+            if is_primitive_class(class) {
+                return Some(match name.as_str() {
+                    "str" => "str",
+                    "int" => "int",
+                    "float" => "float",
+                    "bytes" => "bytes",
+                    _ => unreachable!(),
+                });
+            }
+        }
+        _ => {}
+    }
+    base.and_then(|b| find_scalar_primitive_base(&b))
+}
+
 /// Constant key used to store the backing primitive value inside a
 /// `PyInstance` that subclasses `dict`, `list`, or `set`.
 pub(crate) const BUILTIN_DATA_ATTR: &str = "__builtin_data__";

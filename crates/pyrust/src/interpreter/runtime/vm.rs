@@ -1329,7 +1329,22 @@ impl Interpreter {
                             if let Some(r) = self.try_dunder_unary(&val, dunder_name) {
                                 vm_try!(r)
                             } else {
-                                vm_try!(vm_eval_unary(*op, val))
+                                // Issue #1204: for scalar primitive subclasses
+                                // (MyInt, MyFloat, …), extract the backing value
+                                // before the built-in unary path, since the
+                                // primitive's type slots aren't registered on the
+                                // user class.
+                                let is_instance = matches!(val.kind(), ValueKind::PyInstance(_));
+                                let operand = if is_instance {
+                                    if let ValueKind::PyInstance(inst) = val.kind() {
+                                        instance_builtin_data(inst).unwrap_or_else(|| val.clone())
+                                    } else {
+                                        val
+                                    }
+                                } else {
+                                    val
+                                };
+                                vm_try!(vm_eval_unary(*op, operand))
                             }
                         } else {
                             vm_try!(vm_eval_unary(*op, val))
