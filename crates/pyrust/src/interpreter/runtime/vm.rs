@@ -96,6 +96,41 @@ pub(crate) struct FilterIter {
     pub(crate) done: bool,
 }
 
+/// Lazy iterator for `enumerate(iterable, start=0)`.
+///
+/// `source` is the already-converted iterator object (result of calling
+/// `make_iterator()` on the original iterable at construction time).  No items
+/// are consumed from the source until the first `next()` call on the enumerate
+/// object.  Each step advances `source` by one element via `call_next` and
+/// wraps it with the running counter.
+pub(crate) struct EnumerateIter {
+    /// Already-converted iterator object.
+    pub(crate) source: Value,
+    /// Current counter value; incremented after each yielded pair.
+    pub(crate) counter: i64,
+    /// Set to `true` once the source raises `StopIteration`.
+    pub(crate) done: bool,
+}
+
+/// Lazy iterator for `zip(it1, it2, ..., strict=False)`.
+///
+/// `sources` holds already-converted iterator objects (result of calling
+/// `make_iterator()` on the original arguments at construction time).  Each
+/// step advances all sources by one element via `call_next`.  Stops at the
+/// shortest source (or raises `ValueError` when `strict=True` and lengths
+/// differ).
+pub(crate) struct ZipIter {
+    /// Already-converted iterators (one per positional argument).
+    pub(crate) sources: Vec<Value>,
+    /// When `true`, a length mismatch raises `ValueError` matching CPython's
+    /// wording.
+    pub(crate) strict: bool,
+    /// Set to `true` once any source raises `StopIteration`.
+    pub(crate) done: bool,
+    /// Count of tuples yielded so far; used for `strict` error messages.
+    pub(crate) count: usize,
+}
+
 /// Heap-allocated execution state for a suspended generator.
 /// Stored type-erased inside `Value::generator()` via `Box<dyn Any>`.
 pub(crate) struct GeneratorFrame {
