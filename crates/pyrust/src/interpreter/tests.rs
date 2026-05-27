@@ -961,7 +961,7 @@ result = fact(10)
         // fib(35) without memoization requires ~29M recursive calls and takes seconds.
         // With CallMemo, each unique n is computed once and cached — must finish fast.
         let ok: bool = std::thread::Builder::new()
-            .stack_size(8 * 1024 * 1024)
+            .stack_size(32 * 1024 * 1024)
             .spawn(|| {
                 let interpreter = run_program(
                     "def fib(n):\n    if n <= 1: return n\n    return fib(n-1) + fib(n-2)\nresult = fib(35)\n",
@@ -986,7 +986,7 @@ result = fact(10)
         // Verify correctness for several known Fibonacci values to confirm
         // memoization is not returning stale/wrong cached results.
         let ok: bool = std::thread::Builder::new()
-            .stack_size(8 * 1024 * 1024)
+            .stack_size(32 * 1024 * 1024)
             .spawn(|| {
                 let interp = run_program(
                     "def fib(n):\n    if n <= 1: return n\n    return fib(n-1) + fib(n-2)\n\
