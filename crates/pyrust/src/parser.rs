@@ -1230,7 +1230,13 @@ impl Parser {
             self.expect(&Token::Dedent)?;
             Ok(out)
         } else {
-            self.parse_stmt_sequence()
+            let stmts = self.parse_stmt_sequence()?;
+            // Consume the trailing newline (and any blank lines that follow) so
+            // that callers can immediately check for continuation keywords such
+            // as `except`, `elif`, `else`, and `finally` without needing their
+            // own skip_newlines() calls after every parse_suite() invocation.
+            self.skip_newlines();
+            Ok(stmts)
         }
     }
 
