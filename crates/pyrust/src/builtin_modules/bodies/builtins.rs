@@ -20,7 +20,7 @@ use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
-    CallableIter, FilterIter, MapIter, NativeIterFrame, apply_format_spec, ascii_repr_interp, bigint_divmod_floor,
+    CallableIter, EnumerateIter, FilterIter, MapIter, NativeIterFrame, ZipIter, apply_format_spec, ascii_repr_interp, bigint_divmod_floor,
     class_chain_contains_name, class_is_subclass_of,
     compare_values, compare_values_with_op, coerce_numeric, dir_names,
     instance_builtin_data,
@@ -939,15 +939,14 @@ pyrust_module! {
                 )),
             },
         };
-        // Pre-materialise PyInstance / Generator sources so user
-        // `__iter__` dispatch (which requires the Interpreter) happens
-        // here — the lazy helper in `iter_helpers` reaches the
-        // registry callback, which can't dispatch dunders or resume
-        // generators.  For other sources we still pass the raw value
-        // so side effects (e.g. `open()`) defer to iteration start
-        // (#446).
-        let source = materialize_user_iter(_interp, iterable.0)?;
-        Ok(pyrust_builtins::iter_helpers::enumerate(source, start_val))
+        // Convert the iterable to a lazy iterator without consuming any elements.
+        // Elements are pulled lazily by step_enumerate_iter via call_next.
+        let source = make_iterator(_interp, iterable.0)?;
+        Ok(Value::generator(Box::new(EnumerateIter {
+            source,
+            counter: start_val,
+            done: false,
+        })))
     }
 
     /// CPython: zip(*iterables, strict=False) — parallel iterator.
@@ -970,17 +969,23 @@ pyrust_module! {
                 }
             }
         }
-        let sources: Vec<Value> = args
+        let positional_args: Vec<Value> = args
             .iter()
             .filter(|a| a.name.is_none())
             .map(|a| a.value.clone())
             .collect();
-        // Pre-materialise PyInstance sources (see `enumerate` for rationale).
-        let sources = sources
+        // Convert each iterable to a lazy iterator without consuming any elements.
+        // Elements are pulled lazily by step_zip_iter via call_next.
+        let sources = positional_args
             .into_iter()
-            .map(|v| materialize_user_iter(_interp, v))
+            .map(|v| make_iterator(_interp, v))
             .collect::<Result<Vec<_>>>()?;
-        Ok(pyrust_builtins::iter_helpers::zip(sources, strict))
+        Ok(Value::generator(Box::new(ZipIter {
+            sources,
+            strict,
+            done: false,
+            count: 0,
+        })))
     }
 
     /// CPython: reversed(seq) — reverse iterator.
@@ -1493,6 +1498,10 @@ pyrust_module! {
                     Ok(Value::builtin_function("map"))
                 } else if borrow.downcast_ref::<FilterIter>().is_some() {
                     Ok(Value::builtin_function("filter"))
+                } else if borrow.downcast_ref::<EnumerateIter>().is_some() {
+                    Ok(Value::builtin_function("enumerate"))
+                } else if borrow.downcast_ref::<ZipIter>().is_some() {
+                    Ok(Value::builtin_function("zip"))
                 } else if let Some(native) = borrow.downcast_ref::<NativeIterFrame>() {
                     Ok(Value::builtin_function(native.type_name))
                 } else {
@@ -6627,7 +6636,8 @@ fn builtin_iter_type_name(v: &Value) -> &'static str {
 /// are both stored as `ValueKind::Generator`.  This wrapper downcasts the
 /// generator state to recover the specific type name stored in
 /// `NativeIterFrame::type_name`, or the sentinel names for `MapIter` /
-/// `FilterIter`.  All other value kinds delegate to `value_type_name_str`.
+/// `FilterIter` / `EnumerateIter` / `ZipIter`.  All other value kinds
+/// delegate to `value_type_name_str`.
 fn full_type_name_str(v: &Value) -> std::borrow::Cow<'static, str> {
     if let ValueKind::Generator(state_rc) = v.kind() {
         let borrow = state_rc.borrow();
@@ -6636,6 +6646,12 @@ fn full_type_name_str(v: &Value) -> std::borrow::Cow<'static, str> {
         }
         if borrow.downcast_ref::<FilterIter>().is_some() {
             return std::borrow::Cow::Borrowed("filter");
+        }
+        if borrow.downcast_ref::<EnumerateIter>().is_some() {
+            return std::borrow::Cow::Borrowed("enumerate");
+        }
+        if borrow.downcast_ref::<ZipIter>().is_some() {
+            return std::borrow::Cow::Borrowed("zip");
         }
         if let Some(native) = borrow.downcast_ref::<NativeIterFrame>() {
             return std::borrow::Cow::Borrowed(native.type_name);

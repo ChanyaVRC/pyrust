@@ -96,6 +96,41 @@ pub(crate) struct FilterIter {
     pub(crate) done: bool,
 }
 
+/// Lazy iterator for `enumerate(iterable, start=0)`.
+///
+/// `source` is the already-converted iterator object (result of calling
+/// `make_iterator()` on the original iterable at construction time).  No items
+/// are consumed from the source until the first `next()` call on the enumerate
+/// object.  Each step advances `source` by one element via `call_next` and
+/// wraps it with the running counter.
+pub(crate) struct EnumerateIter {
+    /// Already-converted iterator object.
+    pub(crate) source: Value,
+    /// Current counter value; incremented after each yielded pair.
+    pub(crate) counter: i64,
+    /// Set to `true` once the source raises `StopIteration`.
+    pub(crate) done: bool,
+}
+
+/// Lazy iterator for `zip(it1, it2, ..., strict=False)`.
+///
+/// `sources` holds already-converted iterator objects (result of calling
+/// `make_iterator()` on the original arguments at construction time).  Each
+/// step advances all sources by one element via `call_next`.  Stops at the
+/// shortest source (or raises `ValueError` when `strict=True` and lengths
+/// differ).
+pub(crate) struct ZipIter {
+    /// Already-converted iterators (one per positional argument).
+    pub(crate) sources: Vec<Value>,
+    /// When `true`, a length mismatch raises `ValueError` matching CPython's
+    /// wording.
+    pub(crate) strict: bool,
+    /// Set to `true` once any source raises `StopIteration`.
+    pub(crate) done: bool,
+    /// Count of tuples yielded so far; used for `strict` error messages.
+    pub(crate) count: usize,
+}
+
 /// Heap-allocated execution state for a suspended generator.
 /// Stored type-erased inside `Value::generator()` via `Box<dyn Any>`.
 pub(crate) struct GeneratorFrame {
@@ -3336,6 +3371,34 @@ impl Interpreter {
                                                 Err(e) => Err(e),
                                             })
                                         } else {
+                                        let is_enumerate_iter = state_rc
+                                            .borrow()
+                                            .downcast_ref::<EnumerateIter>()
+                                            .is_some();
+                                        if is_enumerate_iter {
+                                            Some(match self.step_enumerate_iter(&state_rc) {
+                                                Ok(Some(v)) => Ok(v),
+                                                Ok(None) => Err(PyError::named(
+                                                    "StopIteration",
+                                                    String::new(),
+                                                )),
+                                                Err(e) => Err(e),
+                                            })
+                                        } else {
+                                        let is_zip_iter = state_rc
+                                            .borrow()
+                                            .downcast_ref::<ZipIter>()
+                                            .is_some();
+                                        if is_zip_iter {
+                                            Some(match self.step_zip_iter(&state_rc) {
+                                                Ok(Some(v)) => Ok(v),
+                                                Ok(None) => Err(PyError::named(
+                                                    "StopIteration",
+                                                    String::new(),
+                                                )),
+                                                Err(e) => Err(e),
+                                            })
+                                        } else {
                                         let mut borrow = state_rc.borrow_mut();
                                         if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
                                             // Built-in iterator created by iter().
@@ -3365,6 +3428,8 @@ impl Interpreter {
                                             )))
                                         }
                                         }   // closes else { let mut borrow = ...
+                                        }   // closes is_zip_iter else
+                                        }   // closes is_enumerate_iter else
                                         }   // closes is_filter_iter else
                                         }   // closes is_map_iter else
                                     }

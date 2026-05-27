@@ -3332,6 +3332,575 @@ impl Interpreter {
         }
     }
 
+    /// `str % args` — CPython-compatible printf-style string formatting (#1393).
+    ///
+    /// Handles positional (`%s`, `%d`, …) and named (`%(key)s`) format codes.
+    /// The right-hand side may be a single value (implicitly a one-element
+    /// positional tuple), a tuple (positional), or a dict (named lookup).
+    fn str_printf_format(&mut self, fmt_val: Value, args: Value) -> Result<Value> {
+        let fmt = match fmt_val.kind() {
+            ValueKind::Str(s) => s.to_string(),
+            _ => unreachable!("str_printf_format called with non-str left"),
+        };
+
+        // Determine if the right-hand side is a mapping (dict) or a tuple/single.
+        let is_mapping = matches!(args.kind(), ValueKind::Dict(_));
+        // Wrap a non-tuple, non-mapping rhs in a virtual single-element tuple.
+        let positional: Option<Vec<Value>> = if is_mapping {
+            None
+        } else {
+            match args.kind() {
+                ValueKind::Tuple(items) => Some(items.to_vec()),
+                _ => Some(vec![args.clone()]),
+            }
+        };
+        let mut pos_idx: usize = 0;
+
+        let mut out = String::with_capacity(fmt.len());
+        let bytes = fmt.as_bytes();
+        let len = bytes.len();
+        let mut i = 0;
+
+        while i < len {
+            if bytes[i] != b'%' {
+                let ch = fmt[i..].chars().next().unwrap();
+                out.push(ch);
+                i += ch.len_utf8();
+                continue;
+            }
+            i += 1; // consume '%'
+            if i >= len {
+                return Err(PyError::named(
+                    "ValueError",
+                    "incomplete format".to_string(),
+                ));
+            }
+
+            // Named key: %(key)s
+            let named_key: Option<String> = if bytes[i] == b'(' {
+                i += 1;
+                let start = i;
+                while i < len && bytes[i] != b')' {
+                    i += 1;
+                }
+                if i >= len {
+                    return Err(PyError::named(
+                        "ValueError",
+                        "incomplete format key".to_string(),
+                    ));
+                }
+                let key = fmt[start..i].to_string();
+                i += 1; // consume ')'
+                Some(key)
+            } else {
+                None
+            };
+
+            // Flags: -, +, space, #, 0
+            let mut flag_minus = false;
+            let mut flag_plus = false;
+            let mut flag_space = false;
+            let mut flag_zero = false;
+            let mut flag_hash = false;
+            while i < len {
+                match bytes[i] {
+                    b'-' => flag_minus = true,
+                    b'+' => flag_plus = true,
+                    b' ' => flag_space = true,
+                    b'0' => flag_zero = true,
+                    b'#' => flag_hash = true,
+                    _ => break,
+                }
+                i += 1;
+            }
+
+            // Width: integer or '*'
+            let width: Option<usize> = if i < len && bytes[i] == b'*' {
+                i += 1;
+                let w = str_printf_take_positional(&positional, &mut pos_idx)?;
+                match w.kind() {
+                    ValueKind::Int(n) if n >= 0 => Some(n as usize),
+                    ValueKind::Int(n) => {
+                        flag_minus = true;
+                        Some((-n) as usize)
+                    }
+                    _ => {
+                        return Err(PyError::named("TypeError", "* wants int".to_string()));
+                    }
+                }
+            } else if i < len && bytes[i].is_ascii_digit() {
+                let start = i;
+                while i < len && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                Some(fmt[start..i].parse::<usize>().unwrap())
+            } else {
+                None
+            };
+
+            // Precision: .integer or .*
+            let precision: Option<usize> = if i < len && bytes[i] == b'.' {
+                i += 1;
+                if i < len && bytes[i] == b'*' {
+                    i += 1;
+                    let p = str_printf_take_positional(&positional, &mut pos_idx)?;
+                    match p.kind() {
+                        ValueKind::Int(n) if n >= 0 => Some(n as usize),
+                        ValueKind::Int(_) => Some(0),
+                        _ => {
+                            return Err(PyError::named("TypeError", "* wants int".to_string()));
+                        }
+                    }
+                } else {
+                    let start = i;
+                    while i < len && bytes[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                    if i == start { Some(0) } else { Some(fmt[start..i].parse::<usize>().unwrap()) }
+                }
+            } else {
+                None
+            };
+
+            // Length modifier: h, l, L — ignored (CPython ignores them too).
+            if i < len && matches!(bytes[i], b'h' | b'l' | b'L') {
+                i += 1;
+            }
+
+            if i >= len {
+                return Err(PyError::named(
+                    "ValueError",
+                    "incomplete format".to_string(),
+                ));
+            }
+            let conv = bytes[i] as char;
+            i += 1;
+
+            // %% — literal percent, no argument consumed.
+            if conv == '%' {
+                out.push('%');
+                continue;
+            }
+
+            // Get the argument value.
+            let arg: Value = if let Some(ref key) = named_key {
+                if is_mapping {
+                    match args.kind() {
+                        ValueKind::Dict(d) => {
+                            let k = PyKey::Str(intern_string(key));
+                            match d.get(&k) {
+                                Some(v) => v.clone(),
+                                None => {
+                                    return Err(PyError::key_error(Value::string(key.clone())));
+                                }
+                            }
+                        }
+                        _ => {
+                            return Err(PyError::named(
+                                "TypeError",
+                                "format requires a mapping".to_string(),
+                            ));
+                        }
+                    }
+                } else {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "format requires a mapping".to_string(),
+                    ));
+                }
+            } else {
+                str_printf_take_positional(&positional, &mut pos_idx)?
+            };
+
+            // Format the argument according to the conversion code.
+            let formatted: String = match conv {
+                's' => apply_str_precision(self.render_value_as_str(&arg)?, precision),
+                'r' => apply_str_precision(render_instance_repr(self, &arg)?, precision),
+                'd' | 'i' | 'u' => {
+                    let n = str_printf_to_int(&arg, conv)?;
+                    if n < 0 {
+                        format!("{}", n)
+                    } else if flag_plus {
+                        format!("+{}", n)
+                    } else if flag_space {
+                        format!(" {}", n)
+                    } else {
+                        format!("{}", n)
+                    }
+                }
+                'o' => {
+                    let n = str_printf_to_int(&arg, conv)?;
+                    if n < 0 {
+                        // CPython wraps negative ints as unsigned for octal.
+                        let u = (n as u64).wrapping_neg();
+                        if flag_hash { format!("-0o{:o}", u) } else { format!("-{:o}", u) }
+                    } else if flag_hash && n != 0 {
+                        if flag_plus { format!("+0o{:o}", n) }
+                        else if flag_space { format!(" 0o{:o}", n) }
+                        else { format!("0o{:o}", n) }
+                    } else if flag_plus {
+                        format!("+{:o}", n)
+                    } else if flag_space {
+                        format!(" {:o}", n)
+                    } else {
+                        format!("{:o}", n)
+                    }
+                }
+                'x' => {
+                    let n = str_printf_to_int(&arg, conv)?;
+                    if n < 0 {
+                        let u = (n as u64).wrapping_neg();
+                        format!("-{:x}", u)
+                    } else if flag_hash && n != 0 {
+                        if flag_plus { format!("+0x{:x}", n) }
+                        else if flag_space { format!(" 0x{:x}", n) }
+                        else { format!("0x{:x}", n) }
+                    } else if flag_plus {
+                        format!("+{:x}", n)
+                    } else if flag_space {
+                        format!(" {:x}", n)
+                    } else {
+                        format!("{:x}", n)
+                    }
+                }
+                'X' => {
+                    let n = str_printf_to_int(&arg, conv)?;
+                    if n < 0 {
+                        let u = (n as u64).wrapping_neg();
+                        format!("-{:X}", u)
+                    } else if flag_hash && n != 0 {
+                        if flag_plus { format!("+0X{:X}", n) }
+                        else if flag_space { format!(" 0X{:X}", n) }
+                        else { format!("0X{:X}", n) }
+                    } else if flag_plus {
+                        format!("+{:X}", n)
+                    } else if flag_space {
+                        format!(" {:X}", n)
+                    } else {
+                        format!("{:X}", n)
+                    }
+                }
+                'e' | 'E' => {
+                    let f = str_printf_to_float(&arg, conv)?;
+                    let prec = precision.unwrap_or(6);
+                    let s = format_scientific(f, prec, conv == 'E');
+                    if f.is_sign_positive() && flag_plus { format!("+{}", s) }
+                    else if f.is_sign_positive() && flag_space { format!(" {}", s) }
+                    else { s }
+                }
+                'f' | 'F' => {
+                    let f = str_printf_to_float(&arg, conv)?;
+                    let prec = precision.unwrap_or(6);
+                    let s = format!("{:.prec$}", f, prec = prec);
+                    if f.is_sign_positive() && flag_plus { format!("+{}", s) }
+                    else if f.is_sign_positive() && flag_space { format!(" {}", s) }
+                    else { s }
+                }
+                'g' | 'G' => {
+                    let f = str_printf_to_float(&arg, conv)?;
+                    let prec = precision.unwrap_or(6).max(1);
+                    let s = format_general_float(f, prec, conv == 'G');
+                    if f.is_sign_positive() && flag_plus { format!("+{}", s) }
+                    else if f.is_sign_positive() && flag_space { format!(" {}", s) }
+                    else { s }
+                }
+                'c' => match arg.kind() {
+                    ValueKind::Str(s) => {
+                        let mut cs = s.chars();
+                        let c = cs.next().ok_or_else(|| {
+                            PyError::named("TypeError", "%c requires int or char".to_string())
+                        })?;
+                        if cs.next().is_some() {
+                            return Err(PyError::named(
+                                "TypeError",
+                                "%c requires a single character".to_string(),
+                            ));
+                        }
+                        c.to_string()
+                    }
+                    ValueKind::Int(n) => char::from_u32(n as u32)
+                        .ok_or_else(|| {
+                            PyError::named(
+                                "OverflowError",
+                                "%c arg not in range(0x110000)".to_string(),
+                            )
+                        })?
+                        .to_string(),
+                    ValueKind::Bool(b) => char::from_u32(b as u32)
+                        .ok_or_else(|| {
+                            PyError::named(
+                                "OverflowError",
+                                "%c arg not in range(0x110000)".to_string(),
+                            )
+                        })?
+                        .to_string(),
+                    _ => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            "%c requires int or char".to_string(),
+                        ));
+                    }
+                },
+                _ => {
+                    return Err(PyError::named(
+                        "ValueError",
+                        format!(
+                            "unsupported format character '{}' (0x{:02x}) at index {}",
+                            conv,
+                            conv as u32,
+                            i - 1
+                        ),
+                    ));
+                }
+            };
+
+            // Apply width and alignment.
+            let padded = apply_printf_width(formatted, width, flag_minus, flag_zero, conv);
+            out.push_str(&padded);
+        }
+
+        // Unconsumed positional arguments: raise TypeError.
+        if let Some(ref pos) = positional {
+            if pos_idx < pos.len() {
+                return Err(PyError::named(
+                    "TypeError",
+                    "not all arguments converted during string formatting".to_string(),
+                ));
+            }
+        }
+
+        Ok(Value::string(out))
+    }
+
+}
+
+/// Take the next positional argument for printf-style formatting.
+fn str_printf_take_positional(positional: &Option<Vec<Value>>, idx: &mut usize) -> Result<Value> {
+    match positional {
+        None => Err(PyError::named(
+            "TypeError",
+            "not enough arguments for format string".to_string(),
+        )),
+        Some(items) => {
+            if *idx >= items.len() {
+                Err(PyError::named(
+                    "TypeError",
+                    "not enough arguments for format string".to_string(),
+                ))
+            } else {
+                let v = items[*idx].clone();
+                *idx += 1;
+                Ok(v)
+            }
+        }
+    }
+}
+
+/// Convert a `Value` to `i64` for integer printf format codes.
+fn str_printf_to_int(v: &Value, conv: char) -> Result<i64> {
+    match v.kind() {
+        ValueKind::Int(n) => Ok(n),
+        ValueKind::Bool(b) => Ok(b as i64),
+        ValueKind::Float(f) => Ok(f as i64),
+        ValueKind::BigInt(b) => b.to_i64().ok_or_else(|| {
+            PyError::named(
+                "OverflowError",
+                "Python int too large to convert to C long".to_string(),
+            )
+        }),
+        _ => Err(PyError::named(
+            "TypeError",
+            format!(
+                "%{conv} format: a real number is required, not {}",
+                pyrust_core::builtin_type_name(v)
+            ),
+        )),
+    }
+}
+
+/// Convert a `Value` to `f64` for float printf format codes.
+fn str_printf_to_float(v: &Value, conv: char) -> Result<f64> {
+    match v.kind() {
+        ValueKind::Float(f) => Ok(f),
+        ValueKind::Int(n) => Ok(n as f64),
+        ValueKind::Bool(b) => Ok(if b { 1.0 } else { 0.0 }),
+        ValueKind::BigInt(b) => bigint_to_float_or_overflow(b),
+        _ => Err(PyError::named(
+            "TypeError",
+            format!(
+                "%{conv} format: a real number is required, not {}",
+                pyrust_core::builtin_type_name(v)
+            ),
+        )),
+    }
+}
+
+/// Truncate a string to `precision` Unicode chars (for `%s` and `%r`).
+fn apply_str_precision(s: String, precision: Option<usize>) -> String {
+    match precision {
+        None => s,
+        Some(max_chars) => {
+            if s.chars().count() <= max_chars {
+                s
+            } else {
+                s.chars().take(max_chars).collect()
+            }
+        }
+    }
+}
+
+/// Apply width padding to a formatted value string.
+fn apply_printf_width(
+    s: String,
+    width: Option<usize>,
+    left_align: bool,
+    zero_fill: bool,
+    conv: char,
+) -> String {
+    let w = match width {
+        None | Some(0) => return s,
+        Some(w) => w,
+    };
+    let char_len = s.chars().count();
+    if char_len >= w {
+        return s;
+    }
+    let pad = w - char_len;
+    // Zero-fill only for numeric codes, not %s/%r/%c, and not with left-align.
+    if zero_fill
+        && !left_align
+        && matches!(
+            conv,
+            'd' | 'i' | 'u' | 'o' | 'x' | 'X' | 'f' | 'e' | 'E' | 'g' | 'G'
+        )
+    {
+        // Sign character stays first; zeros are inserted after it.
+        let (sign_prefix, rest) = match s.chars().next() {
+            Some(c @ ('+' | '-' | ' ')) => {
+                let mut cs = s.chars();
+                let sign = cs.next().unwrap().to_string();
+                let remaining: String = cs.collect();
+                (sign, remaining)
+            }
+            _ => (String::new(), s),
+        };
+        let mut out = String::with_capacity(w);
+        out.push_str(&sign_prefix);
+        for _ in 0..pad {
+            out.push('0');
+        }
+        out.push_str(&rest);
+        return out;
+    }
+    if left_align {
+        let mut out = s;
+        for _ in 0..pad {
+            out.push(' ');
+        }
+        out
+    } else {
+        let mut out = String::with_capacity(w);
+        for _ in 0..pad {
+            out.push(' ');
+        }
+        out.push_str(&s);
+        out
+    }
+}
+
+/// Format a float in scientific notation matching CPython's `%e`/`%E`.
+///
+/// CPython always uses a sign and at least two exponent digits: e+03, e-03.
+/// Rust's default format may omit the sign for positive exponents; this
+/// function normalises the output to match CPython.
+fn format_scientific(f: f64, prec: usize, upper: bool) -> String {
+    if f.is_nan() {
+        return if upper { "NAN".to_string() } else { "nan".to_string() };
+    }
+    if f.is_infinite() {
+        return if f > 0.0 {
+            if upper { "INF".to_string() } else { "inf".to_string() }
+        } else if upper {
+            "-INF".to_string()
+        } else {
+            "-inf".to_string()
+        };
+    }
+    let raw = format!("{:.prec$e}", f, prec = prec);
+    let e_char = if upper { 'E' } else { 'e' };
+    if let Some(pos) = raw.find('e') {
+        let mantissa = &raw[..pos];
+        let exp_str = &raw[pos + 1..];
+        let (sign, digits) = if exp_str.starts_with('-') {
+            ('-', &exp_str[1..])
+        } else if exp_str.starts_with('+') {
+            ('+', &exp_str[1..])
+        } else {
+            ('+', exp_str)
+        };
+        let exp_n: i32 = digits.parse().unwrap_or(0);
+        // {:+03} produces "+03", "-03" — sign always included, at least 2 digits.
+        format!("{}{}{:+03}", mantissa, e_char, exp_n)
+    } else {
+        raw
+    }
+}
+
+/// Format a float in "general" notation matching CPython's `%g`/`%G`.
+///
+/// Uses scientific notation when exp < -4 or exp >= prec; fixed otherwise.
+/// Trailing zeros are stripped in both cases.
+fn format_general_float(f: f64, prec: usize, upper: bool) -> String {
+    if f.is_nan() {
+        return if upper { "NAN".to_string() } else { "nan".to_string() };
+    }
+    if f.is_infinite() {
+        return if f > 0.0 {
+            if upper { "INF".to_string() } else { "inf".to_string() }
+        } else if upper {
+            "-INF".to_string()
+        } else {
+            "-inf".to_string()
+        };
+    }
+    let abs_f = f.abs();
+    let use_exp = abs_f != 0.0 && {
+        let exp = abs_f.log10().floor() as i64;
+        exp < -4 || exp >= prec as i64
+    };
+    if use_exp {
+        let raw = format_scientific(f, prec.saturating_sub(1), upper);
+        strip_trailing_zeros_exp(&raw)
+    } else {
+        let exp = if abs_f == 0.0 {
+            0i64
+        } else {
+            abs_f.log10().floor() as i64
+        };
+        let decimal_places = (prec as i64 - 1 - exp).max(0) as usize;
+        let raw = format!("{:.prec$}", f, prec = decimal_places);
+        strip_trailing_zeros_fixed(&raw)
+    }
+}
+
+fn strip_trailing_zeros_fixed(s: &str) -> String {
+    if !s.contains('.') {
+        return s.to_string();
+    }
+    let s = s.trim_end_matches('0');
+    s.trim_end_matches('.').to_string()
+}
+
+fn strip_trailing_zeros_exp(s: &str) -> String {
+    let e_pos = s.find('e').or_else(|| s.find('E'));
+    match e_pos {
+        None => strip_trailing_zeros_fixed(s),
+        Some(pos) => {
+            let mantissa = &s[..pos];
+            let exp_part = &s[pos..];
+            format!("{}{}", strip_trailing_zeros_fixed(mantissa), exp_part)
+        }
+    }
 }
 
 fn is_not_implemented(v: &Value) -> bool {

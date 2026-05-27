@@ -1238,6 +1238,37 @@ impl Interpreter {
                 }
             }
 
+            // EnumerateIter path: drive enumerate() to exhaustion.
+            {
+                let is_enumerate_iter =
+                    state_rc.borrow().downcast_ref::<EnumerateIter>().is_some();
+                if is_enumerate_iter {
+                    let mut items = Vec::new();
+                    loop {
+                        match self.step_enumerate_iter(&state_rc)? {
+                            Some(v) => items.push(v),
+                            None => break,
+                        }
+                    }
+                    return Ok(items);
+                }
+            }
+
+            // ZipIter path: drive zip() to exhaustion.
+            {
+                let is_zip_iter = state_rc.borrow().downcast_ref::<ZipIter>().is_some();
+                if is_zip_iter {
+                    let mut items = Vec::new();
+                    loop {
+                        match self.step_zip_iter(&state_rc)? {
+                            Some(v) => items.push(v),
+                            None => break,
+                        }
+                    }
+                    return Ok(items);
+                }
+            }
+
             // GeneratorFrame path: drive the generator to exhaustion.
             let mut items = Vec::new();
             loop {
@@ -1455,9 +1486,8 @@ impl Interpreter {
         &mut self,
         state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
     ) -> Result<Option<Value>> {
-        // Snapshot func and source iterators; borrow released before any
-        // call_next / call_function_expanded invocation.
-        let (func, iterators): (Value, Vec<Value>) = {
+        // Read func and source count; do NOT clone the sources Vec.
+        let (func, n_sources): (Value, usize) = {
             let borrow = state_rc.borrow();
             let s = borrow
                 .downcast_ref::<MapIter>()
@@ -1465,12 +1495,16 @@ impl Interpreter {
             if s.done {
                 return Ok(None);
             }
-            (s.func.clone(), s.sources.clone())
+            (s.func.clone(), s.sources.len())
         };
-        // Advance each source iterator by one element.  Stop at the first
-        // StopIteration (CPython map stops at the shortest iterable).
-        let mut row: Vec<Value> = Vec::with_capacity(iterators.len());
-        for iter_val in iterators {
+        // Advance each source iterator by one element.  Clone one Value at a
+        // time (cheap Rc bump) rather than snapshotting the whole sources Vec.
+        let mut row: Vec<Value> = Vec::with_capacity(n_sources);
+        for i in 0..n_sources {
+            let iter_val = {
+                let borrow = state_rc.borrow();
+                borrow.downcast_ref::<MapIter>().unwrap().sources[i].clone()
+            };
             match self.call_next(iter_val, None) {
                 Ok(v) => row.push(v),
                 Err(e) if e.class_name_is("StopIteration") => {
@@ -1534,6 +1568,136 @@ impl Interpreter {
             }
             // else continue to next candidate
         }
+    }
+
+    /// One step of the lazy `enumerate(iterable, start=N)` iterator.
+    ///
+    /// Advances the stored source iterator by one element via `call_next` and
+    /// returns `(counter, element)`.  Counter is incremented after each yield.
+    ///
+    /// `Ok(Some(v))` → next `(i, x)` tuple; `Ok(None)` → exhausted;
+    /// `Err(e)` → error from the source iterator.
+    pub(crate) fn step_enumerate_iter(
+        &mut self,
+        state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
+    ) -> Result<Option<Value>> {
+        let (iter_val, counter): (Value, i64) = {
+            let borrow = state_rc.borrow();
+            let s = borrow.downcast_ref::<EnumerateIter>().ok_or_else(|| {
+                PyError::Runtime("step_enumerate_iter on non-EnumerateIter state".to_string())
+            })?;
+            if s.done {
+                return Ok(None);
+            }
+            (s.source.clone(), s.counter)
+        };
+        match self.call_next(iter_val, None) {
+            Ok(item) => {
+                let mut borrow = state_rc.borrow_mut();
+                let s = borrow.downcast_mut::<EnumerateIter>().unwrap();
+                s.counter += 1;
+                Ok(Some(Value::tuple(vec![Value::int(counter), item])))
+            }
+            Err(e) if e.class_name_is("StopIteration") => {
+                state_rc
+                    .borrow_mut()
+                    .downcast_mut::<EnumerateIter>()
+                    .unwrap()
+                    .done = true;
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// One step of the lazy `zip(it1, it2, ..., strict=False)` iterator.
+    ///
+    /// Advances all stored source iterators by one element each via `call_next`
+    /// and returns a tuple of the results.  Stops at the first `StopIteration`
+    /// from any source.  When `strict=True`, checks that all other sources also
+    /// raise `StopIteration` at the same position and raises `ValueError` if any
+    /// mismatch is detected.
+    ///
+    /// `Ok(Some(v))` → next row tuple; `Ok(None)` → exhausted;
+    /// `Err(e)` → error from a source or strict-mode mismatch.
+    pub(crate) fn step_zip_iter(
+        &mut self,
+        state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
+    ) -> Result<Option<Value>> {
+        // Read only scalar metadata — do NOT clone the sources Vec.
+        let (n_sources, strict, count) = {
+            let borrow = state_rc.borrow();
+            let s = borrow.downcast_ref::<ZipIter>().ok_or_else(|| {
+                PyError::Runtime("step_zip_iter on non-ZipIter state".to_string())
+            })?;
+            if s.done {
+                return Ok(None);
+            }
+            (s.sources.len(), s.strict, s.count)
+        };
+        if n_sources == 0 {
+            state_rc.borrow_mut().downcast_mut::<ZipIter>().unwrap().done = true;
+            return Ok(None);
+        }
+        // Advance each iterator one step.  Clone one Value at a time (cheap Rc
+        // bump) so we never allocate a temporary Vec<Value> for the whole row.
+        let mut row: Vec<Value> = Vec::with_capacity(n_sources);
+        let mut stopped_at: Option<usize> = None;
+        for i in 0..n_sources {
+            let iter_val = {
+                let borrow = state_rc.borrow();
+                borrow.downcast_ref::<ZipIter>().unwrap().sources[i].clone()
+            };
+            match self.call_next(iter_val, None) {
+                Ok(v) => row.push(v),
+                Err(e) if e.class_name_is("StopIteration") => {
+                    stopped_at = Some(i);
+                    break;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        if let Some(short_idx) = stopped_at {
+            state_rc.borrow_mut().downcast_mut::<ZipIter>().unwrap().done = true;
+            if strict && n_sources > 1 {
+                let check_start = if short_idx == 0 { 1 } else { 0 };
+                for j in check_start..n_sources {
+                    if j == short_idx {
+                        continue;
+                    }
+                    let iter_val = {
+                        let borrow = state_rc.borrow();
+                        borrow.downcast_ref::<ZipIter>().unwrap().sources[j].clone()
+                    };
+                    match self.call_next(iter_val, None) {
+                        Ok(_) => {
+                            if short_idx == 0 {
+                                return Err(PyError::named(
+                                    "ValueError",
+                                    zip_longer_message(j, count),
+                                ));
+                            } else {
+                                return Err(PyError::named(
+                                    "ValueError",
+                                    zip_shorter_message(short_idx, count),
+                                ));
+                            }
+                        }
+                        Err(e) if e.class_name_is("StopIteration") => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+                if short_idx > 0 {
+                    return Err(PyError::named(
+                        "ValueError",
+                        zip_shorter_message(short_idx, count),
+                    ));
+                }
+            }
+            return Ok(None);
+        }
+        state_rc.borrow_mut().downcast_mut::<ZipIter>().unwrap().count += 1;
+        Ok(Some(Value::tuple(row)))
     }
 
     /// Call next() on a generator or any object with __next__.
@@ -1622,6 +1786,41 @@ impl Interpreter {
                 let is_filter_iter = state_rc.borrow().downcast_ref::<FilterIter>().is_some();
                 if is_filter_iter {
                     return match self.step_filter_iter(&state_rc)? {
+                        Some(v) => Ok(v),
+                        None => {
+                            if let Some(d) = default {
+                                Ok(d)
+                            } else {
+                                Err(PyError::named("StopIteration", String::new()))
+                            }
+                        }
+                    };
+                }
+            }
+
+            // EnumerateIter path: (counter, element) pair per step.
+            {
+                let is_enumerate_iter =
+                    state_rc.borrow().downcast_ref::<EnumerateIter>().is_some();
+                if is_enumerate_iter {
+                    return match self.step_enumerate_iter(&state_rc)? {
+                        Some(v) => Ok(v),
+                        None => {
+                            if let Some(d) = default {
+                                Ok(d)
+                            } else {
+                                Err(PyError::named("StopIteration", String::new()))
+                            }
+                        }
+                    };
+                }
+            }
+
+            // ZipIter path: one row tuple per step.
+            {
+                let is_zip_iter = state_rc.borrow().downcast_ref::<ZipIter>().is_some();
+                if is_zip_iter {
+                    return match self.step_zip_iter(&state_rc)? {
                         Some(v) => Ok(v),
                         None => {
                             if let Some(d) = default {
@@ -5190,5 +5389,34 @@ fn str_merge_kwargs(
             "TypeError",
             format!("str.{method}() takes no keyword arguments"),
         )),
+    }
+}
+
+/// CPython wording for `zip(strict=True)` when argument `short_idx+1` (1-based)
+/// ran out before the others, after `count` rows have been yielded.
+fn zip_shorter_message(short_idx: usize, _count: usize) -> String {
+    if short_idx == 1 {
+        format!("zip() argument {} is shorter than argument 1", short_idx + 1)
+    } else {
+        format!(
+            "zip() argument {} is shorter than arguments 1-{}",
+            short_idx + 1,
+            short_idx
+        )
+    }
+}
+
+/// CPython wording for `zip(strict=True)` when argument `long_idx+1` (1-based)
+/// still has a value after argument 1 (index 0) ran out, after `count` rows
+/// have been yielded.
+fn zip_longer_message(long_idx: usize, _count: usize) -> String {
+    if long_idx == 1 {
+        format!("zip() argument {} is longer than argument 1", long_idx + 1)
+    } else {
+        format!(
+            "zip() argument {} is longer than arguments 1-{}",
+            long_idx + 1,
+            long_idx
+        )
     }
 }
