@@ -2818,8 +2818,8 @@ impl Interpreter {
                             return Err(PyError::Raised(exc));
                         }
                         // Collect new argument values before we overwrite any registers.
-                        let mut new_args: Vec<Value> =
-                            Vec::with_capacity(*nargs as usize);
+                        let mut new_args: smallvec::SmallVec<[Value; 4]> =
+                            smallvec::SmallVec::with_capacity(*nargs as usize);
                         for i in 0..*nargs as u32 {
                             new_args.push(vm_try!(vm_read(&regs, args_base + i, num_locals)));
                         }
@@ -4081,7 +4081,7 @@ impl Interpreter {
                             let new_cls = Value::py_class(Rc::clone(&class));
                             // Build the PEP 487 keyword args from the registers
                             // and the kwarg names stored in the class proto.
-                            let kwarg_args: Vec<ExpandedCallArg> = class_kwarg_names
+                            let kwarg_args: ExpandedArgBuf = class_kwarg_names
                                 .iter()
                                 .enumerate()
                                 .map(|(i, key)| {
@@ -4715,7 +4715,7 @@ impl Interpreter {
                 }
                 let obj_val = vm_read(regs, obj, num_locals)?;
                 let method_val = self.get_attr(obj_val, method)?;
-                let mut expanded: Vec<ExpandedCallArg> = pos_items
+                let mut expanded: ExpandedArgBuf = pos_items
                     .into_iter()
                     .map(|v| ExpandedCallArg { name: None, value: v })
                     .collect();

@@ -113,7 +113,7 @@ impl Interpreter {
             pyrust_builtins::super_bound_builtin::as_super_bound_builtin(&function)
         {
             if let Some(dispatch) = crate::builtin_registry::lookup(&fn_name) {
-                let mut combined: Vec<ExpandedCallArg> = Vec::with_capacity(args.len() + 1);
+                let mut combined: ExpandedArgBuf = ExpandedArgBuf::with_capacity(args.len() + 1);
                 combined.push(ExpandedCallArg { name: None, value: instance });
                 combined.extend(args.iter().cloned());
                 return dispatch(self, &combined);
@@ -460,8 +460,8 @@ impl Interpreter {
                         // Reconstitute kwargs as ExpandedCallArgs (the
                         // bound_method dispatch split them into pos+kw maps).
                         // Drain pos so its capacity is preserved in the buf.
-                        let mut combined: Vec<ExpandedCallArg> =
-                            Vec::with_capacity(pos.len() + kw.len());
+                        let mut combined: ExpandedArgBuf =
+                            ExpandedArgBuf::with_capacity(pos.len() + kw.len());
                         for v in pos.drain(..) {
                             combined.push(ExpandedCallArg { name: None, value: v });
                         }
@@ -2741,7 +2741,7 @@ impl Interpreter {
                             "internal: __new__ builtin '{name}' not in registry"
                         ))
                     })?;
-                    let mut combined: Vec<ExpandedCallArg> = Vec::with_capacity(args.len() + 1);
+                    let mut combined: ExpandedArgBuf = ExpandedArgBuf::with_capacity(args.len() + 1);
                     combined.push(ExpandedCallArg {
                         name: None,
                         value: Value::py_class(Rc::clone(&class)),
