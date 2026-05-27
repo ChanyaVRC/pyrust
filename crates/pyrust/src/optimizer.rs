@@ -873,7 +873,12 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | ImportModule(r, _)
         | LoadExc(r)
         | MakeClass(r, _, _, _, _, _, _) => Some(*r),
-        CallMethod { dst, .. } | CallMethodExpanded { dst, .. } | Concat { dst, .. } => Some(*dst),
+        CallMethod { dst, .. }
+        | CallMethodExpanded { dst, .. }
+        | Concat { dst, .. }
+        // Yield writes the caller's sent value into `dst` on resume; aliases
+        // through `dst` are stale after this instruction.
+        | Yield { dst, .. } => Some(*dst),
         // Loop instructions write to their first register on each iteration.
         // Without these arms, pass_const_fold would fail to invalidate the
         // known-constant map entry for the destination, producing stale folds
