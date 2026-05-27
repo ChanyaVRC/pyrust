@@ -57,3 +57,13 @@ try:
     issubclass(42, int | str)
 except TypeError as e:
     print("TypeError")
+
+# Deduplication: int | int returns int itself, not a UnionType
+t5 = int | int
+print(t5 is int)
+print(type(t5).__name__)
+
+# Deduplication in chaining: int | str | int has 2 args (not 3)
+t6 = int | str | int
+print(t6)
+print(len(t6.__args__))

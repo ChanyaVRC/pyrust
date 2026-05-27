@@ -177,14 +177,42 @@ fn component_hash(v: &Value) -> Option<u64> {
 /// Construct a `UnionType` value by combining `lhs` and `rhs`.
 ///
 /// Flattens any `UnionType` components so `(int | str) | float` becomes
-/// `int | str | float` rather than a nested union.
+/// `int | str | float` rather than a nested union.  Deduplicates identical
+/// type components (CPython: `int | int` returns `int`, not a `UnionType`).
+/// When deduplication leaves a single component the component is returned
+/// directly, exactly as CPython does (`int | int is int` is `True`).
 pub fn make_union_type(lhs: Value, rhs: Value) -> Value {
     let mut components: Vec<Value> = Vec::new();
     collect_union_components(lhs, &mut components);
     collect_union_components(rhs, &mut components);
-    let args = Value::tuple(components);
+    // Deduplicate: keep only the first occurrence of each type identity.
+    let mut deduped: Vec<Value> = Vec::with_capacity(components.len());
+    for v in components {
+        if !deduped.iter().any(|u| same_type_identity(u, &v)) {
+            deduped.push(v);
+        }
+    }
+    // If deduplication collapses to a single type, return it directly —
+    // CPython: `int | int is int` is `True`.
+    if deduped.len() == 1 {
+        return deduped.into_iter().next().unwrap();
+    }
+    let args = Value::tuple(deduped);
     let state: Box<dyn Any> = Box::new(UnionTypeState { args });
     Value::builtin_object(UNION_TYPE_OPS, state)
+}
+
+/// Return `true` if `a` and `b` are the same type identity, used for
+/// deduplication in union construction.
+///
+/// - `PyClass` identity: same `Rc` pointer (same class object).
+/// - `BuiltinFunction` identity: same type-name string.
+fn same_type_identity(a: &Value, b: &Value) -> bool {
+    match (a.kind(), b.kind()) {
+        (ValueKind::PyClass(ra), ValueKind::PyClass(rb)) => std::rc::Rc::ptr_eq(ra, rb),
+        (ValueKind::BuiltinFunction(na), ValueKind::BuiltinFunction(nb)) => na == nb,
+        _ => false,
+    }
 }
 
 /// Push all the leaf type components of `v` into `out`, unwrapping nested
