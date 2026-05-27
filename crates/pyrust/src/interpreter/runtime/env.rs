@@ -274,6 +274,12 @@ impl Interpreter {
                         Value::py_class(Rc::clone(&class)),
                     ));
                 }
+                if name == "__subclasses__" {
+                    return Ok(pyrust_builtins::bound_method::bound_method(
+                        "__subclasses__",
+                        Value::py_class(Rc::clone(&class)),
+                    ));
+                }
                 if name == "__annotations__" {
                     // `type.__annotations__` in CPython is a data descriptor on
                     // `type` itself.  On first access it synthesises an empty dict,
@@ -2198,6 +2204,24 @@ fn class_mro_items(class: &Rc<RefCell<PyClass>>) -> Vec<Value> {
         items.push(Value::py_class(obj));
     }
     items
+}
+
+/// Returns the list of direct subclasses of `class`, pruning stale weak refs.
+/// Used by `__subclasses__()` dispatch (issue #1354).
+fn class_direct_subclasses(class: &Rc<RefCell<PyClass>>) -> Vec<Value> {
+    let borrowed = class.borrow();
+    let mut subclasses = borrowed.subclasses.borrow_mut();
+    // Retain only live weak refs and collect as Values.
+    let mut result = Vec::new();
+    subclasses.retain(|weak| {
+        if let Some(rc) = weak.upgrade() {
+            result.push(Value::py_class(rc));
+            true
+        } else {
+            false
+        }
+    });
+    result
 }
 
 /// Returns `true` if `name` is a built-in method on `target`'s type.

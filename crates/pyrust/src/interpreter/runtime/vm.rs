@@ -3878,11 +3878,20 @@ impl Interpreter {
                     let class = Rc::new(RefCell::new(PyClass {
                         name: class_name,
                         qualname,
-                        base,
-                        extra_bases: extra_bases_vec,
+                        base: base.clone(),
+                        extra_bases: extra_bases_vec.clone(),
                         attrs,
                         mutation_version: std::cell::Cell::new(0),
+                        subclasses: std::cell::RefCell::new(vec![]),
                     }));
+                    // Register the new class as a direct subclass of each base
+                    // so that base.__subclasses__() includes it (issue #1354).
+                    if let Some(ref b) = base {
+                        b.borrow().subclasses.borrow_mut().push(Rc::downgrade(&class));
+                    }
+                    for eb in &extra_bases_vec {
+                        eb.borrow().subclasses.borrow_mut().push(Rc::downgrade(&class));
+                    }
                     // Issue #733: write __class__ into the class env so methods
                     // that captured it (at MakeFunction time during the class body)
                     // can reach it through their env chain.  This is how CPython's

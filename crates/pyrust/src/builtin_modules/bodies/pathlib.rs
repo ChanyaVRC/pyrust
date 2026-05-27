@@ -763,6 +763,7 @@ thread_local! {
             extra_bases: vec![],
             attrs,
             mutation_version: std::cell::Cell::new(0),
+            subclasses: std::cell::RefCell::new(vec![]),
         }))
     };
 
@@ -772,14 +773,17 @@ thread_local! {
     /// instances the correct runtime type name (CPython parity on Linux).
     static POSIX_PATH_CLASS: Rc<RefCell<PyClass>> = {
         PATH_CLASS.with(|path_class| {
-            Rc::new(RefCell::new(PyClass {
+            let posix = Rc::new(RefCell::new(PyClass {
                 name: "PosixPath".to_string(),
                 qualname: "PosixPath".to_string(),
                 base: Some(Rc::clone(path_class)),
                 extra_bases: vec![],
                 attrs: IndexMap::new(),
                 mutation_version: std::cell::Cell::new(0),
-            }))
+                subclasses: std::cell::RefCell::new(vec![]),
+            }));
+            path_class.borrow().subclasses.borrow_mut().push(Rc::downgrade(&posix));
+            posix
         })
     };
 }

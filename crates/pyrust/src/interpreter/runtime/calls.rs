@@ -534,6 +534,35 @@ impl Interpreter {
                                 };
                                 Ok(Value::list(class_mro_items(&target_class)))
                             }
+                            "__subclasses__" => {
+                                // CPython: type.__subclasses__(self) → list of direct subclasses.
+                                // Takes no arguments. Prunes stale weak refs lazily.
+                                // CPython distinguishes kw vs positional:
+                                //   A.__subclasses__(1)       → "takes no arguments (1 given)"
+                                //   A.__subclasses__(x=1)     → "takes no keyword arguments"
+                                //   A.__subclasses__(1, x=2)  → "takes no keyword arguments"
+                                let class_name = class.borrow().name.clone();
+                                if !kw.is_empty() {
+                                    self.bound_method_pos_buf = pos;
+                                    return Err(PyError::named(
+                                        "TypeError",
+                                        format!(
+                                            "{class_name}.__subclasses__() takes no keyword arguments",
+                                        ),
+                                    ));
+                                }
+                                let n_pos = pos.len();
+                                if n_pos > 0 {
+                                    self.bound_method_pos_buf = pos;
+                                    return Err(PyError::named(
+                                        "TypeError",
+                                        format!(
+                                            "{class_name}.__subclasses__() takes no arguments ({n_pos} given)",
+                                        ),
+                                    ));
+                                }
+                                Ok(Value::list(class_direct_subclasses(&class)))
+                            }
                             _ => {
                                 self.bound_method_pos_buf = pos;
                                 let class_name = class.borrow().name.clone();

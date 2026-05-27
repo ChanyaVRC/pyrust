@@ -232,6 +232,7 @@ thread_local! {
             extra_bases: vec![],
             attrs,
             mutation_version: std::cell::Cell::new(0),
+            subclasses: std::cell::RefCell::new(vec![]),
         }))
     };
 
@@ -264,6 +265,7 @@ thread_local! {
         extra_bases: vec![],
         attrs: IndexMap::new(),
         mutation_version: std::cell::Cell::new(0),
+        subclasses: std::cell::RefCell::new(vec![]),
     }));
 
     /// O(1) dispatch table for primitive classes (#462 perf): maps the
@@ -361,14 +363,19 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
         // fresh `PyInstance` receiver and breaks the constructor signature
         // (`class S(int): pass; S(5)` → `int(PyInstance, 5)` argument
         // mismatch).  See Copilot review on #463.
-        Rc::new(RefCell::new(PyClass {
+        let class = Rc::new(RefCell::new(PyClass {
             name: name.to_string(),
             qualname: name.to_string(),
-            base,
+            base: base.clone(),
             extra_bases: vec![],
             attrs,
             mutation_version: std::cell::Cell::new(0),
-        }))
+            subclasses: std::cell::RefCell::new(vec![]),
+        }));
+        if let Some(b) = base {
+            b.borrow().subclasses.borrow_mut().push(Rc::downgrade(&class));
+        }
+        class
     }
     let int_class = make("int", None);
     let str_class = make("str", None);
@@ -1293,14 +1300,19 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
     //                 ImportWarning, UnicodeWarning, BytesWarning, EncodingWarning
     //     SystemExit, GeneratorExit, KeyboardInterrupt (direct BaseException children)
     let mk = |name: &str, base: Option<Rc<RefCell<PyClass>>>| {
-        Rc::new(RefCell::new(PyClass {
+        let class = Rc::new(RefCell::new(PyClass {
             name: name.to_string(),
             qualname: name.to_string(),
-            base,
+            base: base.clone(),
             extra_bases: vec![],
             attrs: IndexMap::new(),
             mutation_version: std::cell::Cell::new(0),
-        }))
+            subclasses: std::cell::RefCell::new(vec![]),
+        }));
+        if let Some(b) = base {
+            b.borrow().subclasses.borrow_mut().push(Rc::downgrade(&class));
+        }
+        class
     };
     let base_exception = mk("BaseException", None);
     // Install `add_note` (Python 3.11+ — issue #1067) on BaseException so that
