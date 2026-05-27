@@ -4512,6 +4512,13 @@ impl Compiler {
                     return;
                 }
                 let r = self.compile_expr(expr);
+                // `emit_early_exit_cleanups` may emit `DeleteLocal` for the
+                // `except … as e` variable (PEP 3110).  If the return
+                // expression compiled directly to that same fastlocal register
+                // (e.g. `return e`), the deletion would clobber the value
+                // before `Return` reads it.  Copy to a temp first so the
+                // return value survives any cleanup deletions.
+                let r = self.ensure_temp(r);
                 self.emit_early_exit_cleanups(0);
                 if self.failed {
                     self.free_temp(r);
