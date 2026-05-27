@@ -443,6 +443,78 @@ impl Interpreter {
                             &combined,
                         )
                     }
+                    ValueKind::PyClass(class) => {
+                        // `type.mro()` — returns the MRO as a list (same entries
+                        // as `__mro__` tuple).  CPython's `type.mro(self)` is a
+                        // C slot that returns `list(self.__mro__)`.
+                        //
+                        // Two call forms:
+                        //   B.mro()          → bound receiver is B, pos is empty
+                        //   type.mro(B)      → bound receiver is `type`, pos[0] is B
+                        let class = Rc::clone(class);
+                        match method {
+                            "mro" => {
+                                // Determine the target class.  When the bound receiver
+                                // IS the `type` metaclass, the first positional arg is
+                                // the self argument (unbound descriptor form).  When
+                                // the receiver is any other class, mro() takes no
+                                // extra arguments.
+                                let n = pos.len() + kw.len();
+                                let receiver_is_type =
+                                    Rc::ptr_eq(&class, &type_class_singleton());
+                                let target_class: Rc<RefCell<PyClass>> = if receiver_is_type {
+                                    // Unbound descriptor call: type.mro(B).
+                                    // Requires exactly one positional arg that is a type.
+                                    if pos.len() == 1 && kw.is_empty() {
+                                        let maybe_class = match pos[0].kind() {
+                                            ValueKind::PyClass(c) => Some(Rc::clone(c)),
+                                            _ => None,
+                                        };
+                                        match maybe_class {
+                                            Some(c) => c,
+                                            None => {
+                                                self.bound_method_pos_buf = pos;
+                                                return Err(PyError::named(
+                                                    "TypeError",
+                                                    "descriptor 'mro' for 'type' objects doesn't apply to a non-type argument".to_string(),
+                                                ));
+                                            }
+                                        }
+                                    } else {
+                                        self.bound_method_pos_buf = pos;
+                                        return Err(PyError::named(
+                                            "TypeError",
+                                            "unbound method type.mro() needs an argument".to_string(),
+                                        ));
+                                    }
+                                } else if n == 0 {
+                                    // Bound call: B.mro()
+                                    class
+                                } else {
+                                    // Too many arguments.
+                                    let class_name = class.borrow().name.clone();
+                                    self.bound_method_pos_buf = pos;
+                                    return Err(PyError::named(
+                                        "TypeError",
+                                        format!(
+                                            "{class_name}.mro() takes no arguments ({n} given)",
+                                        ),
+                                    ));
+                                };
+                                Ok(Value::list(class_mro_items(&target_class)))
+                            }
+                            _ => {
+                                self.bound_method_pos_buf = pos;
+                                let class_name = class.borrow().name.clone();
+                                return Err(PyError::named(
+                                    "AttributeError",
+                                    format!(
+                                        "type object '{class_name}' has no attribute '{method}'",
+                                    ),
+                                ));
+                            }
+                        }
+                    }
                     _ => Err(PyError::named(
                         "TypeError",
                         format!("'{}' object has no method '{method}'", pyrust_core::builtin_type_name(&receiver)),
