@@ -1064,7 +1064,7 @@ pyrust_module! {
                 | ValueKind::Range { .. }
         );
         if !is_reversible {
-            let type_name = value_type_name_str(&seq.0);
+            let type_name = full_type_name_str(&seq.0);
             return Err(PyError::named(
                 "TypeError",
                 format!("'{}' object is not reversible", type_name),
@@ -1202,13 +1202,19 @@ pyrust_module! {
                         }
                     }
                     IterKind::Other => {
+                        // Determine the iterator type name before consuming val.
+                        let iter_type_name = builtin_iter_type_name(&val);
                         let items = iter_values(val.clone()).map_err(|_| {
                             PyError::named(
                                 "TypeError",
                                 format!("'{}' object is not iterable", value_type_name_str(&val)),
                             )
                         })?;
-                        Ok(Value::generator(Box::new(NativeIterFrame { items, pos: 0 })))
+                        Ok(Value::generator(Box::new(NativeIterFrame {
+                            items,
+                            pos: 0,
+                            type_name: iter_type_name,
+                        })))
                     }
                 }
             }
@@ -1446,6 +1452,8 @@ pyrust_module! {
                     Ok(Value::builtin_function("map"))
                 } else if borrow.downcast_ref::<FilterIter>().is_some() {
                     Ok(Value::builtin_function("filter"))
+                } else if let Some(native) = borrow.downcast_ref::<NativeIterFrame>() {
+                    Ok(Value::builtin_function(native.type_name))
                 } else {
                     Ok(Value::builtin_function("generator"))
                 }
@@ -5422,4 +5430,64 @@ fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result
         }
     }
     Ok(value.repr())
+}
+
+/// Return the Python iterator type name for a builtin collection, matching
+/// CPython 3.12's iterator type names (e.g. "list_iterator", "set_iterator").
+///
+/// Used by `iter()` to tag `NativeIterFrame` with the right name so that
+/// `type(iter([1,2,3])).__name__` and error messages in `reversed()` are
+/// correct.  Any type that does not map to a specific CPython iterator name
+/// falls back to "generator".
+fn builtin_iter_type_name(v: &Value) -> &'static str {
+    match v.kind() {
+        ValueKind::List(_) => "list_iterator",
+        ValueKind::Tuple(_) => "tuple_iterator",
+        // CPython 3.12 uses "str_ascii_iterator" for pure-ASCII strings and
+        // "str_iterator" for strings containing non-ASCII characters.
+        ValueKind::Str(s) => {
+            if s.is_ascii() {
+                "str_ascii_iterator"
+            } else {
+                "str_iterator"
+            }
+        }
+        ValueKind::Set(_) => "set_iterator",
+        ValueKind::Dict(_) => "dict_keyiterator",
+        ValueKind::Range { .. } => "range_iterator",
+        ValueKind::Bytes(_) => "bytes_iterator",
+        // dict view iterators: "dict_keys" → "dict_keyiterator", etc.
+        ValueKind::BuiltinObject { ops, .. } => match ops.type_name() {
+            "dict_keys" => "dict_keyiterator",
+            "dict_values" => "dict_valueiterator",
+            "dict_items" => "dict_itemiterator",
+            _ => "generator",
+        },
+        _ => "generator",
+    }
+}
+
+/// Return the Python type name for a value, with correct iterator type names
+/// for Generator variants (e.g. "list_iterator", "map", "filter").
+///
+/// `value_type_name_str` (from `pyrust-core`) cannot distinguish between
+/// `NativeIterFrame`-based iterators and true generator frames because they
+/// are both stored as `ValueKind::Generator`.  This wrapper downcasts the
+/// generator state to recover the specific type name stored in
+/// `NativeIterFrame::type_name`, or the sentinel names for `MapIter` /
+/// `FilterIter`.  All other value kinds delegate to `value_type_name_str`.
+fn full_type_name_str(v: &Value) -> std::borrow::Cow<'static, str> {
+    if let ValueKind::Generator(state_rc) = v.kind() {
+        let borrow = state_rc.borrow();
+        if borrow.downcast_ref::<MapIter>().is_some() {
+            return std::borrow::Cow::Borrowed("map");
+        }
+        if borrow.downcast_ref::<FilterIter>().is_some() {
+            return std::borrow::Cow::Borrowed("filter");
+        }
+        if let Some(native) = borrow.downcast_ref::<NativeIterFrame>() {
+            return std::borrow::Cow::Borrowed(native.type_name);
+        }
+    }
+    value_type_name_str(v)
 }
