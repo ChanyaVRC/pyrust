@@ -3417,6 +3417,15 @@ pyrust_module! {
             // so that format(exc, "") and f"{exc}" call the user-defined __str__.
             if spec.is_empty() {
                 return Ok(Value::string(render_instance_str(_interp, value)?));
+            } else {
+                // CPython raises TypeError (not ValueError) when a non-empty spec
+                // is passed to a type that inherits object.__format__ without
+                // overriding it.
+                let type_name = value_type_name_str(value);
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("unsupported format string passed to {}.__format__", type_name),
+                ));
             }
         }
         apply_format_spec(value, spec)
@@ -4126,6 +4135,15 @@ pyrust_module! {
         } else {
             String::new()
         };
+        // CPython raises TypeError when a non-empty spec is passed to
+        // object.__format__ directly.
+        if !spec_str.is_empty() {
+            let type_name = value_type_name_str(&self_val);
+            return Err(PyError::named(
+                "TypeError",
+                format!("unsupported format string passed to {}.__format__", type_name),
+            ));
+        }
         let s = render_instance_str(_interp, &self_val)?;
         // apply_format_spec takes &Value; wrap the str result temporarily.
         apply_format_spec(&Value::string(s), &spec_str)
