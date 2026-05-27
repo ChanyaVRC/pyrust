@@ -4550,22 +4550,31 @@ pyrust_module! {
     /// CPython signature: `object.__getattribute__(self, name, /)`
     #[py_name = "object.__getattribute__"]
     fn object_getattribute(args) -> Result<Value> {
+        // CPython error messages for argument count mismatches:
+        //   0 args: "descriptor '__getattribute__' of 'object' object needs an argument"
+        //   1 arg (self only, 0 name args): "expected 1 argument, got 0"
+        //   3+ args: "expected 1 argument, got N" where N = args.len() - 1
+        if args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                "descriptor '__getattribute__' of 'object' object needs an argument".to_string(),
+            ));
+        }
         if args.len() != 2 {
             return Err(PyError::named(
                 "TypeError",
-                format!(
-                    "object.__getattribute__() takes exactly 2 arguments ({} given)",
-                    args.len()
-                ),
+                format!("expected 1 argument, got {}", args.len() - 1),
             ));
         }
         let name = match args[1].value.kind() {
             ValueKind::Str(s) => s.to_string(),
             _ => {
+                // CPython: "attribute name must be string, not 'TYPE'"
+                let type_name = value_type_name_str(&args[1].value);
                 return Err(PyError::named(
                     "TypeError",
-                    "attribute name must be string, not a non-string object".to_string(),
-                ))
+                    format!("attribute name must be string, not '{type_name}'"),
+                ));
             }
         };
         let instance_rc = match args[0].value.kind() {
