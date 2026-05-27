@@ -31,9 +31,22 @@ print("DynChild" in [c.__name__ for c in Animal.__subclasses__()])
 try:
     Animal.__subclasses__(1)
 except TypeError as e:
-    print(type(e).__name__)
+    print(type(e).__name__, str(e))
 
+# keyword-only → "takes no keyword arguments"
 try:
     Animal.__subclasses__(extra=1)
 except TypeError as e:
-    print(type(e).__name__)
+    print(type(e).__name__, str(e))
+
+# mixed pos+kw → "takes no keyword arguments"
+try:
+    Animal.__subclasses__(1, extra=2)
+except TypeError as e:
+    print(type(e).__name__, str(e))
+
+# 2 positional → "takes no arguments (2 given)"
+try:
+    Animal.__subclasses__(1, 2)
+except TypeError as e:
+    print(type(e).__name__, str(e))
