@@ -5931,6 +5931,10 @@ fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) -> Result<S
         // than the default object repr.  (Counter/defaultdict/deque define
         // their own __repr__ as BuiltinFunctions; the lookup above handles
         // those; this path only fires when lookup returned None.)
+        // Issue #1205: extend to container backings (list/dict/tuple/set
+        // subclasses).  list/dict/tuple render the same as the backing
+        // container.  set/frozenset subclasses prefix the class name:
+        // `MySet({1, 2})` / `MySet()`, matching CPython's set_repr().
         if let Some(backing) = instance_builtin_data(&instance_rc) {
             match backing.kind() {
                 ValueKind::Str(_)
@@ -5939,6 +5943,35 @@ fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) -> Result<S
                 | ValueKind::Bool(_)
                 | ValueKind::Float(_)
                 | ValueKind::Bytes(_) => return Ok(backing.repr()),
+                ValueKind::List(_) | ValueKind::Dict(_) | ValueKind::Tuple(_) => {
+                    return render_value_repr(interp, &backing);
+                }
+                ValueKind::Set(items) => {
+                    let class_name = class.borrow().name.clone();
+                    if items.is_empty() {
+                        return Ok(format!("{class_name}()"));
+                    }
+                    let inner = render_value_repr(interp, &backing)?;
+                    return Ok(format!("{class_name}({inner})"));
+                }
+                ValueKind::BuiltinObject { ops, .. }
+                    if ops.type_name() == pyrust_builtins::frozenset::TYPE_NAME =>
+                {
+                    let class_name = class.borrow().name.clone();
+                    let items = pyrust_builtins::frozenset::as_items(&backing);
+                    let is_empty = items.as_ref().map_or(true, |rc| rc.is_empty());
+                    if is_empty {
+                        return Ok(format!("{class_name}()"));
+                    }
+                    // Render elements as `{e1, e2}` (without the outer
+                    // `frozenset(...)` wrapper that render_value_repr adds).
+                    let snapshot: Vec<_> = items.unwrap().iter().cloned().collect();
+                    let mut parts = Vec::with_capacity(snapshot.len());
+                    for k in &snapshot {
+                        parts.push(render_key_repr(interp, k)?);
+                    }
+                    return Ok(format!("{class_name}({{{}}})", parts.join(", ")));
+                }
                 _ => {}
             }
         }
@@ -6247,6 +6280,42 @@ fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result
                     format!("{dunder} returned non-string"),
                 )),
             };
+        }
+    }
+    // Issue #1205: no __str__ or __repr__ in MRO — delegate to the backing
+    // container so that list/dict/tuple/set subclasses render their contents
+    // via str() just as they do via repr().
+    if let Some(backing) = instance_builtin_data(&inst_rc) {
+        match backing.kind() {
+            ValueKind::List(_) | ValueKind::Dict(_) | ValueKind::Tuple(_) => {
+                return render_value_repr(interp, &backing);
+            }
+            ValueKind::Set(items) => {
+                let class_name = class.borrow().name.clone();
+                if items.is_empty() {
+                    return Ok(format!("{class_name}()"));
+                }
+                let inner = render_value_repr(interp, &backing)?;
+                return Ok(format!("{class_name}({inner})"));
+            }
+            ValueKind::BuiltinObject { ops, .. }
+                if ops.type_name() == pyrust_builtins::frozenset::TYPE_NAME =>
+            {
+                let class_name = class.borrow().name.clone();
+                let items = pyrust_builtins::frozenset::as_items(&backing);
+                let is_empty = items.as_ref().map_or(true, |rc| rc.is_empty());
+                if is_empty {
+                    return Ok(format!("{class_name}()"));
+                }
+                // Render elements as `{e1, e2}` without the outer `frozenset(...)`
+                let snapshot: Vec<_> = items.unwrap().iter().cloned().collect();
+                let mut parts = Vec::with_capacity(snapshot.len());
+                for k in &snapshot {
+                    parts.push(render_key_repr(interp, k)?);
+                }
+                return Ok(format!("{class_name}({{{}}})", parts.join(", ")));
+            }
+            _ => {}
         }
     }
     Ok(value.repr())
