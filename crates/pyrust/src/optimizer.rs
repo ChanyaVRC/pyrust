@@ -3950,6 +3950,23 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             let hi = dst_base + *before as u32 + 1 + *after as u32;
             copies.retain(|k, v| (*k < lo || *k >= hi) && (*v < lo || *v >= hi));
         }
+        // Yield{dst} writes `dst` on resume (resume_generator_with_exc stores
+        // the sent value there before re-entering the bytecode loop).
+        // `writable_dst` does not cover Yield, so kill explicitly.
+        if let Insn::Yield { dst, .. } = &insn {
+            copies.retain(|k, v| *k != *dst && *v != *dst);
+        }
+        // YieldFrom writes both result_reg and sent_reg (see collect_writes).
+        if let Insn::YieldFrom {
+            result_reg,
+            sent_reg,
+            ..
+        } = &insn
+        {
+            let rr = *result_reg;
+            let sr = *sent_reg;
+            copies.retain(|k, v| (*k != rr && *v != rr) && (*k != sr && *v != sr));
+        }
         // Move(dst, src): kill stale aliases THEN record the new copy.
         // Killing is necessary because overwriting `dst` invalidates any
         // existing alias that names `dst` as its source (e.g. `x → dst`).
