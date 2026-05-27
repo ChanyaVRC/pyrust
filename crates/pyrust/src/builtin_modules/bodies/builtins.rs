@@ -27,11 +27,11 @@ use crate::interpreter::{
     int_pow_promoting, invoke_class_method,
     is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_hash_bigint, py_hash_float,
     py_hash_int, py_mod_i64, py_round_half_even, py_round_half_even_f64,
-    reject_keyword_args_expanded, resolve_zero_arg_super, snapshot_current_locals,
+    reject_keyword_args_expanded, resolve_zero_arg_super, round_bigint_neg_ndigits, snapshot_current_locals,
     sync_module_env_to_globals_dict, type_class_singleton,
     value_to_float, value_type_name_str,
 };
-use crate::value::{PyClass, PyKey, PyToPrimitive, PyZero, UserFunctionKind, Value, ValueKind, range_len};
+use crate::value::{PyBigInt, PyClass, PyKey, PyToPrimitive, PyZero, UserFunctionKind, Value, ValueKind, range_len};
 use pyrust_derive::pyrust_module;
 
 pyrust_module! {
@@ -2012,12 +2012,25 @@ pyrust_module! {
             }
         };
         match num {
-            NumKind::Int(v) => Ok(Value::int(v)),
-            NumKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
+            NumKind::Int(v) => match ndigits_i32 {
+                Some(n) if n < 0 => Ok(round_bigint_neg_ndigits(PyBigInt::from(v), (-n) as u32)),
+                _ => Ok(Value::int(v)),
+            },
+            NumKind::Bool(b) => {
+                let v: i64 = if b { 1 } else { 0 };
+                match ndigits_i32 {
+                    Some(n) if n < 0 => Ok(round_bigint_neg_ndigits(PyBigInt::from(v), (-n) as u32)),
+                    _ => Ok(Value::int(v)),
+                }
+            }
             NumKind::BigInt => {
-                // BigInt: return unchanged (any ndigits; int arithmetic exact).
                 if let ValueKind::BigInt(b) = x.0.kind() {
-                    Ok(Value::bigint(b.clone()))
+                    match ndigits_i32 {
+                        Some(n) if n < 0 => {
+                            Ok(round_bigint_neg_ndigits(b.clone(), (-n) as u32))
+                        }
+                        _ => Ok(Value::bigint(b.clone())),
+                    }
                 } else {
                     unreachable!()
                 }

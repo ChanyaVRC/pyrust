@@ -3520,6 +3520,41 @@ pub(crate) fn py_round_half_even_f64(v: f64) -> f64 {
     }
 }
 
+/// Round a `PyBigInt` to the nearest `10^neg_n` using banker's rounding.
+///
+/// This implements CPython's `int.__round__(ndigits)` semantics for negative
+/// `ndigits`: divide by `factor = 10^neg_n` using floor division, keep the
+/// floor multiple, then apply half-even tie-breaking.  The result is returned
+/// as `Value::int` if it fits in `i64`, otherwise `Value::bigint`.
+///
+/// Called by `round()` in builtins for `Int`, `Bool`, and `BigInt` inputs
+/// when `ndigits` is negative.
+pub(crate) fn round_bigint_neg_ndigits(x: PyBigInt, neg_n: u32) -> Value {
+    use num_traits::ToPrimitive;
+
+    let factor = PyPow::pow(PyBigInt::from(10i64), neg_n);
+    let half = &factor / PyBigInt::from(2i64);
+    // floor-divmod: 0 ≤ r < factor, q = floor(x / factor)
+    let (q, r) = bigint_divmod_floor(&x, &factor);
+    let base = &q * &factor;
+    let rounded = if r < half {
+        base
+    } else if r > half {
+        base + &factor
+    } else {
+        // Tie: banker's rounding — round to even quotient.
+        if (&q % PyBigInt::from(2i64)).is_zero() {
+            base
+        } else {
+            base + &factor
+        }
+    };
+    match rounded.to_i64() {
+        Some(v) => Value::int(v),
+        None => Value::bigint(rounded),
+    }
+}
+
 /// Modular exponentiation: (base^exp) % modulus for i64.
 pub(crate) fn modpow_i64(base: i64, exp: u64, modulus: i64) -> i64 {
     if modulus == 1 {
