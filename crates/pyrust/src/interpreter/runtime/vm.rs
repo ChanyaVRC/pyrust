@@ -3889,7 +3889,15 @@ impl Interpreter {
                     // reached even if the direct base doesn't override it.
                     // Skip silently when no base exists (top-level class) or when the
                     // base MRO has no __init_subclass__ defined.
-                    if let Some(base_rc) = class.borrow().base.clone() {
+                    //
+                    // Issue #1252: materialize `maybe_base` in a separate let so the
+                    // temporary Ref<PyClass> from `class.borrow()` is dropped before
+                    // invoke_class_method runs.  Rust extends temporaries in an if-let
+                    // scrutinee to the entire block; if that borrow is still live when
+                    // __init_subclass__ does `cls.flag = True` (→ borrow_mut on the
+                    // same RefCell), it panics with "RefCell already borrowed".
+                    let maybe_base = class.borrow().base.clone();
+                    if let Some(base_rc) = maybe_base {
                         if let Some(method_val) =
                             lookup_class_attr(&base_rc, "__init_subclass__")
                         {
