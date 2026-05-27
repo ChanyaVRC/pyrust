@@ -167,7 +167,7 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
             if s.closed {
                 return Err(PyError::named(
                     "ValueError",
-                    "I/O operation on closed file".to_string(),
+                    "I/O operation on closed file.".to_string(),
                 ));
             }
             Ok(Value::none())
@@ -180,7 +180,7 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
             if s.closed {
                 return Err(PyError::named(
                     "ValueError",
-                    "I/O operation on closed file".to_string(),
+                    "I/O operation on closed file.".to_string(),
                 ));
             }
             let pos = if s.is_readable() {
@@ -214,7 +214,7 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
             if s.closed {
                 return Err(PyError::named(
                     "ValueError",
-                    "I/O operation on closed file".to_string(),
+                    "I/O operation on closed file.".to_string(),
                 ));
             }
             if s.is_readable() {
@@ -313,7 +313,7 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
             if s.closed {
                 return Err(PyError::named(
                     "ValueError",
-                    "I/O operation on closed file".to_string(),
+                    "I/O operation on closed file.".to_string(),
                 ));
             }
             if !s.is_readable() {
@@ -380,7 +380,7 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
             if st.closed {
                 return Err(PyError::named(
                     "ValueError",
-                    "I/O operation on closed file".to_string(),
+                    "I/O operation on closed file.".to_string(),
                 ));
             }
             if !st.is_write && !st.is_append {
@@ -410,7 +410,7 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
             if st.closed {
                 return Err(PyError::named(
                     "ValueError",
-                    "I/O operation on closed file".to_string(),
+                    "I/O operation on closed file.".to_string(),
                 ));
             }
             for v in lines {
@@ -441,7 +441,7 @@ fn read_line_or_none(state: &BuiltinState) -> Result<Option<String>> {
     if s.closed {
         return Err(PyError::named(
             "ValueError",
-            "I/O operation on closed file".to_string(),
+            "I/O operation on closed file.".to_string(),
         ));
     }
     if !s.is_readable() {
