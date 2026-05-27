@@ -4085,8 +4085,7 @@ pyrust_module! {
         let cls_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
             PyError::named(
                 "TypeError",
-                "object.__new__() takes exactly one argument (the type to instantiate)"
-                    .to_string(),
+                "object.__new__(): not enough arguments".to_string(),
             )
         })?;
         let class_rc = match cls_val.kind() {
