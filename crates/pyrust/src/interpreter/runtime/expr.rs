@@ -937,6 +937,46 @@ impl Interpreter {
                 value: value.clone(),
             });
         }
+        // User-defined functions, lambdas, and built-in functions are hashable
+        // by identity (CPython: function.__hash__).  Use the Rc pointer for user
+        // functions and the static name pointer for built-in functions, matching
+        // the hash computed by hash_value for the same values.
+        if let ValueKind::UserFunction(rc) = value.kind() {
+            let ptr = Rc::as_ptr(rc) as usize as u64;
+            return Ok(PyKey::Object {
+                hash: ptr,
+                value: value.clone(),
+            });
+        }
+        if let ValueKind::BuiltinFunction(name) = value.kind() {
+            let ptr = name.as_ptr() as usize as u64;
+            return Ok(PyKey::Object {
+                hash: ptr,
+                value: value.clone(),
+            });
+        }
+        // Bound methods: hash as hash(func) ^ hash(self), using Rc pointer
+        // identity for both components, matching CPython method.__hash__.
+        if let ValueKind::BoundMethod { function, receiver } = value.kind() {
+            let func_ptr = Rc::as_ptr(function) as usize as u64;
+            let recv_ptr = Rc::as_ptr(receiver) as usize as u64;
+            let h = func_ptr ^ recv_ptr;
+            return Ok(PyKey::Object {
+                hash: h,
+                value: value.clone(),
+            });
+        }
+        // Class-bound methods (classmethods): same XOR pattern using the class
+        // Rc pointer instead of an instance pointer.
+        if let ValueKind::ClassBoundMethod { function, class } = value.kind() {
+            let func_ptr = Rc::as_ptr(function) as usize as u64;
+            let class_ptr = Rc::as_ptr(class) as usize as u64;
+            let h = func_ptr ^ class_ptr;
+            return Ok(PyKey::Object {
+                hash: h,
+                value: value.clone(),
+            });
+        }
         let type_name = value_type_name_str(value);
         Err(PyError::named(
             "TypeError",

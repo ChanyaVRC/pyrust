@@ -5332,6 +5332,38 @@ fn hash_value(value: &Value) -> Result<i64> {
             let ptr = Rc::as_ptr(rc) as i64;
             Ok(if ptr == -1 { -2 } else { ptr })
         }
+        // User-defined functions and lambdas are hashable by identity in CPython
+        // (function.__hash__ returns id(f) >> 4, but pointer identity is what
+        // matters for correctness).  Use the Rc pointer as the hash value.
+        ValueKind::UserFunction(rc) => {
+            let ptr = Rc::as_ptr(rc) as i64;
+            Ok(if ptr == -1 { -2 } else { ptr })
+        }
+        // Built-in functions (e.g. `print`, `len`) are interned per-name in a
+        // thread-local cache, so the name pointer is stable and unique per
+        // built-in.  Use the raw pointer of the static name string as the hash.
+        ValueKind::BuiltinFunction(name) => {
+            let ptr = name.as_ptr() as i64;
+            Ok(if ptr == -1 { -2 } else { ptr })
+        }
+        // Bound methods: CPython hashes as hash(func) ^ hash(self), where func
+        // and self are each hashed by pointer identity.  Mirror that here using
+        // the Rc pointer of the underlying UserFunction and the Rc pointer of
+        // the bound instance.
+        ValueKind::BoundMethod { function, receiver } => {
+            let func_ptr = Rc::as_ptr(function) as i64;
+            let recv_ptr = Rc::as_ptr(receiver) as i64;
+            let h = func_ptr ^ recv_ptr;
+            Ok(if h == -1 { -2 } else { h })
+        }
+        // Class-bound methods (classmethods): same XOR pattern, but the second
+        // component is the bound class rather than an instance.
+        ValueKind::ClassBoundMethod { function, class } => {
+            let func_ptr = Rc::as_ptr(function) as i64;
+            let class_ptr = Rc::as_ptr(class) as i64;
+            let h = func_ptr ^ class_ptr;
+            Ok(if h == -1 { -2 } else { h })
+        }
         _ => Err(PyError::named(
             "TypeError",
             format!(
