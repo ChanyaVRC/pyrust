@@ -4967,6 +4967,61 @@ fn str_merge_kwargs(
             }
             Ok(())
         }
+        // encode(encoding='utf-8', errors='strict')
+        "encode" => {
+            let mut encoding: Option<Value> = None;
+            let mut errors: Option<Value> = None;
+            for (k, v) in kw {
+                let key_str = match &k {
+                    PyKey::Str(s) => s.as_str().unwrap_or("").to_owned(),
+                    _ => String::new(),
+                };
+                match key_str.as_str() {
+                    "encoding" => {
+                        if pos.first().is_some() {
+                            return Err(PyError::named(
+                                "TypeError",
+                                "argument for encode() given by name ('encoding') and position (1)".to_string(),
+                            ));
+                        }
+                        encoding = Some(v);
+                    }
+                    "errors" => {
+                        if pos.get(1).is_some() {
+                            return Err(PyError::named(
+                                "TypeError",
+                                "argument for encode() given by name ('errors') and position (2)".to_string(),
+                            ));
+                        }
+                        errors = Some(v);
+                    }
+                    other => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!("'{other}' is an invalid keyword argument for encode()"),
+                        ));
+                    }
+                }
+            }
+            // Merge into positional slots
+            if let Some(err_val) = errors {
+                if pos.is_empty() {
+                    pos.push(encoding.unwrap_or_else(|| Value::string("utf-8")));
+                } else if let Some(enc_val) = encoding {
+                    pos[0] = enc_val;
+                }
+                if pos.len() < 2 {
+                    pos.push(err_val);
+                }
+            } else if let Some(enc_val) = encoding {
+                if pos.is_empty() {
+                    pos.push(enc_val);
+                } else {
+                    pos[0] = enc_val;
+                }
+            }
+            Ok(())
+        }
         // expandtabs(tabsize=8)
         "expandtabs" => {
             let mut tabsize: Option<Value> = None;

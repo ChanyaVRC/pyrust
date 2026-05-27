@@ -288,7 +288,19 @@ fn bytes_hex(bytes: &[u8], args: &[Value]) -> Result<Value> {
 
 fn bytes_decode(bytes: &[u8], args: &[Value], kwargs: &IndexMap<PyKey, Value>) -> Result<Value> {
     // Signature: decode(encoding='utf-8', errors='strict')
-    // Positional args take precedence; keyword args fill in when positional are absent.
+    // Reject unknown keyword arguments first.
+    for key in kwargs.keys() {
+        if let PyKey::Str(s) = key {
+            let name = s.as_str().unwrap_or("");
+            if name != "encoding" && name != "errors" {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("'{name}' is an invalid keyword argument for decode()"),
+                ));
+            }
+        }
+    }
+
     let kw_encoding = kwargs
         .get(&StrKey("encoding"))
         .and_then(|v| match v.kind() {
@@ -304,13 +316,13 @@ fn bytes_decode(bytes: &[u8], args: &[Value], kwargs: &IndexMap<PyKey, Value>) -
     if args.first().is_some() && kw_encoding.is_some() {
         return Err(PyError::named(
             "TypeError",
-            "bytes.decode() got multiple values for argument 'encoding'".to_string(),
+            "argument for decode() given by name ('encoding') and position (1)".to_string(),
         ));
     }
     if args.get(1).is_some() && kw_errors.is_some() {
         return Err(PyError::named(
             "TypeError",
-            "bytes.decode() got multiple values for argument 'errors'".to_string(),
+            "argument for decode() given by name ('errors') and position (2)".to_string(),
         ));
     }
 
