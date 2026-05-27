@@ -266,43 +266,13 @@ impl Interpreter {
                     return Ok(Value::tuple(items));
                 }
                 if name == "__mro__" {
-                    // Build the MRO via a depth-first walk over all bases
-                    // (primary base first, then extra_bases in order),
-                    // deduplicating by pointer identity and appending the
-                    // synthetic `object` at the end.  This gives the correct
-                    // result for the common case and for simple diamond
-                    // hierarchies; full C3 linearization is not yet implemented
-                    // but is planned as a follow-up.
-                    let mut items: Vec<Value> = Vec::new();
-                    let mut seen: Vec<*const RefCell<PyClass>> = Vec::new();
-                    fn mro_walk(
-                        c: &Rc<RefCell<PyClass>>,
-                        items: &mut Vec<Value>,
-                        seen: &mut Vec<*const RefCell<PyClass>>,
-                    ) {
-                        let ptr = Rc::as_ptr(c);
-                        if seen.contains(&ptr) {
-                            return;
-                        }
-                        seen.push(ptr);
-                        items.push(Value::py_class(Rc::clone(c)));
-                        let (base, extra_bases) = {
-                            let borrowed = c.borrow();
-                            (borrowed.base.clone(), borrowed.extra_bases.clone())
-                        };
-                        if let Some(b) = base {
-                            mro_walk(&b, items, seen);
-                        }
-                        for eb in &extra_bases {
-                            mro_walk(eb, items, seen);
-                        }
-                    }
-                    mro_walk(&class, &mut items, &mut seen);
-                    let obj = object_class_singleton();
-                    if !seen.contains(&Rc::as_ptr(&obj)) {
-                        items.push(Value::py_class(obj));
-                    }
-                    return Ok(Value::tuple(items));
+                    return Ok(Value::tuple(class_mro_items(&class)));
+                }
+                if name == "mro" {
+                    return Ok(pyrust_builtins::bound_method::bound_method(
+                        "mro",
+                        Value::py_class(Rc::clone(&class)),
+                    ));
                 }
                 if name == "__annotations__" {
                     // `type.__annotations__` in CPython is a data descriptor on
@@ -2186,6 +2156,48 @@ fn call_descriptor_delete(
         }
     }
     Ok(None)
+}
+
+/// Compute the MRO (method resolution order) for a class as a `Vec<Value>`.
+///
+/// Performs a depth-first walk over the base chain (primary base first, then
+/// extra_bases in order), deduplicating by pointer identity, and appending
+/// the synthetic `object` singleton at the end when it was not already
+/// visited.  This matches CPython's linearization for the common case and
+/// simple diamond hierarchies; full C3 is not yet implemented.
+///
+/// Used by both `__mro__` (returns a tuple) and `mro()` (returns a list).
+fn class_mro_items(class: &Rc<RefCell<PyClass>>) -> Vec<Value> {
+    fn mro_walk(
+        c: &Rc<RefCell<PyClass>>,
+        items: &mut Vec<Value>,
+        seen: &mut Vec<*const RefCell<PyClass>>,
+    ) {
+        let ptr = Rc::as_ptr(c);
+        if seen.contains(&ptr) {
+            return;
+        }
+        seen.push(ptr);
+        items.push(Value::py_class(Rc::clone(c)));
+        let (base, extra_bases) = {
+            let borrowed = c.borrow();
+            (borrowed.base.clone(), borrowed.extra_bases.clone())
+        };
+        if let Some(b) = base {
+            mro_walk(&b, items, seen);
+        }
+        for eb in &extra_bases {
+            mro_walk(eb, items, seen);
+        }
+    }
+    let mut items: Vec<Value> = Vec::new();
+    let mut seen: Vec<*const RefCell<PyClass>> = Vec::new();
+    mro_walk(class, &mut items, &mut seen);
+    let obj = object_class_singleton();
+    if !seen.contains(&Rc::as_ptr(&obj)) {
+        items.push(Value::py_class(obj));
+    }
+    items
 }
 
 /// Returns `true` if `name` is a built-in method on `target`'s type.
