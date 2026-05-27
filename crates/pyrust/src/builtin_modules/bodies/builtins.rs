@@ -4538,6 +4538,16 @@ pyrust_module! {
         let self_val = coerce_numeric(self_val);
         match self_val.kind() {
             ValueKind::List(items) => Ok(Value::int(items.len() as i64)),
+            // Issue #1434: list subclasses arrive as PyInstance; delegate to backing data.
+            ValueKind::PyInstance(inst) => {
+                let inst_rc = Rc::clone(inst);
+                match instance_builtin_data(&inst_rc).as_ref().map(|v| v.kind()) {
+                    Some(ValueKind::List(items)) => Ok(Value::int(items.len() as i64)),
+                    _ => Err(PyError::named("TypeError",
+                        format!("descriptor '__len__' for 'list' objects doesn't apply to a '{}' object",
+                            inst_rc.borrow().class.borrow().name))),
+                }
+            }
             _ => Err(PyError::named("TypeError",
                 format!("descriptor '__len__' for 'list' objects doesn't apply to a '{}' object",
                     value_type_name_str(&self_val)))),
@@ -4554,6 +4564,16 @@ pyrust_module! {
         let self_val = coerce_numeric(self_val);
         match self_val.kind() {
             ValueKind::Tuple(items) => Ok(Value::int(items.len() as i64)),
+            // Issue #1434: tuple subclasses arrive as PyInstance; delegate to backing data.
+            ValueKind::PyInstance(inst) => {
+                let inst_rc = Rc::clone(inst);
+                match instance_builtin_data(&inst_rc).as_ref().map(|v| v.kind()) {
+                    Some(ValueKind::Tuple(items)) => Ok(Value::int(items.len() as i64)),
+                    _ => Err(PyError::named("TypeError",
+                        format!("descriptor '__len__' for 'tuple' objects doesn't apply to a '{}' object",
+                            inst_rc.borrow().class.borrow().name))),
+                }
+            }
             _ => Err(PyError::named("TypeError",
                 format!("descriptor '__len__' for 'tuple' objects doesn't apply to a '{}' object",
                     value_type_name_str(&self_val)))),
@@ -4570,6 +4590,16 @@ pyrust_module! {
         let self_val = coerce_numeric(self_val);
         match self_val.kind() {
             ValueKind::Dict(items) => Ok(Value::int(items.len() as i64)),
+            // Issue #1434: dict subclasses arrive as PyInstance; delegate to backing data.
+            ValueKind::PyInstance(inst) => {
+                let inst_rc = Rc::clone(inst);
+                match instance_builtin_data(&inst_rc).as_ref().map(|v| v.kind()) {
+                    Some(ValueKind::Dict(items)) => Ok(Value::int(items.len() as i64)),
+                    _ => Err(PyError::named("TypeError",
+                        format!("descriptor '__len__' for 'dict' objects doesn't apply to a '{}' object",
+                            inst_rc.borrow().class.borrow().name))),
+                }
+            }
             _ => Err(PyError::named("TypeError",
                 format!("descriptor '__len__' for 'dict' objects doesn't apply to a '{}' object",
                     value_type_name_str(&self_val)))),
@@ -4586,6 +4616,16 @@ pyrust_module! {
         let self_val = coerce_numeric(self_val);
         match self_val.kind() {
             ValueKind::Set(items) => Ok(Value::int(items.len() as i64)),
+            // Issue #1434: set subclasses arrive as PyInstance; delegate to backing data.
+            ValueKind::PyInstance(inst) => {
+                let inst_rc = Rc::clone(inst);
+                match instance_builtin_data(&inst_rc).as_ref().map(|v| v.kind()) {
+                    Some(ValueKind::Set(items)) => Ok(Value::int(items.len() as i64)),
+                    _ => Err(PyError::named("TypeError",
+                        format!("descriptor '__len__' for 'set' objects doesn't apply to a '{}' object",
+                            inst_rc.borrow().class.borrow().name))),
+                }
+            }
             _ => Err(PyError::named("TypeError",
                 format!("descriptor '__len__' for 'set' objects doesn't apply to a '{}' object",
                     value_type_name_str(&self_val)))),
@@ -4602,6 +4642,16 @@ pyrust_module! {
         let self_val = coerce_numeric(self_val);
         match self_val.kind() {
             ValueKind::Bytes(b) => Ok(Value::int(b.len() as i64)),
+            // Issue #1434: bytes subclasses arrive as PyInstance; delegate to backing data.
+            ValueKind::PyInstance(inst) => {
+                let inst_rc = Rc::clone(inst);
+                match instance_builtin_data(&inst_rc).as_ref().map(|v| v.kind()) {
+                    Some(ValueKind::Bytes(b)) => Ok(Value::int(b.len() as i64)),
+                    _ => Err(PyError::named("TypeError",
+                        format!("descriptor '__len__' for 'bytes' objects doesn't apply to a '{}' object",
+                            inst_rc.borrow().class.borrow().name))),
+                }
+            }
             _ => Err(PyError::named("TypeError",
                 format!("descriptor '__len__' for 'bytes' objects doesn't apply to a '{}' object",
                     value_type_name_str(&self_val)))),
