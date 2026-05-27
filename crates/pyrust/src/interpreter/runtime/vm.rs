@@ -3884,6 +3884,10 @@ impl Interpreter {
                         mutation_version: std::cell::Cell::new(0),
                         subclasses: std::cell::RefCell::new(vec![]),
                     }));
+                    // Issue #1233: validate C3 MRO at class construction time so
+                    // that inconsistent base lists raise TypeError immediately,
+                    // matching CPython's behaviour in type.__new__.
+                    vm_try!(class_mro_items(&class).map(|_| ()));
                     // Register the new class as a direct subclass of each base
                     // so that base.__subclasses__() includes it (issue #1354).
                     if let Some(ref b) = base {

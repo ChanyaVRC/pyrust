@@ -532,7 +532,7 @@ impl Interpreter {
                                         ),
                                     ));
                                 };
-                                Ok(Value::list(class_mro_items(&target_class)))
+                                Ok(Value::list(class_mro_items(&target_class)?))
                             }
                             "__subclasses__" => {
                                 // CPython: type.__subclasses__(self) → list of direct subclasses.
