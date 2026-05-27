@@ -4,6 +4,7 @@ use pyrust_core::{PyError, PyKey, Result, StrKey, Value, ValueKind, builtin_type
 /// Canonical list of method names dispatched by `call`.
 /// Single source of truth for `has_method` and the drift-guard test.
 pub const METHODS: &[&str] = &[
+    "__iter__",
     "hex",
     "decode",
     "startswith",

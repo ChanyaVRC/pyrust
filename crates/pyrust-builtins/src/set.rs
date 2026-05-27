@@ -3,6 +3,7 @@ use pyrust_core::{PyError, PyKey, Result, Value, ValueKind};
 
 /// Canonical list of method names dispatched by `call`.
 pub const METHODS: &[&str] = &[
+    "__iter__",
     "add",
     "remove",
     "discard",

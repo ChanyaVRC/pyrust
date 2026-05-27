@@ -4267,6 +4267,25 @@ impl Interpreter {
         // before opening the borrow.  Aliased self-references like
         // `lst.extend(lst)` are now safe by construction.
 
+        // __iter__ on any tagged builtin type uses the same logic as
+        // iter(receiver): produce a NativeIterFrame generator.
+        if method == "__iter__" && obj_kind_tag != 0 {
+            if !args.is_empty() {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "{}.__iter__() takes no arguments",
+                        pyrust_core::builtin_type_name(&regs[obj as usize]),
+                    ),
+                ));
+            }
+            let receiver = vm_read(regs, obj, num_locals)?;
+            let iter_arg = ExpandedCallArg { name: None, value: receiver };
+            let dispatch = crate::builtin_registry::lookup("iter")
+                .expect("iter must be in the registry");
+            return dispatch(self, &[iter_arg]);
+        }
+
         match obj_kind_tag {
             1 => {
                 let receiver = regs[obj as usize].clone();
@@ -4552,6 +4571,24 @@ impl Interpreter {
         // No upfront unalias needed (#448): each builtin scopes its
         // own `borrow_mut()` and snapshots iterables before opening
         // the borrow.
+
+        // __iter__ on any tagged builtin type: same logic as iter(receiver).
+        if method == "__iter__" && obj_kind_tag != 0 {
+            if !pos_items.is_empty() || !kw_map.is_empty() {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "{}.__iter__() takes no arguments",
+                        pyrust_core::builtin_type_name(&regs[obj as usize]),
+                    ),
+                ));
+            }
+            let receiver = vm_read(regs, obj, num_locals)?;
+            let iter_arg = ExpandedCallArg { name: None, value: receiver };
+            let dispatch = crate::builtin_registry::lookup("iter")
+                .expect("iter must be in the registry");
+            return dispatch(self, &[iter_arg]);
+        }
 
         match obj_kind_tag {
             1 => {

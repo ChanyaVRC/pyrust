@@ -199,6 +199,44 @@ impl Interpreter {
                     ValueKind::Set(_) => Kind::Set,
                     _ => Kind::Other,
                 };
+                // __iter__ on any iterable built-in type delegates to the same
+                // logic as the `iter()` built-in: wrap the receiver in a
+                // NativeIterFrame generator.  Intercept here before the per-type
+                // arms so that none of the crate-level `call` functions need to
+                // handle "__iter__" (they would error on an unknown method name).
+                if method == "__iter__" {
+                    let is_iterable_builtin = matches!(
+                        receiver.kind(),
+                        ValueKind::List(_)
+                            | ValueKind::Tuple(_)
+                            | ValueKind::Str(_)
+                            | ValueKind::Bytes(_)
+                            | ValueKind::Dict(_)
+                            | ValueKind::Set(_)
+                            | ValueKind::Range { .. }
+                    ) || matches!(receiver.kind(), ValueKind::BuiltinObject { ops, .. }
+                        if ops.has_method("__iter__"));
+                    if is_iterable_builtin {
+                        if !pos.is_empty() || !kw.is_empty() {
+                            self.bound_method_pos_buf = pos;
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "{}.__iter__() takes no arguments",
+                                    pyrust_core::builtin_type_name(&receiver)
+                                ),
+                            ));
+                        }
+                        let iter_arg = ExpandedCallArg {
+                            name: None,
+                            value: receiver,
+                        };
+                        self.bound_method_pos_buf = pos;
+                        let dispatch = crate::builtin_registry::lookup("iter")
+                            .expect("iter must be in the registry");
+                        return dispatch(self, &[iter_arg]);
+                    }
+                }
                 // Arms that accept `&[Value]` (Int, Float, Bytes) borrow `pos`
                 // directly — the buf's capacity is fully preserved on return.
                 // Arms that need `Vec<Value>` ownership drain `pos` into a

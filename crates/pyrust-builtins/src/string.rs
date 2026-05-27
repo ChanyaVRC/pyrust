@@ -33,6 +33,7 @@ fn subslice_offset(parent: &str, sub: &str) -> usize {
 /// `format_map` is also listed and intercepted in `call_str_method` before
 /// the fall-through to `pyrust_builtins::string::call`.
 pub const METHODS: &[&str] = &[
+    "__iter__",
     "index",
     "count",
     "split",

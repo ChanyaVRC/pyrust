@@ -13,6 +13,7 @@ use pyrust_core::{PyError, PyKey, Result, Value, ValueKind};
 /// here.  The unreachable function bodies that used to live below them in
 /// this file are gone (only the `match` arms in `call` were dead — see #425).
 pub const METHODS: &[&str] = &[
+    "__iter__",
     "get",
     "keys",
     "values",
