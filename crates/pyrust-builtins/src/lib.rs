@@ -1,6 +1,7 @@
 pub mod bound_method;
 pub mod bytes;
 pub mod cached_property;
+pub mod classmethod;
 pub mod complex;
 pub mod dict;
 pub mod dict_views;
@@ -41,6 +42,10 @@ pub fn lookup_ops(type_name: &str) -> Option<&'static dyn pyrust_core::BuiltinTy
         bound_method::TYPE_NAME => Some(bound_method::BOUND_METHOD_OPS),
         mapping_proxy::TYPE_NAME => Some(mapping_proxy::MAPPING_PROXY_OPS),
         slice::TYPE_NAME => Some(slice::SLICE_OPS),
+        classmethod::CLASS_TYPE_NAME => Some(classmethod::CLASS_METHOD_ANY_OPS),
+        classmethod::STATIC_TYPE_NAME => Some(classmethod::STATIC_METHOD_ANY_OPS),
+        classmethod::CLASS_BINDER_TYPE_NAME => Some(classmethod::CLASS_METHOD_GET_BINDER_OPS),
+        classmethod::STATIC_BINDER_TYPE_NAME => Some(classmethod::STATIC_METHOD_GET_BINDER_OPS),
         _ => None,
     }
 }

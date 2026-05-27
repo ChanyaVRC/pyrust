@@ -132,12 +132,26 @@ impl Interpreter {
                     enum AttrKind {
                         UserFunction(Rc<UserFunction>),
                         BuiltinFunction,
+                        ClassMethodAny(Value),
+                        StaticMethodAny(Value),
                         Other,
                     }
                     let tag = match value.kind() {
                         ValueKind::UserFunction(f) => AttrKind::UserFunction(Rc::clone(f)),
                         ValueKind::BuiltinFunction(_) => AttrKind::BuiltinFunction,
-                        _ => AttrKind::Other,
+                        _ => {
+                            if let Some(w) =
+                                pyrust_builtins::classmethod::as_class_method_any(&value)
+                            {
+                                AttrKind::ClassMethodAny(w)
+                            } else if let Some(w) =
+                                pyrust_builtins::classmethod::as_static_method_any(&value)
+                            {
+                                AttrKind::StaticMethodAny(w)
+                            } else {
+                                AttrKind::Other
+                            }
+                        }
                     };
                     return Ok(match tag {
                         AttrKind::UserFunction(f) => match f.kind {
@@ -158,6 +172,13 @@ impl Interpreter {
                                 Value::py_instance(Rc::clone(&instance)),
                             )
                         }
+                        // classmethod/staticmethod wrapping a non-function: apply
+                        // descriptor protocol same as class-level access (§3.3.2).
+                        // classmethod returns the wrapped value (best approximation;
+                        // CPython returns a method object for non-callables but that
+                        // requires a new Value variant); staticmethod returns directly.
+                        AttrKind::ClassMethodAny(w) => w,
+                        AttrKind::StaticMethodAny(w) => w,
                         AttrKind::Other => value,
                     });
                 }
@@ -321,12 +342,30 @@ impl Interpreter {
                     }
                     // Drop the kind() Ref before the `_ => value` arm
                     // may move `value` (#450).
-                    let user_fn = match value.kind() {
-                        ValueKind::UserFunction(f) => Some(Rc::clone(f)),
-                        _ => None,
+                    enum ClassDescTag {
+                        UserFunction(Rc<UserFunction>),
+                        ClassMethodAny(Value),
+                        StaticMethodAny(Value),
+                        Other,
+                    }
+                    let tag = match value.kind() {
+                        ValueKind::UserFunction(f) => ClassDescTag::UserFunction(Rc::clone(f)),
+                        _ => {
+                            if let Some(w) =
+                                pyrust_builtins::classmethod::as_class_method_any(&value)
+                            {
+                                ClassDescTag::ClassMethodAny(w)
+                            } else if let Some(w) =
+                                pyrust_builtins::classmethod::as_static_method_any(&value)
+                            {
+                                ClassDescTag::StaticMethodAny(w)
+                            } else {
+                                ClassDescTag::Other
+                            }
+                        }
                     };
-                    return Ok(match user_fn {
-                        Some(f) => match f.kind {
+                    return Ok(match tag {
+                        ClassDescTag::UserFunction(f) => match f.kind {
                             UserFunctionKind::ClassMethod => {
                                 Value::class_bound_method(Rc::clone(&f), Rc::clone(&class))
                             }
@@ -336,7 +375,14 @@ impl Interpreter {
                             UserFunctionKind::Regular => value,
                             UserFunctionKind::Builtin(_) => value,
                         },
-                        None => value,
+                        // classmethod(non_fn): CPython returns a method object bound to
+                        // the class; pyrust returns the wrapped value (no new Value
+                        // variant for non-UserFunction class-bound values).
+                        ClassDescTag::ClassMethodAny(w) => w,
+                        // staticmethod(non_fn): returns the wrapped value directly,
+                        // matching CPython (`C.s` where `s = staticmethod(42)` → 42).
+                        ClassDescTag::StaticMethodAny(w) => w,
+                        ClassDescTag::Other => value,
                     });
                 }
                 // Issue #1275: __module__ and __doc__ on built-in type objects.
@@ -545,6 +591,22 @@ impl Interpreter {
                         return Ok(Value::with_function_kind(
                             Rc::clone(func),
                             UserFunctionKind::Regular,
+                        ));
+                    }
+                    "__get__" if func.kind == UserFunctionKind::ClassMethod => {
+                        // `classmethod.__get__(instance, owner)` — returns a binder
+                        // that, when called, creates a ClassBoundMethod.  The
+                        // interpreter's `call_function_expanded` resolves the binder
+                        // (see guard arm for `as_class_method_get_binder`).
+                        return Ok(pyrust_builtins::classmethod::class_method_get_binder(
+                            Rc::clone(func),
+                        ));
+                    }
+                    "__get__" if func.kind == UserFunctionKind::StaticMethod => {
+                        // `staticmethod.__get__(instance, owner)` — returns a binder
+                        // that, when called, returns the underlying plain function.
+                        return Ok(pyrust_builtins::classmethod::static_method_get_binder(
+                            Rc::clone(func),
                         ));
                     }
                     _ => {}

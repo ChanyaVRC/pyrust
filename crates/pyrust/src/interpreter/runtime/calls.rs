@@ -863,6 +863,38 @@ impl Interpreter {
             // rejects even the raw-ident form, so the explicit override is
             // the only way to give it its Python-level name.
 
+            // Calling `classmethod.__get__(instance, owner)` where the
+            // classmethod wraps a `UserFunction`.  Returns a ClassBoundMethod
+            // with `owner` as the bound class, or the plain function when
+            // `owner` is not a recognisable class value.
+            _ if pyrust_builtins::classmethod::as_class_method_get_binder(&function)
+                .is_some() =>
+            {
+                let func = pyrust_builtins::classmethod::as_class_method_get_binder(&function)
+                    .expect("guard checked above");
+                // args[1] is the owner class; args[0] is the instance (ignored).
+                let owner = args.get(1).map(|a| a.value.clone()).unwrap_or_else(Value::none);
+                let class_rc = match owner.kind() {
+                    ValueKind::PyClass(c) => Some(Rc::clone(c)),
+                    _ => None,
+                };
+                match class_rc {
+                    Some(class_rc) => Ok(Value::class_bound_method(func, class_rc)),
+                    None => Ok(Value::user_function(func)),
+                }
+            }
+
+            // Calling `staticmethod.__get__(instance, owner)` where the
+            // staticmethod wraps a `UserFunction`.  Returns the underlying
+            // plain function, ignoring both arguments.
+            _ if pyrust_builtins::classmethod::as_static_method_get_binder(&function)
+                .is_some() =>
+            {
+                let func = pyrust_builtins::classmethod::as_static_method_get_binder(&function)
+                    .expect("guard checked above");
+                Ok(Value::with_function_kind(func, pyrust_core::UserFunctionKind::Regular))
+            }
+
             ValueKind::PyInstance(inst) => {
                 let inst_rc = Rc::clone(inst);
                 let class = Rc::clone(&inst_rc.borrow().class);
