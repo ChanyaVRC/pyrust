@@ -32,6 +32,20 @@ try:
 except TypeError as e:
     print(str(e))
 
+# str_ascii_iterator (iter on an ASCII string)
+try:
+    reversed(iter("hello"))
+    print("FAIL: str_ascii_iterator should raise TypeError")
+except TypeError as e:
+    print(str(e))
+
+# str_iterator (iter on a non-ASCII/unicode string)
+try:
+    reversed(iter("hello 中文"))
+    print("FAIL: str_iterator should raise TypeError")
+except TypeError as e:
+    print(str(e))
+
 # dict_keyiterator (iter on a dict)
 try:
     reversed(iter({"k": 1}))
