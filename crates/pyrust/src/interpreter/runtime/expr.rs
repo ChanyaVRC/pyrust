@@ -3095,6 +3095,12 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
     if name == "object" {
         return Some(Value::py_class(object_class_singleton()));
     }
+    // `type` is the metaclass — must resolve to a PyClass singleton so that
+    // `type is type`, `builtins.type is type`, and `repr(type)` all behave
+    // as CPython 3.12 (issue #1312).
+    if name == "type" {
+        return Some(Value::py_class(type_class_singleton()));
+    }
     // Singleton constants that are not callable.
     if name == "NotImplemented" {
         return Some(Value::not_implemented());
