@@ -11,7 +11,8 @@ use crate::ast::BinaryOp;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::{
-    float_to_bigint, reject_keyword_args_expanded, value_to_float, value_type_name_str,
+    check_float_for_int_conversion, float_to_bigint, reject_keyword_args_expanded, value_to_float,
+    value_type_name_str,
 };
 use crate::value::{PyBigInt, PyToPrimitive, Value, ValueKind};
 use pyrust_derive::pyrust_module;
@@ -67,6 +68,7 @@ pyrust_module! {
             _ => {}
         }
         let x = math_coerce_float(val)?;
+        check_float_for_int_conversion(x)?;
         let f = x.floor();
         if f > i64::MAX as f64 || f < i64::MIN as f64 {
             Ok(float_to_bigint(f))
@@ -101,6 +103,7 @@ pyrust_module! {
             _ => {}
         }
         let x = math_coerce_float(val)?;
+        check_float_for_int_conversion(x)?;
         let f = x.ceil();
         if f > i64::MAX as f64 || f < i64::MIN as f64 {
             Ok(float_to_bigint(f))
@@ -137,6 +140,7 @@ pyrust_module! {
             ValueKind::Bool(b) => Ok(Value::int(b as i64)),
             // float: truncate toward zero.
             ValueKind::Float(f) => {
+                check_float_for_int_conversion(f)?;
                 let t = f.trunc();
                 if t > i64::MAX as f64 || t < i64::MIN as f64 {
                     Ok(float_to_bigint(t))

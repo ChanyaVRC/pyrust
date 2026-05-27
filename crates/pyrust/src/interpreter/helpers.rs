@@ -3175,9 +3175,34 @@ pub(crate) fn compute_def_bound_mask(
     mask
 }
 
+/// Raise the CPython-matching error when a float that cannot be converted to
+/// an integer (`inf` or `NaN`) is passed to `int()`, `math.floor()`, etc.
+///
+/// Call this *before* any integer-conversion arithmetic on a float.  It is a
+/// standalone `pub(crate)` function so that `builtins.rs` and `math.rs` share
+/// one source of truth for the error messages (CPython uses the same wording
+/// for all of these: `int()`, `math.floor`, `math.ceil`, `math.trunc`).
+pub(crate) fn check_float_for_int_conversion(f: f64) -> crate::error::Result<()> {
+    if f.is_infinite() {
+        return Err(PyError::named(
+            "OverflowError",
+            "cannot convert float infinity to integer",
+        ));
+    }
+    if f.is_nan() {
+        return Err(PyError::named(
+            "ValueError",
+            "cannot convert float NaN to integer",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn float_to_bigint(f: f64) -> Value {
     use crate::value::PyBigInt;
     // Convert via the decimal string representation of the f64's integer value.
+    // Callers are expected to have called `check_float_for_int_conversion` first;
+    // inf/NaN would produce a parse error and silently fall back to 0 otherwise.
     let s = format!("{:.0}", f);
     let n: PyBigInt = s.parse().unwrap_or_else(|_| PyBigInt::from(0i64));
     Value::bigint(n)
