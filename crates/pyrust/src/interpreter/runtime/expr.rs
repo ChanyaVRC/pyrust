@@ -2582,6 +2582,28 @@ impl Interpreter {
         // return the *same* Value (same Rc pointer) so that aliases see the
         // update.  This implements the Python guarantee that `a += b` on a
         // list or set does not rebind aliases.
+        //
+        // Quick scalar-exit: primitive scalars (Int, Float, Bool, Str, Bytes,
+        // BigInt, Complex, None, Ellipsis, Range) cannot have in-place mutation
+        // semantics, so return None immediately without dispatching a dunder.
+        // This keeps BinOpConst cost near-zero for the common int/float case.
+        if matches!(
+            left.kind(),
+            ValueKind::Int(_)
+                | ValueKind::Float(_)
+                | ValueKind::Bool(_)
+                | ValueKind::Str(_)
+                | ValueKind::Bytes(_)
+                | ValueKind::BigInt(_)
+                | ValueKind::Complex(_, _)
+                | ValueKind::None
+                | ValueKind::Ellipsis
+                | ValueKind::Tuple(_)
+                | ValueKind::Range { .. }
+                | ValueKind::NotImplemented
+        ) {
+            return Ok(None);
+        }
         let is_list = matches!(left.kind(), ValueKind::List(_));
         let is_set = matches!(left.kind(), ValueKind::Set(_));
         if is_list {

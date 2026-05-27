@@ -1293,7 +1293,12 @@ impl Interpreter {
                     }
                     let l = vm_try!(vm_read(&regs, *lhs, num_locals));
                     let r = cv.clone();
-                    regs[*dst as usize] = vm_try!(self.eval_binary(l, *op, r));
+                    let result = if let Some(v) = vm_try!(self.try_inplace_op(l.clone(), *op, r.clone())) {
+                        v
+                    } else {
+                        vm_try!(self.eval_binary(l, *op, r))
+                    };
+                    regs[*dst as usize] = result;
                 }
                 Insn::BinOpImm(dst, lhs, op, imm) => {
                     let imm_i64 = *imm as i64;

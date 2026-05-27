@@ -7615,11 +7615,14 @@ impl Compiler {
     fn emit_aug_binop(&mut self, reg: Reg, op: BinaryOp, expr: &Expr) {
         if let Some(imm) = Self::try_imm_i16(expr) {
             self.emit(Insn::BinOpImm(reg, reg, op, imm));
+        } else if let Some(val) = fold_constant(expr) {
+            // BinOpConst is safe for augmented assignment: the VM's BinOpConst
+            // handler now calls try_inplace_op before eval_binary, so mutable
+            // containers (list *= / list += / set |= etc.) still get the
+            // in-place fast path even when the RHS is a folded constant.
+            let idx = self.intern_const(val);
+            self.emit(Insn::BinOpConst(reg, reg, op, idx));
         } else {
-            // Always use BinOpInPlace (not BinOpConst) so that the VM's
-            // try_inplace_op fast path fires for mutable built-in containers
-            // (list += / list *= / set |= etc.) regardless of whether the RHS
-            // is a compile-time constant.  BinOpConst bypasses try_inplace_op.
             let rhs = self.compile_expr(expr);
             self.emit(Insn::BinOpInPlace(reg, reg, op, rhs));
             self.free_temp(rhs);
