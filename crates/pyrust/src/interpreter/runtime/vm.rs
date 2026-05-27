@@ -4273,10 +4273,7 @@ impl Interpreter {
             if !args.is_empty() {
                 return Err(PyError::named(
                     "TypeError",
-                    format!(
-                        "{}.__iter__() takes no arguments",
-                        pyrust_core::builtin_type_name(&regs[obj as usize]),
-                    ),
+                    format!("expected 0 arguments, got {}", args.len()),
                 ));
             }
             let receiver = vm_read(regs, obj, num_locals)?;
@@ -4574,13 +4571,16 @@ impl Interpreter {
 
         // __iter__ on any tagged builtin type: same logic as iter(receiver).
         if method == "__iter__" && obj_kind_tag != 0 {
-            if !pos_items.is_empty() || !kw_map.is_empty() {
+            if !kw_map.is_empty() {
                 return Err(PyError::named(
                     "TypeError",
-                    format!(
-                        "{}.__iter__() takes no arguments",
-                        pyrust_core::builtin_type_name(&regs[obj as usize]),
-                    ),
+                    "wrapper __iter__() takes no keyword arguments".to_string(),
+                ));
+            }
+            if !pos_items.is_empty() {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("expected 0 arguments, got {}", pos_items.len()),
                 ));
             }
             let receiver = vm_read(regs, obj, num_locals)?;

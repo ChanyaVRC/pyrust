@@ -217,14 +217,19 @@ impl Interpreter {
                     ) || matches!(receiver.kind(), ValueKind::BuiltinObject { ops, .. }
                         if ops.has_method("__iter__"));
                     if is_iterable_builtin {
-                        if !pos.is_empty() || !kw.is_empty() {
+                        if !kw.is_empty() {
                             self.bound_method_pos_buf = pos;
                             return Err(PyError::named(
                                 "TypeError",
-                                format!(
-                                    "{}.__iter__() takes no arguments",
-                                    pyrust_core::builtin_type_name(&receiver)
-                                ),
+                                "wrapper __iter__() takes no keyword arguments".to_string(),
+                            ));
+                        }
+                        if !pos.is_empty() {
+                            let n = pos.len();
+                            self.bound_method_pos_buf = pos;
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!("expected 0 arguments, got {n}"),
                             ));
                         }
                         let iter_arg = ExpandedCallArg {
