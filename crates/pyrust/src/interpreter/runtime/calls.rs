@@ -1124,7 +1124,13 @@ impl Interpreter {
                         "__get__(None, None) is invalid".to_string(),
                     ));
                 }
-                Ok(Value::with_function_kind(func, pyrust_core::UserFunctionKind::Regular))
+                // Prefer wrapped_func to preserve object identity when
+                // `sm = staticmethod(fn)` and `sm.__get__(obj, cls) is fn`.
+                Ok(if let Some(inner) = func.wrapped_func.as_ref() {
+                    Value::user_function(Rc::clone(inner))
+                } else {
+                    Value::with_function_kind(func, pyrust_core::UserFunctionKind::Regular)
+                })
             }
 
             ValueKind::PyInstance(inst) => {
