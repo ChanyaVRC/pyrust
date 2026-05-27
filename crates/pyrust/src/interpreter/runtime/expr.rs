@@ -2909,6 +2909,9 @@ impl Interpreter {
             ValueKind::Bytes(rc) => {
                 match item.kind() {
                     ValueKind::Int(n) if (0..=255).contains(&n) => Ok(Value::bool_(rc.contains(&(n as u8)))),
+                    // bool is a subclass of int in Python; True==1 and False==0 are
+                    // valid byte values, so treat them as their integer equivalents.
+                    ValueKind::Bool(b) => Ok(Value::bool_(rc.contains(&(if b { 1u8 } else { 0u8 })))),
                     ValueKind::Int(_) | ValueKind::BigInt(_) => Err(PyError::named(
                         "ValueError",
                         "byte must be in range(0, 256)".to_string(),

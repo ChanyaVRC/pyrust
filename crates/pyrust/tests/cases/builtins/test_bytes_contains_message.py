@@ -42,3 +42,8 @@ try:
     result = (10 ** 100) in b"hello"
 except (TypeError, ValueError) as e:
     print(type(e).__name__ + ": " + str(e))
+
+# bool operands: bool is a subclass of int, so True==1 and False==0 are valid
+print(True in b"\x01hello")
+print(False in b"hello")
+print(True in b"hello")
