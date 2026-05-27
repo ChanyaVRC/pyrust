@@ -3342,15 +3342,13 @@ pyrust_module! {
                 format!("{FN_NAME} expected 1 argument, got {}", args.len()),
             ));
         }
+        // CPython 3.12 accepts any object as a classmethod descriptor.
+        // When the argument is a UserFunction we use the existing tagged-kind
+        // path; for any other value we wrap it in a BuiltinObject descriptor.
         match args[0].value.kind() {
             ValueKind::UserFunction(f) => Ok(Value::class_method(Rc::clone(f))),
-            // CPython 3.12 accepts any object as a classmethod descriptor, but
-            // Value::class_method requires an Rc<UserFunction>.  Supporting
-            // non-function descriptors needs a Value variant change (follow-up
-            // issue #1315).
-            _ => Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}() argument must be a function"),
+            _ => Ok(pyrust_builtins::classmethod::class_method_any(
+                args[0].value.clone(),
             )),
         }
     }
@@ -3365,15 +3363,13 @@ pyrust_module! {
                 format!("{FN_NAME} expected 1 argument, got {}", args.len()),
             ));
         }
+        // CPython 3.12 accepts any object as a staticmethod descriptor.
+        // When the argument is a UserFunction we use the existing tagged-kind
+        // path; for any other value we wrap it in a BuiltinObject descriptor.
         match args[0].value.kind() {
             ValueKind::UserFunction(f) => Ok(Value::static_method(Rc::clone(f))),
-            // CPython 3.12 accepts any object as a staticmethod descriptor, but
-            // Value::static_method requires an Rc<UserFunction>.  Supporting
-            // non-function descriptors needs a Value variant change (follow-up
-            // issue #1315).
-            _ => Err(PyError::named(
-                "TypeError",
-                format!("{FN_NAME}() argument must be a function"),
+            _ => Ok(pyrust_builtins::classmethod::static_method_any(
+                args[0].value.clone(),
             )),
         }
     }

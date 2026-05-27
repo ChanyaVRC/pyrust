@@ -863,6 +863,59 @@ impl Interpreter {
             // rejects even the raw-ident form, so the explicit override is
             // the only way to give it its Python-level name.
 
+            // Calling `classmethod.__get__(instance, owner)` where the
+            // classmethod wraps a `UserFunction`.  Returns a ClassBoundMethod
+            // with `owner` as the bound class, or the plain function when
+            // `owner` is not a recognisable class value.
+            _ if pyrust_builtins::classmethod::as_class_method_get_binder(&function)
+                .is_some() =>
+            {
+                let func = pyrust_builtins::classmethod::as_class_method_get_binder(&function)
+                    .expect("guard checked above");
+                // args[0] = instance, args[1] = owner class.
+                // CPython 3.12: __get__(None, None) is invalid.
+                let instance = args.first().map(|a| a.value.clone()).unwrap_or_else(Value::none);
+                let owner = args.get(1).map(|a| a.value.clone()).unwrap_or_else(Value::none);
+                if matches!(instance.kind(), ValueKind::None)
+                    && matches!(owner.kind(), ValueKind::None)
+                {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "__get__(None, None) is invalid".to_string(),
+                    ));
+                }
+                let class_rc = match owner.kind() {
+                    ValueKind::PyClass(c) => Some(Rc::clone(c)),
+                    _ => None,
+                };
+                match class_rc {
+                    Some(class_rc) => Ok(Value::class_bound_method(func, class_rc)),
+                    None => Ok(Value::user_function(func)),
+                }
+            }
+
+            // Calling `staticmethod.__get__(instance, owner)` where the
+            // staticmethod wraps a `UserFunction`.  Returns the underlying
+            // plain function, ignoring both arguments.
+            _ if pyrust_builtins::classmethod::as_static_method_get_binder(&function)
+                .is_some() =>
+            {
+                let func = pyrust_builtins::classmethod::as_static_method_get_binder(&function)
+                    .expect("guard checked above");
+                // CPython 3.12: __get__(None, None) is invalid.
+                let instance = args.first().map(|a| a.value.clone()).unwrap_or_else(Value::none);
+                let owner = args.get(1).map(|a| a.value.clone()).unwrap_or_else(Value::none);
+                if matches!(instance.kind(), ValueKind::None)
+                    && matches!(owner.kind(), ValueKind::None)
+                {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "__get__(None, None) is invalid".to_string(),
+                    ));
+                }
+                Ok(Value::with_function_kind(func, pyrust_core::UserFunctionKind::Regular))
+            }
+
             ValueKind::PyInstance(inst) => {
                 let inst_rc = Rc::clone(inst);
                 let class = Rc::clone(&inst_rc.borrow().class);
