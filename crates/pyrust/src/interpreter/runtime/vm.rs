@@ -4379,32 +4379,41 @@ impl Interpreter {
                         AttrCacheEntry::Empty => {
                             let inst = inst_rc.borrow();
                             if !inst.attrs.contains_key(method) {
-                                if let Some(unbound_val) = lookup_class_attr(&inst.class, method) {
-                                    // Only cache Regular UserFunctions and
-                                    // BuiltinFunctions.  StaticMethod / ClassMethod
-                                    // need special receiver treatment — let them always
-                                    // go through get_attr + call_function_expanded.
-                                    let cacheable = match unbound_val.kind() {
-                                        ValueKind::UserFunction(f) => matches!(
-                                            f.kind,
-                                            UserFunctionKind::Regular
-                                        ),
-                                        ValueKind::BuiltinFunction(_) => true,
-                                        _ => false,
-                                    };
-                                    if cacheable {
-                                        let class_ptr =
-                                            Rc::as_ptr(&inst.class) as *const ();
-                                        let class_version =
-                                            inst.class.borrow().mutation_version.get();
-                                        let epoch =
-                                            pyrust_core::class_epoch();
-                                        cache[call_site_pc] = AttrCacheEntry::ClassAttr {
-                                            class_ptr,
-                                            class_version,
-                                            epoch,
-                                            value: unbound_val,
+                                // Don't cache when the class has a user-defined
+                                // __getattribute__ — the CallMethod cache fast path
+                                // bypasses get_attr entirely, skipping the dispatch
+                                // (issue #1254, same as the GetAttr cache guard).
+                                let has_custom_getattribute =
+                                    lookup_class_attr(&inst.class, "__getattribute__")
+                                        .is_some_and(|v| matches!(v.kind(), ValueKind::UserFunction(_)));
+                                if !has_custom_getattribute {
+                                    if let Some(unbound_val) = lookup_class_attr(&inst.class, method) {
+                                        // Only cache Regular UserFunctions and
+                                        // BuiltinFunctions.  StaticMethod / ClassMethod
+                                        // need special receiver treatment — let them always
+                                        // go through get_attr + call_function_expanded.
+                                        let cacheable = match unbound_val.kind() {
+                                            ValueKind::UserFunction(f) => matches!(
+                                                f.kind,
+                                                UserFunctionKind::Regular
+                                            ),
+                                            ValueKind::BuiltinFunction(_) => true,
+                                            _ => false,
                                         };
+                                        if cacheable {
+                                            let class_ptr =
+                                                Rc::as_ptr(&inst.class) as *const ();
+                                            let class_version =
+                                                inst.class.borrow().mutation_version.get();
+                                            let epoch =
+                                                pyrust_core::class_epoch();
+                                            cache[call_site_pc] = AttrCacheEntry::ClassAttr {
+                                                class_ptr,
+                                                class_version,
+                                                epoch,
+                                                value: unbound_val,
+                                            };
+                                        }
                                     }
                                 }
                             }
