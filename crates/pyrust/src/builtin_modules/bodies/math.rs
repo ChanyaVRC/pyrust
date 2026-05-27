@@ -57,6 +57,15 @@ pyrust_module! {
         if let Some(r) = try_math_dunder(_interp, val, "__floor__") {
             return r;
         }
+        // int.__floor__ returns self unchanged — no float coercion needed and
+        // coercing a large int to f64 would silently lose precision (e.g.
+        // math.floor(2**53+1) must return 2**53+1, not 2**53).
+        match val.kind() {
+            ValueKind::Int(n) => return Ok(Value::int(n)),
+            ValueKind::BigInt(b) => return Ok(Value::bigint(b.clone())),
+            ValueKind::Bool(b) => return Ok(Value::int(b as i64)),
+            _ => {}
+        }
         let x = math_coerce_float(val)?;
         let f = x.floor();
         if f > i64::MAX as f64 || f < i64::MIN as f64 {
@@ -82,6 +91,14 @@ pyrust_module! {
         let val = &args[0].value;
         if let Some(r) = try_math_dunder(_interp, val, "__ceil__") {
             return r;
+        }
+        // int.__ceil__ returns self unchanged — same precision reasoning as
+        // floor above.
+        match val.kind() {
+            ValueKind::Int(n) => return Ok(Value::int(n)),
+            ValueKind::BigInt(b) => return Ok(Value::bigint(b.clone())),
+            ValueKind::Bool(b) => return Ok(Value::int(b as i64)),
+            _ => {}
         }
         let x = math_coerce_float(val)?;
         let f = x.ceil();

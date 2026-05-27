@@ -67,10 +67,20 @@ print(math.ceil(False))    # 0
 print(math.trunc(True))    # 1
 
 
-# ── BigInt input for trunc ──────────────────────────────────────────────────
+# ── BigInt input for floor / ceil / trunc ──────────────────────────────────
+# int.__floor__ and int.__ceil__ return self unchanged, so large ints that
+# cannot be represented exactly as f64 must not be coerced to float first.
 
 big = 2**63 + 1
 print(math.trunc(big))     # 9223372036854775809
+print(math.floor(big))     # 9223372036854775809
+print(math.ceil(big))      # 9223372036854775809
+
+# 2**53 + 1 is the smallest int that can't be represented exactly as f64.
+# math.floor / math.ceil must return it unchanged, not 2**53.
+precise = 2**53 + 1
+print(math.floor(precise))   # 9007199254740993
+print(math.ceil(precise))    # 9007199254740993
 
 
 # ── Error: custom class without __trunc__ ────────────────────────────────────
