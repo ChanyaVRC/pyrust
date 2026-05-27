@@ -44,6 +44,8 @@ print(e.errno)
 print(e.strerror)
 print(e.filename)
 print(e.filename2)
+# args is (errno, strerror) only — filename is NOT included (CPython 3.12 behaviour)
+print(e.args)
 
 # ── Manual construction: 2-arg form ─────────────────────────────────────────
 
@@ -51,6 +53,7 @@ e = OSError(13, "Permission denied")
 print(e.errno)
 print(e.strerror)
 print(e.filename)
+print(e.args)
 
 # ── Manual construction: 1-arg form — errno/strerror are None ───────────────
 
@@ -78,3 +81,7 @@ except FileNotFoundError as e:
     print(s.startswith("[Errno 2]"))
     print("No such file or directory" in s)
     print("/no_such_file_str_test_abc" in s)
+
+# repr() of a 3-arg FileNotFoundError shows only (errno, strerror) — no filename
+e = FileNotFoundError(2, "No such file or directory", "/path")
+print(repr(e))
