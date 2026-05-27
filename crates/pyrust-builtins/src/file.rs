@@ -131,8 +131,17 @@ pub fn open(path: &str, mode: &str) -> Result<Value> {
             content_bytes =
                 std::fs::read(path).map_err(|e| PyError::from_io_error(&e, Some(path)))?;
         } else {
-            content = std::fs::read_to_string(path)
+            let raw = std::fs::read_to_string(path)
                 .map_err(|e| PyError::from_io_error(&e, Some(path)))?;
+            // On Windows, text mode strips \r from \r\n (universal newlines).
+            #[cfg(windows)]
+            {
+                content = raw.replace("\r\n", "\n");
+            }
+            #[cfg(not(windows))]
+            {
+                content = raw;
+            }
         }
     }
     let state = FileState {
@@ -623,7 +632,12 @@ fn close_file(state: &BuiltinState) -> Result<()> {
             std::fs::write(&s.path, &s.write_buf_bytes)
                 .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
         } else {
-            std::fs::write(&s.path, &s.write_buf)
+            // On Windows, text mode translates \n -> \r\n on write.
+            #[cfg(windows)]
+            let text_bytes = s.write_buf.replace('\n', "\r\n").into_bytes();
+            #[cfg(not(windows))]
+            let text_bytes: Vec<u8> = s.write_buf.as_bytes().to_vec();
+            std::fs::write(&s.path, &text_bytes)
                 .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
         }
     } else if s.is_append {
@@ -637,7 +651,11 @@ fn close_file(state: &BuiltinState) -> Result<()> {
             f.write_all(&s.write_buf_bytes)
                 .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
         } else {
-            f.write_all(s.write_buf.as_bytes())
+            #[cfg(windows)]
+            let text_bytes = s.write_buf.replace('\n', "\r\n").into_bytes();
+            #[cfg(not(windows))]
+            let text_bytes: Vec<u8> = s.write_buf.as_bytes().to_vec();
+            f.write_all(&text_bytes)
                 .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
         }
     }
