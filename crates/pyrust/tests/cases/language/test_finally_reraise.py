@@ -163,3 +163,47 @@ try:
     as_var_unbound_in_finally()
 except ValueError:
     pass
+
+# Case 12: nested except handlers -- raise exits inner except body; both inner
+# and outer finally blocks must run in innermost-first order.
+def nested_except_both_finally():
+    try:
+        raise ValueError("v")
+    except ValueError:
+        try:
+            raise TypeError("t")
+        except TypeError:
+            raise
+        finally:
+            print("finally12-inner")
+    finally:
+        print("finally12-outer")
+
+try:
+    nested_except_both_finally()
+except TypeError:
+    pass
+
+# Case 13: triple-nested -- each level's finally runs in innermost-first order.
+def triple_nested_finally():
+    try:
+        raise ValueError("v")
+    except ValueError:
+        try:
+            raise TypeError("t")
+        except TypeError:
+            try:
+                raise RuntimeError("r")
+            except RuntimeError:
+                raise
+            finally:
+                print("finally13-inner")
+        finally:
+            print("finally13-mid")
+    finally:
+        print("finally13-outer")
+
+try:
+    triple_nested_finally()
+except RuntimeError:
+    pass

@@ -4251,8 +4251,12 @@ impl Compiler {
             let cleanup = self.except_cleanups[i].clone();
             match cleanup {
                 EarlyExitCleanup::TryBody { .. } => {
-                    // VM exc_handlers covers this; no compile-time cleanup needed.
-                    continue;
+                    // A TryBody entry means this `raise` site is inside a try body
+                    // whose SetupExcept is still live on the VM's exc_handlers stack.
+                    // The VM will dispatch the exception to that handler at runtime;
+                    // no compile-time inlining is needed for this entry or any outer
+                    // entries (which are also covered by their own SetupExcept).
+                    return;
                 }
                 EarlyExitCleanup::ExceptBody {
                     finally_stmts,
@@ -4277,17 +4281,20 @@ impl Compiler {
                         None => {}
                     }
                     // Inline the finally block (if any) without EndExcept.
-                    // The raise instruction propagates the exception; the outer
-                    // exc_handlers on the VM stack (from enclosing try blocks)
-                    // will handle further unwinding.
+                    // The raise instruction propagates the exception; any further
+                    // enclosing ExceptBody entries (outer except handlers whose
+                    // SetupExcept was also popped) are processed by the remaining
+                    // loop iterations.  TryBody entries at outer scopes still have
+                    // live SetupExcept handlers and are handled by the VM.
                     if let Some(stmts) = finally_stmts {
                         let saved_tail: Vec<EarlyExitCleanup> = self.except_cleanups.split_off(i);
                         self.compile_block(&stmts);
                         self.except_cleanups.extend(saved_tail);
                     }
-                    // Only process the innermost ExceptBody; outer TryBody entries
-                    // are handled by the VM's exc_handlers stack.
-                    return;
+                    // Continue the loop: there may be enclosing ExceptBody entries
+                    // (from outer except handlers) whose finallys also need inlining,
+                    // because their outer SetupExcept was likewise popped when the
+                    // outer handler was entered.
                 }
             }
         }
