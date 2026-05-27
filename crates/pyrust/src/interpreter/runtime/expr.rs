@@ -571,15 +571,7 @@ impl Interpreter {
                 if let Some(m) = lookup_class_attr(&class, rmethod)
                     && is_callable_method(&m)
                 {
-                    // BuiltinFunction dunders (e.g. `int.__radd__`) operate on
-                    // the backing primitive value.  Pass the coerced value so
-                    // `eval_binary` inside the dunder doesn't re-dispatch to the
-                    // same method on the still-wrapped PyInstance (infinite loop).
-                    let self_val = if matches!(m.kind(), ValueKind::BuiltinFunction(_)) {
-                        coerce_numeric(right.clone())
-                    } else {
-                        Value::py_instance(Rc::clone(inst))
-                    };
+                    let self_val = Value::py_instance(Rc::clone(inst));
                     let arg = ExpandedCallArg {
                         name: None,
                         value: left.clone(),
@@ -597,11 +589,7 @@ impl Interpreter {
             if let Some(m) = lookup_class_attr(&class, method)
                 && is_callable_method(&m)
             {
-                let self_val = if matches!(m.kind(), ValueKind::BuiltinFunction(_)) {
-                    coerce_numeric(left.clone())
-                } else {
-                    Value::py_instance(Rc::clone(inst))
-                };
+                let self_val = Value::py_instance(Rc::clone(inst));
                 let arg = ExpandedCallArg {
                     name: None,
                     value: right.clone(),
@@ -619,11 +607,7 @@ impl Interpreter {
                 if let Some(m) = lookup_class_attr(&class, rmethod)
                     && is_callable_method(&m)
                 {
-                    let self_val = if matches!(m.kind(), ValueKind::BuiltinFunction(_)) {
-                        coerce_numeric(right.clone())
-                    } else {
-                        Value::py_instance(Rc::clone(inst))
-                    };
+                    let self_val = Value::py_instance(Rc::clone(inst));
                     let arg = ExpandedCallArg {
                         name: None,
                         value: left.clone(),
@@ -647,13 +631,7 @@ impl Interpreter {
             if let Some(m) = lookup_class_attr(&class, method)
                 && is_callable_method(&m)
             {
-                // BuiltinFunction dunders operate on the backing primitive value;
-                // pass the coerced value so they don't reject the PyInstance wrapper.
-                let self_val = if matches!(m.kind(), ValueKind::BuiltinFunction(_)) {
-                    coerce_numeric(val.clone())
-                } else {
-                    Value::py_instance(Rc::clone(inst))
-                };
+                let self_val = Value::py_instance(Rc::clone(inst));
                 return Some(invoke_class_method(self, m, self_val, &[]));
             }
         }
@@ -956,46 +934,6 @@ impl Interpreter {
             let ptr = Rc::as_ptr(class_rc) as usize as u64;
             return Ok(PyKey::Object {
                 hash: ptr,
-                value: value.clone(),
-            });
-        }
-        // User-defined functions, lambdas, and built-in functions are hashable
-        // by identity (CPython: function.__hash__).  Use the Rc pointer for user
-        // functions and the static name pointer for built-in functions, matching
-        // the hash computed by hash_value for the same values.
-        if let ValueKind::UserFunction(rc) = value.kind() {
-            let ptr = Rc::as_ptr(rc) as usize as u64;
-            return Ok(PyKey::Object {
-                hash: ptr,
-                value: value.clone(),
-            });
-        }
-        if let ValueKind::BuiltinFunction(name) = value.kind() {
-            let ptr = name.as_ptr() as usize as u64;
-            return Ok(PyKey::Object {
-                hash: ptr,
-                value: value.clone(),
-            });
-        }
-        // Bound methods: hash as hash(func) ^ hash(self), using Rc pointer
-        // identity for both components, matching CPython method.__hash__.
-        if let ValueKind::BoundMethod { function, receiver } = value.kind() {
-            let func_ptr = Rc::as_ptr(function) as usize as u64;
-            let recv_ptr = Rc::as_ptr(receiver) as usize as u64;
-            let h = func_ptr ^ recv_ptr;
-            return Ok(PyKey::Object {
-                hash: h,
-                value: value.clone(),
-            });
-        }
-        // Class-bound methods (classmethods): same XOR pattern using the class
-        // Rc pointer instead of an instance pointer.
-        if let ValueKind::ClassBoundMethod { function, class } = value.kind() {
-            let func_ptr = Rc::as_ptr(function) as usize as u64;
-            let class_ptr = Rc::as_ptr(class) as usize as u64;
-            let h = func_ptr ^ class_ptr;
-            return Ok(PyKey::Object {
-                hash: h,
                 value: value.clone(),
             });
         }
@@ -1736,21 +1674,6 @@ impl Interpreter {
                     _ => unreachable!(),
                 }
             }
-            // `fromkeys` is a classmethod: ignore the dict receiver and call
-            // the registry dispatch directly with the user-supplied args.
-            "fromkeys" => {
-                let dispatch = crate::builtin_registry::lookup("dict.fromkeys")
-                    .ok_or_else(|| {
-                        PyError::Runtime(
-                            "internal: dict.fromkeys not in registry".to_string(),
-                        )
-                    })?;
-                let expanded: Vec<ExpandedCallArg> = args
-                    .into_iter()
-                    .map(|v| ExpandedCallArg { name: None, value: v })
-                    .collect();
-                dispatch(self, &expanded)
-            }
             _ => pyrust_builtins::dict::call(method, &receiver, args),
         }
     }
@@ -2054,6 +1977,10 @@ impl Interpreter {
             BinaryOp::Mod => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__mod__", "__rmod__") {
                     return r;
+                }
+                // str % args: printf-style formatting (#1393).
+                if matches!(left.kind(), ValueKind::Str(_)) {
+                    return self.str_printf_format(left, right);
                 }
                 // Issue #1204: extract backing for scalar primitive subclasses.
                 self.modulo(coerce_numeric(left), coerce_numeric(right))
@@ -3365,8 +3292,23 @@ impl Interpreter {
             _ => unreachable!("str_printf_format called with non-str left"),
         };
 
-        // Determine if the right-hand side is a mapping (dict) or a tuple/single.
-        let is_mapping = matches!(args.kind(), ValueKind::Dict(_));
+        // CPython mapping mode is triggered by the format string, not by the RHS type.
+        // A dict RHS is only used as a mapping when the format string contains %(key) codes;
+        // if the format has only positional codes, the dict is treated as a single positional arg.
+        let has_named_key = {
+            let b = fmt.as_bytes();
+            let mut found = false;
+            let mut j = 0;
+            while j + 1 < b.len() {
+                if b[j] == b'%' && b[j + 1] == b'(' {
+                    found = true;
+                    break;
+                }
+                j += 1;
+            }
+            found
+        };
+        let is_mapping = has_named_key && matches!(args.kind(), ValueKind::Dict(_));
         // Wrap a non-tuple, non-mapping rhs in a virtual single-element tuple.
         let positional: Option<Vec<Value>> = if is_mapping {
             None
@@ -3478,7 +3420,11 @@ impl Interpreter {
                     while i < len && bytes[i].is_ascii_digit() {
                         i += 1;
                     }
-                    if i == start { Some(0) } else { Some(fmt[start..i].parse::<usize>().unwrap()) }
+                    if i == start {
+                        Some(0)
+                    } else {
+                        Some(fmt[start..i].parse::<usize>().unwrap())
+                    }
                 }
             } else {
                 None
@@ -3553,13 +3499,22 @@ impl Interpreter {
                 'o' => {
                     let n = str_printf_to_int(&arg, conv)?;
                     if n < 0 {
-                        // CPython wraps negative ints as unsigned for octal.
+                        // CPython uses sign-magnitude (not two's complement) for negative octal.
                         let u = (n as u64).wrapping_neg();
-                        if flag_hash { format!("-0o{:o}", u) } else { format!("-{:o}", u) }
-                    } else if flag_hash && n != 0 {
-                        if flag_plus { format!("+0o{:o}", n) }
-                        else if flag_space { format!(" 0o{:o}", n) }
-                        else { format!("0o{:o}", n) }
+                        if flag_hash {
+                            format!("-0o{:o}", u)
+                        } else {
+                            format!("-{:o}", u)
+                        }
+                    } else if flag_hash {
+                        // CPython applies 0o prefix for all values (including 0) when # is set.
+                        if flag_plus {
+                            format!("+0o{:o}", n)
+                        } else if flag_space {
+                            format!(" 0o{:o}", n)
+                        } else {
+                            format!("0o{:o}", n)
+                        }
                     } else if flag_plus {
                         format!("+{:o}", n)
                     } else if flag_space {
@@ -3572,11 +3527,20 @@ impl Interpreter {
                     let n = str_printf_to_int(&arg, conv)?;
                     if n < 0 {
                         let u = (n as u64).wrapping_neg();
-                        format!("-{:x}", u)
-                    } else if flag_hash && n != 0 {
-                        if flag_plus { format!("+0x{:x}", n) }
-                        else if flag_space { format!(" 0x{:x}", n) }
-                        else { format!("0x{:x}", n) }
+                        if flag_hash {
+                            format!("-0x{:x}", u)
+                        } else {
+                            format!("-{:x}", u)
+                        }
+                    } else if flag_hash {
+                        // CPython applies 0x prefix for all values (including 0) when # is set.
+                        if flag_plus {
+                            format!("+0x{:x}", n)
+                        } else if flag_space {
+                            format!(" 0x{:x}", n)
+                        } else {
+                            format!("0x{:x}", n)
+                        }
                     } else if flag_plus {
                         format!("+{:x}", n)
                     } else if flag_space {
@@ -3589,11 +3553,20 @@ impl Interpreter {
                     let n = str_printf_to_int(&arg, conv)?;
                     if n < 0 {
                         let u = (n as u64).wrapping_neg();
-                        format!("-{:X}", u)
-                    } else if flag_hash && n != 0 {
-                        if flag_plus { format!("+0X{:X}", n) }
-                        else if flag_space { format!(" 0X{:X}", n) }
-                        else { format!("0X{:X}", n) }
+                        if flag_hash {
+                            format!("-0X{:X}", u)
+                        } else {
+                            format!("-{:X}", u)
+                        }
+                    } else if flag_hash {
+                        // CPython applies 0X prefix for all values (including 0) when # is set.
+                        if flag_plus {
+                            format!("+0X{:X}", n)
+                        } else if flag_space {
+                            format!(" 0X{:X}", n)
+                        } else {
+                            format!("0X{:X}", n)
+                        }
                     } else if flag_plus {
                         format!("+{:X}", n)
                     } else if flag_space {
@@ -3606,25 +3579,53 @@ impl Interpreter {
                     let f = str_printf_to_float(&arg, conv)?;
                     let prec = precision.unwrap_or(6);
                     let s = format_scientific(f, prec, conv == 'E');
-                    if f.is_sign_positive() && flag_plus { format!("+{}", s) }
-                    else if f.is_sign_positive() && flag_space { format!(" {}", s) }
-                    else { s }
+                    if f.is_sign_positive() && flag_plus {
+                        format!("+{}", s)
+                    } else if f.is_sign_positive() && flag_space {
+                        format!(" {}", s)
+                    } else {
+                        s
+                    }
                 }
                 'f' | 'F' => {
                     let f = str_printf_to_float(&arg, conv)?;
-                    let prec = precision.unwrap_or(6);
-                    let s = format!("{:.prec$}", f, prec = prec);
-                    if f.is_sign_positive() && flag_plus { format!("+{}", s) }
-                    else if f.is_sign_positive() && flag_space { format!(" {}", s) }
-                    else { s }
+                    let upper = conv == 'F';
+                    // Special-case NaN and Inf before calling format!(), which
+                    // produces Rust-style 'NaN'/'inf' rather than CPython-style
+                    // 'nan'/'inf'/'NAN'/'INF'.
+                    let s = if f.is_nan() {
+                        if upper { "NAN".to_string() } else { "nan".to_string() }
+                    } else if f.is_infinite() {
+                        if f > 0.0 {
+                            if upper { "INF".to_string() } else { "inf".to_string() }
+                        } else if upper {
+                            "-INF".to_string()
+                        } else {
+                            "-inf".to_string()
+                        }
+                    } else {
+                        let prec = precision.unwrap_or(6);
+                        format!("{:.prec$}", f, prec = prec)
+                    };
+                    if f.is_sign_positive() && flag_plus {
+                        format!("+{}", s)
+                    } else if f.is_sign_positive() && flag_space {
+                        format!(" {}", s)
+                    } else {
+                        s
+                    }
                 }
                 'g' | 'G' => {
                     let f = str_printf_to_float(&arg, conv)?;
                     let prec = precision.unwrap_or(6).max(1);
                     let s = format_general_float(f, prec, conv == 'G');
-                    if f.is_sign_positive() && flag_plus { format!("+{}", s) }
-                    else if f.is_sign_positive() && flag_space { format!(" {}", s) }
-                    else { s }
+                    if f.is_sign_positive() && flag_plus {
+                        format!("+{}", s)
+                    } else if f.is_sign_positive() && flag_space {
+                        format!(" {}", s)
+                    } else {
+                        s
+                    }
                 }
                 'c' => match arg.kind() {
                     ValueKind::Str(s) => {
@@ -3730,18 +3731,27 @@ fn str_printf_to_int(v: &Value, conv: char) -> Result<i64> {
                 "Python int too large to convert to C long".to_string(),
             )
         }),
-        _ => Err(PyError::named(
-            "TypeError",
-            format!(
-                "%{conv} format: a real number is required, not {}",
-                pyrust_core::builtin_type_name(v)
-            ),
-        )),
+        _ => {
+            // CPython uses "a real number is required" for %d/%i/%u,
+            // and "an integer is required" for %o/%x/%X.
+            let msg = if matches!(conv, 'o' | 'x' | 'X') {
+                format!(
+                    "%{conv} format: an integer is required, not {}",
+                    pyrust_core::builtin_type_name(v)
+                )
+            } else {
+                format!(
+                    "%{conv} format: a real number is required, not {}",
+                    pyrust_core::builtin_type_name(v)
+                )
+            };
+            Err(PyError::named("TypeError", msg))
+        }
     }
 }
 
 /// Convert a `Value` to `f64` for float printf format codes.
-fn str_printf_to_float(v: &Value, conv: char) -> Result<f64> {
+fn str_printf_to_float(v: &Value, _conv: char) -> Result<f64> {
     match v.kind() {
         ValueKind::Float(f) => Ok(f),
         ValueKind::Int(n) => Ok(n as f64),
@@ -3750,7 +3760,7 @@ fn str_printf_to_float(v: &Value, conv: char) -> Result<f64> {
         _ => Err(PyError::named(
             "TypeError",
             format!(
-                "%{conv} format: a real number is required, not {}",
+                "must be real number, not {}",
                 pyrust_core::builtin_type_name(v)
             ),
         )),
@@ -3796,22 +3806,33 @@ fn apply_printf_width(
             'd' | 'i' | 'u' | 'o' | 'x' | 'X' | 'f' | 'e' | 'E' | 'g' | 'G'
         )
     {
-        // Sign character stays first; zeros are inserted after it.
-        let (sign_prefix, rest) = match s.chars().next() {
-            Some(c @ ('+' | '-' | ' ')) => {
-                let mut cs = s.chars();
-                let sign = cs.next().unwrap().to_string();
-                let remaining: String = cs.collect();
-                (sign, remaining)
+        // Determine the non-digit prefix: optional sign (+/-/space), then
+        // optional base prefix (0x, 0X, 0o).  Zeros are inserted after the
+        // full prefix so that "%#010x" % 255 → "0x000000ff" not "0000000xff".
+        let prefix_len = {
+            let mut cs = s.chars();
+            let mut n = 0usize;
+            // sign
+            if let Some('+' | '-' | ' ') = cs.next() {
+                n += 1;
+                // base prefix after sign: 0x, 0X, 0o
+                let mut peek = s[n..].chars();
+                if peek.next() == Some('0') {
+                    if matches!(peek.next(), Some('x' | 'X' | 'o')) {
+                        n += 2;
+                    }
+                }
+            } else if s.starts_with("0x") || s.starts_with("0X") || s.starts_with("0o") {
+                n = 2;
             }
-            _ => (String::new(), s),
+            n
         };
         let mut out = String::with_capacity(w);
-        out.push_str(&sign_prefix);
+        out.push_str(&s[..prefix_len]);
         for _ in 0..pad {
             out.push('0');
         }
-        out.push_str(&rest);
+        out.push_str(&s[prefix_len..]);
         return out;
     }
     if left_align {
@@ -3853,14 +3874,13 @@ fn format_scientific(f: f64, prec: usize, upper: bool) -> String {
     if let Some(pos) = raw.find('e') {
         let mantissa = &raw[..pos];
         let exp_str = &raw[pos + 1..];
-        let (sign, digits) = if exp_str.starts_with('-') {
-            ('-', &exp_str[1..])
-        } else if exp_str.starts_with('+') {
-            ('+', &exp_str[1..])
+        let digits = if exp_str.starts_with(['-', '+']) {
+            &exp_str[1..]
         } else {
-            ('+', exp_str)
+            exp_str
         };
-        let exp_n: i32 = digits.parse().unwrap_or(0);
+        let sign: i32 = if exp_str.starts_with('-') { -1 } else { 1 };
+        let exp_n: i32 = digits.parse::<i32>().unwrap_or(0) * sign;
         // {:+03} produces "+03", "-03" — sign always included, at least 2 digits.
         format!("{}{}{:+03}", mantissa, e_char, exp_n)
     } else {
@@ -4480,8 +4500,8 @@ fn complex_pow(zr: f64, zi: f64, wr: f64, wi: f64) -> Result<Value> {
 }
 
 /// True if `v` can serve as an operand in `X | Y` (PEP 604).
-/// Valid operands: `PyClass`, `BuiltinFunction` type tokens (like `range`, `generator`),
-/// `None` itself (coerced to the `NoneType` PyClass singleton), and existing `UnionType` values.
+/// Valid operands: `PyClass`, `BuiltinFunction` type tokens (like `NoneType`),
+/// `None` itself (coerced to `NoneType`), and existing `UnionType` values.
 fn is_union_operand(v: &Value) -> bool {
     match v.kind() {
         ValueKind::PyClass(_) | ValueKind::BuiltinFunction(_) | ValueKind::None => true,
@@ -4492,12 +4512,12 @@ fn is_union_operand(v: &Value) -> bool {
     }
 }
 
-/// Convert `None` to the `NoneType` PyClass singleton, leaving all other
+/// Convert `None` to the `NoneType` builtin function token, leaving all other
 /// values unchanged.  Used when assembling union components so that
 /// `int | None` stores `NoneType` as the component (matching CPython).
 fn coerce_none_to_nonetype(v: Value) -> Value {
     if v.is_none() {
-        Value::py_class(crate::interpreter::primitive_class_by_name("NoneType").expect("NoneType singleton"))
+        Value::builtin_function("NoneType")
     } else {
         v
     }
