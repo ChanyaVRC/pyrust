@@ -1532,31 +1532,38 @@ fn str_encode(s: &str, args: &[Value]) -> Result<Value> {
     if args.len() > 2 {
         return Err(PyError::named(
             "TypeError",
-            format!(
-                "str.encode() takes at most 2 arguments ({} given)",
-                args.len()
-            ),
+            format!("encode() takes at most 2 arguments ({} given)", args.len()),
         ));
     }
-    let encoding: &str = match args.first().map(|v| v.kind()) {
+    let encoding: &str = match args.first() {
         None => "utf-8",
-        Some(ValueKind::Str(s)) => s,
-        Some(_) => {
-            return Err(PyError::named(
-                "TypeError",
-                "str.encode() argument 'encoding' must be str".to_string(),
-            ));
-        }
+        Some(v) => match v.kind() {
+            ValueKind::Str(s) => s,
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "encode() argument 'encoding' must be str, not {}",
+                        builtin_type_name(v)
+                    ),
+                ));
+            }
+        },
     };
-    let errors: &str = match args.get(1).map(|v| v.kind()) {
+    let errors: &str = match args.get(1) {
         None => "strict",
-        Some(ValueKind::Str(s)) => s,
-        Some(_) => {
-            return Err(PyError::named(
-                "TypeError",
-                "str.encode() argument 'errors' must be str".to_string(),
-            ));
-        }
+        Some(v) => match v.kind() {
+            ValueKind::Str(s) => s,
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "encode() argument 'errors' must be str, not {}",
+                        builtin_type_name(v)
+                    ),
+                ));
+            }
+        },
     };
     encode_str_to_bytes(s, encoding, errors)
 }

@@ -288,6 +288,12 @@ fn bytes_hex(bytes: &[u8], args: &[Value]) -> Result<Value> {
 
 fn bytes_decode(bytes: &[u8], args: &[Value], kwargs: &IndexMap<PyKey, Value>) -> Result<Value> {
     // Signature: decode(encoding='utf-8', errors='strict')
+    if args.len() > 2 {
+        return Err(PyError::named(
+            "TypeError",
+            format!("decode() takes at most 2 arguments ({} given)", args.len()),
+        ));
+    }
     // Reject unknown keyword arguments first.
     for key in kwargs.keys() {
         if let PyKey::Str(s) = key {
