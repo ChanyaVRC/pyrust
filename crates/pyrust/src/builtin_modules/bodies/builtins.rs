@@ -5671,6 +5671,23 @@ fn hash_value(value: &Value) -> Result<i64> {
             let h = func_ptr ^ class_ptr;
             Ok(if h == -1 { -2 } else { h })
         }
+        // Complex: CPython Objects/complexobject.c complex_hash.
+        //
+        //   hash_real = _Py_HashDouble(re)  (as Py_uhash_t)
+        //   hash_imag = _Py_HashDouble(im)  (as Py_uhash_t)
+        //   combined  = hash_real + _Py_HASH_IMAG * hash_imag  (wrapping u64)
+        //   result    = combined as Py_hash_t (i64); if -1 return -2
+        //
+        // No additional modulo is applied to the sum: CPython uses wrapping
+        // unsigned arithmetic matching Py_uhash_t overflow in C.
+        ValueKind::Complex(re, im) => {
+            const HASH_IMAG: u64 = 1000003;
+            let hash_re = py_hash_float(re) as u64;
+            let hash_im = py_hash_float(im) as u64;
+            let combined = hash_re.wrapping_add(HASH_IMAG.wrapping_mul(hash_im));
+            let result = combined as i64;
+            Ok(if result == -1 { -2 } else { result })
+        }
         _ => Err(PyError::named(
             "TypeError",
             format!(

@@ -292,6 +292,11 @@ pub enum PyKey {
     /// CPython.  Holds the backing `Rc<Vec<u8>>` directly to avoid
     /// re-allocation on the hot dict/set lookup path.
     Bytes(Rc<Vec<u8>>),
+    /// Complex key with non-zero imaginary part.  Complex values with zero
+    /// imaginary part are stored as `PyKey::Float(re.to_bits())` so that
+    /// cross-type equality (`1+0j == 1 == 1.0`) works via the existing
+    /// `Float <-> Int` arms without additional special-casing.
+    Complex(f64, f64),
     /// Key constructed for a user-defined `PyInstance` (or any non-builtin
     /// Value that defines `__hash__`).  The `hash` is precomputed by the
     /// caller — pyrust-core has no interpreter reference, so dispatching
@@ -371,6 +376,72 @@ fn pykey_hash_bigint(n: &BigInt) -> i64 {
     if raw == -1 { -2 } else { raw }
 }
 
+/// Compute the CPython-compatible hash for a complex number.
+///
+/// Mirrors `complexobject.c` in CPython 3.12:
+///   hash_real = _Py_HashDouble(re)  (as Py_uhash_t / u64)
+///   hash_imag = _Py_HashDouble(im)  (as Py_uhash_t / u64)
+///   combined  = hash_real + _Py_HASH_IMAG * hash_imag  (wrapping u64)
+///   result    = combined as i64; if -1 return -2
+///
+/// The individual float hashes are reduced mod 2^61-1 by the CPython float
+/// hash algorithm; wrapping u64 overflow on the combined sum matches C
+/// behaviour (no additional modulo is applied to the sum).
+fn py_hash_complex(re: f64, im: f64) -> i64 {
+    const HASH_IMAG: u64 = 1000003;
+
+    // Hash a single float component using CPython's Mersenne-prime scheme,
+    // returning the result reinterpreted as u64.
+    // Mirrors interpreter::helpers::py_hash_float and the Float arm of
+    // py_hash_pykey so that hash(1.0) and hash(1+0j) agree.
+    #[inline]
+    fn hash_float_as_u64(v: f64) -> u64 {
+        const P: u64 = (1u64 << 61) - 1;
+        if v.is_nan() {
+            return 0;
+        }
+        if v.is_infinite() {
+            return if v > 0.0 {
+                314159u64
+            } else {
+                (-314159i64) as u64
+            };
+        }
+        if v == 0.0 {
+            return 0;
+        }
+        let bits = v.to_bits();
+        let sign: i64 = if v < 0.0 { -1 } else { 1 };
+        let biased_exp = ((bits >> 52) & 0x7ff) as i64;
+        let mantissa_bits = bits & 0x000f_ffff_ffff_ffff;
+        let (m, e): (u64, i64) = if biased_exp == 0 {
+            (mantissa_bits, -1074)
+        } else {
+            (mantissa_bits | (1u64 << 52), biased_exp - 1023 - 52)
+        };
+        let h: u64 = if e >= 0 {
+            let shift = (e as u64) % 61;
+            ((m as u128 * (1u128 << shift)) % (P as u128)) as u64
+        } else {
+            let neg_e_mod = ((-e) as u64) % 61;
+            let inv_shift = if neg_e_mod == 0 { 0u64 } else { 61 - neg_e_mod };
+            ((m as u128 * (1u128 << inv_shift)) % (P as u128)) as u64
+        };
+        let signed = h as i64 * sign;
+        if signed == -1 {
+            (-2i64) as u64
+        } else {
+            signed as u64
+        }
+    }
+
+    let hash_re = hash_float_as_u64(re);
+    let hash_im = hash_float_as_u64(im);
+    let combined = hash_re.wrapping_add(HASH_IMAG.wrapping_mul(hash_im));
+    let result = combined as i64;
+    if result == -1 { -2 } else { result }
+}
+
 impl PartialEq for PyKey {
     fn eq(&self, other: &Self) -> bool {
         // In CPython, `True == 1` and `False == 0`, and they hash equal, so
@@ -424,6 +495,9 @@ impl PartialEq for PyKey {
             (PyKey::FrozenSet(a), PyKey::FrozenSet(b)) => a == b,
             (PyKey::Tuple(a), PyKey::Tuple(b)) => a == b,
             (PyKey::Bytes(a), PyKey::Bytes(b)) => a.as_ref() == b.as_ref(),
+            // Complex equality: two complex keys are equal iff both components match.
+            // -0.0 == 0.0 in IEEE 754, which matches CPython's `==` for complex.
+            (PyKey::Complex(ar, ai), PyKey::Complex(br, bi)) => ar == br && ai == bi,
             (PyKey::Object { value: a, .. }, PyKey::Object { value: b, .. }) => a == b,
             _ => false,
         }
@@ -526,6 +600,12 @@ impl Hash for PyKey {
             PyKey::Bytes(b) => {
                 6u8.hash(state);
                 b.as_ref().hash(state);
+            }
+            // Complex with non-zero imaginary: hash using the CPython formula
+            // so that py_hash_pykey(Complex(re, im)) and this Rust Hash impl
+            // agree (equal keys must hash equal per the Hash+Eq contract).
+            PyKey::Complex(re, im) => {
+                (py_hash_complex(*re, *im) as u64).hash(state);
             }
             PyKey::Object { hash, .. } => hash.hash(state),
         }
@@ -742,6 +822,7 @@ pub fn py_hash_pykey(key: &PyKey) -> i64 {
             let result = h as i64;
             if result == -1 { -2 } else { result }
         }
+        PyKey::Complex(re, im) => py_hash_complex(*re, *im),
         PyKey::Object { hash, .. } => *hash as i64,
     }
 }
@@ -3085,6 +3166,17 @@ impl Value {
             ValueKind::None => Some(PyKey::None),
             ValueKind::Ellipsis => Some(PyKey::Ellipsis),
             ValueKind::Bytes(rc) => Some(PyKey::Bytes(Rc::clone(rc))),
+            // Complex with zero imaginary part maps to PyKey::Float(re.to_bits()) so
+            // that cross-type equality (1+0j == 1 == 1.0) is handled by the existing
+            // Float <-> Int arms in PyKey::PartialEq without extra special-casing.
+            // -0.0 imaginary is treated as zero (IEEE 754: -0.0 == 0.0).
+            ValueKind::Complex(re, im) => {
+                if im == 0.0 {
+                    Some(PyKey::Float(re.to_bits()))
+                } else {
+                    Some(PyKey::Complex(re, im))
+                }
+            }
             ValueKind::BuiltinObject { ops, state } => ops.to_key(state),
             ValueKind::Tuple(items) => {
                 // Recursively hash each element.  If any element is itself
@@ -3559,6 +3651,7 @@ pub fn key_repr(key: &PyKey) -> String {
             }
         }
         PyKey::Bytes(b) => bytes_repr(b),
+        PyKey::Complex(re, im) => complex_repr(*re, *im),
         PyKey::Object { value, .. } => value.repr(),
     }
 }
