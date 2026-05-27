@@ -306,7 +306,7 @@ thread_local! {
                 crate::builtin_registry::BuiltinDispatchFn,
             >,
         > = {
-        let cell = std::cell::RefCell::new(std::collections::HashMap::with_capacity(12));
+        let cell = std::cell::RefCell::new(std::collections::HashMap::with_capacity(15));
         PRIMITIVE_CLASSES.with(|c| {
             let mut m = cell.borrow_mut();
             for (class, name) in [
@@ -326,6 +326,24 @@ thread_local! {
                     m.insert(Rc::as_ptr(class), dispatch);
                 }
             }
+            // Issue #1451: NoneType, NotImplementedType, and ellipsis were
+            // added to PrimitiveClasses by #1403 but not registered here,
+            // causing calls like `type(None)()` to fall through to
+            // `call_class_expanded` which allocated a bogus PyInstance.
+            // CPython 3.12: zero-arg call returns the singleton; any
+            // arguments raise TypeError "<TypeName> takes no arguments".
+            m.insert(
+                Rc::as_ptr(&c.none_class),
+                none_ctor as crate::builtin_registry::BuiltinDispatchFn,
+            );
+            m.insert(
+                Rc::as_ptr(&c.notimplemented_class),
+                notimplemented_ctor as crate::builtin_registry::BuiltinDispatchFn,
+            );
+            m.insert(
+                Rc::as_ptr(&c.ellipsis_class),
+                ellipsis_ctor as crate::builtin_registry::BuiltinDispatchFn,
+            );
         });
         // `type` metaclass: every `PyClass` value is an instance of `type`
         // in CPython.  Register the TYPE_CLASS singleton here so that
@@ -733,6 +751,48 @@ pub(crate) fn primitive_class_dispatch(
 ) -> Option<crate::builtin_registry::BuiltinDispatchFn> {
     let ptr = Rc::as_ptr(class);
     PRIMITIVE_CLASS_DISPATCH.with(|m| m.borrow().get(&ptr).copied())
+}
+
+/// Constructor for `NoneType` (issue #1451).
+///
+/// CPython 3.12: `type(None)()` returns `None`; any arguments raise
+/// `TypeError: NoneType takes no arguments`.
+fn none_ctor(_interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value> {
+    if !args.is_empty() {
+        return Err(PyError::named(
+            "TypeError",
+            "NoneType takes no arguments".to_string(),
+        ));
+    }
+    Ok(Value::none())
+}
+
+/// Constructor for `NotImplementedType` (issue #1451).
+///
+/// CPython 3.12: `type(NotImplemented)()` returns `NotImplemented`; any
+/// arguments raise `TypeError: NotImplementedType takes no arguments`.
+fn notimplemented_ctor(_interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value> {
+    if !args.is_empty() {
+        return Err(PyError::named(
+            "TypeError",
+            "NotImplementedType takes no arguments".to_string(),
+        ));
+    }
+    Ok(Value::not_implemented())
+}
+
+/// Constructor for `ellipsis` (issue #1451).
+///
+/// CPython 3.12: `type(...)()` returns `Ellipsis`; any arguments raise
+/// `TypeError: EllipsisType takes no arguments`.
+fn ellipsis_ctor(_interp: &mut Interpreter, args: &[ExpandedCallArg]) -> Result<Value> {
+    if !args.is_empty() {
+        return Err(PyError::named(
+            "TypeError",
+            "EllipsisType takes no arguments".to_string(),
+        ));
+    }
+    Ok(Value::ellipsis())
 }
 
 /// Fast `isinstance(obj, primitive_class)` — when `cls` is one of the
