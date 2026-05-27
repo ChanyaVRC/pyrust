@@ -3297,7 +3297,7 @@ fn is_callable_method(v: &Value) -> bool {
     )
 }
 
-fn coerce_numeric(v: Value) -> Value {
+pub(crate) fn coerce_numeric(v: Value) -> Value {
     // Extract via kind() in a scope so the borrow is dropped before we
     // return `v` from the fallthrough — #450 made `kind()`'s borrow
     // explicit, so we can't move `v` while a `ValueKind::List(_)` (or
