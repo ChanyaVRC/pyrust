@@ -48,3 +48,10 @@ print(getattr(builtins, 'NameError') is NameError)
 
 exc_class = getattr(builtins, 'ZeroDivisionError')
 print(exc_class.__name__)
+
+# --- Non-existent attribute raises AttributeError ---
+try:
+    _ = builtins.NoSuchException
+    print(False)
+except AttributeError:
+    print(True)
