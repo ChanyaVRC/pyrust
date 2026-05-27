@@ -4015,14 +4015,17 @@ impl Compiler {
         // CPython's `True == 1`), so they would collide in the constant pool's
         // hash index even though they are type-distinct values.  Likewise,
         // `Float(1.0)` and `Int(1)` are now hash/eq-equal in PyKey so that
-        // dict/set keys respect CPython's numeric equality invariant.  In both
+        // dict/set keys respect CPython's numeric equality invariant.  Complex
+        // values with zero imaginary part map to `PyKey::Float` via `to_key()`,
+        // which would collide with integer-valued floats and ints.  In all these
         // cases the constant pool must keep the values distinct, so we skip the
-        // hash-map fast path for booleans and all floats and fall
-        // through to the type-exact linear scan instead.
+        // hash-map fast path and fall through to the type-exact linear scan.
         let is_bool = matches!(val.kind(), ValueKind::Bool(_));
         let is_float = matches!(val.kind(), ValueKind::Float(_));
+        let is_complex = matches!(val.kind(), ValueKind::Complex(_, _));
         if !is_bool
             && !is_float
+            && !is_complex
             && let Some(key) = val.to_key()
         {
             if let Some(&idx) = self.const_index.get(&key) {
