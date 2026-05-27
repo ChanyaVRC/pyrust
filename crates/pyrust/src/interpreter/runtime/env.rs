@@ -7,10 +7,15 @@ impl Interpreter {
                     return Ok(Value::py_class(Rc::clone(&instance.borrow().class)));
                 }
                 if name == "__dict__" {
-                    // Shared with `vars(obj)` via `instance_attrs_snapshot`
-                    // — see that helper for the live-vs-snapshot caveat
-                    // (issue #392 follow-up).
-                    return Ok(instance_attrs_snapshot(&instance));
+                    // Return a live mutable proxy so that writes to
+                    // `obj.__dict__['key'] = val` propagate back to the
+                    // instance's actual attrs map.  Required for the data-
+                    // descriptor `__set__` protocol (issues #1271 / #1272).
+                    let is_exc = is_exception_class(&instance.borrow().class);
+                    return Ok(pyrust_builtins::instance_dict::instance_dict(
+                        Rc::clone(&instance),
+                        is_exc,
+                    ));
                 }
 
                 // General descriptor protocol (CPython Data Model §3.3.2):

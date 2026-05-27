@@ -1,13 +1,13 @@
-# `instance.__dict__` returns a dict of the instance's own attributes (#392).
+# `instance.__dict__` returns a live mutable proxy for the instance's attrs
+# (#1271 / #1272).
 #
 # CPython exposes `__dict__` as the canonical mapping of an object's instance
 # state.  It is the documented surface used by `pickle`, `copy.deepcopy`,
 # dataclass-style introspection, and `**obj.__dict__` splats.
 #
-# pyrust returns a snapshot (clone) of the underlying attrs IndexMap — read
-# access, key iteration, splatting and equality with `vars(obj)` all match
-# CPython.  Mutating the returned dict does not propagate back to the
-# instance; that "live dict" semantics is tracked as a follow-up.
+# pyrust returns a live proxy backed by the actual attrs IndexMap — writes
+# through the proxy propagate immediately to the instance, enabling data
+# descriptor `__set__` implementations that store via `obj.__dict__['key'] = v`.
 
 # ── Basic: instance with attrs ──────────────────────────────────────────
 class C:

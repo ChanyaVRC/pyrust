@@ -8,6 +8,7 @@ pub mod file;
 pub mod float;
 pub mod frozenset;
 pub mod generic_alias;
+pub mod instance_dict;
 pub mod int;
 pub mod iter_helpers;
 pub mod list;
@@ -39,6 +40,7 @@ pub fn lookup_ops(type_name: &str) -> Option<&'static dyn pyrust_core::BuiltinTy
         property::TYPE_NAME => Some(property::PROPERTY_OPS),
         cached_property::TYPE_NAME => Some(cached_property::CACHED_PROPERTY_OPS),
         bound_method::TYPE_NAME => Some(bound_method::BOUND_METHOD_OPS),
+        instance_dict::TYPE_NAME => Some(instance_dict::INSTANCE_DICT_OPS),
         mapping_proxy::TYPE_NAME => Some(mapping_proxy::MAPPING_PROXY_OPS),
         slice::TYPE_NAME => Some(slice::SLICE_OPS),
         _ => None,
