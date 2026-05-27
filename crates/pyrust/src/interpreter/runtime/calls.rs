@@ -361,12 +361,17 @@ impl Interpreter {
                         // frozenset/tuple), dispatch on the backing value directly.
                         // This avoids the `kind_ok` type guard in
                         // `call_function_expanded` rejecting the PyInstance receiver.
+                        // Issue #1204: same mechanism for str/int/float/bytes subclasses.
                         if let ValueKind::BuiltinFunction(fn_name) = method_val.kind() {
                             if fn_name.split_once('.').is_some_and(|(t, _)| {
-                                matches!(t, "dict" | "list" | "set" | "frozenset" | "tuple")
+                                matches!(t, "dict" | "list" | "set" | "frozenset" | "tuple"
+                                    | "str" | "int" | "float" | "bytes")
                             }) {
                                 if let Some(backing) = instance_builtin_data(&inst) {
-                                    enum BkKind { Dict, List, Set, Frozenset, Tuple, Other }
+                                    enum BkKind {
+                                        Dict, List, Set, Frozenset, Tuple,
+                                        Str, Int, Float, Bytes, Other,
+                                    }
                                     let bk_kind = match backing.kind() {
                                         ValueKind::Dict(_) => BkKind::Dict,
                                         ValueKind::List(_) => BkKind::List,
@@ -377,6 +382,12 @@ impl Interpreter {
                                             BkKind::Frozenset
                                         }
                                         ValueKind::Tuple(_) => BkKind::Tuple,
+                                        ValueKind::Str(_) => BkKind::Str,
+                                        ValueKind::Int(_)
+                                        | ValueKind::BigInt(_)
+                                        | ValueKind::Bool(_) => BkKind::Int,
+                                        ValueKind::Float(_) => BkKind::Float,
+                                        ValueKind::Bytes(_) => BkKind::Bytes,
                                         _ => BkKind::Other,
                                     };
                                     let args_vec: Vec<Value> = pos.drain(..).collect();
@@ -413,6 +424,31 @@ impl Interpreter {
                                             }
                                             _ => unreachable!("BkKind::Tuple guard above"),
                                         },
+                                        BkKind::Str => {
+                                            self.call_str_method(method, backing, args_vec)
+                                        }
+                                        BkKind::Int => {
+                                            pyrust_builtins::int::call(
+                                                method,
+                                                &backing,
+                                                &args_vec,
+                                            )
+                                        }
+                                        BkKind::Float => {
+                                            let f = match backing.kind() {
+                                                ValueKind::Float(f) => f,
+                                                _ => unreachable!("BkKind::Float guard above"),
+                                            };
+                                            pyrust_builtins::float::call(method, f, &args_vec)
+                                        }
+                                        BkKind::Bytes => {
+                                            pyrust_builtins::bytes::call(
+                                                method,
+                                                &backing,
+                                                &args_vec,
+                                                &kw,
+                                            )
+                                        }
                                         BkKind::Other => Err(PyError::Runtime(format!(
                                             "internal: unexpected builtin_data kind for method '{method}'"
                                         ))),
@@ -834,8 +870,10 @@ impl Interpreter {
                 // subclasses of dict/list/set/frozenset/tuple), use that
                 // backing value as the effective receiver so the kind_ok
                 // check and dispatch below see the expected primitive type.
+                // Issue #1204: same for str/int/float/bytes subclasses.
                 let self_val =
-                    if matches!(type_name, "dict" | "list" | "set" | "frozenset" | "tuple") {
+                    if matches!(type_name, "dict" | "list" | "set" | "frozenset" | "tuple"
+                        | "str" | "int" | "float" | "bytes") {
                         // Extract the Rc before kind() drops its borrow.
                         let maybe_inst = if let ValueKind::PyInstance(inst) = self_val.kind() {
                             Some(Rc::clone(inst))
@@ -2548,6 +2586,22 @@ impl Interpreter {
             }
         }
 
+        // Issue #1204: if this class inherits from str/int/float/bytes (scalar
+        // primitives), build the backing from the constructor args immediately,
+        // mirroring the immutable-primitive approach.  The backing stores the raw
+        // primitive value so that method dispatch can delegate to it (e.g.
+        // `MyStr("hello").upper()` extracts the str backing and calls str.upper).
+        let scalar_prim_base = find_scalar_primitive_base(&class);
+        if let Some(prim_name) = scalar_prim_base {
+            if let Some(dispatch) = crate::builtin_registry::lookup(prim_name) {
+                let backing = dispatch(self, args)?;
+                instance
+                    .borrow_mut()
+                    .attrs
+                    .insert(BUILTIN_DATA_ATTR.to_string(), backing);
+            }
+        }
+
         let init = lookup_class_attr(&class, "__init__");
         match init {
             Some(method_val)
@@ -2589,7 +2643,7 @@ impl Interpreter {
                             .attrs
                             .insert(BUILTIN_DATA_ATTR.to_string(), backing);
                     }
-                } else if immutable_prim_base.is_none() && !args.is_empty() {
+                } else if immutable_prim_base.is_none() && scalar_prim_base.is_none() && !args.is_empty() {
                     let class_name = class.borrow().name.clone();
                     return Err(PyError::Runtime(format!(
                         "{}() takes no arguments",

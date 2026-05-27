@@ -397,6 +397,22 @@ pyrust_module! {
                     &[],
                 );
             }
+            // Issue #1204: fall through to the scalar backing value for
+            // primitive subclasses (MyInt, MyFloat, …) that have no user
+            // __abs__ defined.
+            if let Some(backing) = instance_builtin_data(&inst_rc) {
+                match backing.kind() {
+                    ValueKind::Int(v) => return Ok(Value::int(v.abs())),
+                    ValueKind::BigInt(v) => {
+                        let zero: crate::value::PyBigInt = 0i64.into();
+                        let abs = if v < &zero { -v.clone() } else { v.clone() };
+                        return Ok(Value::bigint(abs));
+                    }
+                    ValueKind::Float(v) => return Ok(Value::float(v.abs())),
+                    ValueKind::Bool(b) => return Ok(Value::int(if b { 1 } else { 0 })),
+                    _ => {}
+                }
+            }
             return Err(PyError::named(
                 "TypeError",
                 format!("bad operand type for abs(): '{}'", class.borrow().name),
@@ -1748,6 +1764,8 @@ pyrust_module! {
                 // call_class_expanded.
                 if let Some(backing) = instance_builtin_data(&inst_rc) {
                     match backing.kind() {
+                        ValueKind::Str(text) => text.chars().count() as i64,
+                        ValueKind::Bytes(rc) => rc.len() as i64,
                         ValueKind::List(items) => items.len() as i64,
                         ValueKind::Dict(items) => items.len() as i64,
                         ValueKind::Set(items) => items.len() as i64,
@@ -2181,6 +2199,13 @@ pyrust_module! {
                     // iterable path. __bytes__ takes priority over __iter__.
                     let inst_rc = Rc::clone(inst);
                     let class = Rc::clone(&inst_rc.borrow().class);
+                    // Issue #1204: if the instance is a bytes subclass extract the
+                    // backing value first. `bytes(MyBytes(b"x"))` must return b'x'.
+                    if let Some(backing) = instance_builtin_data(&inst_rc) {
+                        if matches!(backing.kind(), ValueKind::Bytes(_)) {
+                            return Ok(backing);
+                        }
+                    }
                     let self_val = Value::py_instance(Rc::clone(&inst_rc));
                     if let Some(method) = lookup_class_attr(&class, "__bytes__") {
                         let result = invoke_class_method(_interp, method, self_val, &[])?;
@@ -2760,6 +2785,21 @@ pyrust_module! {
                 ValueKind::PyInstance(inst) => {
                     let inst_rc = Rc::clone(inst);
                     let class = Rc::clone(&inst_rc.borrow().class);
+                    // Issue #1204: if the instance is a scalar-primitive subclass
+                    // (MyInt, MyFloat, …) extract the backing value first.
+                    // `int(MyInt(42))` must return 42, not raise TypeError.
+                    if let Some(backing) = instance_builtin_data(&inst_rc) {
+                        let result = match backing.kind() {
+                            ValueKind::Int(v) => Some(Value::int(v)),
+                            ValueKind::BigInt(_) => Some(backing.clone()),
+                            ValueKind::Bool(b) => Some(Value::int(if b { 1 } else { 0 })),
+                            ValueKind::Float(v) => Some(Value::int(v as i64)),
+                            _ => None,
+                        };
+                        if let Some(v) = result {
+                            return Ok(v);
+                        }
+                    }
                     let self_val = Value::py_instance(Rc::clone(&inst_rc));
                     // CPython 3.12 dispatch: __int__ → __index__ → __trunc__
                     if let Some(method) = lookup_class_attr(&class, "__int__") {
@@ -2972,6 +3012,31 @@ pyrust_module! {
                 ValueKind::PyInstance(inst) => {
                     let inst_rc = Rc::clone(inst);
                     let class = Rc::clone(&inst_rc.borrow().class);
+                    // Issue #1204: if the instance is a scalar-primitive subclass
+                    // (MyFloat, MyInt, …) extract the backing value first.
+                    // `float(MyFloat(3.14))` must return 3.14, not raise TypeError.
+                    if let Some(backing) = instance_builtin_data(&inst_rc) {
+                        match backing.kind() {
+                            ValueKind::Float(v) => return Ok(Value::float(v)),
+                            ValueKind::Int(v) => return Ok(Value::float(v as f64)),
+                            ValueKind::Bool(b) => {
+                                return Ok(Value::float(if b { 1.0 } else { 0.0 }));
+                            }
+                            ValueKind::BigInt(ref b) => {
+                                return b
+                                    .to_f64()
+                                    .filter(|f| f.is_finite())
+                                    .map(Value::float)
+                                    .ok_or_else(|| {
+                                        PyError::named(
+                                            "OverflowError",
+                                            "int too large to convert to float".to_string(),
+                                        )
+                                    });
+                            }
+                            _ => {}
+                        }
+                    }
                     let self_val = Value::py_instance(Rc::clone(&inst_rc));
                     // CPython 3.12 dispatch: __float__ → __index__
                     if let Some(method) = lookup_class_attr(&class, "__float__") {
@@ -5771,6 +5836,23 @@ fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) -> Result<S
                 ))
             };
         }
+        // Issue #1204: no __repr__ defined — if the instance has a scalar
+        // primitive backing (str/int/float/bytes subclass), delegate repr()
+        // to the backing value so that repr(MyInt(42)) gives "42" rather
+        // than the default object repr.  (Counter/defaultdict/deque define
+        // their own __repr__ as BuiltinFunctions; the lookup above handles
+        // those; this path only fires when lookup returned None.)
+        if let Some(backing) = instance_builtin_data(&instance_rc) {
+            match backing.kind() {
+                ValueKind::Str(_)
+                | ValueKind::Int(_)
+                | ValueKind::BigInt(_)
+                | ValueKind::Bool(_)
+                | ValueKind::Float(_)
+                | ValueKind::Bytes(_) => return Ok(backing.repr()),
+                _ => {}
+            }
+        }
         // No __repr__ defined — fall back to default object repr (handles
         // exception instances via exception_repr() and plain instances via
         // the address-based format).
@@ -6036,6 +6118,29 @@ fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result
             .unwrap_or(false);
         if !has_user_str {
             return Ok(value.to_py_str());
+        }
+    }
+    // Issue #1204: if this instance subclasses a scalar primitive (str/int/
+    // float/bytes) and has no user-defined __str__ / __repr__, delegate
+    // str() to the backing primitive value so that print(MyStr("hello"))
+    // outputs "hello" instead of the default object repr.
+    let user_str_or_repr = lookup_class_attr(&class, "__str__")
+        .filter(|v| matches!(v.kind(), ValueKind::UserFunction(_)))
+        .or_else(|| {
+            lookup_class_attr(&class, "__repr__")
+                .filter(|v| matches!(v.kind(), ValueKind::UserFunction(_)))
+        });
+    if user_str_or_repr.is_none() {
+        if let Some(backing) = instance_builtin_data(&inst_rc) {
+            match backing.kind() {
+                ValueKind::Str(_)
+                | ValueKind::Int(_)
+                | ValueKind::BigInt(_)
+                | ValueKind::Bool(_)
+                | ValueKind::Float(_)
+                | ValueKind::Bytes(_) => return Ok(backing.to_py_str()),
+                _ => {}
+            }
         }
     }
     for dunder in &["__str__", "__repr__"] {
