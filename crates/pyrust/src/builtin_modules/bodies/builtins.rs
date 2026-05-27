@@ -6167,7 +6167,7 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
 ///
 /// Also recurses into `PyKey::Tuple` and `PyKey::FrozenSet` so that nested
 /// user objects inside hashable compound keys get their `__repr__` called.
-fn render_key_repr(interp: &mut crate::Interpreter, key: &PyKey) -> Result<String> {
+pub(crate) fn render_key_repr(interp: &mut crate::Interpreter, key: &PyKey) -> Result<String> {
     match key {
         PyKey::Object { value, .. } => render_value_repr(interp, value),
         PyKey::Tuple(items) => {

@@ -4423,10 +4423,15 @@ impl Interpreter {
                         return Ok(format!("{class_name}()"));
                     }
                     // Render elements as `{e1, e2}` without the outer `frozenset(...)`
+                    // Use render_key_repr (interp-aware) so PyKey::Object elements
+                    // have their user __repr__ called.
                     let snapshot: Vec<_> = items.unwrap().iter().cloned().collect();
-                    let inner_elems: Vec<String> = snapshot.iter()
-                        .map(|k| pyrust_core::key_repr(k))
-                        .collect();
+                    let mut inner_elems = Vec::with_capacity(snapshot.len());
+                    for k in &snapshot {
+                        inner_elems.push(
+                            crate::builtin_modules::builtins::render_key_repr(self, k)?,
+                        );
+                    }
                     return Ok(format!("{class_name}({{{}}})", inner_elems.join(", ")));
                 }
                 _ => {}
@@ -4960,10 +4965,14 @@ fn render_instance_repr(interp: &mut Interpreter, value: &Value) -> Result<Strin
                     return Ok(format!("{class_name}()"));
                 }
                 // Render elements as `{e1, e2}` without the outer `frozenset(...)`
+                // Use render_key_repr (interp-aware) so PyKey::Object elements
+                // have their user __repr__ called.
                 let snapshot: Vec<_> = items.unwrap().iter().cloned().collect();
-                let inner_elems: Vec<String> = snapshot.iter()
-                    .map(|k| pyrust_core::key_repr(k))
-                    .collect();
+                let mut inner_elems = Vec::with_capacity(snapshot.len());
+                for k in &snapshot {
+                    inner_elems
+                        .push(crate::builtin_modules::builtins::render_key_repr(interp, k)?);
+                }
                 return Ok(format!("{class_name}({{{}}})", inner_elems.join(", ")));
             }
             _ => {}
