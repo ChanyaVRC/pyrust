@@ -27,6 +27,11 @@ class NoIndex:
     pass
 
 
+class BigIndex:
+    def __index__(self):
+        return 10**100
+
+
 class HasRMul:
     """Defines __rmul__ so try_dunder_binary handles it before __index__."""
 
@@ -76,4 +81,10 @@ except TypeError as e:
 try:
     [1, 2] * NoIndex()
 except TypeError as e:
+    print(e)
+
+# --- OverflowError: __index__ returns a BigInt (type name is original type) ---
+try:
+    [1, 2] * BigIndex()
+except OverflowError as e:
     print(e)

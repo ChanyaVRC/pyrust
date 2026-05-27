@@ -2354,20 +2354,35 @@ impl Interpreter {
                     Value::py_instance(Rc::clone(&inst_rc)),
                     &[],
                 )?;
-                let result_ok = matches!(
-                    result.kind(),
-                    ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
-                );
-                if result_ok {
-                    Ok(result)
-                } else {
-                    Err(PyError::named(
+                // Classify the result before consuming it so the borrow on
+                // result.kind() ends before we move `result` into Ok(_).
+                enum ResultTag {
+                    SmallInt,
+                    BigInt,
+                    Other,
+                }
+                let result_type_name = value_type_name_str(&result).to_string();
+                let result_tag = match result.kind() {
+                    ValueKind::Int(_) | ValueKind::Bool(_) => ResultTag::SmallInt,
+                    ValueKind::BigInt(_) => ResultTag::BigInt,
+                    _ => ResultTag::Other,
+                };
+                match result_tag {
+                    ResultTag::SmallInt => Ok(result),
+                    ResultTag::BigInt => {
+                        // CPython's PyNumber_AsSsize_t raises OverflowError using
+                        // the *original* object's type name, not "int".
+                        Err(PyError::named(
+                            "OverflowError",
+                            format!(
+                                "cannot fit '{type_name_for_err}' into an index-sized integer"
+                            ),
+                        ))
+                    }
+                    ResultTag::Other => Err(PyError::named(
                         "TypeError",
-                        format!(
-                            "__index__ returned non-int (type {})"
-                            , value_type_name_str(&result),
-                        ),
-                    ))
+                        format!("__index__ returned non-int (type {result_type_name})"),
+                    )),
                 }
             }
         }
