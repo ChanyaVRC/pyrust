@@ -945,6 +945,10 @@ pub(crate) struct ExpandedCallArg {
     pub(crate) value: Value,
 }
 
+/// Inline-4 buffer for building small call-arg slices without heap allocation.
+/// Covers `self + 0..3 args` — the dominant case for method invocations.
+pub(crate) type ExpandedArgBuf = smallvec::SmallVec<[ExpandedCallArg; 4]>;
+
 /// Invoke a method that was looked up on a class — handling both
 /// `UserFunction` methods (compiled Python bytecode, bound via the
 /// interpreter's user-function path) and `BuiltinFunction` methods
@@ -973,7 +977,7 @@ pub(crate) fn invoke_class_method(
                     "internal: builtin method '{name}' not in registry"
                 ))
             })?;
-            let mut combined: Vec<ExpandedCallArg> = Vec::with_capacity(args.len() + 1);
+            let mut combined: ExpandedArgBuf = ExpandedArgBuf::with_capacity(args.len() + 1);
             combined.push(ExpandedCallArg {
                 name: None,
                 value: instance,
