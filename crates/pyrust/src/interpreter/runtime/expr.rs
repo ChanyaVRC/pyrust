@@ -571,7 +571,15 @@ impl Interpreter {
                 if let Some(m) = lookup_class_attr(&class, rmethod)
                     && is_callable_method(&m)
                 {
-                    let self_val = Value::py_instance(Rc::clone(inst));
+                    // BuiltinFunction dunders (e.g. `int.__radd__`) operate on
+                    // the backing primitive value.  Pass the coerced value so
+                    // `eval_binary` inside the dunder doesn't re-dispatch to the
+                    // same method on the still-wrapped PyInstance (infinite loop).
+                    let self_val = if matches!(m.kind(), ValueKind::BuiltinFunction(_)) {
+                        coerce_numeric(right.clone())
+                    } else {
+                        Value::py_instance(Rc::clone(inst))
+                    };
                     let arg = ExpandedCallArg {
                         name: None,
                         value: left.clone(),
@@ -589,7 +597,11 @@ impl Interpreter {
             if let Some(m) = lookup_class_attr(&class, method)
                 && is_callable_method(&m)
             {
-                let self_val = Value::py_instance(Rc::clone(inst));
+                let self_val = if matches!(m.kind(), ValueKind::BuiltinFunction(_)) {
+                    coerce_numeric(left.clone())
+                } else {
+                    Value::py_instance(Rc::clone(inst))
+                };
                 let arg = ExpandedCallArg {
                     name: None,
                     value: right.clone(),
@@ -607,7 +619,11 @@ impl Interpreter {
                 if let Some(m) = lookup_class_attr(&class, rmethod)
                     && is_callable_method(&m)
                 {
-                    let self_val = Value::py_instance(Rc::clone(inst));
+                    let self_val = if matches!(m.kind(), ValueKind::BuiltinFunction(_)) {
+                        coerce_numeric(right.clone())
+                    } else {
+                        Value::py_instance(Rc::clone(inst))
+                    };
                     let arg = ExpandedCallArg {
                         name: None,
                         value: left.clone(),
@@ -631,7 +647,13 @@ impl Interpreter {
             if let Some(m) = lookup_class_attr(&class, method)
                 && is_callable_method(&m)
             {
-                let self_val = Value::py_instance(Rc::clone(inst));
+                // BuiltinFunction dunders operate on the backing primitive value;
+                // pass the coerced value so they don't reject the PyInstance wrapper.
+                let self_val = if matches!(m.kind(), ValueKind::BuiltinFunction(_)) {
+                    coerce_numeric(val.clone())
+                } else {
+                    Value::py_instance(Rc::clone(inst))
+                };
                 return Some(invoke_class_method(self, m, self_val, &[]));
             }
         }
@@ -934,6 +956,46 @@ impl Interpreter {
             let ptr = Rc::as_ptr(class_rc) as usize as u64;
             return Ok(PyKey::Object {
                 hash: ptr,
+                value: value.clone(),
+            });
+        }
+        // User-defined functions, lambdas, and built-in functions are hashable
+        // by identity (CPython: function.__hash__).  Use the Rc pointer for user
+        // functions and the static name pointer for built-in functions, matching
+        // the hash computed by hash_value for the same values.
+        if let ValueKind::UserFunction(rc) = value.kind() {
+            let ptr = Rc::as_ptr(rc) as usize as u64;
+            return Ok(PyKey::Object {
+                hash: ptr,
+                value: value.clone(),
+            });
+        }
+        if let ValueKind::BuiltinFunction(name) = value.kind() {
+            let ptr = name.as_ptr() as usize as u64;
+            return Ok(PyKey::Object {
+                hash: ptr,
+                value: value.clone(),
+            });
+        }
+        // Bound methods: hash as hash(func) ^ hash(self), using Rc pointer
+        // identity for both components, matching CPython method.__hash__.
+        if let ValueKind::BoundMethod { function, receiver } = value.kind() {
+            let func_ptr = Rc::as_ptr(function) as usize as u64;
+            let recv_ptr = Rc::as_ptr(receiver) as usize as u64;
+            let h = func_ptr ^ recv_ptr;
+            return Ok(PyKey::Object {
+                hash: h,
+                value: value.clone(),
+            });
+        }
+        // Class-bound methods (classmethods): same XOR pattern using the class
+        // Rc pointer instead of an instance pointer.
+        if let ValueKind::ClassBoundMethod { function, class } = value.kind() {
+            let func_ptr = Rc::as_ptr(function) as usize as u64;
+            let class_ptr = Rc::as_ptr(class) as usize as u64;
+            let h = func_ptr ^ class_ptr;
+            return Ok(PyKey::Object {
+                hash: h,
                 value: value.clone(),
             });
         }
@@ -1673,6 +1735,21 @@ impl Interpreter {
                     }
                     _ => unreachable!(),
                 }
+            }
+            // `fromkeys` is a classmethod: ignore the dict receiver and call
+            // the registry dispatch directly with the user-supplied args.
+            "fromkeys" => {
+                let dispatch = crate::builtin_registry::lookup("dict.fromkeys")
+                    .ok_or_else(|| {
+                        PyError::Runtime(
+                            "internal: dict.fromkeys not in registry".to_string(),
+                        )
+                    })?;
+                let expanded: Vec<ExpandedCallArg> = args
+                    .into_iter()
+                    .map(|v| ExpandedCallArg { name: None, value: v })
+                    .collect();
+                dispatch(self, &expanded)
             }
             _ => pyrust_builtins::dict::call(method, &receiver, args),
         }
@@ -4500,8 +4577,8 @@ fn complex_pow(zr: f64, zi: f64, wr: f64, wi: f64) -> Result<Value> {
 }
 
 /// True if `v` can serve as an operand in `X | Y` (PEP 604).
-/// Valid operands: `PyClass`, `BuiltinFunction` type tokens (like `NoneType`),
-/// `None` itself (coerced to `NoneType`), and existing `UnionType` values.
+/// Valid operands: `PyClass`, `BuiltinFunction` type tokens (like `range`, `generator`),
+/// `None` itself (coerced to the `NoneType` PyClass singleton), and existing `UnionType` values.
 fn is_union_operand(v: &Value) -> bool {
     match v.kind() {
         ValueKind::PyClass(_) | ValueKind::BuiltinFunction(_) | ValueKind::None => true,
@@ -4512,12 +4589,12 @@ fn is_union_operand(v: &Value) -> bool {
     }
 }
 
-/// Convert `None` to the `NoneType` builtin function token, leaving all other
+/// Convert `None` to the `NoneType` PyClass singleton, leaving all other
 /// values unchanged.  Used when assembling union components so that
 /// `int | None` stores `NoneType` as the component (matching CPython).
 fn coerce_none_to_nonetype(v: Value) -> Value {
     if v.is_none() {
-        Value::builtin_function("NoneType")
+        Value::py_class(crate::interpreter::primitive_class_by_name("NoneType").expect("NoneType singleton"))
     } else {
         v
     }
