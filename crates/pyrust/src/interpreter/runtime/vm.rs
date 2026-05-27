@@ -69,29 +69,31 @@ pub(crate) struct CallableIter {
 
 /// Lazy iterator for `map(func, iter1, iter2, ...)`.
 ///
-/// Sources are materialised eagerly on the first `step_map_iter` call
-/// (matching the lazy-on-first-use semantics of the other helpers).
-/// `func` is invoked once per row via `call_function_expanded`.
+/// `sources` holds already-converted iterator objects (result of calling
+/// `iter()` on the original arguments at construction time).  Each call to
+/// `step_map_iter` advances every source by one element via `call_next` and
+/// invokes `func` with the resulting row.  No items are consumed from the
+/// sources until the first `next()` call on the map object.
 pub(crate) struct MapIter {
     pub(crate) func: Value,
+    /// Already-converted iterators (one per positional argument after `func`).
     pub(crate) sources: Vec<Value>,
-    /// Materialised columns; `None` until first step.
-    pub(crate) columns: Option<Vec<Vec<Value>>>,
-    /// Shortest column length (set alongside `columns`).
-    pub(crate) len: usize,
-    pub(crate) pos: usize,
+    /// Set to `true` once any source raises `StopIteration`.
+    pub(crate) done: bool,
 }
 
 /// Lazy iterator for `filter(func, iterable)`.
 ///
-/// Source is materialised eagerly on the first `step_filter_iter` call.
+/// `source` is the already-converted iterator object (result of calling
+/// `iter()` on the original iterable at construction time).  No items are
+/// consumed from the source until the first `next()` call on the filter object.
 /// `func` is `None` when the Python caller passed `None` (identity test).
 pub(crate) struct FilterIter {
     pub(crate) func: Option<Value>,
+    /// Already-converted iterator object.
     pub(crate) source: Value,
-    /// Materialised items; `None` until first step.
-    pub(crate) items: Option<Vec<Value>>,
-    pub(crate) pos: usize,
+    /// Set to `true` once the source raises `StopIteration`.
+    pub(crate) done: bool,
 }
 
 /// Heap-allocated execution state for a suspended generator.

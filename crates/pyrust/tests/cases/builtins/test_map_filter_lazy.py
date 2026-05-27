@@ -1,52 +1,95 @@
-# Parity fixture for issue #1245: map() and filter() lazy semantics.
-# Focuses on type identity, next(), exhaustion, and multi-iterable map.
+# Parity fixture: map() and filter() are lazy iterators over generators.
+# Issue #1388: pyrust was eagerly exhausting generator sources at construction
+# time.  CPython 3.12 guarantees no elements are consumed until next() is
+# called on the returned iterator object.
 
-# type() name checks
-print(type(map(str, range(3))).__name__)
-print(type(filter(None, [0, 1, 2])).__name__)
+# --- map() laziness ---
 
-# next() on map
-m = map(str, range(3))
-print(next(m))
-print(next(m))
-print(next(m))
+steps = []
+
+
+def tracked_gen():
+    for i in range(4):
+        steps.append(f"gen:{i}")
+        yield i
+
+
+steps.append("before_map")
+m = map(lambda x: x * 2, tracked_gen())
+steps.append("after_map")
+v = next(m)
+steps.append(f"got:{v}")
+print(steps)  # ['before_map', 'after_map', 'gen:0', 'got:0']
+
+# --- filter() laziness ---
+
+steps2 = []
+
+
+def tracked_gen2():
+    for i in range(4):
+        steps2.append(f"gen:{i}")
+        yield i
+
+
+steps2.append("before_filter")
+f = filter(lambda x: x > 0, tracked_gen2())
+steps2.append("after_filter")
+v2 = next(f)
+steps2.append(f"got:{v2}")
+print(steps2)  # ['before_filter', 'after_filter', 'gen:0', 'gen:1', 'got:1']
+
+# --- Functional correctness ---
+
+print(list(map(lambda x: x * 2, range(5))))  # [0, 2, 4, 6, 8]
+print(list(filter(lambda x: x > 2, range(5))))  # [3, 4]
+print(next(map(str, [1, 2, 3])))  # 1
+
+# --- filter with None (identity test) ---
+
+print(list(filter(None, [0, 1, False, True, "", "hello"])))  # [1, True, 'hello']
+
+# --- map with multiple iterables ---
+
+print(list(map(lambda x, y: x + y, [1, 2, 3], [10, 20, 30])))  # [11, 22, 33]
+
+# map stops at the shortest iterable
+print(list(map(lambda x, y: x + y, [1, 2, 3], [10, 20])))  # [11, 22]
+
+# --- Infinite generator: construction must not hang ---
+
+def inf_gen():
+    n = 0
+    while True:
+        yield n
+        n += 1
+
+
+m_inf = map(lambda x: x * 2, inf_gen())
+print(next(m_inf))  # 0
+print(next(m_inf))  # 2
+print(next(m_inf))  # 4
+
+# --- StopIteration on exhausted map/filter ---
+
+m_ex = map(lambda x: x, [1, 2])
+print(next(m_ex))  # 1
+print(next(m_ex))  # 2
 try:
-    next(m)
+    next(m_ex)
+    print("MISSING StopIteration")
 except StopIteration:
-    print('StopIteration')
+    print("StopIteration raised correctly")
 
-# map exhaustion: second list() call returns []
-m2 = map(str, range(2))
-list(m2)
-print(list(m2))
-
-# multi-iterable map stops at shortest
-print(list(map(lambda x, y: x + y, [1, 2], [3, 4])))
-print(list(map(lambda x, y: x + y, [1, 2, 3], [10, 20])))
-print(list(map(lambda x, y, z: x * y + z, [1, 2], [3, 4], [5, 6])))
-
-# next() on filter (func=None keeps truthy)
-f = filter(None, [0, 1, 2])
-print(next(f))
-print(next(f))
+f_ex = filter(lambda x: x > 0, [1])
+print(next(f_ex))  # 1
 try:
-    next(f)
+    next(f_ex)
+    print("MISSING StopIteration")
 except StopIteration:
-    print('StopIteration')
+    print("StopIteration raised correctly")
 
-# filter exhaustion
-f2 = filter(None, [1, 2])
-list(f2)
-print(list(f2))
+# --- type() returns correct names ---
 
-# filter with callable
-print(list(filter(lambda x: x % 2 == 0, [1, 2, 3, 4, 5])))
-
-# map with user-defined function
-def add_one(x):
-    return x + 1
-
-print(list(map(add_one, [10, 20, 30])))
-
-# map with range source
-print(list(map(str, range(4))))
+print(type(map(str, [])).__name__)   # map
+print(type(filter(None, [])).__name__)  # filter

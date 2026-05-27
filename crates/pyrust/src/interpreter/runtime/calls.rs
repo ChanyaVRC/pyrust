@@ -1405,58 +1405,45 @@ impl Interpreter {
 
     /// One step of the lazy `map(func, *iterables)` iterator.
     ///
-    /// On the first call the sources are materialised via
-    /// `iter_values_via_registry` (eagerly per source, lazy across sources).
-    /// Subsequent calls invoke `func` with one argument drawn from each
-    /// column at the current position and advance the position.
+    /// Advances each stored source iterator by one element via `call_next`
+    /// and invokes `func` with the resulting row.  Stops as soon as any
+    /// source raises `StopIteration` (CPython map stops at the shortest).
     ///
-    /// `Ok(Some(v))` → next mapped value; `Ok(None)` → exhausted (shortest
-    /// source ran out); `Err(e)` → error from materialisation or `func`.
+    /// `Ok(Some(v))` → next mapped value; `Ok(None)` → exhausted;
+    /// `Err(e)` → error from `func` or an iterator.
     pub(crate) fn step_map_iter(
         &mut self,
         state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
     ) -> Result<Option<Value>> {
-        // Materialise sources on first call.
-        {
-            let mut borrow = state_rc.borrow_mut();
-            let s = borrow
-                .downcast_mut::<MapIter>()
-                .ok_or_else(|| PyError::Runtime("step_map_iter on non-MapIter state".to_string()))?;
-            if s.columns.is_none() {
-                let mut cols: Vec<Vec<Value>> = Vec::with_capacity(s.sources.len());
-                for src in &s.sources {
-                    cols.push(pyrust_core::iter_values_via_registry(src)?);
-                }
-                let len = cols.iter().map(|c| c.len()).min().unwrap_or(0);
-                s.len = len;
-                s.columns = Some(cols);
-            }
-        }
-        // Extract row at current position (borrow released before calling func).
-        let snapshot: Option<(Value, Vec<Value>)> = {
+        // Snapshot func and source iterators; borrow released before any
+        // call_next / call_function_expanded invocation.
+        let (func, iterators): (Value, Vec<Value>) = {
             let borrow = state_rc.borrow();
-            let s = borrow.downcast_ref::<MapIter>().unwrap();
-            if s.pos >= s.len {
-                None
-            } else {
-                let cols = s.columns.as_ref().unwrap();
-                let row: Vec<Value> = cols.iter().map(|c| c[s.pos].clone()).collect();
-                Some((s.func.clone(), row))
+            let s = borrow
+                .downcast_ref::<MapIter>()
+                .ok_or_else(|| PyError::Runtime("step_map_iter on non-MapIter state".to_string()))?;
+            if s.done {
+                return Ok(None);
             }
+            (s.func.clone(), s.sources.clone())
         };
-        match snapshot {
-            None => Ok(None),
-            Some((func, row)) => {
-                // Advance pos before calling func so that if func raises the
-                // exception propagates to the caller but the next next() call
-                // moves on to the following element (CPython behaviour).
-                state_rc.borrow_mut().downcast_mut::<MapIter>().unwrap().pos += 1;
-                let args: Vec<ExpandedCallArg> =
-                    row.into_iter().map(|v| ExpandedCallArg { name: None, value: v }).collect();
-                let result = self.call_function_expanded(func, &args)?;
-                Ok(Some(result))
+        // Advance each source iterator by one element.  Stop at the first
+        // StopIteration (CPython map stops at the shortest iterable).
+        let mut row: Vec<Value> = Vec::with_capacity(iterators.len());
+        for iter_val in iterators {
+            match self.call_next(iter_val, None) {
+                Ok(v) => row.push(v),
+                Err(e) if e.class_name_is("StopIteration") => {
+                    state_rc.borrow_mut().downcast_mut::<MapIter>().unwrap().done = true;
+                    return Ok(None);
+                }
+                Err(e) => return Err(e),
             }
         }
+        let args: Vec<ExpandedCallArg> =
+            row.into_iter().map(|v| ExpandedCallArg { name: None, value: v }).collect();
+        let result = self.call_function_expanded(func, &args)?;
+        Ok(Some(result))
     }
 
     /// One step of the lazy `filter(func, iterable)` iterator.
@@ -1470,48 +1457,41 @@ impl Interpreter {
         &mut self,
         state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
     ) -> Result<Option<Value>> {
-        // Materialise source on first call.
-        {
-            let mut borrow = state_rc.borrow_mut();
-            let s = borrow.downcast_mut::<FilterIter>().ok_or_else(|| {
-                PyError::Runtime("step_filter_iter on non-FilterIter state".to_string())
-            })?;
-            if s.items.is_none() {
-                let items = pyrust_core::iter_values_via_registry(&s.source)?;
-                s.items = Some(items);
-            }
-        }
         loop {
-            // Snapshot next candidate (release borrow before calling func).
-            let candidate: Option<(Option<Value>, Value)> = {
+            // Snapshot source iterator and func; borrow released before
+            // call_next / call_function_expanded.
+            let (func_opt, iter_val): (Option<Value>, Value) = {
                 let borrow = state_rc.borrow();
-                let s = borrow.downcast_ref::<FilterIter>().unwrap();
-                let items = s.items.as_ref().unwrap();
-                if s.pos >= items.len() {
-                    None
-                } else {
-                    Some((s.func.clone(), items[s.pos].clone()))
+                let s = borrow.downcast_ref::<FilterIter>().ok_or_else(|| {
+                    PyError::Runtime("step_filter_iter on non-FilterIter state".to_string())
+                })?;
+                if s.done {
+                    return Ok(None);
                 }
+                (s.func.clone(), s.source.clone())
             };
-            match candidate {
-                None => return Ok(None),
-                Some((func_opt, item)) => {
-                    state_rc.borrow_mut().downcast_mut::<FilterIter>().unwrap().pos += 1;
-                    let keep = if let Some(func) = func_opt {
-                        let test = self.call_function_expanded(
-                            func,
-                            &[ExpandedCallArg { name: None, value: item.clone() }],
-                        )?;
-                        self.truthy_value(&test)?
-                    } else {
-                        self.truthy_value(&item)?
-                    };
-                    if keep {
-                        return Ok(Some(item));
-                    }
-                    // else continue to next candidate
+            // Advance the source by one element.
+            let item = match self.call_next(iter_val, None) {
+                Ok(v) => v,
+                Err(e) if e.class_name_is("StopIteration") => {
+                    state_rc.borrow_mut().downcast_mut::<FilterIter>().unwrap().done = true;
+                    return Ok(None);
                 }
+                Err(e) => return Err(e),
+            };
+            let keep = if let Some(func) = func_opt {
+                let test = self.call_function_expanded(
+                    func,
+                    &[ExpandedCallArg { name: None, value: item.clone() }],
+                )?;
+                self.truthy_value(&test)?
+            } else {
+                self.truthy_value(&item)?
+            };
+            if keep {
+                return Ok(Some(item));
             }
+            // else continue to next candidate
         }
     }
 
