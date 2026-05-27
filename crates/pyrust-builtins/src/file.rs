@@ -11,7 +11,6 @@ use std::rc::Rc;
 use indexmap::IndexMap;
 use pyrust_core::{BuiltinState, BuiltinTypeOps, PyError, Result, Value, ValueKind};
 
-#[allow(dead_code)] // `mode` is kept for diagnostics / future repr() support
 pub struct FileState {
     pub path: String,
     pub mode: String,
@@ -24,6 +23,8 @@ pub struct FileState {
     pub write_buf: String,
     pub is_write: bool,
     pub is_append: bool,
+    /// Whether the file was opened in binary mode (`'b'` in mode string).
+    pub is_binary: bool,
 }
 
 impl FileState {
@@ -42,8 +43,20 @@ impl BuiltinTypeOps for FileOps {
         TYPE_NAME
     }
 
-    fn repr(&self, _state: &BuiltinState) -> String {
-        "<file object>".to_string()
+    fn repr(&self, state: &BuiltinState) -> String {
+        let borrow = state.borrow();
+        if let Some(s) = borrow.downcast_ref::<FileState>() {
+            if s.is_binary {
+                format!("<_io.BufferedReader name='{}'>", s.path)
+            } else {
+                format!(
+                    "<_io.TextIOWrapper name='{}' mode='{}' encoding='UTF-8'>",
+                    s.path, s.mode
+                )
+            }
+        } else {
+            "<file object>".to_string()
+        }
     }
 
     fn truthy(&self, _state: &BuiltinState) -> bool {
@@ -56,6 +69,24 @@ impl BuiltinTypeOps for FileOps {
 
     fn is_iterable(&self) -> bool {
         true
+    }
+
+    fn getattr(&self, state: &BuiltinState, name: &str) -> Option<Value> {
+        let borrow = state.borrow();
+        let s = borrow.downcast_ref::<FileState>()?;
+        match name {
+            "name" => Some(Value::string(s.path.clone())),
+            "mode" => Some(Value::string(s.mode.clone())),
+            "closed" => Some(Value::bool_(s.closed)),
+            "encoding" => {
+                if s.is_binary {
+                    None
+                } else {
+                    Some(Value::string("UTF-8"))
+                }
+            }
+            _ => None,
+        }
     }
 
     fn has_method(&self, name: &str) -> bool {
@@ -87,6 +118,7 @@ pub fn open(path: &str, mode: &str) -> Result<Value> {
     let is_write = mode.contains('w');
     let is_append = mode.contains('a');
     let is_read = mode.contains('r') || (!is_write && !is_append);
+    let is_binary = mode.contains('b');
 
     let mut content = String::new();
     if is_read {
@@ -102,6 +134,7 @@ pub fn open(path: &str, mode: &str) -> Result<Value> {
         write_buf: String::new(),
         is_write,
         is_append,
+        is_binary,
     };
     let state: Box<dyn Any> = Box::new(state);
     Ok(Value::builtin_object(FILE_OPS, state))
@@ -126,6 +159,148 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
             close_file(state)?;
             Ok(Value::none())
         }
+        "flush" => {
+            let borrow = state.borrow();
+            let s = borrow
+                .downcast_ref::<FileState>()
+                .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
+            if s.closed {
+                return Err(PyError::named(
+                    "ValueError",
+                    "I/O operation on closed file.".to_string(),
+                ));
+            }
+            Ok(Value::none())
+        }
+        "tell" => {
+            let borrow = state.borrow();
+            let s = borrow
+                .downcast_ref::<FileState>()
+                .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
+            if s.closed {
+                return Err(PyError::named(
+                    "ValueError",
+                    "I/O operation on closed file.".to_string(),
+                ));
+            }
+            let pos = if s.is_readable() {
+                s.pos
+            } else {
+                s.write_buf.len()
+            };
+            Ok(Value::int(pos as i64))
+        }
+        "seek" => {
+            let offset = args
+                .first()
+                .and_then(|v| match v.kind() {
+                    ValueKind::Int(n) => Some(n),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    PyError::named("TypeError", "seek() argument must be int".to_string())
+                })?;
+            let whence = args
+                .get(1)
+                .and_then(|v| match v.kind() {
+                    ValueKind::Int(n) => Some(n),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            let mut borrow = state.borrow_mut();
+            let s = borrow
+                .downcast_mut::<FileState>()
+                .ok_or_else(|| PyError::Runtime("internal: bad file state".to_string()))?;
+            if s.closed {
+                return Err(PyError::named(
+                    "ValueError",
+                    "I/O operation on closed file.".to_string(),
+                ));
+            }
+            if s.is_readable() {
+                let content_len = s.content.len();
+                let new_pos = match whence {
+                    0 => {
+                        if offset < 0 {
+                            return Err(PyError::named(
+                                "ValueError",
+                                format!("negative seek position {offset}"),
+                            ));
+                        }
+                        (offset as usize).min(content_len)
+                    }
+                    1 => {
+                        // Text mode only allows seek(0, 1)
+                        if offset != 0 {
+                            return Err(PyError::named(
+                                "io.UnsupportedOperation",
+                                "can't do nonzero cur-relative seeks".to_string(),
+                            ));
+                        }
+                        s.pos
+                    }
+                    2 => {
+                        // Text mode only allows seek(0, 2)
+                        if offset != 0 {
+                            return Err(PyError::named(
+                                "io.UnsupportedOperation",
+                                "can't do nonzero end-relative seeks".to_string(),
+                            ));
+                        }
+                        content_len
+                    }
+                    _ => {
+                        return Err(PyError::named(
+                            "ValueError",
+                            format!("invalid whence ({whence}, should be 0, 1 or 2)"),
+                        ));
+                    }
+                };
+                s.pos = new_pos;
+                Ok(Value::int(new_pos as i64))
+            } else {
+                // Write / append mode: track position in write_buf
+                let buf_len = s.write_buf.len();
+                let new_pos = match whence {
+                    0 => {
+                        if offset < 0 {
+                            return Err(PyError::named(
+                                "ValueError",
+                                format!("negative seek position {offset}"),
+                            ));
+                        }
+                        (offset as usize).min(buf_len)
+                    }
+                    1 => {
+                        if offset != 0 {
+                            return Err(PyError::named(
+                                "io.UnsupportedOperation",
+                                "can't do nonzero cur-relative seeks".to_string(),
+                            ));
+                        }
+                        buf_len
+                    }
+                    2 => {
+                        if offset != 0 {
+                            return Err(PyError::named(
+                                "io.UnsupportedOperation",
+                                "can't do nonzero end-relative seeks".to_string(),
+                            ));
+                        }
+                        buf_len
+                    }
+                    _ => {
+                        return Err(PyError::named(
+                            "ValueError",
+                            format!("invalid whence ({whence}, should be 0, 1 or 2)"),
+                        ));
+                    }
+                };
+                // Truncate write_buf to new_pos (seek in write mode discards future bytes)
+                s.write_buf.truncate(new_pos);
+                Ok(Value::int(new_pos as i64))
+            }
+        }
         "read" => {
             let n = args.first().and_then(|v| match v.kind() {
                 ValueKind::Int(n) => Some(n),
@@ -138,7 +313,7 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
             if s.closed {
                 return Err(PyError::named(
                     "ValueError",
-                    "I/O operation on closed file".to_string(),
+                    "I/O operation on closed file.".to_string(),
                 ));
             }
             if !s.is_readable() {
@@ -197,7 +372,7 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
                 .ok_or_else(|| {
                     PyError::named("TypeError", "write() argument must be str".to_string())
                 })?;
-            let len = s.len();
+            let len = s.chars().count();
             let mut borrow = state.borrow_mut();
             let st = borrow
                 .downcast_mut::<FileState>()
@@ -205,7 +380,7 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
             if st.closed {
                 return Err(PyError::named(
                     "ValueError",
-                    "I/O operation on closed file".to_string(),
+                    "I/O operation on closed file.".to_string(),
                 ));
             }
             if !st.is_write && !st.is_append {
@@ -235,7 +410,7 @@ fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) ->
             if st.closed {
                 return Err(PyError::named(
                     "ValueError",
-                    "I/O operation on closed file".to_string(),
+                    "I/O operation on closed file.".to_string(),
                 ));
             }
             for v in lines {
@@ -266,7 +441,7 @@ fn read_line_or_none(state: &BuiltinState) -> Result<Option<String>> {
     if s.closed {
         return Err(PyError::named(
             "ValueError",
-            "I/O operation on closed file".to_string(),
+            "I/O operation on closed file.".to_string(),
         ));
     }
     if !s.is_readable() {
@@ -326,9 +501,12 @@ pub fn has_method(name: &str) -> bool {
             | "__iter__"
             | "__next__"
             | "close"
+            | "flush"
             | "read"
             | "readline"
             | "readlines"
+            | "seek"
+            | "tell"
             | "write"
             | "writelines"
     )
