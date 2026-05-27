@@ -22,7 +22,7 @@ use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, P
 use crate::interpreter::{
     CallableIter, FilterIter, MapIter, NativeIterFrame, apply_format_spec, ascii_repr_interp, bigint_divmod_floor,
     class_chain_contains_name, class_is_subclass_of,
-    compare_values, compare_values_with_op, dir_names,
+    compare_values, compare_values_with_op, coerce_numeric, dir_names,
     instance_builtin_data,
     int_pow_promoting, invoke_class_method,
     is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_hash_bigint, py_hash_float,
@@ -4149,7 +4149,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Add, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Add, b)
     }
 
     /// Issue #1256: `int.__sub__(self, value)`
@@ -4163,7 +4163,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Sub, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Sub, b)
     }
 
     /// Issue #1256: `int.__mul__(self, value)`
@@ -4179,7 +4179,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Mul, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Mul, b)
     }
 
     /// Issue #1256: `int.__truediv__(self, value)`
@@ -4193,7 +4193,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Div, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Div, b)
     }
 
     /// Issue #1256: `int.__floordiv__(self, value)`
@@ -4207,7 +4207,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::FloorDiv, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::FloorDiv, b)
     }
 
     /// Issue #1256: `int.__mod__(self, value)`
@@ -4221,7 +4221,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Mod, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Mod, b)
     }
 
     /// Issue #1256: `int.__pow__(self, value)`
@@ -4235,7 +4235,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Pow, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Pow, b)
     }
 
     /// Issue #1256: `int.__and__(self, value)`
@@ -4249,7 +4249,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::BitAnd, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::BitAnd, b)
     }
 
     /// Issue #1256: `int.__or__(self, value)`
@@ -4263,7 +4263,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::BitOr, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::BitOr, b)
     }
 
     /// Issue #1256: `int.__xor__(self, value)`
@@ -4277,7 +4277,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::BitXor, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::BitXor, b)
     }
 
     /// Issue #1256: `int.__lshift__(self, value)`
@@ -4291,7 +4291,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::LShift, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::LShift, b)
     }
 
     /// Issue #1256: `int.__rshift__(self, value)`
@@ -4305,7 +4305,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::RShift, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::RShift, b)
     }
 
     /// Issue #1256: `int.__lt__(self, value)`
@@ -4319,7 +4319,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Lt, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Lt, b)
     }
 
     /// Issue #1256: `int.__le__(self, value)`
@@ -4333,7 +4333,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Le, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Le, b)
     }
 
     /// Issue #1256: `int.__gt__(self, value)`
@@ -4347,7 +4347,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Gt, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Gt, b)
     }
 
     /// Issue #1256: `int.__ge__(self, value)`
@@ -4361,7 +4361,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Ge, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Ge, b)
     }
 
     /// Issue #1256: `int.__eq__(self, value)`
@@ -4378,7 +4378,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Eq, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Eq, b)
     }
 
     /// Issue #1256: `int.__ne__(self, value)`
@@ -4393,7 +4393,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Ne, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Ne, b)
     }
 
     /// Issue #1256: `str.__len__(self)` — exposes `str.__len__` as a class-level
@@ -4407,6 +4407,7 @@ pyrust_module! {
             PyError::named("TypeError",
                 "descriptor '__len__' of 'str' needs an argument".to_string())
         })?;
+        let self_val = coerce_numeric(self_val);
         match self_val.kind() {
             ValueKind::Str(s) => Ok(Value::int(s.chars().count() as i64)),
             _ => Err(PyError::named("TypeError",
@@ -4423,7 +4424,7 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__add__' of 'str' needs an argument".to_string())),
         };
-        _interp.eval_binary(a, BinaryOp::Add, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Add, b)
     }
 
     /// Issue #1256: `str.__mul__(self, value)`
@@ -4434,7 +4435,7 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__mul__' of 'str' needs an argument".to_string())),
         };
-        _interp.eval_binary(a, BinaryOp::Mul, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Mul, b)
     }
 
     /// Issue #1256: `str.__lt__(self, value)`
@@ -4448,7 +4449,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Str(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Lt, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Lt, b)
     }
 
     /// Issue #1256: `str.__le__(self, value)`
@@ -4462,7 +4463,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Str(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Le, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Le, b)
     }
 
     /// Issue #1256: `str.__gt__(self, value)`
@@ -4476,7 +4477,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Str(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Gt, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Gt, b)
     }
 
     /// Issue #1256: `str.__ge__(self, value)`
@@ -4490,7 +4491,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Str(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Ge, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Ge, b)
     }
 
     /// Issue #1256: `str.__eq__(self, value)`
@@ -4506,7 +4507,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Str(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Eq, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Eq, b)
     }
 
     /// Issue #1256: `str.__ne__(self, value)`
@@ -4521,7 +4522,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Str(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Ne, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Ne, b)
     }
 
     /// Issue #1256: `list.__len__(self)` — exposes `list.__len__` as a
@@ -4534,6 +4535,7 @@ pyrust_module! {
             PyError::named("TypeError",
                 "descriptor '__len__' of 'list' needs an argument".to_string())
         })?;
+        let self_val = coerce_numeric(self_val);
         match self_val.kind() {
             ValueKind::List(items) => Ok(Value::int(items.len() as i64)),
             _ => Err(PyError::named("TypeError",
@@ -4549,6 +4551,7 @@ pyrust_module! {
             PyError::named("TypeError",
                 "descriptor '__len__' of 'tuple' needs an argument".to_string())
         })?;
+        let self_val = coerce_numeric(self_val);
         match self_val.kind() {
             ValueKind::Tuple(items) => Ok(Value::int(items.len() as i64)),
             _ => Err(PyError::named("TypeError",
@@ -4564,6 +4567,7 @@ pyrust_module! {
             PyError::named("TypeError",
                 "descriptor '__len__' of 'dict' needs an argument".to_string())
         })?;
+        let self_val = coerce_numeric(self_val);
         match self_val.kind() {
             ValueKind::Dict(items) => Ok(Value::int(items.len() as i64)),
             _ => Err(PyError::named("TypeError",
@@ -4579,6 +4583,7 @@ pyrust_module! {
             PyError::named("TypeError",
                 "descriptor '__len__' of 'set' needs an argument".to_string())
         })?;
+        let self_val = coerce_numeric(self_val);
         match self_val.kind() {
             ValueKind::Set(items) => Ok(Value::int(items.len() as i64)),
             _ => Err(PyError::named("TypeError",
@@ -4594,6 +4599,7 @@ pyrust_module! {
             PyError::named("TypeError",
                 "descriptor '__len__' of 'bytes' needs an argument".to_string())
         })?;
+        let self_val = coerce_numeric(self_val);
         match self_val.kind() {
             ValueKind::Bytes(b) => Ok(Value::int(b.len() as i64)),
             _ => Err(PyError::named("TypeError",
