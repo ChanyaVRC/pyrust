@@ -204,6 +204,7 @@ fn key_to_value(k: PyKey) -> Value {
         }
         PyKey::Tuple(items) => Value::tuple(items.into_iter().map(key_to_value).collect()),
         PyKey::Bytes(rc) => Value::bytes((*rc).clone()),
+        PyKey::Complex(re, im) => Value::complex(re, im),
         PyKey::Object { value, .. } => value,
     }
 }
