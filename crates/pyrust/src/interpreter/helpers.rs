@@ -3176,12 +3176,32 @@ pub(crate) fn compute_def_bound_mask(
     mask
 }
 
-pub(crate) fn float_to_bigint(f: f64) -> Value {
+/// Convert a finite `f64` to a `BigInt` `Value`, raising the CPython-matching
+/// Python exceptions for non-finite inputs:
+/// - `OverflowError` for ±infinity
+/// - `ValueError` for NaN
+///
+/// For finite floats the fractional part is discarded (truncation toward zero),
+/// matching CPython's `int(float)` / `math.floor` / `math.ceil` semantics.
+pub(crate) fn float_to_bigint(f: f64) -> crate::error::Result<Value> {
     use crate::value::PyBigInt;
-    // Convert via the decimal string representation of the f64's integer value.
-    let s = format!("{:.0}", f);
-    let n: PyBigInt = s.parse().unwrap_or_else(|_| PyBigInt::from(0i64));
-    Value::bigint(n)
+    use num_traits::FromPrimitive;
+    if f.is_nan() {
+        return Err(crate::error::PyError::named(
+            "ValueError",
+            "cannot convert float NaN to integer".to_string(),
+        ));
+    }
+    if f.is_infinite() {
+        return Err(crate::error::PyError::named(
+            "OverflowError",
+            "cannot convert float infinity to integer".to_string(),
+        ));
+    }
+    // Truncate toward zero (matching CPython's behaviour for floor/ceil callers
+    // that have already applied their own rounding before calling here).
+    let n = PyBigInt::from_f64(f.trunc()).expect("finite f64 must convert to BigInt");
+    Ok(Value::bigint(n))
 }
 
 /// Coerce a `Value` to `f64` for numeric ops.  Returns the raw `f64` on

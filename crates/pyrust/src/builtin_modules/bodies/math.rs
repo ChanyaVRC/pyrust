@@ -67,9 +67,23 @@ pyrust_module! {
             _ => {}
         }
         let x = math_coerce_float(val)?;
+        // Guard nan/inf before applying floor — NaN comparisons are always false
+        // so the range check below would silently fall through to `as i64`.
+        if x.is_nan() {
+            return Err(PyError::named(
+                "ValueError",
+                "cannot convert float NaN to integer".to_string(),
+            ));
+        }
+        if x.is_infinite() {
+            return Err(PyError::named(
+                "OverflowError",
+                "cannot convert float infinity to integer".to_string(),
+            ));
+        }
         let f = x.floor();
         if f > i64::MAX as f64 || f < i64::MIN as f64 {
-            Ok(float_to_bigint(f))
+            float_to_bigint(f)
         } else {
             Ok(Value::int(f as i64))
         }
@@ -101,9 +115,22 @@ pyrust_module! {
             _ => {}
         }
         let x = math_coerce_float(val)?;
+        // Guard nan/inf before applying ceil — same reasoning as floor above.
+        if x.is_nan() {
+            return Err(PyError::named(
+                "ValueError",
+                "cannot convert float NaN to integer".to_string(),
+            ));
+        }
+        if x.is_infinite() {
+            return Err(PyError::named(
+                "OverflowError",
+                "cannot convert float infinity to integer".to_string(),
+            ));
+        }
         let f = x.ceil();
         if f > i64::MAX as f64 || f < i64::MIN as f64 {
-            Ok(float_to_bigint(f))
+            float_to_bigint(f)
         } else {
             Ok(Value::int(f as i64))
         }
@@ -137,9 +164,23 @@ pyrust_module! {
             ValueKind::Bool(b) => Ok(Value::int(b as i64)),
             // float: truncate toward zero.
             ValueKind::Float(f) => {
+                // Guard nan/inf before trunc — NaN comparisons are always false
+                // so the range check below would silently fall through to `as i64`.
+                if f.is_nan() {
+                    return Err(PyError::named(
+                        "ValueError",
+                        "cannot convert float NaN to integer".to_string(),
+                    ));
+                }
+                if f.is_infinite() {
+                    return Err(PyError::named(
+                        "OverflowError",
+                        "cannot convert float infinity to integer".to_string(),
+                    ));
+                }
                 let t = f.trunc();
                 if t > i64::MAX as f64 || t < i64::MIN as f64 {
-                    Ok(float_to_bigint(t))
+                    float_to_bigint(t)
                 } else {
                     Ok(Value::int(t as i64))
                 }

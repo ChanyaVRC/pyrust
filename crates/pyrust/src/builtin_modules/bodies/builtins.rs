@@ -23,7 +23,7 @@ use crate::interpreter::{
     CallableIter, EnumerateIter, FilterIter, IterSrcBuf, MapIter, NativeIterFrame, ZipIter, apply_format_spec, ascii_repr_interp, bigint_divmod_floor,
     class_chain_contains_name, class_is_subclass_of,
     compare_values, compare_values_with_op, coerce_numeric, dir_names,
-    instance_builtin_data,
+    float_to_bigint, instance_builtin_data,
     int_pow_promoting, invoke_class_method,
     is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_hash_bigint, py_hash_float,
     py_hash_int, py_mod_i64, py_round_half_even, py_round_half_even_f64,
@@ -2777,7 +2777,26 @@ pyrust_module! {
             0 => Ok(Value::int(0)),
             1 => match args[0].value.kind() {
                 ValueKind::Int(v) => Ok(Value::int(v)),
-                ValueKind::Float(v) => Ok(Value::int(v as i64)),
+                ValueKind::Float(v) => {
+                    if v.is_nan() {
+                        return Err(PyError::named(
+                            "ValueError",
+                            "cannot convert float NaN to integer".to_string(),
+                        ));
+                    }
+                    if v.is_infinite() {
+                        return Err(PyError::named(
+                            "OverflowError",
+                            "cannot convert float infinity to integer".to_string(),
+                        ));
+                    }
+                    let t = v.trunc();
+                    if t > i64::MAX as f64 || t < i64::MIN as f64 {
+                        float_to_bigint(t)
+                    } else {
+                        Ok(Value::int(t as i64))
+                    }
+                }
                 ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
                 ValueKind::Str(s) => s.trim().parse::<i64>().map(Value::int).map_err(|_| {
                     PyError::named(
@@ -2807,15 +2826,34 @@ pyrust_module! {
                     // (MyInt, MyFloat, …) extract the backing value first.
                     // `int(MyInt(42))` must return 42, not raise TypeError.
                     if let Some(backing) = instance_builtin_data(&inst_rc) {
-                        let result = match backing.kind() {
-                            ValueKind::Int(v) => Some(Value::int(v)),
-                            ValueKind::BigInt(_) => Some(backing.clone()),
-                            ValueKind::Bool(b) => Some(Value::int(if b { 1 } else { 0 })),
-                            ValueKind::Float(v) => Some(Value::int(v as i64)),
+                        let result: Option<Result<Value>> = match backing.kind() {
+                            ValueKind::Int(v) => Some(Ok(Value::int(v))),
+                            ValueKind::BigInt(_) => Some(Ok(backing.clone())),
+                            ValueKind::Bool(b) => Some(Ok(Value::int(if b { 1 } else { 0 }))),
+                            ValueKind::Float(v) => {
+                                if v.is_nan() {
+                                    Some(Err(PyError::named(
+                                        "ValueError",
+                                        "cannot convert float NaN to integer".to_string(),
+                                    )))
+                                } else if v.is_infinite() {
+                                    Some(Err(PyError::named(
+                                        "OverflowError",
+                                        "cannot convert float infinity to integer".to_string(),
+                                    )))
+                                } else {
+                                    let t = v.trunc();
+                                    if t > i64::MAX as f64 || t < i64::MIN as f64 {
+                                        Some(float_to_bigint(t))
+                                    } else {
+                                        Some(Ok(Value::int(t as i64)))
+                                    }
+                                }
+                            }
                             _ => None,
                         };
                         if let Some(v) = result {
-                            return Ok(v);
+                            return v;
                         }
                     }
                     let self_val = Value::py_instance(Rc::clone(&inst_rc));
@@ -2859,7 +2897,10 @@ pyrust_module! {
                             ValueKind::Int(v) => Ok(Value::int(v)),
                             ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
                             ValueKind::BigInt(_) => Ok(trunc_result.clone()),
-                            ValueKind::Float(v) => Ok(Value::int(v as i64)),
+                            // CPython 3.12: float is not an Integral type — any float returned
+                            // from __trunc__ (including inf/nan) raises TypeError, not
+                            // OverflowError/ValueError.  The inf/nan guards belong only in the
+                            // direct float-to-int conversion paths, not here.
                             _ => Err(PyError::named(
                                 "TypeError",
                                 format!(
