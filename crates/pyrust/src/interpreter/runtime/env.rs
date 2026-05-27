@@ -425,13 +425,21 @@ impl Interpreter {
                         func.kind,
                         UserFunctionKind::StaticMethod | UserFunctionKind::ClassMethod
                     ) => {
-                        // `staticmethod.__func__` and `classmethod.__func__` return
-                        // the wrapped plain function.  Reset the kind tag to Regular
-                        // so the returned value is a normal callable.
-                        return Ok(Value::with_function_kind(
-                            Rc::clone(func),
-                            UserFunctionKind::Regular,
-                        ));
+                        // `staticmethod.__func__` and `classmethod.__func__` return the
+                        // exact object that was passed to staticmethod()/classmethod(),
+                        // preserving identity (`sm.__func__ is f`).
+                        // `wrapped_func` holds the original Rc from the wrapping call.
+                        // Fall back to stripping the kind tag when there is no stored
+                        // `wrapped_func` (compile-time tagging of a Builtin, or any
+                        // path that predates this field).
+                        return if let Some(inner) = func.wrapped_func.as_ref() {
+                            Ok(Value::user_function(Rc::clone(inner)))
+                        } else {
+                            Ok(Value::with_function_kind(
+                                Rc::clone(func),
+                                UserFunctionKind::Regular,
+                            ))
+                        };
                     }
                     "__get__" if func.kind == UserFunctionKind::ClassMethod => {
                         // `classmethod.__get__(instance, owner)` — returns a binder
