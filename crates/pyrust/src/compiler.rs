@@ -4211,6 +4211,77 @@ impl Compiler {
     /// an early exit (e.g. `return`) inside that inlined block does not re-walk
     /// the frame we are currently unwinding — which would cause infinite
     /// recursion (see issue #365: `try: return X finally: return Y`).
+
+    /// Emit cleanup instructions for a `raise` statement that exits an `except`
+    /// handler body.  Unlike `emit_early_exit_cleanups` (which is for
+    /// `break`/`continue`/`return`), `raise` does NOT emit `EndExcept` because
+    /// the raise instruction itself manages `handled_exc_stack`:
+    ///
+    /// - `RaiseReRaise` explicitly pops `handled_exc_stack` before propagating.
+    /// - `RaiseValue`/`RaiseFrom` don't pop, but `handle_vm_error` checks for
+    ///   a duplicate top-of-stack entry and removes it automatically.
+    ///
+    /// So for `raise` we only need to: delete any `as VAR` binding (PEP 3110),
+    /// then inline any `finally` stmts.  `TryBody` entries don't need compile-time
+    /// cleanup — the VM's `exc_handlers` stack still covers them.
+    fn emit_raise_cleanups(&mut self) {
+        let total = self.except_cleanups.len();
+        for i in (0..total).rev() {
+            if self.failed {
+                return;
+            }
+            let cleanup = self.except_cleanups[i].clone();
+            match cleanup {
+                EarlyExitCleanup::TryBody { .. } => {
+                    // A TryBody entry means this `raise` site is inside a try body
+                    // whose SetupExcept is still live on the VM's exc_handlers stack.
+                    // The VM will dispatch the exception to that handler at runtime;
+                    // no compile-time inlining is needed for this entry or any outer
+                    // entries (which are also covered by their own SetupExcept).
+                    return;
+                }
+                EarlyExitCleanup::ExceptBody {
+                    finally_stmts,
+                    as_var_delete,
+                } => {
+                    // PEP 3110: delete the `as VAR` binding (matches the normal
+                    // handler exit path at line ~7427).  Also clear def_set so
+                    // that any reference to the variable inside the inlined
+                    // finally block correctly emits CheckLocal → UnboundLocalError,
+                    // matching CPython's behaviour (the `as` binding is gone before
+                    // the finally clause runs).
+                    match as_var_delete {
+                        Some(ExceptAsVarDel::Local(reg)) => {
+                            self.emit(Insn::DeleteLocal(reg, u16::MAX));
+                            if (reg as usize) < 64 {
+                                self.def_set &= !(1u64 << reg);
+                            }
+                        }
+                        Some(ExceptAsVarDel::Name(name_idx)) => {
+                            self.emit(Insn::DeleteName(name_idx));
+                        }
+                        None => {}
+                    }
+                    // Inline the finally block (if any) without EndExcept.
+                    // The raise instruction propagates the exception; any further
+                    // enclosing ExceptBody entries (outer except handlers whose
+                    // SetupExcept was also popped) are processed by the remaining
+                    // loop iterations.  TryBody entries at outer scopes still have
+                    // live SetupExcept handlers and are handled by the VM.
+                    if let Some(stmts) = finally_stmts {
+                        let saved_tail: Vec<EarlyExitCleanup> = self.except_cleanups.split_off(i);
+                        self.compile_block(&stmts);
+                        self.except_cleanups.extend(saved_tail);
+                    }
+                    // Continue the loop: there may be enclosing ExceptBody entries
+                    // (from outer except handlers) whose finallys also need inlining,
+                    // because their outer SetupExcept was likewise popped when the
+                    // outer handler was entered.
+                }
+            }
+        }
+    }
+
     fn emit_early_exit_cleanups(&mut self, from_depth: usize) {
         let total = self.except_cleanups.len();
         if total <= from_depth {
@@ -4319,6 +4390,19 @@ impl Compiler {
             candidate
         } else {
             self.alloc_temp()
+        }
+    }
+
+    /// If `src` is a fastlocal register (not a temp), copy its value into a
+    /// fresh temp register and return that temp.  Otherwise return `src` as-is.
+    /// Used when a value must survive a `DeleteLocal` on the same register.
+    fn ensure_temp(&mut self, src: Reg) -> Reg {
+        if src >= self.base_temp {
+            src
+        } else {
+            let dst = self.alloc_temp();
+            self.emit(Insn::Move(dst, src));
+            dst
         }
     }
 
@@ -6180,19 +6264,112 @@ impl Compiler {
     // ── Raise / Delete / Import ───────────────────────────────────────────────
 
     fn compile_raise(&mut self, expr: Option<&Expr>, cause: Option<&Expr>) {
-        match expr {
-            None => {
-                self.emit(Insn::RaiseReRaise);
-            }
+        // If we are inside an except handler body and that handler's enclosing
+        // try/except/finally has a finally clause, the compiler already popped the
+        // outer SetupExcept from the VM's exc_handlers stack (to avoid double-running
+        // finally on exceptions from the handler body).  A `raise` statement exits the
+        // handler body, so we must inline the finally block here before emitting the
+        // raise instruction — the VM won't see the outer handler on exc_handlers.
+        // True only when we're in an except-handler body that has a finally
+        // clause to inline.  The finally clause is the only reason we need
+        // `LoadExc` before the cleanup: without it, `RaiseReRaise` can rely
+        // on `active_exception` directly.
+        let in_except_body_with_finally = self.except_cleanups.iter().any(|c| {
+            matches!(
+                c,
+                EarlyExitCleanup::ExceptBody {
+                    finally_stmts: Some(_),
+                    ..
+                }
+            )
+        });
+
+        // Compile the raise expressions BEFORE any cleanup, so that references
+        // to `except ... as var` bindings resolve (e.g. `raise TypeError() from e`).
+        //
+        // For bare `raise` when inside an except handler body:
+        //   `emit_raise_cleanups` inlines the finally block, which may contain
+        //   a try/except that catches an exception.  If that inner exception
+        //   matches the outer handler's context entry, `handle_vm_error`'s
+        //   de-duplication logic removes it from `handled_exc_stack`, leaving
+        //   `active_exception = None` by the time `RaiseReRaise` runs.
+        //   Fix: save the current exception via `LoadExc` into a temp before
+        //   the cleanup and re-raise it as `RaiseValue` (which doesn't rely on
+        //   `active_exception` at the raise site).
+        let bare_reraise_tmp: Option<Reg> = if expr.is_none() && in_except_body_with_finally {
+            let tmp = self.alloc_temp();
+            self.emit(Insn::LoadExc(tmp));
+            Some(tmp)
+        } else {
+            None
+        };
+
+        // Compile the raise expressions (for non-bare raise forms).
+        //
+        // `emit_raise_cleanups` will delete the `as VAR` binding (PEP 3110)
+        // before inlining the finally block.  If the cause expression happens
+        // to BE the deleted local variable register, we must copy its value
+        // into a fresh temp *before* the deletion occurs.  We therefore call
+        // `ensure_temp` on both `r` and `c` after evaluating them.
+        let compiled = match expr {
+            None => None,
             Some(e) => {
                 let r = self.compile_expr(e);
-                if let Some(cause_expr) = cause {
-                    let c = self.compile_expr(cause_expr);
-                    self.emit(Insn::RaiseFrom(r, c));
+                // Copy to temp if r is a fastlocal (ensure_temp = alloc+Move).
+                let r = self.ensure_temp(r);
+                let c = cause.map(|ce| {
+                    let c = self.compile_expr(ce);
+                    self.ensure_temp(c)
+                });
+                Some((r, c))
+            }
+        };
+        if self.failed {
+            if let Some(tmp) = bare_reraise_tmp {
+                self.free_temp(tmp);
+            }
+            if let Some((r, c)) = compiled {
+                if let Some(c) = c {
                     self.free_temp(c);
-                } else {
-                    self.emit(Insn::RaiseValue(r));
                 }
+                self.free_temp(r);
+            }
+            return;
+        }
+
+        self.emit_raise_cleanups();
+        if self.failed {
+            if let Some(tmp) = bare_reraise_tmp {
+                self.free_temp(tmp);
+            }
+            if let Some((r, c)) = compiled {
+                if let Some(c) = c {
+                    self.free_temp(c);
+                }
+                self.free_temp(r);
+            }
+            return;
+        }
+        match (compiled, bare_reraise_tmp) {
+            // Bare `raise` inside an except handler body with a finally: use the
+            // saved exception value so the re-raise is independent of
+            // `active_exception`, which may have been cleared by the inlined
+            // finally block's own exception handling.
+            (None, Some(tmp)) => {
+                self.emit(Insn::RaiseValue(tmp));
+                self.free_temp(tmp);
+            }
+            // Bare `raise` outside any except body: rely on `active_exception`.
+            (None, None) => {
+                self.emit(Insn::RaiseReRaise);
+            }
+            (Some((r, Some(c))), _) => {
+                self.emit(Insn::RaiseFrom(r, c));
+                self.free_temp(c);
+                self.free_temp(r);
+            }
+            (Some((r, None)), _) => {
+                self.emit(Insn::RaiseValue(r));
                 self.free_temp(r);
             }
         }
