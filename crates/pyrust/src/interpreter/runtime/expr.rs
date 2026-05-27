@@ -3856,8 +3856,8 @@ fn complex_pow(zr: f64, zi: f64, wr: f64, wi: f64) -> Result<Value> {
 }
 
 /// True if `v` can serve as an operand in `X | Y` (PEP 604).
-/// Valid operands: `PyClass`, `BuiltinFunction` type tokens (like `NoneType`),
-/// `None` itself (coerced to `NoneType`), and existing `UnionType` values.
+/// Valid operands: `PyClass`, `BuiltinFunction` type tokens (like `range`, `generator`),
+/// `None` itself (coerced to the `NoneType` PyClass singleton), and existing `UnionType` values.
 fn is_union_operand(v: &Value) -> bool {
     match v.kind() {
         ValueKind::PyClass(_) | ValueKind::BuiltinFunction(_) | ValueKind::None => true,
