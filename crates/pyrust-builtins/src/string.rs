@@ -33,6 +33,7 @@ fn subslice_offset(parent: &str, sub: &str) -> usize {
 /// `format_map` is also listed and intercepted in `call_str_method` before
 /// the fall-through to `pyrust_builtins::string::call`.
 pub const METHODS: &[&str] = &[
+    "__iter__",
     "index",
     "count",
     "split",
@@ -303,6 +304,11 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
                 "str.format_map() takes exactly one argument ({} given)",
                 args.len()
             ),
+        )),
+        // Intercepted upstream in vm.rs / calls.rs; sentinel for drift guard.
+        "__iter__" => Err(PyError::named(
+            "TypeError",
+            "'str' __iter__ must be dispatched by the interpreter",
         )),
         _ => Err(PyError::Runtime(format!(
             "'str' object has no attribute '{method}'"

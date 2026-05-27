@@ -27,6 +27,7 @@ pub const TYPE_NAME: &str = "frozenset";
 /// the non-mutating subset of `set`'s methods via `call_method` (see below);
 /// this list mirrors the names recognised there and is consumed by `dir()`.
 pub const METHODS: &[&str] = &[
+    "__iter__",
     "copy",
     "difference",
     "intersection",
@@ -104,7 +105,8 @@ impl BuiltinTypeOps for FrozenSetOps {
     fn has_method(&self, name: &str) -> bool {
         matches!(
             name,
-            "copy"
+            "__iter__"
+                | "copy"
                 | "union"
                 | "intersection"
                 | "difference"

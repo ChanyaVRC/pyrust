@@ -3,6 +3,7 @@ use pyrust_core::{PyError, PyKey, Result, Value, ValueKind};
 
 /// Canonical list of method names dispatched by `call`.
 pub const METHODS: &[&str] = &[
+    "__iter__",
     "add",
     "remove",
     "discard",
@@ -129,6 +130,11 @@ pub fn call(method: &str, receiver: &Value, args: Vec<Value>) -> Result<Value> {
         "issubset" => issubset(receiver, args),
         "issuperset" => issuperset(receiver, args),
         "isdisjoint" => isdisjoint(receiver, args),
+        // Intercepted upstream in vm.rs / calls.rs; sentinel for drift guard.
+        "__iter__" => Err(PyError::named(
+            "TypeError",
+            "'set' __iter__ must be dispatched by the interpreter",
+        )),
         _ => Err(PyError::Runtime(format!(
             "'set' object has no attribute '{method}'"
         ))),

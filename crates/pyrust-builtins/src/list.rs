@@ -6,8 +6,8 @@ use crate::sequence;
 
 /// Canonical list of method names dispatched by `call`.
 pub const METHODS: &[&str] = &[
-    "index", "count", "append", "clear", "copy", "extend", "insert", "pop", "remove", "reverse",
-    "sort",
+    "__iter__", "index", "count", "append", "clear", "copy", "extend", "insert", "pop", "remove",
+    "reverse", "sort",
 ];
 
 /// Returns `true` if `method` is the name of a built-in `list` method.
@@ -45,6 +45,11 @@ pub fn call(
         "reverse" => ms::reverse(receiver, args),
         // List-specific
         "sort" => sort(receiver, &args, kwargs),
+        // Intercepted upstream in vm.rs / calls.rs; sentinel for drift guard.
+        "__iter__" => Err(PyError::named(
+            "TypeError",
+            "'list' __iter__ must be dispatched by the interpreter",
+        )),
         _ => Err(PyError::Runtime(format!(
             "'list' object has no attribute '{method}'"
         ))),
