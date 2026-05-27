@@ -1198,6 +1198,37 @@ impl Interpreter {
                 }
             }
 
+            // EnumerateIter path: drive enumerate() to exhaustion.
+            {
+                let is_enumerate_iter =
+                    state_rc.borrow().downcast_ref::<EnumerateIter>().is_some();
+                if is_enumerate_iter {
+                    let mut items = Vec::new();
+                    loop {
+                        match self.step_enumerate_iter(&state_rc)? {
+                            Some(v) => items.push(v),
+                            None => break,
+                        }
+                    }
+                    return Ok(items);
+                }
+            }
+
+            // ZipIter path: drive zip() to exhaustion.
+            {
+                let is_zip_iter = state_rc.borrow().downcast_ref::<ZipIter>().is_some();
+                if is_zip_iter {
+                    let mut items = Vec::new();
+                    loop {
+                        match self.step_zip_iter(&state_rc)? {
+                            Some(v) => items.push(v),
+                            None => break,
+                        }
+                    }
+                    return Ok(items);
+                }
+            }
+
             // GeneratorFrame path: drive the generator to exhaustion.
             let mut items = Vec::new();
             loop {
@@ -1496,6 +1527,138 @@ impl Interpreter {
         }
     }
 
+    /// One step of the lazy `enumerate(iterable, start=N)` iterator.
+    ///
+    /// Advances the stored source iterator by one element via `call_next` and
+    /// returns `(counter, element)`.  Counter is incremented after each yield.
+    ///
+    /// `Ok(Some(v))` → next `(i, x)` tuple; `Ok(None)` → exhausted;
+    /// `Err(e)` → error from the source iterator.
+    pub(crate) fn step_enumerate_iter(
+        &mut self,
+        state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
+    ) -> Result<Option<Value>> {
+        let (iter_val, counter): (Value, i64) = {
+            let borrow = state_rc.borrow();
+            let s = borrow.downcast_ref::<EnumerateIter>().ok_or_else(|| {
+                PyError::Runtime("step_enumerate_iter on non-EnumerateIter state".to_string())
+            })?;
+            if s.done {
+                return Ok(None);
+            }
+            (s.source.clone(), s.counter)
+        };
+        match self.call_next(iter_val, None) {
+            Ok(item) => {
+                let mut borrow = state_rc.borrow_mut();
+                let s = borrow.downcast_mut::<EnumerateIter>().unwrap();
+                s.counter += 1;
+                Ok(Some(Value::tuple(vec![Value::int(counter), item])))
+            }
+            Err(e) if e.class_name_is("StopIteration") => {
+                state_rc
+                    .borrow_mut()
+                    .downcast_mut::<EnumerateIter>()
+                    .unwrap()
+                    .done = true;
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// One step of the lazy `zip(it1, it2, ..., strict=False)` iterator.
+    ///
+    /// Advances all stored source iterators by one element each via `call_next`
+    /// and returns a tuple of the results.  Stops at the first `StopIteration`
+    /// from any source.  When `strict=True`, checks that all other sources also
+    /// raise `StopIteration` at the same position and raises `ValueError` if any
+    /// mismatch is detected.
+    ///
+    /// `Ok(Some(v))` → next row tuple; `Ok(None)` → exhausted;
+    /// `Err(e)` → error from a source or strict-mode mismatch.
+    pub(crate) fn step_zip_iter(
+        &mut self,
+        state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
+    ) -> Result<Option<Value>> {
+        let (iterators, strict, count): (Vec<Value>, bool, usize) = {
+            let borrow = state_rc.borrow();
+            let s = borrow.downcast_ref::<ZipIter>().ok_or_else(|| {
+                PyError::Runtime("step_zip_iter on non-ZipIter state".to_string())
+            })?;
+            if s.done {
+                return Ok(None);
+            }
+            (s.sources.clone(), s.strict, s.count)
+        };
+        if iterators.is_empty() {
+            state_rc.borrow_mut().downcast_mut::<ZipIter>().unwrap().done = true;
+            return Ok(None);
+        }
+        // Advance each iterator one step, collecting results.
+        let mut row: Vec<Value> = Vec::with_capacity(iterators.len());
+        let mut stopped_at: Option<usize> = None;
+        for (i, iter_val) in iterators.iter().enumerate() {
+            match self.call_next(iter_val.clone(), None) {
+                Ok(v) => row.push(v),
+                Err(e) if e.class_name_is("StopIteration") => {
+                    stopped_at = Some(i);
+                    break;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        if let Some(short_idx) = stopped_at {
+            state_rc.borrow_mut().downcast_mut::<ZipIter>().unwrap().done = true;
+            // In strict mode, verify that all remaining iterators are also exhausted.
+            if strict && iterators.len() > 1 {
+                // Find the first iterator that is *not* yet exhausted (i.e. has a
+                // value where we expected StopIteration).
+                let check_start = if short_idx == 0 { 1 } else { 0 };
+                for (j, iter_val) in iterators.iter().enumerate().skip(check_start) {
+                    if j == short_idx {
+                        continue;
+                    }
+                    match self.call_next(iter_val.clone(), None) {
+                        Ok(_) => {
+                            // j+1 still has a value; short_idx+1 ran out first.
+                            if short_idx == 0 {
+                                // argument 1 is shorter; argument j+1 is longer.
+                                return Err(PyError::named(
+                                    "ValueError",
+                                    zip_longer_message(j, count),
+                                ));
+                            } else {
+                                return Err(PyError::named(
+                                    "ValueError",
+                                    zip_shorter_message(short_idx, count),
+                                ));
+                            }
+                        }
+                        Err(e) if e.class_name_is("StopIteration") => {
+                            // also exhausted — continue checking
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                // All iterators exhausted at the same position — check whether
+                // the first iterator to stop was actually short compared to the
+                // ones already advanced.
+                if short_idx > 0 {
+                    // short_idx stopped; indices 0..short_idx each produced a value.
+                    return Err(PyError::named(
+                        "ValueError",
+                        zip_shorter_message(short_idx, count),
+                    ));
+                }
+            }
+            return Ok(None);
+        }
+        // All sources produced a value; increment count and return the row.
+        state_rc.borrow_mut().downcast_mut::<ZipIter>().unwrap().count += 1;
+        Ok(Some(Value::tuple(row)))
+    }
+
     /// Call next() on a generator or any object with __next__.
     pub(crate) fn call_next(&mut self, val: Value, default: Option<Value>) -> Result<Value> {
         if let ValueKind::Generator(state_rc) = val.kind() {
@@ -1582,6 +1745,41 @@ impl Interpreter {
                 let is_filter_iter = state_rc.borrow().downcast_ref::<FilterIter>().is_some();
                 if is_filter_iter {
                     return match self.step_filter_iter(&state_rc)? {
+                        Some(v) => Ok(v),
+                        None => {
+                            if let Some(d) = default {
+                                Ok(d)
+                            } else {
+                                Err(PyError::named("StopIteration", String::new()))
+                            }
+                        }
+                    };
+                }
+            }
+
+            // EnumerateIter path: (counter, element) pair per step.
+            {
+                let is_enumerate_iter =
+                    state_rc.borrow().downcast_ref::<EnumerateIter>().is_some();
+                if is_enumerate_iter {
+                    return match self.step_enumerate_iter(&state_rc)? {
+                        Some(v) => Ok(v),
+                        None => {
+                            if let Some(d) = default {
+                                Ok(d)
+                            } else {
+                                Err(PyError::named("StopIteration", String::new()))
+                            }
+                        }
+                    };
+                }
+            }
+
+            // ZipIter path: one row tuple per step.
+            {
+                let is_zip_iter = state_rc.borrow().downcast_ref::<ZipIter>().is_some();
+                if is_zip_iter {
+                    return match self.step_zip_iter(&state_rc)? {
                         Some(v) => Ok(v),
                         None => {
                             if let Some(d) = default {
@@ -5126,5 +5324,33 @@ fn str_merge_kwargs(
             "TypeError",
             format!("str.{method}() takes no keyword arguments"),
         )),
+    }
+}
+
+/// CPython wording for `zip(strict=True)` when argument `short_idx+1` (1-based)
+/// ran out before the others.
+fn zip_shorter_message(short_idx: usize, _count: usize) -> String {
+    if short_idx == 1 {
+        format!("zip() argument {} is shorter than argument 1", short_idx + 1)
+    } else {
+        format!(
+            "zip() argument {} is shorter than arguments 1-{}",
+            short_idx + 1,
+            short_idx
+        )
+    }
+}
+
+/// CPython wording for `zip(strict=True)` when argument `long_idx+1` (1-based)
+/// still has a value after argument 1 (index 0) ran out.
+fn zip_longer_message(long_idx: usize, _count: usize) -> String {
+    if long_idx == 1 {
+        format!("zip() argument {} is longer than argument 1", long_idx + 1)
+    } else {
+        format!(
+            "zip() argument {} is longer than arguments 1-{}",
+            long_idx + 1,
+            long_idx
+        )
     }
 }
