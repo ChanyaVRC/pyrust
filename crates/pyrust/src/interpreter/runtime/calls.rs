@@ -1448,11 +1448,12 @@ impl Interpreter {
 
     /// One step of the lazy `filter(func, iterable)` iterator.
     ///
-    /// On the first call the source is materialised.  Each subsequent call
-    /// scans forward from `pos` for the next item that passes the predicate.
+    /// Advances the stored source iterator by one element via `call_next` and
+    /// tests the result with `func` (or truthiness when `func` is `None`).
+    /// Repeats until a passing item is found or the source is exhausted.
     ///
     /// `Ok(Some(v))` → next passing value; `Ok(None)` → exhausted;
-    /// `Err(e)` → error from materialisation or `func`.
+    /// `Err(e)` → error from `func` or the iterator.
     pub(crate) fn step_filter_iter(
         &mut self,
         state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
