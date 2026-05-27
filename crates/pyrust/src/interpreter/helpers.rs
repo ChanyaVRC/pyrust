@@ -1036,6 +1036,56 @@ pub(crate) fn class_chain_contains_name(class: &Rc<RefCell<PyClass>>, name: &str
     extra_bases.iter().any(|b| class_chain_contains_name(b, name))
 }
 
+/// Return the errno-specific OSError subclass `Rc` for a given errno value,
+/// mirroring CPython 3.12's `_Py_errnomap` table in `Objects/exceptions.c`.
+/// Returns `None` when the errno has no mapped subclass (plain `OSError` is
+/// used in that case).  Only called when the constructor class is exactly
+/// `OSError`; subclasses are never remapped.
+fn oserror_subclass_for_errno(errno: i64) -> Option<Rc<RefCell<PyClass>>> {
+    // CPython's _Py_errnomap (Linux errno values):
+    //   1  EPERM        → PermissionError
+    //   2  ENOENT       → FileNotFoundError
+    //   3  ESRCH        → ProcessLookupError
+    //   4  EINTR        → InterruptedError
+    //  10  ECHILD       → ChildProcessError
+    //  11  EAGAIN       → BlockingIOError
+    //  13  EACCES       → PermissionError
+    //  17  EEXIST       → FileExistsError
+    //  20  ENOTDIR      → NotADirectoryError
+    //  21  EISDIR       → IsADirectoryError
+    //  32  EPIPE        → BrokenPipeError
+    // 103  ECONNABORTED → ConnectionAbortedError
+    // 104  ECONNRESET   → ConnectionResetError
+    // 108  ESHUTDOWN    → BrokenPipeError
+    // 110  ETIMEDOUT    → TimeoutError
+    // 111  ECONNREFUSED → ConnectionRefusedError
+    // 114  EALREADY     → BlockingIOError
+    // 115  EINPROGRESS  → BlockingIOError
+    let subclass_name = match errno {
+        1 | 13 => "PermissionError",
+        2 => "FileNotFoundError",
+        3 => "ProcessLookupError",
+        4 => "InterruptedError",
+        10 => "ChildProcessError",
+        11 | 114 | 115 => "BlockingIOError",
+        17 => "FileExistsError",
+        20 => "NotADirectoryError",
+        21 => "IsADirectoryError",
+        32 | 108 => "BrokenPipeError",
+        103 => "ConnectionAbortedError",
+        104 => "ConnectionResetError",
+        110 => "TimeoutError",
+        111 => "ConnectionRefusedError",
+        _ => return None,
+    };
+    EXC_CLASS_CACHE.with(|cache| {
+        cache
+            .iter()
+            .find(|(name, _)| *name == subclass_name)
+            .map(|(_, cls)| Rc::clone(cls))
+    })
+}
+
 pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value>) -> Value {
     let mut attrs = IndexMap::new();
     // CPython 3.12: StopIteration.__init__ sets self.value = args[0] if args else None.
@@ -1130,6 +1180,21 @@ pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value
             "filename2".to_string(),
             args.get(4).cloned().unwrap_or_else(Value::none),
         );
+        // CPython 3.12 OSError.__new__ remaps to an errno-specific subclass when
+        // called as exactly OSError(errno, strerror[, ...]) where there are at
+        // least 2 args and the first is an integer.  Single-arg calls (e.g.
+        // OSError(2)) are NOT remapped.  Subclasses (FileNotFoundError, …) are
+        // also not remapped — only the plain OSError call triggers the lookup.
+        if args.len() >= 2 && class.borrow().name == "OSError" {
+            if let Some(errno_int) = args[0].as_int() {
+                if let Some(subclass) = oserror_subclass_for_errno(errno_int) {
+                    return Value::py_instance(Rc::new(RefCell::new(PyInstance {
+                        class: subclass,
+                        attrs,
+                    })));
+                }
+            }
+        }
     }
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
