@@ -3801,6 +3801,16 @@ fn str_printf_to_int(v: &Value, conv: char) -> Result<i64> {
     match v.kind() {
         ValueKind::Int(n) => Ok(n),
         ValueKind::Bool(b) => Ok(b as i64),
+        ValueKind::Float(_) if matches!(conv, 'o' | 'x' | 'X') => {
+            // CPython 3.12: %o/%x/%X reject float with "an integer is required".
+            // %d/%i/%u accept float (truncating toward zero) for historical reasons.
+            Err(PyError::named(
+                "TypeError",
+                format!(
+                    "%{conv} format: an integer is required, not float"
+                ),
+            ))
+        }
         ValueKind::Float(f) => Ok(f as i64),
         ValueKind::BigInt(b) => b.to_i64().ok_or_else(|| {
             PyError::named(

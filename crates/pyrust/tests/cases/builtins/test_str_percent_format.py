@@ -96,6 +96,22 @@ try:
 except TypeError as e:
     print("TypeError:", e)
 
+# Error: float for %o/%x/%X (CPython 3.12 rejects, unlike %d which truncates)
+try:
+    "%o" % 1.5
+except TypeError as e:
+    print("TypeError:", e)
+
+try:
+    "%x" % 1.5
+except TypeError as e:
+    print("TypeError:", e)
+
+try:
+    "%X" % 1.5
+except TypeError as e:
+    print("TypeError:", e)
+
 # Error: wrong type for %f/%g (CPython says "must be real number")
 try:
     "%f" % "hello"
