@@ -21,7 +21,7 @@ use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
     CallableIter, EnumerateIter, FilterIter, MapIter, NativeIterFrame, ZipIter, apply_format_spec, ascii_repr_interp, bigint_divmod_floor,
-    check_float_for_int_conversion,
+    check_float_for_int_conversion, float_to_bigint,
     class_chain_contains_name, class_is_subclass_of,
     compare_values, compare_values_with_op, coerce_numeric, dir_names,
     instance_builtin_data,
@@ -2780,7 +2780,12 @@ pyrust_module! {
                 ValueKind::Int(v) => Ok(Value::int(v)),
                 ValueKind::Float(v) => {
                     check_float_for_int_conversion(v)?;
-                    Ok(Value::int(v as i64))
+                    let t = v.trunc();
+                    if t > i64::MAX as f64 || t < i64::MIN as f64 {
+                        Ok(float_to_bigint(t))
+                    } else {
+                        Ok(Value::int(t as i64))
+                    }
                 }
                 ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
                 ValueKind::Str(s) => s.trim().parse::<i64>().map(Value::int).map_err(|_| {
@@ -2815,9 +2820,14 @@ pyrust_module! {
                             ValueKind::Int(v) => Some(Ok(Value::int(v))),
                             ValueKind::BigInt(_) => Some(Ok(backing.clone())),
                             ValueKind::Bool(b) => Some(Ok(Value::int(if b { 1 } else { 0 }))),
-                            ValueKind::Float(v) => {
-                                Some(check_float_for_int_conversion(v).map(|()| Value::int(v as i64)))
-                            }
+                            ValueKind::Float(v) => Some(check_float_for_int_conversion(v).and_then(|()| {
+                                let t = v.trunc();
+                                if t > i64::MAX as f64 || t < i64::MIN as f64 {
+                                    Ok(float_to_bigint(t))
+                                } else {
+                                    Ok(Value::int(t as i64))
+                                }
+                            })),
                             _ => None,
                         };
                         if let Some(v) = result {

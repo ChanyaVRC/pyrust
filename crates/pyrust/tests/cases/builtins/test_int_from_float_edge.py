@@ -71,3 +71,16 @@ try:
     math.trunc(float('nan'))
 except ValueError as e:
     print(f"ValueError: {e}")
+
+# Large finite floats beyond i64 range must promote to BigInt, not saturate.
+print(int(1e20))
+print(int(-1e20))
+print(math.floor(1e20))
+print(math.ceil(-1e20))
+print(math.trunc(1e20))
+
+# Float subclass must also promote to BigInt for out-of-range values.
+class MyFloat(float):
+    pass
+print(int(MyFloat(1e20)))
+print(int(MyFloat(-1e20)))
