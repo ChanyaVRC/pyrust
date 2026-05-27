@@ -1186,12 +1186,31 @@ pyrust_module! {
                     IterKind::PyInstance(inst_rc) => {
                         let class = Rc::clone(&inst_rc.borrow().class);
                         if let Some(method_val) = lookup_class_attr(&class, "__iter__") {
-                            invoke_class_method(
+                            let iter_obj = invoke_class_method(
                                 _interp,
                                 method_val,
                                 Value::py_instance(inst_rc),
                                 &[],
-                            )
+                            )?;
+                            let is_valid_iter = match iter_obj.kind() {
+                                ValueKind::Generator(_) => true,
+                                ValueKind::PyInstance(it) => {
+                                    let it_class = Rc::clone(&it.borrow().class);
+                                    lookup_class_attr(&it_class, "__next__").is_some()
+                                }
+                                ValueKind::BuiltinObject { ops, .. } => ops.is_iterable(),
+                                _ => false,
+                            };
+                            if !is_valid_iter {
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    format!(
+                                        "iter() returned non-iterator of type '{}'",
+                                        value_type_name_str(&iter_obj),
+                                    ),
+                                ));
+                            }
+                            Ok(iter_obj)
                         } else if lookup_class_attr(&class, "__getitem__").is_some() {
                             _interp.make_getitem_iter(inst_rc)
                         } else {

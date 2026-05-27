@@ -3152,6 +3152,24 @@ impl Interpreter {
                                         Value::py_instance(inst_rc),
                                         &[],
                                     ));
+                                    let is_valid_iter = match iter_obj.kind() {
+                                        ValueKind::Generator(_) => true,
+                                        ValueKind::PyInstance(it) => {
+                                            let it_class = Rc::clone(&it.borrow().class);
+                                            lookup_class_attr(&it_class, "__next__").is_some()
+                                        }
+                                        ValueKind::BuiltinObject { ops, .. } => ops.is_iterable(),
+                                        _ => false,
+                                    };
+                                    if !is_valid_iter {
+                                        vm_try!(Err(PyError::named(
+                                            "TypeError",
+                                            format!(
+                                                "iter() returned non-iterator of type '{}'",
+                                                value_type_name_str(&iter_obj),
+                                            ),
+                                        )));
+                                    }
                                     IterState::UserDefined(iter_obj)
                                 } else if let Some(backing) = instance_builtin_data(&inst_rc) {
                                     // list/dict/set subclass with no user-defined __iter__:
@@ -3365,7 +3383,10 @@ impl Interpreter {
                                 None => {
                                     vm_try!(Err(PyError::named(
                                         "TypeError",
-                                        "iterator has no __next__ method".to_string(),
+                                        format!(
+                                            "iter() returned non-iterator of type '{}'",
+                                            value_type_name_str(&iter_val),
+                                        ),
                                     )));
                                 }
                             }
