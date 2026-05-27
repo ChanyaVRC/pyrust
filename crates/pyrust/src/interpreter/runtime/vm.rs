@@ -3371,6 +3371,34 @@ impl Interpreter {
                                                 Err(e) => Err(e),
                                             })
                                         } else {
+                                        let is_enumerate_iter = state_rc
+                                            .borrow()
+                                            .downcast_ref::<EnumerateIter>()
+                                            .is_some();
+                                        if is_enumerate_iter {
+                                            Some(match self.step_enumerate_iter(&state_rc) {
+                                                Ok(Some(v)) => Ok(v),
+                                                Ok(None) => Err(PyError::named(
+                                                    "StopIteration",
+                                                    String::new(),
+                                                )),
+                                                Err(e) => Err(e),
+                                            })
+                                        } else {
+                                        let is_zip_iter = state_rc
+                                            .borrow()
+                                            .downcast_ref::<ZipIter>()
+                                            .is_some();
+                                        if is_zip_iter {
+                                            Some(match self.step_zip_iter(&state_rc) {
+                                                Ok(Some(v)) => Ok(v),
+                                                Ok(None) => Err(PyError::named(
+                                                    "StopIteration",
+                                                    String::new(),
+                                                )),
+                                                Err(e) => Err(e),
+                                            })
+                                        } else {
                                         let mut borrow = state_rc.borrow_mut();
                                         if let Some(native) = borrow.downcast_mut::<NativeIterFrame>() {
                                             // Built-in iterator created by iter().
@@ -3400,6 +3428,8 @@ impl Interpreter {
                                             )))
                                         }
                                         }   // closes else { let mut borrow = ...
+                                        }   // closes is_zip_iter else
+                                        }   // closes is_enumerate_iter else
                                         }   // closes is_filter_iter else
                                         }   // closes is_map_iter else
                                     }

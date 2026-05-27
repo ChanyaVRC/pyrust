@@ -1446,9 +1446,8 @@ impl Interpreter {
         &mut self,
         state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
     ) -> Result<Option<Value>> {
-        // Snapshot func and source iterators; borrow released before any
-        // call_next / call_function_expanded invocation.
-        let (func, iterators): (Value, Vec<Value>) = {
+        // Read func and source count; do NOT clone the sources Vec.
+        let (func, n_sources): (Value, usize) = {
             let borrow = state_rc.borrow();
             let s = borrow
                 .downcast_ref::<MapIter>()
@@ -1456,12 +1455,16 @@ impl Interpreter {
             if s.done {
                 return Ok(None);
             }
-            (s.func.clone(), s.sources.clone())
+            (s.func.clone(), s.sources.len())
         };
-        // Advance each source iterator by one element.  Stop at the first
-        // StopIteration (CPython map stops at the shortest iterable).
-        let mut row: Vec<Value> = Vec::with_capacity(iterators.len());
-        for iter_val in iterators {
+        // Advance each source iterator by one element.  Clone one Value at a
+        // time (cheap Rc bump) rather than snapshotting the whole sources Vec.
+        let mut row: Vec<Value> = Vec::with_capacity(n_sources);
+        for i in 0..n_sources {
+            let iter_val = {
+                let borrow = state_rc.borrow();
+                borrow.downcast_ref::<MapIter>().unwrap().sources[i].clone()
+            };
             match self.call_next(iter_val, None) {
                 Ok(v) => row.push(v),
                 Err(e) if e.class_name_is("StopIteration") => {
@@ -1581,7 +1584,8 @@ impl Interpreter {
         &mut self,
         state_rc: &Rc<RefCell<Box<dyn std::any::Any>>>,
     ) -> Result<Option<Value>> {
-        let (iterators, strict, count): (Vec<Value>, bool, usize) = {
+        // Read only scalar metadata — do NOT clone the sources Vec.
+        let (n_sources, strict, count) = {
             let borrow = state_rc.borrow();
             let s = borrow.downcast_ref::<ZipIter>().ok_or_else(|| {
                 PyError::Runtime("step_zip_iter on non-ZipIter state".to_string())
@@ -1589,17 +1593,22 @@ impl Interpreter {
             if s.done {
                 return Ok(None);
             }
-            (s.sources.clone(), s.strict, s.count)
+            (s.sources.len(), s.strict, s.count)
         };
-        if iterators.is_empty() {
+        if n_sources == 0 {
             state_rc.borrow_mut().downcast_mut::<ZipIter>().unwrap().done = true;
             return Ok(None);
         }
-        // Advance each iterator one step, collecting results.
-        let mut row: Vec<Value> = Vec::with_capacity(iterators.len());
+        // Advance each iterator one step.  Clone one Value at a time (cheap Rc
+        // bump) so we never allocate a temporary Vec<Value> for the whole row.
+        let mut row: Vec<Value> = Vec::with_capacity(n_sources);
         let mut stopped_at: Option<usize> = None;
-        for (i, iter_val) in iterators.iter().enumerate() {
-            match self.call_next(iter_val.clone(), None) {
+        for i in 0..n_sources {
+            let iter_val = {
+                let borrow = state_rc.borrow();
+                borrow.downcast_ref::<ZipIter>().unwrap().sources[i].clone()
+            };
+            match self.call_next(iter_val, None) {
                 Ok(v) => row.push(v),
                 Err(e) if e.class_name_is("StopIteration") => {
                     stopped_at = Some(i);
@@ -1610,20 +1619,19 @@ impl Interpreter {
         }
         if let Some(short_idx) = stopped_at {
             state_rc.borrow_mut().downcast_mut::<ZipIter>().unwrap().done = true;
-            // In strict mode, verify that all remaining iterators are also exhausted.
-            if strict && iterators.len() > 1 {
-                // Find the first iterator that is *not* yet exhausted (i.e. has a
-                // value where we expected StopIteration).
+            if strict && n_sources > 1 {
                 let check_start = if short_idx == 0 { 1 } else { 0 };
-                for (j, iter_val) in iterators.iter().enumerate().skip(check_start) {
+                for j in check_start..n_sources {
                     if j == short_idx {
                         continue;
                     }
-                    match self.call_next(iter_val.clone(), None) {
+                    let iter_val = {
+                        let borrow = state_rc.borrow();
+                        borrow.downcast_ref::<ZipIter>().unwrap().sources[j].clone()
+                    };
+                    match self.call_next(iter_val, None) {
                         Ok(_) => {
-                            // j+1 still has a value; short_idx+1 ran out first.
                             if short_idx == 0 {
-                                // argument 1 is shorter; argument j+1 is longer.
                                 return Err(PyError::named(
                                     "ValueError",
                                     zip_longer_message(j, count),
@@ -1635,17 +1643,11 @@ impl Interpreter {
                                 ));
                             }
                         }
-                        Err(e) if e.class_name_is("StopIteration") => {
-                            // also exhausted — continue checking
-                        }
+                        Err(e) if e.class_name_is("StopIteration") => {}
                         Err(e) => return Err(e),
                     }
                 }
-                // All iterators exhausted at the same position — check whether
-                // the first iterator to stop was actually short compared to the
-                // ones already advanced.
                 if short_idx > 0 {
-                    // short_idx stopped; indices 0..short_idx each produced a value.
                     return Err(PyError::named(
                         "ValueError",
                         zip_shorter_message(short_idx, count),
@@ -1654,7 +1656,6 @@ impl Interpreter {
             }
             return Ok(None);
         }
-        // All sources produced a value; increment count and return the row.
         state_rc.borrow_mut().downcast_mut::<ZipIter>().unwrap().count += 1;
         Ok(Some(Value::tuple(row)))
     }
