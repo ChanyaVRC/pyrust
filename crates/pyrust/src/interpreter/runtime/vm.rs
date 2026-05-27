@@ -14,9 +14,15 @@ pub(crate) type RegsBuf = smallvec::SmallVec<[Value; VM_REGS_INLINE]>;
 /// Stored type-erased inside `Value::generator()` via `Box<dyn Any>`,
 /// the same slot used for GeneratorFrame.  resume_generator() checks
 /// which concrete type it has by downcasting.
+///
+/// `type_name` carries the Python-level iterator type name (e.g.
+/// "list_iterator", "set_iterator") so that `type()` and error messages
+/// report the right name instead of the generic "generator".  Internal
+/// iterators that have no CPython-specified name use "generator".
 pub(crate) struct NativeIterFrame {
     pub(crate) items: Vec<Value>,
     pub(crate) pos: usize,
+    pub(crate) type_name: &'static str,
 }
 
 /// Lazy iterator over `obj.__getitem__(0)`, `obj.__getitem__(1)`, …

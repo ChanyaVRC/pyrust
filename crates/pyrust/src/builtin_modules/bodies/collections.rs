@@ -133,7 +133,7 @@ pyrust_module! {
         fn __iter__(args) -> Result<Value> {
             let counts = read_counts(args, FN_NAME)?;
             let items: Vec<Value> = counts.keys().cloned().map(key_to_value).collect();
-            Ok(Value::generator(Box::new(NativeIterFrame { items, pos: 0 })))
+            Ok(Value::generator(Box::new(NativeIterFrame { items, pos: 0, type_name: "generator" })))
         }
 
         /// `repr(c)` — most-common-first when all values are integers
@@ -500,6 +500,7 @@ pyrust_module! {
             Ok(Value::generator(Box::new(NativeIterFrame {
                 items: keys,
                 pos: 0,
+                type_name: "generator",
             })))
         }
 
@@ -1187,7 +1188,7 @@ pyrust_module! {
         fn __iter__(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let items = deque_items_snapshot(&inst)?;
-            Ok(Value::generator(Box::new(NativeIterFrame { items, pos: 0 })))
+            Ok(Value::generator(Box::new(NativeIterFrame { items, pos: 0, type_name: "generator" })))
         }
 
         /// `repr(d)` — `deque([1, 2, 3])` or `deque([1, 2, 3], maxlen=5)`.

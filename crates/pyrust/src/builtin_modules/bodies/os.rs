@@ -514,6 +514,7 @@ pyrust_module! {
         Ok(Value::generator(Box::new(NativeIterFrame {
             items: keys,
             pos: 0,
+            type_name: "generator",
         })))
     }
 
