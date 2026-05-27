@@ -287,6 +287,19 @@ thread_local! {
         subclasses: std::cell::RefCell::new(vec![]),
     }));
 
+    /// Per-thread class singleton for the `ellipsis` type.  In CPython,
+    /// `type(...)` returns `<class 'ellipsis'>` and `isinstance(type(...), type)`
+    /// is True.  Mirrors the `TYPE_CLASS` pattern (issue #1412).
+    static ELLIPSIS_TYPE_CLASS: Rc<RefCell<PyClass>> = Rc::new(RefCell::new(PyClass {
+        name: "ellipsis".to_string(),
+        qualname: "ellipsis".to_string(),
+        base: None,
+        extra_bases: vec![],
+        attrs: IndexMap::new(),
+        mutation_version: std::cell::Cell::new(0),
+        subclasses: std::cell::RefCell::new(vec![]),
+    }));
+
     /// O(1) dispatch table for primitive classes (#462 perf): maps the
     /// `Rc<RefCell<PyClass>>` identity (by raw pointer) to the registry's
     /// `BuiltinDispatchFn` for the corresponding constructor.  Populated
@@ -630,6 +643,14 @@ pub(crate) fn object_class_singleton() -> Rc<RefCell<PyClass>> {
 /// mirrors the `object_class_singleton` pattern (issue #1312).
 pub(crate) fn type_class_singleton() -> Rc<RefCell<PyClass>> {
     TYPE_CLASS.with(|c| Rc::clone(c))
+}
+
+/// Returns the singleton `ellipsis` class.  In CPython `type(...)` returns
+/// `<class 'ellipsis'>` and `isinstance(type(...), type)` is `True`.
+/// Using a per-thread singleton matches the `type_class_singleton` pattern
+/// (issue #1412).
+pub(crate) fn ellipsis_type_class_singleton() -> Rc<RefCell<PyClass>> {
+    ELLIPSIS_TYPE_CLASS.with(|c| Rc::clone(c))
 }
 
 /// Look up the per-primitive `PyClass` singleton for one of the 11 migrated

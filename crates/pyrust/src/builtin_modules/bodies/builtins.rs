@@ -28,7 +28,7 @@ use crate::interpreter::{
     is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_hash_bigint, py_hash_float,
     py_hash_int, py_mod_i64, py_round_half_even, py_round_half_even_f64,
     reject_keyword_args_expanded, resolve_zero_arg_super, snapshot_current_locals,
-    sync_module_env_to_globals_dict, type_class_singleton,
+    sync_module_env_to_globals_dict, type_class_singleton, ellipsis_type_class_singleton,
     value_to_float, value_type_name_str,
 };
 use crate::value::{PyClass, PyKey, PyToPrimitive, PyZero, UserFunctionKind, Value, ValueKind, range_len};
@@ -1500,7 +1500,7 @@ pyrust_module! {
                 }
             }
             ValueKind::NotImplemented => Ok(Value::builtin_function("NotImplementedType")),
-            ValueKind::Ellipsis => Ok(Value::builtin_function("ellipsis")),
+            ValueKind::Ellipsis => Ok(Value::py_class(ellipsis_type_class_singleton())),
             ValueKind::BuiltinObject { ops, .. } => {
                 // instance_dict is a live-proxy for obj.__dict__; its Python
                 // type is `dict` (same as CPython's actual __dict__).
@@ -5547,6 +5547,11 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
         if Rc::ptr_eq(expected, &type_class_singleton()) {
             return matches!(obj.kind(), ValueKind::PyClass(_));
         }
+        // Fast path: `ellipsis` class — only `...` / `Ellipsis` is an
+        // instance (issue #1412).
+        if Rc::ptr_eq(expected, &ellipsis_type_class_singleton()) {
+            return matches!(obj.kind(), ValueKind::Ellipsis);
+        }
         // Fast path: if `expected` is one of the 11 primitive class
         // singletons, do a direct `ValueKind` tag check.  Skips the
         // `primitive_class_for_value` thread_local + Rc::clone + the
@@ -5572,7 +5577,6 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
     match (obj.kind(), cls.kind()) {
         (ValueKind::None, ValueKind::BuiltinFunction("NoneType")) => true,
         (ValueKind::NotImplemented, ValueKind::BuiltinFunction("NotImplementedType")) => true,
-        (ValueKind::Ellipsis, ValueKind::BuiltinFunction("ellipsis")) => true,
         (ValueKind::UserFunction(f), ValueKind::BuiltinFunction("staticmethod")) => {
             f.kind == UserFunctionKind::StaticMethod
         }
