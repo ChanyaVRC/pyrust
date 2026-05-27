@@ -158,7 +158,15 @@ impl BuiltinTypeOps for InstanceDictOps {
     fn get_item(&self, state: &BuiltinState, key: &Value) -> Result<Value> {
         let s = borrow_state(state)
             .ok_or_else(|| PyError::Runtime("internal: bad instance_dict state".to_string()))?;
-        let key_str = key_as_str(key)?;
+        // Non-string keys are never present in the instance attrs map (which
+        // stores only string keys).  CPython raises KeyError (not TypeError)
+        // when a non-string key is absent from a dict — match that behaviour.
+        let key_str = match key.kind() {
+            ValueKind::Str(k) => k,
+            _ => {
+                return Err(PyError::key_error(key.clone()));
+            }
+        };
         // Hidden exception C-level slots must not be accessible via subscript.
         if s.is_hidden(key_str) {
             return Err(PyError::named(
@@ -189,13 +197,17 @@ impl BuiltinTypeOps for InstanceDictOps {
     fn delete_item(&self, state: &BuiltinState, key: &Value) -> Result<()> {
         let s = borrow_state(state)
             .ok_or_else(|| PyError::Runtime("internal: bad instance_dict state".to_string()))?;
-        let key_str = key_as_str(key)?;
-        let removed = s.instance.borrow_mut().attrs.shift_remove(key_str);
+        // Non-string keys are never present; CPython raises KeyError (not
+        // TypeError) for missing keys regardless of key type.
+        let key_str = match key.kind() {
+            ValueKind::Str(k) => k.to_string(),
+            _ => {
+                return Err(PyError::key_error(key.clone()));
+            }
+        };
+        let removed = s.instance.borrow_mut().attrs.shift_remove(&key_str);
         if removed.is_none() {
-            return Err(PyError::named(
-                "KeyError",
-                Value::string(key_str.to_string()).repr(),
-            ));
+            return Err(PyError::named("KeyError", Value::string(key_str).repr()));
         }
         s.iter_keys.borrow_mut().take();
         *s.iter_pos.borrow_mut() = 0;
