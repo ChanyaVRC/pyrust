@@ -50,3 +50,20 @@ print("{:.{prec}}".format("hello world", prec=3))   # hel
 # --- regression: named precision still works with g ---
 print("{:.{prec}g}".format(3.14159, prec=3))        # 3.14
 print("{:.{prec}g}".format(3.14159, prec=5))        # 3.1416
+
+# --- prec=0 no type char: CPython uses exponential notation ---
+print("{:.{}}".format(3.14159, 0))                  # 3e+00
+print("{:.{prec}}".format(3.14159, prec=0))         # 3e+00
+print("{:.{}}".format(0.0, 0))                      # 0e+00
+print("{:.{}}".format(0.0, 1))                      # 0e+00
+print("{:.{}}".format(0.0, 2))                      # 0.0
+
+# --- prec=1 no type char: exp >= 0 triggers exponential ---
+print("{:.{}}".format(3.14159, 1))                  # 3e+00
+print("{:.{}}".format(10.0, 1))                     # 1e+01
+print("{:.{}}".format(0.1, 1))                      # 0.1
+
+# --- fixed notation ensures trailing .0 for integer-valued floats ---
+print("{:.{}}".format(10.0, 3))                     # 10.0
+print("{:.{}}".format(100.0, 4))                    # 100.0
+print("{:.{}}".format(1.0, 2))                      # 1.0

@@ -3422,14 +3422,18 @@ fn format_float_value(value: &Value, fs: &FormatSpec, type_char: Option<char>) -
             (format!("{s}%"), "")
         }
         _ => {
-            // No explicit type char.  When precision is given, CPython treats
-            // this identically to 'g' with that precision (e.g. `{:.3}` on a
-            // float gives the same result as `{:.3g}`).  Without precision, use
-            // a shortest-roundtrip-ish repr (at least one digit after the
-            // decimal point).
+            // No explicit type char.  When precision is given, CPython's
+            // no-type-char float format differs from 'g' in two ways:
+            //
+            //  1. Exponential threshold: use `exp >= max(prec - 1, 0)` (one
+            //     step earlier than 'g' which uses `exp >= prec`).
+            //  2. Fixed notation must preserve at least one decimal digit
+            //     (e.g. `10.0` not `10`).
+            //
+            // Without precision, use a shortest-roundtrip-ish repr with at
+            // least one digit after the decimal point.
             let s = if let Some(prec) = fs.precision {
-                let prec = if prec == 0 { 1 } else { prec };
-                format_g(abs_f, prec, false)
+                format_no_type_with_prec(abs_f, prec)
             } else {
                 match value.kind() {
                     ValueKind::Float(_) => {
@@ -3812,6 +3816,57 @@ fn normalise_exp_str(s: String, f: f64, sign: Option<char>) -> String {
         s
     };
     apply_sign_str(s, f, sign)
+}
+
+/// Format a float with the no-type-char rule when a precision is given.
+///
+/// CPython's `{:.N}` (no explicit type) on a float differs from `{:.Ng}` in:
+///
+/// 1. Exponential threshold: switches to `e` notation when `exp >= max(N-1, 0)`
+///    (one step earlier than `g`'s `exp >= N`).
+/// 2. Fixed notation result must have at least one decimal digit (trailing `.0`
+///    appended when the sig-fig trim would leave a bare integer like `10`).
+///
+/// `prec=0` is normalised to `prec=1` for the sig-fig computation but keeps
+/// the `prec=0` threshold (i.e. `exp >= 0` triggers exponential).
+fn format_no_type_with_prec(f: f64, prec: usize) -> String {
+    let sig_prec = if prec == 0 { 1 } else { prec };
+    // Threshold: exp >= max(prec - 1, 0).  For prec=0 and prec=1 this is 0;
+    // for prec >= 2 it is prec - 1.
+    let threshold = if prec <= 1 { 0_i32 } else { (prec as i32) - 1 };
+
+    if f == 0.0 {
+        // Zero with prec <= 1 uses exponential: '0e+00'.
+        // Zero with prec >= 2 uses fixed: '0.0'.
+        return if threshold == 0 {
+            "0e+00".to_string()
+        } else {
+            "0.0".to_string()
+        };
+    }
+
+    let exp = f.abs().log10().floor() as i32;
+    if exp < -(4_i32) || exp >= threshold {
+        // Exponential notation with sig_prec significant figures.
+        let sig_digits = sig_prec.saturating_sub(1);
+        let s = format!("{:.sig_digits$e}", f);
+        trim_g_trailing_zeros(normalise_exp_str(s, f, None))
+    } else {
+        // Fixed notation.  Compute decimal places for sig_prec sig figs.
+        let decimal_digits = if exp >= 0 {
+            sig_prec.saturating_sub(exp as usize + 1)
+        } else {
+            sig_prec + (-exp - 1) as usize
+        };
+        let s = format!("{:.decimal_digits$}", f);
+        let s = trim_g_trailing_zeros(s);
+        // Ensure at least one digit after the decimal point.
+        if s.contains('.') || s.contains('e') {
+            s
+        } else {
+            format!("{s}.0")
+        }
+    }
 }
 
 fn format_g(f: f64, prec: usize, upper: bool) -> String {
