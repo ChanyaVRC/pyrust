@@ -45,3 +45,19 @@ try:
     {"a": 1} | [1, 2]
 except TypeError as e:
     print(e)  # unsupported operand type(s) for |: 'dict' and 'list'
+
+# dict | dict subclass: right operand is a dict subclass, result is plain dict
+class SubDict(dict):
+    pass
+sd = SubDict({"b": 2})
+result = {"a": 1} | sd
+print(result)                    # {'a': 1, 'b': 2}
+print(type(result).__name__)     # dict
+
+# dict subclass |= dict: in-place update preserves identity and type
+sd2 = SubDict({"a": 1})
+sd2_alias = sd2
+sd2 |= {"b": 2}
+print(dict(sd2))                 # {'a': 1, 'b': 2}
+print(sd2 is sd2_alias)          # True
+print(type(sd2).__name__)        # SubDict

@@ -2118,20 +2118,17 @@ impl Interpreter {
                     return r;
                 }
                 // PEP 584: dict | dict → new merged dict (right wins on key collision).
-                // Only plain dicts reach here; PyInstance subclasses go through the dunder
-                // path above.
-                if matches!(left.kind(), ValueKind::Dict(_)) {
+                // Covers plain `dict` and PyInstance dict subclasses; PyInstance subclasses
+                // with a custom `__or__` were already handled by the dunder path above.
+                if let Some(lhs_entries) = dict_entries_from_value(&left) {
                     let right_type = value_type_name_str(&right);
-                    let rhs_entries = right.dict_with(|d| {
-                        d.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>()
-                    });
-                    let Some(rhs_entries) = rhs_entries else {
+                    let Some(rhs_entries) = dict_entries_from_value(&right) else {
                         return Err(PyError::named(
                             "TypeError",
                             format!("unsupported operand type(s) for |: 'dict' and '{right_type}'"),
                         ));
                     };
-                    let mut merged = left.dict_with(|d| d.clone()).unwrap();
+                    let mut merged: IndexMap<PyKey, Value> = lhs_entries.into_iter().collect();
                     for (k, v) in rhs_entries {
                         merged.insert(k, v);
                     }
@@ -2581,6 +2578,11 @@ impl Interpreter {
         // PEP 584: dict |= other → in-place update (same semantics as dict.update()).
         // Mutate the dict through its Rc and return the same Value so aliases are
         // preserved (`d2 = d; d |= x` keeps `d is d2`).
+        //
+        // Plain `dict` has no `__ior__` slot, so skip the dunder path and go
+        // directly to `dict.update()`.  For PyInstance dict subclasses we first
+        // let the dunder path run below so that a user-defined `__ior__` takes
+        // precedence; the subclass fallback is handled after dunder resolution.
         if op == BinaryOp::BitOr && matches!(left.kind(), ValueKind::Dict(_)) {
             pyrust_builtins::dict::call("update", &left, vec![right])?;
             return Ok(Some(left));
@@ -2601,12 +2603,26 @@ impl Interpreter {
             BinaryOp::RShift => "__irshift__",
             _ => return Ok(None),
         };
-        let result = self.try_call_binary_method(&left, dunder, right)?;
-        if let Some(ref v) = result
-            && is_not_implemented(v) {
-                return Ok(None);
+        let result = self.try_call_binary_method(&left, dunder, right.clone())?;
+        if let Some(ref v) = result {
+            if !is_not_implemented(v) {
+                return Ok(result);
             }
-        Ok(result)
+        }
+        // PEP 584 fallback: PyInstance dict subclass |= other when no `__ior__`
+        // was found.  Call update() on the backing dict (so dict_with_mut works)
+        // and return `left` to preserve object identity.
+        if op == BinaryOp::BitOr {
+            if let Some(inst_rc) = left.as_py_instance_rc() {
+                if let Some(backing) = instance_builtin_data(inst_rc) {
+                    if matches!(backing.kind(), ValueKind::Dict(_)) {
+                        pyrust_builtins::dict::call("update", &backing, vec![right])?;
+                        return Ok(Some(left));
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 
     fn matmul(&mut self, left: Value, right: Value) -> Result<Value> {
@@ -3394,6 +3410,24 @@ enum SetOp {
     Sub, // difference
     Xor, // symmetric difference
 }
+
+/// Extract key-value pairs from a plain `dict` or a `PyInstance` dict
+/// subclass backed by a dict.  Returns `None` for any other type.
+/// Used by the PEP 584 `dict | dict` merge path in `eval_binary`.
+fn dict_entries_from_value(v: &Value) -> Option<Vec<(PyKey, Value)>> {
+    if let Some(entries) = v.dict_with(|d| {
+        d.iter().map(|(k, val)| (k.clone(), val.clone())).collect::<Vec<_>>()
+    }) {
+        return Some(entries);
+    }
+    if let Some(inst_rc) = v.as_py_instance_rc() {
+        if let Some(backing) = instance_builtin_data(inst_rc) {
+            return dict_entries_from_value(&backing);
+        }
+    }
+    None
+}
+
 
 /// Extract a set's items and frozen flag from a value that is a `set`,
 /// `frozenset`, or a `PyInstance` subclass backed by either.  Returns
