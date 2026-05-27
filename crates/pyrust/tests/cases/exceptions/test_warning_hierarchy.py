@@ -51,3 +51,35 @@ try:
     raise Warning("base warning")
 except Warning as e:
     print("caught base Warning:", e)
+
+# __name__ and __module__ attributes
+print(Warning.__name__)
+print(Warning.__module__)
+print(DeprecationWarning.__name__)
+
+# BaseException subclass check
+print(issubclass(Warning, BaseException))
+print(issubclass(UserWarning, BaseException))
+
+# User-defined subclass of a warning class
+class MyWarning(UserWarning):
+    pass
+
+print(issubclass(MyWarning, UserWarning))
+print(issubclass(MyWarning, Warning))
+print(issubclass(MyWarning, Exception))
+
+try:
+    raise MyWarning("custom")
+except Warning as e:
+    print("caught user subclass:", type(e).__name__, str(e))
+
+# Multi-type except with Warning
+try:
+    raise RuntimeWarning("multi")
+except (TypeError, Warning) as e:
+    print("caught in multi-except:", type(e).__name__)
+
+# args attribute
+w = UserWarning("msg", 42)
+print(w.args)

@@ -22,7 +22,7 @@ use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, P
 use crate::interpreter::{
     CallableIter, FilterIter, MapIter, NativeIterFrame, apply_format_spec, ascii_repr_interp, bigint_divmod_floor,
     class_chain_contains_name, class_is_subclass_of,
-    compare_values, compare_values_with_op, dir_names,
+    compare_values, compare_values_with_op, coerce_numeric, dir_names,
     instance_builtin_data,
     int_pow_promoting, invoke_class_method,
     is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_hash_bigint, py_hash_float,
@@ -1102,19 +1102,18 @@ pyrust_module! {
             ));
         }
         let func = args[0].value.clone();
-        // Pre-materialise any Generator/PyInstance sources so that
-        // iter_values_via_registry can reach them inside MapIter.
+        // Convert each iterable argument to an iterator object without
+        // consuming any elements.  Elements are pulled lazily by
+        // step_map_iter via call_next.
         let sources: Result<Vec<Value>> = args[1..]
             .iter()
-            .map(|a| materialize_user_iter(_interp, a.value.clone()))
+            .map(|a| make_iterator(_interp, a.value.clone()))
             .collect();
         let sources = sources?;
         Ok(Value::generator(Box::new(MapIter {
             func,
             sources,
-            columns: None,
-            len: 0,
-            pos: 0,
+            done: false,
         })))
     }
 
@@ -1126,15 +1125,14 @@ pyrust_module! {
         #[positional_only] func: PyValue,
         #[positional_only] iterable: PyValue,
     ) -> Result<Value> {
-        // Pre-materialise Generator/PyInstance so iter_values_via_registry
-        // can reach items from FilterIter without an interpreter handle.
-        let source = materialize_user_iter(_interp, iterable.0)?;
+        // Convert the iterable to an iterator without consuming any elements.
+        // Elements are pulled lazily by step_filter_iter via call_next.
+        let source = make_iterator(_interp, iterable.0)?;
         let func_opt = if func.0.is_none() { None } else { Some(func.0) };
         Ok(Value::generator(Box::new(FilterIter {
             func: func_opt,
             source,
-            items: None,
-            pos: 0,
+            done: false,
         })))
     }
 
@@ -4149,7 +4147,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Add, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Add, b)
     }
 
     /// Issue #1256: `int.__sub__(self, value)`
@@ -4163,7 +4161,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Sub, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Sub, b)
     }
 
     /// Issue #1256: `int.__mul__(self, value)`
@@ -4179,7 +4177,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Mul, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Mul, b)
     }
 
     /// Issue #1256: `int.__truediv__(self, value)`
@@ -4193,7 +4191,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Div, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Div, b)
     }
 
     /// Issue #1256: `int.__floordiv__(self, value)`
@@ -4207,7 +4205,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::FloorDiv, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::FloorDiv, b)
     }
 
     /// Issue #1256: `int.__mod__(self, value)`
@@ -4221,7 +4219,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Mod, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Mod, b)
     }
 
     /// Issue #1256: `int.__pow__(self, value)`
@@ -4235,7 +4233,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Pow, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Pow, b)
     }
 
     /// Issue #1256: `int.__and__(self, value)`
@@ -4249,7 +4247,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::BitAnd, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::BitAnd, b)
     }
 
     /// Issue #1256: `int.__or__(self, value)`
@@ -4263,7 +4261,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::BitOr, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::BitOr, b)
     }
 
     /// Issue #1256: `int.__xor__(self, value)`
@@ -4277,7 +4275,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::BitXor, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::BitXor, b)
     }
 
     /// Issue #1256: `int.__lshift__(self, value)`
@@ -4291,7 +4289,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::LShift, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::LShift, b)
     }
 
     /// Issue #1256: `int.__rshift__(self, value)`
@@ -4305,7 +4303,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::RShift, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::RShift, b)
     }
 
     /// Issue #1256: `int.__lt__(self, value)`
@@ -4319,7 +4317,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Lt, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Lt, b)
     }
 
     /// Issue #1256: `int.__le__(self, value)`
@@ -4333,7 +4331,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Le, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Le, b)
     }
 
     /// Issue #1256: `int.__gt__(self, value)`
@@ -4347,7 +4345,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Gt, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Gt, b)
     }
 
     /// Issue #1256: `int.__ge__(self, value)`
@@ -4361,7 +4359,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Ge, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Ge, b)
     }
 
     /// Issue #1256: `int.__eq__(self, value)`
@@ -4378,7 +4376,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Eq, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Eq, b)
     }
 
     /// Issue #1256: `int.__ne__(self, value)`
@@ -4393,7 +4391,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Ne, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Ne, b)
     }
 
     /// Issue #1256: `str.__len__(self)` — exposes `str.__len__` as a class-level
@@ -4407,6 +4405,7 @@ pyrust_module! {
             PyError::named("TypeError",
                 "descriptor '__len__' of 'str' needs an argument".to_string())
         })?;
+        let self_val = coerce_numeric(self_val);
         match self_val.kind() {
             ValueKind::Str(s) => Ok(Value::int(s.chars().count() as i64)),
             _ => Err(PyError::named("TypeError",
@@ -4423,7 +4422,7 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__add__' of 'str' needs an argument".to_string())),
         };
-        _interp.eval_binary(a, BinaryOp::Add, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Add, b)
     }
 
     /// Issue #1256: `str.__mul__(self, value)`
@@ -4434,7 +4433,7 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__mul__' of 'str' needs an argument".to_string())),
         };
-        _interp.eval_binary(a, BinaryOp::Mul, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Mul, b)
     }
 
     /// Issue #1256: `str.__lt__(self, value)`
@@ -4448,7 +4447,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Str(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Lt, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Lt, b)
     }
 
     /// Issue #1256: `str.__le__(self, value)`
@@ -4462,7 +4461,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Str(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Le, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Le, b)
     }
 
     /// Issue #1256: `str.__gt__(self, value)`
@@ -4476,7 +4475,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Str(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Gt, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Gt, b)
     }
 
     /// Issue #1256: `str.__ge__(self, value)`
@@ -4490,7 +4489,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Str(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Ge, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Ge, b)
     }
 
     /// Issue #1256: `str.__eq__(self, value)`
@@ -4506,7 +4505,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Str(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Eq, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Eq, b)
     }
 
     /// Issue #1256: `str.__ne__(self, value)`
@@ -4521,7 +4520,7 @@ pyrust_module! {
         if !matches!(b.kind(), ValueKind::Str(_)) {
             return Ok(Value::not_implemented());
         }
-        _interp.eval_binary(a, BinaryOp::Ne, b)
+        _interp.eval_binary(coerce_numeric(a), BinaryOp::Ne, b)
     }
 
     /// Issue #1256: `list.__len__(self)` — exposes `list.__len__` as a
@@ -4534,6 +4533,7 @@ pyrust_module! {
             PyError::named("TypeError",
                 "descriptor '__len__' of 'list' needs an argument".to_string())
         })?;
+        let self_val = coerce_numeric(self_val);
         match self_val.kind() {
             ValueKind::List(items) => Ok(Value::int(items.len() as i64)),
             _ => Err(PyError::named("TypeError",
@@ -4549,6 +4549,7 @@ pyrust_module! {
             PyError::named("TypeError",
                 "descriptor '__len__' of 'tuple' needs an argument".to_string())
         })?;
+        let self_val = coerce_numeric(self_val);
         match self_val.kind() {
             ValueKind::Tuple(items) => Ok(Value::int(items.len() as i64)),
             _ => Err(PyError::named("TypeError",
@@ -4564,6 +4565,7 @@ pyrust_module! {
             PyError::named("TypeError",
                 "descriptor '__len__' of 'dict' needs an argument".to_string())
         })?;
+        let self_val = coerce_numeric(self_val);
         match self_val.kind() {
             ValueKind::Dict(items) => Ok(Value::int(items.len() as i64)),
             _ => Err(PyError::named("TypeError",
@@ -4579,6 +4581,7 @@ pyrust_module! {
             PyError::named("TypeError",
                 "descriptor '__len__' of 'set' needs an argument".to_string())
         })?;
+        let self_val = coerce_numeric(self_val);
         match self_val.kind() {
             ValueKind::Set(items) => Ok(Value::int(items.len() as i64)),
             _ => Err(PyError::named("TypeError",
@@ -4594,6 +4597,7 @@ pyrust_module! {
             PyError::named("TypeError",
                 "descriptor '__len__' of 'bytes' needs an argument".to_string())
         })?;
+        let self_val = coerce_numeric(self_val);
         match self_val.kind() {
             ValueKind::Bytes(b) => Ok(Value::int(b.len() as i64)),
             _ => Err(PyError::named("TypeError",
@@ -5075,6 +5079,83 @@ pub(super) fn materialize_user_iter(
     }
 }
 
+/// Convert an arbitrary Python iterable value into an iterator object without
+/// consuming any elements.
+///
+/// Mirrors the single-argument `iter()` builtin logic:
+/// - `Generator` values (already-created iterators: map, filter, enumerate,
+///   generator objects, etc.) are returned as-is.
+/// - `PyInstance` values with `__iter__` have it called; the resulting iterator
+///   object is returned.  `PyInstance` values with only `__getitem__` are
+///   wrapped in a `GetItemIter`.
+/// - All other values (lists, tuples, ranges, dict views, …) are wrapped in a
+///   `NativeIterFrame` so they can be advanced one element at a time without
+///   materialising the entire sequence upfront.
+///
+/// Used by `map()` and `filter()` to avoid eagerly exhausting generator sources
+/// at construction time (issue #1388).
+pub(super) fn make_iterator(interp: &mut crate::Interpreter, v: Value) -> Result<Value> {
+    enum IterKind {
+        Generator,
+        PyInstance(Rc<RefCell<crate::value::PyInstance>>),
+        Other,
+    }
+    let kind = match v.kind() {
+        ValueKind::Generator(_) => IterKind::Generator,
+        ValueKind::PyInstance(inst) => IterKind::PyInstance(Rc::clone(inst)),
+        _ => IterKind::Other,
+    };
+    match kind {
+        IterKind::Generator => Ok(v),
+        IterKind::PyInstance(inst_rc) => {
+            let class = Rc::clone(&inst_rc.borrow().class);
+            if let Some(method_val) = lookup_class_attr(&class, "__iter__") {
+                let iter_obj =
+                    invoke_class_method(interp, method_val, Value::py_instance(inst_rc), &[])?;
+                let is_valid_iter = match iter_obj.kind() {
+                    ValueKind::Generator(_) => true,
+                    ValueKind::PyInstance(it) => {
+                        let it_class = Rc::clone(&it.borrow().class);
+                        lookup_class_attr(&it_class, "__next__").is_some()
+                    }
+                    ValueKind::BuiltinObject { ops, .. } => ops.is_iterable(),
+                    _ => false,
+                };
+                if !is_valid_iter {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "iter() returned non-iterator of type '{}'",
+                            value_type_name_str(&iter_obj),
+                        ),
+                    ));
+                }
+                Ok(iter_obj)
+            } else if lookup_class_attr(&class, "__getitem__").is_some() {
+                interp.make_getitem_iter(inst_rc)
+            } else {
+                Err(PyError::named(
+                    "TypeError",
+                    format!("'{}' object is not iterable", class.borrow().name),
+                ))
+            }
+        }
+        IterKind::Other => {
+            let iter_type_name = builtin_iter_type_name(&v);
+            let items = iter_values(v.clone()).map_err(|_| {
+                PyError::named(
+                    "TypeError",
+                    format!("'{}' object is not iterable", value_type_name_str(&v)),
+                )
+            })?;
+            Ok(Value::generator(Box::new(NativeIterFrame {
+                items,
+                pos: 0,
+                type_name: iter_type_name,
+            })))
+        }
+    }
+}
 
 // `int_hash` and `bigint_hash` were previously defined here.  They are now
 // shared helpers (`py_hash_int` / `py_hash_bigint`) in
