@@ -234,6 +234,7 @@ thread_local! {
             "__ne__",
             "__hash__",
             "__init__",
+            "__new__",
             "__lt__",
             "__le__",
             "__gt__",
@@ -443,6 +444,21 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
         cls.borrow_mut()
             .attrs
             .insert("__init__".to_string(), Value::builtin_function(sentinel));
+    }
+    // Issue #1143: register `tuple.__new__` and `frozenset.__new__` so that
+    // `super().__new__(cls, it)` from a tuple/frozenset subclass resolves via
+    // MRO lookup to the primitive `__new__` which creates a `PyInstance` with
+    // the proper backing store (rather than falling through to `object.__new__`
+    // which would create a bare instance without backing data).
+    for (cls, type_name) in [
+        (&frozenset_class, "frozenset"),
+        (&tuple_class, "tuple"),
+    ] {
+        let sentinel: &'static str =
+            Box::leak(format!("{type_name}.__new__").into_boxed_str());
+        cls.borrow_mut()
+            .attrs
+            .insert("__new__".to_string(), Value::builtin_function(sentinel));
     }
     // Issue #1134: register `dict.__getitem__` so that `super().__getitem__(key)`
     // from a dict subclass resolves via MRO lookup to a BuiltinFunction sentinel

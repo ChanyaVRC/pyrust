@@ -4074,6 +4074,158 @@ pyrust_module! {
         Ok(Value::none())
     }
 
+    /// Issue #1143: `object.__new__(cls)` — the default allocator that creates
+    /// a bare `PyInstance` of `cls`.  Registered so that `super().__new__(cls)`
+    /// in user-defined `__new__` methods can resolve it via the MRO walk and
+    /// `call_class_expanded` can distinguish it from user-defined `__new__`.
+    ///
+    /// CPython signature: `object.__new__(cls, /)`
+    #[py_name = "object.__new__"]
+    fn object_new_dunder(args) -> Result<Value> {
+        let cls_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "object.__new__() takes exactly one argument (the type to instantiate)"
+                    .to_string(),
+            )
+        })?;
+        let class_rc = match cls_val.kind() {
+            ValueKind::PyClass(c) => Rc::clone(c),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "object.__new__(X): X is not a type object ({})",
+                        value_type_name_str(&cls_val)
+                    ),
+                ));
+            }
+        };
+        Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
+            crate::value::PyInstance {
+                class: class_rc,
+                attrs: indexmap::IndexMap::new(),
+            },
+        ))))
+    }
+
+    /// Issue #1143: `tuple.__new__(cls, iterable=())` — allocator for tuple
+    /// subclasses.  Creates a `PyInstance` of `cls` with the tuple backing
+    /// store (`__builtin_data__`) populated from `iterable`.  Called when
+    /// a `tuple` subclass's `__new__` calls `super().__new__(cls, it)`.
+    ///
+    /// CPython signature: `tuple.__new__(cls, iterable=(), /)`
+    #[py_name = "tuple.__new__"]
+    fn tuple_new_dunder(args) -> Result<Value> {
+        let (cls_val, rest) = match args {
+            [] => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "tuple.__new__() takes at least 1 argument (0 given)".to_string(),
+                ));
+            }
+            [first, rest @ ..] => (first.value.clone(), rest),
+        };
+        let class_rc = match cls_val.kind() {
+            ValueKind::PyClass(c) => Rc::clone(c),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "tuple.__new__(X): X is not a type object ({})",
+                        value_type_name_str(&cls_val)
+                    ),
+                ));
+            }
+        };
+        let backing = match rest {
+            [] => Value::tuple(vec![]),
+            [single] => Value::tuple(_interp.collect_iterable(single.value.clone())?),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "tuple expected at most 1 argument, got {}",
+                        rest.len()
+                    ),
+                ));
+            }
+        };
+        let mut attrs = indexmap::IndexMap::new();
+        attrs.insert(
+            crate::interpreter::BUILTIN_DATA_ATTR.to_string(),
+            backing,
+        );
+        Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
+            crate::value::PyInstance {
+                class: class_rc,
+                attrs,
+            },
+        ))))
+    }
+
+    /// Issue #1143: `frozenset.__new__(cls, iterable=())` — allocator for
+    /// frozenset subclasses.  Creates a `PyInstance` of `cls` with the
+    /// frozenset backing store (`__builtin_data__`) populated from `iterable`.
+    ///
+    /// CPython signature: `frozenset.__new__(cls, iterable=(), /)`
+    #[py_name = "frozenset.__new__"]
+    fn frozenset_new_dunder(args) -> Result<Value> {
+        let (cls_val, rest) = match args {
+            [] => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "frozenset.__new__() takes at least 1 argument (0 given)".to_string(),
+                ));
+            }
+            [first, rest @ ..] => (first.value.clone(), rest),
+        };
+        let class_rc = match cls_val.kind() {
+            ValueKind::PyClass(c) => Rc::clone(c),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "frozenset.__new__(X): X is not a type object ({})",
+                        value_type_name_str(&cls_val)
+                    ),
+                ));
+            }
+        };
+        let backing = match rest {
+            [] => pyrust_builtins::frozenset::frozenset(indexmap::IndexSet::new()),
+            [single] => {
+                let items = _interp.collect_iterable(single.value.clone())?;
+                let mut set = indexmap::IndexSet::new();
+                for item in items {
+                    let key = _interp.value_to_pykey(&item)?;
+                    _interp.set_insert(&mut set, key)?;
+                }
+                pyrust_builtins::frozenset::frozenset(set)
+            }
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "frozenset expected at most 1 argument, got {}",
+                        rest.len()
+                    ),
+                ));
+            }
+        };
+        let mut attrs = indexmap::IndexMap::new();
+        attrs.insert(
+            crate::interpreter::BUILTIN_DATA_ATTR.to_string(),
+            backing,
+        );
+        Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
+            crate::value::PyInstance {
+                class: class_rc,
+                attrs,
+            },
+        ))))
+    }
+
     /// Issue #1256: `object.__lt__`, `__le__`, `__gt__`, `__ge__` — ordering
     /// comparisons not defined on object; all return `NotImplemented`.
     ///
