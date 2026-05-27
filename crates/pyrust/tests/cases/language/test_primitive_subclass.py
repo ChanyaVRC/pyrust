@@ -108,3 +108,15 @@ print(m.extra)  # extra
 print(MyInt(0))    # 0
 print(MyInt(-7))   # -7
 print(abs(MyInt(-7)))  # 7
+
+# --- repr() delegates to backing primitive ---
+print(repr(MyInt(42)))      # 42
+print(repr(MyStr("hello"))) # 'hello'
+print(repr(MyFloat(3.14)))  # 3.14
+print(repr(MyBytes(b"ab"))) # b'ab'
+
+# --- Casting back to base type ---
+print(int(MyInt(42)))         # 42
+print(float(MyFloat(3.14)))   # 3.14
+print(str(MyStr("hello")))    # hello
+print(bytes(MyBytes(b"ab")))  # b'ab'
