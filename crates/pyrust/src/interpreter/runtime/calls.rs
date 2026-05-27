@@ -59,17 +59,18 @@ impl Interpreter {
         fn_name: std::sync::Arc<str>,
         qualname: std::sync::Arc<str>,
     ) -> Value {
+        let num_iters = code.num_iters as usize;
         let frame = GeneratorFrame {
             code: Rc::clone(code),
             regs,
-            iters: vec![None; code.num_iters as usize],
-            exc_handlers: Vec::new(),
+            iters: smallvec![None; num_iters],
+            exc_handlers: ExcHandlersBuf::new(),
             pc: 0,
             done: false,
             saved_env,
             // PEP 3134 per-generator exception state; both empty until
             // the body actually pushes handlers and yields inside one.
-            handled_exc_slice: Vec::new(),
+            handled_exc_slice: HandledExcBuf::new(),
             active_exception: None,
             local_index,
             // Meaningless until the first yield; initialised to 0 as a safe
