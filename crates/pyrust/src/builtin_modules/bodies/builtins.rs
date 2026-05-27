@@ -4070,9 +4070,10 @@ pyrust_module! {
 
     /// Issue #1256: `int.__add__(self, value)` — exposes `int.__add__` as a
     /// class-level attribute so that `int.__add__(1, 2)` and
-    /// `hasattr(int, '__add__')` work.  Routes through `eval_binary` which
-    /// already handles all int/BigInt combinations and returns `NotImplemented`
-    /// for non-numeric right-hand operands.
+    /// `hasattr(int, '__add__')` work.  Returns `NotImplemented` when the
+    /// right-hand operand is not an integer type, matching CPython's C slot
+    /// which only handles int/bool/BigInt and delegates float/str/other to the
+    /// reflected operator on the right-hand side.
     ///
     /// CPython signature: `int.__add__(self, value, /)`
     #[py_name = "int.__add__"]
@@ -4082,6 +4083,9 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__add__' of 'int' needs an argument".to_string())),
         };
+        if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
+            return Ok(Value::not_implemented());
+        }
         _interp.eval_binary(a, BinaryOp::Add, b)
     }
 
@@ -4093,6 +4097,9 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__sub__' of 'int' needs an argument".to_string())),
         };
+        if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
+            return Ok(Value::not_implemented());
+        }
         _interp.eval_binary(a, BinaryOp::Sub, b)
     }
 
@@ -4104,6 +4111,11 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__mul__' of 'int' needs an argument".to_string())),
         };
+        // CPython's int.__mul__ only accepts integer types; string repetition
+        // (1 * "x" = "x") is dispatched via str.__rmul__, not here.
+        if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
+            return Ok(Value::not_implemented());
+        }
         _interp.eval_binary(a, BinaryOp::Mul, b)
     }
 
@@ -4115,6 +4127,9 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__truediv__' of 'int' needs an argument".to_string())),
         };
+        if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
+            return Ok(Value::not_implemented());
+        }
         _interp.eval_binary(a, BinaryOp::Div, b)
     }
 
@@ -4126,6 +4141,9 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__floordiv__' of 'int' needs an argument".to_string())),
         };
+        if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
+            return Ok(Value::not_implemented());
+        }
         _interp.eval_binary(a, BinaryOp::FloorDiv, b)
     }
 
@@ -4137,6 +4155,9 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__mod__' of 'int' needs an argument".to_string())),
         };
+        if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
+            return Ok(Value::not_implemented());
+        }
         _interp.eval_binary(a, BinaryOp::Mod, b)
     }
 
@@ -4148,6 +4169,9 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__pow__' of 'int' needs an argument".to_string())),
         };
+        if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
+            return Ok(Value::not_implemented());
+        }
         _interp.eval_binary(a, BinaryOp::Pow, b)
     }
 
@@ -4159,6 +4183,9 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__and__' of 'int' needs an argument".to_string())),
         };
+        if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
+            return Ok(Value::not_implemented());
+        }
         _interp.eval_binary(a, BinaryOp::BitAnd, b)
     }
 
@@ -4170,6 +4197,9 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__or__' of 'int' needs an argument".to_string())),
         };
+        if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
+            return Ok(Value::not_implemented());
+        }
         _interp.eval_binary(a, BinaryOp::BitOr, b)
     }
 
@@ -4181,6 +4211,9 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__xor__' of 'int' needs an argument".to_string())),
         };
+        if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
+            return Ok(Value::not_implemented());
+        }
         _interp.eval_binary(a, BinaryOp::BitXor, b)
     }
 
@@ -4192,6 +4225,9 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__lshift__' of 'int' needs an argument".to_string())),
         };
+        if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
+            return Ok(Value::not_implemented());
+        }
         _interp.eval_binary(a, BinaryOp::LShift, b)
     }
 
@@ -4203,6 +4239,9 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__rshift__' of 'int' needs an argument".to_string())),
         };
+        if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
+            return Ok(Value::not_implemented());
+        }
         _interp.eval_binary(a, BinaryOp::RShift, b)
     }
 
@@ -4214,6 +4253,9 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__lt__' of 'int' needs an argument".to_string())),
         };
+        if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
+            return Ok(Value::not_implemented());
+        }
         _interp.eval_binary(a, BinaryOp::Lt, b)
     }
 
@@ -4225,6 +4267,9 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__le__' of 'int' needs an argument".to_string())),
         };
+        if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
+            return Ok(Value::not_implemented());
+        }
         _interp.eval_binary(a, BinaryOp::Le, b)
     }
 
@@ -4236,6 +4281,9 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__gt__' of 'int' needs an argument".to_string())),
         };
+        if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
+            return Ok(Value::not_implemented());
+        }
         _interp.eval_binary(a, BinaryOp::Gt, b)
     }
 
@@ -4247,6 +4295,9 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__ge__' of 'int' needs an argument".to_string())),
         };
+        if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
+            return Ok(Value::not_implemented());
+        }
         _interp.eval_binary(a, BinaryOp::Ge, b)
     }
 
@@ -4258,6 +4309,12 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__eq__' of 'int' needs an argument".to_string())),
         };
+        // CPython's int.__eq__ returns NotImplemented for non-integer types;
+        // pyrust's eval_binary(Eq) falls through to values_user_eq which
+        // returns False for cross-type comparisons without raising TypeError.
+        if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
+            return Ok(Value::not_implemented());
+        }
         _interp.eval_binary(a, BinaryOp::Eq, b)
     }
 
@@ -4269,6 +4326,10 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__ne__' of 'int' needs an argument".to_string())),
         };
+        // CPython's int.__ne__ returns NotImplemented for non-integer types.
+        if !matches!(b.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
+            return Ok(Value::not_implemented());
+        }
         _interp.eval_binary(a, BinaryOp::Ne, b)
     }
 
@@ -4321,6 +4382,9 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__lt__' of 'str' needs an argument".to_string())),
         };
+        if !matches!(b.kind(), ValueKind::Str(_)) {
+            return Ok(Value::not_implemented());
+        }
         _interp.eval_binary(a, BinaryOp::Lt, b)
     }
 
@@ -4332,6 +4396,9 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__le__' of 'str' needs an argument".to_string())),
         };
+        if !matches!(b.kind(), ValueKind::Str(_)) {
+            return Ok(Value::not_implemented());
+        }
         _interp.eval_binary(a, BinaryOp::Le, b)
     }
 
@@ -4343,6 +4410,9 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__gt__' of 'str' needs an argument".to_string())),
         };
+        if !matches!(b.kind(), ValueKind::Str(_)) {
+            return Ok(Value::not_implemented());
+        }
         _interp.eval_binary(a, BinaryOp::Gt, b)
     }
 
@@ -4354,6 +4424,9 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__ge__' of 'str' needs an argument".to_string())),
         };
+        if !matches!(b.kind(), ValueKind::Str(_)) {
+            return Ok(Value::not_implemented());
+        }
         _interp.eval_binary(a, BinaryOp::Ge, b)
     }
 
@@ -4365,6 +4438,11 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__eq__' of 'str' needs an argument".to_string())),
         };
+        // CPython's str.__eq__ returns NotImplemented for non-str types;
+        // eval_binary(Eq) falls through to values_user_eq which returns False.
+        if !matches!(b.kind(), ValueKind::Str(_)) {
+            return Ok(Value::not_implemented());
+        }
         _interp.eval_binary(a, BinaryOp::Eq, b)
     }
 
@@ -4376,6 +4454,10 @@ pyrust_module! {
             _ => return Err(PyError::named("TypeError",
                 "descriptor '__ne__' of 'str' needs an argument".to_string())),
         };
+        // CPython's str.__ne__ returns NotImplemented for non-str types.
+        if !matches!(b.kind(), ValueKind::Str(_)) {
+            return Ok(Value::not_implemented());
+        }
         _interp.eval_binary(a, BinaryOp::Ne, b)
     }
 

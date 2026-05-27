@@ -75,6 +75,18 @@ print(int.__xor__(0b1100, 0b1010))
 print(int.__lshift__(1, 4))
 print(int.__rshift__(16, 2))
 
+# int dunders return NotImplemented for incompatible rhs (not TypeError)
+print(int.__add__(1, "x"))
+print(int.__sub__(1, "x"))
+print(int.__mul__(1, "x"))
+print(int.__lt__(1, "x"))
+print(int.__eq__(1, "x"))
+# float rhs also returns NotImplemented (int.__add__ is strictly integer-only)
+print(int.__add__(1, 2.0))
+print(int.__mul__(3, 2.0))
+print(int.__lt__(1, 2.0))
+print(int.__eq__(1, 1.0))
+
 # ── int comparison dunders ────────────────────────────────────────────────────
 print(int.__lt__(1, 2))
 print(int.__le__(2, 2))
@@ -91,6 +103,11 @@ print(str.__mul__("ab", 3))
 print(str.__lt__("a", "b"))
 print(str.__eq__("x", "x"))
 print(str.__ne__("x", "y"))
+
+# str comparison dunders return NotImplemented for incompatible rhs
+print(str.__lt__("a", 1))
+print(str.__gt__("a", 1))
+print(str.__eq__("a", 1))
 
 # ── sequence __len__ dunders ─────────────────────────────────────────────────
 print(list.__len__([1, 2, 3]))
