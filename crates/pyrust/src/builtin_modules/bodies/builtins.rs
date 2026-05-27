@@ -3412,9 +3412,17 @@ pyrust_module! {
                     ))
                 };
             }
-            // No user __format__: for an empty spec, CPython's object.__format__
-            // delegates to str(self), which dispatches __str__.  Mirror that here
-            // so that format(exc, "") and f"{exc}" call the user-defined __str__.
+            // No user __format__ in MRO.  For primitive subclasses (e.g.
+            // `class MyInt(int): pass`), fall through to the backing value's
+            // format so that `format(MyInt(42), "d")` returns `"42"` the same
+            // way CPython delegates to `int.__format__`.
+            if let Some(backing) = instance_builtin_data(&instance_rc) {
+                return apply_format_spec(&backing, spec);
+            }
+            // Pure user class with no custom __format__: for an empty spec,
+            // CPython's object.__format__ delegates to str(self), which
+            // dispatches __str__.  Mirror that here so that format(exc, "")
+            // and f"{exc}" call the user-defined __str__.
             if spec.is_empty() {
                 return Ok(Value::string(render_instance_str(_interp, value)?));
             } else {
