@@ -22,6 +22,7 @@ pub mod slice;
 pub mod string;
 pub mod super_bound_builtin;
 pub mod tuple;
+pub mod union_type;
 
 /// Look up `BuiltinTypeOps` by stable type-name.  Installed in pyrust-core's
 /// registry at interpreter startup so the VM can dispatch operations on
@@ -48,6 +49,7 @@ pub fn lookup_ops(type_name: &str) -> Option<&'static dyn pyrust_core::BuiltinTy
         classmethod::STATIC_TYPE_NAME => Some(classmethod::STATIC_METHOD_ANY_OPS),
         classmethod::CLASS_BINDER_TYPE_NAME => Some(classmethod::CLASS_METHOD_GET_BINDER_OPS),
         classmethod::STATIC_BINDER_TYPE_NAME => Some(classmethod::STATIC_METHOD_GET_BINDER_OPS),
+        union_type::TYPE_NAME => Some(union_type::UNION_TYPE_OPS),
         _ => None,
     }
 }
