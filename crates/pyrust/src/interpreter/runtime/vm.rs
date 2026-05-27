@@ -2874,8 +2874,40 @@ impl Interpreter {
                 }
                 Insn::DictUpdate(dict_reg, src_reg) => {
                     let src_val = vm_try!(vm_read(&regs, *src_reg, num_locals));
-                    let src_dict = match src_val.kind() {
-                        ValueKind::Dict(d) => d.clone(),
+                    let pairs: Vec<(PyKey, Value)> = match src_val.kind() {
+                        ValueKind::Dict(d) => d.clone().into_iter().collect(),
+                        // instance_dict proxy: extract visible attrs as (PyKey, Value) pairs.
+                        ValueKind::BuiltinObject { ops, .. }
+                            if ops.type_name()
+                                == pyrust_builtins::instance_dict::TYPE_NAME =>
+                        {
+                            match pyrust_builtins::instance_dict::as_instance_dict_items(&src_val) {
+                                Some(pairs) => pairs,
+                                None => vm_try!(Err(PyError::Runtime(
+                                    "internal: bad instance_dict state in DictUpdate".to_string(),
+                                ))),
+                            }
+                        }
+                        // mappingproxy (**cls.__dict__ or similar): extract via keys.
+                        ValueKind::BuiltinObject { ops, .. }
+                            if ops.type_name()
+                                == pyrust_builtins::mapping_proxy::TYPE_NAME =>
+                        {
+                            if let Some(cls_rc) =
+                                pyrust_builtins::mapping_proxy::as_class_rc(&src_val)
+                            {
+                                cls_rc
+                                    .borrow()
+                                    .attrs
+                                    .iter()
+                                    .map(|(k, v)| (PyKey::str_from(k), v.clone()))
+                                    .collect()
+                            } else {
+                                vm_try!(Err(PyError::Runtime(
+                                    "internal: bad mappingproxy state in DictUpdate".to_string(),
+                                )))
+                            }
+                        }
                         _ => vm_try!(Err(PyError::named(
                             "TypeError",
                             format!(
@@ -2884,8 +2916,6 @@ impl Interpreter {
                             ),
                         ))),
                     };
-                    let pairs: Vec<(PyKey, Value)> =
-                        src_dict.into_iter().collect();
                     vm_try!(regs[*dict_reg as usize].dict_extend(pairs));
                 }
 

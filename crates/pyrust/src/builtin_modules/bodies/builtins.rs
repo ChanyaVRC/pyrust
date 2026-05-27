@@ -22,7 +22,7 @@ use crate::interpreter::builtin_args::{PyBool, PyBytes, PyFloat, PyInt, PyStr, P
 use crate::interpreter::{
     CallableIter, FilterIter, MapIter, NativeIterFrame, apply_format_spec, ascii_repr_interp, bigint_divmod_floor,
     class_chain_contains_name, class_is_subclass_of,
-    compare_values, compare_values_with_op, dir_names, instance_attrs_snapshot,
+    compare_values, compare_values_with_op, dir_names,
     instance_builtin_data,
     int_pow_promoting, invoke_class_method,
     is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_hash_bigint, py_hash_float,
@@ -1453,6 +1453,15 @@ pyrust_module! {
             ValueKind::NotImplemented => Ok(Value::builtin_function("NotImplementedType")),
             ValueKind::Ellipsis => Ok(Value::builtin_function("ellipsis")),
             ValueKind::BuiltinObject { ops, .. } => {
+                // instance_dict is a live-proxy for obj.__dict__; its Python
+                // type is `dict` (same as CPython's actual __dict__).
+                if ops.type_name() == pyrust_builtins::instance_dict::TYPE_NAME {
+                    if let Some(dict_class) =
+                        crate::interpreter::primitive_class_by_name("dict")
+                    {
+                        return Ok(Value::py_class(dict_class));
+                    }
+                }
                 Ok(Value::builtin_function(ops.type_name()))
             }
             // Migrated primitives are handled above via
@@ -1566,7 +1575,16 @@ pyrust_module! {
             return Ok(Value::dict(snapshot_current_locals(_interp)));
         }
         match args[0].value.kind() {
-            ValueKind::PyInstance(instance) => Ok(instance_attrs_snapshot(instance)),
+            ValueKind::PyInstance(instance) => {
+                let is_exc = class_chain_contains_name(
+                    &instance.borrow().class,
+                    "BaseException",
+                );
+                Ok(pyrust_builtins::instance_dict::instance_dict(
+                    Rc::clone(instance),
+                    is_exc,
+                ))
+            }
             ValueKind::PyModule(module) => {
                 let mut dict: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
                 for (k, v) in module.borrow().attrs.iter() {
