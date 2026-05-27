@@ -2079,8 +2079,11 @@ fn collect_local_names_from_block(
 ) {
     for stmt in body {
         match stmt {
-            Stmt::Assign(target, _) => {
+            Stmt::Assign(target, rhs) => {
                 collect_assign_target_names(target, names, global_names, nonlocal_names);
+                // Walrus targets inside comprehensions on the RHS escape to this
+                // function's scope (PEP 572).
+                collect_walrus_targets_in_expr(rhs, names, global_names, nonlocal_names);
             }
             Stmt::AttrAssign { .. } => {}
             Stmt::Def { name, .. } => {
@@ -3007,6 +3010,34 @@ fn collect_walrus_targets_in_expr(
                 }
             }
             walk(parts, names, global_names, nonlocal_names);
+        }
+        // Walrus targets inside a comprehension escape to the nearest enclosing
+        // non-comprehension scope (PEP 572). Descend into the element/value
+        // expressions and filter conditions so their walrus targets are recorded
+        // as locals of the enclosing function.  Do NOT descend into Lambda nodes
+        // (they create a true new scope).
+        Expr::ListComp { elt, clauses }
+        | Expr::SetComp { elt, clauses }
+        | Expr::GenExp { elt, clauses } => {
+            collect_walrus_targets_in_expr(elt, names, global_names, nonlocal_names);
+            for clause in clauses {
+                if let Some(c) = &clause.cond {
+                    collect_walrus_targets_in_expr(c, names, global_names, nonlocal_names);
+                }
+                // Inner clause iters also run in the comprehension scope and can
+                // contain walrus expressions that escape outward.
+                collect_walrus_targets_in_expr(&clause.iter, names, global_names, nonlocal_names);
+            }
+        }
+        Expr::DictComp { key, val, clauses } => {
+            collect_walrus_targets_in_expr(key, names, global_names, nonlocal_names);
+            collect_walrus_targets_in_expr(val, names, global_names, nonlocal_names);
+            for clause in clauses {
+                if let Some(c) = &clause.cond {
+                    collect_walrus_targets_in_expr(c, names, global_names, nonlocal_names);
+                }
+                collect_walrus_targets_in_expr(&clause.iter, names, global_names, nonlocal_names);
+            }
         }
         _ => {}
     }
