@@ -1496,35 +1496,44 @@ impl Interpreter {
                                         if let Some(inst_rc) = obj_val.as_py_instance_rc() {
                                             let inst = inst_rc.borrow();
                                             if !inst.attrs.contains_key(name) {
-                                                // No property — we only cache the
-                                                // straightforward class-attr case.
-                                                let unbound =
-                                                    lookup_class_attr(&inst.class, name);
-                                                if let Some(unbound_val) = unbound {
-                                                    // Don't cache cached_property (it
-                                                    // mutates instance.attrs on first
-                                                    // access and must go through get_attr).
-                                                    let is_cached_prop =
-                                                        pyrust_builtins::cached_property::with_cached_property(
-                                                            &unbound_val, |_| (),
-                                                        ).is_some();
-                                                    let is_property =
-                                                        pyrust_builtins::property::with_property(
-                                                            &unbound_val, |_| (),
-                                                        ).is_some();
-                                                    if !is_cached_prop && !is_property {
-                                                        let class_ptr =
-                                                            Rc::as_ptr(&inst.class) as *const ();
-                                                        let class_version =
-                                                            inst.class.borrow().mutation_version.get();
-                                                        let epoch =
-                                                            pyrust_core::class_epoch();
-                                                        cache[pc - 1] = AttrCacheEntry::ClassAttr {
-                                                            class_ptr,
-                                                            class_version,
-                                                            epoch,
-                                                            value: unbound_val,
-                                                        };
+                                                // Don't cache when the class has a user-defined
+                                                // __getattribute__ — the cache bypasses get_attr
+                                                // entirely and would skip the __getattribute__
+                                                // dispatch (issue #1254).
+                                                let has_custom_getattribute =
+                                                    lookup_class_attr(&inst.class, "__getattribute__")
+                                                        .is_some_and(|v| matches!(v.kind(), ValueKind::UserFunction(_)));
+                                                if !has_custom_getattribute {
+                                                    // No property — we only cache the
+                                                    // straightforward class-attr case.
+                                                    let unbound =
+                                                        lookup_class_attr(&inst.class, name);
+                                                    if let Some(unbound_val) = unbound {
+                                                        // Don't cache cached_property (it
+                                                        // mutates instance.attrs on first
+                                                        // access and must go through get_attr).
+                                                        let is_cached_prop =
+                                                            pyrust_builtins::cached_property::with_cached_property(
+                                                                &unbound_val, |_| (),
+                                                            ).is_some();
+                                                        let is_property =
+                                                            pyrust_builtins::property::with_property(
+                                                                &unbound_val, |_| (),
+                                                            ).is_some();
+                                                        if !is_cached_prop && !is_property {
+                                                            let class_ptr =
+                                                                Rc::as_ptr(&inst.class) as *const ();
+                                                            let class_version =
+                                                                inst.class.borrow().mutation_version.get();
+                                                            let epoch =
+                                                                pyrust_core::class_epoch();
+                                                            cache[pc - 1] = AttrCacheEntry::ClassAttr {
+                                                                class_ptr,
+                                                                class_version,
+                                                                epoch,
+                                                                value: unbound_val,
+                                                            };
+                                                        }
                                                     }
                                                 }
                                             }
