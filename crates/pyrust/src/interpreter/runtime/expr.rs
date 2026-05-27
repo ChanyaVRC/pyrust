@@ -2055,6 +2055,10 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__mod__", "__rmod__") {
                     return r;
                 }
+                // str % args: printf-style formatting (#1393).
+                if matches!(left.kind(), ValueKind::Str(_)) {
+                    return self.str_printf_format(left, right);
+                }
                 // Issue #1204: extract backing for scalar primitive subclasses.
                 self.modulo(coerce_numeric(left), coerce_numeric(right))
             }
@@ -3365,8 +3369,23 @@ impl Interpreter {
             _ => unreachable!("str_printf_format called with non-str left"),
         };
 
-        // Determine if the right-hand side is a mapping (dict) or a tuple/single.
-        let is_mapping = matches!(args.kind(), ValueKind::Dict(_));
+        // CPython mapping mode is triggered by the format string, not by the RHS type.
+        // A dict RHS is only used as a mapping when the format string contains %(key) codes;
+        // if the format has only positional codes, the dict is treated as a single positional arg.
+        let has_named_key = {
+            let b = fmt.as_bytes();
+            let mut found = false;
+            let mut j = 0;
+            while j + 1 < b.len() {
+                if b[j] == b'%' && b[j + 1] == b'(' {
+                    found = true;
+                    break;
+                }
+                j += 1;
+            }
+            found
+        };
+        let is_mapping = has_named_key && matches!(args.kind(), ValueKind::Dict(_));
         // Wrap a non-tuple, non-mapping rhs in a virtual single-element tuple.
         let positional: Option<Vec<Value>> = if is_mapping {
             None
@@ -3478,7 +3497,11 @@ impl Interpreter {
                     while i < len && bytes[i].is_ascii_digit() {
                         i += 1;
                     }
-                    if i == start { Some(0) } else { Some(fmt[start..i].parse::<usize>().unwrap()) }
+                    if i == start {
+                        Some(0)
+                    } else {
+                        Some(fmt[start..i].parse::<usize>().unwrap())
+                    }
                 }
             } else {
                 None
@@ -3553,13 +3576,22 @@ impl Interpreter {
                 'o' => {
                     let n = str_printf_to_int(&arg, conv)?;
                     if n < 0 {
-                        // CPython wraps negative ints as unsigned for octal.
+                        // CPython uses sign-magnitude (not two's complement) for negative octal.
                         let u = (n as u64).wrapping_neg();
-                        if flag_hash { format!("-0o{:o}", u) } else { format!("-{:o}", u) }
-                    } else if flag_hash && n != 0 {
-                        if flag_plus { format!("+0o{:o}", n) }
-                        else if flag_space { format!(" 0o{:o}", n) }
-                        else { format!("0o{:o}", n) }
+                        if flag_hash {
+                            format!("-0o{:o}", u)
+                        } else {
+                            format!("-{:o}", u)
+                        }
+                    } else if flag_hash {
+                        // CPython applies 0o prefix for all values (including 0) when # is set.
+                        if flag_plus {
+                            format!("+0o{:o}", n)
+                        } else if flag_space {
+                            format!(" 0o{:o}", n)
+                        } else {
+                            format!("0o{:o}", n)
+                        }
                     } else if flag_plus {
                         format!("+{:o}", n)
                     } else if flag_space {
@@ -3572,11 +3604,20 @@ impl Interpreter {
                     let n = str_printf_to_int(&arg, conv)?;
                     if n < 0 {
                         let u = (n as u64).wrapping_neg();
-                        format!("-{:x}", u)
-                    } else if flag_hash && n != 0 {
-                        if flag_plus { format!("+0x{:x}", n) }
-                        else if flag_space { format!(" 0x{:x}", n) }
-                        else { format!("0x{:x}", n) }
+                        if flag_hash {
+                            format!("-0x{:x}", u)
+                        } else {
+                            format!("-{:x}", u)
+                        }
+                    } else if flag_hash {
+                        // CPython applies 0x prefix for all values (including 0) when # is set.
+                        if flag_plus {
+                            format!("+0x{:x}", n)
+                        } else if flag_space {
+                            format!(" 0x{:x}", n)
+                        } else {
+                            format!("0x{:x}", n)
+                        }
                     } else if flag_plus {
                         format!("+{:x}", n)
                     } else if flag_space {
@@ -3589,11 +3630,20 @@ impl Interpreter {
                     let n = str_printf_to_int(&arg, conv)?;
                     if n < 0 {
                         let u = (n as u64).wrapping_neg();
-                        format!("-{:X}", u)
-                    } else if flag_hash && n != 0 {
-                        if flag_plus { format!("+0X{:X}", n) }
-                        else if flag_space { format!(" 0X{:X}", n) }
-                        else { format!("0X{:X}", n) }
+                        if flag_hash {
+                            format!("-0X{:X}", u)
+                        } else {
+                            format!("-{:X}", u)
+                        }
+                    } else if flag_hash {
+                        // CPython applies 0X prefix for all values (including 0) when # is set.
+                        if flag_plus {
+                            format!("+0X{:X}", n)
+                        } else if flag_space {
+                            format!(" 0X{:X}", n)
+                        } else {
+                            format!("0X{:X}", n)
+                        }
                     } else if flag_plus {
                         format!("+{:X}", n)
                     } else if flag_space {
@@ -3606,25 +3656,53 @@ impl Interpreter {
                     let f = str_printf_to_float(&arg, conv)?;
                     let prec = precision.unwrap_or(6);
                     let s = format_scientific(f, prec, conv == 'E');
-                    if f.is_sign_positive() && flag_plus { format!("+{}", s) }
-                    else if f.is_sign_positive() && flag_space { format!(" {}", s) }
-                    else { s }
+                    if f.is_sign_positive() && flag_plus {
+                        format!("+{}", s)
+                    } else if f.is_sign_positive() && flag_space {
+                        format!(" {}", s)
+                    } else {
+                        s
+                    }
                 }
                 'f' | 'F' => {
                     let f = str_printf_to_float(&arg, conv)?;
-                    let prec = precision.unwrap_or(6);
-                    let s = format!("{:.prec$}", f, prec = prec);
-                    if f.is_sign_positive() && flag_plus { format!("+{}", s) }
-                    else if f.is_sign_positive() && flag_space { format!(" {}", s) }
-                    else { s }
+                    let upper = conv == 'F';
+                    // Special-case NaN and Inf before calling format!(), which
+                    // produces Rust-style 'NaN'/'inf' rather than CPython-style
+                    // 'nan'/'inf'/'NAN'/'INF'.
+                    let s = if f.is_nan() {
+                        if upper { "NAN".to_string() } else { "nan".to_string() }
+                    } else if f.is_infinite() {
+                        if f > 0.0 {
+                            if upper { "INF".to_string() } else { "inf".to_string() }
+                        } else if upper {
+                            "-INF".to_string()
+                        } else {
+                            "-inf".to_string()
+                        }
+                    } else {
+                        let prec = precision.unwrap_or(6);
+                        format!("{:.prec$}", f, prec = prec)
+                    };
+                    if f.is_sign_positive() && flag_plus {
+                        format!("+{}", s)
+                    } else if f.is_sign_positive() && flag_space {
+                        format!(" {}", s)
+                    } else {
+                        s
+                    }
                 }
                 'g' | 'G' => {
                     let f = str_printf_to_float(&arg, conv)?;
                     let prec = precision.unwrap_or(6).max(1);
                     let s = format_general_float(f, prec, conv == 'G');
-                    if f.is_sign_positive() && flag_plus { format!("+{}", s) }
-                    else if f.is_sign_positive() && flag_space { format!(" {}", s) }
-                    else { s }
+                    if f.is_sign_positive() && flag_plus {
+                        format!("+{}", s)
+                    } else if f.is_sign_positive() && flag_space {
+                        format!(" {}", s)
+                    } else {
+                        s
+                    }
                 }
                 'c' => match arg.kind() {
                     ValueKind::Str(s) => {
@@ -3723,6 +3801,16 @@ fn str_printf_to_int(v: &Value, conv: char) -> Result<i64> {
     match v.kind() {
         ValueKind::Int(n) => Ok(n),
         ValueKind::Bool(b) => Ok(b as i64),
+        ValueKind::Float(_) if matches!(conv, 'o' | 'x' | 'X') => {
+            // CPython 3.12: %o/%x/%X reject float with "an integer is required".
+            // %d/%i/%u accept float (truncating toward zero) for historical reasons.
+            Err(PyError::named(
+                "TypeError",
+                format!(
+                    "%{conv} format: an integer is required, not float"
+                ),
+            ))
+        }
         ValueKind::Float(f) => Ok(f as i64),
         ValueKind::BigInt(b) => b.to_i64().ok_or_else(|| {
             PyError::named(
@@ -3730,18 +3818,27 @@ fn str_printf_to_int(v: &Value, conv: char) -> Result<i64> {
                 "Python int too large to convert to C long".to_string(),
             )
         }),
-        _ => Err(PyError::named(
-            "TypeError",
-            format!(
-                "%{conv} format: a real number is required, not {}",
-                pyrust_core::builtin_type_name(v)
-            ),
-        )),
+        _ => {
+            // CPython uses "a real number is required" for %d/%i/%u,
+            // and "an integer is required" for %o/%x/%X.
+            let msg = if matches!(conv, 'o' | 'x' | 'X') {
+                format!(
+                    "%{conv} format: an integer is required, not {}",
+                    pyrust_core::builtin_type_name(v)
+                )
+            } else {
+                format!(
+                    "%{conv} format: a real number is required, not {}",
+                    pyrust_core::builtin_type_name(v)
+                )
+            };
+            Err(PyError::named("TypeError", msg))
+        }
     }
 }
 
 /// Convert a `Value` to `f64` for float printf format codes.
-fn str_printf_to_float(v: &Value, conv: char) -> Result<f64> {
+fn str_printf_to_float(v: &Value, _conv: char) -> Result<f64> {
     match v.kind() {
         ValueKind::Float(f) => Ok(f),
         ValueKind::Int(n) => Ok(n as f64),
@@ -3750,7 +3847,7 @@ fn str_printf_to_float(v: &Value, conv: char) -> Result<f64> {
         _ => Err(PyError::named(
             "TypeError",
             format!(
-                "%{conv} format: a real number is required, not {}",
+                "must be real number, not {}",
                 pyrust_core::builtin_type_name(v)
             ),
         )),
@@ -3796,22 +3893,33 @@ fn apply_printf_width(
             'd' | 'i' | 'u' | 'o' | 'x' | 'X' | 'f' | 'e' | 'E' | 'g' | 'G'
         )
     {
-        // Sign character stays first; zeros are inserted after it.
-        let (sign_prefix, rest) = match s.chars().next() {
-            Some(c @ ('+' | '-' | ' ')) => {
-                let mut cs = s.chars();
-                let sign = cs.next().unwrap().to_string();
-                let remaining: String = cs.collect();
-                (sign, remaining)
+        // Determine the non-digit prefix: optional sign (+/-/space), then
+        // optional base prefix (0x, 0X, 0o).  Zeros are inserted after the
+        // full prefix so that "%#010x" % 255 → "0x000000ff" not "0000000xff".
+        let prefix_len = {
+            let mut cs = s.chars();
+            let mut n = 0usize;
+            // sign
+            if let Some('+' | '-' | ' ') = cs.next() {
+                n += 1;
+                // base prefix after sign: 0x, 0X, 0o
+                let mut peek = s[n..].chars();
+                if peek.next() == Some('0') {
+                    if matches!(peek.next(), Some('x' | 'X' | 'o')) {
+                        n += 2;
+                    }
+                }
+            } else if s.starts_with("0x") || s.starts_with("0X") || s.starts_with("0o") {
+                n = 2;
             }
-            _ => (String::new(), s),
+            n
         };
         let mut out = String::with_capacity(w);
-        out.push_str(&sign_prefix);
+        out.push_str(&s[..prefix_len]);
         for _ in 0..pad {
             out.push('0');
         }
-        out.push_str(&rest);
+        out.push_str(&s[prefix_len..]);
         return out;
     }
     if left_align {
@@ -3853,14 +3961,13 @@ fn format_scientific(f: f64, prec: usize, upper: bool) -> String {
     if let Some(pos) = raw.find('e') {
         let mantissa = &raw[..pos];
         let exp_str = &raw[pos + 1..];
-        let (sign, digits) = if exp_str.starts_with('-') {
-            ('-', &exp_str[1..])
-        } else if exp_str.starts_with('+') {
-            ('+', &exp_str[1..])
+        let digits = if exp_str.starts_with(['-', '+']) {
+            &exp_str[1..]
         } else {
-            ('+', exp_str)
+            exp_str
         };
-        let exp_n: i32 = digits.parse().unwrap_or(0);
+        let sign: i32 = if exp_str.starts_with('-') { -1 } else { 1 };
+        let exp_n: i32 = digits.parse::<i32>().unwrap_or(0) * sign;
         // {:+03} produces "+03", "-03" — sign always included, at least 2 digits.
         format!("{}{}{:+03}", mantissa, e_char, exp_n)
     } else {
