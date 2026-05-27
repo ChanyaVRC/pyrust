@@ -4,9 +4,9 @@ Tests tell(), seek(), readline(), readlines(), flush(), and the .name,
 .mode, .closed, .encoding attributes on file objects.
 """
 
-import os, tempfile
+import os
 
-FNAME = os.path.join(tempfile.gettempdir(), "pyrust_test_file_methods.txt")
+FNAME = "pyrust_test_file_methods.txt"
 
 # --- write mode ---
 f = open(FNAME, "w")
