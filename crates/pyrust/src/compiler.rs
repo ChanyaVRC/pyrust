@@ -8365,6 +8365,17 @@ impl Compiler {
                         Self::collect_walrus_targets_in_stmts(b, out);
                     }
                 }
+                Stmt::IndexAssign { expr: e, .. } | Stmt::SliceAssign { expr: e, .. } => {
+                    Self::collect_walrus_targets_in_expr(e, out);
+                }
+                Stmt::Raise { expr, cause } => {
+                    if let Some(e) = expr {
+                        Self::collect_walrus_targets_in_expr(e, out);
+                    }
+                    if let Some(c) = cause {
+                        Self::collect_walrus_targets_in_expr(c, out);
+                    }
+                }
                 // Def/Class create their own scopes; don't descend.
                 _ => {}
             }

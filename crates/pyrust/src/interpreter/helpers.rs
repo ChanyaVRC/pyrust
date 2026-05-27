@@ -2123,7 +2123,7 @@ fn collect_local_names_from_block(
                     }
                 }
             }
-            Stmt::AnnAssign { name, .. } => {
+            Stmt::AnnAssign { name, value, .. } => {
                 // Both `x: T = v` (value = Some) and `x: T` (value = None) declare
                 // a local slot.  At function scope the bare form causes UnboundLocalError
                 // on read (matching CPython); at class scope the slot is allocated but
@@ -2131,15 +2131,33 @@ fn collect_local_names_from_block(
                 if !global_names.contains(name) && !nonlocal_names.contains(name) {
                     names.insert(name.clone());
                 }
+                // Walrus targets inside a comprehension on the RHS escape to this
+                // function's scope (PEP 572).
+                if let Some(v) = value {
+                    collect_walrus_targets_in_expr(v, names, global_names, nonlocal_names);
+                }
             }
-            Stmt::AugAssign { .. }
-            | Stmt::IndexAssign { .. }
-            | Stmt::SliceAssign { .. }
-            | Stmt::Delete(_)
-            | Stmt::Raise { .. }
-            | Stmt::Break
-            | Stmt::Continue
-            | Stmt::Pass => {}
+            Stmt::AugAssign { expr, .. } => {
+                // Walrus targets inside a comprehension on the RHS escape to this
+                // function's scope (PEP 572).
+                collect_walrus_targets_in_expr(expr, names, global_names, nonlocal_names);
+            }
+            Stmt::IndexAssign { expr, .. } | Stmt::SliceAssign { expr, .. } => {
+                // Walrus targets inside a comprehension on the RHS escape to this
+                // function's scope (PEP 572).
+                collect_walrus_targets_in_expr(expr, names, global_names, nonlocal_names);
+            }
+            Stmt::Raise { expr, cause } => {
+                // Walrus targets inside a comprehension in the raise expression or
+                // cause escape to this function's scope (PEP 572).
+                if let Some(e) = expr {
+                    collect_walrus_targets_in_expr(e, names, global_names, nonlocal_names);
+                }
+                if let Some(c) = cause {
+                    collect_walrus_targets_in_expr(c, names, global_names, nonlocal_names);
+                }
+            }
+            Stmt::Delete(_) | Stmt::Break | Stmt::Continue | Stmt::Pass => {}
             // Walk expressions for walrus operator targets.
             Stmt::Expr(e) => {
                 collect_walrus_targets_in_expr(e, names, global_names, nonlocal_names);
