@@ -2825,7 +2825,13 @@ impl Interpreter {
             ValueKind::Str(s) => {
                 match item.kind() {
                     ValueKind::Str(sub) => Ok(Value::bool_(s.contains(sub))),
-                    _ => Err(PyError::Runtime("'in <string>' requires string as left operand".to_string())),
+                    _ => Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "'in <string>' requires string as left operand, not {}",
+                            value_type_name_str(&item)
+                        ),
+                    )),
                 }
             }
             ValueKind::Dict(_) => unreachable!("handled above"),
