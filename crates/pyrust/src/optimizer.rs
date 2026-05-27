@@ -728,26 +728,26 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -
                             .and_then(|v| intern_const_in_pool(consts, v))
                     })
                 });
-                if let Some(nc) = folded {
-                    known.insert(dst, nc);
-                    out.push(Insn::LoadConst(dst, nc));
-                } else {
-                    known.remove(&dst);
-                    out.push(Insn::BinOp(dst, lhs, op, rhs));
-                }
+                apply_const_fold(
+                    &mut known,
+                    &mut out,
+                    dst,
+                    folded,
+                    Insn::BinOp(dst, lhs, op, rhs),
+                );
             }
             Insn::BinOpConst(dst, lhs, op, c) => {
                 let folded = known.get(&lhs).and_then(|&cl| {
                     crate::compiler::fold_binop(&consts[cl as usize], op, &consts[c as usize])
                         .and_then(|v| intern_const_in_pool(consts, v))
                 });
-                if let Some(nc) = folded {
-                    known.insert(dst, nc);
-                    out.push(Insn::LoadConst(dst, nc));
-                } else {
-                    known.remove(&dst);
-                    out.push(Insn::BinOpConst(dst, lhs, op, c));
-                }
+                apply_const_fold(
+                    &mut known,
+                    &mut out,
+                    dst,
+                    folded,
+                    Insn::BinOpConst(dst, lhs, op, c),
+                );
             }
             Insn::BinOpImm(dst, lhs, op, imm) => {
                 let folded = known.get(&lhs).and_then(|&cl| {
@@ -755,13 +755,13 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -
                     crate::compiler::fold_binop(&consts[cl as usize], op, &rhs_val)
                         .and_then(|v| intern_const_in_pool(consts, v))
                 });
-                if let Some(nc) = folded {
-                    known.insert(dst, nc);
-                    out.push(Insn::LoadConst(dst, nc));
-                } else {
-                    known.remove(&dst);
-                    out.push(Insn::BinOpImm(dst, lhs, op, imm));
-                }
+                apply_const_fold(
+                    &mut known,
+                    &mut out,
+                    dst,
+                    folded,
+                    Insn::BinOpImm(dst, lhs, op, imm),
+                );
             }
             // Branch/loop/raise/suspend: clear the map — values may differ per
             // path or may be written by external resume machinery.
@@ -823,6 +823,28 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -
         }
     }
     out
+}
+
+/// Emit a folded constant or the original instruction into `out`, updating `known`.
+///
+/// Called by the three BinOp folding arms in `pass_const_fold`. When `folded`
+/// is `Some(nc)`, emits `LoadConst(dst, nc)` and records the known value;
+/// otherwise emits `fallback` and removes `dst` from `known`.
+#[inline]
+fn apply_const_fold(
+    known: &mut std::collections::HashMap<u32, u16>,
+    out: &mut Vec<Insn>,
+    dst: u32,
+    folded: Option<u16>,
+    fallback: Insn,
+) {
+    if let Some(nc) = folded {
+        known.insert(dst, nc);
+        out.push(Insn::LoadConst(dst, nc));
+    } else {
+        known.remove(&dst);
+        out.push(fallback);
+    }
 }
 
 /// Return the single destination register of `insn`, if any.
