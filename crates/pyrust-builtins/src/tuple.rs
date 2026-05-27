@@ -14,6 +14,11 @@ pub fn call(method: &str, items: &[Value], args: Vec<Value>) -> Result<Value> {
     match method {
         "index" => sequence::seq_index(items, &args, "tuple"),
         "count" => sequence::seq_count(items, &args, "tuple"),
+        // Intercepted upstream in vm.rs / calls.rs; sentinel for drift guard.
+        "__iter__" => Err(PyError::named(
+            "TypeError",
+            "'tuple' __iter__ must be dispatched by the interpreter",
+        )),
         _ => Err(PyError::Runtime(format!(
             "'tuple' object has no attribute '{method}'"
         ))),

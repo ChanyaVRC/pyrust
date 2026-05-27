@@ -45,6 +45,11 @@ pub fn call(
         "reverse" => ms::reverse(receiver, args),
         // List-specific
         "sort" => sort(receiver, &args, kwargs),
+        // Intercepted upstream in vm.rs / calls.rs; sentinel for drift guard.
+        "__iter__" => Err(PyError::named(
+            "TypeError",
+            "'list' __iter__ must be dispatched by the interpreter",
+        )),
         _ => Err(PyError::Runtime(format!(
             "'list' object has no attribute '{method}'"
         ))),
