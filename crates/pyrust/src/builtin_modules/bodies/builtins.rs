@@ -3881,6 +3881,582 @@ pyrust_module! {
         Ok(Value::none())
     }
 
+    /// Issue #1256: `object.__str__(self)` — the default __str__ exposed on
+    /// the `object` class so that `super().__str__()` and `hasattr(object,
+    /// '__str__')` work correctly.
+    ///
+    /// CPython's `object.__str__` is implemented by calling `tp_repr` on the
+    /// object's type (typeobject.c:object_str).  We route through
+    /// `render_value_repr` which dispatches `type(self).__repr__(self)` for
+    /// user instances, and falls back to `value.repr()` for primitives.
+    ///
+    /// CPython signature: `object.__str__(self, /)`
+    #[py_name = "object.__str__"]
+    fn object_str_dunder(args) -> Result<Value> {
+        let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "descriptor '__str__' of 'object' needs an argument".to_string(),
+            )
+        })?;
+        let s = render_value_repr(_interp, &self_val)?;
+        Ok(Value::string(s))
+    }
+
+    /// Issue #1256: `object.__repr__(self)` — the default __repr__ on `object`.
+    ///
+    /// Returns the canonical `<ClassName object at 0xADDR>` format for
+    /// instances.  For primitives (int, str, …) this delegates to the
+    /// primitive's own repr via `value.repr()`.
+    ///
+    /// CPython signature: `object.__repr__(self, /)`
+    #[py_name = "object.__repr__"]
+    fn object_repr_dunder(args) -> Result<Value> {
+        let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "descriptor '__repr__' of 'object' needs an argument".to_string(),
+            )
+        })?;
+        Ok(Value::string(self_val.repr()))
+    }
+
+    /// Issue #1256: `object.__eq__(self, other)` — default identity equality.
+    ///
+    /// Returns `True` if `self is other`, `NotImplemented` otherwise (so the
+    /// reflected `other.__eq__(self)` gets a chance).  This matches CPython's
+    /// `object_richcompare` for `Py_EQ`.
+    ///
+    /// CPython signature: `object.__eq__(self, value, /)`
+    #[py_name = "object.__eq__"]
+    fn object_eq_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named(
+                "TypeError",
+                "descriptor '__eq__' of 'object' needs an argument".to_string(),
+            )),
+        };
+        // Identity comparison: two PyInstance values are equal iff they are
+        // the same object (Rc::ptr_eq), matching CPython's default __eq__.
+        // For non-instance primitives we fall back to structural equality so
+        // that `int.__eq__(1, 1)` still returns True.
+        let same = match (a.kind(), b.kind()) {
+            (ValueKind::PyInstance(ra), ValueKind::PyInstance(rb)) => {
+                Rc::ptr_eq(ra, rb)
+            }
+            _ => a == b,
+        };
+        Ok(if same { Value::bool_(true) } else { Value::not_implemented() })
+    }
+
+    /// Issue #1256: `object.__ne__(self, other)` — default identity inequality.
+    ///
+    /// Returns `False` if `self is other`, `NotImplemented` otherwise.
+    ///
+    /// CPython signature: `object.__ne__(self, value, /)`
+    #[py_name = "object.__ne__"]
+    fn object_ne_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named(
+                "TypeError",
+                "descriptor '__ne__' of 'object' needs an argument".to_string(),
+            )),
+        };
+        let same = match (a.kind(), b.kind()) {
+            (ValueKind::PyInstance(ra), ValueKind::PyInstance(rb)) => {
+                Rc::ptr_eq(ra, rb)
+            }
+            _ => a == b,
+        };
+        Ok(if same { Value::bool_(false) } else { Value::not_implemented() })
+    }
+
+    /// Issue #1256: `object.__hash__(self)` — default identity-based hash.
+    ///
+    /// For user instances, CPython hashes by `id(self) // 16`.  For primitives
+    /// routed here via an explicit `object.__hash__(x)` call, delegate to the
+    /// standard `hash_value_with_interp` helper which already contains the
+    /// correct Mersenne-prime hash for each primitive type.
+    ///
+    /// CPython signature: `object.__hash__(self, /)`
+    #[py_name = "object.__hash__"]
+    fn object_hash_dunder(args) -> Result<Value> {
+        let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "descriptor '__hash__' of 'object' needs an argument".to_string(),
+            )
+        })?;
+        // For user instances use the Rc pointer as the identity hash, matching
+        // CPython's default `id(x) >> 4`.  Map -1 → -2 as CPython requires.
+        if let ValueKind::PyInstance(inst) = self_val.kind() {
+            let ptr = Rc::as_ptr(inst) as i64;
+            let h = if ptr == -1 { -2 } else { ptr };
+            return Ok(Value::int(h));
+        }
+        // For primitives, use the shared hash helper.
+        let h = hash_value_with_interp(_interp, &self_val)?;
+        Ok(Value::int(h))
+    }
+
+    /// Issue #1256: `object.__init__(self, *args, **kwargs)` — the default no-op
+    /// `__init__` exposed on `object` so that `super().__init__()` in user
+    /// classes terminates the MRO walk without error.
+    ///
+    /// CPython signature: `object.__init__(self, /)`
+    #[py_name = "object.__init__"]
+    fn object_init_dunder(_args) -> Result<Value> {
+        Ok(Value::none())
+    }
+
+    /// Issue #1256: `object.__lt__`, `__le__`, `__gt__`, `__ge__` — ordering
+    /// comparisons not defined on object; all return `NotImplemented`.
+    ///
+    /// CPython signature: `object.__lt__(self, value, /)`
+    #[py_name = "object.__lt__"]
+    fn object_lt_dunder(_args) -> Result<Value> {
+        Ok(Value::not_implemented())
+    }
+
+    /// CPython signature: `object.__le__(self, value, /)`
+    #[py_name = "object.__le__"]
+    fn object_le_dunder(_args) -> Result<Value> {
+        Ok(Value::not_implemented())
+    }
+
+    /// CPython signature: `object.__gt__(self, value, /)`
+    #[py_name = "object.__gt__"]
+    fn object_gt_dunder(_args) -> Result<Value> {
+        Ok(Value::not_implemented())
+    }
+
+    /// CPython signature: `object.__ge__(self, value, /)`
+    #[py_name = "object.__ge__"]
+    fn object_ge_dunder(_args) -> Result<Value> {
+        Ok(Value::not_implemented())
+    }
+
+    /// Issue #1256: `object.__format__(self, format_spec)`.
+    ///
+    /// CPython's default implementation calls `str(self)` then applies the
+    /// format spec.
+    ///
+    /// CPython signature: `object.__format__(self, format_spec, /)`
+    #[py_name = "object.__format__"]
+    fn object_format_dunder(args) -> Result<Value> {
+        let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "descriptor '__format__' of 'object' needs an argument".to_string(),
+            )
+        })?;
+        let spec_str = if args.len() >= 2 {
+            match args[1].value.kind() {
+                ValueKind::Str(s) => s.to_string(),
+                _ => return Err(PyError::named(
+                    "TypeError",
+                    "format_spec must be a string".to_string(),
+                )),
+            }
+        } else {
+            String::new()
+        };
+        let s = render_instance_str(_interp, &self_val)?;
+        // apply_format_spec takes &Value; wrap the str result temporarily.
+        apply_format_spec(&Value::string(s), &spec_str)
+    }
+
+    /// Issue #1256: `int.__add__(self, value)` — exposes `int.__add__` as a
+    /// class-level attribute so that `int.__add__(1, 2)` and
+    /// `hasattr(int, '__add__')` work.  Routes through `eval_binary` which
+    /// already handles all int/BigInt combinations and returns `NotImplemented`
+    /// for non-numeric right-hand operands.
+    ///
+    /// CPython signature: `int.__add__(self, value, /)`
+    #[py_name = "int.__add__"]
+    fn int_add_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named("TypeError",
+                "descriptor '__add__' of 'int' needs an argument".to_string())),
+        };
+        _interp.eval_binary(a, BinaryOp::Add, b)
+    }
+
+    /// Issue #1256: `int.__sub__(self, value)`
+    #[py_name = "int.__sub__"]
+    fn int_sub_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named("TypeError",
+                "descriptor '__sub__' of 'int' needs an argument".to_string())),
+        };
+        _interp.eval_binary(a, BinaryOp::Sub, b)
+    }
+
+    /// Issue #1256: `int.__mul__(self, value)`
+    #[py_name = "int.__mul__"]
+    fn int_mul_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named("TypeError",
+                "descriptor '__mul__' of 'int' needs an argument".to_string())),
+        };
+        _interp.eval_binary(a, BinaryOp::Mul, b)
+    }
+
+    /// Issue #1256: `int.__truediv__(self, value)`
+    #[py_name = "int.__truediv__"]
+    fn int_truediv_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named("TypeError",
+                "descriptor '__truediv__' of 'int' needs an argument".to_string())),
+        };
+        _interp.eval_binary(a, BinaryOp::Div, b)
+    }
+
+    /// Issue #1256: `int.__floordiv__(self, value)`
+    #[py_name = "int.__floordiv__"]
+    fn int_floordiv_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named("TypeError",
+                "descriptor '__floordiv__' of 'int' needs an argument".to_string())),
+        };
+        _interp.eval_binary(a, BinaryOp::FloorDiv, b)
+    }
+
+    /// Issue #1256: `int.__mod__(self, value)`
+    #[py_name = "int.__mod__"]
+    fn int_mod_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named("TypeError",
+                "descriptor '__mod__' of 'int' needs an argument".to_string())),
+        };
+        _interp.eval_binary(a, BinaryOp::Mod, b)
+    }
+
+    /// Issue #1256: `int.__pow__(self, value)`
+    #[py_name = "int.__pow__"]
+    fn int_pow_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named("TypeError",
+                "descriptor '__pow__' of 'int' needs an argument".to_string())),
+        };
+        _interp.eval_binary(a, BinaryOp::Pow, b)
+    }
+
+    /// Issue #1256: `int.__and__(self, value)`
+    #[py_name = "int.__and__"]
+    fn int_and_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named("TypeError",
+                "descriptor '__and__' of 'int' needs an argument".to_string())),
+        };
+        _interp.eval_binary(a, BinaryOp::BitAnd, b)
+    }
+
+    /// Issue #1256: `int.__or__(self, value)`
+    #[py_name = "int.__or__"]
+    fn int_or_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named("TypeError",
+                "descriptor '__or__' of 'int' needs an argument".to_string())),
+        };
+        _interp.eval_binary(a, BinaryOp::BitOr, b)
+    }
+
+    /// Issue #1256: `int.__xor__(self, value)`
+    #[py_name = "int.__xor__"]
+    fn int_xor_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named("TypeError",
+                "descriptor '__xor__' of 'int' needs an argument".to_string())),
+        };
+        _interp.eval_binary(a, BinaryOp::BitXor, b)
+    }
+
+    /// Issue #1256: `int.__lshift__(self, value)`
+    #[py_name = "int.__lshift__"]
+    fn int_lshift_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named("TypeError",
+                "descriptor '__lshift__' of 'int' needs an argument".to_string())),
+        };
+        _interp.eval_binary(a, BinaryOp::LShift, b)
+    }
+
+    /// Issue #1256: `int.__rshift__(self, value)`
+    #[py_name = "int.__rshift__"]
+    fn int_rshift_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named("TypeError",
+                "descriptor '__rshift__' of 'int' needs an argument".to_string())),
+        };
+        _interp.eval_binary(a, BinaryOp::RShift, b)
+    }
+
+    /// Issue #1256: `int.__lt__(self, value)`
+    #[py_name = "int.__lt__"]
+    fn int_lt_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named("TypeError",
+                "descriptor '__lt__' of 'int' needs an argument".to_string())),
+        };
+        _interp.eval_binary(a, BinaryOp::Lt, b)
+    }
+
+    /// Issue #1256: `int.__le__(self, value)`
+    #[py_name = "int.__le__"]
+    fn int_le_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named("TypeError",
+                "descriptor '__le__' of 'int' needs an argument".to_string())),
+        };
+        _interp.eval_binary(a, BinaryOp::Le, b)
+    }
+
+    /// Issue #1256: `int.__gt__(self, value)`
+    #[py_name = "int.__gt__"]
+    fn int_gt_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named("TypeError",
+                "descriptor '__gt__' of 'int' needs an argument".to_string())),
+        };
+        _interp.eval_binary(a, BinaryOp::Gt, b)
+    }
+
+    /// Issue #1256: `int.__ge__(self, value)`
+    #[py_name = "int.__ge__"]
+    fn int_ge_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named("TypeError",
+                "descriptor '__ge__' of 'int' needs an argument".to_string())),
+        };
+        _interp.eval_binary(a, BinaryOp::Ge, b)
+    }
+
+    /// Issue #1256: `int.__eq__(self, value)`
+    #[py_name = "int.__eq__"]
+    fn int_eq_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named("TypeError",
+                "descriptor '__eq__' of 'int' needs an argument".to_string())),
+        };
+        _interp.eval_binary(a, BinaryOp::Eq, b)
+    }
+
+    /// Issue #1256: `int.__ne__(self, value)`
+    #[py_name = "int.__ne__"]
+    fn int_ne_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named("TypeError",
+                "descriptor '__ne__' of 'int' needs an argument".to_string())),
+        };
+        _interp.eval_binary(a, BinaryOp::Ne, b)
+    }
+
+    /// Issue #1256: `str.__len__(self)` — exposes `str.__len__` as a class-level
+    /// attribute so that `str.__len__("hello")` and `hasattr(str, '__len__')`
+    /// work.
+    ///
+    /// CPython signature: `str.__len__(self, /)`
+    #[py_name = "str.__len__"]
+    fn str_len_dunder(args) -> Result<Value> {
+        let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
+            PyError::named("TypeError",
+                "descriptor '__len__' of 'str' needs an argument".to_string())
+        })?;
+        match self_val.kind() {
+            ValueKind::Str(s) => Ok(Value::int(s.chars().count() as i64)),
+            _ => Err(PyError::named("TypeError",
+                format!("descriptor '__len__' for 'str' objects doesn't apply to a '{}' object",
+                    value_type_name_str(&self_val)))),
+        }
+    }
+
+    /// Issue #1256: `str.__add__(self, value)`
+    #[py_name = "str.__add__"]
+    fn str_add_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named("TypeError",
+                "descriptor '__add__' of 'str' needs an argument".to_string())),
+        };
+        _interp.eval_binary(a, BinaryOp::Add, b)
+    }
+
+    /// Issue #1256: `str.__mul__(self, value)`
+    #[py_name = "str.__mul__"]
+    fn str_mul_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named("TypeError",
+                "descriptor '__mul__' of 'str' needs an argument".to_string())),
+        };
+        _interp.eval_binary(a, BinaryOp::Mul, b)
+    }
+
+    /// Issue #1256: `str.__lt__(self, value)`
+    #[py_name = "str.__lt__"]
+    fn str_lt_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named("TypeError",
+                "descriptor '__lt__' of 'str' needs an argument".to_string())),
+        };
+        _interp.eval_binary(a, BinaryOp::Lt, b)
+    }
+
+    /// Issue #1256: `str.__le__(self, value)`
+    #[py_name = "str.__le__"]
+    fn str_le_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named("TypeError",
+                "descriptor '__le__' of 'str' needs an argument".to_string())),
+        };
+        _interp.eval_binary(a, BinaryOp::Le, b)
+    }
+
+    /// Issue #1256: `str.__gt__(self, value)`
+    #[py_name = "str.__gt__"]
+    fn str_gt_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named("TypeError",
+                "descriptor '__gt__' of 'str' needs an argument".to_string())),
+        };
+        _interp.eval_binary(a, BinaryOp::Gt, b)
+    }
+
+    /// Issue #1256: `str.__ge__(self, value)`
+    #[py_name = "str.__ge__"]
+    fn str_ge_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named("TypeError",
+                "descriptor '__ge__' of 'str' needs an argument".to_string())),
+        };
+        _interp.eval_binary(a, BinaryOp::Ge, b)
+    }
+
+    /// Issue #1256: `str.__eq__(self, value)`
+    #[py_name = "str.__eq__"]
+    fn str_eq_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named("TypeError",
+                "descriptor '__eq__' of 'str' needs an argument".to_string())),
+        };
+        _interp.eval_binary(a, BinaryOp::Eq, b)
+    }
+
+    /// Issue #1256: `str.__ne__(self, value)`
+    #[py_name = "str.__ne__"]
+    fn str_ne_dunder(args) -> Result<Value> {
+        let (a, b) = match args {
+            [a, b, ..] => (a.value.clone(), b.value.clone()),
+            _ => return Err(PyError::named("TypeError",
+                "descriptor '__ne__' of 'str' needs an argument".to_string())),
+        };
+        _interp.eval_binary(a, BinaryOp::Ne, b)
+    }
+
+    /// Issue #1256: `list.__len__(self)` — exposes `list.__len__` as a
+    /// class-level attribute.
+    ///
+    /// CPython signature: `list.__len__(self, /)`
+    #[py_name = "list.__len__"]
+    fn list_len_dunder(args) -> Result<Value> {
+        let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
+            PyError::named("TypeError",
+                "descriptor '__len__' of 'list' needs an argument".to_string())
+        })?;
+        match self_val.kind() {
+            ValueKind::List(items) => Ok(Value::int(items.len() as i64)),
+            _ => Err(PyError::named("TypeError",
+                format!("descriptor '__len__' for 'list' objects doesn't apply to a '{}' object",
+                    value_type_name_str(&self_val)))),
+        }
+    }
+
+    /// Issue #1256: `tuple.__len__(self)`
+    #[py_name = "tuple.__len__"]
+    fn tuple_len_dunder(args) -> Result<Value> {
+        let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
+            PyError::named("TypeError",
+                "descriptor '__len__' of 'tuple' needs an argument".to_string())
+        })?;
+        match self_val.kind() {
+            ValueKind::Tuple(items) => Ok(Value::int(items.len() as i64)),
+            _ => Err(PyError::named("TypeError",
+                format!("descriptor '__len__' for 'tuple' objects doesn't apply to a '{}' object",
+                    value_type_name_str(&self_val)))),
+        }
+    }
+
+    /// Issue #1256: `dict.__len__(self)`
+    #[py_name = "dict.__len__"]
+    fn dict_len_dunder(args) -> Result<Value> {
+        let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
+            PyError::named("TypeError",
+                "descriptor '__len__' of 'dict' needs an argument".to_string())
+        })?;
+        match self_val.kind() {
+            ValueKind::Dict(items) => Ok(Value::int(items.len() as i64)),
+            _ => Err(PyError::named("TypeError",
+                format!("descriptor '__len__' for 'dict' objects doesn't apply to a '{}' object",
+                    value_type_name_str(&self_val)))),
+        }
+    }
+
+    /// Issue #1256: `set.__len__(self)`
+    #[py_name = "set.__len__"]
+    fn set_len_dunder(args) -> Result<Value> {
+        let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
+            PyError::named("TypeError",
+                "descriptor '__len__' of 'set' needs an argument".to_string())
+        })?;
+        match self_val.kind() {
+            ValueKind::Set(items) => Ok(Value::int(items.len() as i64)),
+            _ => Err(PyError::named("TypeError",
+                format!("descriptor '__len__' for 'set' objects doesn't apply to a '{}' object",
+                    value_type_name_str(&self_val)))),
+        }
+    }
+
+    /// Issue #1256: `bytes.__len__(self)`
+    #[py_name = "bytes.__len__"]
+    fn bytes_len_dunder(args) -> Result<Value> {
+        let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
+            PyError::named("TypeError",
+                "descriptor '__len__' of 'bytes' needs an argument".to_string())
+        })?;
+        match self_val.kind() {
+            ValueKind::Bytes(b) => Ok(Value::int(b.len() as i64)),
+            _ => Err(PyError::named("TypeError",
+                format!("descriptor '__len__' for 'bytes' objects doesn't apply to a '{}' object",
+                    value_type_name_str(&self_val)))),
+        }
+    }
+
     /// Issue #1112: `BaseException.__init__(self, *args)` — updates `self.args`
     /// so that `super().__init__(msg)` in an exception subclass sets the correct
     /// `.args` tuple on the already-constructed instance.  Also mirrors the

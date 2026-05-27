@@ -220,11 +220,29 @@ thread_local! {
         // CPython.  Register the builtin sentinel so that
         // `super().__init_subclass__(**kwargs)` inside user __init_subclass__
         // methods finds it when the MRO walk reaches `object`.
+        //
+        // Issue #1256: also register the common object dunders so that
+        // `hasattr(object, '__str__')` returns True and `super().__str__()`
+        // in user classes resolves via MRO to the registered handler.
         let mut attrs: IndexMap<String, Value> = IndexMap::new();
-        attrs.insert(
-            "__init_subclass__".to_string(),
-            Value::builtin_function("object.__init_subclass__"),
-        );
+        for dunder in &[
+            "__init_subclass__",
+            "__str__",
+            "__repr__",
+            "__eq__",
+            "__ne__",
+            "__hash__",
+            "__init__",
+            "__lt__",
+            "__le__",
+            "__gt__",
+            "__ge__",
+            "__format__",
+        ] {
+            let qualified: &'static str =
+                Box::leak(format!("object.{dunder}").into_boxed_str());
+            attrs.insert((*dunder).to_string(), Value::builtin_function(qualified));
+        }
         Rc::new(RefCell::new(PyClass {
             name: "object".to_string(),
             qualname: "object".to_string(),
@@ -470,6 +488,36 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
         .borrow_mut()
         .attrs
         .insert("maketrans".to_string(), Value::builtin_function("bytes.maketrans"));
+    // Issue #1256: expose dunder methods on primitive class objects so that
+    // `hasattr(int, '__add__')` returns True and `int.__add__(1, 2)` works.
+    // Each sentinel registers as `BuiltinFunction("<type>.<dunder>")` in the
+    // class attrs and must have a matching entry in the builtin registry
+    // (bodies/builtins.rs).
+    for (cls, type_name, dunders) in [
+        (&int_class, "int", &[
+            "__add__", "__sub__", "__mul__", "__truediv__", "__floordiv__",
+            "__mod__", "__pow__", "__and__", "__or__", "__xor__",
+            "__lshift__", "__rshift__",
+            "__lt__", "__le__", "__gt__", "__ge__", "__eq__", "__ne__",
+        ][..]),
+        (&str_class, "str", &[
+            "__len__", "__add__", "__mul__",
+            "__lt__", "__le__", "__gt__", "__ge__", "__eq__", "__ne__",
+        ][..]),
+        (&list_class, "list", &["__len__"][..]),
+        (&tuple_class, "tuple", &["__len__"][..]),
+        (&dict_class, "dict", &["__len__"][..]),
+        (&set_class, "set", &["__len__"][..]),
+        (&bytes_class, "bytes", &["__len__"][..]),
+    ] {
+        for &dunder in dunders {
+            let qualified: &'static str =
+                Box::leak(format!("{type_name}.{dunder}").into_boxed_str());
+            cls.borrow_mut()
+                .attrs
+                .insert(dunder.to_string(), Value::builtin_function(qualified));
+        }
+    }
     PrimitiveClasses {
         bytes_class,
         complex_class,
