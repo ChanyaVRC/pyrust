@@ -534,6 +534,22 @@ impl Interpreter {
                                 };
                                 Ok(Value::list(class_mro_items(&target_class)))
                             }
+                            "__subclasses__" => {
+                                // CPython: type.__subclasses__(self) → list of direct subclasses.
+                                // Takes no arguments. Prunes stale weak refs lazily.
+                                let n_args = pos.len() + kw.len();
+                                if n_args > 0 {
+                                    let class_name = class.borrow().name.clone();
+                                    self.bound_method_pos_buf = pos;
+                                    return Err(PyError::named(
+                                        "TypeError",
+                                        format!(
+                                            "{class_name}.__subclasses__() takes no arguments ({n_args} given)",
+                                        ),
+                                    ));
+                                }
+                                Ok(Value::list(class_direct_subclasses(&class)))
+                            }
                             _ => {
                                 self.bound_method_pos_buf = pos;
                                 let class_name = class.borrow().name.clone();

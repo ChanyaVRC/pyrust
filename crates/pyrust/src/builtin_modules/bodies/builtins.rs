@@ -1411,14 +1411,22 @@ pyrust_module! {
                     ),
                 )),
             }
-            return Ok(Value::py_class(Rc::new(RefCell::new(PyClass {
+            let new_class = Rc::new(RefCell::new(PyClass {
                 qualname: name.clone(),
                 name,
-                base,
-                extra_bases,
+                base: base.clone(),
+                extra_bases: extra_bases.clone(),
                 attrs,
                 mutation_version: std::cell::Cell::new(0),
-            }))));
+                subclasses: std::cell::RefCell::new(vec![]),
+            }));
+            if let Some(ref b) = base {
+                b.borrow().subclasses.borrow_mut().push(Rc::downgrade(&new_class));
+            }
+            for eb in &extra_bases {
+                eb.borrow().subclasses.borrow_mut().push(Rc::downgrade(&new_class));
+            }
+            return Ok(Value::py_class(new_class));
         }
         if args.len() != 1 {
             return Err(PyError::named(

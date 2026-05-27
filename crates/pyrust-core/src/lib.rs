@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -890,6 +890,7 @@ pub struct PyClass {
     /// cache miss).  `Cell<u64>` avoids the `borrow_mut()` overhead on the
     /// hot re-validation path.
     pub mutation_version: Cell<u64>,
+    pub subclasses: RefCell<Vec<Weak<RefCell<PyClass>>>>,
 }
 
 #[derive(Debug, Clone)]
