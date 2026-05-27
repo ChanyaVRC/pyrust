@@ -960,8 +960,10 @@ result = fact(10)
     fn vm_pure_fn_memoized_fib() {
         // fib(35) without memoization requires ~29M recursive calls and takes seconds.
         // With CallMemo, each unique n is computed once and cached — must finish fast.
+        // fib(35) reaches depth 35; debug frames are ~350 KB/level across the
+        // full Rust call chain, so 16 MB gives comfortable headroom.
         let ok: bool = std::thread::Builder::new()
-            .stack_size(32 * 1024 * 1024)
+            .stack_size(16 * 1024 * 1024)
             .spawn(|| {
                 let interpreter = run_program(
                     "def fib(n):\n    if n <= 1: return n\n    return fib(n-1) + fib(n-2)\nresult = fib(35)\n",

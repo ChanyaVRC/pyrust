@@ -106,12 +106,19 @@ impl BuiltinTypeOps for UnionTypeOps {
 
 /// Repr for a single component of a union type.
 /// For a class this is the qualified name.
-/// For a `NoneType` token it is `None` (matching CPython: `int | None` not `int | NoneType`).
+/// `NoneType` displays as `None` in union repr (CPython: `int | None`, not `int | NoneType`).
 /// For a nested UnionType we recursively repr it.
 pub fn repr_type_component(v: &Value) -> String {
     match v.kind() {
-        ValueKind::PyClass(rc) => rc.borrow().qualname.clone(),
-        ValueKind::BuiltinFunction("NoneType") => "None".to_string(),
+        ValueKind::PyClass(rc) => {
+            let name = rc.borrow().qualname.clone();
+            // `NoneType` displays as `None` in union repr (CPython: `int | None`).
+            if name == "NoneType" {
+                "None".to_string()
+            } else {
+                name
+            }
+        }
         ValueKind::BuiltinObject { ops, state } if ops.type_name() == TYPE_NAME => ops.repr(state),
         _ => v.repr(),
     }

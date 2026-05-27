@@ -1477,7 +1477,6 @@ pyrust_module! {
             // displays as `<class 'type'>` and `isinstance(cls, type)` works
             // through the standard class machinery (issue #1312).
             ValueKind::PyClass(_) => Ok(Value::py_class(type_class_singleton())),
-            ValueKind::None => Ok(Value::builtin_function("NoneType")),
             ValueKind::Range { .. } => Ok(Value::builtin_function("range")),
             ValueKind::UserFunction(f) => {
                 let type_name = match f.kind {
@@ -1508,8 +1507,6 @@ pyrust_module! {
                     Ok(Value::builtin_function("generator"))
                 }
             }
-            ValueKind::NotImplemented => Ok(Value::builtin_function("NotImplementedType")),
-            ValueKind::Ellipsis => Ok(Value::builtin_function("ellipsis")),
             ValueKind::BuiltinObject { ops, .. } => {
                 // instance_dict is a live-proxy for obj.__dict__; its Python
                 // type is `dict` (same as CPython's actual __dict__).
@@ -1529,6 +1526,7 @@ pyrust_module! {
             | ValueKind::Float(_) | ValueKind::Str(_) | ValueKind::List(_)
             | ValueKind::Tuple(_) | ValueKind::Dict(_) | ValueKind::Set(_)
             | ValueKind::Bytes(_) | ValueKind::Complex(_, _)
+            | ValueKind::None | ValueKind::NotImplemented | ValueKind::Ellipsis
             | ValueKind::PyInstance(_) => unreachable!(
                 "primitive_class_for_value should have handled this variant"
             ),
@@ -5908,12 +5906,8 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
     // Non-class `cls` operands are an error at the API boundary
     // (`isinstance_check` rejects them); the only remaining match here is
     // the legacy `BuiltinFunction(name)` path for types that haven't been
-    // migrated to PyClass yet (`NoneType` and any future builtin-only
-    // type tokens).
+    // migrated to PyClass yet.
     match (obj.kind(), cls.kind()) {
-        (ValueKind::None, ValueKind::BuiltinFunction("NoneType")) => true,
-        (ValueKind::NotImplemented, ValueKind::BuiltinFunction("NotImplementedType")) => true,
-        (ValueKind::Ellipsis, ValueKind::BuiltinFunction("ellipsis")) => true,
         (ValueKind::UserFunction(f), ValueKind::BuiltinFunction("staticmethod")) => {
             f.kind == UserFunctionKind::StaticMethod
         }
