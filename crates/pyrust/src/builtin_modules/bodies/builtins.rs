@@ -5443,7 +5443,15 @@ fn builtin_iter_type_name(v: &Value) -> &'static str {
     match v.kind() {
         ValueKind::List(_) => "list_iterator",
         ValueKind::Tuple(_) => "tuple_iterator",
-        ValueKind::Str(_) => "str_ascii_iterator",
+        // CPython 3.12 uses "str_ascii_iterator" for pure-ASCII strings and
+        // "str_iterator" for strings containing non-ASCII characters.
+        ValueKind::Str(s) => {
+            if s.is_ascii() {
+                "str_ascii_iterator"
+            } else {
+                "str_iterator"
+            }
+        }
         ValueKind::Set(_) => "set_iterator",
         ValueKind::Dict(_) => "dict_keyiterator",
         ValueKind::Range { .. } => "range_iterator",
