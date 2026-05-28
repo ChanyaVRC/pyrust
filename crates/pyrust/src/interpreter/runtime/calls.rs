@@ -4931,6 +4931,11 @@ fn normalise_exp_str(s: String, f: f64, sign: Option<char>) -> String {
 ///
 /// `prec=0` is normalised to `prec=1` for the sig-fig computation but keeps
 /// the `prec=0` threshold (i.e. `exp >= 0` triggers exponential).
+///
+/// Importantly, both threshold checks (`exp < -4` and `exp >= threshold`) use
+/// the exponent of the *rounded* value, not the original.  For example,
+/// `9.99` rounded to 1 sig fig is `10` (exp=1), so with prec=2 (threshold=1)
+/// it triggers exponential notation even though the original exp was 0.
 fn format_no_type_with_prec(f: f64, prec: usize) -> String {
     let sig_prec = if prec == 0 { 1 } else { prec };
     // Threshold: exp >= max(prec - 1, 0).  For prec=0 and prec=1 this is 0;
@@ -4947,18 +4952,28 @@ fn format_no_type_with_prec(f: f64, prec: usize) -> String {
         };
     }
 
-    let exp = f.abs().log10().floor() as i32;
-    if exp < -(4_i32) || exp >= threshold {
-        // Exponential notation with sig_prec significant figures.
-        let sig_digits = sig_prec.saturating_sub(1);
-        let s = format!("{:.sig_digits$e}", f);
-        trim_g_trailing_zeros(normalise_exp_str(s, f, None))
+    // Format in exponential notation first to get the rounded exponent.
+    // This correctly handles cases where rounding changes the order of
+    // magnitude (e.g. 9.99 rounded to 1 sig fig => 10, exp becomes 1).
+    let sig_digits = sig_prec.saturating_sub(1);
+    let exp_str = format!("{:.sig_digits$e}", f);
+    // Parse the exponent from Rust's exponential string (e.g. "1e1" -> 1).
+    let rounded_exp = if let Some(e_pos) = exp_str.find('e') {
+        exp_str[e_pos + 1..].parse::<i32>().unwrap_or(0)
     } else {
-        // Fixed notation.  Compute decimal places for sig_prec sig figs.
-        let decimal_digits = if exp >= 0 {
-            sig_prec.saturating_sub(exp as usize + 1)
+        0
+    };
+
+    if rounded_exp < -(4_i32) || rounded_exp >= threshold {
+        // Exponential notation: reuse the already-computed exp_str.
+        trim_g_trailing_zeros(normalise_exp_str(exp_str, f, None))
+    } else {
+        // Fixed notation.  Compute decimal places for sig_prec sig figs
+        // using the rounded exponent so the digit count is correct.
+        let decimal_digits = if rounded_exp >= 0 {
+            sig_prec.saturating_sub(rounded_exp as usize + 1)
         } else {
-            sig_prec + (-exp - 1) as usize
+            sig_prec + (-rounded_exp - 1) as usize
         };
         let s = format!("{:.decimal_digits$}", f);
         let s = trim_g_trailing_zeros(s);
