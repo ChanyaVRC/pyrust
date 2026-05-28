@@ -2175,7 +2175,11 @@ pyrust_module! {
                         if factor.is_infinite() || z.is_infinite() {
                             return Ok(Value::float(v));
                         }
-                        Ok(Value::float(py_round_half_even_f64(z) / factor))
+                        let result = py_round_half_even_f64(z) / factor;
+                        // Preserve sign: CPython returns -0.0 when a negative float
+                        // rounds to zero (IEEE 754 negative-zero semantics).
+                        let result = if result == 0.0 { result.copysign(v) } else { result };
+                        Ok(Value::float(result))
                     } else {
                         // Use powf (not powi) to match libm pow() precision — powi uses
                         // repeated squarings that accumulate ULP error at high exponents
@@ -2268,7 +2272,9 @@ pyrust_module! {
                                     if factor.is_infinite() || z.is_infinite() {
                                         return Ok(Value::float(v));
                                     }
-                                    Ok(Value::float(py_round_half_even_f64(z) / factor))
+                                    let result = py_round_half_even_f64(z) / factor;
+                                    let result = if result == 0.0 { result.copysign(v) } else { result };
+                                    Ok(Value::float(result))
                                 } else {
                                     let factor = 10f64.powf((-n) as f64);
                                     if factor.is_infinite() {
