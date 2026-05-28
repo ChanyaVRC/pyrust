@@ -33,6 +33,18 @@ try:
 except ValueError as e:
     print(str(e))
 
+# list: missing str — repr must include quotes
+try:
+    ["a", "b"].index("z")
+except ValueError as e:
+    print(str(e))
+
+# list: missing float — repr must use float notation
+try:
+    [1.0, 2.0].index(3.14)
+except ValueError as e:
+    print(str(e))
+
 # Regression: happy path must still work
 print([1, 2, 3].index(2))
 print((10, 20, 30).index(20))
