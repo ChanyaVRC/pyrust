@@ -3385,9 +3385,93 @@ impl Interpreter {
             let key = self.value_to_pykey(&item)?;
             return Ok(Value::bool_(self.set_lookup_in(&rc, &key)?.is_some()));
         }
+        // List and Tuple: dispatch user `__eq__` when any element or the
+        // item itself is a `PyInstance` (Rust `Value::eq` would fall back to
+        // `Rc::ptr_eq` for distinct-but-equal instances).
+        //
+        // Fast path: if neither `item` nor any element requires user dispatch,
+        // iterate the raw slice directly — no allocation, no dunder call.
+        //
+        // Slow path: snapshot the elements first (so user `__eq__` cannot
+        // invalidate the raw backing `Vec` through aliased mutation), then
+        // walk with `values_user_eq`.  `values_user_eq` has an identity
+        // short-circuit (`if a == b { return Ok(true) }`) so the slow path
+        // is still allocation-free for lists that happen to contain primitives
+        // alongside one PyInstance.
+        if let Some(items) = container.as_list() {
+            let needs_dispatch = matches!(
+                item.kind(),
+                ValueKind::PyInstance(_)
+                    | ValueKind::List(_)
+                    | ValueKind::Tuple(_)
+                    | ValueKind::Dict(_)
+                    | ValueKind::Set(_)
+                    | ValueKind::BuiltinObject { .. }
+            ) || items.iter().any(|e| {
+                matches!(
+                    e.kind(),
+                    ValueKind::PyInstance(_)
+                        | ValueKind::List(_)
+                        | ValueKind::Tuple(_)
+                        | ValueKind::Dict(_)
+                        | ValueKind::Set(_)
+                        | ValueKind::BuiltinObject { .. }
+                )
+            });
+            if needs_dispatch {
+                let items: Vec<Value> = items.to_vec();
+                for elem in &items {
+                    if self.values_user_eq(elem, &item)? {
+                        return Ok(Value::bool_(true));
+                    }
+                }
+            } else {
+                for elem in items {
+                    if *elem == item {
+                        return Ok(Value::bool_(true));
+                    }
+                }
+            }
+            return Ok(Value::bool_(false));
+        }
+        if let Some(items) = container.as_tuple() {
+            let needs_dispatch = matches!(
+                item.kind(),
+                ValueKind::PyInstance(_)
+                    | ValueKind::List(_)
+                    | ValueKind::Tuple(_)
+                    | ValueKind::Dict(_)
+                    | ValueKind::Set(_)
+                    | ValueKind::BuiltinObject { .. }
+            ) || items.iter().any(|e| {
+                matches!(
+                    e.kind(),
+                    ValueKind::PyInstance(_)
+                        | ValueKind::List(_)
+                        | ValueKind::Tuple(_)
+                        | ValueKind::Dict(_)
+                        | ValueKind::Set(_)
+                        | ValueKind::BuiltinObject { .. }
+                )
+            });
+            if needs_dispatch {
+                let items: Vec<Value> = items.to_vec();
+                for elem in &items {
+                    if self.values_user_eq(elem, &item)? {
+                        return Ok(Value::bool_(true));
+                    }
+                }
+            } else {
+                for elem in items {
+                    if *elem == item {
+                        return Ok(Value::bool_(true));
+                    }
+                }
+            }
+            return Ok(Value::bool_(false));
+        }
         match container.kind() {
-            ValueKind::List(items) => Ok(Value::bool_(items.iter().any(|b| b == &item))),
-            ValueKind::Tuple(items) => Ok(Value::bool_(items.contains(&item))),
+            ValueKind::List(_) | ValueKind::Tuple(_) => unreachable!("handled above"),
             ValueKind::Set(_) => unreachable!("handled above"),
             ValueKind::BuiltinObject { ops, state } => {
                 ops.contains(state, &item).map(Value::bool_)
@@ -3472,7 +3556,7 @@ impl Interpreter {
                     loop {
                         match self.call_next(iter_obj.clone(), None) {
                             Ok(elem) => {
-                                if elem == item {
+                                if self.values_user_eq(&elem, &item)? {
                                     return Ok(Value::bool_(true));
                                 }
                             }
@@ -3499,7 +3583,7 @@ impl Interpreter {
                     loop {
                         match self.call_next(iter_val.clone(), None) {
                             Ok(elem) => {
-                                if elem == item {
+                                if self.values_user_eq(&elem, &item)? {
                                     return Ok(Value::bool_(true));
                                 }
                             }
