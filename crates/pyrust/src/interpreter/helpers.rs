@@ -309,6 +309,36 @@ thread_local! {
         subclasses: std::cell::RefCell::new(vec![]),
     }));
 
+    /// Per-thread `PyClass` singleton for the `method` type.  In CPython,
+    /// `type(instance.method)` returns `<class 'method'>` — a proper class
+    /// whose metatype is `type`, so `type(type(c.m)) is type` holds.
+    /// Issue #1528: previously `type(c.m)` returned a `BuiltinFunction("method")`
+    /// sentinel, so `type(type(c.m))` resolved to `builtin_function_or_method`.
+    static METHOD_TYPE: Rc<RefCell<PyClass>> = Rc::new(RefCell::new(PyClass {
+        name: "method".to_string(),
+        qualname: "method".to_string(),
+        base: None,
+        extra_bases: vec![],
+        attrs: IndexMap::new(),
+        mutation_version: std::cell::Cell::new(0),
+        subclasses: std::cell::RefCell::new(vec![]),
+    }));
+
+    /// Per-thread `PyClass` singleton for the `function` type.  In CPython,
+    /// `type(lambda: None)` returns `<class 'function'>` — a proper class
+    /// whose metatype is `type`, so `type(type(lambda: None)) is type` holds.
+    /// Issue #1528: previously `type(f)` for a user-defined function returned
+    /// a `BuiltinFunction("function")` sentinel.
+    static FUNCTION_TYPE: Rc<RefCell<PyClass>> = Rc::new(RefCell::new(PyClass {
+        name: "function".to_string(),
+        qualname: "function".to_string(),
+        base: None,
+        extra_bases: vec![],
+        attrs: IndexMap::new(),
+        mutation_version: std::cell::Cell::new(0),
+        subclasses: std::cell::RefCell::new(vec![]),
+    }));
+
     /// O(1) dispatch table for primitive classes (#462 perf): maps the
     /// `Rc<RefCell<PyClass>>` identity (by raw pointer) to the registry's
     /// `BuiltinDispatchFn` for the corresponding constructor.  Populated
@@ -715,6 +745,21 @@ pub(crate) fn object_class_singleton() -> Rc<RefCell<PyClass>> {
 /// mirrors the `object_class_singleton` pattern (issue #1312).
 pub(crate) fn type_class_singleton() -> Rc<RefCell<PyClass>> {
     TYPE_CLASS.with(|c| Rc::clone(c))
+}
+
+/// Returns the singleton `method` class.  In CPython, `type(instance.method)`
+/// returns `<class 'method'>` and `type(type(c.m)) is type` holds because
+/// `method` is a proper `PyClass` (not a `BuiltinFunction` sentinel).
+/// Issue #1528.
+pub(crate) fn method_type_singleton() -> Rc<RefCell<PyClass>> {
+    METHOD_TYPE.with(|c| Rc::clone(c))
+}
+
+/// Returns the singleton `function` class.  In CPython, `type(lambda: None)`
+/// returns `<class 'function'>` and `type(type(lambda: None)) is type` holds.
+/// Issue #1528.
+pub(crate) fn function_type_singleton() -> Rc<RefCell<PyClass>> {
+    FUNCTION_TYPE.with(|c| Rc::clone(c))
 }
 
 /// Look up the per-primitive `PyClass` singleton for one of the 11 migrated
