@@ -3888,6 +3888,36 @@ fn exception_to_string(instance: &Rc<RefCell<PyInstance>>) -> String {
         }
     }
 
+    // CPython's `SyntaxError.__str__` (and subclasses IndentationError,
+    // TabError) formats as:
+    //   "{msg} ({filename}, line {lineno})"  — when both filename (str) and
+    //                                           lineno (int) are set
+    //   "{msg} ({filename})"                 — filename set, lineno not an int
+    //   "{msg} (line {lineno})"              — lineno set, filename not a str
+    //   "{msg}"                              — neither set
+    // The structured attrs (`.msg`, `.filename`, `.lineno`) are used, not
+    // the raw `args` tuple, matching CPython's `SyntaxError_str` in
+    // Objects/exceptions.c.
+    if class_chain_has_name(&instance.borrow().class, "SyntaxError") {
+        let borrowed = instance.borrow();
+        let msg_str = borrowed
+            .attrs
+            .get("msg")
+            .map(|v| v.to_py_str())
+            .unwrap_or_default();
+        let filename_str = borrowed
+            .attrs
+            .get("filename")
+            .and_then(|v| v.as_str().map(str::to_owned));
+        let lineno_int = borrowed.attrs.get("lineno").and_then(|v| v.as_int());
+        return match (filename_str, lineno_int) {
+            (Some(fname), Some(lineno)) => format!("{msg_str} ({fname}, line {lineno})"),
+            (Some(fname), None) => format!("{msg_str} ({fname})"),
+            (None, Some(lineno)) => format!("{msg_str} (line {lineno})"),
+            (None, None) => msg_str,
+        };
+    }
+
     // CPython's UnicodeDecodeError.__str__ derives the message from the five
     // structured attributes, not from args.  Only format this way when all
     // five attributes are set (i.e. the exception was properly constructed).
