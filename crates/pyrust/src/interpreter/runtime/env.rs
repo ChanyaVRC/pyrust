@@ -313,9 +313,10 @@ impl Interpreter {
                     });
                 }
                 let class_name = class.borrow().name.clone();
-                Err(PyError::named(
-                    "AttributeError",
+                Err(PyError::attribute_error(
                     format!("type object '{}' has no attribute '{}'", class_name, name),
+                    Some(name.to_string()),
+                    Some(Value::py_class(Rc::clone(&class))),
                 ))
             }
             ValueKind::SuperProxy { class, instance } => {
@@ -544,9 +545,10 @@ impl Interpreter {
                     }
                     _ => {}
                 }
-                Err(PyError::named(
-                    "AttributeError",
+                Err(PyError::attribute_error(
                     format!("module '{mod_name}' has no attribute '{name}'"),
+                    Some(name.to_string()),
+                    Some(target.clone()),
                 ))
             }
             ValueKind::UserFunction(func) => {
@@ -634,9 +636,10 @@ impl Interpreter {
                     UserFunctionKind::ClassMethod => "classmethod",
                     _ => "function",
                 };
-                Err(PyError::named(
-                    "AttributeError",
+                Err(PyError::attribute_error(
                     format!("'{type_name}' object has no attribute '{name}'"),
+                    Some(name.to_string()),
+                    Some(target.clone()),
                 ))
             }
             ValueKind::BuiltinFunction(func_name) => {
@@ -767,9 +770,10 @@ impl Interpreter {
                     ));
                 }
                 let type_name = pyrust_core::builtin_type_name(&target);
-                Err(PyError::named(
-                    "AttributeError",
+                Err(PyError::attribute_error(
                     format!("'{type_name}' object has no attribute '{name}'"),
+                    Some(name.to_string()),
+                    Some(target.clone()),
                 ))
             }
             ValueKind::Generator(state_rc) => {
@@ -825,9 +829,10 @@ impl Interpreter {
                         _ => {}
                     }
                 }
-                Err(PyError::named(
-                    "AttributeError",
+                Err(PyError::attribute_error(
                     format!("'generator' object has no attribute '{name}'"),
+                    Some(name.to_string()),
+                    Some(target.clone()),
                 ))
             }
             _ => {
@@ -933,9 +938,10 @@ impl Interpreter {
                     }
                 }
                 let type_name = pyrust_core::builtin_type_name(&target);
-                Err(PyError::named(
-                    "AttributeError",
+                Err(PyError::attribute_error(
                     format!("'{type_name}' object has no attribute '{name}'"),
+                    Some(name.to_string()),
+                    Some(target.clone()),
                 ))
             }
         }
@@ -1224,9 +1230,10 @@ impl Interpreter {
         }
 
         let class_name = class.borrow().name.clone();
-        Err(PyError::named(
-            "AttributeError",
+        Err(PyError::attribute_error(
             format!("'{}' object has no attribute '{}'", class_name, name),
+            Some(name.to_string()),
+            Some(Value::py_instance(Rc::clone(&instance))),
         ))
     }
 
@@ -1352,9 +1359,10 @@ impl Interpreter {
         }
         if instance.borrow_mut().attrs.shift_remove(name).is_none() {
             let class_name = instance.borrow().class.borrow().name.clone();
-            return Err(PyError::named(
-                "AttributeError",
+            return Err(PyError::attribute_error(
                 format!("'{class_name}' object has no attribute '{name}'"),
+                Some(name.to_string()),
+                Some(Value::py_instance(Rc::clone(&instance))),
             ));
         }
         Ok(())

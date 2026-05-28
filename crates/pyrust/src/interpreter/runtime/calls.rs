@@ -400,12 +400,11 @@ impl Interpreter {
                             Some(v) => v,
                             None => {
                                 self.bound_method_pos_buf = pos;
-                                return Err(PyError::named(
-                                    "AttributeError",
-                                    format!(
-                                        "'{}' object has no attribute '{method}'",
-                                        class.borrow().name,
-                                    ),
+                                let class_name = class.borrow().name.clone();
+                                return Err(PyError::attribute_error(
+                                    format!("'{class_name}' object has no attribute '{method}'"),
+                                    Some(method.to_string()),
+                                    Some(Value::py_instance(Rc::clone(inst))),
                                 ));
                             }
                         };
@@ -753,11 +752,10 @@ impl Interpreter {
                             _ => {
                                 self.bound_method_pos_buf = pos;
                                 let class_name = class.borrow().name.clone();
-                                return Err(PyError::named(
-                                    "AttributeError",
-                                    format!(
-                                        "type object '{class_name}' has no attribute '{method}'",
-                                    ),
+                                return Err(PyError::attribute_error(
+                                    format!("type object '{class_name}' has no attribute '{method}'"),
+                                    Some(method.to_string()),
+                                    Some(Value::py_class(Rc::clone(&class))),
                                 ));
                             }
                         }

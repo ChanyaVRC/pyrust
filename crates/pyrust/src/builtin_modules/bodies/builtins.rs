@@ -1651,7 +1651,7 @@ pyrust_module! {
         };
         let result = match _interp.get_attr(args[0].value.clone(), &name) {
             Ok(_) => true,
-            Err(PyError::Named(ref cls, _)) if cls == "AttributeError" => false,
+            Err(ref e) if e.class_name_is("AttributeError") => false,
             Err(e) => return Err(e),
         };
         Ok(Value::bool_(result))
@@ -1682,7 +1682,7 @@ pyrust_module! {
         };
         match _interp.get_attr(args[0].value.clone(), &name) {
             Ok(v) => Ok(v),
-            Err(PyError::Named(ref cls, _)) if cls == "AttributeError" && args.len() == 3 => {
+            Err(ref e) if e.class_name_is("AttributeError") && args.len() == 3 => {
                 Ok(args[2].value.clone())
             }
             Err(e) => Err(e),

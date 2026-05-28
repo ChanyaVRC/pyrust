@@ -4434,6 +4434,24 @@ pub enum PyError {
         message: String,
         name: Option<String>,
     },
+    /// An `AttributeError` raised by the VM when an attribute lookup fails.
+    /// Carries the attribute name and the receiver object so the VM can set
+    /// `.name` and `.obj` on the resulting instance, matching CPython 3.12
+    /// parity.
+    ///
+    /// CPython 3.12: `AttributeError.__init__` stores the attribute name as
+    /// `self.name` and the object on which the lookup was attempted as
+    /// `self.obj`.  User-constructed instances (`AttributeError('msg')`) have
+    /// both set to `None`.
+    ///
+    /// `name` is the attribute that was not found; `None` when not available.
+    /// `obj` is the receiver on which the lookup was attempted; `None` when
+    /// not available.
+    AttributeError {
+        message: String,
+        name: Option<String>,
+        obj: Option<Value>,
+    },
     Raised(Value),
 }
 
@@ -4503,6 +4521,25 @@ impl PyError {
             class_name,
             message: message.into(),
             name,
+        }
+    }
+
+    /// Constructor for an `AttributeError` that carries the attribute name and
+    /// the receiver object so the VM can set `.name` and `.obj` on the
+    /// resulting instance, matching CPython 3.12 parity.
+    ///
+    /// `name` is the attribute that was not found; pass `None` when not
+    /// available.  `obj` is the receiver; pass `None` when not available.
+    #[inline]
+    pub fn attribute_error(
+        message: impl Into<String>,
+        name: Option<String>,
+        obj: Option<Value>,
+    ) -> Self {
+        PyError::AttributeError {
+            message: message.into(),
+            name,
+            obj,
         }
     }
 
@@ -4622,6 +4659,10 @@ impl PyError {
                     || name == "Exception"
                     || name == "BaseException"
             }
+            PyError::AttributeError { .. } => {
+                // AttributeError is a subclass of Exception → BaseException.
+                matches!(name, "AttributeError" | "Exception" | "BaseException")
+            }
             PyError::Raised(exc) => match exc.kind() {
                 ValueKind::PyInstance(inst) => class_chain_has_name(&inst.borrow().class, name),
                 ValueKind::PyClass(cls) => class_chain_has_name(cls, name),
@@ -4687,6 +4728,9 @@ impl fmt::Display for PyError {
                 ..
             } => {
                 write!(f, "{class_name}: {message}")
+            }
+            PyError::AttributeError { message, .. } => {
+                write!(f, "AttributeError: {message}")
             }
             PyError::Raised(value) => write!(f, "Uncaught exception: {}", value.repr()),
         }
