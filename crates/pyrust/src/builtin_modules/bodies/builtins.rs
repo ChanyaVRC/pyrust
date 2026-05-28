@@ -2131,7 +2131,10 @@ pyrust_module! {
                     ValueKind::None => None,
                     _ => return Err(PyError::named(
                         "TypeError",
-                        format!("{FN_NAME}() ndigits must be an integer or None"),
+                        format!(
+                            "'{}' object cannot be interpreted as an integer",
+                            value_type_name_str(&v.0),
+                        ),
                     )),
                 },
             }
