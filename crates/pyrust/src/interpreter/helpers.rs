@@ -4235,6 +4235,21 @@ pub(crate) fn round_bigint_neg_ndigits(x: PyBigInt, neg_n: u32) -> Value {
     }
 }
 
+/// Modular exponentiation: (base^exp) % modulus using BigInt arithmetic.
+///
+/// Callers MUST ensure exp >= 0 and modulus != 0 before calling; this
+/// function panics if either precondition is violated (delegated to
+/// BigInt::modpow).  The result is returned as Value::int when it fits in
+/// i64, otherwise Value::bigint.
+pub(crate) fn modpow_bigint(base: &PyBigInt, exp: &PyBigInt, modulus: &PyBigInt) -> Value {
+    use num_traits::ToPrimitive;
+    let result = base.modpow(exp, modulus);
+    match result.to_i64() {
+        Some(v) => Value::int(v),
+        None => Value::bigint(result),
+    }
+}
+
 /// Modular exponentiation: (base^exp) % modulus for i64.
 pub(crate) fn modpow_i64(base: i64, exp: u64, modulus: i64) -> i64 {
     if modulus == 1 {
