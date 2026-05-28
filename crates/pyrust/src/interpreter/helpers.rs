@@ -1195,7 +1195,8 @@ pub(crate) fn reject_keyword_args_expanded(function_name: &str, args: &[Expanded
 }
 
 pub(crate) fn py_mod_i64(a: i64, b: i64) -> i64 {
-    let mut remainder = a % b;
+    // `i64::MIN % -1` overflows; the mathematical result is 0.
+    let mut remainder = a.wrapping_rem(b);
     if (remainder > 0 && b < 0) || (remainder < 0 && b > 0) {
         remainder += b;
     }
