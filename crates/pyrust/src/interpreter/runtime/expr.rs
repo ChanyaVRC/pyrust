@@ -1938,6 +1938,84 @@ impl Interpreter {
             };
             return pyrust_builtins::string::call("join", &receiver, vec![iterable]);
         }
+        if method == "translate" {
+            // Dict fast path: delegate to pyrust-builtins which handles the
+            // common `str.maketrans`-produced dict without needing the interpreter.
+            if args.len() != 1 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "str.translate() takes exactly one argument ({} given)",
+                        args.len()
+                    ),
+                ));
+            }
+            let is_dict = matches!(args[0].kind(), ValueKind::Dict(_));
+            if is_dict {
+                return pyrust_builtins::string::call("translate", &receiver, args);
+            }
+            // General mapping protocol: call table[ordinal] per codepoint.
+            // KeyError / IndexError / LookupError → keep character;
+            // None → delete; int → replace with chr(n); str → replace.
+            let s = match receiver.kind() {
+                ValueKind::Str(s) => s.to_string(),
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "descriptor 'translate' requires a 'str' object".to_string(),
+                    ))
+                }
+            };
+            let table = args.into_iter().next().unwrap();
+            let chars: Vec<char> = s.chars().collect();
+            let mut out = String::with_capacity(s.len());
+            for c in chars {
+                let cp = Value::int(c as i64);
+                match self.eval_index(table.clone(), cp) {
+                    Ok(v) => match v.kind() {
+                        ValueKind::None => { /* delete */ }
+                        ValueKind::Int(n) => {
+                            if n < 0 || n > 0x10FFFF {
+                                return Err(PyError::named(
+                                    "ValueError",
+                                    "character mapping must be in range(0x110000)".to_string(),
+                                ));
+                            }
+                            let replacement = char::from_u32(n as u32).ok_or_else(|| {
+                                PyError::named(
+                                    "ValueError",
+                                    "character mapping must be in range(0x110000)".to_string(),
+                                )
+                            })?;
+                            out.push(replacement);
+                        }
+                        ValueKind::Bool(b) => {
+                            let replacement =
+                                char::from_u32(b as u32).expect("0 and 1 are valid codepoints");
+                            out.push(replacement);
+                        }
+                        ValueKind::Str(repl) => {
+                            out.push_str(&repl.to_string());
+                        }
+                        _ => {
+                            return Err(PyError::named(
+                                "TypeError",
+                                "character mapping must return integer, None or str".to_string(),
+                            ));
+                        }
+                    },
+                    Err(e)
+                        if e.class_name_is("KeyError")
+                            || e.class_name_is("IndexError")
+                            || e.class_name_is("LookupError") =>
+                    {
+                        out.push(c);
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            return Ok(Value::string(out));
+        }
         pyrust_builtins::string::call(method, &receiver, args)
     }
 
