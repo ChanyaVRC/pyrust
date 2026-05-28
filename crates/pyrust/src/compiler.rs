@@ -7872,6 +7872,20 @@ impl Compiler {
                 if let Some(reg) = self.local_reg(name) {
                     let definitely_bound = (reg as usize) < 64 && (self.def_set >> reg) & 1 != 0;
                     if !definitely_bound {
+                        // Issue #1411: at module scope, a name that is not yet
+                        // definitely bound must resolve through the global →
+                        // builtins chain rather than raising NameError.  Module
+                        // scope is sequential (like a REPL), so a later
+                        // assignment does NOT shadow earlier reads.  LoadGlobal
+                        // already has a fastlocal-register fallback (via
+                        // vm_frame_views) for names that have been assigned,
+                        // so already-written names are still found efficiently.
+                        if self.is_module_scope {
+                            let name_idx = self.intern_name(name);
+                            let dst = self.alloc_temp();
+                            self.emit(Insn::LoadGlobal(dst, name_idx));
+                            return dst;
+                        }
                         let name_idx = self.intern_name(name);
                         self.emit(Insn::CheckLocal(reg, name_idx));
                     }
