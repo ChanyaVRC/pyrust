@@ -3025,6 +3025,30 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 }
             });
         }
+        // YieldFrom writes both result_reg and sent_reg on resume.  Neither
+        // register is in writable_dst (which is single-register), so evict
+        // both explicitly here, mirroring the Unpack/LoadNoneRange pattern above.
+        if let Insn::YieldFrom {
+            result_reg,
+            sent_reg,
+            ..
+        } = &insn
+        {
+            let rr = *result_reg;
+            let sr = *sent_reg;
+            table.retain(|k, prev_dst| {
+                if *prev_dst == rr || *prev_dst == sr {
+                    return false;
+                }
+                match k {
+                    CseKey::LoadConst(_) => true,
+                    CseKey::BinOpConst(src, _, _) | CseKey::BinOpImm(src, _, _) => {
+                        *src != rr && *src != sr
+                    }
+                    CseKey::UnaryOp(_, src) => *src != rr && *src != sr,
+                }
+            });
+        }
 
         // Call-boundary invalidation: any user-defined callee may update
         // named-local registers (r < num_locals) via the `assign_name`
