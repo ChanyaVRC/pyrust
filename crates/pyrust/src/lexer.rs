@@ -1594,8 +1594,8 @@ fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<Vec<FStringPart>> 
 /// byte positions for `\N` error messages (matching CPython 3.12 output).
 ///
 /// Supports single-character escapes (`\n`, `\t`, ...), octal escapes
-/// (`\ooo`, 1–3 digits, value 0–255), and `\xNN` hex escapes (exactly two
-/// hex digits, producing U+0000–U+00FF).
+/// (`\ooo`, 1–3 digits, value 0–511 as a Unicode codepoint), and `\xNN` hex
+/// escapes (exactly two hex digits, producing U+0000–U+00FF).
 ///
 /// For unrecognized escape sequences (e.g. `\z`), CPython 3.12 emits a
 /// `DeprecationWarning` and preserves the two-character sequence `\<char>`
@@ -1616,7 +1616,8 @@ fn parse_escape(chars: &[char], pos: usize, content_start: usize) -> Result<(Str
         'f' => Ok(("\x0C".to_string(), pos + 1)),
         'v' => Ok(("\x0B".to_string(), pos + 1)),
         '0'..='7' => {
-            // \ooo — 1 to 3 octal digits; produces values 0x00–0xFF.
+            // \ooo — 1 to 3 octal digits; in string literals produces U+0000–U+01FF
+            // (CPython 3.12 accepts values > 0xFF as Unicode codepoints with a warning).
             let d1 = c as u32 - '0' as u32;
             let mut val = d1;
             let mut end = pos + 1;
@@ -1632,9 +1633,10 @@ fn parse_escape(chars: &[char], pos: usize, content_start: usize) -> Result<(Str
                     }
                 }
             }
-            let v = u8::try_from(val)
-                .map_err(|_| PyError::Lex(format!("octal escape value out of range: \\{val:o}")))?;
-            Ok((char::from(v).to_string(), end))
+            let ch = char::from_u32(val).ok_or_else(|| {
+                PyError::Lex(format!("octal escape value out of range: \\{val:o}"))
+            })?;
+            Ok((ch.to_string(), end))
         }
         'x' => {
             // \xNN — exactly two hex digits; produces U+0000–U+00FF.
