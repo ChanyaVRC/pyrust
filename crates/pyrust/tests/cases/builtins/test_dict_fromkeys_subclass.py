@@ -64,3 +64,18 @@ try:
     MyDict.fromkeys([[1, 2]])
 except TypeError as e:
     print(type(e).__name__, e)
+
+# Instance call: MyDict().fromkeys(...) should also return MyDict (CPython classmethod semantics)
+result7 = MyDict().fromkeys(["a", "b"])
+print(type(result7).__name__)
+print(result7)
+
+# Instance call with explicit value
+result8 = MyDict().fromkeys(["x"], 7)
+print(type(result8).__name__)
+print(result8)
+
+# Plain dict instance call still returns dict
+result9 = {}.fromkeys(["a", "b"])
+print(type(result9).__name__)
+print(result9)

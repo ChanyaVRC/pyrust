@@ -438,6 +438,41 @@ impl Interpreter {
                                     self.bound_method_pos_buf = pos;
                                     return match bk_kind {
                                         BkKind::Dict => {
+                                            // Issue #1563: `fromkeys` is a classmethod; when
+                                            // called on a subclass instance (`MyDict().fromkeys`)
+                                            // CPython uses `type(self)` as `cls`, so the result
+                                            // is a `MyDict`, not a plain `dict`.  Route through
+                                            // the same class-dispatch path used for
+                                            // `MyDict.fromkeys` (bound-method on PyClass).
+                                            if method == "fromkeys" {
+                                                let bound = pyrust_builtins::bound_method::bound_method(
+                                                    "fromkeys",
+                                                    Value::py_class(Rc::clone(&class)),
+                                                );
+                                                let mut expanded: Vec<ExpandedCallArg> =
+                                                    args_vec
+                                                        .into_iter()
+                                                        .map(|v| ExpandedCallArg {
+                                                            name: None,
+                                                            value: v,
+                                                        })
+                                                        .collect();
+                                                for (k, v) in &kw {
+                                                    if let PyKey::Str(s) = k {
+                                                        expanded.push(ExpandedCallArg {
+                                                            name: Some(
+                                                                s.as_str()
+                                                                    .unwrap_or("")
+                                                                    .to_owned(),
+                                                            ),
+                                                            value: v.clone(),
+                                                        });
+                                                    }
+                                                }
+                                                return self.call_function_expanded(
+                                                    bound, &expanded,
+                                                );
+                                            }
                                             self.call_dict_method(method, backing, args_vec)
                                         }
                                         BkKind::List => {
