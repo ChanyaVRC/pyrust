@@ -173,8 +173,11 @@ impl<'a> PyInt<'a> {
 
     /// Like [`as_i64`], but converts overflow into a CPython-style
     /// `OverflowError` instead of `None`.  Used by builtin bodies that
-    /// can't process bignums (e.g. `chr()` whose codepoint must fit in
-    /// `u32`).
+    /// can't process bignums.  Note: `chr()` uses `as_i64()` directly
+    /// so it can supply the CPython-exact message (#1584); this helper
+    /// remains available for other builtins with different wording
+    /// requirements.
+    #[allow(dead_code)]
     pub fn expect_i64(&self, fn_name: &str, arg_name: &str) -> Result<i64> {
         self.as_i64().ok_or_else(|| {
             PyError::named(

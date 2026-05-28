@@ -49,16 +49,19 @@ pyrust_module! {
     /// macro's default "unsupported argument type(s)" fallback would
     /// drift from that canonical wording.  All parameters are
     /// `#[positional_only]` so the macro's positional-only fast-path
-    /// applies (no kwarg-validation work).  Bignum inputs raise
-    /// `OverflowError` via `PyInt::expect_i64` *before* the range
-    /// check — a deliberate CPython-parity improvement over the
-    /// legacy body, which raised `ValueError("chr() arg not in
-    /// range(0x110000)")` via the range check.  Modern CPython
-    /// raises `OverflowError` here too (compare `hex(bignum)`
-    /// behaviour above).
+    /// applies (no kwarg-validation work).  Bignum inputs that don't fit
+    /// in i64 raise `OverflowError("Python int too large to convert to C
+    /// int")` — matching CPython 3.12's exact wording (#1584).  Values
+    /// that fit in i64 but exceed the Unicode range raise `ValueError` via
+    /// `chr_from_code_point`.
     #[pure]
     fn chr(#[positional_only] i: PyInt) -> Result<Value> {
-        let code_point = i.expect_i64(FN_NAME, "i")?;
+        let code_point = i.as_i64().ok_or_else(|| {
+            PyError::named(
+                "OverflowError",
+                "Python int too large to convert to C int".to_string(),
+            )
+        })?;
         chr_from_code_point(code_point)
     }
 
