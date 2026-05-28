@@ -4196,7 +4196,8 @@ impl Interpreter {
         let msg = if type_name == "tuple" {
             "tuple.index(x): x not in tuple".to_string()
         } else {
-            format!("{target} is not in {type_name}")
+            let repr_str = render_instance_repr(self, target)?;
+            format!("{repr_str} is not in {type_name}")
         };
         Err(PyError::named("ValueError", msg))
     }
