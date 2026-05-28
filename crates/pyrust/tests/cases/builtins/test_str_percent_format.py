@@ -1,4 +1,4 @@
-# str % args — printf-style string formatting (#1393)
+# str % args — printf-style string formatting (#1018, #1393)
 
 # Basic %s
 print("%s" % "hello")
