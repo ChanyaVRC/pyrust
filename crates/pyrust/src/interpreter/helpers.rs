@@ -214,18 +214,20 @@ pub(crate) fn lookup_class_attr(class: &Rc<RefCell<PyClass>>, name: &str) -> Opt
     }
     // Issue #1378: every class implicitly has `object` as its ultimate ancestor
     // (CPython's invariant).  When the MRO chain terminates (no explicit primary
-    // base) and the class is not itself `object` or a primitive type, fall
-    // through to the object singleton's attrs.  This mirrors class_is_subclass_of
-    // (which returns true for any class when expected is object) and
-    // class_mro_items (which appends object at the end of every MRO).
+    // base) and the class is not itself `object`, fall through to the object
+    // singleton's attrs.  This mirrors class_is_subclass_of (which returns true
+    // for any class when expected is object) and class_mro_items (which appends
+    // object at the end of every MRO).
     //
     // Without this fallback, built-in exception classes whose base chain ends at
     // BaseException (base==None) never reached object's attrs — so
     // `hasattr(Exception, '__init_subclass__')` was False.
     //
-    // Primitive types (int, str, list, …) are excluded because their methods are
-    // dispatched through a separate mechanism; leaking object's registered dunders
-    // onto them would shadow that dispatch and break repr/str for subclasses.
+    // Issue #1537: primitive class singletons (int, str, list, …) now set their
+    // `base` to the `object` singleton explicitly, so `has_explicit_base` is
+    // true for them and this fallback branch is skipped for them.  The
+    // `is_primitive_class` guard is retained as a safety net for any class that
+    // might lack an explicit base but still should not fall through to object.
     if !has_explicit_base && !is_primitive_class(class) {
         let obj = object_class_singleton();
         if !Rc::ptr_eq(class, &obj) {
@@ -301,15 +303,24 @@ thread_local! {
     /// both a callable and a class — `type(int)` returns `<class 'type'>`,
     /// and `isinstance(int, type)` is True.  Mirrors the `OBJECT_CLASS`
     /// pattern (issue #1312).
-    static TYPE_CLASS: Rc<RefCell<PyClass>> = Rc::new(RefCell::new(PyClass {
-        name: "type".to_string(),
-        qualname: "type".to_string(),
-        base: None,
-        extra_bases: vec![],
-        attrs: IndexMap::new(),
-        mutation_version: std::cell::Cell::new(0),
-        subclasses: std::cell::RefCell::new(vec![]),
-    }));
+    ///
+    /// Issue #1537: `type.__bases__ == (object,)` in CPython.  Setting the
+    /// explicit base lets `lookup_class_attr` walk to `object` so that
+    /// `hasattr(type, '__init_subclass__')` returns True.
+    static TYPE_CLASS: Rc<RefCell<PyClass>> = {
+        let obj = OBJECT_CLASS.with(|c| Rc::clone(c));
+        let cls = Rc::new(RefCell::new(PyClass {
+            name: "type".to_string(),
+            qualname: "type".to_string(),
+            base: Some(Rc::clone(&obj)),
+            extra_bases: vec![],
+            attrs: IndexMap::new(),
+            mutation_version: std::cell::Cell::new(0),
+            subclasses: std::cell::RefCell::new(vec![]),
+        }));
+        obj.borrow().subclasses.borrow_mut().push(Rc::downgrade(&cls));
+        cls
+    };
 
     /// Per-thread `PyClass` singleton for the `method` type.  In CPython,
     /// `type(instance.method)` returns `<class 'method'>` — a proper class
@@ -471,13 +482,20 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
         }
         class
     }
-    let int_class = make("int", None);
-    let str_class = make("str", None);
-    let list_class = make("list", None);
-    let tuple_class = make("tuple", None);
-    let dict_class = make("dict", None);
-    let set_class = make("set", None);
-    let bytes_class = make("bytes", None);
+    // Issue #1537: every primitive type inherits from `object` in CPython
+    // (`int.__bases__ == (object,)`, etc.).  Setting an explicit `base` here
+    // lets `lookup_class_attr` walk to `object` and find dunders like
+    // `__init_subclass__`, so `hasattr(int, '__init_subclass__')` returns True.
+    // The PRIMITIVE_CLASS_DISPATCH table is keyed on the class pointer (not the
+    // base), so the fast-path constructor dispatch is unaffected.
+    let obj = object_class_singleton();
+    let int_class = make("int", Some(Rc::clone(&obj)));
+    let str_class = make("str", Some(Rc::clone(&obj)));
+    let list_class = make("list", Some(Rc::clone(&obj)));
+    let tuple_class = make("tuple", Some(Rc::clone(&obj)));
+    let dict_class = make("dict", Some(Rc::clone(&obj)));
+    let set_class = make("set", Some(Rc::clone(&obj)));
+    let bytes_class = make("bytes", Some(Rc::clone(&obj)));
     populate_primitive_methods(&int_class, "int", INT_METHODS);
     populate_primitive_methods(&bytes_class, "bytes", BYTES_METHODS);
     populate_primitive_methods(&str_class, "str", STR_METHODS);
@@ -485,9 +503,9 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
     populate_primitive_methods(&tuple_class, "tuple", TUPLE_METHODS);
     populate_primitive_methods(&dict_class, "dict", DICT_METHODS);
     populate_primitive_methods(&set_class, "set", SET_METHODS);
-    let complex_class = make("complex", None);
-    let frozenset_class = make("frozenset", None);
-    let float_class = make("float", None);
+    let complex_class = make("complex", Some(Rc::clone(&obj)));
+    let frozenset_class = make("frozenset", Some(Rc::clone(&obj)));
+    let float_class = make("float", Some(Rc::clone(&obj)));
     populate_primitive_methods(&complex_class, "complex", COMPLEX_METHODS);
     populate_primitive_methods(&frozenset_class, "frozenset", FROZENSET_METHODS);
     populate_primitive_methods(&float_class, "float", FLOAT_METHODS);
