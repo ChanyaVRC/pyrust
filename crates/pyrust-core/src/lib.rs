@@ -3995,20 +3995,60 @@ fn repr_quote(s: &str) -> char {
     }
 }
 
+/// Iterate over the codepoints of a string that may contain CESU-8-encoded
+/// lone surrogates (0xD800–0xDFFF).  Rust's `str::chars()` calls
+/// `char::from_u32_unchecked` internally; in debug builds that triggers an
+/// undefined-behaviour precondition check and aborts when the decoded value is
+/// a surrogate.  This iterator decodes the bytes manually and yields `u32`
+/// values directly, avoiding `char` entirely for the surrogate range.
+fn cesu8_codepoints(s: &str) -> impl Iterator<Item = u32> + '_ {
+    let mut bytes = s.as_bytes();
+    std::iter::from_fn(move || {
+        let b0 = *bytes.first()?;
+        let (cp, len) = if b0 < 0x80 {
+            (b0 as u32, 1usize)
+        } else if b0 < 0xE0 {
+            let b1 = bytes[1];
+            (((b0 & 0x1F) as u32) << 6 | (b1 & 0x3F) as u32, 2)
+        } else if b0 < 0xF0 {
+            let b1 = bytes[1];
+            let b2 = bytes[2];
+            (
+                ((b0 & 0x0F) as u32) << 12 | ((b1 & 0x3F) as u32) << 6 | (b2 & 0x3F) as u32,
+                3,
+            )
+        } else {
+            let b1 = bytes[1];
+            let b2 = bytes[2];
+            let b3 = bytes[3];
+            (
+                ((b0 & 0x07) as u32) << 18
+                    | ((b1 & 0x3F) as u32) << 12
+                    | ((b2 & 0x3F) as u32) << 6
+                    | (b3 & 0x3F) as u32,
+                4,
+            )
+        };
+        bytes = &bytes[len..];
+        Some(cp)
+    })
+}
+
 fn escape_str(s: &str, quote: char) -> String {
+    let quote_u32 = quote as u32;
     let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            c if c == quote => {
+    for n in cesu8_codepoints(s) {
+        match n {
+            0x5C => out.push_str("\\\\"), // '\\'
+            0x0A => out.push_str("\\n"),  // '\n'
+            0x09 => out.push_str("\\t"),  // '\t'
+            0x0D => out.push_str("\\r"),  // '\r'
+            n if n == quote_u32 => {
                 out.push('\\');
-                out.push(c);
+                // SAFETY: quote is a valid char (it is either '\'' or '"').
+                out.push(quote);
             }
-            c if !py_is_printable(c) => {
-                let n = c as u32;
+            n if !cp_is_printable(n) => {
                 if n <= 0xFF {
                     out.push_str(&format!("\\x{n:02x}"));
                 } else if n <= 0xFFFF {
@@ -4017,35 +4057,57 @@ fn escape_str(s: &str, quote: char) -> String {
                     out.push_str(&format!("\\U{n:08x}"));
                 }
             }
-            c => out.push(c),
+            n => {
+                // n is printable and not a surrogate (surrogates are non-printable).
+                // SAFETY: printable codepoints are not surrogates, so from_u32 is safe.
+                if let Some(c) = char::from_u32(n) {
+                    out.push(c);
+                } else {
+                    // Unreachable in well-formed input; escape as fallback.
+                    out.push_str(&format!("\\u{n:04x}"));
+                }
+            }
         }
     }
     out
 }
 
-/// Returns `true` when `c` is considered "printable" by Python's
+/// Returns `true` when codepoint `n` is considered "printable" by Python's
 /// `str.isprintable()` / CPython's `Py_UNICODE_ISPRINTABLE`.
 ///
 /// CPython considers a character non-printable when its Unicode general
 /// category is one of: Cc (control), Cf (format), Cs (surrogate),
 /// Co (private-use), Cn (unassigned), Zl/Zp (line/paragraph separators),
 /// or any Zs (space separator) except ASCII space (U+0020).
+///
+/// Accepts a raw `u32` codepoint so that surrogate codepoints
+/// (which are not valid Rust `char` values) can be tested without invoking
+/// undefined behaviour via `char::from_u32_unchecked`.
 #[inline]
-fn py_is_printable(c: char) -> bool {
-    if c == ' ' {
-        return true;
+fn cp_is_printable(n: u32) -> bool {
+    if n == 0x20 {
+        return true; // ASCII space is printable
     }
-    !matches!(
-        c.general_category(),
-        GeneralCategory::Control
-            | GeneralCategory::Format
-            | GeneralCategory::Surrogate
-            | GeneralCategory::PrivateUse
-            | GeneralCategory::Unassigned
-            | GeneralCategory::SpaceSeparator
-            | GeneralCategory::LineSeparator
-            | GeneralCategory::ParagraphSeparator
-    )
+    // Lone surrogates (Cs category) are never printable.
+    if (0xD800..=0xDFFF).contains(&n) {
+        return false;
+    }
+    // For non-surrogate codepoints in the valid Unicode scalar range, delegate
+    // to the char-based general_category lookup.
+    match char::from_u32(n) {
+        None => false, // out of Unicode range → not printable
+        Some(c) => !matches!(
+            c.general_category(),
+            GeneralCategory::Control
+                | GeneralCategory::Format
+                | GeneralCategory::Surrogate
+                | GeneralCategory::PrivateUse
+                | GeneralCategory::Unassigned
+                | GeneralCategory::SpaceSeparator
+                | GeneralCategory::LineSeparator
+                | GeneralCategory::ParagraphSeparator
+        ),
+    }
 }
 
 pub fn range_len(start: i64, stop: i64, step: i64) -> i64 {

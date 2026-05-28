@@ -12,11 +12,11 @@ print(repr('abc'.translate(t2)))  # '\udfffbc'
 
 # Non-surrogate just before surrogate range (U+D7FF) — must still work
 t3 = str.maketrans({'a': 0xD7FF})
-print(repr('abc'.translate(t3)))  # '퟿bc'
+print(repr('abc'.translate(t3)))  # '\ud7ffbc'
 
 # Non-surrogate just after surrogate range (U+E000) — must still work
 t4 = str.maketrans({'a': 0xE000})
-print(repr('abc'.translate(t4)))  # 'bc'
+print(repr('abc'.translate(t4)))  # '\ue000bc'
 
 # Multiple surrogates in one call
 t5 = str.maketrans({'a': 0xDC00, 'b': 0xD800})
