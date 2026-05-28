@@ -1,4 +1,4 @@
-# OSError structured attributes: errno, strerror, filename, filename2.
+# OSError structured attributes: errno, strerror, filename, filename2. Windows-portable.
 #
 # CPython 3.12 sets these on every OSError (and subclass) raised from a real
 # OS operation, and also when the class is constructed with the 2- or 3-arg
