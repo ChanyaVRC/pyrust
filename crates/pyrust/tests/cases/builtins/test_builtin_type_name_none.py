@@ -64,6 +64,24 @@ msg = capture(lambda: "x".replace("a", None))
 assert msg == "replace() argument 2 must be str, not None", repr(msg)
 print(msg)
 
+# --- str.removeprefix() / removesuffix() ---
+msg = capture(lambda: "x".removeprefix(None))
+assert msg == "removeprefix() argument must be str, not None", repr(msg)
+print(msg)
+
+msg = capture(lambda: "x".removesuffix(None))
+assert msg == "removesuffix() argument must be str, not None", repr(msg)
+print(msg)
+
+# --- str.maketrans() argument 2 and 3 ---
+msg = capture(lambda: str.maketrans("a", None))
+assert msg == "maketrans() argument 2 must be str, not None", repr(msg)
+print(msg)
+
+msg = capture(lambda: str.maketrans("a", "b", None))
+assert msg == "maketrans() argument 3 must be str, not None", repr(msg)
+print(msg)
+
 # --- Non-None arguments still use the class name ---
 msg = capture(lambda: b"x".decode(42))
 assert "not int" in msg, repr(msg)
@@ -72,6 +90,12 @@ msg = capture(lambda: "x".encode(42))
 assert "not int" in msg, repr(msg)
 
 msg = capture(lambda: "x".replace(42, "a"))
+assert "not int" in msg, repr(msg)
+
+msg = capture(lambda: "x".removeprefix(42))
+assert "not int" in msg, repr(msg)
+
+msg = capture(lambda: str.maketrans("a", 42))
 assert "not int" in msg, repr(msg)
 
 # --- Other builtins still use "NoneType" for None ---
