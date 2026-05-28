@@ -5873,8 +5873,13 @@ fn divmod_int_int(
             ));
         }
         let modulo = py_mod_i64(a, b);
-        let quotient = (a - modulo) / b;
-        return Ok(Value::tuple(vec![Value::int(quotient), Value::int(modulo)]));
+        // `a - modulo` can overflow i64 when `a` is near `i64::MIN` and
+        // `modulo > 0` (e.g. `divmod(-2**63, 3)` → modulo=1, a-modulo wraps).
+        // Fall through to BigInt arithmetic in that case.
+        if let Some(a_adj) = a.checked_sub(modulo) {
+            let quotient = a_adj / b;
+            return Ok(Value::tuple(vec![Value::int(quotient), Value::int(modulo)]));
+        }
     }
     // BigInt path: at least one operand doesn't fit in i64.
     let a_big = a.to_bigint();

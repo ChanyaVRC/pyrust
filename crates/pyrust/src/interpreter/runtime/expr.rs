@@ -2934,7 +2934,14 @@ impl Interpreter {
                 ));
             }
             let modulo = py_mod_i64(a, b);
-            return Ok(Value::int((a - modulo) / b));
+            // `a - modulo` can overflow i64 when `a` is near `i64::MIN` and
+            // `modulo > 0` (e.g. `(-2**63) // 3` → modulo=1, a-modulo wraps).
+            // Promote to BigInt for exact floor division in that case.
+            if let Some(a_adj) = a.checked_sub(modulo) {
+                return Ok(Value::int(a_adj / b));
+            }
+            let (q, _) = bigint_divmod_floor(&PyBigInt::from(a), &PyBigInt::from(b));
+            return Ok(Value::bigint(q));
         }
         // BigInt cross-type arms (#485): once #421 promotes overflow to
         // BigInt, `(2**64) // 2` arrives here with a BigInt operand.
