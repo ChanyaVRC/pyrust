@@ -4578,12 +4578,14 @@ pyrust_module! {
         //   type(obj)                                  — returns type(obj)
         // The one-arg form is handled by the "type" registry entry, not here.
         // Here we always expect exactly 4 args (mcs + name + bases + namespace).
+        // CPython reports the count excluding the implicit first `mcs` argument,
+        // so "takes exactly 3 arguments (N given)" where N = args.len() - 1.
         if args.len() != 4 {
             return Err(PyError::named(
                 "TypeError",
                 format!(
-                    "type.__new__() takes exactly 4 arguments ({} given)",
-                    args.len()
+                    "type.__new__() takes exactly 3 arguments ({} given)",
+                    args.len().saturating_sub(1)
                 ),
             ));
         }
