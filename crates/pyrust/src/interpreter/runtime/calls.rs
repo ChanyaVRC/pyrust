@@ -2376,6 +2376,20 @@ impl Interpreter {
     }
 
     pub(crate) fn parse_print_options_expanded(&mut self, args: &[ExpandedCallArg]) -> Result<PrintOptions> {
+        // First pass: reject any unknown keyword name before type-checking valid ones.
+        // CPython 3.12 raises the unknown-keyword error first regardless of argument order.
+        for arg in args {
+            if let Some(name) = arg.name.as_deref() {
+                if !matches!(name, "sep" | "end" | "file" | "flush") {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("'{}' is an invalid keyword argument for print()", name),
+                    ));
+                }
+            }
+        }
+
+        // Second pass: extract and validate known keyword arguments.
         let mut values = Vec::new();
         let mut sep = String::from(" ");
         let mut end = String::from("\n");
@@ -2401,12 +2415,7 @@ impl Interpreter {
                 Some("flush") => {
                     flush = self.truthy_value(&value)?;
                 }
-                Some(other) => {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!("'{}' is an invalid keyword argument for print()", other),
-                    ));
-                }
+                Some(_) => unreachable!("unknown keywords already rejected in first pass"),
             }
         }
 
