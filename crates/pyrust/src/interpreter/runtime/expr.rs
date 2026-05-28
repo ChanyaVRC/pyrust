@@ -2052,12 +2052,16 @@ impl Interpreter {
                 self.floor_div(coerce_numeric(left), coerce_numeric(right))
             }
             BinaryOp::Mod => {
-                if let Some(r) = self.try_dunder_binary(&left, &right, "__mod__", "__rmod__") {
-                    return r;
-                }
                 // str % args: printf-style formatting (#1393).
+                // Must come BEFORE try_dunder_binary so that rhs.__rmod__ is
+                // never consulted when lhs is str — CPython's str.__mod__ is
+                // never NotImplemented, so the reflected slot must not run
+                // (#1472).
                 if matches!(left.kind(), ValueKind::Str(_)) {
                     return self.str_printf_format(left, right);
+                }
+                if let Some(r) = self.try_dunder_binary(&left, &right, "__mod__", "__rmod__") {
+                    return r;
                 }
                 // Issue #1204: extract backing for scalar primitive subclasses.
                 self.modulo(coerce_numeric(left), coerce_numeric(right))
