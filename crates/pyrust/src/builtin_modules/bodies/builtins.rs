@@ -4276,9 +4276,22 @@ pyrust_module! {
 
     /// Issue #1256: `object.__repr__(self)` — the default __repr__ on `object`.
     ///
-    /// Returns the canonical `<ClassName object at 0xADDR>` format for
-    /// instances.  For primitives (int, str, …) this delegates to the
-    /// primitive's own repr via `value.repr()`.
+    /// Returns the canonical `<ClassName object at 0xADDR>` format for plain
+    /// instances.  For `PyInstance` values that carry a primitive backing store
+    /// (e.g. a `MyList(list)` subclass instance), delegates to the backing data
+    /// so that `list.__repr__(MyList([1,2,3]))` returns `[1, 2, 3]` rather than
+    /// the generic `<__main__.MyList object at 0x...>` form.
+    ///
+    /// Issue #1600: regression from PR #1595 (primitive types got
+    /// `base: Some(OBJECT_CLASS)`), which caused `list.__repr__` to resolve via
+    /// MRO to this sentinel and fall through to `self_val.repr()`.
+    ///
+    /// Note: we call `render_value_repr(interp, &backing)` (on the raw backing
+    /// value, NOT on the instance) so that nested `PyInstance` elements inside a
+    /// list/dict/tuple get their own `__repr__` dispatched correctly, but we do
+    /// NOT re-run the MRO lookup on the outer instance — this matches CPython's
+    /// behaviour where `list.__repr__(MyList_with_custom_repr)` still renders the
+    /// list contents, not the custom `__repr__`.
     ///
     /// CPython signature: `object.__repr__(self, /)`
     #[py_name = "object.__repr__"]
@@ -4289,6 +4302,55 @@ pyrust_module! {
                 "descriptor '__repr__' of 'object' needs an argument".to_string(),
             )
         })?;
+        // Issue #1600: for a PyInstance with backing primitive data, render the
+        // backing value directly (bypassing MRO lookup) so that
+        // `list.__repr__(MyList([1,2,3]))` returns `[1, 2, 3]`.
+        if let ValueKind::PyInstance(inst_rc) = self_val.kind() {
+            let inst_rc = Rc::clone(inst_rc);
+            if let Some(backing) = instance_builtin_data(&inst_rc) {
+                let class = Rc::clone(&inst_rc.borrow().class);
+                let s = match backing.kind() {
+                    ValueKind::Str(_)
+                    | ValueKind::Int(_)
+                    | ValueKind::BigInt(_)
+                    | ValueKind::Bool(_)
+                    | ValueKind::Float(_)
+                    | ValueKind::Bytes(_) => backing.repr(),
+                    ValueKind::List(_) | ValueKind::Dict(_) | ValueKind::Tuple(_) => {
+                        render_value_repr(_interp, &backing)?
+                    }
+                    ValueKind::Set(items) => {
+                        let class_name = class.borrow().name.clone();
+                        if items.is_empty() {
+                            format!("{class_name}()")
+                        } else {
+                            let inner = render_value_repr(_interp, &backing)?;
+                            format!("{class_name}({inner})")
+                        }
+                    }
+                    ValueKind::BuiltinObject { ops, .. }
+                        if ops.type_name() == pyrust_builtins::frozenset::TYPE_NAME =>
+                    {
+                        let class_name = class.borrow().name.clone();
+                        let items = pyrust_builtins::frozenset::as_items(&backing);
+                        let is_empty = items.as_ref().map_or(true, |rc| rc.is_empty());
+                        if is_empty {
+                            format!("{class_name}()")
+                        } else {
+                            let snapshot: Vec<_> =
+                                items.unwrap().iter().cloned().collect();
+                            let mut parts = Vec::with_capacity(snapshot.len());
+                            for k in &snapshot {
+                                parts.push(render_key_repr(_interp, k)?);
+                            }
+                            format!("{class_name}({{{}}})", parts.join(", "))
+                        }
+                    }
+                    _ => self_val.repr(),
+                };
+                return Ok(Value::string(s));
+            }
+        }
         Ok(Value::string(self_val.repr()))
     }
 
