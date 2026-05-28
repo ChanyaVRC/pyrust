@@ -53,6 +53,37 @@ pyrust_module! {
         // scope for this implementation.
         // <https://docs.python.org/3/library/sys.html#sys.modules>
         "modules"      => Value::dict(indexmap::IndexMap::new()),
+        // CPython: sys.executable — string giving the absolute path of the
+        // Python interpreter binary.  pyrust uses an empty string because
+        // there is no single well-defined binary path.
+        // <https://docs.python.org/3/library/sys.html#sys.executable>
+        "executable"   => Value::string(""),
+        // CPython: sys.byteorder — "little" or "big" reflecting native byte
+        // order of the running platform.
+        // <https://docs.python.org/3/library/sys.html#sys.byteorder>
+        "byteorder"    => Value::string(sys_byteorder()),
+        // CPython: sys.prefix / exec_prefix / base_prefix / base_exec_prefix
+        // — installation directory paths.  pyrust has no installation, so all
+        // four are the empty string.
+        // <https://docs.python.org/3/library/sys.html#sys.prefix>
+        "prefix"         => Value::string(""),
+        "exec_prefix"    => Value::string(""),
+        "base_prefix"    => Value::string(""),
+        "base_exec_prefix" => Value::string(""),
+        // CPython: sys.hexversion — version encoded as a single integer.
+        // 3.12.0 final → 0x030c00f0
+        // (major<<24 | minor<<16 | micro<<8 | 0xf0 for 'final' | serial)
+        // <https://docs.python.org/3/library/sys.html#sys.hexversion>
+        "hexversion"   => Value::int(0x030c_00f0),
+        // CPython: sys.copyright — string containing copyright pertaining to
+        // the Python interpreter.  pyrust returns an empty string.
+        // <https://docs.python.org/3/library/sys.html#sys.copyright>
+        "copyright"    => Value::string(""),
+        // CPython: sys.flags — named struct exposing command-line flag status.
+        // pyrust uses a PyInstance of the `flags` class with all fields set to
+        // their default zero values, matching the normal-run state in CPython.
+        // <https://docs.python.org/3/library/sys.html#sys.flags>
+        "flags"        => make_flags(),
     }
 
     /// CPython: sys.exit([arg]) — raises `SystemExit(arg)`.
@@ -338,6 +369,19 @@ const fn sys_platform() -> &'static str {
     }
 }
 
+/// Return the byte-order string matching CPython's `sys.byteorder` for the
+/// current compilation target.
+const fn sys_byteorder() -> &'static str {
+    #[cfg(target_endian = "little")]
+    {
+        "little"
+    }
+    #[cfg(target_endian = "big")]
+    {
+        "big"
+    }
+}
+
 // ── version_info helpers ─────────────────────────────────────────────────────
 
 /// The five fields of `sys.version_info`, extracted from a PyInstance.
@@ -463,6 +507,61 @@ fn normalise_index(i: i64, len: usize) -> Result<usize> {
         ));
     }
     Ok(idx as usize)
+}
+
+// ── flags class singleton ────────────────────────────────────────────────────
+//
+// CPython exposes `sys.flags` as a named-tuple-like object with a `flags`
+// class.  We build a minimal PyInstance whose fields all hold their default
+// values (all-zeros for the integer fields, False for the bool fields).  The
+// class carries only a `__repr__` so that `repr(sys.flags)` produces a
+// recognisable string.
+
+thread_local! {
+    static FLAGS_CLASS: Rc<RefCell<PyClass>> = {
+        Rc::new(RefCell::new(PyClass {
+            name: "flags".to_string(),
+            qualname: "flags".to_string(),
+            base: None,
+            extra_bases: vec![],
+            attrs: indexmap::IndexMap::new(),
+            mutation_version: std::cell::Cell::new(0),
+            subclasses: std::cell::RefCell::new(vec![]),
+            metatype: None,
+        }))
+    };
+}
+
+/// Build the `sys.flags` singleton value.
+fn make_flags() -> Value {
+    FLAGS_CLASS.with(|class| {
+        let mut attrs: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
+        // Fields and their defaults match CPython's sys.flags for a normal run
+        // with no command-line options (all optimization / debug flags are 0).
+        // <https://docs.python.org/3/library/sys.html#sys.flags>
+        attrs.insert("debug".to_string(), Value::int(0));
+        attrs.insert("inspect".to_string(), Value::int(0));
+        attrs.insert("interactive".to_string(), Value::int(0));
+        attrs.insert("optimize".to_string(), Value::int(0));
+        attrs.insert("dont_write_bytecode".to_string(), Value::int(0));
+        attrs.insert("no_user_site".to_string(), Value::int(0));
+        attrs.insert("no_site".to_string(), Value::int(0));
+        attrs.insert("ignore_environment".to_string(), Value::int(0));
+        attrs.insert("verbose".to_string(), Value::int(0));
+        attrs.insert("bytes_warning".to_string(), Value::int(0));
+        attrs.insert("quiet".to_string(), Value::int(0));
+        attrs.insert("hash_randomization".to_string(), Value::int(0));
+        attrs.insert("isolated".to_string(), Value::int(0));
+        attrs.insert("dev_mode".to_string(), Value::bool_(false));
+        attrs.insert("utf8_mode".to_string(), Value::int(0));
+        attrs.insert("warn_default_encoding".to_string(), Value::int(0));
+        attrs.insert("safe_path".to_string(), Value::bool_(false));
+        attrs.insert("int_max_str_digits".to_string(), Value::int(4300));
+        Value::py_instance(Rc::new(RefCell::new(PyInstance {
+            class: Rc::clone(class),
+            attrs,
+        })))
+    })
 }
 
 // ── version_info class singleton ─────────────────────────────────────────────
