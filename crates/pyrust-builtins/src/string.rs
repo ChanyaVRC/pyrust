@@ -1,7 +1,7 @@
 use indexmap::IndexMap;
 use pyrust_core::{
     PyError, PyKey, Result, Value, ValueKind, builtin_type_name, expect_arg_count,
-    extract_fill_char, extract_int, extract_optional_int,
+    extract_fill_char, extract_int, extract_optional_int, py_value_display_name,
 };
 use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
@@ -1228,7 +1228,7 @@ fn str_replace(s: &str, args: &[Value]) -> Result<Value> {
                 "TypeError",
                 format!(
                     "replace() argument 1 must be str, not {}",
-                    builtin_type_name(&args[0])
+                    py_value_display_name(&args[0])
                 ),
             ));
         }
@@ -1240,7 +1240,7 @@ fn str_replace(s: &str, args: &[Value]) -> Result<Value> {
                 "TypeError",
                 format!(
                     "replace() argument 2 must be str, not {}",
-                    builtin_type_name(&args[1])
+                    py_value_display_name(&args[1])
                 ),
             ));
         }
@@ -1576,7 +1576,7 @@ fn str_encode(s: &str, args: &[Value]) -> Result<Value> {
                     "TypeError",
                     format!(
                         "encode() argument 'encoding' must be str, not {}",
-                        builtin_type_name(v)
+                        py_value_display_name(v)
                     ),
                 ));
             }
@@ -1591,7 +1591,7 @@ fn str_encode(s: &str, args: &[Value]) -> Result<Value> {
                     "TypeError",
                     format!(
                         "encode() argument 'errors' must be str, not {}",
-                        builtin_type_name(v)
+                        py_value_display_name(v)
                     ),
                 ));
             }

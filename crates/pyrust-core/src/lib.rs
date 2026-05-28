@@ -3535,6 +3535,26 @@ pub fn builtin_type_name(value: &Value) -> Cow<'static, str> {
     }
 }
 
+/// Display name for a value used in error messages of the form `"not <name>"`.
+///
+/// CPython special-cases `None` in certain TypeError contexts: it prints the
+/// singleton display name (`"None"`) rather than the type name (`"NoneType"`).
+/// Affected methods include `bytes.decode()`, `str.encode()`, `str.replace()`,
+/// and similar argument-type checks where the message reads
+/// `"argument '<param>' must be str, not <name>"`.
+///
+/// Use this function instead of [`builtin_type_name`] when constructing those
+/// messages. Use [`builtin_type_name`] everywhere else (e.g. `"'NoneType' object
+/// is not iterable"`, `"bad operand type for abs(): 'NoneType'"`) where CPython
+/// still uses the class name.
+pub fn py_value_display_name(value: &Value) -> Cow<'static, str> {
+    if matches!(value.kind(), ValueKind::None) {
+        Cow::Borrowed("None")
+    } else {
+        builtin_type_name(value)
+    }
+}
+
 /// Render a `bytes` value the way Python does (b'...' with escapes).
 fn bytes_repr(bytes: &[u8]) -> String {
     // Choose a quote: if any single quote and no double quote, use double; else single.
