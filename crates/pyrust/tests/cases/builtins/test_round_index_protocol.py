@@ -9,6 +9,11 @@ class Indexable:
     def __index__(self):
         return 2
 
+class IndexReturnsSubclass:
+    """__index__ returning an int subclass — CPython accepts with DeprecationWarning."""
+    def __index__(self):
+        return MyInt(2)
+
 class BadIndex:
     def __index__(self):
         return "oops"
@@ -28,6 +33,9 @@ print(round(1234, MyInt(-2)))       # 1200
 
 # custom __index__ as ndigits
 print(round(3.14159, Indexable()))  # 3.14
+
+# __index__ returning an int subclass (CPython accepts, DeprecationWarning in 3.12)
+print(round(3.14159, IndexReturnsSubclass()))  # 3.14
 
 # plain int ndigits still works (no regression)
 print(round(3.14159, 2))            # 3.14

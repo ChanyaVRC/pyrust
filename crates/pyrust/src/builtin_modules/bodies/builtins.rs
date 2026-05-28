@@ -2406,6 +2406,14 @@ pyrust_module! {
                                 )?
                             }
                         };
+                        // CPython's operator.index() accepts __index__ returning
+                        // an int subclass (with a DeprecationWarning in 3.12).
+                        // Coerce PyInstance results so int subclasses are unwrapped.
+                        let result = if matches!(result.kind(), ValueKind::PyInstance(_)) {
+                            coerce_numeric(result)
+                        } else {
+                            result
+                        };
                         match result.kind() {
                             ValueKind::Int(n) => Some(n.clamp(-(i32::MAX as i64), i32::MAX as i64) as i32),
                             ValueKind::Bool(b) => Some(b as i32),
@@ -2539,6 +2547,13 @@ pyrust_module! {
                                             &[],
                                         )?
                                     }
+                                };
+                                // CPython's operator.index() accepts __index__
+                                // returning an int subclass (DeprecationWarning in 3.12).
+                                let result = if matches!(result.kind(), ValueKind::PyInstance(_)) {
+                                    coerce_numeric(result)
+                                } else {
+                                    result
                                 };
                                 match result.kind() {
                                     ValueKind::Int(n) => Some(n.clamp(-(i32::MAX as i64), i32::MAX as i64) as i32),
