@@ -516,6 +516,13 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
         .borrow_mut()
         .attrs
         .insert("fromhex".to_string(), Value::builtin_function("float.fromhex"));
+    // `from_bytes` is a classmethod: register it in int_class.attrs so that
+    // both `int.from_bytes(b, 'big')` and `(5).from_bytes(b, 'big')` resolve
+    // to the same `BuiltinFunction("int.from_bytes")` sentinel.
+    int_class
+        .borrow_mut()
+        .attrs
+        .insert("from_bytes".to_string(), Value::builtin_function("int.from_bytes"));
     // Issue #988: register `__init__` on dict/list/set so that
     // `super().__init__()` from a subclass can resolve it via MRO lookup
     // without raising AttributeError.  The registered dispatch returns None
@@ -675,7 +682,13 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
 /// (`list.append`) returns a `BuiltinFunction("list.append")` sentinel
 /// dispatched by the unified `<type>.<method>` arm in
 /// `call_function_expanded`.
-const INT_METHODS: &[&str] = &["bit_length", "bit_count", "is_integer"];
+const INT_METHODS: &[&str] = &[
+    "bit_length",
+    "bit_count",
+    "is_integer",
+    "to_bytes",
+    "as_integer_ratio",
+];
 const BYTES_METHODS: &[&str] = pyrust_builtins::bytes::METHODS;
 
 const STR_METHODS: &[&str] = &[
