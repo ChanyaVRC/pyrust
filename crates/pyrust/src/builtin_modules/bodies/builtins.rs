@@ -7105,25 +7105,36 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
         let instance_rc = Rc::clone(instance);
         let class = Rc::clone(&instance_rc.borrow().class);
         if let Some(method_val) = lookup_class_attr(&class, "__repr__") {
-            let result = invoke_class_method(
-                interp,
-                method_val,
-                Value::py_instance(instance_rc),
-                &[],
-            )?;
-            return if matches!(result.kind(), ValueKind::Str(_)) {
-                Ok(result.as_str().unwrap_or("").to_string())
-            } else {
-                Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "__repr__ returned non-string (type {})",
-                        pyrust_core::builtin_type_name(&result)
-                    ),
-                ))
-            };
+            // Issue #1537: primitive types now have `object` as an explicit
+            // MRO base, so `object.__repr__` is reachable for user subclasses
+            // (e.g. `class MyList(list): pass`).  Skip the `object.__repr__`
+            // sentinel when backing data is present — the backing-data path
+            // below renders the contents correctly, matching CPython's
+            // `list.__repr__`, `dict.__repr__`, etc. behaviour.
+            let is_object_repr =
+                matches!(method_val.kind(), ValueKind::BuiltinFunction("object.__repr__"));
+            if !is_object_repr || instance_builtin_data(&instance_rc).is_none() {
+                let result = invoke_class_method(
+                    interp,
+                    method_val,
+                    Value::py_instance(instance_rc),
+                    &[],
+                )?;
+                return if matches!(result.kind(), ValueKind::Str(_)) {
+                    Ok(result.as_str().unwrap_or("").to_string())
+                } else {
+                    Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "__repr__ returned non-string (type {})",
+                            pyrust_core::builtin_type_name(&result)
+                        ),
+                    ))
+                };
+            }
         }
-        // Issue #1204: no __repr__ defined — if the instance has a scalar
+        // Issue #1204: no __repr__ defined (or object.__repr__ skipped) —
+        // if the instance has a scalar
         // primitive backing (str/int/float/bytes subclass), delegate repr()
         // to the backing value so that repr(MyInt(42)) gives "42" rather
         // than the default object repr.  (Counter/defaultdict/deque define
@@ -7480,8 +7491,20 @@ fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result
             }
         }
     }
+    // Issue #1537: skip `object.__str__` / `object.__repr__` sentinels when
+    // the instance has a primitive backing store.  Primitive types now set
+    // `object` as an explicit MRO base, making these reachable for user
+    // subclasses.  The backing-data path below renders the contents correctly.
     for dunder in &["__str__", "__repr__"] {
         if let Some(method_val) = lookup_class_attr(&class, dunder) {
+            let is_object_dunder = matches!(
+                method_val.kind(),
+                ValueKind::BuiltinFunction("object.__str__")
+                    | ValueKind::BuiltinFunction("object.__repr__")
+            );
+            if is_object_dunder && instance_builtin_data(&inst_rc).is_some() {
+                continue;
+            }
             let result = invoke_class_method(
                 interp,
                 method_val,
@@ -7497,7 +7520,8 @@ fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result
             };
         }
     }
-    // Issue #1205: no __str__ or __repr__ in MRO — delegate to the backing
+    // Issue #1205: no __str__ or __repr__ in MRO (or object.* sentinels
+    // skipped) — delegate to the backing
     // container so that list/dict/tuple/set subclasses render their contents
     // via str() just as they do via repr().
     if let Some(backing) = instance_builtin_data(&inst_rc) {

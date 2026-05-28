@@ -5068,24 +5068,32 @@ impl Interpreter {
                 return Ok(value.to_py_str());
             }
         }
-        // Try user-defined __str__ first.
+        // Try user-defined __str__ first.  Skip `object.__str__` when the
+        // instance has a primitive backing store (issue #1537): primitive
+        // types now have `object` as an explicit MRO base, making
+        // `object.__str__` reachable for subclasses.  The backing-data
+        // path below produces the correct output for those cases.
         if let Some(method_val) = lookup_class_attr(&class, "__str__") {
-            let result = invoke_class_method(
-                self,
-                method_val,
-                Value::py_instance(Rc::clone(&inst_rc)),
-                &[],
-            )?;
-            return match result.kind() {
-                ValueKind::Str(s) => Ok(s.to_string()),
-                _ => Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "__str__ returned non-string (type {})",
-                        pyrust_core::builtin_type_name(&result)
-                    ),
-                )),
-            };
+            let is_object_str =
+                matches!(method_val.kind(), ValueKind::BuiltinFunction("object.__str__"));
+            if !is_object_str || instance_builtin_data(&inst_rc).is_none() {
+                let result = invoke_class_method(
+                    self,
+                    method_val,
+                    Value::py_instance(Rc::clone(&inst_rc)),
+                    &[],
+                )?;
+                return match result.kind() {
+                    ValueKind::Str(s) => Ok(s.to_string()),
+                    _ => Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "__str__ returned non-string (type {})",
+                            pyrust_core::builtin_type_name(&result)
+                        ),
+                    )),
+                };
+            }
         }
         // Issue #1542: str/bytes subclasses return the raw backing value for
         // str() even when the subclass defines __repr__.  CPython's
@@ -5100,23 +5108,28 @@ impl Interpreter {
         // No user __str__ and no str/bytes backing: fall through to __repr__,
         // then to the numeric/container backing, matching CPython's str()
         // delegation chain for int/float subclasses and container subclasses.
+        // Same object.__repr__ sentinel skip as in render_instance_repr.
         if let Some(method_val) = lookup_class_attr(&class, "__repr__") {
-            let result = invoke_class_method(
-                self,
-                method_val,
-                Value::py_instance(Rc::clone(&inst_rc)),
-                &[],
-            )?;
-            return match result.kind() {
-                ValueKind::Str(s) => Ok(s.to_string()),
-                _ => Err(PyError::named(
-                    "TypeError",
-                    format!(
-                        "__repr__ returned non-string (type {})",
-                        pyrust_core::builtin_type_name(&result)
-                    ),
-                )),
-            };
+            let is_object_repr =
+                matches!(method_val.kind(), ValueKind::BuiltinFunction("object.__repr__"));
+            if !is_object_repr || instance_builtin_data(&inst_rc).is_none() {
+                let result = invoke_class_method(
+                    self,
+                    method_val,
+                    Value::py_instance(Rc::clone(&inst_rc)),
+                    &[],
+                )?;
+                return match result.kind() {
+                    ValueKind::Str(s) => Ok(s.to_string()),
+                    _ => Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "__repr__ returned non-string (type {})",
+                            pyrust_core::builtin_type_name(&result)
+                        ),
+                    )),
+                };
+            }
         }
         // Issue #1205 / #1542: no __str__ or __repr__ in MRO — delegate to
         // the backing value so that scalar and container subclasses render
@@ -5702,26 +5715,37 @@ fn render_instance_repr(interp: &mut Interpreter, value: &Value) -> Result<Strin
     let inst_rc = Rc::clone(&inst);
     let class = Rc::clone(&inst_rc.borrow().class);
     if let Some(method_val) = lookup_class_attr(&class, "__repr__") {
-        let result = invoke_class_method(
-            interp,
-            method_val,
-            Value::py_instance(Rc::clone(&inst_rc)),
-            &[],
-        )?;
-        return match result.kind() {
-            ValueKind::Str(s) => Ok(s.to_string()),
-            _ => Err(PyError::named(
-                "TypeError",
-                format!(
-                    "__repr__ returned non-string (type {})",
-                    pyrust_core::builtin_type_name(&result)
-                ),
-            )),
-        };
+        // Issue #1537: primitive types now expose `object` as an explicit
+        // MRO base, so `object.__repr__` is reachable for user subclasses
+        // (e.g. `class MyList(list): pass`).  Skip the `object.__repr__`
+        // sentinel when the instance has a primitive backing store — the
+        // backing-data path below renders the contents correctly, matching
+        // CPython's `list.__repr__`, `dict.__repr__`, etc. behaviour.
+        let is_object_repr =
+            matches!(method_val.kind(), ValueKind::BuiltinFunction("object.__repr__"));
+        if !is_object_repr || instance_builtin_data(&inst_rc).is_none() {
+            let result = invoke_class_method(
+                interp,
+                method_val,
+                Value::py_instance(Rc::clone(&inst_rc)),
+                &[],
+            )?;
+            return match result.kind() {
+                ValueKind::Str(s) => Ok(s.to_string()),
+                _ => Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "__repr__ returned non-string (type {})",
+                        pyrust_core::builtin_type_name(&result)
+                    ),
+                )),
+            };
+        }
     }
-    // Issue #1205: no __repr__ in MRO — delegate to backing container so
-    // that list/dict/tuple/set subclasses render their contents rather than
-    // the generic `<ClassName object at 0x...>` object repr.
+    // Issue #1205: no __repr__ in MRO (or object.__repr__ skipped above) —
+    // delegate to backing container so that list/dict/tuple/set subclasses
+    // render their contents rather than the generic `<ClassName object at
+    // 0x...>` object repr.
     // Use render_value_repr (interp-aware) so that PyInstance elements
     // inside the backing container have their __repr__ called correctly.
     // Issue #1542: scalar backings (int/float/str/bytes subclasses) also
