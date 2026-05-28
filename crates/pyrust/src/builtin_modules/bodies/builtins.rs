@@ -4425,7 +4425,7 @@ pyrust_module! {
             [] => {
                 return Err(PyError::named(
                     "TypeError",
-                    "int.__new__() takes at least 1 argument (0 given)".to_string(),
+                    "int.__new__(): not enough arguments".to_string(),
                 ));
             }
             [first, rest @ ..] => (first.value.clone(), rest),
@@ -4472,7 +4472,7 @@ pyrust_module! {
             [] => {
                 return Err(PyError::named(
                     "TypeError",
-                    "str.__new__() takes at least 1 argument (0 given)".to_string(),
+                    "str.__new__(): not enough arguments".to_string(),
                 ));
             }
             [first, rest @ ..] => (first.value.clone(), rest),
@@ -4519,7 +4519,7 @@ pyrust_module! {
             [] => {
                 return Err(PyError::named(
                     "TypeError",
-                    "float.__new__() takes at least 1 argument (0 given)".to_string(),
+                    "float.__new__(): not enough arguments".to_string(),
                 ));
             }
             [first, rest @ ..] => (first.value.clone(), rest),
@@ -4568,7 +4568,7 @@ pyrust_module! {
             [] => {
                 return Err(PyError::named(
                     "TypeError",
-                    "bytes.__new__() takes at least 1 argument (0 given)".to_string(),
+                    "bytes.__new__(): not enough arguments".to_string(),
                 ));
             }
             [first, rest @ ..] => (first.value.clone(), rest),
