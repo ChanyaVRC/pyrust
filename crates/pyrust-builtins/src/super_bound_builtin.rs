@@ -43,6 +43,37 @@ impl BuiltinTypeOps for SuperBoundBuiltinOps {
         true
     }
 
+    /// Expose `__name__`, `__qualname__`, `__self__`, `__module__`, and
+    /// `__doc__` so that e.g. `int.__init_subclass__.__name__` works.
+    /// CPython exposes these on `builtin_function_or_method` objects.
+    fn getattr(&self, state: &BuiltinState, name: &str) -> Option<Value> {
+        let borrow = state.borrow();
+        let s = borrow.downcast_ref::<SuperBoundBuiltinState>()?;
+        match name {
+            "__name__" => {
+                // "object.__init_subclass__" → "__init_subclass__"
+                let bare = s.fn_name.rsplit('.').next().unwrap_or(&s.fn_name);
+                Some(Value::string(bare))
+            }
+            "__qualname__" => {
+                // Bind to the instance's class name if available.
+                // E.g. for `int.__init_subclass__`, returns "int.__init_subclass__".
+                let cls_name = match s.instance.kind() {
+                    ValueKind::PyClass(c) => c.borrow().name.clone(),
+                    _ => pyrust_core::builtin_type_name(&s.instance).into_owned(),
+                };
+                let bare = s.fn_name.rsplit('.').next().unwrap_or(&s.fn_name);
+                Some(Value::string(format!("{cls_name}.{bare}")))
+            }
+            "__self__" => Some(s.instance.clone()),
+            // CPython's classmethod_descriptor.__module__ is None (unlike
+            // top-level builtin_function_or_method which returns "builtins").
+            "__module__" => Some(Value::none()),
+            "__doc__" => Some(Value::none()),
+            _ => None,
+        }
+    }
+
     // `call` is not implemented — same reason as `bound_method`: we need the
     // interpreter handle to call the registry dispatch.  The interpreter
     // intercepts via `as_super_bound_builtin` before the trait default.

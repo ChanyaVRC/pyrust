@@ -4417,8 +4417,12 @@ impl Interpreter {
                     // (classmethod semantics: prepended as the first positional argument).
                     // Look up via the MRO walk so an ancestor that defines the hook is
                     // reached even if the direct base doesn't override it.
-                    // Skip silently when no base exists (top-level class) or when the
-                    // base MRO has no __init_subclass__ defined.
+                    //
+                    // Issue #1080: classes with no explicit base still implicitly inherit
+                    // from `object`, so `object.__init_subclass__` must be called even
+                    // then.  Fall back to the `object` singleton when `base` is None.
+                    // This ensures `class A(tag="x"):` raises TypeError (unexpected kwarg)
+                    // matching CPython parity.
                     //
                     // Issue #1252: materialize `maybe_base` in a separate let so the
                     // temporary Ref<PyClass> from `class.borrow()` is dropped before
@@ -4427,31 +4431,33 @@ impl Interpreter {
                     // __init_subclass__ does `cls.flag = True` (→ borrow_mut on the
                     // same RefCell), it panics with "RefCell already borrowed".
                     let maybe_base = class.borrow().base.clone();
-                    if let Some(base_rc) = maybe_base {
-                        if let Some(method_val) =
-                            lookup_class_attr(&base_rc, "__init_subclass__")
-                        {
-                            let new_cls = Value::py_class(Rc::clone(&class));
-                            // Build the PEP 487 keyword args from the registers
-                            // and the kwarg names stored in the class proto.
-                            let kwarg_args: ExpandedArgBuf = class_kwarg_names
-                                .iter()
-                                .enumerate()
-                                .map(|(i, key)| {
-                                    let reg = (*kwarg_base as usize + i) as crate::bytecode::Reg;
-                                    ExpandedCallArg {
-                                        name: Some(key.clone()),
-                                        value: regs[reg as usize].clone(),
-                                    }
-                                })
-                                .collect();
-                            vm_try!(invoke_class_method(
-                                self,
-                                method_val,
-                                new_cls,
-                                &kwarg_args,
-                            ));
-                        }
+                    // Use the explicit base if present; otherwise fall through to object
+                    // (every class implicitly inherits from it).
+                    let lookup_base = maybe_base
+                        .unwrap_or_else(|| object_class_singleton());
+                    if let Some(method_val) =
+                        lookup_class_attr(&lookup_base, "__init_subclass__")
+                    {
+                        let new_cls = Value::py_class(Rc::clone(&class));
+                        // Build the PEP 487 keyword args from the registers
+                        // and the kwarg names stored in the class proto.
+                        let kwarg_args: ExpandedArgBuf = class_kwarg_names
+                            .iter()
+                            .enumerate()
+                            .map(|(i, key)| {
+                                let reg = (*kwarg_base as usize + i) as crate::bytecode::Reg;
+                                ExpandedCallArg {
+                                    name: Some(key.clone()),
+                                    value: regs[reg as usize].clone(),
+                                }
+                            })
+                            .collect();
+                        vm_try!(invoke_class_method(
+                            self,
+                            method_val,
+                            new_cls,
+                            &kwarg_args,
+                        ));
                     }
                     regs[*dst as usize] = Value::py_class(class);
                 }

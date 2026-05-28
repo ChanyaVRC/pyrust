@@ -282,7 +282,30 @@ impl Interpreter {
                         // staticmethod(non_fn): returns the wrapped value directly,
                         // matching CPython (`C.s` where `s = staticmethod(42)` → 42).
                         ClassDescTag::StaticMethodAny(w) => w,
-                        ClassDescTag::Other => value,
+                        // Issue #1080: builtin classmethods (e.g. `object.__init_subclass__`)
+                        // must be bound to `cls` when accessed on a class, just like
+                        // user-defined classmethods are bound via ClassBoundMethod.
+                        // CPython's classmethod_descriptor.__get__ returns a bound
+                        // builtin_function_or_method with __self__ = cls.
+                        ClassDescTag::Other => {
+                            let builtin_cm_name = match value.kind() {
+                                ValueKind::BuiltinFunction(fn_name)
+                                    if is_builtin_classmethod(fn_name) =>
+                                {
+                                    Some(fn_name.to_string())
+                                }
+                                _ => None,
+                            };
+                            match builtin_cm_name {
+                                Some(fn_name) => {
+                                    pyrust_builtins::super_bound_builtin::super_bound_builtin(
+                                        fn_name,
+                                        Value::py_class(Rc::clone(&class)),
+                                    )
+                                }
+                                None => value,
+                            }
+                        }
                     });
                 }
                 // Issue #1275: __module__ and __doc__ on built-in type objects.
@@ -446,7 +469,31 @@ impl Interpreter {
                                 }
                                 UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(&f)),
                             },
-                            None => value,
+                            // `object.__init_subclass__` is a builtin classmethod.
+                            // Bind obj_class so the dispatcher prepends it as `cls`
+                            // when `super().__init_subclass__(**kwargs)` is called inside
+                            // a user-defined `__init_subclass__` (PEP 487 / issue #1080).
+                            // Only wrap known builtin classmethods to avoid prepending
+                            // a class where an instance is expected (e.g. __init__).
+                            None => {
+                                let builtin_cm_name = match value.kind() {
+                                    ValueKind::BuiltinFunction(fn_name)
+                                        if is_builtin_classmethod(fn_name) =>
+                                    {
+                                        Some(fn_name.to_string())
+                                    }
+                                    _ => None,
+                                };
+                                match builtin_cm_name {
+                                    Some(fn_name) => {
+                                        pyrust_builtins::super_bound_builtin::super_bound_builtin(
+                                            fn_name,
+                                            Value::py_class(Rc::clone(&obj_class)),
+                                        )
+                                    }
+                                    None => value,
+                                }
+                            }
                         });
                     }
                 }
