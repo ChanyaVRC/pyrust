@@ -227,14 +227,23 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
         "startswith" => str_startswith(s, args),
         "endswith" => str_endswith(s, args),
         "isdigit" => Ok(Value::bool_(
-            !s.is_empty() && s.chars().all(is_python_digit),
+            !s.is_empty()
+                && if s.is_ascii() {
+                    // is_python_digit includes superscript/subscript No codepoints which
+                    // are all non-ASCII, so pure ASCII strings can shortcut with is_ascii_digit.
+                    s.bytes().all(|b| b.is_ascii_digit())
+                } else {
+                    // Use cesu8_codepoints so surrogate bytes don't reach chars().
+                    // char::from_u32 returns None for surrogates; None → false → all() fails.
+                    cesu8_codepoints(s).all(|n| char::from_u32(n).map_or(false, is_python_digit))
+                },
         )),
         "isalpha" => Ok(Value::bool_(
             !s.is_empty()
                 && if s.is_ascii() {
                     s.bytes().all(|b| b.is_ascii_alphabetic())
                 } else {
-                    s.chars().all(is_python_alpha)
+                    cesu8_codepoints(s).all(|n| char::from_u32(n).map_or(false, is_python_alpha))
                 },
         )),
         "isalnum" => Ok(Value::bool_(
@@ -242,7 +251,8 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
                 && if s.is_ascii() {
                     s.bytes().all(|b| b.is_ascii_alphanumeric())
                 } else {
-                    s.chars().all(|c| c.is_alphanumeric())
+                    cesu8_codepoints(s)
+                        .all(|n| char::from_u32(n).map_or(false, |c| c.is_alphanumeric()))
                 },
         )),
         "isspace" => Ok(Value::bool_(
@@ -251,7 +261,8 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
                     s.bytes()
                         .all(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c))
                 } else {
-                    s.chars().all(|c| c.is_whitespace())
+                    cesu8_codepoints(s)
+                        .all(|n| char::from_u32(n).map_or(false, |c| c.is_whitespace()))
                 },
         )),
         "isdecimal" => Ok(Value::bool_(
@@ -259,8 +270,11 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
                 && if s.is_ascii() {
                     s.bytes().all(|b| b.is_ascii_digit())
                 } else {
-                    s.chars()
-                        .all(|c| c.general_category() == GeneralCategory::DecimalNumber)
+                    cesu8_codepoints(s).all(|n| {
+                        char::from_u32(n).map_or(false, |c| {
+                            c.general_category() == GeneralCategory::DecimalNumber
+                        })
+                    })
                 },
         )),
         "isnumeric" => Ok(Value::bool_(
@@ -268,7 +282,7 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
                 && if s.is_ascii() {
                     s.bytes().all(|b| b.is_ascii_digit())
                 } else {
-                    s.chars().all(is_python_numeric)
+                    cesu8_codepoints(s).all(|n| char::from_u32(n).map_or(false, is_python_numeric))
                 },
         )),
         "islower" => Ok(Value::bool_(str_islower(s))),
@@ -649,8 +663,10 @@ fn str_islower(s: &str) -> bool {
         }
         return has_cased;
     }
+    // cesu8_codepoints: surrogate codepoints have no case; treat as uncased separator.
     let mut has_cased = false;
-    for c in s.chars() {
+    for n in cesu8_codepoints(s) {
+        let Some(c) = char::from_u32(n) else { continue };
         if c.is_uppercase() {
             return false;
         }
@@ -674,8 +690,10 @@ fn str_isupper(s: &str) -> bool {
         }
         return has_cased;
     }
+    // cesu8_codepoints: surrogate codepoints have no case; treat as uncased separator.
     let mut has_cased = false;
-    for c in s.chars() {
+    for n in cesu8_codepoints(s) {
+        let Some(c) = char::from_u32(n) else { continue };
         if c.is_lowercase() {
             return false;
         }
@@ -709,9 +727,17 @@ fn str_istitle(s: &str) -> bool {
         }
         return has_cased;
     }
+    // cesu8_codepoints: surrogate codepoints have no case; treat as uncased separator.
     let mut prev_cased = false;
     let mut has_cased = false;
-    for c in s.chars() {
+    for n in cesu8_codepoints(s) {
+        let c = match char::from_u32(n) {
+            Some(c) => c,
+            None => {
+                prev_cased = false;
+                continue;
+            }
+        };
         if c.is_uppercase() {
             if prev_cased {
                 return false; // uppercase after cased (must follow non-cased)
@@ -743,12 +769,17 @@ fn str_isidentifier(s: &str) -> bool {
         }
         return bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_');
     }
-    let mut chars = s.chars();
-    let first = chars.next().unwrap();
+    // Use cesu8_codepoints to avoid chars() panicking on surrogate bytes.
+    // A surrogate codepoint is not a valid identifier character → return false.
+    let mut codepoints = cesu8_codepoints(s);
+    let first = match codepoints.next().and_then(char::from_u32) {
+        Some(c) => c,
+        None => return false, // empty or surrogate first codepoint
+    };
     if !first.is_alphabetic() && first != '_' {
         return false;
     }
-    chars.all(|c| c.is_alphanumeric() || c == '_')
+    codepoints.all(|n| char::from_u32(n).map_or(false, |c| c.is_alphanumeric() || c == '_'))
 }
 
 /// Python's str.isnumeric(): includes Nd (decimal), No (other number like fractions,
