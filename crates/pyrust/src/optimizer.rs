@@ -7587,12 +7587,12 @@ mod tests {
     fn builtin_dce_keeps_call_with_runtime_arg() {
         // Call(r2, 1) where arg r3 comes from a BinOp (not LoadConst).
         // The call may raise TypeError — must NOT be removed.
-        let names = vec!["len".to_string()];
+        let names = vec!["abs".to_string()];
         let insns = vec![
-            Insn::LoadGlobal(2, 0), // r2 = len  (pure)
+            Insn::LoadGlobal(2, 0), // r2 = abs  (pure)
             // r3 is produced by a BinOp (runtime value, not const):
             Insn::BinOp(3, 0, crate::ast::BinaryOp::Add, 1),
-            Insn::Call(2, 1), // r2 = len(r3) — r3 is NOT in const_reg → keep call
+            Insn::Call(2, 1), // r2 = abs(r3) — r3 is NOT in const_reg → keep call
             Insn::ReturnNone,
         ];
         let out = pass_builtin_dce(insns, 2, &names);
@@ -7600,6 +7600,25 @@ mod tests {
         assert!(
             out.iter().any(|i| matches!(i, Insn::Call(..))),
             "Call with non-const arg must survive"
+        );
+    }
+
+    #[test]
+    fn builtin_dce_keeps_dead_call_to_impure_builtin() {
+        // `len` dispatches user __len__ (issue #1526) and must NOT be DCE'd
+        // even when the result is dead and the argument is a compile-time constant.
+        let names = vec!["len".to_string()];
+        let insns = vec![
+            Insn::LoadGlobal(2, 0), // r2 = len  (impure — dispatches __len__)
+            Insn::LoadConst(3, 0),  // r3 = const[0]
+            Insn::Call(2, 1),       // r2 = len(r3) — result dead, but must not be removed
+            Insn::ReturnNone,
+        ];
+        let out = pass_builtin_dce(insns, 2, &names);
+        assert_eq!(out.len(), 4, "Call to impure builtin must not be removed");
+        assert!(
+            out.iter().any(|i| matches!(i, Insn::Call(..))),
+            "Dead Call to impure len must survive (may dispatch user __len__)"
         );
     }
 

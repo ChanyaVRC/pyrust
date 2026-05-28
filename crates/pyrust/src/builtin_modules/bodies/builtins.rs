@@ -1801,7 +1801,8 @@ pyrust_module! {
 
     /// CPython: len(s) — number of items in a container.
     /// <https://docs.python.org/3/library/functions.html#len>
-    #[pure]
+    /// Not marked `#[pure]`: the `PyInstance` arm dispatches user `__len__` via
+    /// `invoke_class_method`, which can run arbitrary user code (issue #1526).
     fn len(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 1 {
