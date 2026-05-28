@@ -4268,10 +4268,15 @@ pyrust_module! {
     /// `call_class_expanded` can distinguish it from user-defined `__new__`.
     ///
     /// Issue #1421: CPython 3.12 arg-leniency rule — extra positional/keyword
-    /// arguments are accepted (and ignored) when `cls` defines a custom
-    /// `__init__` (i.e. something other than `object.__init__`).  When no
-    /// custom `__init__` is found, extra args raise
-    /// `TypeError: <cls>() takes no arguments`.
+    /// arguments are accepted (and ignored) only when BOTH:
+    ///   (a) `cls` does NOT define a custom `__new__` (i.e. cls.__new__ IS
+    ///       object.__new__), AND
+    ///   (b) `cls` defines a custom `__init__` (something other than
+    ///       object.__init__).
+    /// When `cls` defines a custom `__new__`, extra args raise
+    /// `TypeError: object.__new__() takes exactly one argument (the type to
+    /// instantiate)`.  When neither custom override is present, extra args
+    /// raise `TypeError: <cls>() takes no arguments`.
     ///
     /// CPython signature: `object.__new__(cls, /)`
     #[py_name = "object.__new__"]
@@ -4294,11 +4299,36 @@ pyrust_module! {
                 ));
             }
         };
-        // Issue #1421: reject extra args unless cls defines a custom __init__.
-        // CPython rule (Objects/typeobject.c): object.__new__ is lenient about
-        // extra args only when type(cls).__init__ is NOT object.__init__.
+        // Issue #1421: reject extra args unless the full CPython 3.12 leniency
+        // rule is satisfied.  From Objects/typeobject.c (object_new):
+        //
+        //   lenient iff:
+        //     (a) cls.__new__  IS  object.__new__  (no custom __new__), AND
+        //     (b) cls.__init__ is NOT object.__init__ (has a custom __init__)
+        //
+        // When both (a) and (b) hold, the extra args are intended for the
+        // custom __init__ and object.__new__ should silently ignore them.
+        // In all other cases extra args are a programmer error:
+        //
+        //   - cls has a custom __new__ → the custom __new__ is responsible for
+        //     any extra args; object.__new__ rejects them with the "takes
+        //     exactly one argument" wording.
+        //   - cls has no custom __init__ → no-one will consume the args →
+        //     "<cls>() takes no arguments".
         let has_extra_args = args.len() > 1 || args.iter().any(|a| a.name.is_some());
         if has_extra_args {
+            let new_val = lookup_class_attr(&class_rc, "__new__");
+            let has_custom_new = matches!(
+                new_val.as_ref().map(|v| v.kind()),
+                Some(ValueKind::UserFunction(_))
+            );
+            if has_custom_new {
+                return Err(PyError::named(
+                    "TypeError",
+                    "object.__new__() takes exactly one argument (the type to instantiate)"
+                        .to_string(),
+                ));
+            }
             let init_val = lookup_class_attr(&class_rc, "__init__");
             let has_custom_init = matches!(
                 init_val.as_ref().map(|v| v.kind()),
