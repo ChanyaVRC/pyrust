@@ -139,6 +139,39 @@ pyrust_module! {
         Ok(Value::none())
     }
 
+    /// CPython: sys.exc_info() — returns the (type, value, traceback) tuple
+    /// for the exception currently being handled, or (None, None, None) when
+    /// called outside any active exception handler.
+    /// <https://docs.python.org/3/library/sys.html#sys.exc_info>
+    fn exc_info(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        match _interp.active_exception.clone() {
+            None => Ok(Value::tuple(vec![
+                Value::none(),
+                Value::none(),
+                Value::none(),
+            ])),
+            Some(exc_val) => {
+                let exc_type = match exc_val.kind() {
+                    ValueKind::PyInstance(inst) => {
+                        Value::py_class(Rc::clone(&inst.borrow().class))
+                    }
+                    _ => Value::none(),
+                };
+                Ok(Value::tuple(vec![exc_type, exc_val, Value::none()]))
+            }
+        }
+    }
+
+    /// CPython: sys.exception() — returns the exception instance currently
+    /// being handled, or None when called outside any active exception handler.
+    /// Added in Python 3.11.
+    /// <https://docs.python.org/3/library/sys.html#sys.exception>
+    fn exception(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        Ok(_interp.active_exception.clone().unwrap_or_else(Value::none))
+    }
+
     // ── version_info rich-comparison and sequence methods ────────────────────
     //
     // These are registered as `"sys.version_info_*"` builtins; they are
