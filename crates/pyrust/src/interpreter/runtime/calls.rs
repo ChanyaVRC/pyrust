@@ -980,6 +980,16 @@ impl Interpreter {
                     .collect();
                 pyrust_builtins::bytes::bytes_maketrans(&positional)
             }
+            // `str.maketrans` is a staticmethod: same pattern as `bytes.maketrans`.
+            // Must appear before the generic `str.*` arm.
+            ValueKind::BuiltinFunction("str.maketrans") => {
+                let positional: Vec<Value> = args
+                    .iter()
+                    .filter(|a| a.name.is_none())
+                    .map(|a| a.value.clone())
+                    .collect();
+                pyrust_builtins::string::str_maketrans(&positional)
+            }
             // #462: class-method-of-primitive dispatch.  When a primitive
             // class's attr is `BuiltinFunction("<type>.<method>")` — populated
             // by `populate_*_methods` in `helpers.rs` — calling it dispatches
@@ -4925,6 +4935,7 @@ fn builtin_method_names(type_name: &str) -> Vec<String> {
     if type_name == "str" {
         out.push("format".to_string());
         out.push("format_map".to_string());
+        out.push("maketrans".to_string());
     }
     if type_name == "bytes" {
         out.push("maketrans".to_string());

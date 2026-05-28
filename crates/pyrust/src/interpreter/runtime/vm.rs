@@ -4495,6 +4495,12 @@ impl Interpreter {
                         .to_string();
                     return self.format_str_template_map(&template, mapping);
                 }
+                // `maketrans` is a staticmethod on str: the receiver is discarded
+                // and the call is forwarded to str_maketrans exactly like
+                // `str.maketrans(...)` would be.
+                if method == "maketrans" {
+                    return pyrust_builtins::string::str_maketrans(&args);
+                }
                 let receiver = vm_read(regs, obj, num_locals)?;
                 self.call_str_method(method, receiver, args)
             }

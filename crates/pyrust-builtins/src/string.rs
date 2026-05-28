@@ -1790,10 +1790,7 @@ pub fn str_maketrans(args: &[Value]) -> Result<Value> {
                 _ => {
                     return Err(PyError::named(
                         "TypeError",
-                        format!(
-                            "keys in translate table must be strings or integers, not {}",
-                            pykey_type_name(k)
-                        ),
+                        "keys in translate table must be strings or integers".to_string(),
                     ));
                 }
             };
@@ -1806,10 +1803,8 @@ pub fn str_maketrans(args: &[Value]) -> Result<Value> {
             _ => {
                 return Err(PyError::named(
                     "TypeError",
-                    format!(
-                        "maketrans argument 1 must be str, not {}",
-                        builtin_type_name(&args[0])
-                    ),
+                    "first maketrans argument must be a string if there is a second argument"
+                        .to_string(),
                 ));
             }
         };
@@ -1819,7 +1814,7 @@ pub fn str_maketrans(args: &[Value]) -> Result<Value> {
                 return Err(PyError::named(
                     "TypeError",
                     format!(
-                        "maketrans argument 2 must be str, not {}",
+                        "maketrans() argument 2 must be str, not {}",
                         builtin_type_name(&args[1])
                     ),
                 ));
@@ -1843,7 +1838,7 @@ pub fn str_maketrans(args: &[Value]) -> Result<Value> {
                     return Err(PyError::named(
                         "TypeError",
                         format!(
-                            "maketrans argument 3 must be str, not {}",
+                            "maketrans() argument 3 must be str, not {}",
                             builtin_type_name(&args[2])
                         ),
                     ));
@@ -1871,7 +1866,7 @@ fn str_translate(s: &str, args: &[Value]) -> Result<Value> {
         return Err(PyError::named(
             "TypeError",
             format!(
-                "translate() takes exactly one argument ({} given)",
+                "str.translate() takes exactly one argument ({} given)",
                 args.len()
             ),
         ));
@@ -1897,23 +1892,24 @@ fn str_translate(s: &str, args: &[Value]) -> Result<Value> {
             Some(v) => match v.kind() {
                 ValueKind::None => { /* delete */ }
                 ValueKind::Int(n) => {
-                    let code = n as u32;
-                    let replacement = char::from_u32(code).ok_or_else(|| {
+                    if n < 0 || n > 0x10FFFF {
+                        return Err(PyError::named(
+                            "ValueError",
+                            "character mapping must be in range(0x110000)".to_string(),
+                        ));
+                    }
+                    let replacement = char::from_u32(n as u32).ok_or_else(|| {
                         PyError::named(
                             "ValueError",
-                            "character mapping must return integer, None or str".to_string(),
+                            "character mapping must be in range(0x110000)".to_string(),
                         )
                     })?;
                     out.push(replacement);
                 }
                 ValueKind::Bool(b) => {
-                    let code = b as u32;
-                    let replacement = char::from_u32(code).ok_or_else(|| {
-                        PyError::named(
-                            "ValueError",
-                            "character mapping must return integer, None or str".to_string(),
-                        )
-                    })?;
+                    // bool is a subclass of int; False=0 (NUL), True=1 (SOH)
+                    let replacement =
+                        char::from_u32(b as u32).expect("0 and 1 are valid codepoints");
                     out.push(replacement);
                 }
                 ValueKind::Str(repl) => {
