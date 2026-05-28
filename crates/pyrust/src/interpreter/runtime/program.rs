@@ -374,11 +374,64 @@ impl Interpreter {
         let program = Self::parse_source_to_stmts(source)?;
         match globals_dict {
             None => {
-                // No explicit namespace: run in the current module scope so
-                // assignments go to the module globals dict (just like
-                // top-level statements do).
-                self.try_exec_vm_script(&program, false)
-                    .unwrap_or_else(|| Err(PyError::Runtime("compilation failed".to_string())))
+                // No explicit namespace: compile and run in the current module
+                // scope, but do NOT go through try_exec_vm_script_with_index —
+                // that path converts any raised exception into PyError::Runtime
+                // (the traceback-formatted string) which makes the exception
+                // uncatchable by type.  exec() must propagate the raw exception
+                // so callers can catch ZeroDivisionError, NameError, etc.
+                use std::collections::HashSet;
+                let empty: HashSet<String> = HashSet::new();
+                let local_names =
+                    crate::interpreter::collect_local_names(&[], &program, &empty, &empty);
+                const MAX_SCRIPT_LOCALS: usize = 200;
+                let local_index: Rc<HashMap<String, crate::bytecode::Reg>> =
+                    if local_names.len() <= MAX_SCRIPT_LOCALS {
+                        Rc::new(
+                            (0u32..)
+                                .zip(local_names.iter())
+                                .map(|(i, n)| (n.clone(), i))
+                                .collect(),
+                        )
+                    } else {
+                        Rc::new(HashMap::new())
+                    };
+                let code = match crate::compiler::compile_script(
+                    &program,
+                    Rc::clone(&local_index),
+                    false,
+                ) {
+                    Ok(c) => Rc::new(crate::optimizer::optimize(c)),
+                    Err(e) => return Err(e),
+                };
+                let num_regs = code.num_regs as usize;
+                let mut regs: RegsBuf = smallvec![Value::unset(); num_regs];
+                let regs_ptr =
+                    unsafe { std::ptr::NonNull::new_unchecked(regs.as_mut_ptr()) };
+                let regs_len = regs.len();
+                self.vm_frame_views.push(VmFrameView {
+                    kind: FrameKind::Script,
+                    regs_ptr,
+                    regs_len,
+                    local_index: Rc::clone(&local_index),
+                    nonlocal_names: None,
+                    env: None,
+                    is_class_method: false,
+                });
+                let regs_slice =
+                    unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
+                let vm_result = self.run_bytecode(&code, regs_slice);
+                self.vm_frame_views.pop();
+                // Write fastlocals back to module env so names are visible
+                // after exec() returns, matching top-level assignment semantics.
+                for (name, &idx) in local_index.iter() {
+                    if !regs[idx as usize].is_unset() {
+                        let val =
+                            std::mem::replace(&mut regs[idx as usize], Value::unset());
+                        self.assign_name(name.clone(), val);
+                    }
+                }
+                vm_result.map(|_| ())
             }
             Some(gdict) => {
                 // Explicit globals dict: seed a fresh env from the dict, run,

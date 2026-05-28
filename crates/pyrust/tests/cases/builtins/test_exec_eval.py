@@ -74,3 +74,15 @@ try:
     compile("x=1", "<s>", "badmode")
 except ValueError:
     print("ValueError")  # ValueError
+
+# --- runtime error inside exec propagates with correct type ---
+try:
+    exec("1 / 0")
+except ZeroDivisionError:
+    print("ZeroDivisionError from exec")  # ZeroDivisionError from exec
+
+# --- runtime error inside eval propagates with correct type ---
+try:
+    eval("1 / 0")
+except ZeroDivisionError:
+    print("ZeroDivisionError from eval")  # ZeroDivisionError from eval
