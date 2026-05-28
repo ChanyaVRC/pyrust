@@ -4579,11 +4579,20 @@ pyrust_module! {
         // The one-arg form is handled by the "type" registry entry, not here.
         // Here we always expect exactly 4 args (mcs + name + bases + namespace).
         if args.len() != 4 {
+            // CPython counts positional args excluding the implicit cls arg, so
+            // the error says "3 arguments" (name, bases, dict) not "4".
+            // With 0 args (no cls at all), CPython uses a different message.
+            if args.is_empty() {
+                return Err(PyError::named(
+                    "TypeError",
+                    "type.__new__(): not enough arguments".to_string(),
+                ));
+            }
             return Err(PyError::named(
                 "TypeError",
                 format!(
-                    "type.__new__() takes exactly 4 arguments ({} given)",
-                    args.len()
+                    "type.__new__() takes exactly 3 arguments ({} given)",
+                    args.len() - 1,
                 ),
             ));
         }
