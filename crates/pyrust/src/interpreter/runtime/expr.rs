@@ -217,11 +217,13 @@ const MAX_SHIFT: usize = 1 << 30;
 
 /// Validate a shift count and convert it to `ShiftCount`.  Returns
 /// `Err(ValueError)` for negative shifts and `Err(TypeError)` if the
-/// operand isn't an int / bool.  Matches CPython's error messages
-/// where possible.
+/// operand isn't an int / bool.  Call sites replace the TypeError message
+/// with the operand-specific "unsupported operand type(s) for OP: 'X' and 'Y'"
+/// format via `map_err`.
 fn shift_count(v: &Value) -> Result<ShiftCount> {
     let big = value_to_bigint(v).ok_or_else(|| {
-        PyError::named("TypeError", "bitwise op requires integer".to_string())
+        // Caller replaces this message via map_err; see LShift / RShift arms.
+        PyError::named("TypeError", String::new())
     })?;
     match big.sign() {
         PyBigIntSign::Minus => Err(PyError::named(
@@ -2350,6 +2352,8 @@ impl Interpreter {
                     return r;
                 }
                 // Issue #1204: extract backing for scalar primitive subclasses.
+                let lt = value_type_name_str(&left);
+                let rt = value_type_name_str(&right);
                 let left = coerce_numeric(left);
                 let right = coerce_numeric(right);
                 // BigInt × int / int × BigInt / BigInt × BigInt all flow
@@ -2357,14 +2361,20 @@ impl Interpreter {
                 // path inside `bitwise_op`.  See issue #485.
                 if matches!(left.kind(), ValueKind::BigInt(_)) || matches!(right.kind(), ValueKind::BigInt(_)) {
                     let a = value_to_bigint(&left).ok_or_else(|| {
-                        PyError::named("TypeError", "bitwise op requires integer".to_string())
+                        PyError::named(
+                            "TypeError",
+                            format!("unsupported operand type(s) for &: '{lt}' and '{rt}'"),
+                        )
                     })?;
                     let b = value_to_bigint(&right).ok_or_else(|| {
-                        PyError::named("TypeError", "bitwise op requires integer".to_string())
+                        PyError::named(
+                            "TypeError",
+                            format!("unsupported operand type(s) for &: '{lt}' and '{rt}'"),
+                        )
                     })?;
                     return Ok(Value::bigint(a & b));
                 }
-                self.bitwise_op(&left, &right, |a, b| Ok(a & b))
+                self.bitwise_op(&left, &right, |a, b| Ok(a & b), "&", &lt, &rt)
             }
             BinaryOp::BitOr => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__or__", "__ror__") {
@@ -2415,18 +2425,26 @@ impl Interpreter {
                     ));
                 }
                 // Issue #1204: extract backing for scalar primitive subclasses.
+                let lt = value_type_name_str(&left);
+                let rt = value_type_name_str(&right);
                 let left = coerce_numeric(left);
                 let right = coerce_numeric(right);
                 if matches!(left.kind(), ValueKind::BigInt(_)) || matches!(right.kind(), ValueKind::BigInt(_)) {
                     let a = value_to_bigint(&left).ok_or_else(|| {
-                        PyError::named("TypeError", "bitwise op requires integer".to_string())
+                        PyError::named(
+                            "TypeError",
+                            format!("unsupported operand type(s) for |: '{lt}' and '{rt}'"),
+                        )
                     })?;
                     let b = value_to_bigint(&right).ok_or_else(|| {
-                        PyError::named("TypeError", "bitwise op requires integer".to_string())
+                        PyError::named(
+                            "TypeError",
+                            format!("unsupported operand type(s) for |: '{lt}' and '{rt}'"),
+                        )
                     })?;
                     return Ok(Value::bigint(a | b));
                 }
-                self.bitwise_op(&left, &right, |a, b| Ok(a | b))
+                self.bitwise_op(&left, &right, |a, b| Ok(a | b), "|", &lt, &rt)
             }
             BinaryOp::BitXor => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__xor__", "__rxor__") {
@@ -2436,24 +2454,34 @@ impl Interpreter {
                     return r;
                 }
                 // Issue #1204: extract backing for scalar primitive subclasses.
+                let lt = value_type_name_str(&left);
+                let rt = value_type_name_str(&right);
                 let left = coerce_numeric(left);
                 let right = coerce_numeric(right);
                 if matches!(left.kind(), ValueKind::BigInt(_)) || matches!(right.kind(), ValueKind::BigInt(_)) {
                     let a = value_to_bigint(&left).ok_or_else(|| {
-                        PyError::named("TypeError", "bitwise op requires integer".to_string())
+                        PyError::named(
+                            "TypeError",
+                            format!("unsupported operand type(s) for ^: '{lt}' and '{rt}'"),
+                        )
                     })?;
                     let b = value_to_bigint(&right).ok_or_else(|| {
-                        PyError::named("TypeError", "bitwise op requires integer".to_string())
+                        PyError::named(
+                            "TypeError",
+                            format!("unsupported operand type(s) for ^: '{lt}' and '{rt}'"),
+                        )
                     })?;
                     return Ok(Value::bigint(a ^ b));
                 }
-                self.bitwise_op(&left, &right, |a, b| Ok(a ^ b))
+                self.bitwise_op(&left, &right, |a, b| Ok(a ^ b), "^", &lt, &rt)
             }
             BinaryOp::LShift => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__lshift__", "__rlshift__") {
                     return r;
                 }
                 // Issue #1204: extract backing for scalar primitive subclasses.
+                let lt = value_type_name_str(&left);
+                let rt = value_type_name_str(&right);
                 let left = coerce_numeric(left);
                 let right = coerce_numeric(right);
                 // BigInt LHS: shift exactly, no `& 63` truncation.
@@ -2461,9 +2489,19 @@ impl Interpreter {
                 // astronomically large.  See #485.
                 if matches!(left.kind(), ValueKind::BigInt(_)) || matches!(right.kind(), ValueKind::BigInt(_)) {
                     let a = value_to_bigint(&left).ok_or_else(|| {
-                        PyError::named("TypeError", "bitwise op requires integer".to_string())
+                        PyError::named(
+                            "TypeError",
+                            format!("unsupported operand type(s) for <<: '{lt}' and '{rt}'"),
+                        )
                     })?;
-                    return match shift_count(&right)? {
+                    let sc = shift_count(&right).map_err(|e| match e {
+                        PyError::Named(ref name, _) if name == "TypeError" => PyError::named(
+                            "TypeError",
+                            format!("unsupported operand type(s) for <<: '{lt}' and '{rt}'"),
+                        ),
+                        other => other,
+                    })?;
+                    return match sc {
                         ShiftCount::Fits(n) => {
                             if n > MAX_SHIFT && !a.is_zero() {
                                 return Err(PyError::named(
@@ -2492,9 +2530,20 @@ impl Interpreter {
                 let a = match left.kind() {
                     ValueKind::Int(v) => v,
                     ValueKind::Bool(b) => if b { 1 } else { 0 },
-                    _ => return Err(PyError::named("TypeError", "bitwise op requires integer".to_string())),
+                    _ => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!("unsupported operand type(s) for <<: '{lt}' and '{rt}'"),
+                        ))
+                    }
                 };
-                match shift_count(&right)? {
+                match shift_count(&right).map_err(|e| match e {
+                    PyError::Named(ref name, _) if name == "TypeError" => PyError::named(
+                        "TypeError",
+                        format!("unsupported operand type(s) for <<: '{lt}' and '{rt}'"),
+                    ),
+                    other => other,
+                })? {
                     ShiftCount::Fits(n) => {
                         if n > MAX_SHIFT && a != 0 {
                             return Err(PyError::named(
@@ -2526,13 +2575,25 @@ impl Interpreter {
                     return r;
                 }
                 // Issue #1204: extract backing for scalar primitive subclasses.
+                let lt = value_type_name_str(&left);
+                let rt = value_type_name_str(&right);
                 let left = coerce_numeric(left);
                 let right = coerce_numeric(right);
                 if matches!(left.kind(), ValueKind::BigInt(_)) || matches!(right.kind(), ValueKind::BigInt(_)) {
                     let a = value_to_bigint(&left).ok_or_else(|| {
-                        PyError::named("TypeError", "bitwise op requires integer".to_string())
+                        PyError::named(
+                            "TypeError",
+                            format!("unsupported operand type(s) for >>: '{lt}' and '{rt}'"),
+                        )
                     })?;
-                    return match shift_count(&right)? {
+                    let sc = shift_count(&right).map_err(|e| match e {
+                        PyError::Named(ref name, _) if name == "TypeError" => PyError::named(
+                            "TypeError",
+                            format!("unsupported operand type(s) for >>: '{lt}' and '{rt}'"),
+                        ),
+                        other => other,
+                    })?;
+                    return match sc {
                         ShiftCount::Fits(n) => Ok(Value::bigint(a >> n)),
                         // CPython: `>>` by a count larger than the
                         // value's bit length collapses to the sign
@@ -2548,9 +2609,20 @@ impl Interpreter {
                 let a = match left.kind() {
                     ValueKind::Int(v) => v,
                     ValueKind::Bool(b) => if b { 1 } else { 0 },
-                    _ => return Err(PyError::named("TypeError", "bitwise op requires integer".to_string())),
+                    _ => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!("unsupported operand type(s) for >>: '{lt}' and '{rt}'"),
+                        ))
+                    }
                 };
-                match shift_count(&right)? {
+                match shift_count(&right).map_err(|e| match e {
+                    PyError::Named(ref name, _) if name == "TypeError" => PyError::named(
+                        "TypeError",
+                        format!("unsupported operand type(s) for >>: '{lt}' and '{rt}'"),
+                    ),
+                    other => other,
+                })? {
                     ShiftCount::Fits(n) => {
                         // Arithmetic right shift: always fits in i64.
                         if n >= 64 {
@@ -3449,16 +3521,34 @@ impl Interpreter {
         }
     }
 
-    fn bitwise_op(&self, left: &Value, right: &Value, op: impl Fn(i64, i64) -> Result<i64>) -> Result<Value> {
+    fn bitwise_op(
+        &self,
+        left: &Value,
+        right: &Value,
+        op: impl Fn(i64, i64) -> Result<i64>,
+        op_sym: &str,
+        left_type: &str,
+        right_type: &str,
+    ) -> Result<Value> {
         let a = match left.kind() {
             ValueKind::Int(v) => v,
             ValueKind::Bool(b) => if b { 1 } else { 0 },
-            _ => return Err(PyError::named("TypeError", "bitwise op requires integer".to_string())),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("unsupported operand type(s) for {op_sym}: '{left_type}' and '{right_type}'"),
+                ))
+            }
         };
         let b = match right.kind() {
             ValueKind::Int(v) => v,
             ValueKind::Bool(b) => if b { 1 } else { 0 },
-            _ => return Err(PyError::named("TypeError", "bitwise op requires integer".to_string())),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("unsupported operand type(s) for {op_sym}: '{left_type}' and '{right_type}'"),
+                ))
+            }
         };
         Ok(Value::int(op(a, b)?))
     }
