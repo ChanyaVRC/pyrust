@@ -533,6 +533,13 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
         .borrow_mut()
         .attrs
         .insert("fromhex".to_string(), Value::builtin_function("bytes.fromhex"));
+    // `str.maketrans` is a staticmethod: register it in str_class.attrs so
+    // that both `str.maketrans(...)` and `"".maketrans(...)` resolve to the
+    // same `BuiltinFunction("str.maketrans")` sentinel.
+    str_class
+        .borrow_mut()
+        .attrs
+        .insert("maketrans".to_string(), Value::builtin_function("str.maketrans"));
     // Issue #1256: expose dunder methods on primitive class objects so that
     // `hasattr(int, '__add__')` returns True and `int.__add__(1, 2)` works.
     // Each sentinel registers as `BuiltinFunction("<type>.<dunder>")` in the
@@ -604,6 +611,7 @@ const STR_METHODS: &[&str] = &[
     "startswith", "endswith",
     "isdigit", "isalpha", "isalnum", "isspace", "isdecimal", "isnumeric",
     "islower", "isupper", "istitle", "isascii", "isidentifier", "isprintable",
+    "translate",
 ];
 
 const LIST_METHODS: &[&str] = &[
