@@ -3584,94 +3584,128 @@ impl Interpreter {
                 's' => apply_str_precision(self.render_value_as_str(&arg)?, precision),
                 'r' => apply_str_precision(render_instance_repr(self, &arg)?, precision),
                 'd' | 'i' | 'u' => {
-                    let n = str_printf_to_int(&arg, conv)?;
-                    if n < 0 {
-                        format!("{}", n)
-                    } else if flag_plus {
-                        format!("+{}", n)
-                    } else if flag_space {
-                        format!(" {}", n)
-                    } else {
-                        format!("{}", n)
+                    match str_printf_to_int(&arg, conv)? {
+                        PrintfInt::Small(n) => {
+                            if n < 0 {
+                                format!("{}", n)
+                            } else if flag_plus {
+                                format!("+{}", n)
+                            } else if flag_space {
+                                format!(" {}", n)
+                            } else {
+                                format!("{}", n)
+                            }
+                        }
+                        PrintfInt::Big(b) => {
+                            // to_str_radix(10) includes the '-' sign for negatives.
+                            let s = b.to_str_radix(10);
+                            if s.starts_with('-') {
+                                s
+                            } else if flag_plus {
+                                format!("+{}", s)
+                            } else if flag_space {
+                                format!(" {}", s)
+                            } else {
+                                s
+                            }
+                        }
                     }
                 }
                 'o' => {
-                    let n = str_printf_to_int(&arg, conv)?;
-                    if n < 0 {
-                        // CPython uses sign-magnitude (not two's complement) for negative octal.
-                        let u = (n as u64).wrapping_neg();
-                        if flag_hash {
-                            format!("-0o{:o}", u)
-                        } else {
-                            format!("-{:o}", u)
+                    match str_printf_to_int(&arg, conv)? {
+                        PrintfInt::Small(n) => {
+                            if n < 0 {
+                                // CPython uses sign-magnitude (not two's complement) for negative octal.
+                                let u = (n as u64).wrapping_neg();
+                                if flag_hash {
+                                    format!("-0o{:o}", u)
+                                } else {
+                                    format!("-{:o}", u)
+                                }
+                            } else if flag_hash {
+                                // CPython applies 0o prefix for all values (including 0) when # is set.
+                                if flag_plus {
+                                    format!("+0o{:o}", n)
+                                } else if flag_space {
+                                    format!(" 0o{:o}", n)
+                                } else {
+                                    format!("0o{:o}", n)
+                                }
+                            } else if flag_plus {
+                                format!("+{:o}", n)
+                            } else if flag_space {
+                                format!(" {:o}", n)
+                            } else {
+                                format!("{:o}", n)
+                            }
                         }
-                    } else if flag_hash {
-                        // CPython applies 0o prefix for all values (including 0) when # is set.
-                        if flag_plus {
-                            format!("+0o{:o}", n)
-                        } else if flag_space {
-                            format!(" 0o{:o}", n)
-                        } else {
-                            format!("0o{:o}", n)
-                        }
-                    } else if flag_plus {
-                        format!("+{:o}", n)
-                    } else if flag_space {
-                        format!(" {:o}", n)
-                    } else {
-                        format!("{:o}", n)
+                        PrintfInt::Big(b) => format_printf_bigint_radix(
+                            &b, 8, "0o", false, flag_hash, flag_plus, flag_space,
+                        ),
                     }
                 }
                 'x' => {
-                    let n = str_printf_to_int(&arg, conv)?;
-                    if n < 0 {
-                        let u = (n as u64).wrapping_neg();
-                        if flag_hash {
-                            format!("-0x{:x}", u)
-                        } else {
-                            format!("-{:x}", u)
+                    match str_printf_to_int(&arg, conv)? {
+                        PrintfInt::Small(n) => {
+                            if n < 0 {
+                                let u = (n as u64).wrapping_neg();
+                                if flag_hash {
+                                    format!("-0x{:x}", u)
+                                } else {
+                                    format!("-{:x}", u)
+                                }
+                            } else if flag_hash {
+                                // CPython applies 0x prefix for all values (including 0) when # is set.
+                                if flag_plus {
+                                    format!("+0x{:x}", n)
+                                } else if flag_space {
+                                    format!(" 0x{:x}", n)
+                                } else {
+                                    format!("0x{:x}", n)
+                                }
+                            } else if flag_plus {
+                                format!("+{:x}", n)
+                            } else if flag_space {
+                                format!(" {:x}", n)
+                            } else {
+                                format!("{:x}", n)
+                            }
                         }
-                    } else if flag_hash {
-                        // CPython applies 0x prefix for all values (including 0) when # is set.
-                        if flag_plus {
-                            format!("+0x{:x}", n)
-                        } else if flag_space {
-                            format!(" 0x{:x}", n)
-                        } else {
-                            format!("0x{:x}", n)
-                        }
-                    } else if flag_plus {
-                        format!("+{:x}", n)
-                    } else if flag_space {
-                        format!(" {:x}", n)
-                    } else {
-                        format!("{:x}", n)
+                        PrintfInt::Big(b) => format_printf_bigint_radix(
+                            &b, 16, "0x", false, flag_hash, flag_plus, flag_space,
+                        ),
                     }
                 }
                 'X' => {
-                    let n = str_printf_to_int(&arg, conv)?;
-                    if n < 0 {
-                        let u = (n as u64).wrapping_neg();
-                        if flag_hash {
-                            format!("-0X{:X}", u)
-                        } else {
-                            format!("-{:X}", u)
+                    match str_printf_to_int(&arg, conv)? {
+                        PrintfInt::Small(n) => {
+                            if n < 0 {
+                                let u = (n as u64).wrapping_neg();
+                                if flag_hash {
+                                    format!("-0X{:X}", u)
+                                } else {
+                                    format!("-{:X}", u)
+                                }
+                            } else if flag_hash {
+                                // CPython applies 0X prefix for all values (including 0) when # is set.
+                                if flag_plus {
+                                    format!("+0X{:X}", n)
+                                } else if flag_space {
+                                    format!(" 0X{:X}", n)
+                                } else {
+                                    format!("0X{:X}", n)
+                                }
+                            } else if flag_plus {
+                                format!("+{:X}", n)
+                            } else if flag_space {
+                                format!(" {:X}", n)
+                            } else {
+                                format!("{:X}", n)
+                            }
                         }
-                    } else if flag_hash {
-                        // CPython applies 0X prefix for all values (including 0) when # is set.
-                        if flag_plus {
-                            format!("+0X{:X}", n)
-                        } else if flag_space {
-                            format!(" 0X{:X}", n)
-                        } else {
-                            format!("0X{:X}", n)
-                        }
-                    } else if flag_plus {
-                        format!("+{:X}", n)
-                    } else if flag_space {
-                        format!(" {:X}", n)
-                    } else {
-                        format!("{:X}", n)
+                        PrintfInt::Big(b) => format_printf_bigint_radix(
+                            &b, 16, "0X", true, flag_hash, flag_plus, flag_space,
+                        ),
                     }
                 }
                 'e' | 'E' => {
@@ -3818,11 +3852,31 @@ fn str_printf_take_positional(positional: &Option<Vec<Value>>, idx: &mut usize) 
     }
 }
 
-/// Convert a `Value` to `i64` for integer printf format codes.
-fn str_printf_to_int(v: &Value, conv: char) -> Result<i64> {
+/// Result of coercing a printf argument to an integer value.
+///
+/// `Small` covers values that fit in `i64` (the common case: `int`, `bool`,
+/// truncated `float`).  `Big` is used only for `BigInt` values that are
+/// outside the `i64` range — the caller formats them with BigInt-native
+/// methods (`to_str_radix`, etc.) instead of Rust integer formatting.
+enum PrintfInt {
+    Small(i64),
+    Big(PyBigInt),
+}
+
+/// Convert a `Value` to a `PrintfInt` for integer printf format codes.
+///
+/// Unlike the old `i64`-returning version, the `BigInt` arm no longer raises
+/// `OverflowError`; it returns `PrintfInt::Big` so that the caller can format
+/// arbitrarily large integers using BigInt-native methods.
+///
+/// For `%d`/`%i`/`%u`, float arguments are truncated toward zero following
+/// CPython's `int(float)` semantics: NaN raises `ValueError`, infinity raises
+/// `OverflowError`, and finite floats larger than `i64::MAX` are promoted to
+/// `PrintfInt::Big` rather than being silently clamped.
+fn str_printf_to_int(v: &Value, conv: char) -> Result<PrintfInt> {
     match v.kind() {
-        ValueKind::Int(n) => Ok(n),
-        ValueKind::Bool(b) => Ok(b as i64),
+        ValueKind::Int(n) => Ok(PrintfInt::Small(n)),
+        ValueKind::Bool(b) => Ok(PrintfInt::Small(b as i64)),
         ValueKind::Float(_) if matches!(conv, 'o' | 'x' | 'X') => {
             // CPython 3.12: %o/%x/%X reject float with "an integer is required".
             // %d/%i/%u accept float (truncating toward zero) for historical reasons.
@@ -3833,13 +3887,19 @@ fn str_printf_to_int(v: &Value, conv: char) -> Result<i64> {
                 ),
             ))
         }
-        ValueKind::Float(f) => Ok(f as i64),
-        ValueKind::BigInt(b) => b.to_i64().ok_or_else(|| {
-            PyError::named(
-                "OverflowError",
-                "Python int too large to convert to C long".to_string(),
-            )
-        }),
+        ValueKind::Float(f) => {
+            // CPython converts via PyLong_FromDouble: NaN → ValueError,
+            // infinity → OverflowError, finite → truncate toward zero.
+            // Rust's `f as i64` silently saturates at i64::MAX/MIN for
+            // out-of-range finite floats, losing significant digits.
+            let int_val = float_to_bigint(f)?;
+            match int_val.kind() {
+                ValueKind::Int(n) => Ok(PrintfInt::Small(n)),
+                ValueKind::BigInt(b) => Ok(PrintfInt::Big(b.clone())),
+                _ => unreachable!("float_to_bigint returns Int or BigInt"),
+            }
+        }
+        ValueKind::BigInt(b) => Ok(PrintfInt::Big(b.clone())),
         _ => {
             // CPython uses "a real number is required" for %d/%i/%u,
             // and "an integer is required" for %o/%x/%X.
@@ -3856,6 +3916,56 @@ fn str_printf_to_int(v: &Value, conv: char) -> Result<i64> {
             };
             Err(PyError::named("TypeError", msg))
         }
+    }
+}
+
+/// Format a `BigInt` value for `%o`/`%x`/`%X` printf codes.
+///
+/// `to_str_radix` produces sign-magnitude notation (e.g., `-ff` for `-255`),
+/// which matches CPython's behaviour.  This helper inserts the optional base
+/// prefix (`0o`/`0x`/`0X`) and sign prefix (`+` / ` `) in the positions that
+/// `apply_printf_width` expects for correct zero-fill later.
+fn format_printf_bigint_radix(
+    b: &PyBigInt,
+    radix: u32,
+    base_prefix: &str,
+    upper: bool,
+    flag_hash: bool,
+    flag_plus: bool,
+    flag_space: bool,
+) -> String {
+    // num_bigint::BigInt::to_str_radix uses sign-magnitude: negative values
+    // get a leading '-'; the remaining digits are the absolute magnitude.
+    let raw = b.to_str_radix(radix);
+    let is_neg = raw.starts_with('-');
+    let digits: std::borrow::Cow<str> = if upper {
+        let d = if is_neg { &raw[1..] } else { &raw[..] };
+        std::borrow::Cow::Owned(d.to_uppercase())
+    } else if is_neg {
+        std::borrow::Cow::Borrowed(&raw[1..])
+    } else {
+        std::borrow::Cow::Borrowed(&raw[..])
+    };
+    if is_neg {
+        if flag_hash {
+            format!("-{}{}", base_prefix, digits)
+        } else {
+            format!("-{}", digits)
+        }
+    } else if flag_hash {
+        if flag_plus {
+            format!("+{}{}", base_prefix, digits)
+        } else if flag_space {
+            format!(" {}{}", base_prefix, digits)
+        } else {
+            format!("{}{}", base_prefix, digits)
+        }
+    } else if flag_plus {
+        format!("+{}", digits)
+    } else if flag_space {
+        format!(" {}", digits)
+    } else {
+        digits.into_owned()
     }
 }
 
