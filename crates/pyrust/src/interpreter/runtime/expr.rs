@@ -3380,6 +3380,136 @@ impl Interpreter {
         }
     }
 
+    /// Coerce a `PyInstance` argument to its int backing (for int subclasses) or
+    /// call `__index__` (for objects that define it), ready for integer printf
+    /// format codes (`%d`, `%i`, `%u`, `%o`, `%x`, `%X`).
+    ///
+    /// Non-`PyInstance` values are returned unchanged; `str_printf_to_int` will
+    /// handle them (or raise `TypeError`) as before.  This mirrors CPython's
+    /// `PyNumber_Index` pre-coercion that happens before `formatlong`.
+    fn coerce_printf_int_arg(&mut self, val: Value) -> Result<Value> {
+        // Use a tag enum so the borrow from val.kind() ends before we move val.
+        enum Tag {
+            Instance(Rc<RefCell<PyInstance>>),
+            Other,
+        }
+        let tag = match val.kind() {
+            ValueKind::PyInstance(inst) => Tag::Instance(Rc::clone(inst)),
+            _ => Tag::Other,
+        };
+        let inst_rc = match tag {
+            Tag::Other => return Ok(val),
+            Tag::Instance(rc) => rc,
+        };
+        // Int subclass: extract the backing primitive (Int or BigInt).
+        if let Some(backing) = instance_builtin_data(&inst_rc) {
+            if matches!(backing.kind(), ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)) {
+                return Ok(backing);
+            }
+        }
+        // Non-int-subclass: look for __index__.
+        let class = Rc::clone(&inst_rc.borrow().class);
+        let Some(method_val) = lookup_class_attr(&class, "__index__") else {
+            // No backing and no __index__: return original; str_printf_to_int
+            // will produce the correct TypeError.
+            return Ok(val);
+        };
+        let result = invoke_class_method(
+            self,
+            method_val,
+            Value::py_instance(Rc::clone(&inst_rc)),
+            &[],
+        )?;
+        // CPython: if __index__ returns non-int, the printf format code falls
+        // back to its standard error ("a real number is required, not Foo").
+        // Return val unchanged so str_printf_to_int produces the right message.
+        let is_int = matches!(
+            result.kind(),
+            ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+        );
+        if is_int { Ok(result) } else { Ok(val) }
+    }
+
+    /// Coerce a `PyInstance` argument to `f64` for float printf format codes
+    /// (`%e`, `%E`, `%f`, `%F`, `%g`, `%G`).
+    ///
+    /// Tries `__float__` first (float subclasses carry a float backing value),
+    /// then `__index__` (int-like objects acceptable as float arguments).
+    /// Non-`PyInstance` values are returned unchanged.
+    fn coerce_printf_float_arg(&mut self, val: Value) -> Result<Value> {
+        // Use a tag enum so the borrow from val.kind() ends before we move val.
+        enum Tag {
+            Instance(Rc<RefCell<PyInstance>>),
+            Other,
+        }
+        let tag = match val.kind() {
+            ValueKind::PyInstance(inst) => Tag::Instance(Rc::clone(inst)),
+            _ => Tag::Other,
+        };
+        let inst_rc = match tag {
+            Tag::Other => return Ok(val),
+            Tag::Instance(rc) => rc,
+        };
+        // Float or int subclass: extract the backing primitive directly.
+        if let Some(backing) = instance_builtin_data(&inst_rc) {
+            if matches!(
+                backing.kind(),
+                ValueKind::Float(_) | ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_)
+            ) {
+                return Ok(backing);
+            }
+        }
+        let class = Rc::clone(&inst_rc.borrow().class);
+        // Try __float__ first.
+        if let Some(method_val) = lookup_class_attr(&class, "__float__") {
+            let result = invoke_class_method(
+                self,
+                method_val,
+                Value::py_instance(Rc::clone(&inst_rc)),
+                &[],
+            )?;
+            enum FloatTag { Ok, Err { class_name: String, type_name: String } }
+            let ftag = match result.kind() {
+                ValueKind::Float(_) => FloatTag::Ok,
+                _ => FloatTag::Err {
+                    class_name: inst_rc.borrow().class.borrow().name.clone(),
+                    type_name: value_type_name_str(&result).to_string(),
+                },
+            };
+            return match ftag {
+                FloatTag::Ok => Ok(result),
+                FloatTag::Err { class_name, type_name } => Err(PyError::named(
+                    "TypeError",
+                    format!("{class_name}.__float__ returned non-float (type {type_name})"),
+                )),
+            };
+        }
+        // Try __index__ as fallback (CPython accepts integer-like objects for %f).
+        if let Some(method_val) = lookup_class_attr(&class, "__index__") {
+            let result = invoke_class_method(
+                self,
+                method_val,
+                Value::py_instance(Rc::clone(&inst_rc)),
+                &[],
+            )?;
+            enum IdxTag { Ok, Err(String) }
+            let itag = match result.kind() {
+                ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => IdxTag::Ok,
+                _ => IdxTag::Err(value_type_name_str(&result).to_string()),
+            };
+            return match itag {
+                IdxTag::Ok => Ok(result),
+                IdxTag::Err(type_name) => Err(PyError::named(
+                    "TypeError",
+                    format!("__index__ returned non-int (type {type_name})"),
+                )),
+            };
+        }
+        // No __float__, no __index__: return original; str_printf_to_float
+        // will produce the correct TypeError.
+        Ok(val)
+    }
+
     /// `str % args` — CPython-compatible printf-style string formatting (#1393).
     ///
     /// Handles positional (`%s`, `%d`, …) and named (`%(key)s`) format codes.
@@ -3584,7 +3714,8 @@ impl Interpreter {
                 's' => apply_str_precision(self.render_value_as_str(&arg)?, precision),
                 'r' => apply_str_precision(render_instance_repr(self, &arg)?, precision),
                 'd' | 'i' | 'u' => {
-                    match str_printf_to_int(&arg, conv)? {
+                    let coerced_int = self.coerce_printf_int_arg(arg.clone())?;
+                    match str_printf_to_int(&coerced_int, conv)? {
                         PrintfInt::Small(n) => {
                             if n < 0 {
                                 format!("{}", n)
@@ -3612,7 +3743,8 @@ impl Interpreter {
                     }
                 }
                 'o' => {
-                    match str_printf_to_int(&arg, conv)? {
+                    let coerced_int = self.coerce_printf_int_arg(arg.clone())?;
+                    match str_printf_to_int(&coerced_int, conv)? {
                         PrintfInt::Small(n) => {
                             if n < 0 {
                                 // CPython uses sign-magnitude (not two's complement) for negative octal.
@@ -3645,7 +3777,8 @@ impl Interpreter {
                     }
                 }
                 'x' => {
-                    match str_printf_to_int(&arg, conv)? {
+                    let coerced_int = self.coerce_printf_int_arg(arg.clone())?;
+                    match str_printf_to_int(&coerced_int, conv)? {
                         PrintfInt::Small(n) => {
                             if n < 0 {
                                 let u = (n as u64).wrapping_neg();
@@ -3677,7 +3810,8 @@ impl Interpreter {
                     }
                 }
                 'X' => {
-                    match str_printf_to_int(&arg, conv)? {
+                    let coerced_int = self.coerce_printf_int_arg(arg.clone())?;
+                    match str_printf_to_int(&coerced_int, conv)? {
                         PrintfInt::Small(n) => {
                             if n < 0 {
                                 let u = (n as u64).wrapping_neg();
@@ -3709,7 +3843,8 @@ impl Interpreter {
                     }
                 }
                 'e' | 'E' => {
-                    let f = str_printf_to_float(&arg, conv)?;
+                    let coerced_float = self.coerce_printf_float_arg(arg.clone())?;
+                    let f = str_printf_to_float(&coerced_float, conv)?;
                     let prec = precision.unwrap_or(6);
                     let s = format_scientific(f, prec, conv == 'E');
                     if f.is_sign_positive() && flag_plus {
@@ -3721,7 +3856,8 @@ impl Interpreter {
                     }
                 }
                 'f' | 'F' => {
-                    let f = str_printf_to_float(&arg, conv)?;
+                    let coerced_float = self.coerce_printf_float_arg(arg.clone())?;
+                    let f = str_printf_to_float(&coerced_float, conv)?;
                     let upper = conv == 'F';
                     // Special-case NaN and Inf before calling format!(), which
                     // produces Rust-style 'NaN'/'inf' rather than CPython-style
@@ -3749,7 +3885,8 @@ impl Interpreter {
                     }
                 }
                 'g' | 'G' => {
-                    let f = str_printf_to_float(&arg, conv)?;
+                    let coerced_float = self.coerce_printf_float_arg(arg.clone())?;
+                    let f = str_printf_to_float(&coerced_float, conv)?;
                     let prec = precision.unwrap_or(6).max(1);
                     let s = format_general_float(f, prec, conv == 'G');
                     if f.is_sign_positive() && flag_plus {
@@ -3760,43 +3897,64 @@ impl Interpreter {
                         s
                     }
                 }
-                'c' => match arg.kind() {
-                    ValueKind::Str(s) => {
-                        let mut cs = s.chars();
-                        let c = cs.next().ok_or_else(|| {
-                            PyError::named("TypeError", "%c requires int or char".to_string())
-                        })?;
-                        if cs.next().is_some() {
+                'c' => {
+                    // Coerce int subclasses and __index__ objects the same way
+                    // as %d/%x etc.  If __index__ returns non-int, we fall back
+                    // to the original value so the match below emits the correct
+                    // "%c requires int or char" TypeError.
+                    let coerced_char = self.coerce_printf_int_arg(arg.clone())?;
+                    match coerced_char.kind() {
+                        ValueKind::Str(s) => {
+                            let mut cs = s.chars();
+                            let c = cs.next().ok_or_else(|| {
+                                PyError::named("TypeError", "%c requires int or char".to_string())
+                            })?;
+                            if cs.next().is_some() {
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    "%c requires a single character".to_string(),
+                                ));
+                            }
+                            c.to_string()
+                        }
+                        ValueKind::Int(n) => char::from_u32(n as u32)
+                            .ok_or_else(|| {
+                                PyError::named(
+                                    "OverflowError",
+                                    "%c arg not in range(0x110000)".to_string(),
+                                )
+                            })?
+                            .to_string(),
+                        ValueKind::Bool(b) => char::from_u32(b as u32)
+                            .ok_or_else(|| {
+                                PyError::named(
+                                    "OverflowError",
+                                    "%c arg not in range(0x110000)".to_string(),
+                                )
+                            })?
+                            .to_string(),
+                        ValueKind::BigInt(b) => {
+                            // A BigInt may be in range [0, 0x10ffff] or not.
+                            use crate::value::PyToPrimitive;
+                            let n = b.to_u32();
+                            let c = n
+                                .and_then(char::from_u32)
+                                .ok_or_else(|| {
+                                    PyError::named(
+                                        "OverflowError",
+                                        "%c arg not in range(0x110000)".to_string(),
+                                    )
+                                })?;
+                            c.to_string()
+                        }
+                        _ => {
                             return Err(PyError::named(
                                 "TypeError",
-                                "%c requires a single character".to_string(),
+                                "%c requires int or char".to_string(),
                             ));
                         }
-                        c.to_string()
                     }
-                    ValueKind::Int(n) => char::from_u32(n as u32)
-                        .ok_or_else(|| {
-                            PyError::named(
-                                "OverflowError",
-                                "%c arg not in range(0x110000)".to_string(),
-                            )
-                        })?
-                        .to_string(),
-                    ValueKind::Bool(b) => char::from_u32(b as u32)
-                        .ok_or_else(|| {
-                            PyError::named(
-                                "OverflowError",
-                                "%c arg not in range(0x110000)".to_string(),
-                            )
-                        })?
-                        .to_string(),
-                    _ => {
-                        return Err(PyError::named(
-                            "TypeError",
-                            "%c requires int or char".to_string(),
-                        ));
-                    }
-                },
+                }
                 _ => {
                     return Err(PyError::named(
                         "ValueError",
