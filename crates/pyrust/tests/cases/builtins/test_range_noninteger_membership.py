@@ -42,3 +42,11 @@ print((1.5+0j) in range(5))  # False
 # String: never in range
 print('x' in range(5))       # False
 print('1' in range(5))       # False
+
+# Boundary: float(i64::MAX) rounds to the same f64 as float(2**63).
+# int(float(i64::MAX)) == 2**63, which is NOT in any i64-bounded range.
+# Guard must use explicit bounds check, not the round-trip (f as i64) as f64 == f,
+# because that round-trip cannot distinguish i64::MAX from i64::MAX+1.
+i64max = 9223372036854775807
+print(float(i64max) in range(i64max, i64max - 5, -1))      # False
+print(float(i64max - 1024) in range(i64max - 1024, i64max - 1020, 1))  # True

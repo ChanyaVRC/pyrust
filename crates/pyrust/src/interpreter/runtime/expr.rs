@@ -3534,25 +3534,35 @@ impl Interpreter {
                     // convert to i64 and do the fast O(1) range check.
                     // Non-integer or non-finite floats cannot equal any integer.
                     // This matches CPython 3.12's range.__contains__ behaviour.
+                    //
+                    // Bounds are checked before casting to avoid Rust's saturating
+                    // f64-to-i64 cast.  float(2**63) and float(2**63-1) are the same
+                    // f64 value (both round to 9.223372036854776e18), so the round-trip
+                    // check `(f as i64) as f64 == f` does NOT detect saturation at the
+                    // positive boundary.  Use strict half-open bounds instead:
+                    // i64 range is [-2**63, 2**63), both endpoints are exact f64 values.
                     ValueKind::Float(f) => {
-                        let in_range = f.fract() == 0.0
-                            && f.is_finite()
-                            && {
-                                let v = f as i64;
-                                v as f64 == f && range_contains_i64(v)
-                            };
+                        // 9223372036854775808.0 == 2**63 as f64 (exactly representable)
+                        const I64_MIN_F: f64 = i64::MIN as f64;
+                        const I64_MAX_PLUS1_F: f64 = 9_223_372_036_854_775_808.0_f64;
+                        let in_range = f.is_finite()
+                            && f.fract() == 0.0
+                            && f >= I64_MIN_F
+                            && f < I64_MAX_PLUS1_F
+                            && range_contains_i64(f as i64);
                         Ok(Value::bool_(in_range))
                     }
                     // Complex: if imaginary part is zero and real part is an
                     // integer-valued finite float, same fast O(1) check.
                     ValueKind::Complex(re, im) => {
+                        const I64_MIN_F: f64 = i64::MIN as f64;
+                        const I64_MAX_PLUS1_F: f64 = 9_223_372_036_854_775_808.0_f64;
                         let in_range = im == 0.0
-                            && re.fract() == 0.0
                             && re.is_finite()
-                            && {
-                                let v = re as i64;
-                                v as f64 == re && range_contains_i64(v)
-                            };
+                            && re.fract() == 0.0
+                            && re >= I64_MIN_F
+                            && re < I64_MAX_PLUS1_F
+                            && range_contains_i64(re as i64);
                         Ok(Value::bool_(in_range))
                     }
                     _ => Ok(Value::bool_(false)),
