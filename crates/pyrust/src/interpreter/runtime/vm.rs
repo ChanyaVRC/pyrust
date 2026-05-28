@@ -1486,7 +1486,12 @@ impl Interpreter {
                                         Regular(std::rc::Rc<pyrust_core::UserFunction>),
                                         ClassMethod(std::rc::Rc<pyrust_core::UserFunction>),
                                         StaticMethod(std::rc::Rc<pyrust_core::UserFunction>),
-                                        Builtin,
+                                        // fn_name_matches: true when the
+                                        // BuiltinFunction's embedded name
+                                        // matches the attribute name; see
+                                        // the env.rs AttrKind::BuiltinFunction
+                                        // comment for the full rationale.
+                                        Builtin { fn_name_matches: bool },
                                         Other,
                                     }
                                     let tag = match unbound.kind() {
@@ -1498,9 +1503,20 @@ impl Interpreter {
                                             UserFunctionKind::StaticMethod =>
                                                 Tag::StaticMethod(Rc::clone(f)),
                                             UserFunctionKind::Builtin(_) =>
-                                                Tag::StaticMethod(Rc::clone(f)),
+                                                Tag::Builtin {
+                                                    fn_name_matches: false,
+                                                },
                                         },
-                                        ValueKind::BuiltinFunction(_) => Tag::Builtin,
+                                        ValueKind::BuiltinFunction(fn_name) =>
+                                            Tag::Builtin {
+                                                fn_name_matches: name_opt.map_or(
+                                                    false,
+                                                    |n| fn_name.rfind('.').map_or(
+                                                        false,
+                                                        |i| &fn_name[i + 1..] == n,
+                                                    ),
+                                                ),
+                                            },
                                         _ => Tag::Other,
                                     };
                                     let bound = match tag {
@@ -1520,14 +1536,19 @@ impl Interpreter {
                                                 )
                                             }
                                         }
-                                        Tag::Builtin => {
-                                            // name_opt is Some here: no_shadow was true,
-                                            // which requires name_opt.is_some().
-                                            let n = name_opt.unwrap_or_default();
-                                            pyrust_builtins::bound_method::bound_method(
-                                                n.to_string(),
-                                                Value::py_instance(inst_rc_clone),
-                                            )
+                                        Tag::Builtin { fn_name_matches } => {
+                                            if fn_name_matches {
+                                                let n = name_opt.unwrap_or_default();
+                                                pyrust_builtins::bound_method::bound_method(
+                                                    n.to_string(),
+                                                    Value::py_instance(inst_rc_clone),
+                                                )
+                                            } else {
+                                                // The builtin was stored under a
+                                                // user-chosen alias (e.g. A.f = len).
+                                                // CPython does not bind it.
+                                                unbound
+                                            }
                                         }
                                         Tag::Other => unbound,
                                     };
