@@ -1513,6 +1513,10 @@ fn extract_width(args: &[Value], method: &str) -> Result<i64> {
     match args.first().map(|v| v.kind()) {
         Some(ValueKind::Int(n)) => Ok(n),
         Some(ValueKind::Bool(b)) => Ok(b as i64),
+        Some(ValueKind::BigInt(_)) => Err(PyError::named(
+            "OverflowError",
+            "Python int too large to convert to C ssize_t",
+        )),
         _ => Err(PyError::named(
             "TypeError",
             format!("{method} width must be an integer"),
@@ -1825,6 +1829,12 @@ fn bytes_expandtabs(bytes: &[u8], args: &[Value]) -> Result<Value> {
         None => 8,
         Some(ValueKind::Int(n)) => n,
         Some(ValueKind::Bool(b)) => b as i64,
+        Some(ValueKind::BigInt(_)) => {
+            return Err(PyError::named(
+                "OverflowError",
+                "Python int too large to convert to C int",
+            ));
+        }
         _ => {
             return Err(PyError::named(
                 "TypeError",
