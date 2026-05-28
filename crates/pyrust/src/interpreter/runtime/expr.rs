@@ -3897,43 +3897,64 @@ impl Interpreter {
                         s
                     }
                 }
-                'c' => match arg.kind() {
-                    ValueKind::Str(s) => {
-                        let mut cs = s.chars();
-                        let c = cs.next().ok_or_else(|| {
-                            PyError::named("TypeError", "%c requires int or char".to_string())
-                        })?;
-                        if cs.next().is_some() {
+                'c' => {
+                    // Coerce int subclasses and __index__ objects the same way
+                    // as %d/%x etc.  If __index__ returns non-int, we fall back
+                    // to the original value so the match below emits the correct
+                    // "%c requires int or char" TypeError.
+                    let coerced_char = self.coerce_printf_int_arg(arg.clone())?;
+                    match coerced_char.kind() {
+                        ValueKind::Str(s) => {
+                            let mut cs = s.chars();
+                            let c = cs.next().ok_or_else(|| {
+                                PyError::named("TypeError", "%c requires int or char".to_string())
+                            })?;
+                            if cs.next().is_some() {
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    "%c requires a single character".to_string(),
+                                ));
+                            }
+                            c.to_string()
+                        }
+                        ValueKind::Int(n) => char::from_u32(n as u32)
+                            .ok_or_else(|| {
+                                PyError::named(
+                                    "OverflowError",
+                                    "%c arg not in range(0x110000)".to_string(),
+                                )
+                            })?
+                            .to_string(),
+                        ValueKind::Bool(b) => char::from_u32(b as u32)
+                            .ok_or_else(|| {
+                                PyError::named(
+                                    "OverflowError",
+                                    "%c arg not in range(0x110000)".to_string(),
+                                )
+                            })?
+                            .to_string(),
+                        ValueKind::BigInt(b) => {
+                            // A BigInt may be in range [0, 0x10ffff] or not.
+                            use crate::value::PyToPrimitive;
+                            let n = b.to_u32();
+                            let c = n
+                                .and_then(char::from_u32)
+                                .ok_or_else(|| {
+                                    PyError::named(
+                                        "OverflowError",
+                                        "%c arg not in range(0x110000)".to_string(),
+                                    )
+                                })?;
+                            c.to_string()
+                        }
+                        _ => {
                             return Err(PyError::named(
                                 "TypeError",
-                                "%c requires a single character".to_string(),
+                                "%c requires int or char".to_string(),
                             ));
                         }
-                        c.to_string()
                     }
-                    ValueKind::Int(n) => char::from_u32(n as u32)
-                        .ok_or_else(|| {
-                            PyError::named(
-                                "OverflowError",
-                                "%c arg not in range(0x110000)".to_string(),
-                            )
-                        })?
-                        .to_string(),
-                    ValueKind::Bool(b) => char::from_u32(b as u32)
-                        .ok_or_else(|| {
-                            PyError::named(
-                                "OverflowError",
-                                "%c arg not in range(0x110000)".to_string(),
-                            )
-                        })?
-                        .to_string(),
-                    _ => {
-                        return Err(PyError::named(
-                            "TypeError",
-                            "%c requires int or char".to_string(),
-                        ));
-                    }
-                },
+                }
                 _ => {
                     return Err(PyError::named(
                         "ValueError",

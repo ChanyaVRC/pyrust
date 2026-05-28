@@ -116,3 +116,27 @@ try:
     "%f" % Foo()
 except TypeError as e:
     print(f"TypeError: {e}")
+
+# --- %c with int subclass ---
+print("%c" % MyInt(65))
+
+# --- %c with __index__ ---
+print("%c" % MyIdx())
+
+# --- %c with int subclass whose backing is BigInt (out of range) ---
+try:
+    "%c" % MyInt(10**30)
+except OverflowError as e:
+    print(f"OverflowError: {e}")
+
+# --- %c with __index__ returning non-int falls back to TypeError ---
+try:
+    "%c" % BadIdx()
+except TypeError as e:
+    print(f"TypeError: {e}")
+
+# --- %c with no __index__ raises TypeError ---
+try:
+    "%c" % Foo()
+except TypeError as e:
+    print(f"TypeError: {e}")
