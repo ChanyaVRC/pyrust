@@ -407,12 +407,46 @@ impl Parser {
                 self.expect(&Token::RBrace)?;
                 Ok(Pattern::Mapping(pairs, rest))
             }
-            // Parenthesised pattern (single element — not a sequence)
+            // Parenthesised pattern: grouping `(p)` or sequence `(p1, p2)` / `(p,)` / `()`.
+            // Per PEP 634: a trailing comma or multiple elements makes it a sequence pattern.
             Some(Token::LParen) => {
                 self.bump();
-                let pat = self.parse_pattern()?;
-                self.expect(&Token::RParen)?;
-                Ok(pat)
+                // Empty parens → empty sequence pattern (matches empty tuple/list).
+                if self.is(&Token::RParen) {
+                    self.bump();
+                    return Ok(Pattern::Sequence(vec![]));
+                }
+                // Parse the first sub-pattern.
+                let first = if self.is(&Token::Star) {
+                    self.bump();
+                    let name = self.expect_ident("star pattern name")?;
+                    (Pattern::Capture(name), true)
+                } else {
+                    (self.parse_pattern()?, false)
+                };
+                // If a comma follows, this is a sequence pattern.
+                if self.is(&Token::Comma) {
+                    let mut elements = vec![first];
+                    while self.is(&Token::Comma) {
+                        self.bump();
+                        if self.is(&Token::RParen) || self.is(&Token::Eof) {
+                            break;
+                        }
+                        if self.is(&Token::Star) {
+                            self.bump();
+                            let name = self.expect_ident("star pattern name")?;
+                            elements.push((Pattern::Capture(name), true));
+                        } else {
+                            elements.push((self.parse_pattern()?, false));
+                        }
+                    }
+                    self.expect(&Token::RParen)?;
+                    Ok(Pattern::Sequence(elements))
+                } else {
+                    // No comma → plain grouping; return the inner pattern.
+                    self.expect(&Token::RParen)?;
+                    Ok(first.0)
+                }
             }
             other => Err(PyError::Parse(format!(
                 "unexpected token in pattern: {other:?}"
