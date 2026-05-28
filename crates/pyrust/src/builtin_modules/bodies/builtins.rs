@@ -1885,10 +1885,26 @@ pyrust_module! {
                                 ))
                             }
                             ValueKind::Bool(b) => if b { 1 } else { 0 },
+                            ValueKind::BigInt(b) => {
+                                use num_bigint::Sign;
+                                if b.sign() == Sign::Minus {
+                                    return Err(PyError::named(
+                                        "ValueError",
+                                        "__len__() should return >= 0".to_string(),
+                                    ));
+                                }
+                                return Err(PyError::named(
+                                    "OverflowError",
+                                    "cannot fit 'int' into an index-sized integer".to_string(),
+                                ));
+                            }
                             _ => {
                                 return Err(PyError::named(
                                     "TypeError",
-                                    "__len__ returned non-int".to_string(),
+                                    format!(
+                                        "'{}' object cannot be interpreted as an integer",
+                                        pyrust_core::builtin_type_name(&result),
+                                    ),
                                 ))
                             }
                         }
