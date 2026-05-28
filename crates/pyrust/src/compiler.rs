@@ -5658,6 +5658,37 @@ impl Compiler {
                 }
             }
             Pattern::Sequence(elements) => {
+                // PEP 634 §3: str, bytes, and bytearray are explicitly excluded
+                // from sequence pattern matching even though they support len()
+                // and __getitem__. Emit isinstance(subj, (str, bytes)) and jump
+                // to the fail label if true.
+                {
+                    let isinstance_name_idx = self.intern_name("isinstance");
+                    let isinstance_fn = self.alloc_temp();
+                    self.emit(Insn::LoadGlobal(isinstance_fn, isinstance_name_idx));
+                    let arg0 = self.alloc_temp();
+                    self.emit(Insn::Move(arg0, subj));
+                    // Build a (str, bytes) tuple in the two slots right after arg0.
+                    let str_slot = self.alloc_temp();
+                    let str_name_idx = self.intern_name("str");
+                    self.emit(Insn::LoadGlobal(str_slot, str_name_idx));
+                    let bytes_slot = self.alloc_temp();
+                    let bytes_name_idx = self.intern_name("bytes");
+                    self.emit(Insn::LoadGlobal(bytes_slot, bytes_name_idx));
+                    // Collapse str_slot and bytes_slot into a single tuple at str_slot.
+                    self.emit(Insn::BuildTuple(str_slot, str_slot, 2));
+                    // str_slot is now arg1 = (str, bytes); bytes_slot is consumed but
+                    // still allocated — free it first (LIFO), then call, then free arg0.
+                    self.free_temp(bytes_slot);
+                    self.emit(Insn::Call(isinstance_fn, 2));
+                    self.free_temp(str_slot);
+                    self.free_temp(arg0);
+                    // If subj IS a str or bytes, jump to the fail label.
+                    let jmp = self.emit(Insn::JumpIfTrue(isinstance_fn, 0));
+                    fail_patches.push(jmp);
+                    self.free_temp(isinstance_fn);
+                }
+
                 // Check that subject has exactly `fixed_count` elements
                 // (unless there's a star element, then >= fixed_count).
                 let has_star = elements.iter().any(|(_, is_star)| *is_star);
