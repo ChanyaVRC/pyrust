@@ -2570,28 +2570,48 @@ impl Interpreter {
                 ));
             }
             // Resolve defaults: fill any still-empty bound_args slots in-place.
+            // Collect all missing required positional and keyword-only args before
+            // raising, so the error groups them all (CPython 3.12 parity).
+            let mut missing_positional: Vec<&str> = Vec::new();
+            let mut missing_kwonly: Vec<&str> = Vec::new();
             for (index, param) in function.params.iter().enumerate() {
                 if bound_args[index].is_none() {
-                    bound_args[index] = Some(param.default.clone().ok_or_else(|| {
-                        if param.is_keyword_only {
-                            PyError::named(
-                                "TypeError",
-                                format!(
-                                    "{}() missing 1 required keyword-only argument: '{}'",
-                                    function.name, param.name
-                                ),
-                            )
-                        } else {
-                            PyError::named(
-                                "TypeError",
-                                format!(
-                                    "{}() missing required positional argument: '{}'",
-                                    function.name, param.name
-                                ),
-                            )
-                        }
-                    })?);
+                    if let Some(default) = param.default.clone() {
+                        bound_args[index] = Some(default);
+                    } else if param.is_keyword_only {
+                        missing_kwonly.push(&param.name);
+                    } else {
+                        missing_positional.push(&param.name);
+                    }
                 }
+            }
+            // Use the qualified name (e.g. "Foo.__new__") so the error message
+            // matches CPython 3.12: "Foo.__new__() missing 1 required positional
+            // argument: 'x'" rather than the bare "__new__()".
+            let fn_display_name = &function.qualname;
+            if !missing_positional.is_empty() {
+                let count = missing_positional.len();
+                let arg_word = if count == 1 { "argument" } else { "arguments" };
+                let names_str = format_missing_args(&missing_positional);
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "{}() missing {count} required positional {arg_word}: {names_str}",
+                        fn_display_name,
+                    ),
+                ));
+            }
+            if !missing_kwonly.is_empty() {
+                let count = missing_kwonly.len();
+                let arg_word = if count == 1 { "argument" } else { "arguments" };
+                let names_str = format_missing_args(&missing_kwonly);
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "{}() missing {count} required keyword-only {arg_word}: {names_str}",
+                        fn_display_name,
+                    ),
+                ));
             }
 
             // Memoization: build cache key by borrowing from bound_args — no extra clone.
@@ -6603,5 +6623,21 @@ fn zip_longer_message(long_idx: usize, _count: usize) -> String {
             long_idx + 1,
             long_idx
         )
+    }
+}
+
+/// Format a list of missing argument names the same way CPython 3.12 does:
+/// - 1 name  → `'x'`
+/// - 2 names → `'a' and 'b'`
+/// - 3+ names → `'a', 'b', and 'c'`  (Oxford comma)
+fn format_missing_args(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [only] => format!("'{only}'"),
+        [first, second] => format!("'{first}' and '{second}'"),
+        [init @ .., last] => {
+            let quoted: Vec<String> = init.iter().map(|n| format!("'{n}'")).collect();
+            format!("{}, and '{last}'", quoted.join(", "))
+        }
     }
 }
