@@ -1553,7 +1553,7 @@ pyrust_module! {
                 Ok(Value::builtin_function(type_name))
             }
             ValueKind::BoundMethod { .. }
-            | ValueKind::ClassBoundMethod { .. } => Ok(Value::builtin_function("function")),
+            | ValueKind::ClassBoundMethod { .. } => Ok(Value::builtin_function("method")),
             ValueKind::BuiltinFunction(_) => Ok(Value::builtin_function("builtin_function_or_method")),
             ValueKind::PyModule(_) => Ok(Value::builtin_function("module")),
             ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => Ok(Value::builtin_function("super")),
