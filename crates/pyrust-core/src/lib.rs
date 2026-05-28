@@ -3505,9 +3505,10 @@ pub fn builtin_type_name(value: &Value) -> Cow<'static, str> {
         ValueKind::Range { .. } => Cow::Borrowed("range"),
         ValueKind::Bytes(_) => Cow::Borrowed("bytes"),
         ValueKind::Complex(_, _) => Cow::Borrowed("complex"),
-        ValueKind::BuiltinFunction(_)
-        | ValueKind::BoundMethod { .. }
-        | ValueKind::ClassBoundMethod { .. } => Cow::Borrowed("function"),
+        ValueKind::BuiltinFunction(_) => Cow::Borrowed("builtin_function_or_method"),
+        ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. } => {
+            Cow::Borrowed("method")
+        }
         ValueKind::UserFunction(f) => match f.kind {
             UserFunctionKind::StaticMethod => Cow::Borrowed("staticmethod"),
             UserFunctionKind::ClassMethod => Cow::Borrowed("classmethod"),
