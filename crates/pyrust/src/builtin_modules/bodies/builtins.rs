@@ -5318,13 +5318,13 @@ pyrust_module! {
     fn str_len_dunder(args) -> Result<Value> {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
             PyError::named("TypeError",
-                "descriptor '__len__' of 'str' needs an argument".to_string())
+                "descriptor '__len__' of 'str' object needs an argument".to_string())
         })?;
         let self_val = coerce_numeric(self_val);
         match self_val.kind() {
             ValueKind::Str(s) => Ok(Value::int(s.chars().count() as i64)),
             _ => Err(PyError::named("TypeError",
-                format!("descriptor '__len__' for 'str' objects doesn't apply to a '{}' object",
+                format!("descriptor '__len__' requires a 'str' object but received a '{}'",
                     value_type_name_str(&self_val)))),
         }
     }
@@ -5446,7 +5446,7 @@ pyrust_module! {
     fn list_len_dunder(args) -> Result<Value> {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
             PyError::named("TypeError",
-                "descriptor '__len__' of 'list' needs an argument".to_string())
+                "descriptor '__len__' of 'list' object needs an argument".to_string())
         })?;
         let self_val = coerce_numeric(self_val);
         match self_val.kind() {
@@ -5457,12 +5457,12 @@ pyrust_module! {
                 match instance_builtin_data(&inst_rc).as_ref().map(|v| v.kind()) {
                     Some(ValueKind::List(items)) => Ok(Value::int(items.len() as i64)),
                     _ => Err(PyError::named("TypeError",
-                        format!("descriptor '__len__' for 'list' objects doesn't apply to a '{}' object",
+                        format!("descriptor '__len__' requires a 'list' object but received a '{}'",
                             inst_rc.borrow().class.borrow().name))),
                 }
             }
             _ => Err(PyError::named("TypeError",
-                format!("descriptor '__len__' for 'list' objects doesn't apply to a '{}' object",
+                format!("descriptor '__len__' requires a 'list' object but received a '{}'",
                     value_type_name_str(&self_val)))),
         }
     }
@@ -5472,7 +5472,7 @@ pyrust_module! {
     fn tuple_len_dunder(args) -> Result<Value> {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
             PyError::named("TypeError",
-                "descriptor '__len__' of 'tuple' needs an argument".to_string())
+                "descriptor '__len__' of 'tuple' object needs an argument".to_string())
         })?;
         let self_val = coerce_numeric(self_val);
         match self_val.kind() {
@@ -5483,12 +5483,12 @@ pyrust_module! {
                 match instance_builtin_data(&inst_rc).as_ref().map(|v| v.kind()) {
                     Some(ValueKind::Tuple(items)) => Ok(Value::int(items.len() as i64)),
                     _ => Err(PyError::named("TypeError",
-                        format!("descriptor '__len__' for 'tuple' objects doesn't apply to a '{}' object",
+                        format!("descriptor '__len__' requires a 'tuple' object but received a '{}'",
                             inst_rc.borrow().class.borrow().name))),
                 }
             }
             _ => Err(PyError::named("TypeError",
-                format!("descriptor '__len__' for 'tuple' objects doesn't apply to a '{}' object",
+                format!("descriptor '__len__' requires a 'tuple' object but received a '{}'",
                     value_type_name_str(&self_val)))),
         }
     }
@@ -5498,7 +5498,7 @@ pyrust_module! {
     fn dict_len_dunder(args) -> Result<Value> {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
             PyError::named("TypeError",
-                "descriptor '__len__' of 'dict' needs an argument".to_string())
+                "descriptor '__len__' of 'dict' object needs an argument".to_string())
         })?;
         let self_val = coerce_numeric(self_val);
         match self_val.kind() {
@@ -5509,12 +5509,12 @@ pyrust_module! {
                 match instance_builtin_data(&inst_rc).as_ref().map(|v| v.kind()) {
                     Some(ValueKind::Dict(items)) => Ok(Value::int(items.len() as i64)),
                     _ => Err(PyError::named("TypeError",
-                        format!("descriptor '__len__' for 'dict' objects doesn't apply to a '{}' object",
+                        format!("descriptor '__len__' requires a 'dict' object but received a '{}'",
                             inst_rc.borrow().class.borrow().name))),
                 }
             }
             _ => Err(PyError::named("TypeError",
-                format!("descriptor '__len__' for 'dict' objects doesn't apply to a '{}' object",
+                format!("descriptor '__len__' requires a 'dict' object but received a '{}'",
                     value_type_name_str(&self_val)))),
         }
     }
@@ -5584,7 +5584,7 @@ pyrust_module! {
     fn set_len_dunder(args) -> Result<Value> {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
             PyError::named("TypeError",
-                "descriptor '__len__' of 'set' needs an argument".to_string())
+                "descriptor '__len__' of 'set' object needs an argument".to_string())
         })?;
         let self_val = coerce_numeric(self_val);
         match self_val.kind() {
@@ -5595,12 +5595,12 @@ pyrust_module! {
                 match instance_builtin_data(&inst_rc).as_ref().map(|v| v.kind()) {
                     Some(ValueKind::Set(items)) => Ok(Value::int(items.len() as i64)),
                     _ => Err(PyError::named("TypeError",
-                        format!("descriptor '__len__' for 'set' objects doesn't apply to a '{}' object",
+                        format!("descriptor '__len__' requires a 'set' object but received a '{}'",
                             inst_rc.borrow().class.borrow().name))),
                 }
             }
             _ => Err(PyError::named("TypeError",
-                format!("descriptor '__len__' for 'set' objects doesn't apply to a '{}' object",
+                format!("descriptor '__len__' requires a 'set' object but received a '{}'",
                     value_type_name_str(&self_val)))),
         }
     }
@@ -5610,7 +5610,7 @@ pyrust_module! {
     fn bytes_len_dunder(args) -> Result<Value> {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
             PyError::named("TypeError",
-                "descriptor '__len__' of 'bytes' needs an argument".to_string())
+                "descriptor '__len__' of 'bytes' object needs an argument".to_string())
         })?;
         let self_val = coerce_numeric(self_val);
         match self_val.kind() {
@@ -5621,12 +5621,12 @@ pyrust_module! {
                 match instance_builtin_data(&inst_rc).as_ref().map(|v| v.kind()) {
                     Some(ValueKind::Bytes(b)) => Ok(Value::int(b.len() as i64)),
                     _ => Err(PyError::named("TypeError",
-                        format!("descriptor '__len__' for 'bytes' objects doesn't apply to a '{}' object",
+                        format!("descriptor '__len__' requires a 'bytes' object but received a '{}'",
                             inst_rc.borrow().class.borrow().name))),
                 }
             }
             _ => Err(PyError::named("TypeError",
-                format!("descriptor '__len__' for 'bytes' objects doesn't apply to a '{}' object",
+                format!("descriptor '__len__' requires a 'bytes' object but received a '{}'",
                     value_type_name_str(&self_val)))),
         }
     }
@@ -5636,7 +5636,7 @@ pyrust_module! {
     fn frozenset_len_dunder(args) -> Result<Value> {
         let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
             PyError::named("TypeError",
-                "descriptor '__len__' of 'frozenset' needs an argument".to_string())
+                "descriptor '__len__' of 'frozenset' object needs an argument".to_string())
         })?;
         let self_val = coerce_numeric(self_val);
         match self_val.kind() {
@@ -5655,12 +5655,12 @@ pyrust_module! {
                         Ok(Value::int(ops.len(state).unwrap_or(0) as i64))
                     }
                     _ => Err(PyError::named("TypeError",
-                        format!("descriptor '__len__' for 'frozenset' objects doesn't apply to a '{}' object",
+                        format!("descriptor '__len__' requires a 'frozenset' object but received a '{}'",
                             inst_rc.borrow().class.borrow().name))),
                 }
             }
             _ => Err(PyError::named("TypeError",
-                format!("descriptor '__len__' for 'frozenset' objects doesn't apply to a '{}' object",
+                format!("descriptor '__len__' requires a 'frozenset' object but received a '{}'",
                     value_type_name_str(&self_val)))),
         }
     }
