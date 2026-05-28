@@ -2384,11 +2384,14 @@ impl Interpreter {
                 // Covers plain `dict` and PyInstance dict subclasses; PyInstance subclasses
                 // with a custom `__or__` were already handled by the dunder path above.
                 if let Some(lhs_entries) = dict_entries_from_value(&left) {
+                    let left_type = value_type_name_str(&left);
                     let right_type = value_type_name_str(&right);
                     let Some(rhs_entries) = dict_entries_from_value(&right) else {
                         return Err(PyError::named(
                             "TypeError",
-                            format!("unsupported operand type(s) for |: 'dict' and '{right_type}'"),
+                            format!(
+                                "unsupported operand type(s) for |: '{left_type}' and '{right_type}'"
+                            ),
                         ));
                     };
                     let mut merged: IndexMap<PyKey, Value> = lhs_entries.into_iter().collect();
@@ -2927,6 +2930,7 @@ impl Interpreter {
         left: Value,
         op: BinaryOp,
         right: Value,
+        is_augmented_assign: bool,
     ) -> Result<Option<Value>> {
         // Fast paths for built-in mutable containers: mutate in-place and
         // return the *same* Value (same Rc pointer) so that aliases see the
@@ -3046,8 +3050,14 @@ impl Interpreter {
         } else if matches!(left.kind(), ValueKind::Dict(_)) && op == BinaryOp::BitOr {
             // PEP 584: dict |= other → in-place update.
             // Plain dict: skip dunder path, go directly to update().
-            pyrust_builtins::dict::call("update", &left, vec![right])?;
-            return Ok(Some(left));
+            // For binary | (not augmented assign), only dict-compatible RHS is
+            // valid; fall through to eval_binary for the TypeError with correct
+            // operand names.  For |= the full dict.update() semantics apply
+            // (accepts dicts and iterables of pairs).
+            if is_augmented_assign || dict_entries_from_value(&right).is_some() {
+                pyrust_builtins::dict::call("update", &left, vec![right])?;
+                return Ok(Some(left));
+            }
         }
 
         let dunder = match op {
@@ -3075,12 +3085,17 @@ impl Interpreter {
         // PEP 584 fallback: PyInstance dict subclass |= other when no `__ior__`
         // was found.  Call update() on the backing dict (so dict_with_mut works)
         // and return `left` to preserve object identity.
+        // For binary | (not augmented assign), only dict-compatible RHS is valid;
+        // fall through to eval_binary which uses the subclass type name correctly
+        // (e.g. 'D' rather than 'dict') in the unsupported-operand TypeError.
         if op == BinaryOp::BitOr {
             if let Some(inst_rc) = left.as_py_instance_rc() {
                 if let Some(backing) = instance_builtin_data(inst_rc) {
                     if matches!(backing.kind(), ValueKind::Dict(_)) {
-                        pyrust_builtins::dict::call("update", &backing, vec![right])?;
-                        return Ok(Some(left));
+                        if is_augmented_assign || dict_entries_from_value(&right).is_some() {
+                            pyrust_builtins::dict::call("update", &backing, vec![right])?;
+                            return Ok(Some(left));
+                        }
                     }
                 }
             }

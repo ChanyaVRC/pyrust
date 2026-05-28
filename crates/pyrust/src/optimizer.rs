@@ -3949,8 +3949,20 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             Insn::BinOpInPlace(dst, lhs, op, rhs) => {
                 Insn::BinOpInPlace(dst, s(&copies, lhs), op, s(&copies, rhs))
             }
-            Insn::BinOpConst(dst, lhs, op, c) => Insn::BinOpConst(dst, s(&copies, lhs), op, c),
-            Insn::BinOpImm(dst, lhs, op, imm) => Insn::BinOpImm(dst, s(&copies, lhs), op, imm),
+            // For BinOpConst/BinOpImm the compiler emits `dst == lhs` for
+            // augmented assignments (emit_aug_binop).  The VM uses `dst == lhs`
+            // as a signal to pass `is_augmented_assign = true` to try_inplace_op.
+            // Do NOT copy-propagate lhs when dst == lhs, because doing so would
+            // silently break that signal and cause dict/set |= to fall through
+            // to eval_binary, producing wrong TypeErrors.
+            Insn::BinOpConst(dst, lhs, op, c) => {
+                let new_lhs = if dst == lhs { lhs } else { s(&copies, lhs) };
+                Insn::BinOpConst(dst, new_lhs, op, c)
+            }
+            Insn::BinOpImm(dst, lhs, op, imm) => {
+                let new_lhs = if dst == lhs { lhs } else { s(&copies, lhs) };
+                Insn::BinOpImm(dst, new_lhs, op, imm)
+            }
             Insn::CmpJumpIfFalse(lhs, op, rhs, k) => {
                 Insn::CmpJumpIfFalse(s(&copies, lhs), op, s(&copies, rhs), k)
             }
