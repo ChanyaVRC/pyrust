@@ -20,7 +20,7 @@ use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::builtin_args::{FromValue, PyBool, PyBytes, PyFloat, PyInt, PyStr, PyValue};
 use crate::interpreter::{
-    CallableIter, EnumerateIter, FilterIter, IterSrcBuf, MapIter, NativeIterFrame, ZipIter, apply_format_spec, ascii_repr_interp, bigint_divmod_floor,
+    CallableIter, EnumerateIter, FilterIter, GetItemIter, IterSrcBuf, MapIter, NativeIterFrame, ZipIter, apply_format_spec, ascii_repr_interp, bigint_divmod_floor,
     class_chain_contains_name, class_is_subclass_of,
     compare_values, compare_values_with_op, coerce_numeric, dir_names,
     find_immutable_primitive_base, find_mutable_primitive_base, find_scalar_primitive_base,
@@ -1705,6 +1705,10 @@ pyrust_module! {
                     Ok(Value::builtin_function("enumerate"))
                 } else if borrow.downcast_ref::<ZipIter>().is_some() {
                     Ok(Value::builtin_function("zip"))
+                } else if borrow.downcast_ref::<CallableIter>().is_some() {
+                    Ok(Value::builtin_function("callable_iterator"))
+                } else if borrow.downcast_ref::<GetItemIter>().is_some() {
+                    Ok(Value::builtin_function("iterator"))
                 } else if let Some(native) = borrow.downcast_ref::<NativeIterFrame>() {
                     Ok(Value::builtin_function(native.type_name))
                 } else {
@@ -8419,26 +8423,18 @@ fn builtin_iter_type_name(v: &Value) -> &'static str {
         ValueKind::Range { .. } => "range_iterator",
         ValueKind::Bytes(_) => "bytes_iterator",
         // dict view iterators: "dict_keys" → "dict_keyiterator", etc.
+        // CPython uses "set_iterator" for frozenset iteration as well.
         ValueKind::BuiltinObject { ops, .. } => match ops.type_name() {
             "dict_keys" => "dict_keyiterator",
             "dict_values" => "dict_valueiterator",
             "dict_items" => "dict_itemiterator",
+            "frozenset" => "set_iterator",
             _ => "generator",
         },
         _ => "generator",
     }
 }
 
-/// Return the Python type name for a value, with correct iterator type names
-/// for Generator variants (e.g. "list_iterator", "map", "filter").
-///
-/// `value_type_name_str` (from `pyrust-core`) cannot distinguish between
-/// `NativeIterFrame`-based iterators and true generator frames because they
-/// are both stored as `ValueKind::Generator`.  This wrapper downcasts the
-/// generator state to recover the specific type name stored in
-/// `NativeIterFrame::type_name`, or the sentinel names for `MapIter` /
-/// `FilterIter` / `EnumerateIter` / `ZipIter`.  All other value kinds
-/// delegate to `value_type_name_str`.
 /// Parse and validate arguments for `exec()` and `eval()`.
 ///
 /// Both accept `(source[, globals[, locals]])`.  Returns
@@ -8473,6 +8469,16 @@ fn parse_exec_eval_args(
     Ok((source_val, globals_opt, locals_opt))
 }
 
+/// Return the Python type name for a value, with correct iterator type names
+/// for Generator variants (e.g. "list_iterator", "map", "filter").
+///
+/// `value_type_name_str` (from `pyrust-core`) cannot distinguish between
+/// `NativeIterFrame`-based iterators and true generator frames because they
+/// are both stored as `ValueKind::Generator`.  This wrapper downcasts the
+/// generator state to recover the specific type name stored in
+/// `NativeIterFrame::type_name`, or the sentinel names for `MapIter` /
+/// `FilterIter` / `EnumerateIter` / `ZipIter` / `CallableIter` /
+/// `GetItemIter`.  All other value kinds delegate to `value_type_name_str`.
 fn full_type_name_str(v: &Value) -> std::borrow::Cow<'static, str> {
     if let ValueKind::Generator(state_rc) = v.kind() {
         let borrow = state_rc.borrow();
@@ -8487,6 +8493,12 @@ fn full_type_name_str(v: &Value) -> std::borrow::Cow<'static, str> {
         }
         if borrow.downcast_ref::<ZipIter>().is_some() {
             return std::borrow::Cow::Borrowed("zip");
+        }
+        if borrow.downcast_ref::<CallableIter>().is_some() {
+            return std::borrow::Cow::Borrowed("callable_iterator");
+        }
+        if borrow.downcast_ref::<GetItemIter>().is_some() {
+            return std::borrow::Cow::Borrowed("iterator");
         }
         if let Some(native) = borrow.downcast_ref::<NativeIterFrame>() {
             return std::borrow::Cow::Borrowed(native.type_name);
