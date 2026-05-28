@@ -4987,8 +4987,17 @@ impl Interpreter {
         // their contents rather than the generic object repr.
         // Use render_value_repr (interp-aware) so that PyInstance elements
         // inside the backing container have their __repr__ called correctly.
+        // Issue #1542: scalar backings (int/float/str/bytes subclasses) also
+        // need to delegate to the backing value's to_py_str() so that
+        // `"%s" % MyInt(42)` returns "42" rather than the address repr.
         if let Some(backing) = instance_builtin_data(&inst_rc) {
             match backing.kind() {
+                ValueKind::Str(_)
+                | ValueKind::Int(_)
+                | ValueKind::BigInt(_)
+                | ValueKind::Bool(_)
+                | ValueKind::Float(_)
+                | ValueKind::Bytes(_) => return Ok(backing.to_py_str()),
                 ValueKind::List(_) | ValueKind::Dict(_) | ValueKind::Tuple(_) => {
                     return crate::builtin_modules::builtins::render_value_repr(self, &backing);
                 }
@@ -5582,8 +5591,17 @@ fn render_instance_repr(interp: &mut Interpreter, value: &Value) -> Result<Strin
     // the generic `<ClassName object at 0x...>` object repr.
     // Use render_value_repr (interp-aware) so that PyInstance elements
     // inside the backing container have their __repr__ called correctly.
+    // Issue #1542: scalar backings (int/float/str/bytes subclasses) also
+    // need to delegate to the backing value's repr() so that
+    // `"%r" % MyInt(42)` returns "42" rather than the address repr.
     if let Some(backing) = instance_builtin_data(&inst_rc) {
         match backing.kind() {
+            ValueKind::Str(_)
+            | ValueKind::Int(_)
+            | ValueKind::BigInt(_)
+            | ValueKind::Bool(_)
+            | ValueKind::Float(_)
+            | ValueKind::Bytes(_) => return Ok(backing.repr()),
             ValueKind::List(_) | ValueKind::Dict(_) | ValueKind::Tuple(_) => {
                 return crate::builtin_modules::builtins::render_value_repr(interp, &backing);
             }
