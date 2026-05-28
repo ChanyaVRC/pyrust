@@ -52,7 +52,7 @@ print(s.find("o", 6, 100))   # -1 (start > len)
 
 # ── Unicode (non-ASCII): same semantics, different code path ──────────────────
 
-u = "helo"   # 4 Unicode chars; é is 2 bytes in UTF-8
+u = "hélo"   # 4 Unicode chars; é is 2 bytes in UTF-8
 print(len(u))          # 4
 print(u.find("", 4))   # 4
 print(u.find("", 5))   # -1
