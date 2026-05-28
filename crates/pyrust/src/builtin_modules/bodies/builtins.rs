@@ -5776,10 +5776,15 @@ pyrust_module! {
                 _interp.assign_attr_instance_raw(instance_rc, &name, value)?;
             }
             _ => {
-                // For non-PyInstance values (builtins like int, str, etc.),
-                // delegate to the regular assign_attr which will produce the
-                // correct AttributeError.
-                _interp.assign_attr(args[0].value.clone(), &name, value)?;
+                // CPython raises AttributeError for non-instance values (int, str,
+                // list, etc.) — their slots are immutable from Python.  The
+                // general assign_attr catch-all returns RuntimeError here, which
+                // is wrong; emit the same message CPython does instead.
+                let type_name = value_type_name_str(&args[0].value);
+                return Err(PyError::named(
+                    "AttributeError",
+                    format!("'{type_name}' object has no attribute '{name}'"),
+                ));
             }
         }
         Ok(Value::none())
@@ -5821,7 +5826,14 @@ pyrust_module! {
                 _interp.delete_attr_instance_raw(instance_rc, &name)?;
             }
             _ => {
-                _interp.delete_attr(args[0].value.clone(), &name)?;
+                // CPython raises AttributeError for non-instance values — same
+                // pattern as in object_setattr_dunder; the general delete_attr
+                // catch-all returns RuntimeError here, which is wrong.
+                let type_name = value_type_name_str(&args[0].value);
+                return Err(PyError::named(
+                    "AttributeError",
+                    format!("'{type_name}' object has no attribute '{name}'"),
+                ));
             }
         }
         Ok(Value::none())
