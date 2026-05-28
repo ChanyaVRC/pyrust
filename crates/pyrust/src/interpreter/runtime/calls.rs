@@ -3452,8 +3452,8 @@ impl Interpreter {
 
                 let value = apply_field_accessors(self, base, rest)?;
                 let value = match conversion {
-                    Some('r') => Value::string(value.repr()),
-                    Some('s') => Value::string(value.to_py_str()),
+                    Some('r') => Value::string(render_instance_repr(self, &value)?),
+                    Some('s') => Value::string(self.render_value_as_str(&value)?),
                     Some('a') => Value::string(ascii_repr_interp(self, &value)?),
                     Some(c) => {
                         return Err(PyError::named(
