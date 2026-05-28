@@ -2120,7 +2120,11 @@ pyrust_module! {
             match ndigits {
                 None => None,
                 Some(ref v) => match v.0.kind() {
-                    ValueKind::Int(n) => Some(n as i32),
+                    // Clamp to -(i32::MAX)..=i32::MAX to avoid both the as-i32 wrap
+                    // for large positive values and the -n overflow for i32::MIN.
+                    // Out-of-range values land in the is_infinite() overflow guards
+                    // in the float branch.
+                    ValueKind::Int(n) => Some(n.clamp(-(i32::MAX as i64), i32::MAX as i64) as i32),
                     ValueKind::Bool(b) => Some(b as i32),
                     ValueKind::None => None,
                     _ => return Err(PyError::named(
@@ -2216,7 +2220,9 @@ pyrust_module! {
                     let ndigits_i32_coerced: Option<i32> = match ndigits {
                         None => None,
                         Some(ref v) => match v.0.kind() {
-                            ValueKind::Int(n) => Some(n as i32),
+                            // Clamp to -(i32::MAX)..=i32::MAX for the same reason as the
+                            // primary ndigits_i32 path above.
+                            ValueKind::Int(n) => Some(n.clamp(-(i32::MAX as i64), i32::MAX as i64) as i32),
                             ValueKind::Bool(b) => Some(b as i32),
                             ValueKind::None => None,
                             _ => return Err(PyError::named(
