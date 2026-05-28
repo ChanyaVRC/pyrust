@@ -4425,6 +4425,198 @@ pyrust_module! {
         ))))
     }
 
+    /// Issue #1465: `int.__new__(cls, x=0)` — allocator for int subclasses.
+    /// Creates a `PyInstance` of `cls` with the int backing store
+    /// (`__builtin_data__`) populated from the constructor arguments.
+    /// Called when an `int` subclass's `__new__` calls `super().__new__(cls, val)`.
+    ///
+    /// CPython signature: `int.__new__(cls, x=0, /)`
+    #[py_name = "int.__new__"]
+    fn int_new_dunder(args) -> Result<Value> {
+        let (cls_val, rest) = match args {
+            [] => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "int.__new__(): not enough arguments".to_string(),
+                ));
+            }
+            [first, rest @ ..] => (first.value.clone(), rest),
+        };
+        let class_rc = match cls_val.kind() {
+            ValueKind::PyClass(c) => Rc::clone(c),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "int.__new__(X): X is not a type object ({})",
+                        value_type_name_str(&cls_val)
+                    ),
+                ));
+            }
+        };
+        let backing = if let Some(dispatch) = crate::builtin_registry::lookup("int") {
+            dispatch(_interp, rest)?
+        } else {
+            return Err(PyError::Runtime("internal: int not in registry".to_string()));
+        };
+        let mut attrs = indexmap::IndexMap::new();
+        attrs.insert(
+            crate::interpreter::BUILTIN_DATA_ATTR.to_string(),
+            backing,
+        );
+        Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
+            crate::value::PyInstance {
+                class: class_rc,
+                attrs,
+            },
+        ))))
+    }
+
+    /// Issue #1465: `str.__new__(cls, object='')` — allocator for str subclasses.
+    /// Creates a `PyInstance` of `cls` with the str backing store
+    /// (`__builtin_data__`) populated from the constructor arguments.
+    /// Called when a `str` subclass's `__new__` calls `super().__new__(cls, val)`.
+    ///
+    /// CPython signature: `str.__new__(cls, object='', /)`
+    #[py_name = "str.__new__"]
+    fn str_new_dunder(args) -> Result<Value> {
+        let (cls_val, rest) = match args {
+            [] => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "str.__new__(): not enough arguments".to_string(),
+                ));
+            }
+            [first, rest @ ..] => (first.value.clone(), rest),
+        };
+        let class_rc = match cls_val.kind() {
+            ValueKind::PyClass(c) => Rc::clone(c),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "str.__new__(X): X is not a type object ({})",
+                        value_type_name_str(&cls_val)
+                    ),
+                ));
+            }
+        };
+        let backing = if let Some(dispatch) = crate::builtin_registry::lookup("str") {
+            dispatch(_interp, rest)?
+        } else {
+            return Err(PyError::Runtime("internal: str not in registry".to_string()));
+        };
+        let mut attrs = indexmap::IndexMap::new();
+        attrs.insert(
+            crate::interpreter::BUILTIN_DATA_ATTR.to_string(),
+            backing,
+        );
+        Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
+            crate::value::PyInstance {
+                class: class_rc,
+                attrs,
+            },
+        ))))
+    }
+
+    /// Issue #1465: `float.__new__(cls, x=0.0)` — allocator for float subclasses.
+    /// Creates a `PyInstance` of `cls` with the float backing store
+    /// (`__builtin_data__`) populated from the constructor arguments.
+    /// Called when a `float` subclass's `__new__` calls `super().__new__(cls, val)`.
+    ///
+    /// CPython signature: `float.__new__(cls, x=0.0, /)`
+    #[py_name = "float.__new__"]
+    fn float_new_dunder(args) -> Result<Value> {
+        let (cls_val, rest) = match args {
+            [] => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "float.__new__(): not enough arguments".to_string(),
+                ));
+            }
+            [first, rest @ ..] => (first.value.clone(), rest),
+        };
+        let class_rc = match cls_val.kind() {
+            ValueKind::PyClass(c) => Rc::clone(c),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "float.__new__(X): X is not a type object ({})",
+                        value_type_name_str(&cls_val)
+                    ),
+                ));
+            }
+        };
+        let backing = if let Some(dispatch) = crate::builtin_registry::lookup("float") {
+            dispatch(_interp, rest)?
+        } else {
+            return Err(PyError::Runtime(
+                "internal: float not in registry".to_string(),
+            ));
+        };
+        let mut attrs = indexmap::IndexMap::new();
+        attrs.insert(
+            crate::interpreter::BUILTIN_DATA_ATTR.to_string(),
+            backing,
+        );
+        Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
+            crate::value::PyInstance {
+                class: class_rc,
+                attrs,
+            },
+        ))))
+    }
+
+    /// Issue #1465: `bytes.__new__(cls, source=b'')` — allocator for bytes subclasses.
+    /// Creates a `PyInstance` of `cls` with the bytes backing store
+    /// (`__builtin_data__`) populated from the constructor arguments.
+    /// Called when a `bytes` subclass's `__new__` calls `super().__new__(cls, val)`.
+    ///
+    /// CPython signature: `bytes.__new__(cls, source=b'', /)`
+    #[py_name = "bytes.__new__"]
+    fn bytes_new_dunder(args) -> Result<Value> {
+        let (cls_val, rest) = match args {
+            [] => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "bytes.__new__(): not enough arguments".to_string(),
+                ));
+            }
+            [first, rest @ ..] => (first.value.clone(), rest),
+        };
+        let class_rc = match cls_val.kind() {
+            ValueKind::PyClass(c) => Rc::clone(c),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "bytes.__new__(X): X is not a type object ({})",
+                        value_type_name_str(&cls_val)
+                    ),
+                ));
+            }
+        };
+        let backing = if let Some(dispatch) = crate::builtin_registry::lookup("bytes") {
+            dispatch(_interp, rest)?
+        } else {
+            return Err(PyError::Runtime(
+                "internal: bytes not in registry".to_string(),
+            ));
+        };
+        let mut attrs = indexmap::IndexMap::new();
+        attrs.insert(
+            crate::interpreter::BUILTIN_DATA_ATTR.to_string(),
+            backing,
+        );
+        Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
+            crate::value::PyInstance {
+                class: class_rc,
+                attrs,
+            },
+        ))))
+    }
+
     /// Issue #1256: `object.__lt__`, `__le__`, `__gt__`, `__ge__` — ordering
     /// comparisons not defined on object; all return `NotImplemented`.
     ///
