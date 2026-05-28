@@ -95,6 +95,24 @@ try:
 except TypeError as te:
     print(te)        # 'bad' is an invalid keyword argument for ImportError()
 
+# --- Error messages use base class name, not subclass name ---
+# UnboundLocalError errors say "NameError()" not "UnboundLocalError()"
+try:
+    UnboundLocalError("msg", foo="x")
+except TypeError as te:
+    print(te)        # 'foo' is an invalid keyword argument for NameError()
+
+try:
+    UnboundLocalError("msg", foo="a", bar="b")
+except TypeError as te:
+    print(te)        # NameError() takes at most 1 keyword argument (2 given)
+
+# ModuleNotFoundError errors say "ImportError()" not "ModuleNotFoundError()"
+try:
+    ModuleNotFoundError("msg", bad="x")
+except TypeError as te:
+    print(te)        # 'bad' is an invalid keyword argument for ImportError()
+
 # --- Other exception classes still reject all kwargs ---
 try:
     ValueError("msg", foo="bar")

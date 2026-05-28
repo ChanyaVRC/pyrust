@@ -3175,6 +3175,10 @@ impl Interpreter {
             // Extract any recognised keyword arguments before building the positional
             // values list; reject unrecognised keywords with the class-specific
             // error message CPython uses.
+            //
+            // IMPORTANT: CPython's error messages always use the *base* class name
+            // ("NameError()" / "ImportError()"), even when the actual class is a
+            // subclass like UnboundLocalError or ModuleNotFoundError.
             let class_name = class.borrow().name.clone();
             let is_name_error_class = class_chain_contains_name(&class, "NameError");
             let is_import_error_class = class_chain_contains_name(&class, "ImportError");
@@ -3185,12 +3189,13 @@ impl Interpreter {
                 // CPython 3.12: NameError accepts at most 1 keyword argument (`name=`).
                 // If total kwarg count > 1, raises "takes at most 1 keyword argument".
                 // If total kwarg count == 1 and it is not `name=`, raises "invalid keyword".
+                // Error messages always say "NameError()" regardless of the actual subclass.
                 let kw_count = args.iter().filter(|a| a.name.is_some()).count();
                 if kw_count > 1 {
                     return Err(PyError::named(
                         "TypeError",
                         format!(
-                            "{class_name}() takes at most 1 keyword argument ({kw_count} given)"
+                            "NameError() takes at most 1 keyword argument ({kw_count} given)"
                         ),
                     ));
                 }
@@ -3202,7 +3207,7 @@ impl Interpreter {
                             return Err(PyError::named(
                                 "TypeError",
                                 format!(
-                                    "'{other}' is an invalid keyword argument for {class_name}()"
+                                    "'{other}' is an invalid keyword argument for NameError()"
                                 ),
                             ));
                         }
@@ -3211,6 +3216,7 @@ impl Interpreter {
             } else if is_import_error_class {
                 // CPython 3.12: ImportError accepts `name=` and `path=`; any other
                 // keyword raises "'X' is an invalid keyword argument for ImportError()".
+                // Error messages always say "ImportError()" regardless of the actual subclass.
                 for arg in args {
                     match arg.name.as_deref() {
                         None => values.push(arg.value.clone()),
@@ -3220,7 +3226,7 @@ impl Interpreter {
                             return Err(PyError::named(
                                 "TypeError",
                                 format!(
-                                    "'{other}' is an invalid keyword argument for {class_name}()"
+                                    "'{other}' is an invalid keyword argument for ImportError()"
                                 ),
                             ));
                         }
