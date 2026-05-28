@@ -74,9 +74,18 @@ dm = {m1: "m1"}
 print(dm[m1])
 print(dm[m2])
 
-# Classmethod
+# Classmethod: equality and dict dedup
+# Two references to the same classmethod must compare equal and hash equal,
+# so that dict/set operations deduplicate them correctly.
 print(type(hash(A.cm)).__name__)
 print(hash(A.cm) == hash(A.cm))
+print(A.cm == A.cm)
+
+# Classmethod as dict key: updating the key must overwrite, not insert a second entry
+dc = {A.cm: "first"}
+dc[A.cm] = "second"
+print(dc[A.cm])    # second
+print(len(dc))     # 1
 
 # Built-in functions
 print(type(hash(print)).__name__)
