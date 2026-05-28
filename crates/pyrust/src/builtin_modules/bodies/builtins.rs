@@ -2177,18 +2177,7 @@ pyrust_module! {
             }
             NumKind::Float(v) => match ndigits_i32 {
                 None => Ok(Value::int(py_round_half_even(v))),
-                Some(n) => {
-                    if n >= 0 {
-                        // For large ndigits the float has insufficient precision;
-                        // return unchanged (CPython behaviour).
-                        let factor = 10f64.powi(n);
-                        let z = v * factor;
-                        if factor.is_infinite() || z.is_infinite() {
-                            return Ok(Value::float(v));
-                        }
-                    }
-                    round_float_ndigits(v, n)
-                }
+                Some(n) => round_float_ndigits(v, n),
             },
             NumKind::Other => {
                 // Check for user-defined __round__ before raising TypeError.
@@ -2255,16 +2244,7 @@ pyrust_module! {
                         },
                         ValueKind::Float(v) => return match ndigits_i32_coerced {
                             None => Ok(Value::int(py_round_half_even(v))),
-                            Some(n) => {
-                                if n >= 0 {
-                                    let factor = 10f64.powi(n);
-                                    let z = v * factor;
-                                    if factor.is_infinite() || z.is_infinite() {
-                                        return Ok(Value::float(v));
-                                    }
-                                }
-                                round_float_ndigits(v, n)
-                            }
+                            Some(n) => round_float_ndigits(v, n),
                         },
                         _ => {}
                     }

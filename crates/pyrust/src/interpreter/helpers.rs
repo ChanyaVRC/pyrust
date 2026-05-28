@@ -3875,6 +3875,14 @@ pub(crate) fn py_round_half_even(v: f64) -> i64 {
 /// NaN and infinities pass through as-is.
 pub(crate) fn round_float_ndigits(v: f64, n: i32) -> crate::error::Result<Value> {
     if n >= 0 {
+        // A f64 has at most 1074 significant decimal digits (the subnormal 5e-324
+        // has exactly 324 significant decimal digits; normal floats have fewer).
+        // Any ndigits > 1074 cannot change the float's value, so return v unchanged.
+        // This cap also prevents Rust's formatter from panicking: format!("{:.prec$}")
+        // panics when prec >= 65536, and ndigits_i32 can be as large as i32::MAX.
+        if n > 1074 {
+            return Ok(Value::float(v));
+        }
         let prec = n as usize;
         // Rust's {:.prec$} formatter uses the exact float value (Grisu3/Dragon4),
         // so it correctly rounds 2.675 to 2.67 (the exact IEEE 754 value is slightly

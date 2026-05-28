@@ -51,3 +51,11 @@ print(round(float('nan'), -2))  # nan
 
 # Very small negative ndigits → 0.0
 print(round(1.5, -1000))   # 0.0
+
+# Subnormal float: ndigits large enough that 10^ndigits overflows f64, but the
+# correct result is still 0.0 (not the original value) when ndigits < the float's
+# decimal precision.  5e-324 is the minimum positive float (2^-1074); its decimal
+# expansion has 324 significant digits, so round(5e-324, 323) rounds to 0.0.
+print(round(5e-324, 320))  # 0.0
+print(round(5e-324, 323))  # 0.0
+print(round(5e-324, 324))  # 5e-324
