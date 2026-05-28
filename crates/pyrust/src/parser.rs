@@ -1175,7 +1175,28 @@ impl Parser {
 
     fn parse_import_from(&mut self) -> Result<Stmt> {
         self.expect(&Token::From)?;
-        let module = self.parse_dotted_name()?;
+        // Count leading dots for relative imports: `from . import x`,
+        // `from .. import x`, `from .pkg import x`, etc.
+        // Token::Ellipsis (`...`) counts as 3 dots.
+        let mut dots = String::new();
+        loop {
+            if self.is(&Token::Dot) {
+                self.bump();
+                dots.push('.');
+            } else if self.is(&Token::Ellipsis) {
+                self.bump();
+                dots.push_str("...");
+            } else {
+                break;
+            }
+        }
+        // The module name is optional when dots are present (`from . import x`).
+        let base = if !dots.is_empty() && self.is(&Token::Import) {
+            String::new()
+        } else {
+            self.parse_dotted_name()?
+        };
+        let module = format!("{}{}", dots, base);
         self.expect(&Token::Import)?;
         let mut names = Vec::new();
         if self.is(&Token::Star) {
