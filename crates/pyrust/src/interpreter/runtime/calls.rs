@@ -2302,19 +2302,22 @@ impl Interpreter {
                 bound_args[index] = Some(value.clone());
             }
             let mut positional_index = bound_prefix.len();
+            let mut posonly_violations: Vec<&str> = Vec::new();
+            // Deferred unknown-keyword: CPython raises posonly error before
+            // unexpected-keyword error when both are present in the same call.
+            let mut first_unknown_keyword: Option<&str> = None;
             for arg in args {
                 let value = arg.value.clone();
                 if let Some(name) = &arg.name {
                     let Some(param_index) =
                         function.params.iter().position(|param| param.name == *name)
                     else {
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "{}() got an unexpected keyword argument '{}'",
-                                function.name, name
-                            ),
-                        ));
+                        // Don't return immediately — a posonly violation earlier
+                        // in the arg list must still take priority (CPython 3.12).
+                        if first_unknown_keyword.is_none() {
+                            first_unknown_keyword = Some(name.as_str());
+                        }
+                        continue;
                     };
                     if function.params[param_index].is_positional_only {
                         // The fast path only runs when the function has neither
@@ -2323,13 +2326,11 @@ impl Interpreter {
                         // **kwargs to absorb this name — TypeError is correct.
                         // The variadic path (`compute_kw_pos` below) handles
                         // the "absorb into **kwargs" case separately.
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "{}() got some positional-only arguments passed as keyword arguments: '{}'",
-                                function.name, name
-                            ),
-                        ));
+                        // Collect all violations so the error lists all names,
+                        // matching CPython 3.12: foo() got some positional-only
+                        // arguments passed as keyword arguments: 'a, b'
+                        posonly_violations.push(name.as_str());
+                        continue;
                     }
                     if bound_args[param_index].is_some() {
                         return Err(PyError::named(
@@ -2382,6 +2383,22 @@ impl Interpreter {
                     bound_args[positional_index] = Some(value);
                     positional_index += 1;
                 }
+            }
+            if !posonly_violations.is_empty() {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "{}() got some positional-only arguments passed as keyword arguments: '{}'",
+                        function.name,
+                        posonly_violations.join(", ")
+                    ),
+                ));
+            }
+            if let Some(name) = first_unknown_keyword {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{}() got an unexpected keyword argument '{}'", function.name, name),
+                ));
             }
             // Resolve defaults: fill any still-empty bound_args slots in-place.
             for (index, param) in function.params.iter().enumerate() {
@@ -2718,24 +2735,32 @@ impl Interpreter {
         }
 
         if !has_kwargs {
+            // First pass: collect all positional-only violations so the error
+            // lists every offending name, matching CPython 3.12 parity.
+            let posonly_violations: Vec<&str> = keyword_vals
+                .iter()
+                .filter(|(name, _)| {
+                    !consumed_keywords.contains(name)
+                        && function
+                            .params
+                            .iter()
+                            .any(|p| p.is_positional_only && &p.name == name)
+                })
+                .map(|(name, _)| name.as_str())
+                .collect();
+            if !posonly_violations.is_empty() {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "{}() got some positional-only arguments passed as keyword arguments: '{}'",
+                        function.name,
+                        posonly_violations.join(", ")
+                    ),
+                ));
+            }
+            // Second pass: check for entirely unexpected keyword arguments.
             for (name, _) in &keyword_vals {
                 if !consumed_keywords.contains(name) {
-                    // Distinguish "this name matches a positional-only param"
-                    // from "this name is completely unknown" — CPython raises
-                    // a more specific TypeError in the former case.
-                    if function
-                        .params
-                        .iter()
-                        .any(|p| p.is_positional_only && &p.name == name)
-                    {
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "{}() got some positional-only arguments passed as keyword arguments: '{}'",
-                                function.name, name
-                            ),
-                        ));
-                    }
                     return Err(PyError::Runtime(format!(
                         "{}() got unexpected keyword argument '{}'",
                         function.name, name
