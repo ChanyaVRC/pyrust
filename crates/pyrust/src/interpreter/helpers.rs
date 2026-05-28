@@ -1102,7 +1102,8 @@ pub(crate) fn find_immutable_primitive_base(
 
 /// Walk the base chain of `class` and return the name of the first scalar
 /// (non-container) primitive builtin base found (`"str"`, `"int"`, `"float"`,
-/// or `"bytes"`), or `None` if the class does not inherit from any of these.
+/// `"bytes"`, or `"complex"`), or `None` if the class does not inherit from
+/// any of these.
 ///
 /// Issue #1204: these types require the same `__builtin_data__` backing-store
 /// approach used by the container primitives (`dict`/`list`/`set`), so that
@@ -1117,13 +1118,14 @@ pub(crate) fn find_scalar_primitive_base(
         (borrowed.name.clone(), borrowed.base.clone())
     };
     match name.as_str() {
-        "str" | "int" | "float" | "bytes" => {
+        "str" | "int" | "float" | "bytes" | "complex" => {
             if is_primitive_class(class) {
                 return Some(match name.as_str() {
                     "str" => "str",
                     "int" => "int",
                     "float" => "float",
                     "bytes" => "bytes",
+                    "complex" => "complex",
                     _ => unreachable!(),
                 });
             }

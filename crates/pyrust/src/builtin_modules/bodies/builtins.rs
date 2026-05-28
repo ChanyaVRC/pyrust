@@ -4315,6 +4315,7 @@ pyrust_module! {
                     | ValueKind::BigInt(_)
                     | ValueKind::Bool(_)
                     | ValueKind::Float(_)
+                    | ValueKind::Complex(_, _)
                     | ValueKind::Bytes(_) => backing.repr(),
                     ValueKind::List(_) | ValueKind::Dict(_) | ValueKind::Tuple(_) => {
                         render_value_repr(_interp, &backing)?
@@ -7296,6 +7297,7 @@ pub(crate) fn render_value_repr(interp: &mut crate::Interpreter, value: &Value) 
                 | ValueKind::BigInt(_)
                 | ValueKind::Bool(_)
                 | ValueKind::Float(_)
+                | ValueKind::Complex(_, _)
                 | ValueKind::Bytes(_) => return Ok(backing.repr()),
                 ValueKind::List(_) | ValueKind::Dict(_) | ValueKind::Tuple(_) => {
                     return render_value_repr(interp, &backing);
@@ -7631,7 +7633,8 @@ fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result
                 ValueKind::Int(_)
                 | ValueKind::BigInt(_)
                 | ValueKind::Bool(_)
-                | ValueKind::Float(_) => return Ok(backing.to_py_str()),
+                | ValueKind::Float(_)
+                | ValueKind::Complex(_, _) => return Ok(backing.to_py_str()),
                 _ => {}
             }
         }

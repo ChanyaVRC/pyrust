@@ -5182,6 +5182,7 @@ impl Interpreter {
                 | ValueKind::BigInt(_)
                 | ValueKind::Bool(_)
                 | ValueKind::Float(_)
+                | ValueKind::Complex(_, _)
                 | ValueKind::Bytes(_) => return Ok(backing.to_py_str()),
                 ValueKind::List(_) | ValueKind::Dict(_) | ValueKind::Tuple(_) => {
                     return crate::builtin_modules::builtins::render_value_repr(self, &backing);
@@ -5797,6 +5798,7 @@ fn render_instance_repr(interp: &mut Interpreter, value: &Value) -> Result<Strin
             | ValueKind::BigInt(_)
             | ValueKind::Bool(_)
             | ValueKind::Float(_)
+            | ValueKind::Complex(_, _)
             | ValueKind::Bytes(_) => return Ok(backing.repr()),
             ValueKind::List(_) | ValueKind::Dict(_) | ValueKind::Tuple(_) => {
                 return crate::builtin_modules::builtins::render_value_repr(interp, &backing);
