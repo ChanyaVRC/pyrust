@@ -2393,10 +2393,26 @@ impl Interpreter {
                 // PEP 604: `type | type` (and `None | type`, `type | None`,
                 // `UnionType | type`, etc.) creates a `types.UnionType`.
                 // `None` is coerced to `NoneType` as the union component.
-                if is_union_operand(&left) && is_union_operand(&right) {
+                // At least one operand must be a strict type (PyClass / BuiltinFunction /
+                // UnionType): `None | None` has neither side as a type and must raise
+                // TypeError, matching CPython 3.12 (`type.__or__` is what makes it work).
+                if is_union_operand(&left)
+                    && is_union_operand(&right)
+                    && (is_strict_type_union_operand(&left) || is_strict_type_union_operand(&right))
+                {
                     let lhs = coerce_none_to_nonetype(left);
                     let rhs = coerce_none_to_nonetype(right);
                     return Ok(pyrust_builtins::union_type::make_union_type(lhs, rhs));
+                }
+                // `None | None`: both operands looked like union components but neither
+                // was a type, so CPython raises TypeError with the operand-type message.
+                if is_union_operand(&left) && is_union_operand(&right) {
+                    let lt = value_type_name_str(&left);
+                    let rt = value_type_name_str(&right);
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("unsupported operand type(s) for |: '{lt}' and '{rt}'"),
+                    ));
                 }
                 // Issue #1204: extract backing for scalar primitive subclasses.
                 let left = coerce_numeric(left);
@@ -5008,6 +5024,22 @@ fn complex_pow(zr: f64, zi: f64, wr: f64, wi: f64) -> Result<Value> {
 fn is_union_operand(v: &Value) -> bool {
     match v.kind() {
         ValueKind::PyClass(_) | ValueKind::BuiltinFunction(_) | ValueKind::None => true,
+        ValueKind::BuiltinObject { ops, .. } => {
+            ops.type_name() == pyrust_builtins::union_type::TYPE_NAME
+        }
+        _ => false,
+    }
+}
+
+/// True if `v` is a "type-like" PEP 604 operand — a `PyClass`, a `BuiltinFunction`
+/// acting as a type token, or an existing `UnionType`.  `None` is excluded: it
+/// can appear in a union *only* when the other operand is a type, so at least
+/// one side must satisfy this stricter predicate.  This matches CPython's
+/// behaviour where `None | None` raises TypeError but `int | None` succeeds
+/// (dispatched through `type.__or__`).
+fn is_strict_type_union_operand(v: &Value) -> bool {
+    match v.kind() {
+        ValueKind::PyClass(_) | ValueKind::BuiltinFunction(_) => true,
         ValueKind::BuiltinObject { ops, .. } => {
             ops.type_name() == pyrust_builtins::union_type::TYPE_NAME
         }
