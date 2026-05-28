@@ -2368,6 +2368,60 @@ pyrust_module! {
                         use num_bigint::Sign;
                         Some(if b.sign() == Sign::Minus { -(i32::MAX) } else { i32::MAX })
                     }
+                    // CPython calls operator.index() on any non-int ndigits.
+                    // For int subclasses, coerce_numeric extracts the backing
+                    // primitive (no __index__ call needed — the subclass IS an
+                    // int).  For other objects with __index__, call it.
+                    ValueKind::PyInstance(_) => {
+                        let coerced = coerce_numeric(v.0.clone());
+                        let result = match coerced.kind() {
+                            ValueKind::Int(_) | ValueKind::BigInt(_) => coerced.clone(),
+                            _ => {
+                                // Not an int subclass; try user-defined __index__.
+                                let inst_rc = match v.0.as_py_instance_rc() {
+                                    Some(rc) => Rc::clone(rc),
+                                    None => return Err(PyError::named(
+                                        "TypeError",
+                                        format!(
+                                            "'{}' object cannot be interpreted as an integer",
+                                            value_type_name_str(&v.0),
+                                        ),
+                                    )),
+                                };
+                                let class = Rc::clone(&inst_rc.borrow().class);
+                                let Some(method_val) = lookup_class_attr(&class, "__index__") else {
+                                    return Err(PyError::named(
+                                        "TypeError",
+                                        format!(
+                                            "'{}' object cannot be interpreted as an integer",
+                                            value_type_name_str(&v.0),
+                                        ),
+                                    ));
+                                };
+                                invoke_class_method(
+                                    _interp,
+                                    method_val,
+                                    Value::py_instance(inst_rc),
+                                    &[],
+                                )?
+                            }
+                        };
+                        match result.kind() {
+                            ValueKind::Int(n) => Some(n.clamp(-(i32::MAX as i64), i32::MAX as i64) as i32),
+                            ValueKind::Bool(b) => Some(b as i32),
+                            ValueKind::BigInt(b) => {
+                                use num_bigint::Sign;
+                                Some(if b.sign() == Sign::Minus { -(i32::MAX) } else { i32::MAX })
+                            }
+                            _ => return Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "__index__ returned non-int (type {})",
+                                    value_type_name_str(&result),
+                                ),
+                            )),
+                        }
+                    }
                     _ => return Err(PyError::named(
                         "TypeError",
                         format!(
@@ -2450,6 +2504,57 @@ pyrust_module! {
                             ValueKind::BigInt(b) => {
                                 use num_bigint::Sign;
                                 Some(if b.sign() == Sign::Minus { -(i32::MAX) } else { i32::MAX })
+                            }
+                            // int subclass / __index__ object: same coerce_numeric +
+                            // __index__ protocol as the primary ndigits_i32 path above.
+                            ValueKind::PyInstance(_) => {
+                                let coerced_nd = coerce_numeric(v.0.clone());
+                                let result = match coerced_nd.kind() {
+                                    ValueKind::Int(_) | ValueKind::BigInt(_) => coerced_nd.clone(),
+                                    _ => {
+                                        let inst_rc = match v.0.as_py_instance_rc() {
+                                            Some(rc) => Rc::clone(rc),
+                                            None => return Err(PyError::named(
+                                                "TypeError",
+                                                format!(
+                                                    "'{}' object cannot be interpreted as an integer",
+                                                    value_type_name_str(&v.0),
+                                                ),
+                                            )),
+                                        };
+                                        let class = Rc::clone(&inst_rc.borrow().class);
+                                        let Some(method_val) = lookup_class_attr(&class, "__index__") else {
+                                            return Err(PyError::named(
+                                                "TypeError",
+                                                format!(
+                                                    "'{}' object cannot be interpreted as an integer",
+                                                    value_type_name_str(&v.0),
+                                                ),
+                                            ));
+                                        };
+                                        invoke_class_method(
+                                            _interp,
+                                            method_val,
+                                            Value::py_instance(inst_rc),
+                                            &[],
+                                        )?
+                                    }
+                                };
+                                match result.kind() {
+                                    ValueKind::Int(n) => Some(n.clamp(-(i32::MAX as i64), i32::MAX as i64) as i32),
+                                    ValueKind::Bool(b) => Some(b as i32),
+                                    ValueKind::BigInt(b) => {
+                                        use num_bigint::Sign;
+                                        Some(if b.sign() == Sign::Minus { -(i32::MAX) } else { i32::MAX })
+                                    }
+                                    _ => return Err(PyError::named(
+                                        "TypeError",
+                                        format!(
+                                            "__index__ returned non-int (type {})",
+                                            value_type_name_str(&result),
+                                        ),
+                                    )),
+                                }
                             }
                             _ => return Err(PyError::named(
                                 "TypeError",
