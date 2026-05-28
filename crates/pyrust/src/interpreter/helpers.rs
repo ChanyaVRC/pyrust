@@ -4315,6 +4315,126 @@ pub(crate) fn resolve_zero_arg_super(
     Ok((class_val, first_arg.clone()))
 }
 
+/// Format the exception chain that precedes `exc_val` as a prefix string to
+/// prepend to the main traceback output.
+///
+/// Walks `__cause__` (when `__suppress_context__ == True`) or `__context__`
+/// (when `__suppress_context__` is falsy) and collects the chain from innermost
+/// (closest to `exc_val`) to outermost.  The chain is then reversed and printed
+/// oldest-first, matching CPython's display order.
+///
+/// Each chained exception is formatted as just its `"ClassName: msg"` line
+/// (no "Traceback (most recent call last):" header) because pyrust does not
+/// yet track per-exception frame captures — only the final propagating
+/// exception has frame info.  CPython does the same when the chained
+/// exception's `__traceback__` is `None`.
+///
+/// Returns an empty string when there is no visible chain (no `__cause__` /
+/// `__context__`, or the chain is suppressed via `raise X from None`).
+pub(crate) fn format_exc_chain_prefix(exc_val: &Value) -> String {
+    // Collect (exc_value, is_cause) pairs from innermost to outermost.
+    let mut chain: Vec<(Value, bool)> = Vec::new();
+    let mut seen: HashSet<*const ()> = HashSet::new();
+
+    let mut current = exc_val.clone();
+    loop {
+        let ValueKind::PyInstance(inst) = current.kind() else {
+            break;
+        };
+        let raw_ptr = Rc::as_ptr(inst) as *const ();
+        if !seen.insert(raw_ptr) {
+            break; // cycle guard
+        }
+        let borrow = inst.borrow();
+        let suppress = borrow
+            .attrs
+            .get("__suppress_context__")
+            .and_then(|v| match v.kind() {
+                ValueKind::Bool(b) => Some(b),
+                _ => None,
+            })
+            .unwrap_or(false);
+
+        if suppress {
+            // raise X from Y: display __cause__ (if not None)
+            let cause = borrow.attrs.get("__cause__").cloned();
+            drop(borrow);
+            match cause {
+                Some(c) if !matches!(c.kind(), ValueKind::None) => {
+                    // Check the predecessor for cycles before pushing it.
+                    if let ValueKind::PyInstance(next_inst) = c.kind() {
+                        if seen.contains(&(Rc::as_ptr(next_inst) as *const ())) {
+                            break;
+                        }
+                    }
+                    chain.push((c.clone(), true));
+                    current = c;
+                }
+                _ => break,
+            }
+        } else {
+            // Implicit chaining: display __context__ (if not None)
+            let context = borrow.attrs.get("__context__").cloned();
+            drop(borrow);
+            match context {
+                Some(c) if !matches!(c.kind(), ValueKind::None) => {
+                    // Check the predecessor for cycles before pushing it.
+                    if let ValueKind::PyInstance(next_inst) = c.kind() {
+                        if seen.contains(&(Rc::as_ptr(next_inst) as *const ())) {
+                            break;
+                        }
+                    }
+                    chain.push((c.clone(), false));
+                    current = c;
+                }
+                _ => break,
+            }
+        }
+    }
+
+    if chain.is_empty() {
+        return String::new();
+    }
+
+    // chain is innermost-first; reverse to print oldest first.
+    chain.reverse();
+
+    let mut out = String::new();
+    for (exc, is_cause) in chain {
+        out.push_str(&format_single_exc_line(&exc));
+        out.push('\n');
+        out.push('\n');
+        if is_cause {
+            out.push_str(
+                "The above exception was the direct cause of the following exception:\n",
+            );
+        } else {
+            out.push_str(
+                "During handling of the above exception, another exception occurred:\n",
+            );
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Format a single exception value as `"ClassName: msg"` (or just `"ClassName"`
+/// when the message is empty).  Used by `format_exc_chain_prefix`.
+fn format_single_exc_line(value: &Value) -> String {
+    match value.kind() {
+        ValueKind::PyInstance(inst) => {
+            let class_name = inst.borrow().class.borrow().name.clone();
+            let msg = value.to_py_str();
+            if msg.is_empty() {
+                class_name
+            } else {
+                format!("{class_name}: {msg}")
+            }
+        }
+        _ => format!("Uncaught exception: {}", value.repr()),
+    }
+}
+
 #[cfg(test)]
 mod purity_tests {
     use super::is_pure_body;

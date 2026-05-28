@@ -306,7 +306,17 @@ impl Interpreter {
                         _ => format!("Uncaught exception: {}", value.repr()),
                     },
                 };
-                Some(pyrust_core::format_traceback(&frames, &error_line))
+                // PEP 3134: walk __cause__ / __context__ and prepend each
+                // chained exception's line with the appropriate connecting
+                // banner ("The above exception was the direct cause of..."
+                // or "During handling of the above exception...").
+                let chain_prefix = if let PyError::Raised(exc_val) = e {
+                    format_exc_chain_prefix(exc_val)
+                } else {
+                    String::new()
+                };
+                let main_tb = pyrust_core::format_traceback(&frames, &error_line);
+                Some(format!("{chain_prefix}{main_tb}"))
             }
         } else {
             None
