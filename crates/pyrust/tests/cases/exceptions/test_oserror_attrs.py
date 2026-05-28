@@ -76,5 +76,5 @@ except FileNotFoundError as e:
     # str(e) produces "[Errno N] message: 'filename'"
     s = str(e)
     print(s.startswith("[Errno 2]"))
-    print("No such file or directory" in s)
+    print(e.strerror in s)
     print("/no_such_file_str_test_abc" in s)

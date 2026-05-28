@@ -4070,13 +4070,18 @@ impl PyError {
         let class_name = Self::io_kind_to_class(e.kind());
         // `std::io::Error::from_raw_os_error(N).to_string()` on Linux produces
         // "strerror(N) (os error N)" — strip the Rust-added trailer.
+        // On Windows the OS message conventionally ends with a period (e.g.
+        // "The system cannot find the file specified. (os error 2)"); strip
+        // that trailing period too, matching CPython's FormatMessage behaviour
+        // which returns messages without a trailing period.
         let strerror = if raw != 0 {
             let full = std::io::Error::from_raw_os_error(raw).to_string();
-            if let Some(pos) = full.rfind(" (os error ") {
-                full[..pos].to_owned()
+            let trimmed = if let Some(pos) = full.rfind(" (os error ") {
+                &full[..pos]
             } else {
-                full
-            }
+                &full[..]
+            };
+            trimmed.trim_end_matches('.').to_owned()
         } else {
             e.to_string()
         };
