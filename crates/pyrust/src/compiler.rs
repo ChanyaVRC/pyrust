@@ -6680,8 +6680,14 @@ impl Compiler {
                     return;
                 }
             }
-            // All names are valid; emit nothing — the features are no-ops here.
-            return;
+            // All names are valid.  Fall through to the ordinary import-from
+            // bytecode path below.  CPython 3.12 also emits real import
+            // bytecode for `from __future__ import X` (IMPORT_NAME followed
+            // by IMPORT_FROM + STORE_NAME), so the feature name is bound in
+            // the module namespace and `import __future__; __future__.X` also
+            // works.  With a real `__future__` module stub in the registry
+            // the emitted ImportModule / ImportFromAttr / StoreGlobal sequence
+            // resolves correctly and the binding is visible at runtime.
         }
 
         let mod_idx = self.intern_name(module);
