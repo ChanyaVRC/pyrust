@@ -1109,7 +1109,14 @@ pyrust_module! {
                             "__len__() should return >= 0".to_string(),
                         ))
                     }
-                    ValueKind::BigInt(_) => {
+                    ValueKind::BigInt(b) => {
+                        use num_bigint::Sign;
+                        if b.sign() == Sign::Minus {
+                            return Err(PyError::named(
+                                "ValueError",
+                                "__len__() should return >= 0".to_string(),
+                            ));
+                        }
                         return Err(PyError::named(
                             "OverflowError",
                             "cannot fit 'int' into an index-sized integer".to_string(),

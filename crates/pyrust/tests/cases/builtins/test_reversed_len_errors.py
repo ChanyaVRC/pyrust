@@ -78,3 +78,17 @@ except ValueError as e:
     print("ValueError:", e)
 except Exception as e:
     print(type(e).__name__ + ":", e)
+
+# Case 7: __len__ returns negative BigInt -> ValueError (not OverflowError)
+class NegBigLen:
+    def __len__(self):
+        return -(2**200)
+    def __getitem__(self, i):
+        return i
+
+try:
+    list(reversed(NegBigLen()))
+except ValueError as e:
+    print("ValueError:", e)
+except Exception as e:
+    print(type(e).__name__ + ":", e)
