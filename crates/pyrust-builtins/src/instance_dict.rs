@@ -12,6 +12,15 @@
 //! behave correctly.  Previously `obj.__dict__` returned a snapshot copy,
 //! which silently swallowed writes and broke the data-descriptor `__set__`
 //! protocol (issues #1271 / #1272).
+//!
+//! ## Identity (`vars(obj) is vars(obj)`)
+//!
+//! CPython guarantees `vars(obj) is vars(obj)` for the same instance.  pyrust
+//! implements this in `values_are_identical` (helpers.rs): when both operands
+//! are `instance_dict` proxies, identity is True iff both reference the same
+//! underlying `PyInstance` (checked via `Rc::ptr_eq`).  This avoids caching
+//! state in `PyInstance` (which would create a reference cycle) while still
+//! satisfying the CPython parity test.
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -527,6 +536,11 @@ pub fn as_instance_dict_items(value: &Value) -> Option<Vec<(PyKey, Value)>> {
 }
 
 /// Construct an `instance_dict` proxy wrapping a live `PyInstance` reference.
+///
+/// Each call returns a fresh `BuiltinObject` value whose backing `Rc` is
+/// distinct.  CPython identity (`vars(obj) is vars(obj)`) is implemented
+/// separately in `values_are_identical` by comparing the `instance` `Rc`
+/// pointers of two `instance_dict` proxies.
 pub fn instance_dict(instance: Rc<RefCell<PyInstance>>, is_exception: bool) -> Value {
     let state: Box<dyn Any> = Box::new(InstanceDictState {
         instance,
@@ -535,6 +549,23 @@ pub fn instance_dict(instance: Rc<RefCell<PyInstance>>, is_exception: bool) -> V
         iter_pos: RefCell::new(0),
     });
     Value::builtin_object(INSTANCE_DICT_OPS, state)
+}
+
+/// Return `true` if both `BuiltinState` values are `instance_dict` proxies for
+/// the same underlying `PyInstance` (by `Rc` pointer equality).
+///
+/// Used by `values_are_identical` to implement `vars(a) is vars(a)` → `True`
+/// without caching the proxy inside the instance.
+pub fn same_instance(a: &BuiltinState, b: &BuiltinState) -> bool {
+    let a_s = match borrow_state(a) {
+        Some(s) => s,
+        None => return false,
+    };
+    let b_s = match borrow_state(b) {
+        Some(s) => s,
+        None => return false,
+    };
+    Rc::ptr_eq(&a_s.instance, &b_s.instance)
 }
 
 fn borrow_state(state: &BuiltinState) -> Option<std::cell::Ref<'_, InstanceDictState>> {

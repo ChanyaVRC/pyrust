@@ -3549,10 +3549,32 @@ fn values_are_identical(a: &Value, b: &Value) -> bool {
         // is the correct identity test.  `a = lst.append; a is a` → True;
         // `lst.append is lst.append` → False (fresh BoundMethodState each
         // time) — matching CPython builtin_function_or_method identity (#722).
+        //
+        // Special case: `instance_dict` proxies always have distinct BuiltinState
+        // Rc's (a new proxy is created on each `vars(obj)` / `obj.__dict__`
+        // access).  CPython guarantees `vars(obj) is vars(obj)` is `True` for the
+        // same instance — we match that by checking whether both proxies point to
+        // the same underlying PyInstance via `same_instance` (#1027).
         (
-            ValueKind::BuiltinObject { state: sa, .. },
-            ValueKind::BuiltinObject { state: sb, .. },
-        ) => Rc::ptr_eq(sa, sb),
+            ValueKind::BuiltinObject {
+                ops: ops_a,
+                state: sa,
+            },
+            ValueKind::BuiltinObject {
+                ops: ops_b,
+                state: sb,
+            },
+        ) => {
+            if Rc::ptr_eq(sa, sb) {
+                return true;
+            }
+            if ops_a.type_name() == pyrust_builtins::instance_dict::TYPE_NAME
+                && ops_b.type_name() == pyrust_builtins::instance_dict::TYPE_NAME
+            {
+                return pyrust_builtins::instance_dict::same_instance(sa, sb);
+            }
+            false
+        }
         _ => false,
     }
 }
