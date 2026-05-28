@@ -4962,34 +4962,61 @@ impl Interpreter {
                 return Ok(value.to_py_str());
             }
         }
-        for dunder in &["__str__", "__repr__"] {
-            if let Some(method_val) = lookup_class_attr(&class, dunder) {
-                let result = invoke_class_method(
-                    self,
-                    method_val,
-                    Value::py_instance(Rc::clone(&inst_rc)),
-                    &[],
-                )?;
-                return match result.kind() {
-                    ValueKind::Str(s) => Ok(s.to_string()),
-                    _ => Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "{dunder} returned non-string (type {})",
-                            pyrust_core::builtin_type_name(&result)
-                        ),
-                    )),
-                };
+        // Try user-defined __str__ first.
+        if let Some(method_val) = lookup_class_attr(&class, "__str__") {
+            let result = invoke_class_method(
+                self,
+                method_val,
+                Value::py_instance(Rc::clone(&inst_rc)),
+                &[],
+            )?;
+            return match result.kind() {
+                ValueKind::Str(s) => Ok(s.to_string()),
+                _ => Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "__str__ returned non-string (type {})",
+                        pyrust_core::builtin_type_name(&result)
+                    ),
+                )),
+            };
+        }
+        // Issue #1542: str/bytes subclasses return the raw backing value for
+        // str() even when the subclass defines __repr__.  CPython's
+        // str.__str__ and bytes.__str__ return `self` directly without
+        // delegating to __repr__.  int/float subclasses do NOT share this
+        // property — their str() dispatches __repr__ if defined.
+        if let Some(backing) = instance_builtin_data(&inst_rc) {
+            if matches!(backing.kind(), ValueKind::Str(_) | ValueKind::Bytes(_)) {
+                return Ok(backing.to_py_str());
             }
         }
-        // Issue #1205: no __str__ or __repr__ in MRO — delegate to the
-        // backing container so that list/dict/tuple/set subclasses render
+        // No user __str__ and no str/bytes backing: fall through to __repr__,
+        // then to the numeric/container backing, matching CPython's str()
+        // delegation chain for int/float subclasses and container subclasses.
+        if let Some(method_val) = lookup_class_attr(&class, "__repr__") {
+            let result = invoke_class_method(
+                self,
+                method_val,
+                Value::py_instance(Rc::clone(&inst_rc)),
+                &[],
+            )?;
+            return match result.kind() {
+                ValueKind::Str(s) => Ok(s.to_string()),
+                _ => Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "__repr__ returned non-string (type {})",
+                        pyrust_core::builtin_type_name(&result)
+                    ),
+                )),
+            };
+        }
+        // Issue #1205 / #1542: no __str__ or __repr__ in MRO — delegate to
+        // the backing value so that scalar and container subclasses render
         // their contents rather than the generic object repr.
         // Use render_value_repr (interp-aware) so that PyInstance elements
         // inside the backing container have their __repr__ called correctly.
-        // Issue #1542: scalar backings (int/float/str/bytes subclasses) also
-        // need to delegate to the backing value's to_py_str() so that
-        // `"%s" % MyInt(42)` returns "42" rather than the address repr.
         if let Some(backing) = instance_builtin_data(&inst_rc) {
             match backing.kind() {
                 ValueKind::Str(_)
