@@ -1447,9 +1447,13 @@ fn str_slice_args(s: &str, args: &[Value]) -> Result<Option<(usize, usize)>> {
     // ASCII fast path: char index == byte index, no scanning needed
     if s.is_ascii() {
         let byte_len = s.len();
+        // Do NOT clamp start before the inverted-window check: if the caller
+        // passes start > len(s), that must produce None (not found / 0 count),
+        // not a zero-length window at the end.  Mirror the Unicode path which
+        // defers the start clamp until after the end_char < start_char test.
         let start_char = match args.get(1).map(|v| v.kind()) {
-            Some(ValueKind::Int(i)) => normalise_char_idx(i, byte_len).min(byte_len),
-            Some(ValueKind::Bool(b)) => normalise_char_idx(b as i64, byte_len).min(byte_len),
+            Some(ValueKind::Int(i)) => normalise_char_idx(i, byte_len),
+            Some(ValueKind::Bool(b)) => normalise_char_idx(b as i64, byte_len),
             Some(ValueKind::None) | None => 0,
             _ => {
                 return Err(PyError::named(
@@ -1472,7 +1476,7 @@ fn str_slice_args(s: &str, args: &[Value]) -> Result<Option<(usize, usize)>> {
         if end_char < start_char {
             return Ok(None);
         }
-        return Ok(Some((start_char, end_char)));
+        return Ok(Some((start_char.min(byte_len), end_char)));
     }
 
     // Unicode: single scan for char_len + both byte positions
