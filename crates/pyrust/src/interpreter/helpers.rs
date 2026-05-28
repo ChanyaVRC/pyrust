@@ -884,6 +884,33 @@ pub(crate) fn primitive_class_isinstance_fast(
     })
 }
 
+/// Returns the type name if `class` is one of the builtin types that
+/// CPython marks as non-subclassable (i.e. lacks `Py_TPFLAGS_BASETYPE`):
+/// `NoneType`, `ellipsis`, `NotImplementedType`, and `bool`.
+///
+/// Used in the `MakeClass` instruction to raise `TypeError: type 'X' is
+/// not an acceptable base type` before the class body runs.
+pub(crate) fn non_subclassable_builtin_name(
+    class: &Rc<RefCell<PyClass>>,
+) -> Option<&'static str> {
+    let ptr = Rc::as_ptr(class);
+    PRIMITIVE_CLASSES.with(|c| {
+        if ptr == Rc::as_ptr(&c.none_class) {
+            return Some("NoneType");
+        }
+        if ptr == Rc::as_ptr(&c.notimplemented_class) {
+            return Some("NotImplementedType");
+        }
+        if ptr == Rc::as_ptr(&c.ellipsis_class) {
+            return Some("ellipsis");
+        }
+        if ptr == Rc::as_ptr(&c.bool_class) {
+            return Some("bool");
+        }
+        None
+    })
+}
+
 /// Walk the base chain of `class` and return the name of the first
 /// primitive builtin base found (`"dict"`, `"list"`, `"set"`, …), or
 /// `None` if the class does not inherit from any primitive.
