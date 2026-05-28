@@ -28,6 +28,16 @@ for exc_class in (KeyError, TypeError, AttributeError, IndexError, OSError):
     inst = exc_class("msg")
     print(inst.__traceback__ is None)      # True
 
+# with_traceback(tb) sets __traceback__ to the given traceback object.
+try:
+    raise ValueError("inner")
+except ValueError as inner:
+    tb = inner.__traceback__
+outer = TypeError("outer")
+outer2 = outer.with_traceback(tb)
+print(outer is outer2)                     # True
+print(outer2.__traceback__ is tb)          # True
+
 # with_traceback() returns self (same identity).
 e = ValueError("x")
 e2 = e.with_traceback(None)
