@@ -2190,14 +2190,13 @@ pyrust_module! {
                             }));
                         }
                         let result = py_round_half_even_f64(v / factor) * factor;
-                        // CPython: if a finite float rounds to infinity, raise OverflowError.
-                        // Non-finite inputs (inf/nan) propagate unchanged (no error).
                         if v.is_finite() && result.is_infinite() {
                             return Err(PyError::named(
                                 "OverflowError",
                                 "rounded value too large to represent".to_string(),
                             ));
                         }
+                        let result = if result == 0.0 { result.copysign(v) } else { result };
                         Ok(Value::float(result))
                     }
                 }
@@ -2286,6 +2285,7 @@ pyrust_module! {
                                             "rounded value too large to represent".to_string(),
                                         ));
                                     }
+                                    let result = if result == 0.0 { result.copysign(v) } else { result };
                                     Ok(Value::float(result))
                                 }
                             }
