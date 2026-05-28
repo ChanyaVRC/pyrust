@@ -4224,6 +4224,7 @@ impl Interpreter {
                         attrs,
                         mutation_version: std::cell::Cell::new(0),
                         subclasses: std::cell::RefCell::new(vec![]),
+                        metatype: None,
                     }));
                     // Issue #1233: validate C3 MRO at class construction time so
                     // that inconsistent base lists raise TypeError immediately,

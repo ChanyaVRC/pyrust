@@ -977,6 +977,13 @@ pub struct PyClass {
     /// hot re-validation path.
     pub mutation_version: Cell<u64>,
     pub subclasses: RefCell<Vec<Weak<RefCell<PyClass>>>>,
+    /// The metaclass (metatype) of this class.  `None` for classes whose
+    /// metatype is the built-in `type` (the common case).  Set to `Some(mcs)`
+    /// when the class is created via a custom metaclass (e.g.
+    /// `class Foo(metaclass=Meta): pass`).  Used by `type(Foo)` to return the
+    /// actual metaclass instead of always returning the `type` singleton
+    /// (issue #1626).
+    pub metatype: Option<Rc<RefCell<PyClass>>>,
 }
 
 #[derive(Debug, Clone)]

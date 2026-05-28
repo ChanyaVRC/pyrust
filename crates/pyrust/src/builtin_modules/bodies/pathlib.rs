@@ -764,6 +764,7 @@ thread_local! {
             attrs,
             mutation_version: std::cell::Cell::new(0),
             subclasses: std::cell::RefCell::new(vec![]),
+            metatype: None,
         }))
     };
 
@@ -781,6 +782,7 @@ thread_local! {
                 attrs: IndexMap::new(),
                 mutation_version: std::cell::Cell::new(0),
                 subclasses: std::cell::RefCell::new(vec![]),
+                metatype: None,
             }));
             path_class.borrow().subclasses.borrow_mut().push(Rc::downgrade(&posix));
             posix
