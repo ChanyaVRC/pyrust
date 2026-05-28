@@ -2373,6 +2373,16 @@ impl Interpreter {
                 return Ok(module);
             }
         }
+        // Relative imports (module name starts with '.') cannot be resolved in
+        // pyrust's package-less runtime.  CPython 3.12 raises ImportError (not
+        // ModuleNotFoundError) with a specific message in this case.
+        if name.starts_with('.') {
+            return Err(PyError::import_error(
+                "ImportError",
+                "attempted relative import with no known parent package".to_string(),
+                None,
+            ));
+        }
         Err(PyError::import_error(
             "ModuleNotFoundError",
             format!("No module named '{name}'"),
