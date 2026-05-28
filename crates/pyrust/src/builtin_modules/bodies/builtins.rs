@@ -6886,22 +6886,44 @@ fn format_bigint_radix(b: &crate::value::PyBigInt, radix: u32, prefix: &str) -> 
 
 /// Validate a codepoint and return the corresponding single-char `str`
 /// `Value`.  Shared by the `PyInt` and `PyBool` overloads of the typed
-/// `chr` builtin (#400).  Out-of-range codepoints raise `ValueError`
-/// with CPython-style wording preserved verbatim from the legacy body.
+/// `chr` builtin (#400).  Out-of-range codepoints raise `ValueError` with
+/// the same wording CPython 3.12 uses (`"chr() arg not in range(0x110000)"`).
+///
+/// CPython accepts any value in `range(0x110000)`, including the surrogate
+/// range (0xD800–0xDFFF).  Rust's `char` rejects surrogates (they are not
+/// Unicode scalar values), so we write the CESU-8 three-byte sequence
+/// directly for that range, matching the representation used throughout the
+/// runtime for surrogate-containing strings (#1573).
 fn chr_from_code_point(code_point: i64) -> Result<Value> {
     if !(0..=1114111).contains(&code_point) {
         return Err(PyError::named(
             "ValueError",
-            format!("chr() arg not in range(0x110000): {code_point}"),
+            "chr() arg not in range(0x110000)".to_string(),
         ));
     }
-    let ch = char::from_u32(code_point as u32).ok_or_else(|| {
-        PyError::named(
-            "ValueError",
-            format!("chr() arg not in range(0x110000): {code_point}"),
-        )
-    })?;
-    Ok(Value::string(ch.to_string()))
+    let cp = code_point as u32;
+    if (0xD800..=0xDFFF).contains(&cp) {
+        // Lone surrogates are not valid Unicode scalar values; char::from_u32
+        // rejects them.  CPython's str type freely stores lone surrogates, so
+        // we write the CESU-8 three-byte sequence directly into a new String.
+        // SAFETY: the three bytes produced by the formula below are a
+        // well-formed CESU-8 encoding of a surrogate codepoint and match the
+        // representation pyrust uses for surrogate-containing strings
+        // throughout the runtime (same pattern as str.translate after #1565).
+        let s = unsafe {
+            String::from_utf8_unchecked(vec![
+                0xE0 | (cp >> 12) as u8,
+                0x80 | ((cp >> 6) & 0x3F) as u8,
+                0x80 | (cp & 0x3F) as u8,
+            ])
+        };
+        Ok(Value::string(s))
+    } else {
+        // Non-surrogate codepoints in 0..=0x10FFFF are valid Unicode scalar
+        // values; char::from_u32 is safe and infallible here.
+        let ch = char::from_u32(cp).expect("non-surrogate in 0..=0x10FFFF is a valid char");
+        Ok(Value::string(ch.to_string()))
+    }
 }
 
 /// Encode a Python `str` to `bytes` for `bytes(source, encoding[, errors])`.
