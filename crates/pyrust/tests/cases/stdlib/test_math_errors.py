@@ -103,3 +103,22 @@ check_overflowerror(math.pow, 1e300, 2)
 print(math.pow(2, 3))        # 8.0
 print(math.pow(float('inf'), 2))   # inf  (not an error)
 print(math.pow(float('-inf'), 2))  # inf  (not an error)
+
+# -- sin / cos / tan with infinite inputs --
+# CPython raises ValueError when ±inf is passed because sin/cos/tan are undefined at ±inf.
+# NaN input propagates silently (CPython mirrors this: isnan(r) && !isnan(x) triggers error,
+# but nan input gives nan output with no error).
+check_valueerror(math.sin, float('inf'))
+check_valueerror(math.sin, float('-inf'))
+print(math.sin(float('nan')))    # nan  (not an error)
+print(math.sin(0))               # 0.0
+
+check_valueerror(math.cos, float('inf'))
+check_valueerror(math.cos, float('-inf'))
+print(math.cos(float('nan')))    # nan  (not an error)
+print(math.cos(0))               # 1.0
+
+check_valueerror(math.tan, float('inf'))
+check_valueerror(math.tan, float('-inf'))
+print(math.tan(float('nan')))    # nan  (not an error)
+print(math.tan(0))               # 0.0

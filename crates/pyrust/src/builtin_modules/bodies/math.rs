@@ -212,19 +212,22 @@ pyrust_module! {
     /// CPython: math.sin(x) → float.  <https://docs.python.org/3/library/math.html#math.sin>
     #[pure]
     fn sin(args) -> Result<Value> {
-        Ok(Value::float(single_float(FN_NAME, args)?.sin()))
+        let x = single_float(FN_NAME, args)?;
+        Ok(Value::float(check_math_result(x, x.sin())?))
     }
 
     /// CPython: math.cos(x) → float.  <https://docs.python.org/3/library/math.html#math.cos>
     #[pure]
     fn cos(args) -> Result<Value> {
-        Ok(Value::float(single_float(FN_NAME, args)?.cos()))
+        let x = single_float(FN_NAME, args)?;
+        Ok(Value::float(check_math_result(x, x.cos())?))
     }
 
     /// CPython: math.tan(x) → float.  <https://docs.python.org/3/library/math.html#math.tan>
     #[pure]
     fn tan(args) -> Result<Value> {
-        Ok(Value::float(single_float(FN_NAME, args)?.tan()))
+        let x = single_float(FN_NAME, args)?;
+        Ok(Value::float(check_math_result(x, x.tan())?))
     }
 
     /// CPython: math.asin(x) → float.  <https://docs.python.org/3/library/math.html#math.asin>
@@ -621,23 +624,31 @@ pyrust_module! {
 
 // ── Helpers used by the macro-generated bodies ───────────────────────────────
 
-/// Post-call result checker matching CPython's errno / fpclassify logic.
+/// Post-call result checker matching CPython's `math_1` errno/fpclassify logic.
 ///
-/// If the input was finite and the result is not finite, raises:
-/// - `ValueError: math domain error`  when result is NaN or -∞ (undefined domain)
-/// - `OverflowError: math range error` when result is +∞ (range overflow)
+/// Mirrors CPython's two-condition check in `Modules/mathmodule.c`:
+/// - `isinf(r) && isfinite(x)` and `r > 0` → `OverflowError: math range error`
+/// - `isinf(r) && isfinite(x)` and `r < 0` → `ValueError: math domain error` (e.g. log(0) → -inf)
+/// - `isnan(r) && !isnan(x)` → `ValueError: math domain error`
 ///
-/// When the input is not finite (already NaN or ±∞) the result is returned
-/// unchanged — CPython propagates those through without error.
+/// The last condition catches inputs that are ±∞ (not NaN) but produce NaN
+/// in the underlying C math function, such as `sin(inf)` / `cos(inf)` / `tan(inf)`.
+/// Those are domain errors even though the input itself is not finite.
 #[inline]
 fn check_math_result(arg: f64, result: f64) -> Result<f64> {
-    if arg.is_finite() && !result.is_finite() {
-        if result == f64::INFINITY {
+    if result.is_infinite() && arg.is_finite() {
+        if result > 0.0 {
             return Err(PyError::named(
                 "OverflowError",
                 "math range error".to_string(),
             ));
         }
+        return Err(PyError::named(
+            "ValueError",
+            "math domain error".to_string(),
+        ));
+    }
+    if result.is_nan() && !arg.is_nan() {
         return Err(PyError::named(
             "ValueError",
             "math domain error".to_string(),
