@@ -1,7 +1,7 @@
 use indexmap::IndexMap;
 use pyrust_core::{
-    PyError, PyKey, Result, Value, ValueKind, builtin_type_name, expect_arg_count,
-    extract_fill_char, extract_int, extract_optional_int, py_value_display_name,
+    PyError, PyKey, Result, Value, ValueKind, builtin_type_name, cesu8_codepoints, cp_is_printable,
+    expect_arg_count, extract_fill_char, extract_int, extract_optional_int, py_value_display_name,
 };
 use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
@@ -280,7 +280,9 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
             // Printable ASCII: 0x20 (space) through 0x7e (~). DEL (0x7f) is not printable.
             s.bytes().all(|b| b >= 0x20 && b < 0x7f)
         } else {
-            s.chars().all(is_printable)
+            // Use cesu8_codepoints to handle surrogate bytes without invoking
+            // chars(), which panics in debug builds on surrogate byte sequences.
+            cesu8_codepoints(s).all(cp_is_printable)
         })),
         "encode" => str_encode(s, args),
         "translate" => str_translate(s, args),
@@ -540,25 +542,6 @@ fn str_removesuffix(s: &str, suffix: &str) -> Value {
     } else {
         Value::string(s)
     }
-}
-
-/// CPython `str.isprintable` semantics: printable unless in Control, Format,
-/// Surrogate, PrivateUse, Unassigned, or Separator (except ASCII space U+0020).
-fn is_printable(c: char) -> bool {
-    if c == ' ' {
-        return true;
-    }
-    !matches!(
-        c.general_category(),
-        GeneralCategory::Control
-            | GeneralCategory::Format
-            | GeneralCategory::Surrogate
-            | GeneralCategory::PrivateUse
-            | GeneralCategory::Unassigned
-            | GeneralCategory::SpaceSeparator
-            | GeneralCategory::LineSeparator
-            | GeneralCategory::ParagraphSeparator
-    )
 }
 
 /// Unicode full case-folding (CaseFolding.txt status F and S).

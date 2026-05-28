@@ -4021,7 +4021,7 @@ fn repr_quote(s: &str) -> char {
 /// undefined-behaviour precondition check and aborts when the decoded value is
 /// a surrogate.  This iterator decodes the bytes manually and yields `u32`
 /// values directly, avoiding `char` entirely for the surrogate range.
-fn cesu8_codepoints(s: &str) -> impl Iterator<Item = u32> + '_ {
+pub fn cesu8_codepoints(s: &str) -> impl Iterator<Item = u32> + '_ {
     let mut bytes = s.as_bytes();
     std::iter::from_fn(move || {
         let b0 = *bytes.first()?;
@@ -4104,7 +4104,7 @@ fn escape_str(s: &str, quote: char) -> String {
 /// (which are not valid Rust `char` values) can be tested without invoking
 /// undefined behaviour via `char::from_u32_unchecked`.
 #[inline]
-fn cp_is_printable(n: u32) -> bool {
+pub fn cp_is_printable(n: u32) -> bool {
     if n == 0x20 {
         return true; // ASCII space is printable
     }
