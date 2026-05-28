@@ -3982,12 +3982,39 @@ impl Interpreter {
                                 unreachable!()
                             }
                         };
+                        // Issue #1453: CPython rejects subclassing types that
+                        // lack Py_TPFLAGS_BASETYPE (NoneType, ellipsis,
+                        // NotImplementedType, bool).  Check every base before
+                        // the class body runs or any storage is allocated.
+                        if let Some(tname) =
+                            crate::interpreter::non_subclassable_builtin_name(&first)
+                        {
+                            vm_try!(Err::<(), _>(PyError::named(
+                                "TypeError",
+                                format!("type '{tname}' is not an acceptable base type"),
+                            )));
+                            unreachable!()
+                        }
                         let mut extras: Vec<Rc<RefCell<PyClass>>> = Vec::new();
                         for i in 1..*bases_n as usize {
                             let reg = (*bases_base as usize + i) as crate::bytecode::Reg;
                             let base_val = vm_try!(vm_read(&regs, reg, num_locals));
                             match base_val.kind() {
-                                ValueKind::PyClass(c) => extras.push(Rc::clone(c)),
+                                ValueKind::PyClass(c) => {
+                                    let cls = Rc::clone(c);
+                                    if let Some(tname) =
+                                        crate::interpreter::non_subclassable_builtin_name(&cls)
+                                    {
+                                        vm_try!(Err::<(), _>(PyError::named(
+                                            "TypeError",
+                                            format!(
+                                                "type '{tname}' is not an acceptable base type"
+                                            ),
+                                        )));
+                                        unreachable!()
+                                    }
+                                    extras.push(cls);
+                                }
                                 _ => {
                                     vm_try!(Err::<(), _>(PyError::Runtime(
                                         "class base must be a class".to_string(),

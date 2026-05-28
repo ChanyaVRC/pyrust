@@ -1450,15 +1450,27 @@ pyrust_module! {
                 )),
             };
             // Validate each entry and split into primary base + extra bases.
+            // Issue #1453: reject non-subclassable singletons here too, so
+            // `type("Foo", (type(None),), {})` raises TypeError just like the
+            // `class Foo(type(None)): pass` syntax path does.
             let mut base: Option<Rc<RefCell<PyClass>>> = None;
             let mut extra_bases: Vec<Rc<RefCell<PyClass>>> = Vec::new();
             for (i, entry) in base_values.iter().enumerate() {
                 match entry.kind() {
                     ValueKind::PyClass(c) => {
+                        let cls = Rc::clone(c);
+                        if let Some(tname) =
+                            crate::interpreter::non_subclassable_builtin_name(&cls)
+                        {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!("type '{tname}' is not an acceptable base type"),
+                            ));
+                        }
                         if i == 0 {
-                            base = Some(Rc::clone(c));
+                            base = Some(cls);
                         } else {
-                            extra_bases.push(Rc::clone(c));
+                            extra_bases.push(cls);
                         }
                     }
                     _ => return Err(PyError::named(
