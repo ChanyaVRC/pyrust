@@ -908,34 +908,17 @@ impl Interpreter {
             // (#450).
             enum AttrKind {
                 UserFunction(Rc<UserFunction>),
-                // fn_name_matches: true when the BuiltinFunction's embedded
-                // name equals the attribute lookup name — meaning it was
-                // stored as a type method under its canonical name (e.g.
-                // Counter.most_common).  When false, the builtin was aliased
-                // under a different name (e.g. `A.f = len`) and CPython's
-                // descriptor protocol does not bind it to the instance.
-                BuiltinFunction { fn_name_matches: bool },
+                // Carries the qualified function name, e.g. "list.append".
+                // Used for both type-check enforcement (#1500) and binding
+                // decision (has dot + name matches → bind; no dot → don't bind).
+                BuiltinFunction(&'static str),
                 ClassMethodAny(Value),
                 StaticMethodAny(Value),
                 Other,
             }
             let tag = match value.kind() {
                 ValueKind::UserFunction(f) => AttrKind::UserFunction(Rc::clone(f)),
-                // A BuiltinFunction whose embedded name is qualified as
-                // `"TypeName.method_name"` is a type method registered
-                // under its canonical class-qualified name.  If the part
-                // after the last dot equals the lookup attribute name,
-                // this is a proper type method and should be bound.
-                //
-                // Global builtins like `len` have no dot in their name;
-                // they should never be bound even when stored under their
-                // own name (e.g. `A.len = len`), because they do not
-                // accept a receiver.
-                ValueKind::BuiltinFunction(fn_name) => AttrKind::BuiltinFunction {
-                    fn_name_matches: fn_name
-                        .rfind('.')
-                        .map_or(false, |i| &fn_name[i + 1..] == name),
-                },
+                ValueKind::BuiltinFunction(fn_name) => AttrKind::BuiltinFunction(fn_name),
                 _ => {
                     if let Some(w) = pyrust_builtins::classmethod::as_class_method_any(&value) {
                         AttrKind::ClassMethodAny(w)
@@ -948,8 +931,8 @@ impl Interpreter {
                     }
                 }
             };
-            return Ok(match tag {
-                AttrKind::UserFunction(f) => match f.kind {
+            return match tag {
+                AttrKind::UserFunction(f) => Ok(match f.kind {
                     UserFunctionKind::Regular => Value::bound_method(Rc::clone(&f), instance),
                     UserFunctionKind::ClassMethod => {
                         Value::class_bound_method(Rc::clone(&f), Rc::clone(&class))
@@ -962,22 +945,38 @@ impl Interpreter {
                         }
                     }
                     UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(&f)),
-                },
-                // When the BuiltinFunction's canonical name matches the
-                // attribute lookup name it is a proper type method (e.g.
-                // Counter.most_common stored as "most_common") — bind it.
-                // When the names differ the builtin was assigned under a
-                // user-chosen alias (e.g. `A.f = len`); CPython's descriptor
-                // protocol does not bind plain callables that lack __get__,
-                // so return the value as-is.
-                AttrKind::BuiltinFunction { fn_name_matches } => {
-                    if fn_name_matches {
-                        pyrust_builtins::bound_method::bound_method(
-                            name.to_string(),
-                            Value::py_instance(Rc::clone(&instance)),
-                        )
+                }),
+                // Global builtins (no dot in name, e.g. "len") are never bound —
+                // they lack __get__ (#1477/#1495).  Type methods (e.g.
+                // "list.append") are bound after verifying the instance's class is
+                // a subclass of the defining type (CPython method_descriptor.__get__
+                // raises TypeError on mismatch, #1500).
+                AttrKind::BuiltinFunction(fn_name) => {
+                    if let Some(dot) = fn_name.rfind('.') {
+                        let defining_type = &fn_name[..dot];
+                        let method_name = &fn_name[dot + 1..];
+                        if let Some(defining_class) = primitive_class_by_name(defining_type) {
+                            if !class_is_subclass_of(&class, &defining_class) {
+                                let instance_type = class.borrow().name.clone();
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    format!(
+                                        "descriptor '{}' for '{}' objects doesn't apply to a '{}' object",
+                                        method_name, defining_type, instance_type
+                                    ),
+                                ));
+                            }
+                        }
+                        if method_name == name {
+                            Ok(pyrust_builtins::bound_method::bound_method(
+                                name.to_string(),
+                                Value::py_instance(Rc::clone(&instance)),
+                            ))
+                        } else {
+                            Ok(value)
+                        }
                     } else {
-                        value
+                        Ok(value)
                     }
                 }
                 // classmethod/staticmethod wrapping a non-function: apply
@@ -985,10 +984,10 @@ impl Interpreter {
                 // classmethod returns the wrapped value (best approximation;
                 // CPython returns a method object for non-callables but that
                 // requires a new Value variant); staticmethod returns directly.
-                AttrKind::ClassMethodAny(w) => w,
-                AttrKind::StaticMethodAny(w) => w,
-                AttrKind::Other => value,
-            });
+                AttrKind::ClassMethodAny(w) => Ok(w),
+                AttrKind::StaticMethodAny(w) => Ok(w),
+                AttrKind::Other => Ok(value),
+            };
         }
 
         // PEP 3134 attributes on exception instances default to
