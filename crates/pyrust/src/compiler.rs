@@ -4617,15 +4617,13 @@ impl Compiler {
                 let cond = self.compile_expr(test);
                 let skip = self.emit(Insn::JumpIfTrue(cond, 0));
                 self.free_temp(cond);
-                let msg_reg = if let Some(msg_expr) = msg {
-                    self.compile_expr(msg_expr)
+                if let Some(msg_expr) = msg {
+                    let msg_reg = self.compile_expr(msg_expr);
+                    self.emit(Insn::RaiseAssert(msg_reg));
+                    self.free_temp(msg_reg);
                 } else {
-                    let r = self.alloc_temp();
-                    self.emit(Insn::LoadNone(r));
-                    r
-                };
-                self.emit(Insn::RaiseAssert(msg_reg));
-                self.free_temp(msg_reg);
+                    self.emit(Insn::RaiseAssertNoMsg);
+                }
                 self.patch_jump(skip);
             }
             Stmt::If {

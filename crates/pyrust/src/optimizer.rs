@@ -616,6 +616,7 @@ fn pass_reassoc(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -> V
                     | Insn::RaiseFrom(..)
                     | Insn::RaiseReRaise
                     | Insn::RaiseAssert(_)
+                    | Insn::RaiseAssertNoMsg
                     | Insn::Unpack(..)
                     | Insn::UnpackEx { .. }
                     | Insn::Yield { .. }
@@ -784,6 +785,7 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -
             | Insn::RaiseFrom(..)
             | Insn::RaiseReRaise
             | Insn::RaiseAssert(_)
+            | Insn::RaiseAssertNoMsg
             | Insn::Unpack(..)
             | Insn::UnpackEx { .. }
             | Insn::Yield { .. }
@@ -952,6 +954,7 @@ fn pass_dead_code(insns: Vec<Insn>) -> Vec<Insn> {
             | Insn::RaiseReRaise
             | Insn::RaiseFrom(_, _)
             | Insn::RaiseAssert(_)
+            | Insn::RaiseAssertNoMsg
             | Insn::TailCall { .. } => {}
 
             Insn::JumpIfFalse(_, k) | Insn::JumpIfTrue(_, k) => {
@@ -1607,6 +1610,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | PopExcContext
         | ReturnNone
         | RaiseReRaise
+        | RaiseAssertNoMsg
         | ForIter(..)
         | ForCountConst(..)
         | ForCountConstInline(..)
@@ -1733,6 +1737,7 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         | PopExcContext
         | ReturnNone
         | RaiseReRaise
+        | RaiseAssertNoMsg
         | ForIter(..)
         | ForCountConst(..)
         | ForCountConstInline(..)
@@ -2508,6 +2513,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | RaiseFrom(..)
         | RaiseReRaise
         | RaiseAssert(..)
+        | RaiseAssertNoMsg
         | SetupExcept(..)
         | PopExcept
         | EndExcept
@@ -2732,6 +2738,7 @@ fn is_terminator(insn: &Insn) -> bool {
         Return(..)
             | ReturnNone
             | RaiseAssert(..)
+            | RaiseAssertNoMsg
             | RaiseValue(..)
             | RaiseFrom(..)
             | RaiseReRaise
@@ -2760,6 +2767,7 @@ fn is_control_flow(insn: &Insn) -> bool {
             | Return(..)
             | ReturnNone
             | RaiseAssert(..)
+            | RaiseAssertNoMsg
             | RaiseValue(..)
             | RaiseFrom(..)
             | RaiseReRaise
@@ -3131,6 +3139,7 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 | Insn::RaiseFrom(..)
                 | Insn::RaiseReRaise
                 | Insn::RaiseAssert(_)
+                | Insn::RaiseAssertNoMsg
         );
         if is_terminator {
             table.clear();
@@ -4119,6 +4128,7 @@ fn pass_switch_hoist(insns: Vec<Insn>, num_locals: u32, consts: &[Value]) -> Vec
             | Insn::RaiseFrom(_, _)
             | Insn::RaiseReRaise
             | Insn::RaiseAssert(_)
+            | Insn::RaiseAssertNoMsg
             | Insn::TailCall { .. } => {
                 // No fall-through.
             }
@@ -5613,6 +5623,7 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         | PopExcContext
         | ReturnNone
         | RaiseReRaise
+        | RaiseAssertNoMsg
         | ForIter(..) => {}
 
         ForCountConst(var, _, _, _, _) | ForCountConstInline(var, _, _, _, _) => f(*var),
@@ -5952,6 +5963,7 @@ fn pass_cross_jump_once(insns: Vec<Insn>) -> (Vec<Insn>, bool) {
                 | Insn::RaiseFrom(..)
                 | Insn::RaiseReRaise
                 | Insn::RaiseAssert(_)
+                | Insn::RaiseAssertNoMsg
         )
     };
 
