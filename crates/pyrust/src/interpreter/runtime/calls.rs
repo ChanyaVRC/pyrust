@@ -2907,15 +2907,15 @@ impl Interpreter {
                         "TypeError",
                         format!(
                             "{}() missing 1 required keyword-only argument: '{}'",
-                            function.name, param.name
+                            function.qualname, param.name
                         ),
                     ));
                 } else {
                     return Err(PyError::named(
                         "TypeError",
                         format!(
-                            "{}() missing required argument: '{}'",
-                            function.name, param.name
+                            "{}() missing 1 required positional argument: '{}'",
+                            function.qualname, param.name
                         ),
                     ));
                 }
