@@ -293,7 +293,8 @@ impl Interpreter {
     fn instantiate_named_exception(&self, name: &str, message: String) -> Result<Value> {
         let class = lookup_exc_class(name)
             .ok_or_else(|| PyError::Runtime(format!("built-in exception '{}' is not defined", name)))?;
-        Ok(instantiate_exception(class, vec![Value::string(message)]))
+        let args = if message.is_empty() { vec![] } else { vec![Value::string(message)] };
+        Ok(instantiate_exception(class, args))
     }
 
     /// Like [`instantiate_named_exception`] but stores a raw `Value` as
