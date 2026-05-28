@@ -48,6 +48,8 @@ pub const METHODS: &[&str] = &[
     "swapcase",
     "isascii",
     "istitle",
+    // Added in #1170
+    "expandtabs",
 ];
 
 /// Returns `true` if `method` is the name of a built-in `bytes` method.
@@ -142,6 +144,8 @@ pub fn call(
         )),
         "isascii" => Ok(Value::bool_(bytes.iter().all(|&b| b < 128))),
         "istitle" => Ok(Value::bool_(bytes_istitle(bytes))),
+        // Added in #1170
+        "expandtabs" => bytes_expandtabs(bytes, args),
         _ => Err(PyError::named(
             "AttributeError",
             format!("'bytes' object has no attribute '{method}'"),
@@ -1795,6 +1799,66 @@ fn bytes_istitle(bytes: &[u8]) -> bool {
         }
     }
     has_alpha
+}
+
+// ---------------------------------------------------------------------------
+// expandtabs
+// ---------------------------------------------------------------------------
+
+/// `bytes.expandtabs(tabsize=8)`
+///
+/// Return a copy where tab characters (`\t`, 0x09) are replaced by spaces up
+/// to the next tab stop (multiples of `tabsize`).  `\n` and `\r` reset the
+/// column counter.  Non-ASCII bytes are treated as single-column characters
+/// (matching CPython's behaviour: bytes are opaque octets, not Unicode).
+fn bytes_expandtabs(bytes: &[u8], args: &[Value]) -> Result<Value> {
+    if args.len() > 1 {
+        return Err(PyError::named(
+            "TypeError",
+            format!(
+                "expandtabs() takes at most 1 argument ({} given)",
+                args.len()
+            ),
+        ));
+    }
+    let tabsize: i64 = match args.first().map(|v| v.kind()) {
+        None => 8,
+        Some(ValueKind::Int(n)) => n,
+        Some(ValueKind::Bool(b)) => b as i64,
+        _ => {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "'{}' object cannot be interpreted as an integer",
+                    pyrust_core::builtin_type_name(args.first().unwrap())
+                ),
+            ));
+        }
+    };
+    let tabsize = tabsize.max(0) as usize;
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut col: usize = 0;
+    for &b in bytes {
+        match b {
+            b'\t' => {
+                if tabsize > 0 {
+                    let spaces = tabsize - (col % tabsize);
+                    out.extend(std::iter::repeat(b' ').take(spaces));
+                    col += spaces;
+                }
+                // tabsize == 0: tab is silently removed (col unchanged)
+            }
+            b'\n' | b'\r' => {
+                out.push(b);
+                col = 0;
+            }
+            _ => {
+                out.push(b);
+                col += 1;
+            }
+        }
+    }
+    Ok(Value::bytes(out))
 }
 
 // ---------------------------------------------------------------------------
