@@ -471,8 +471,13 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
     // MRO lookup to the primitive `__new__` which creates a `PyInstance` with
     // the proper backing store (rather than falling through to `object.__new__`
     // which would create a bare instance without backing data).
+    // Issue #1465: same fix for scalar primitives — int/str/float/bytes.
     for (cls, type_name) in [
+        (&bytes_class, "bytes"),
+        (&float_class, "float"),
         (&frozenset_class, "frozenset"),
+        (&int_class, "int"),
+        (&str_class, "str"),
         (&tuple_class, "tuple"),
     ] {
         let sentinel: &'static str =
