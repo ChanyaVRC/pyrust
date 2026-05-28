@@ -5735,16 +5735,33 @@ impl Compiler {
                             self.free_temp(base);
                             self.free_temp(stop_r);
                             self.free_temp(start_r);
-                            // Get the slice: subj[start:stop] via GetItem with a slice key
-                            let elem_r = self.alloc_temp();
-                            self.emit(Insn::GetItem(elem_r, subj, slice_key));
+                            // Get the slice: subj[start:stop] via GetItem with a slice key.
+                            // The slice result preserves the subject's type (e.g. tuple →
+                            // tuple). CPython guarantees *rest is always a list regardless
+                            // of the subject's type, so convert via BuildList + ListExtend.
+                            let saved_next = self.next_temp;
+                            let slice_r = self.alloc_temp();
+                            self.emit(Insn::GetItem(slice_r, subj, slice_key));
                             self.free_temp(slice_key);
+                            let list_r = self.alloc_temp();
+                            let empty_base = self.next_temp;
+                            self.next_temp = empty_base + 1;
+                            if empty_base > self.max_reg {
+                                self.max_reg = empty_base;
+                            }
+                            self.emit(Insn::BuildList(list_r, empty_base, 0));
+                            self.emit(Insn::ListExtend(list_r, slice_r));
                             // Store into capture name
-                            self.compile_store_name(name, elem_r);
+                            self.compile_store_name(name, list_r);
                             if let Some(reg) = self.local_reg(name) {
                                 self.mark_def(reg);
                             }
-                            self.free_temp(elem_r);
+                            // slice_r / list_r / empty_base cannot be freed in LIFO
+                            // order because the phantom empty_base slot sits above
+                            // list_r. All three are dead after the store, so restore
+                            // next_temp explicitly; max_reg already reflects peak
+                            // usage from the empty_base bump above.
+                            self.next_temp = saved_next;
                         }
                         // Don't increment fixed_idx for the star element itself.
                         continue;
