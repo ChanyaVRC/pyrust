@@ -132,3 +132,43 @@ class BoolMapping:
 
 result = "a".translate(BoolMapping())
 print(ord(result))  # 1
+
+
+# --- int subclass return is accepted ---
+
+class MyInt(int):
+    pass
+
+class IntSubclassMapping:
+    def __getitem__(self, key):
+        return MyInt(65)  # ord('A')
+
+result = "a".translate(IntSubclassMapping())
+print(repr(result))  # 'A'
+
+
+# --- str subclass return is accepted ---
+
+class MyStr(str):
+    pass
+
+class StrSubclassMapping:
+    def __getitem__(self, key):
+        if key == ord('a'):
+            return MyStr("XY")
+        raise KeyError(key)
+
+result = "ab".translate(StrSubclassMapping())
+print(repr(result))  # 'XYb'
+
+
+# --- BigInt (> i64::MAX) return raises ValueError, not TypeError ---
+
+class BigIntOutOfRange:
+    def __getitem__(self, key):
+        return 2 ** 63  # Too large for any Unicode codepoint
+
+try:
+    "a".translate(BigIntOutOfRange())
+except ValueError as e:
+    print(f"ValueError: {e}")  # ValueError: character mapping must be in range(0x110000)
