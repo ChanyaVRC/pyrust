@@ -4873,6 +4873,16 @@ pyrust_module! {
     /// CPython signature: `object.__init__(self, /)`
     #[py_name = "object.__init__"]
     fn object_init_dunder(args) -> Result<Value> {
+        // CPython 3.12 descriptor protocol: object.__init__() called with no
+        // arguments (no self) raises TypeError.
+        // Reproduced from CPython's slot_tp_init / descriptor wrappers:
+        //   TypeError: descriptor '__init__' of 'object' object needs an argument
+        if args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                "descriptor '__init__' of 'object' object needs an argument".to_string(),
+            ));
+        }
         // Only args beyond the mandatory first (self) are "extra".
         let has_extra_args = args.len() > 1 || args.iter().skip(1).any(|a| a.name.is_some());
         if has_extra_args {
@@ -4894,7 +4904,13 @@ pyrust_module! {
                 ValueKind::PyInstance(inst) => Some(Rc::clone(&inst.borrow().class)),
                 _ => None,
             });
-            let is_lenient = if let Some(ref class_rc) = class_rc_opt {
+            // CPython error message prefix:
+            //   - when type(self) has a custom __init__: "object.__init__()"
+            //   - when type(self) has no custom __init__: "<typename>.__init__()"
+            // (Objects/typeobject.c, object_init:
+            //    PyErr_Format(..., "%.100s.__init__()", Py_TYPE(self)->tp_name)
+            //    when tp_init == object_init; "object.__init__()" otherwise)
+            let (is_lenient, err_prefix) = if let Some(ref class_rc) = class_rc_opt {
                 // "Custom __new__" = any __new__ that is not object.__new__.
                 // This includes:
                 //   (a) user-defined __new__ (UserFunction), or
@@ -4933,15 +4949,23 @@ pyrust_module! {
                     init_val.as_ref().map(|v| v.kind()),
                     None | Some(ValueKind::BuiltinFunction("object.__init__"))
                 );
-                has_custom_new && !has_custom_init
+                // CPython error prefix: type name when no custom __init__,
+                // "object" when a custom __init__ is present.
+                let prefix = if has_custom_init {
+                    "object".to_string()
+                } else {
+                    class_rc.borrow().name.clone()
+                };
+                (has_custom_new && !has_custom_init, prefix)
             } else {
-                false
+                (false, "object".to_string())
             };
             if !is_lenient {
                 return Err(PyError::named(
                     "TypeError",
-                    "object.__init__() takes exactly one argument (the instance to initialize)"
-                        .to_string(),
+                    format!(
+                        "{err_prefix}.__init__() takes exactly one argument (the instance to initialize)"
+                    ),
                 ));
             }
         }
