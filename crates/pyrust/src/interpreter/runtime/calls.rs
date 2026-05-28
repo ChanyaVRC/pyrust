@@ -3212,11 +3212,7 @@ impl Interpreter {
                     spec
                 };
                 let formatted = self.dispatch_dunder_format(&value, spec)?;
-                if let ValueKind::Str(s) = formatted.kind() {
-                    out.push_str(s);
-                } else {
-                    out.push_str(&formatted.to_py_str());
-                }
+                out.push_str(&extract_str_value(&formatted));
             } else if c == b'}' {
                 if i + 1 < bytes.len() && bytes[i + 1] == b'}' {
                     out.push('}');
@@ -4853,7 +4849,7 @@ impl Interpreter {
                         value: Value::string(spec),
                     }],
                 )?;
-                return if matches!(result.kind(), ValueKind::Str(_)) {
+                return if is_str_or_str_subclass(&result) {
                     Ok(result)
                 } else {
                     Err(PyError::named(
@@ -5011,11 +5007,7 @@ fn format_str_template(
             // validate the return is a str.  For non-instance values fall through
             // to apply_format_spec directly.
             let formatted = self.dispatch_dunder_format(&value, spec)?;
-            if let ValueKind::Str(s) = formatted.kind() {
-                out.push_str(s);
-            } else {
-                out.push_str(&formatted.to_py_str());
-            }
+            out.push_str(&extract_str_value(&formatted));
         } else if c == b'}' {
             if i + 1 < bytes.len() && bytes[i + 1] == b'}' {
                 out.push('}');
