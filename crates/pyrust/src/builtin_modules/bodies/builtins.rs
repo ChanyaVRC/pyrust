@@ -84,11 +84,11 @@ pyrust_module! {
     /// Migrated to the typed-signature dialect (#400) as a three-element
     /// overload set: `PyStr` is the primary path; `PyBytes` mirrors
     /// CPython's acceptance of one-byte bytes (`ord(b"A") == 65`); a
-    /// trailing `PyValue` catch-all preserves the legacy
-    /// `"expected string of length 1, but got non-string"` TypeError
-    /// verbatim.  Length-mismatch wording on the `PyStr` overload is also
-    /// preserved verbatim from the legacy body so parity output is
-    /// stable.  All parameters are `#[positional_only]` so the macro's
+    /// trailing `PyValue` catch-all raises `"expected string of length 1,
+    /// but TYPE found"` using the actual type name (CPython 3.12 wording,
+    /// fixed in #1339).  Length-mismatch wording on the `PyStr` overload
+    /// is preserved verbatim from CPython so parity output is stable.
+    /// All parameters are `#[positional_only]` so the macro's
     /// positional-only fast-path applies.  The `PyBytes` overload is a
     /// new CPython-parity feature — the legacy body rejected `bytes`
     /// outright, but CPython has always accepted a 1-byte `bytes`
