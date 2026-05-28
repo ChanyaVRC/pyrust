@@ -560,7 +560,10 @@ fn module_class(name: &str) -> Option<Rc<RefCell<crate::value::PyClass>>> {
 /// seed private state without going through a public constructor.
 fn make_instance(name: &str, attrs: IndexMap<String, Value>) -> Value {
     match module_class(name) {
-        Some(class) => Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs }))),
+        Some(class) => Value::py_instance(Rc::new(RefCell::new(PyInstance {
+            class,
+            attrs,
+        }))),
         // "Shouldn't happen" really means "would indicate a macro/build
         // bug": every class name passed here is declared in this very
         // module via `class { … }`, which the `pyrust_module!` macro
