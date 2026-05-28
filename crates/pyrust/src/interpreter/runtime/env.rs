@@ -129,6 +129,20 @@ impl Interpreter {
                         .insert("__annotations__".to_string(), empty.clone());
                     return Ok(empty);
                 }
+                // Issue #1563: `dict.fromkeys` is a classmethod that must return
+                // an instance of `cls`, not always a plain `dict`.  When called
+                // on a dict subclass, bind the class as the receiver so that the
+                // bound-method dispatch in calls.rs can call `cls()` instead of
+                // hard-coding `Value::dict(map)`.
+                if name == "fromkeys"
+                    && !is_primitive_class(&class)
+                    && class_chain_contains_name(&class, "dict")
+                {
+                    return Ok(pyrust_builtins::bound_method::bound_method(
+                        "fromkeys",
+                        Value::py_class(Rc::clone(&class)),
+                    ));
+                }
                 if let Some(value) = lookup_class_attr(&class, name) {
                     // Descriptor protocol for class-level access: if the class
                     // attribute is a user-defined descriptor (PyInstance with
