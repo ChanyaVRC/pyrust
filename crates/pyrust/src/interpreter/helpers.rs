@@ -201,6 +201,7 @@ pub(crate) fn lookup_class_attr(class: &Rc<RefCell<PyClass>>, name: &str) -> Opt
     if value.is_some() {
         return value;
     }
+    let has_explicit_base = base.is_some();
     if let Some(base) = base {
         if let Some(v) = lookup_class_attr(&base, name) {
             return Some(v);
@@ -209,6 +210,26 @@ pub(crate) fn lookup_class_attr(class: &Rc<RefCell<PyClass>>, name: &str) -> Opt
     for extra in &extra_bases {
         if let Some(v) = lookup_class_attr(extra, name) {
             return Some(v);
+        }
+    }
+    // Issue #1378: every class implicitly has `object` as its ultimate ancestor
+    // (CPython's invariant).  When the MRO chain terminates (no explicit primary
+    // base) and the class is not itself `object` or a primitive type, fall
+    // through to the object singleton's attrs.  This mirrors class_is_subclass_of
+    // (which returns true for any class when expected is object) and
+    // class_mro_items (which appends object at the end of every MRO).
+    //
+    // Without this fallback, built-in exception classes whose base chain ends at
+    // BaseException (base==None) never reached object's attrs — so
+    // `hasattr(Exception, '__init_subclass__')` was False.
+    //
+    // Primitive types (int, str, list, …) are excluded because their methods are
+    // dispatched through a separate mechanism; leaking object's registered dunders
+    // onto them would shadow that dispatch and break repr/str for subclasses.
+    if !has_explicit_base && !is_primitive_class(class) {
+        let obj = object_class_singleton();
+        if !Rc::ptr_eq(class, &obj) {
+            return lookup_class_attr(&obj, name);
         }
     }
     None
