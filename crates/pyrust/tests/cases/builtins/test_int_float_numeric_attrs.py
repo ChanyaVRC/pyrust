@@ -79,3 +79,21 @@ try:
     (3.14).conjugate(1)
 except TypeError as e:
     print(e)
+
+# --- int and float subclasses inherit numeric-tower properties ---
+class MyInt(int):
+    pass
+
+mi = MyInt(42)
+print(mi.real)        # 42
+print(mi.imag)        # 0
+print(mi.numerator)   # 42
+print(mi.denominator) # 1
+
+class MyFloat(float):
+    pass
+
+mf = MyFloat(3.14)
+print(mf.real)        # 3.14
+print(mf.imag)        # 0.0
+print(mf.conjugate()) # 3.14

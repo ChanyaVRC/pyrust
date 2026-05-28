@@ -891,6 +891,40 @@ impl Interpreter {
             return Ok(value);
         }
 
+        // Step 2b: numeric-tower read-only properties for int/float subclasses.
+        // CPython defines `real`, `imag`, `numerator`, `denominator` as
+        // getset_descriptor data descriptors on `int` and `float`, so int/float
+        // subclass instances inherit them.  Pyrust intercepts them via the
+        // backing `__builtin_data__` value rather than registering real
+        // descriptors on the primitive class (issue #1341).
+        if matches!(name, "real" | "imag" | "numerator" | "denominator") {
+            if let Some(backing) = instance_builtin_data(&instance) {
+                let result = match backing.kind() {
+                    ValueKind::Bool(b) => match name {
+                        "real" | "numerator" => Some(Value::int(b as i64)),
+                        "imag" => Some(Value::int(0)),
+                        "denominator" => Some(Value::int(1)),
+                        _ => None,
+                    },
+                    ValueKind::Int(_) | ValueKind::BigInt(_) => match name {
+                        "real" | "numerator" => Some(backing.clone()),
+                        "imag" => Some(Value::int(0)),
+                        "denominator" => Some(Value::int(1)),
+                        _ => None,
+                    },
+                    ValueKind::Float(_) => match name {
+                        "real" => Some(backing.clone()),
+                        "imag" => Some(Value::float(0.0)),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(v) = result {
+                    return Ok(v);
+                }
+            }
+        }
+
         // Step 3: Non-data descriptor or plain class attribute.
         // `cached_property` and user-defined non-data descriptors
         // (has __get__ but NOT __set__/__delete__) fire here;
