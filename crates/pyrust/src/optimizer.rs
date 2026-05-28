@@ -3891,6 +3891,15 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             Insn::SyncModuleGlobal(reg, name_idx) => {
                 Insn::SyncModuleGlobal(s(&copies, reg), name_idx)
             }
+            Insn::YieldFrom {
+                iter_reg,
+                sent_reg,
+                result_reg,
+            } => Insn::YieldFrom {
+                iter_reg: s(&copies, iter_reg),
+                sent_reg: s(&copies, sent_reg),
+                result_reg,
+            },
             // Call/BuildList/BuildTuple/etc. use a base register for a range of args;
             // do not substitute the base register as that would misalign the arg block.
             other => other,
