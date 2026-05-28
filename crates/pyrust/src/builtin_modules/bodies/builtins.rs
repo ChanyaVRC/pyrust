@@ -2174,7 +2174,10 @@ pyrust_module! {
                         }
                         Ok(Value::float(py_round_half_even_f64(z) / factor))
                     } else {
-                        let factor = 10f64.powi(-n);
+                        // Use powf (not powi) to match libm pow() precision — powi uses
+                        // repeated squarings that accumulate ULP error at high exponents
+                        // (e.g. powi(308) != powf(308.0) != 1e308), causing wrong rounding.
+                        let factor = 10f64.powf((-n) as f64);
                         if factor.is_infinite() {
                             // 10^(-n) overflows f64; any finite value rounds to signed zero.
                             return Ok(Value::float(if v.is_finite() {
@@ -2183,7 +2186,16 @@ pyrust_module! {
                                 v
                             }));
                         }
-                        Ok(Value::float(py_round_half_even_f64(v / factor) * factor))
+                        let result = py_round_half_even_f64(v / factor) * factor;
+                        // CPython: if a finite float rounds to infinity, raise OverflowError.
+                        // Non-finite inputs (inf/nan) propagate unchanged (no error).
+                        if v.is_finite() && result.is_infinite() {
+                            return Err(PyError::named(
+                                "OverflowError",
+                                "rounded value too large to represent".to_string(),
+                            ));
+                        }
+                        Ok(Value::float(result))
                     }
                 }
             },
@@ -2256,7 +2268,7 @@ pyrust_module! {
                                     }
                                     Ok(Value::float(py_round_half_even_f64(z) / factor))
                                 } else {
-                                    let factor = 10f64.powi(-n);
+                                    let factor = 10f64.powf((-n) as f64);
                                     if factor.is_infinite() {
                                         return Ok(Value::float(if v.is_finite() {
                                             if v.is_sign_negative() { -0.0f64 } else { 0.0f64 }
@@ -2264,7 +2276,14 @@ pyrust_module! {
                                             v
                                         }));
                                     }
-                                    Ok(Value::float(py_round_half_even_f64(v / factor) * factor))
+                                    let result = py_round_half_even_f64(v / factor) * factor;
+                                    if v.is_finite() && result.is_infinite() {
+                                        return Err(PyError::named(
+                                            "OverflowError",
+                                            "rounded value too large to represent".to_string(),
+                                        ));
+                                    }
+                                    Ok(Value::float(result))
                                 }
                             }
                         },
