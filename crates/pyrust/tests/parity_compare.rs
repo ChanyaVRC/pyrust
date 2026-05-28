@@ -113,16 +113,52 @@ fn warn_if_python_version_off_target(python: &Path) {
     }
 }
 
+/// Return true if `line` looks like a CPython warning header of the form:
+///   <file>:<lineno>: SomeWarning: <message>
+/// Detected by requiring "Warning:" in the line and a ":<digits>" in the prefix.
+fn is_cpython_warning_header(line: &str) -> bool {
+    let Some(warn_pos) = line.find("Warning:") else {
+        return false;
+    };
+    let prefix = &line[..warn_pos];
+    let mut chars = prefix.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == ':' && chars.peek().map_or(false, |d| d.is_ascii_digit()) {
+            return true;
+        }
+    }
+    false
+}
+
 fn normalize_pythonish_output(raw: &str) -> String {
-    raw.lines()
-        .filter(|line| {
-            let trimmed = line.trim_start();
-            !trimmed.starts_with("Traceback (most recent call last):")
-                && !trimmed.starts_with("File \"")
-        })
-        .map(|line| line.trim_end())
-        .collect::<Vec<_>>()
-        .join("\n")
+    // CPython emits SyntaxWarnings to stderr at compile time for unrecognized
+    // escape sequences and similar issues.  The harness merges stdout+stderr, so
+    // these lines appear in CPython output but not pyrust output.  Strip:
+    //   <file>:<lineno>: SyntaxWarning: <message>
+    //     <source context line>   (indented, follows the header)
+    let mut skip_context = false;
+    let mut out: Vec<&str> = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim_start();
+        if skip_context {
+            // The source-context line that follows a warning header is indented.
+            if line.starts_with(' ') || line.starts_with('\t') {
+                continue;
+            }
+            skip_context = false;
+        }
+        if trimmed.starts_with("Traceback (most recent call last):")
+            || trimmed.starts_with("File \"")
+            || is_cpython_warning_header(trimmed)
+        {
+            if is_cpython_warning_header(trimmed) {
+                skip_context = true;
+            }
+            continue;
+        }
+        out.push(line.trim_end());
+    }
+    out.join("\n")
 }
 
 fn collect_test_scripts(dir: &Path, out: &mut Vec<PathBuf>) {
