@@ -1145,6 +1145,20 @@ impl Interpreter {
                 return result;
             }
         }
+        // CPython 3.12: SyntaxError's structured slots reset to None on
+        // delete rather than removing the attribute (issue #1588).
+        if class_chain_contains_name(&class, "SyntaxError")
+            && matches!(
+                name,
+                "msg" | "filename" | "lineno" | "offset" | "text" | "end_lineno" | "end_offset"
+            )
+        {
+            instance
+                .borrow_mut()
+                .attrs
+                .insert(name.to_string(), Value::none());
+            return Ok(());
+        }
         if instance.borrow_mut().attrs.shift_remove(name).is_none() {
             let class_name = instance.borrow().class.borrow().name.clone();
             return Err(PyError::named(
@@ -1631,6 +1645,28 @@ impl Interpreter {
                     {
                         return result;
                     }
+                }
+                // CPython 3.12: SyntaxError's structured slots are C-level
+                // member descriptors that reset to None on delete rather than
+                // removing the attribute entirely (issue #1588).  Mirror that
+                // here by storing None instead of removing the key.
+                if class_chain_contains_name(&class, "SyntaxError")
+                    && matches!(
+                        name,
+                        "msg"
+                            | "filename"
+                            | "lineno"
+                            | "offset"
+                            | "text"
+                            | "end_lineno"
+                            | "end_offset"
+                    )
+                {
+                    instance
+                        .borrow_mut()
+                        .attrs
+                        .insert(name.to_string(), Value::none());
+                    return Ok(());
                 }
                 // `shift_remove` keeps the remaining entries in their
                 // original insertion order so `vars(obj)` after `del obj.x`
