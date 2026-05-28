@@ -2887,6 +2887,7 @@ pyrust_module! {
             0 => Ok(Value::int(0)),
             1 => match args[0].value.kind() {
                 ValueKind::Int(v) => Ok(Value::int(v)),
+                ValueKind::BigInt(b) => Ok(Value::bigint((*b).clone())),
                 ValueKind::Float(v) => {
                     if v.is_nan() {
                         return Err(PyError::named(
