@@ -81,6 +81,8 @@ except FileNotFoundError as e:
     print(s.startswith("[Errno 2]"))
     # strerror is platform-specific; only check the stable parts.
     print("/no_such_file_str_test_abc" in s)
+    # Cross-platform: strerror must appear in str(e) regardless of OS wording.
+    print(e.strerror in s)
 
 # repr() of a 3-arg FileNotFoundError shows only (errno, strerror) — no filename
 e = FileNotFoundError(2, "No such file or directory", "/path")
