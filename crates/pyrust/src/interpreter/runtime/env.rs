@@ -1833,6 +1833,28 @@ impl Interpreter {
                     format!("'method' object has no attribute '{name}'"),
                 ))
             }
+            ValueKind::Generator(_) => {
+                // CPython 3.12 symmetry with assign_attr: deleting __name__ or
+                // __qualname__ raises the same TypeError as assigning a non-string.
+                // The read-only gi_* attrs raise AttributeError "not writable".
+                // Anything else raises AttributeError "has no attribute".
+                match name {
+                    "__name__" | "__qualname__" => Err(PyError::named(
+                        "TypeError",
+                        format!("{name} must be set to a string object"),
+                    )),
+                    "gi_running" | "gi_yieldfrom" | "gi_frame" | "gi_code" => {
+                        Err(PyError::named(
+                            "AttributeError",
+                            format!("attribute '{name}' of 'generator' objects is not writable"),
+                        ))
+                    }
+                    _ => Err(PyError::named(
+                        "AttributeError",
+                        format!("'generator' object has no attribute '{name}'"),
+                    )),
+                }
+            }
             _ => {
                 let type_name = pyrust_core::builtin_type_name(&target);
                 Err(PyError::named(
