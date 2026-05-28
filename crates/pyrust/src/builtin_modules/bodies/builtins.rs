@@ -23,6 +23,7 @@ use crate::interpreter::{
     CallableIter, EnumerateIter, FilterIter, IterSrcBuf, MapIter, NativeIterFrame, ZipIter, apply_format_spec, ascii_repr_interp, bigint_divmod_floor,
     class_chain_contains_name, class_is_subclass_of,
     compare_values, compare_values_with_op, coerce_numeric, dir_names,
+    find_immutable_primitive_base, find_mutable_primitive_base, find_scalar_primitive_base,
     float_to_bigint, instance_builtin_data, is_str_or_str_subclass,
     int_pow_promoting, invoke_class_method,
     is_exception_class, iter_values, lookup_class_attr, modinv_bigint, modinv_i64, modpow_bigint, modpow_i64, py_hash_bigint, py_hash_float,
@@ -4860,9 +4861,90 @@ pyrust_module! {
     /// `__init__` exposed on `object` so that `super().__init__()` in user
     /// classes terminates the MRO walk without error.
     ///
+    /// Issue #1016: CPython 3.12 arg-leniency rule — extra positional/keyword
+    /// arguments are accepted (and ignored) only when BOTH:
+    ///   (a) `type(self)` defines a custom `__new__` (not `object.__new__`), AND
+    ///   (b) `type(self)` does NOT define a custom `__init__` (i.e. inherits
+    ///       `object.__init__`).
+    /// This is the symmetric counterpart of the rule in `object_new_dunder`.
+    /// In all other cases extra args raise `TypeError: object.__init__() takes
+    /// exactly one argument (the instance to initialize)`.
+    ///
     /// CPython signature: `object.__init__(self, /)`
     #[py_name = "object.__init__"]
-    fn object_init_dunder(_args) -> Result<Value> {
+    fn object_init_dunder(args) -> Result<Value> {
+        // Only args beyond the mandatory first (self) are "extra".
+        let has_extra_args = args.len() > 1 || args.iter().skip(1).any(|a| a.name.is_some());
+        if has_extra_args {
+            // Determine whether the leniency rule applies.  From CPython's
+            // object_init in Objects/typeobject.c:
+            //
+            //   if (excess_args(args, kwds)) {
+            //       if (type->tp_new == object_new) {
+            //           /* no custom __new__ → error */
+            //       } else if (type->tp_init != object_init) {
+            //           /* custom __new__ AND custom __init__ → error */
+            //       }
+            //       /* else: custom __new__, no custom __init__ → lenient */
+            //   }
+            //
+            // Lenient iff: has_custom_new AND NOT has_custom_init.
+            let self_val = args.first().map(|a| a.value.clone());
+            let class_rc_opt = self_val.as_ref().and_then(|v| match v.kind() {
+                ValueKind::PyInstance(inst) => Some(Rc::clone(&inst.borrow().class)),
+                _ => None,
+            });
+            let is_lenient = if let Some(ref class_rc) = class_rc_opt {
+                // "Custom __new__" = any __new__ that is not object.__new__.
+                // This includes:
+                //   (a) user-defined __new__ (UserFunction), or
+                //   (b) a registered builtin __new__ (str.__new__, int.__new__,
+                //       etc.) — BuiltinFunction with name != "object.__new__",
+                //   (c) a primitive subclass that uses the type's builtin
+                //       constructor as its allocator (e.g. complex/list/dict/set
+                //       which lack an explicit __new__ registration but are
+                //       handled by find_scalar/mutable/immutable_primitive_base
+                //       in call_class_expanded).  In CPython these types have
+                //       tp_new != object_new at the C level.
+                let new_val = lookup_class_attr(class_rc, "__new__");
+                let has_custom_new = match new_val.as_ref().map(|v| v.kind()) {
+                    Some(ValueKind::UserFunction(_)) => true,
+                    Some(ValueKind::BuiltinFunction("object.__new__")) => {
+                        // __new__ resolved to object.__new__ via MRO.  This can
+                        // happen for primitive types like complex/list/dict/set
+                        // that have no explicit __new__ registration in pyrust.
+                        // In CPython these types have tp_new != object_new at the
+                        // C level, so treat their subclasses as having a custom
+                        // __new__ by checking for primitive ancestry.
+                        find_scalar_primitive_base(class_rc).is_some()
+                            || find_mutable_primitive_base(class_rc).is_some()
+                            || find_immutable_primitive_base(class_rc).is_some()
+                    }
+                    Some(ValueKind::BuiltinFunction(_)) => true,
+                    _ => false,
+                };
+                // "Custom __init__" = any __init__ other than object.__init__:
+                // both user-defined (UserFunction) and builtin subtype inits
+                // (list.__init__, dict.__init__, etc.) count.  object.__init__
+                // is the sentinel; None means the MRO has no __init__ at all
+                // (only possible for pathological class structures).
+                let init_val = lookup_class_attr(class_rc, "__init__");
+                let has_custom_init = !matches!(
+                    init_val.as_ref().map(|v| v.kind()),
+                    None | Some(ValueKind::BuiltinFunction("object.__init__"))
+                );
+                has_custom_new && !has_custom_init
+            } else {
+                false
+            };
+            if !is_lenient {
+                return Err(PyError::named(
+                    "TypeError",
+                    "object.__init__() takes exactly one argument (the instance to initialize)"
+                        .to_string(),
+                ));
+            }
+        }
         Ok(Value::none())
     }
 
