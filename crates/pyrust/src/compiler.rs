@@ -5141,6 +5141,14 @@ impl Compiler {
                         self.emit(Insn::SyncModuleGlobal(reg, name_idx));
                         self.free_temp(lhs);
                     } else {
+                        // Issue #1644: at function scope, a local that is not yet
+                        // definitely bound must be guarded by CheckLocal so that
+                        // an unset register produces UnboundLocalError (not the
+                        // generic NameError that vm_read emits).
+                        if !self.is_module_scope && !definitely_bound {
+                            let name_idx = self.intern_name(name);
+                            self.emit(Insn::CheckLocal(reg, name_idx));
+                        }
                         self.emit_aug_binop(reg, op, expr);
                         self.maybe_record_class_store(reg);
                         // Issue #820: sync the updated value into module_globals_dict
