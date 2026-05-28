@@ -616,6 +616,7 @@ fn pass_reassoc(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -> V
                     | Insn::RaiseFrom(..)
                     | Insn::RaiseReRaise
                     | Insn::RaiseAssert(_)
+                    | Insn::RaiseAssertNoMsg
                     | Insn::Unpack(..)
                     | Insn::UnpackEx { .. }
                     | Insn::Yield { .. }
@@ -784,6 +785,7 @@ fn pass_const_fold(insns: Vec<Insn>, consts: &mut Vec<Value>, num_locals: u32) -
             | Insn::RaiseFrom(..)
             | Insn::RaiseReRaise
             | Insn::RaiseAssert(_)
+            | Insn::RaiseAssertNoMsg
             | Insn::Unpack(..)
             | Insn::UnpackEx { .. }
             | Insn::Yield { .. }
