@@ -407,14 +407,35 @@ pub fn decode_bytes(bytes: &[u8], encoding: &str, errors: &str) -> Result<Value>
                 Err(e) => {
                     // Decoding failed — now the error handler matters.
                     match errors {
-                        "strict" => Err(PyError::named(
-                            "UnicodeDecodeError",
-                            format!(
-                                "'utf-8' codec can't decode byte 0x{:02x} in position {}: invalid start byte",
-                                bytes[e.valid_up_to()],
-                                e.valid_up_to()
-                            ),
-                        )),
+                        "strict" => {
+                            let start = e.valid_up_to();
+                            let end = start + e.error_len().unwrap_or(bytes.len() - start);
+                            let reason = if e.error_len().is_none() {
+                                "unexpected end of data"
+                            } else {
+                                let b = bytes[start];
+                                // CPython 3.12 reports "invalid continuation byte" when the
+                                // byte at `start` is a valid multi-byte sequence start
+                                // (0xC2..=0xF4) but the bytes that follow are not valid
+                                // continuation bytes.  All other cases (lone continuation
+                                // bytes 0x80..=0xBF, overlong-sequence starts 0xC0..=0xC1,
+                                // and out-of-range starts 0xF5..=0xFF) are "invalid start
+                                // byte" because the byte itself cannot begin a legal UTF-8
+                                // sequence.
+                                if matches!(b, 0xC2..=0xF4) {
+                                    "invalid continuation byte"
+                                } else {
+                                    "invalid start byte"
+                                }
+                            };
+                            Err(PyError::UnicodeDecodeError {
+                                encoding: "utf-8".to_string(),
+                                object: bytes.to_vec(),
+                                start,
+                                end,
+                                reason: reason.to_string(),
+                            })
+                        }
                         "ignore" => Ok(Value::string(&bytes_decode_utf8_ignore(bytes))),
                         "replace" => Ok(Value::string(String::from_utf8_lossy(bytes).as_ref())),
                         _ => Err(PyError::named(
@@ -442,15 +463,16 @@ pub fn decode_bytes(bytes: &[u8], encoding: &str, errors: &str) -> Result<Value>
                         std::str::from_utf8_unchecked(bytes)
                     }))
                 }
-                Some((i, &b)) => {
+                Some((i, _b)) => {
                     // At least one bad byte — now the error handler matters.
                     match errors {
-                        "strict" => Err(PyError::named(
-                            "UnicodeDecodeError",
-                            format!(
-                                "'ascii' codec can't decode byte 0x{b:02x} in position {i}: ordinal not in range(128)"
-                            ),
-                        )),
+                        "strict" => Err(PyError::UnicodeDecodeError {
+                            encoding: "ascii".to_string(),
+                            object: bytes.to_vec(),
+                            start: i,
+                            end: i + 1,
+                            reason: "ordinal not in range(128)".to_string(),
+                        }),
                         "ignore" => {
                             let s: String = bytes
                                 .iter()

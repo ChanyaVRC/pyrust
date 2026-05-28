@@ -266,6 +266,30 @@ impl Interpreter {
                             format!("{class_name}: [Errno {errno}] {strerror}")
                         }
                     }
+                    PyError::UnicodeDecodeError {
+                        encoding,
+                        object,
+                        start,
+                        end,
+                        reason,
+                    } => {
+                        let msg = pyrust_core::format_unicode_decode_str(
+                            &encoding, &object, *start, *end, &reason,
+                        );
+                        format!("UnicodeDecodeError: {msg}")
+                    }
+                    PyError::UnicodeEncodeError {
+                        encoding,
+                        object,
+                        start,
+                        end,
+                        reason,
+                    } => {
+                        let msg = pyrust_core::format_unicode_encode_str(
+                            &encoding, &object, *start, *end, &reason,
+                        );
+                        format!("UnicodeEncodeError: {msg}")
+                    }
                     PyError::Raised(value) => match value.kind() {
                         ValueKind::PyInstance(inst) => {
                             let class_name = inst.borrow().class.borrow().name.clone();

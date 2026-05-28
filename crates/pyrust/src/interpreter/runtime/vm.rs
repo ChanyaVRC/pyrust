@@ -897,6 +897,34 @@ impl Interpreter {
                     Err(e2) => return Err(e2),
                 }
             }
+            PyError::UnicodeDecodeError {
+                encoding,
+                object,
+                start,
+                end,
+                reason,
+            } => {
+                match self.instantiate_unicode_decode_error_exception(
+                    encoding, object, start, end, reason,
+                ) {
+                    Ok(v) => v,
+                    Err(e2) => return Err(e2),
+                }
+            }
+            PyError::UnicodeEncodeError {
+                encoding,
+                object,
+                start,
+                end,
+                reason,
+            } => {
+                match self.instantiate_unicode_encode_error_exception(
+                    encoding, object, start, end, reason,
+                ) {
+                    Ok(v) => v,
+                    Err(e2) => return Err(e2),
+                }
+            }
             other => return Err(other),
         };
         self.attach_implicit_context(&exc_val);

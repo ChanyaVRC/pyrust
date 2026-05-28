@@ -1330,6 +1330,12 @@ pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value
     // share the same Rc, so checking for "OSError" in the chain suffices.
     let is_os_error = class_chain_contains_name(&class, "OSError");
     let is_system_exit = class_chain_contains_name(&class, "SystemExit");
+    let is_unicode_decode_error = class_chain_contains_name(&class, "UnicodeDecodeError");
+    let is_unicode_encode_error =
+        !is_unicode_decode_error && class_chain_contains_name(&class, "UnicodeEncodeError");
+    let is_unicode_translate_error = !is_unicode_decode_error
+        && !is_unicode_encode_error
+        && class_chain_contains_name(&class, "UnicodeTranslateError");
     attrs.insert("args".to_string(), Value::tuple(args.clone()));
     // CPython 3.12: every BaseException instance has __traceback__ initialised
     // to None at __new__ time.  The VM's handle_vm_error overwrites it with a
@@ -1438,6 +1444,13 @@ pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value
                 }
             }
         }
+    } else if is_unicode_decode_error || is_unicode_encode_error || is_unicode_translate_error {
+        // CPython 3.12: UnicodeDecodeError(encoding, object, start, end, reason)
+        //               UnicodeEncodeError(encoding, object, start, end, reason)
+        //               UnicodeTranslateError(object, start, end, reason)
+        // Arg count validation is done in call_class_expanded before reaching here.
+        // We set attributes from args when the right number are present.
+        unicode_exc_set_attrs(&mut attrs, &args, is_unicode_decode_error || is_unicode_encode_error);
     }
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
@@ -1496,6 +1509,118 @@ pub(crate) fn instantiate_import_error(
     };
     attrs.insert("name".to_string(), name_val);
     attrs.insert("path".to_string(), Value::none());
+    Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
+}
+
+/// Set the five Unicode-exception structured attributes (`encoding`, `object`,
+/// `start`, `end`, `reason`) on an already-allocated `attrs` map from a
+/// positional argument list.
+///
+/// Used by both `instantiate_exception` (for user-constructed calls) and
+/// `base_exception_init` (for `super().__init__(...)` in subclasses).
+///
+/// `has_encoding` is `true` for `UnicodeDecodeError`/`UnicodeEncodeError`
+/// (which take 5 args: encoding, object, start, end, reason) and `false`
+/// for `UnicodeTranslateError` (4 args: object, start, end, reason).
+///
+/// If the arg count doesn't match the expected signature, this function is a
+/// no-op — arg count validation is the caller's responsibility.
+pub(crate) fn unicode_exc_set_attrs(
+    attrs: &mut IndexMap<String, Value>,
+    args: &[Value],
+    has_encoding: bool,
+) {
+    if has_encoding {
+        if args.len() != 5 {
+            return;
+        }
+        attrs.insert("encoding".to_string(), args[0].clone());
+        attrs.insert("object".to_string(), args[1].clone());
+        attrs.insert("start".to_string(), args[2].clone());
+        attrs.insert("end".to_string(), args[3].clone());
+        attrs.insert("reason".to_string(), args[4].clone());
+    } else {
+        if args.len() != 4 {
+            return;
+        }
+        attrs.insert("object".to_string(), args[0].clone());
+        attrs.insert("start".to_string(), args[1].clone());
+        attrs.insert("end".to_string(), args[2].clone());
+        attrs.insert("reason".to_string(), args[3].clone());
+    }
+}
+
+/// Instantiate a `UnicodeDecodeError` with its five structured attributes set
+/// from the raw Rust data produced by an internal decoding operation (e.g.
+/// `bytes.decode()`).  Used by the VM when materialising a
+/// `PyError::UnicodeDecodeError` variant.
+pub(crate) fn instantiate_unicode_decode_error(
+    class: Rc<RefCell<PyClass>>,
+    encoding: String,
+    object: Vec<u8>,
+    start: usize,
+    end: usize,
+    reason: String,
+) -> Value {
+    let enc_val = Value::string(&encoding);
+    let obj_val = Value::bytes(object);
+    let start_val = Value::int(start as i64);
+    let end_val = Value::int(end as i64);
+    let reason_val = Value::string(&reason);
+    let mut attrs = IndexMap::new();
+    attrs.insert(
+        "args".to_string(),
+        Value::tuple(vec![
+            enc_val.clone(),
+            obj_val.clone(),
+            start_val.clone(),
+            end_val.clone(),
+            reason_val.clone(),
+        ]),
+    );
+    attrs.insert("__traceback__".to_string(), Value::none());
+    attrs.insert("encoding".to_string(), enc_val);
+    attrs.insert("object".to_string(), obj_val);
+    attrs.insert("start".to_string(), start_val);
+    attrs.insert("end".to_string(), end_val);
+    attrs.insert("reason".to_string(), reason_val);
+    Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
+}
+
+/// Instantiate a `UnicodeEncodeError` with its five structured attributes set
+/// from the raw Rust data produced by an internal encoding operation (e.g.
+/// `str.encode()`).  Used by the VM when materialising a
+/// `PyError::UnicodeEncodeError` variant.
+pub(crate) fn instantiate_unicode_encode_error(
+    class: Rc<RefCell<PyClass>>,
+    encoding: String,
+    object: String,
+    start: usize,
+    end: usize,
+    reason: String,
+) -> Value {
+    let enc_val = Value::string(&encoding);
+    let obj_val = Value::string(&object);
+    let start_val = Value::int(start as i64);
+    let end_val = Value::int(end as i64);
+    let reason_val = Value::string(&reason);
+    let mut attrs = IndexMap::new();
+    attrs.insert(
+        "args".to_string(),
+        Value::tuple(vec![
+            enc_val.clone(),
+            obj_val.clone(),
+            start_val.clone(),
+            end_val.clone(),
+            reason_val.clone(),
+        ]),
+    );
+    attrs.insert("__traceback__".to_string(), Value::none());
+    attrs.insert("encoding".to_string(), enc_val);
+    attrs.insert("object".to_string(), obj_val);
+    attrs.insert("start".to_string(), start_val);
+    attrs.insert("end".to_string(), end_val);
+    attrs.insert("reason".to_string(), reason_val);
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 

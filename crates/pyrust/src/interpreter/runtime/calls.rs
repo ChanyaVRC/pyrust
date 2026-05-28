@@ -2723,6 +2723,156 @@ impl Interpreter {
         Err(PyError::Runtime(format!("no bytecode for '{}'", function.name)))
     }
 
+    /// Validate arguments for `UnicodeDecodeError(encoding, object, start, end, reason)`.
+    /// Matches CPython 3.12's `UnicodeDecodeError_init` checks.
+    fn validate_unicode_decode_args(args: &[Value]) -> Result<()> {
+        if args.len() != 5 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("function takes exactly 5 arguments ({} given)", args.len()),
+            ));
+        }
+        if !matches!(args[0].kind(), ValueKind::Str(_)) {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "argument 1 must be str, not {}",
+                    pyrust_core::builtin_type_name(&args[0])
+                ),
+            ));
+        }
+        if !matches!(args[1].kind(), ValueKind::Bytes(_)) {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "a bytes-like object is required, not '{}'",
+                    pyrust_core::builtin_type_name(&args[1])
+                ),
+            ));
+        }
+        for idx in [2usize, 3usize] {
+            match args[idx].kind() {
+                ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => {}
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "'{}' object cannot be interpreted as an integer",
+                            pyrust_core::builtin_type_name(&args[idx])
+                        ),
+                    ));
+                }
+            }
+        }
+        if !matches!(args[4].kind(), ValueKind::Str(_)) {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "argument 5 must be str, not {}",
+                    pyrust_core::builtin_type_name(&args[4])
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validate arguments for `UnicodeEncodeError(encoding, object, start, end, reason)`.
+    /// Matches CPython 3.12's `UnicodeEncodeError_init` checks.
+    fn validate_unicode_encode_args(args: &[Value]) -> Result<()> {
+        if args.len() != 5 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("function takes exactly 5 arguments ({} given)", args.len()),
+            ));
+        }
+        if !matches!(args[0].kind(), ValueKind::Str(_)) {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "argument 1 must be str, not {}",
+                    pyrust_core::builtin_type_name(&args[0])
+                ),
+            ));
+        }
+        if !matches!(args[1].kind(), ValueKind::Str(_)) {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "argument 2 must be str, not {}",
+                    pyrust_core::builtin_type_name(&args[1])
+                ),
+            ));
+        }
+        for idx in [2usize, 3usize] {
+            match args[idx].kind() {
+                ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => {}
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "'{}' object cannot be interpreted as an integer",
+                            pyrust_core::builtin_type_name(&args[idx])
+                        ),
+                    ));
+                }
+            }
+        }
+        if !matches!(args[4].kind(), ValueKind::Str(_)) {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "argument 5 must be str, not {}",
+                    pyrust_core::builtin_type_name(&args[4])
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validate arguments for `UnicodeTranslateError(object, start, end, reason)`.
+    /// Matches CPython 3.12's `UnicodeTranslateError_init` checks.
+    fn validate_unicode_translate_args(args: &[Value]) -> Result<()> {
+        if args.len() != 4 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("function takes exactly 4 arguments ({} given)", args.len()),
+            ));
+        }
+        if !matches!(args[0].kind(), ValueKind::Str(_)) {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "argument 1 must be str, not {}",
+                    pyrust_core::builtin_type_name(&args[0])
+                ),
+            ));
+        }
+        for idx in [1usize, 2usize] {
+            match args[idx].kind() {
+                ValueKind::Int(_) | ValueKind::Bool(_) | ValueKind::BigInt(_) => {}
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "'{}' object cannot be interpreted as an integer",
+                            pyrust_core::builtin_type_name(&args[idx])
+                        ),
+                    ));
+                }
+            }
+        }
+        if !matches!(args[3].kind(), ValueKind::Str(_)) {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "argument 4 must be str, not {}",
+                    pyrust_core::builtin_type_name(&args[3])
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     fn call_class_expanded(
         &mut self,
         class: Rc<RefCell<PyClass>>,
@@ -2856,6 +3006,18 @@ impl Interpreter {
                     }
                     _ => {}
                 }
+            }
+            // CPython 3.12: UnicodeDecodeError and UnicodeEncodeError require
+            // exactly 5 positional arguments; UnicodeTranslateError requires 4.
+            // Also validate argument types (encoding must be str, object must be
+            // bytes for Decode / str for Encode, start/end must be int-like,
+            // reason must be str).
+            if class_chain_contains_name(&class, "UnicodeDecodeError") {
+                Self::validate_unicode_decode_args(&values)?;
+            } else if class_chain_contains_name(&class, "UnicodeEncodeError") {
+                Self::validate_unicode_encode_args(&values)?;
+            } else if class_chain_contains_name(&class, "UnicodeTranslateError") {
+                Self::validate_unicode_translate_args(&values)?;
             }
             return Ok(instantiate_exception(class, values));
         }

@@ -1582,19 +1582,6 @@ fn str_encode(s: &str, args: &[Value]) -> Result<Value> {
     encode_str_to_bytes(s, encoding, errors)
 }
 
-/// Format a single Unicode codepoint the way CPython does in
-/// `UnicodeEncodeError` messages: `\xXX` for `< 0x100`, `\uXXXX` for
-/// `< 0x10000`, otherwise `\UXXXXXXXX`.
-fn format_codepoint_repr(cp: u32) -> String {
-    if cp < 0x100 {
-        format!("\\x{:02x}", cp)
-    } else if cp < 0x10000 {
-        format!("\\u{:04x}", cp)
-    } else {
-        format!("\\U{:08x}", cp)
-    }
-}
-
 /// Encode a Python `str` to `bytes`.
 ///
 /// Supports `utf-8`, `ascii`, `latin-1` (and CPython aliases).
@@ -1694,19 +1681,13 @@ pub fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result
                         while run_end < chars.len() && !fits(chars[run_end] as u32) {
                             run_end += 1;
                         }
-                        let run_len = run_end - run_start;
-                        let msg = if run_len == 1 {
-                            format!(
-                                "'{codec_name}' codec can't encode character '{}' in position {run_start}: ordinal not in range({range_label})",
-                                format_codepoint_repr(cp),
-                            )
-                        } else {
-                            format!(
-                                "'{codec_name}' codec can't encode characters in position {run_start}-{}: ordinal not in range({range_label})",
-                                run_end - 1,
-                            )
-                        };
-                        return Err(PyError::named("UnicodeEncodeError", msg));
+                        return Err(PyError::UnicodeEncodeError {
+                            encoding: codec_name.to_string(),
+                            object: source.to_string(),
+                            start: run_start,
+                            end: run_end,
+                            reason: format!("ordinal not in range({range_label})"),
+                        });
                     }
                 }
             }

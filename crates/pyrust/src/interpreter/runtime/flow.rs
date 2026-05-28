@@ -337,6 +337,40 @@ impl Interpreter {
         Ok(instantiate_os_error(class, errno, strerror, filename, filename2))
     }
 
+    /// Instantiate a `UnicodeDecodeError` with all five structured attributes
+    /// set from a `PyError::UnicodeDecodeError` variant raised internally (e.g.
+    /// from `bytes.decode()`).
+    fn instantiate_unicode_decode_error_exception(
+        &self,
+        encoding: String,
+        object: Vec<u8>,
+        start: usize,
+        end: usize,
+        reason: String,
+    ) -> Result<Value> {
+        let class = lookup_exc_class("UnicodeDecodeError").ok_or_else(|| {
+            PyError::Runtime("built-in exception 'UnicodeDecodeError' is not defined".to_string())
+        })?;
+        Ok(instantiate_unicode_decode_error(class, encoding, object, start, end, reason))
+    }
+
+    /// Instantiate a `UnicodeEncodeError` with all five structured attributes
+    /// set from a `PyError::UnicodeEncodeError` variant raised internally (e.g.
+    /// from `str.encode()`).
+    fn instantiate_unicode_encode_error_exception(
+        &self,
+        encoding: String,
+        object: String,
+        start: usize,
+        end: usize,
+        reason: String,
+    ) -> Result<Value> {
+        let class = lookup_exc_class("UnicodeEncodeError").ok_or_else(|| {
+            PyError::Runtime("built-in exception 'UnicodeEncodeError' is not defined".to_string())
+        })?;
+        Ok(instantiate_unicode_encode_error(class, encoding, object, start, end, reason))
+    }
+
     fn exception_matches(&self, exception: &Value, kind: &Value) -> Result<bool> {
         let instance = match exception.kind() {
             ValueKind::PyInstance(i) => Rc::clone(i),
