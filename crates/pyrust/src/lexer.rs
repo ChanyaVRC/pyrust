@@ -847,11 +847,9 @@ fn lex_bytes(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> 
                                     }
                                 }
                             }
-                            u8::try_from(val).map_err(|_| {
-                                PyError::Lex(format!(
-                                    "octal escape value out of range in bytes literal: \\{val:o}"
-                                ))
-                            })?
+                            // CPython 3.12: values > 0xFF emit SyntaxWarning and truncate
+                            // to the low byte. pyrust omits the warning for now.
+                            (val & 0xFF) as u8
                         }
                         'x' => {
                             let hi = chars
@@ -964,6 +962,8 @@ fn lex_bytes(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> 
                 'v' => 0x0b,
                 '0'..='7' => {
                     // \ooo — 1 to 3 octal digits; produces values 0x00–0xFF.
+                    // CPython 3.12: values > 0xFF emit SyntaxWarning and truncate to
+                    // the low byte. pyrust omits the warning for now.
                     let mut val = esc as u32 - '0' as u32;
                     if let Some(&d) = chars.get(pos + 1) {
                         if ('0'..='7').contains(&d) {
@@ -977,11 +977,7 @@ fn lex_bytes(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)> 
                             }
                         }
                     }
-                    u8::try_from(val).map_err(|_| {
-                        PyError::Lex(format!(
-                            "octal escape value out of range in bytes literal: \\{val:o}"
-                        ))
-                    })?
+                    (val & 0xFF) as u8
                 }
                 'x' => {
                     // \xNN — two hex digits
@@ -1798,5 +1794,17 @@ mod tests {
         assert_eq!(lex_one(r"b'\\'"), Token::Bytes(vec![0x5C]));
         assert_eq!(lex_one(r"b'\x41'"), Token::Bytes(vec![0x41]));
         assert_eq!(lex_one(r"b'\101'"), Token::Bytes(vec![0x41])); // octal
+    }
+
+    /// Octal escapes > 0xFF in bytes literals must truncate to the low byte,
+    /// matching CPython 3.12 (which emits SyntaxWarning + truncates).
+    #[test]
+    fn bytes_octal_escape_overflow_truncates() {
+        // \400 = 256 decimal → low byte 0x00
+        assert_eq!(lex_one("b'\\400'"), Token::Bytes(vec![0x00]));
+        // \777 = 511 decimal → low byte 0xFF
+        assert_eq!(lex_one("b'\\777'"), Token::Bytes(vec![0xFF]));
+        // \377 = 255 decimal → 0xFF (no overflow, sanity check)
+        assert_eq!(lex_one("b'\\377'"), Token::Bytes(vec![0xFF]));
     }
 }
