@@ -35,7 +35,12 @@ pub struct FileState {
     /// Encoding for text mode (e.g. "utf-8", "ascii", "latin-1").  Always
     /// `None` for binary mode.  `None` in text mode means locale default
     /// (pyrust uses UTF-8 as the locale default).
+    /// This is the normalised (lowercase, hyphens) form used for codec routing.
     pub encoding: Option<String>,
+    /// The original user-supplied encoding string (exact case as passed to `open()`).
+    /// Used for `repr()` and the `.encoding` attribute to match CPython behaviour
+    /// of preserving the user-supplied name verbatim.
+    pub encoding_display: Option<String>,
 }
 
 impl FileState {
@@ -60,11 +65,7 @@ impl BuiltinTypeOps for FileOps {
             if s.is_binary {
                 format!("<_io.BufferedReader name='{}'>", s.path)
             } else {
-                let enc = s
-                    .encoding
-                    .as_deref()
-                    .unwrap_or("utf-8")
-                    .to_ascii_uppercase();
+                let enc = s.encoding_display.as_deref().unwrap_or("UTF-8");
                 format!(
                     "<_io.TextIOWrapper name='{}' mode='{}' encoding='{}'>",
                     s.path, s.mode, enc
@@ -98,11 +99,7 @@ impl BuiltinTypeOps for FileOps {
                 if s.is_binary {
                     None
                 } else {
-                    let enc = s
-                        .encoding
-                        .as_deref()
-                        .unwrap_or("utf-8")
-                        .to_ascii_uppercase();
+                    let enc = s.encoding_display.as_deref().unwrap_or("UTF-8");
                     Some(Value::string(enc))
                 }
             }
@@ -164,7 +161,10 @@ pub fn open(path: &str, mode: &str, encoding: Option<&str>, closefd: bool) -> Re
 
     // Validate the encoding name early (before opening the file) so we get a
     // clean LookupError rather than a confusing IO error.
-    let encoding_norm: Option<String> = if is_binary {
+    // encoding_norm: lowercased+hyphens form used for codec routing.
+    // encoding_display: exact user-supplied string preserved for .encoding attr
+    //   and repr(), matching CPython which returns the verbatim user input.
+    let (encoding_norm, encoding_display): (Option<String>, Option<String>) = if is_binary {
         // Binary mode must not have an encoding.
         if encoding.is_some() {
             return Err(PyError::named(
@@ -172,10 +172,10 @@ pub fn open(path: &str, mode: &str, encoding: Option<&str>, closefd: bool) -> Re
                 "binary mode doesn't take an encoding argument".to_string(),
             ));
         }
-        None
+        (None, None)
     } else {
         match encoding {
-            None => None,
+            None => (None, None),
             Some(enc) => {
                 let norm = normalise_encoding(enc);
                 // Validate the name by attempting a dummy decode of empty bytes.
@@ -191,7 +191,7 @@ pub fn open(path: &str, mode: &str, encoding: Option<&str>, closefd: bool) -> Re
                         ));
                     }
                 }
-                Some(norm)
+                (Some(norm), Some(enc.to_string()))
             }
         }
     };
@@ -231,6 +231,7 @@ pub fn open(path: &str, mode: &str, encoding: Option<&str>, closefd: bool) -> Re
         is_append,
         is_binary,
         encoding: encoding_norm,
+        encoding_display,
     };
     let state: Box<dyn Any> = Box::new(state);
     Ok(Value::builtin_object(FILE_OPS, state))
@@ -822,7 +823,7 @@ fn close_file(state: &BuiltinState) -> Result<()> {
             let text_to_encode = s.write_buf.replace('\n', "\r\n");
             #[cfg(not(windows))]
             let text_to_encode: &str = &s.write_buf;
-            let text_bytes = encode_text_to_bytes(text_to_encode, enc)?;
+            let text_bytes = encode_text_to_bytes(&text_to_encode, enc)?;
             std::fs::write(&s.path, &text_bytes)
                 .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
         }
@@ -842,7 +843,7 @@ fn close_file(state: &BuiltinState) -> Result<()> {
             let text_to_encode = s.write_buf.replace('\n', "\r\n");
             #[cfg(not(windows))]
             let text_to_encode: &str = &s.write_buf;
-            let text_bytes = encode_text_to_bytes(text_to_encode, enc)?;
+            let text_bytes = encode_text_to_bytes(&text_to_encode, enc)?;
             f.write_all(&text_bytes)
                 .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
         }
