@@ -863,6 +863,7 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | BinOpInPlace(r, _, _, _)
         | UnaryOp(r, _, _)
         | GetAttr(r, _, _)
+        | GetAttrForWith(r, _, _, _)
         | ImportFromAttr(r, _, _)
         | GetItem(r, _, _)
         | Call(r, _)
@@ -1632,6 +1633,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | Unpack(_, s, _)
         | CheckLocal(s, _)
         | GetAttr(_, s, _)
+        | GetAttrForWith(_, s, _, _)
         | ImportFromAttr(_, s, _)
         | DeleteAttr(s, _)
         | BinOpConst(_, s, _, _)
@@ -1761,6 +1763,7 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         | Unpack(_, s, _)
         | CheckLocal(s, _)
         | GetAttr(_, s, _)
+        | GetAttrForWith(_, s, _, _)
         | ImportFromAttr(_, s, _)
         | DeleteAttr(s, _)
         | BinOpConst(_, s, _, _)
@@ -2445,6 +2448,7 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | BinOpImm(r, _, _, _)
         | UnaryOp(r, _, _)
         | GetAttr(r, _, _)
+        | GetAttrForWith(r, _, _, _)
         | ImportFromAttr(r, _, _)
         | GetItem(r, _, _)
         | Call(r, _)
@@ -3972,6 +3976,9 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             Insn::SetItem(obj, idx, val) => Insn::SetItem(obj, s(&copies, idx), s(&copies, val)),
             Insn::DeleteItem(obj, idx) => Insn::DeleteItem(obj, s(&copies, idx)),
             Insn::GetAttr(dst, obj, n) => Insn::GetAttr(dst, s(&copies, obj), n),
+            Insn::GetAttrForWith(dst, obj, n, me) => {
+                Insn::GetAttrForWith(dst, s(&copies, obj), n, me)
+            }
             Insn::ImportFromAttr(dst, obj, n) => Insn::ImportFromAttr(dst, s(&copies, obj), n),
             Insn::GetItem(dst, obj, idx) => Insn::GetItem(dst, s(&copies, obj), s(&copies, idx)),
             Insn::GetIter(slot, src) => Insn::GetIter(slot, s(&copies, src)),
@@ -5715,6 +5722,7 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         | Unpack(_, s, _)
         | CheckLocal(s, _)
         | GetAttr(_, s, _)
+        | GetAttrForWith(_, s, _, _)
         | ImportFromAttr(_, s, _)
         | DeleteAttr(s, _)
         | BinOpConst(_, s, _, _)
