@@ -4217,6 +4217,20 @@ impl Interpreter {
                     } else {
                         (None, vec![])
                     };
+                    // Issue #1677: reject bases with incompatible C-level layouts.
+                    {
+                        let all_bases = base.iter().chain(extra_bases_vec.iter());
+                        let solid_count = all_bases
+                            .filter(|c| crate::interpreter::is_solid_primitive_class(c))
+                            .count();
+                        if solid_count >= 2 {
+                            vm_try!(Err::<(), _>(PyError::named(
+                                "TypeError",
+                                "multiple bases have instance lay-out conflict".to_string(),
+                            )));
+                            unreachable!()
+                        }
+                    }
                     let class = Rc::new(RefCell::new(PyClass {
                         name: class_name,
                         qualname,
