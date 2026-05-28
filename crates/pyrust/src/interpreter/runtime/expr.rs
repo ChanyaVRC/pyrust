@@ -2115,7 +2115,7 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__sub__", "__rsub__") {
                     return r;
                 }
-                if let Some(r) = set_binary_op(&left, &right, SetOp::Sub) {
+                if let Some(r) = set_binary_op(&left, &right, SetOp::Sub, "-") {
                     return r;
                 }
                 self.sub(left, right)
@@ -2346,7 +2346,7 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__and__", "__rand__") {
                     return r;
                 }
-                if let Some(r) = set_binary_op(&left, &right, SetOp::And) {
+                if let Some(r) = set_binary_op(&left, &right, SetOp::And, "&") {
                     return r;
                 }
                 // Issue #1204: extract backing for scalar primitive subclasses.
@@ -2387,7 +2387,7 @@ impl Interpreter {
                     }
                     return Ok(Value::dict(merged));
                 }
-                if let Some(r) = set_binary_op(&left, &right, SetOp::Or) {
+                if let Some(r) = set_binary_op(&left, &right, SetOp::Or, "|") {
                     return r;
                 }
                 // PEP 604: `type | type` (and `None | type`, `type | None`,
@@ -2432,7 +2432,7 @@ impl Interpreter {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__xor__", "__rxor__") {
                     return r;
                 }
-                if let Some(r) = set_binary_op(&left, &right, SetOp::Xor) {
+                if let Some(r) = set_binary_op(&left, &right, SetOp::Xor, "^") {
                     return r;
                 }
                 // Issue #1204: extract backing for scalar primitive subclasses.
@@ -2917,10 +2917,27 @@ impl Interpreter {
             match op {
                 BinaryOp::BitOr | BinaryOp::BitAnd | BinaryOp::Sub | BinaryOp::BitXor => {
                     // set |= / &= / -= / ^= require RHS to be a set or frozenset.
-                    // If RHS is neither, return None so eval_binary produces TypeError.
+                    // If RHS is neither, raise the CPython-format TypeError directly
+                    // (the op symbol must include `=` for in-place operators).
                     let rhs_items = match set_items_from_value(&right) {
                         Some((items, _)) => items,
-                        None => return Ok(None),
+                        None => {
+                            let op_sym = match op {
+                                BinaryOp::BitOr => "|=",
+                                BinaryOp::BitAnd => "&=",
+                                BinaryOp::Sub => "-=",
+                                BinaryOp::BitXor => "^=",
+                                _ => unreachable!(),
+                            };
+                            let lt = value_type_name_str(&left);
+                            let rt = value_type_name_str(&right);
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'"
+                                ),
+                            ));
+                        }
                     };
                     left.set_with_mut(|lhs| match op {
                         BinaryOp::BitOr => {
@@ -2994,6 +3011,39 @@ impl Interpreter {
                         return Ok(Some(left));
                     }
                 }
+            }
+        }
+        // Frozenset (plain BuiltinObject) and set subclass (PyInstance backed by
+        // set/frozenset): when no in-place dunder was found, check whether RHS
+        // is a valid set operand.  If not, raise the CPython-format TypeError
+        // with the `|=:` / `&=:` / etc. symbol directly (returning None would
+        // fall through to eval_binary which uses the non-`=` symbol).
+        if matches!(
+            op,
+            BinaryOp::BitOr | BinaryOp::BitAnd | BinaryOp::Sub | BinaryOp::BitXor
+        ) {
+            let lhs_is_set_like = if let Some(inst_rc) = left.as_py_instance_rc() {
+                instance_builtin_data(inst_rc)
+                    .map_or(false, |b| set_items_from_value(&b).is_some())
+            } else {
+                // Plain frozenset (BuiltinObject) — not caught by the is_set
+                // branch above (which only matches ValueKind::Set).
+                set_items_from_value(&left).is_some()
+            };
+            if lhs_is_set_like && set_items_from_value(&right).is_none() {
+                let op_sym = match op {
+                    BinaryOp::BitOr => "|=",
+                    BinaryOp::BitAnd => "&=",
+                    BinaryOp::Sub => "-=",
+                    BinaryOp::BitXor => "^=",
+                    _ => unreachable!(),
+                };
+                let lt = value_type_name_str(&left);
+                let rt = value_type_name_str(&right);
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'"),
+                ));
             }
         }
         Ok(None)
@@ -4926,9 +4976,22 @@ fn set_items_from_value(v: &Value) -> Option<(indexmap::IndexSet<PyKey>, bool)> 
 /// `PyInstance` subclasses thereof).  Returns `Set` if both backing stores are
 /// mutable sets, otherwise `FrozenSet` (any frozenset operand promotes the
 /// result, matching CPython).
-fn set_binary_op(left: &Value, right: &Value, op: SetOp) -> Option<Result<Value>> {
+///
+/// Returns `None` when the left operand is not a set/frozenset (caller should
+/// fall through to the next handler).  Returns `Some(Err(...))` when the left
+/// operand is a set/frozenset but the right operand is not — CPython raises
+/// `TypeError: unsupported operand type(s) for OP: 'X' and 'Y'` in that case.
+fn set_binary_op(left: &Value, right: &Value, op: SetOp, op_sym: &str) -> Option<Result<Value>> {
     let lhs_items = set_items_from_value(left)?;
-    let rhs_items = set_items_from_value(right)?;
+    // LHS is a set/frozenset; if RHS is not, emit the CPython-format TypeError.
+    let Some(rhs_items) = set_items_from_value(right) else {
+        let lt = value_type_name_str(left);
+        let rt = value_type_name_str(right);
+        return Some(Err(PyError::named(
+            "TypeError",
+            format!("unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'"),
+        )));
+    };
     let (a, l_frozen) = lhs_items;
     let (b, r_frozen) = rhs_items;
     let mut out = indexmap::IndexSet::new();
