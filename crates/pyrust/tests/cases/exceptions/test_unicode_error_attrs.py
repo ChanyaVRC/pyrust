@@ -66,6 +66,18 @@ except UnicodeDecodeError as ex:
     print(str(ex))
 
 # --- internally-raised encode error ---
+# Primary repro for issue #1037: multi-byte string with a non-ASCII character.
+# "caf\xe9" is 4 chars; '\xe9' (U+00E9 'e' with acute) is at index 3, so start=3, end=4.
+try:
+    "caf\xe9".encode("ascii")
+except UnicodeEncodeError as ex:
+    print(ex.encoding)
+    print(ascii(ex.object))
+    print(ex.start)
+    print(ex.end)
+    print(ex.reason)
+    print(str(ex))
+
 try:
     "\xff".encode("ascii")
 except UnicodeEncodeError as ex:
