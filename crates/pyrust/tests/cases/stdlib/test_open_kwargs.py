@@ -6,13 +6,12 @@ through for text-mode reads and writes.
 """
 
 import os
-import tempfile
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-_TMPFILE = os.path.join(tempfile.gettempdir(), "_pyrust_test_open_kwargs.txt")
+_TMPFILE = "test_open_kwargs_temp.txt"
 
 
 def cleanup():
