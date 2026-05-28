@@ -70,3 +70,16 @@ print(type(C.sm) is type(f))         # True
 
 # method and function are distinct types
 print(type(c.m) is type(f))          # False
+
+# Neither type is subclassable (CPython: Py_TPFLAGS_BASETYPE not set)
+try:
+    class SubMethod(type(c.m)): pass
+    print("no error")
+except TypeError as e:
+    print(str(e))
+
+try:
+    class SubFunction(type(f)): pass
+    print("no error")
+except TypeError as e:
+    print(str(e))

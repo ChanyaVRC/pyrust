@@ -967,7 +967,8 @@ pub(crate) fn primitive_class_isinstance_fast(
 
 /// Returns the type name if `class` is one of the builtin types that
 /// CPython marks as non-subclassable (i.e. lacks `Py_TPFLAGS_BASETYPE`):
-/// `NoneType`, `ellipsis`, `NotImplementedType`, and `bool`.
+/// `NoneType`, `ellipsis`, `NotImplementedType`, `bool`, `method`, and
+/// `function`.
 ///
 /// Used in the `MakeClass` instruction to raise `TypeError: type 'X' is
 /// not an acceptable base type` before the class body runs.
@@ -975,6 +976,15 @@ pub(crate) fn non_subclassable_builtin_name(
     class: &Rc<RefCell<PyClass>>,
 ) -> Option<&'static str> {
     let ptr = Rc::as_ptr(class);
+    // Check the METHOD_TYPE and FUNCTION_TYPE singletons (issue #1528): CPython
+    // raises `TypeError: type 'method'/'function' is not an acceptable base type`
+    // when either is used as a base class.
+    if METHOD_TYPE.with(|m| ptr == Rc::as_ptr(m)) {
+        return Some("method");
+    }
+    if FUNCTION_TYPE.with(|f| ptr == Rc::as_ptr(f)) {
+        return Some("function");
+    }
     PRIMITIVE_CLASSES.with(|c| {
         if ptr == Rc::as_ptr(&c.none_class) {
             return Some("NoneType");
