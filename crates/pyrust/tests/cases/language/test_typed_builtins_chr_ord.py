@@ -31,13 +31,8 @@ try:
 except ValueError:
     print("chr-overflow-range", True)
 
-# Note: bignum chr() (e.g. `chr(2**100)`) raises OverflowError on
-# both CPython and modern pyrust via the PyInt expect_i64 path (the
-# legacy pyrust body raised ValueError via the range check — see the
-# `chr` docstring in builtins.rs).  We can't exercise it here because
-# pyrust's integer arithmetic is i64-bounded (`2**100` overflows to
-# 0) and large literals are lex-rejected, so the parity comparison
-# would diverge structurally rather than just on wording.
+# Note: bignum chr() (e.g. `chr(2**100)`) raises OverflowError on both
+# CPython and pyrust.  Covered by test_chr_bigint_overflow.py (#1584).
 
 # Non-int: TypeError wording differs across implementations, class only.
 try:

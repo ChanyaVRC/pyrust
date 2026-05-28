@@ -1,23 +1,41 @@
-# Parity tests for chr() with BigInt arguments that don't fit in C int (#1584).
+# Parity tests for chr() with arguments that don't fit in a C int (#1584).
 #
-# CPython 3.12 raises OverflowError("Python int too large to convert to C int")
-# for any integer argument that doesn't fit in a C int, regardless of whether
-# it's positive or negative.  Values that fit in i64 but exceed the Unicode
-# range (0x110000) raise ValueError instead.
+# CPython 3.12 converts chr()'s argument to a C int (int32_t, range
+# [-2**31, 2**31-1]) before the Unicode range check.  Anything outside that
+# range raises OverflowError("Python int too large to convert to C int").
+# Values inside the C-int range but outside 0..0x110000 raise ValueError.
 
-# Positive BigInt: too large to convert to C int.
+# Positive BigInt (> i64 max): too large to convert to C int.
 try:
     chr(10**100)
 except OverflowError as e:
     print(type(e).__name__, str(e))
 
-# Negative BigInt: also too large to convert to C int.
+# Negative BigInt (< i64 min): also too large to convert to C int.
 try:
     chr(-10**100)
 except OverflowError as e:
     print(type(e).__name__, str(e))
 
-# Just out of range (fits in i64, but exceeds Unicode range) -> ValueError.
+# 2**31: fits in i64 but exceeds C int max -> OverflowError (not ValueError).
+try:
+    chr(2**31)
+except OverflowError as e:
+    print(type(e).__name__, str(e))
+
+# -(2**31 + 1): fits in i64 but below C int min -> OverflowError.
+try:
+    chr(-(2**31) - 1)
+except OverflowError as e:
+    print(type(e).__name__, str(e))
+
+# 0x7fffffff: largest C int, outside Unicode range -> ValueError (not OverflowError).
+try:
+    chr(0x7fffffff)
+except ValueError as e:
+    print(type(e).__name__, str(e))
+
+# Just out of Unicode range (fits in C int) -> ValueError.
 try:
     chr(0x110000)
 except ValueError as e:

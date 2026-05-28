@@ -6961,12 +6961,26 @@ fn format_bigint_radix(b: &crate::value::PyBigInt, radix: u32, prefix: &str) -> 
 /// `chr` builtin (#400).  Out-of-range codepoints raise `ValueError` with
 /// the same wording CPython 3.12 uses (`"chr() arg not in range(0x110000)"`).
 ///
+/// CPython's `chr()` converts its argument to a C `int` (int32_t) before the
+/// Unicode range check.  Values outside `[i32::MIN, i32::MAX]` therefore raise
+/// `OverflowError("Python int too large to convert to C int")`, even if they
+/// fit in an i64.  Values inside the C-int range but outside `0..0x110000`
+/// raise `ValueError`.  (#1584)
+///
 /// CPython accepts any value in `range(0x110000)`, including the surrogate
 /// range (0xD800–0xDFFF).  Rust's `char` rejects surrogates (they are not
 /// Unicode scalar values), so we write the CESU-8 three-byte sequence
 /// directly for that range, matching the representation used throughout the
 /// runtime for surrogate-containing strings (#1573).
 fn chr_from_code_point(code_point: i64) -> Result<Value> {
+    // CPython converts to C int (int32_t) first.  Anything outside that range
+    // raises OverflowError regardless of the Unicode range check.
+    if !(i64::from(i32::MIN)..=i64::from(i32::MAX)).contains(&code_point) {
+        return Err(PyError::named(
+            "OverflowError",
+            "Python int too large to convert to C int".to_string(),
+        ));
+    }
     if !(0..=1114111).contains(&code_point) {
         return Err(PyError::named(
             "ValueError",
