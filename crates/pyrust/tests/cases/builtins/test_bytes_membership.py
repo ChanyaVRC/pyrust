@@ -5,7 +5,7 @@
 b = b'hello'
 
 # In-range int: membership check works normally.
-print(97 in b)   # True  (ord('a') == 97)
+print(97 in b)   # False (ord('a') == 97, but 'a' is not in b'hello')
 print(104 in b)  # True  (ord('h') == 104)
 print(120 in b)  # False (ord('x') == 120, not in b'hello')
 
