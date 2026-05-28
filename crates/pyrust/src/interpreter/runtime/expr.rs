@@ -3385,9 +3385,32 @@ impl Interpreter {
             let key = self.value_to_pykey(&item)?;
             return Ok(Value::bool_(self.set_lookup_in(&rc, &key)?.is_some()));
         }
+        // List and Tuple: snapshot to release borrow on `container`, then
+        // walk element-wise through `values_user_eq` so user `__eq__` is
+        // dispatched for `PyInstance` elements (Rust `Value::eq` would fall
+        // back to `Rc::ptr_eq` for distinct-but-equal instances).
+        // `values_user_eq` already short-circuits via `if a == b { return Ok(true) }`
+        // so primitives (int, str, float, None) stay on the fast path.
+        if let Some(items) = container.as_list() {
+            let items: Vec<Value> = items.to_vec();
+            for elem in &items {
+                if self.values_user_eq(elem, &item)? {
+                    return Ok(Value::bool_(true));
+                }
+            }
+            return Ok(Value::bool_(false));
+        }
+        if let Some(items) = container.as_tuple() {
+            let items: Vec<Value> = items.to_vec();
+            for elem in &items {
+                if self.values_user_eq(elem, &item)? {
+                    return Ok(Value::bool_(true));
+                }
+            }
+            return Ok(Value::bool_(false));
+        }
         match container.kind() {
-            ValueKind::List(items) => Ok(Value::bool_(items.iter().any(|b| b == &item))),
-            ValueKind::Tuple(items) => Ok(Value::bool_(items.contains(&item))),
+            ValueKind::List(_) | ValueKind::Tuple(_) => unreachable!("handled above"),
             ValueKind::Set(_) => unreachable!("handled above"),
             ValueKind::BuiltinObject { ops, state } => {
                 ops.contains(state, &item).map(Value::bool_)
@@ -3472,7 +3495,7 @@ impl Interpreter {
                     loop {
                         match self.call_next(iter_obj.clone(), None) {
                             Ok(elem) => {
-                                if elem == item {
+                                if self.values_user_eq(&elem, &item)? {
                                     return Ok(Value::bool_(true));
                                 }
                             }
@@ -3499,7 +3522,7 @@ impl Interpreter {
                     loop {
                         match self.call_next(iter_val.clone(), None) {
                             Ok(elem) => {
-                                if elem == item {
+                                if self.values_user_eq(&elem, &item)? {
                                     return Ok(Value::bool_(true));
                                 }
                             }
