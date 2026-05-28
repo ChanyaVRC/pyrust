@@ -30,5 +30,7 @@ print(errno.errorcode[22])   # EINVAL
 # errorcode canonical winner for aliased codes:
 #   11: EAGAIN wins over EWOULDBLOCK
 #   35: EDEADLOCK wins over EDEADLK
+#   95: ENOTSUP wins over EOPNOTSUPP
 print(errno.errorcode[11])   # EAGAIN
 print(errno.errorcode[35])   # EDEADLOCK
+print(errno.errorcode[95])   # ENOTSUP
