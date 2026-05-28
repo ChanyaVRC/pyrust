@@ -5854,6 +5854,19 @@ impl Compiler {
                     }
                 }
             }
+            Pattern::As { pattern, name } => {
+                // Compile the inner pattern first (may add to fail_patches).
+                self.compile_pattern_match(subj, pattern, fail_patches);
+                if self.failed {
+                    return;
+                }
+                // If we reach here the inner pattern matched; bind the entire
+                // subject (not just the matched portion) to `name`.
+                self.compile_store_name(name, subj);
+                if let Some(reg) = self.local_reg(name) {
+                    self.mark_def(reg);
+                }
+            }
         }
     }
 

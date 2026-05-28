@@ -176,6 +176,9 @@ pub enum Pattern {
     /// Per PEP 634: a name followed by at least one `.attr` is a value pattern,
     /// not a capture.  The inner `Expr` is always an `Expr::Attr` chain.
     Value(Expr),
+    /// `pattern as name` — matches `pattern` and, if it succeeds, binds the
+    /// entire subject (not just the matched portion) to `name`.
+    As { pattern: Box<Pattern>, name: String },
 }
 
 /// An entry in a dict literal: either a `key: value` pair or a `**expr` splat

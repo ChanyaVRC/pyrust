@@ -2898,6 +2898,12 @@ fn collect_pattern_names(
                 collect_pattern_names(attr_pat, names, global_names, nonlocal_names);
             }
         }
+        Pattern::As { pattern, name } => {
+            collect_pattern_names(pattern, names, global_names, nonlocal_names);
+            if !global_names.contains(name) && !nonlocal_names.contains(name) {
+                names.insert(name.clone());
+            }
+        }
     }
 }
 
@@ -3474,6 +3480,10 @@ fn collect_pattern_bound_names(pattern: &crate::ast::Pattern, assigned: &mut Has
         crate::ast::Pattern::Wildcard
         | crate::ast::Pattern::Literal(_)
         | crate::ast::Pattern::Value(_) => {}
+        crate::ast::Pattern::As { pattern, name } => {
+            collect_pattern_bound_names(pattern, assigned);
+            assigned.insert(name.clone());
+        }
     }
 }
 

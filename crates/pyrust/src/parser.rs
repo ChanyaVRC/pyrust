@@ -200,18 +200,30 @@ impl Parser {
     }
 
     /// Parse a pattern for a `case` clause.
-    /// Handles Or-patterns at the top level: `p1 | p2 | p3`.
+    /// Handles Or-patterns and As-patterns at the top level:
+    /// `p1 | p2 | p3` and `pattern as name` (PEP 634 §7).
     fn parse_pattern(&mut self) -> Result<Pattern> {
         let first = self.parse_pattern_atom()?;
-        if self.is(&Token::Pipe) {
+        let or_pat = if self.is(&Token::Pipe) {
             let mut alternatives = vec![first];
             while self.is(&Token::Pipe) {
                 self.bump();
                 alternatives.push(self.parse_pattern_atom()?);
             }
-            Ok(Pattern::Or(alternatives))
+            Pattern::Or(alternatives)
         } else {
-            Ok(first)
+            first
+        };
+        // As-pattern: `or_pattern 'as' capture_name`
+        if self.is(&Token::As) {
+            self.bump();
+            let name = self.expect_ident("capture name in 'as' pattern")?;
+            Ok(Pattern::As {
+                pattern: Box::new(or_pat),
+                name,
+            })
+        } else {
+            Ok(or_pat)
         }
     }
 
