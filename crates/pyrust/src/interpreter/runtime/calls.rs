@@ -2872,6 +2872,10 @@ impl Interpreter {
         let mut consumed_keywords = std::collections::HashSet::new();
         let mut pos_idx = 0;
         let mut param_vals: Vec<Value> = Vec::with_capacity(function.params.len());
+        // Collect all missing required args before raising, so the error groups
+        // them all (CPython 3.12 parity).
+        let mut missing_positional: Vec<&str> = Vec::new();
+        let mut missing_kwonly: Vec<&str> = Vec::new();
 
         for param in function.params.iter() {
             let value = if param.is_args {
@@ -2903,24 +2907,42 @@ impl Interpreter {
                 } else if let Some(d) = &param.default {
                     d.clone()
                 } else if param.is_keyword_only {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "{}() missing 1 required keyword-only argument: '{}'",
-                            function.qualname, param.name
-                        ),
-                    ));
+                    missing_kwonly.push(&param.name);
+                    Value::unset()
                 } else {
-                    return Err(PyError::named(
-                        "TypeError",
-                        format!(
-                            "{}() missing 1 required positional argument: '{}'",
-                            function.qualname, param.name
-                        ),
-                    ));
+                    missing_positional.push(&param.name);
+                    Value::unset()
                 }
             };
             param_vals.push(value);
+        }
+
+        // Report positional missing args first; only report kwonly if all
+        // positional params were satisfied (matching CPython 3.12 behaviour).
+        let fn_display_name = &function.qualname;
+        if !missing_positional.is_empty() {
+            let count = missing_positional.len();
+            let arg_word = if count == 1 { "argument" } else { "arguments" };
+            let names_str = format_missing_args(&missing_positional);
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "{}() missing {count} required positional {arg_word}: {names_str}",
+                    fn_display_name,
+                ),
+            ));
+        }
+        if !missing_kwonly.is_empty() {
+            let count = missing_kwonly.len();
+            let arg_word = if count == 1 { "argument" } else { "arguments" };
+            let names_str = format_missing_args(&missing_kwonly);
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "{}() missing {count} required keyword-only {arg_word}: {names_str}",
+                    fn_display_name,
+                ),
+            ));
         }
 
         if !has_kwargs {
