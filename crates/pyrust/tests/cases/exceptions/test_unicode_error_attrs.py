@@ -22,7 +22,7 @@ print(str(e2))
 # --- UnicodeEncodeError ---
 e3 = UnicodeEncodeError("ascii", "hello\xff", 5, 6, "ordinal not in range(128)")
 print(e3.encoding)
-print(e3.object)
+print(ascii(e3.object))
 print(e3.start)
 print(e3.end)
 print(e3.reason)
@@ -34,7 +34,7 @@ print(str(e4))
 
 # --- UnicodeTranslateError ---
 e5 = UnicodeTranslateError("\xff", 0, 1, "surrogates not allowed")
-print(e5.object)
+print(ascii(e5.object))
 print(e5.start)
 print(e5.end)
 print(e5.reason)
@@ -70,7 +70,7 @@ try:
     "\xff".encode("ascii")
 except UnicodeEncodeError as ex:
     print(ex.encoding)
-    print(ex.object)
+    print(ascii(ex.object))
     print(ex.start)
     print(ex.end)
     print(ex.reason)

@@ -1264,10 +1264,24 @@ impl Interpreter {
                         )
                     })
                     .expect("guard ensured property");
-                reject_keyword_args_expanded("property accessor", args)?;
+                let accessor_name = match slot {
+                    0 => "property.getter",
+                    1 => "property.setter",
+                    _ => "property.deleter",
+                };
+                if args.iter().any(|a| a.name.is_some()) {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("{accessor_name}() takes no keyword arguments"),
+                    ));
+                }
                 if args.len() != 1 {
-                    return Err(PyError::Runtime(
-                        "property accessor takes exactly one argument".to_string(),
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "{accessor_name}() takes exactly one argument ({} given)",
+                            args.len()
+                        ),
                     ));
                 }
                 let new_fn = args[0].value.clone();
