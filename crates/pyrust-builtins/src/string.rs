@@ -1898,13 +1898,33 @@ fn str_translate(s: &str, args: &[Value]) -> Result<Value> {
                             "character mapping must be in range(0x110000)".to_string(),
                         ));
                     }
-                    let replacement = char::from_u32(n as u32).ok_or_else(|| {
-                        PyError::named(
-                            "ValueError",
-                            "character mapping must be in range(0x110000)".to_string(),
-                        )
-                    })?;
-                    out.push(replacement);
+                    let cp = n as u32;
+                    if (0xD800..=0xDFFF).contains(&cp) {
+                        // Lone surrogates are not Unicode scalar values, so
+                        // char::from_u32 rejects them. CPython's str type freely
+                        // stores lone surrogates; match that by writing the
+                        // CESU-8 three-byte sequence directly into the buffer.
+                        // SAFETY: we hold &mut String's backing Vec exclusively,
+                        // and the three bytes we push are a well-formed CESU-8
+                        // encoding of a surrogate codepoint. Every other write to
+                        // `out` goes through safe String methods, so the rest of
+                        // the buffer is valid UTF-8. The combined byte sequence is
+                        // the same representation pyrust uses for surrogate-
+                        // containing strings throughout the runtime.
+                        unsafe {
+                            out.as_mut_vec().extend_from_slice(&[
+                                0xE0 | (cp >> 12) as u8,
+                                0x80 | ((cp >> 6) & 0x3F) as u8,
+                                0x80 | (cp & 0x3F) as u8,
+                            ]);
+                        }
+                    } else {
+                        // Non-surrogate codepoints in 0..=0x10FFFF are valid
+                        // Unicode scalar values; from_u32 is safe here.
+                        let replacement = char::from_u32(cp)
+                            .expect("non-surrogate in 0..=0x10FFFF is a valid char");
+                        out.push(replacement);
+                    }
                 }
                 ValueKind::Bool(b) => {
                     // bool is a subclass of int; False=0 (NUL), True=1 (SOH)
