@@ -23,7 +23,7 @@ use crate::interpreter::{
     CallableIter, EnumerateIter, FilterIter, IterSrcBuf, MapIter, NativeIterFrame, ZipIter, apply_format_spec, ascii_repr_interp, bigint_divmod_floor,
     class_chain_contains_name, class_is_subclass_of,
     compare_values, compare_values_with_op, coerce_numeric, dir_names,
-    float_to_bigint, instance_builtin_data,
+    float_to_bigint, instance_builtin_data, is_str_or_str_subclass,
     int_pow_promoting, invoke_class_method,
     is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_hash_bigint, py_hash_float,
     py_hash_int, py_mod_i64, py_round_half_even, py_round_half_even_f64,
@@ -3674,8 +3674,7 @@ pyrust_module! {
                         value: Value::string(spec),
                     }],
                 )?;
-                let is_str = matches!(result.kind(), ValueKind::Str(_));
-                return if is_str {
+                return if is_str_or_str_subclass(&result) {
                     Ok(result)
                 } else {
                     Err(PyError::named(

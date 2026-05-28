@@ -1050,6 +1050,49 @@ pub(crate) fn instance_builtin_data(inst: &Rc<RefCell<PyInstance>>) -> Option<Va
         .cloned()
 }
 
+/// Returns `true` if `v` is a `str` value or a `str` subclass instance.
+///
+/// CPython's `__format__` protocol accepts `str` subclasses as valid return
+/// values (they satisfy `isinstance(result, str)`).  A subclass instance is
+/// represented as a `PyInstance` whose `__builtin_data__` backing is `Str`.
+pub(crate) fn is_str_or_str_subclass(v: &Value) -> bool {
+    match v.kind() {
+        ValueKind::Str(_) => true,
+        ValueKind::PyInstance(inst) => matches!(
+            inst.borrow().attrs.get(BUILTIN_DATA_ATTR).map(|b| b.kind()),
+            Some(ValueKind::Str(_))
+        ),
+        _ => false,
+    }
+}
+
+/// Extract the string content from a value that is known to satisfy
+/// `is_str_or_str_subclass`.  Returns the backing `String` so the caller
+/// can append it without holding a borrow across a `RefCell`.
+///
+/// Panics (debug) if called on a value that is neither `Str` nor a
+/// `PyInstance` with a `Str` backing — callers must gate on
+/// `is_str_or_str_subclass` first.
+pub(crate) fn extract_str_value(v: &Value) -> String {
+    match v.kind() {
+        ValueKind::Str(s) => s.to_string(),
+        ValueKind::PyInstance(inst) => {
+            let borrowed = inst.borrow();
+            if let Some(backing) = borrowed.attrs.get(BUILTIN_DATA_ATTR) {
+                if let ValueKind::Str(s) = backing.kind() {
+                    return s.to_string();
+                }
+            }
+            debug_assert!(false, "extract_str_value called on non-str instance");
+            v.to_py_str()
+        }
+        _ => {
+            debug_assert!(false, "extract_str_value called on non-str value");
+            v.to_py_str()
+        }
+    }
+}
+
 pub(crate) struct PrintOptions {
     pub(crate) values: Vec<Value>,
     pub(crate) sep: String,
