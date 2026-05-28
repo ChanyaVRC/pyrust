@@ -66,3 +66,25 @@ b = Ellipsis
 print(b is ...)             # True
 d2 = {Ellipsis: "name"}
 print(d2[...])              # name
+
+# Function body as Ellipsis — common stub pattern
+def abstract_method(self): ...
+print(abstract_method(None))   # None (function returns Ellipsis body value is not used)
+
+class Base:
+    def method(self): ...
+obj = Base()
+print(obj.method())            # None
+
+# Annotated assignment with Ellipsis as value
+z: int = ...
+print(z)                       # Ellipsis
+
+# Type annotation using Ellipsis (e.g. Callable[..., int] style)
+def typed(x: ...): pass
+
+# Subscript with Ellipsis (numpy-style a[...] or Callable[...])
+class Subscriptable:
+    def __getitem__(self, key): return repr(key)
+sub = Subscriptable()
+print(sub[...])                # Ellipsis
