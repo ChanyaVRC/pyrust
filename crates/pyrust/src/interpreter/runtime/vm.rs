@@ -1449,6 +1449,8 @@ impl Interpreter {
                     // dst == lhs means the compiler emitted this as an augmented
                     // assign (emit_aug_binop); dst != lhs means the optimizer fused
                     // a LoadConst + BinOp from a regular binary expression.
+                    // pass_copy_prop preserves this invariant by not substituting
+                    // lhs when dst == lhs.
                     let is_aug = *dst == *lhs;
                     let result = if let Some(v) = vm_try!(self.try_inplace_op(l.clone(), *op, r.clone(), is_aug)) {
                         v
@@ -1470,6 +1472,8 @@ impl Interpreter {
                     // dst == lhs means the compiler emitted this as an augmented
                     // assign (emit_aug_binop); dst != lhs means the optimizer fused
                     // a LoadConst + BinOp from a regular binary expression.
+                    // pass_copy_prop preserves this invariant by not substituting
+                    // lhs when dst == lhs.
                     let is_aug = *dst == *lhs;
                     let result = if let Some(v) = vm_try!(self.try_inplace_op(l.clone(), *op, r.clone(), is_aug)) {
                         v
