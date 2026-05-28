@@ -52,3 +52,13 @@ print((5.5).conjugate())  # 5.5
 # --- method_descriptor is callable with an explicit instance ---
 print(int.conjugate(5))     # 5
 print(float.conjugate(5.5)) # 5.5
+
+# --- int/float subclasses inherit descriptors (MRO lookup) ---
+class MyInt(int): pass
+class MyFloat(float): pass
+print(hasattr(MyInt, 'real'))        # True
+print(MyInt.real)                    # <attribute 'real' of 'int' objects>
+print(MyInt.conjugate)               # <method 'conjugate' of 'int' objects>
+print(hasattr(MyFloat, 'real'))      # True
+print(MyFloat.real)                  # <attribute 'real' of 'float' objects>
+print(MyFloat.conjugate)             # <method 'conjugate' of 'float' objects>

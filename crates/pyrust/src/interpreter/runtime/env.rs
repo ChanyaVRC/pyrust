@@ -146,47 +146,66 @@ impl Interpreter {
                 // Issue #1617: numeric-tower read-only properties and conjugate
                 // are exposed on the `int` and `float` class objects as descriptors
                 // (matching CPython 3.12's `getset_descriptor` / `method_descriptor`).
-                // `bool` inherits from `int` and exposes the same descriptors with
-                // class_name "int" (CPython: `bool.real` says "of 'int' objects").
+                // `bool` and any other int subclass inherit from `int` and expose
+                // the same descriptors with class_name "int" (CPython: `bool.real`
+                // says "of 'int' objects").  Use class_chain_contains_name so that
+                // user-defined subclasses (`class MyInt(int): pass`) also get the
+                // descriptors, matching CPython MRO-based lookup.
+                //
+                // Check int chain before float chain: int (and bool) takes priority.
+                // The attr_name literals must be `'static` — use explicit match arms
+                // rather than passing `name` directly.
                 {
-                    let class_name = class.borrow().name.clone();
-                    let descriptor = match class_name.as_str() {
-                        "int" | "bool" => match name {
-                            "real" | "imag" | "numerator" | "denominator" => {
-                                Some(pyrust_builtins::numeric_attrs_descriptor::getset_descriptor(
-                                    match name {
-                                        "real" => "real",
-                                        "imag" => "imag",
-                                        "numerator" => "numerator",
-                                        _ => "denominator",
-                                    },
-                                    "int",
-                                ))
-                            }
-                            "conjugate" => {
-                                Some(pyrust_builtins::numeric_attrs_descriptor::method_descriptor(
-                                    "conjugate",
-                                    "int",
-                                ))
-                            }
+                    let descriptor = if class_chain_contains_name(&class, "int") {
+                        match name {
+                            "real" => Some(
+                                pyrust_builtins::numeric_attrs_descriptor::getset_descriptor(
+                                    "real", "int",
+                                ),
+                            ),
+                            "imag" => Some(
+                                pyrust_builtins::numeric_attrs_descriptor::getset_descriptor(
+                                    "imag", "int",
+                                ),
+                            ),
+                            "numerator" => Some(
+                                pyrust_builtins::numeric_attrs_descriptor::getset_descriptor(
+                                    "numerator", "int",
+                                ),
+                            ),
+                            "denominator" => Some(
+                                pyrust_builtins::numeric_attrs_descriptor::getset_descriptor(
+                                    "denominator", "int",
+                                ),
+                            ),
+                            "conjugate" => Some(
+                                pyrust_builtins::numeric_attrs_descriptor::method_descriptor(
+                                    "conjugate", "int",
+                                ),
+                            ),
                             _ => None,
-                        },
-                        "float" => match name {
-                            "real" | "imag" => {
-                                Some(pyrust_builtins::numeric_attrs_descriptor::getset_descriptor(
-                                    if name == "real" { "real" } else { "imag" },
-                                    "float",
-                                ))
-                            }
-                            "conjugate" => {
-                                Some(pyrust_builtins::numeric_attrs_descriptor::method_descriptor(
-                                    "conjugate",
-                                    "float",
-                                ))
-                            }
+                        }
+                    } else if class_chain_contains_name(&class, "float") {
+                        match name {
+                            "real" => Some(
+                                pyrust_builtins::numeric_attrs_descriptor::getset_descriptor(
+                                    "real", "float",
+                                ),
+                            ),
+                            "imag" => Some(
+                                pyrust_builtins::numeric_attrs_descriptor::getset_descriptor(
+                                    "imag", "float",
+                                ),
+                            ),
+                            "conjugate" => Some(
+                                pyrust_builtins::numeric_attrs_descriptor::method_descriptor(
+                                    "conjugate", "float",
+                                ),
+                            ),
                             _ => None,
-                        },
-                        _ => None,
+                        }
+                    } else {
+                        None
                     };
                     if let Some(d) = descriptor {
                         return Ok(d);
