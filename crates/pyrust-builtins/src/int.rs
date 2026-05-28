@@ -5,9 +5,13 @@ use pyrust_core::{
 
 /// Canonical list of method names dispatched by `call`.
 /// Single source of truth for `has_method` and the drift-guard test.
+/// Note: `real`, `imag`, `numerator`, `denominator` are read-only properties
+/// (not methods) and are intercepted in `get_attr` before `has_method` is
+/// reached.  `conjugate` is a true zero-arg method and lives here.
 pub const METHODS: &[&str] = &[
     "bit_length",
     "bit_count",
+    "conjugate",
     "is_integer",
     "to_bytes",
     "from_bytes",
@@ -28,6 +32,34 @@ pub fn call(
     kw: &IndexMap<PyKey, Value>,
 ) -> Result<Value> {
     match method {
+        "conjugate" => {
+            if !kw.is_empty() {
+                return Err(PyError::named(
+                    "TypeError",
+                    "int.conjugate() takes no keyword arguments".to_string(),
+                ));
+            }
+            if !args.is_empty() {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("int.conjugate() takes no arguments ({} given)", args.len()),
+                ));
+            }
+            // int.conjugate() returns self (int has no imaginary part).
+            // CPython returns an int, not a bool, even for True/False.
+            match receiver.kind() {
+                ValueKind::Int(_) | ValueKind::BigInt(_) => Ok(receiver.clone()),
+                // bool.conjugate() returns the int equivalent (True -> 1, False -> 0).
+                ValueKind::Bool(b) => Ok(Value::int(b as i64)),
+                _ => Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "descriptor 'conjugate' for 'int' objects doesn't apply to a '{}' object",
+                        pyrust_core::builtin_type_name(receiver)
+                    ),
+                )),
+            }
+        }
         "bit_length" => {
             if !kw.is_empty() {
                 return Err(PyError::named(

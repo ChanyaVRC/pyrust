@@ -798,6 +798,35 @@ impl Interpreter {
                         _ => {}
                     }
                 }
+                // int / bool / BigInt numeric-tower read-only properties:
+                // real, imag, numerator, denominator.  These are properties
+                // (attribute access returns the value directly, not a bound
+                // method), matching CPython's int abstract-number-tower
+                // protocol (issue #1341).  bool is a subclass of int and
+                // inherits the same behaviour.
+                match target.kind() {
+                    // bool.real / bool.numerator: CPython returns an int, not a
+                    // bool (True.real == 1, type(True.real) is int).
+                    ValueKind::Bool(b) => match name {
+                        "real" | "numerator" => return Ok(Value::int(b as i64)),
+                        "imag" => return Ok(Value::int(0)),
+                        "denominator" => return Ok(Value::int(1)),
+                        _ => {}
+                    },
+                    ValueKind::Int(_) | ValueKind::BigInt(_) => match name {
+                        "real" => return Ok(target.clone()),
+                        "imag" => return Ok(Value::int(0)),
+                        "numerator" => return Ok(target.clone()),
+                        "denominator" => return Ok(Value::int(1)),
+                        _ => {}
+                    },
+                    ValueKind::Float(_) => match name {
+                        "real" => return Ok(target.clone()),
+                        "imag" => return Ok(Value::float(0.0)),
+                        _ => {}
+                    },
+                    _ => {}
+                }
                 // `BuiltinObject` types can expose arbitrary attributes via
                 // `BuiltinTypeOps::getattr` (e.g. `GenericAlias.__origin__`,
                 // `GenericAlias.__args__`).  Probe before the generic
@@ -901,6 +930,40 @@ impl Interpreter {
         // Step 2: Instance __dict__.
         if let Some(value) = instance.borrow().attrs.get(name).cloned() {
             return Ok(value);
+        }
+
+        // Step 2b: numeric-tower read-only properties for int/float subclasses.
+        // CPython defines `real`, `imag`, `numerator`, `denominator` as
+        // getset_descriptor data descriptors on `int` and `float`, so int/float
+        // subclass instances inherit them.  Pyrust intercepts them via the
+        // backing `__builtin_data__` value rather than registering real
+        // descriptors on the primitive class (issue #1341).
+        if matches!(name, "real" | "imag" | "numerator" | "denominator") {
+            if let Some(backing) = instance_builtin_data(&instance) {
+                let result = match backing.kind() {
+                    ValueKind::Bool(b) => match name {
+                        "real" | "numerator" => Some(Value::int(b as i64)),
+                        "imag" => Some(Value::int(0)),
+                        "denominator" => Some(Value::int(1)),
+                        _ => None,
+                    },
+                    ValueKind::Int(_) | ValueKind::BigInt(_) => match name {
+                        "real" | "numerator" => Some(backing.clone()),
+                        "imag" => Some(Value::int(0)),
+                        "denominator" => Some(Value::int(1)),
+                        _ => None,
+                    },
+                    ValueKind::Float(_) => match name {
+                        "real" => Some(backing.clone()),
+                        "imag" => Some(Value::float(0.0)),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(v) = result {
+                    return Ok(v);
+                }
+            }
         }
 
         // Step 3: Non-data descriptor or plain class attribute.

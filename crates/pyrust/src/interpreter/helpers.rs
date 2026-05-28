@@ -685,6 +685,7 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
 const INT_METHODS: &[&str] = &[
     "bit_length",
     "bit_count",
+    "conjugate",
     "is_integer",
     "to_bytes",
     "as_integer_ratio",
