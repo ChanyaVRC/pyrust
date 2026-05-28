@@ -118,7 +118,7 @@ impl ExcClasses {
 
 pub struct Interpreter {
     pub(crate) env: EnvRef,
-    active_exception: Option<Value>,
+    pub(crate) active_exception: Option<Value>,
     /// Stack of currently-handled exceptions (PEP 3134 `__context__`).
     /// An entry is pushed when an exception handler catches an exception
     /// (matching CPython's per-frame "exc_info" stack), and popped when
