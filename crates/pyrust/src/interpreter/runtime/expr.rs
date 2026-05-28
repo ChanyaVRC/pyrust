@@ -3530,6 +3530,31 @@ impl Interpreter {
                     ValueKind::BigInt(n) => {
                         Ok(Value::bool_(n.to_i64().is_some_and(range_contains_i64)))
                     }
+                    // Float: if the value is an integer-valued finite float,
+                    // convert to i64 and do the fast O(1) range check.
+                    // Non-integer or non-finite floats cannot equal any integer.
+                    // This matches CPython 3.12's range.__contains__ behaviour.
+                    ValueKind::Float(f) => {
+                        let in_range = f.fract() == 0.0
+                            && f.is_finite()
+                            && {
+                                let v = f as i64;
+                                v as f64 == f && range_contains_i64(v)
+                            };
+                        Ok(Value::bool_(in_range))
+                    }
+                    // Complex: if imaginary part is zero and real part is an
+                    // integer-valued finite float, same fast O(1) check.
+                    ValueKind::Complex(re, im) => {
+                        let in_range = im == 0.0
+                            && re.fract() == 0.0
+                            && re.is_finite()
+                            && {
+                                let v = re as i64;
+                                v as f64 == re && range_contains_i64(v)
+                            };
+                        Ok(Value::bool_(in_range))
+                    }
                     _ => Ok(Value::bool_(false)),
                 }
             }
