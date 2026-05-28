@@ -4315,7 +4315,10 @@ pyrust_module! {
         //     exactly one argument" wording.
         //   - cls has no custom __init__ → no-one will consume the args →
         //     "<cls>() takes no arguments".
-        let has_extra_args = args.len() > 1 || args.iter().any(|a| a.name.is_some());
+        // Only args beyond the mandatory first (cls) are "extra".  Do not
+        // include the cls arg itself — it may arrive as a keyword arg via the
+        // raw expanded-arg slice, and that must not trigger the leniency check.
+        let has_extra_args = args.len() > 1 || args.iter().skip(1).any(|a| a.name.is_some());
         if has_extra_args {
             let new_val = lookup_class_attr(&class_rc, "__new__");
             let has_custom_new = matches!(
