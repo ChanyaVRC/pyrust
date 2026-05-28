@@ -36,6 +36,20 @@ e = Exception("test")
 e.args = (1, 2)
 print(e.args)
 
+# BaseException itself (not only subclasses)
+e = BaseException("base")
+try:
+    del e.args
+except TypeError as e2:
+    print(type(e2).__name__, str(e2))
+
+# object.__delattr__ path also raises TypeError
+e = Exception("x")
+try:
+    object.__delattr__(e, "args")
+except TypeError as e2:
+    print(type(e2).__name__, str(e2))
+
 # del on non-exception user class — AttributeError for nonexistent attr
 class Foo:
     pass
