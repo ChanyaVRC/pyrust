@@ -1860,10 +1860,54 @@ pyrust_module! {
             },
             ValueKind::PyInstance(inst) => {
                 let inst_rc = Rc::clone(inst);
-                // Issue #976/#994: delegate to backing primitive for
-                // dict/list/set/frozenset/tuple subclasses constructed by
-                // call_class_expanded.
-                if let Some(backing) = instance_builtin_data(&inst_rc) {
+                // Always check for a user-defined __len__ override first.
+                // Only fall back to backing primitive data when the class
+                // does not define __len__. This matches CPython's dunder
+                // dispatch semantics (issue #1448).
+                let class = Rc::clone(&inst_rc.borrow().class);
+                if let Some(method_val) = lookup_class_attr(&class, "__len__") {
+                    let result = invoke_class_method(
+                        _interp,
+                        method_val,
+                        Value::py_instance(inst_rc),
+                        &[],
+                    )?;
+                    match result.kind() {
+                        ValueKind::Int(n) if n >= 0 => n,
+                        ValueKind::Int(_) => {
+                            return Err(PyError::named(
+                                "ValueError",
+                                "__len__() should return >= 0".to_string(),
+                            ))
+                        }
+                        ValueKind::Bool(b) => if b { 1 } else { 0 },
+                        ValueKind::BigInt(b) => {
+                            use num_bigint::Sign;
+                            if b.sign() == Sign::Minus {
+                                return Err(PyError::named(
+                                    "ValueError",
+                                    "__len__() should return >= 0".to_string(),
+                                ));
+                            }
+                            return Err(PyError::named(
+                                "OverflowError",
+                                "cannot fit 'int' into an index-sized integer".to_string(),
+                            ));
+                        }
+                        _ => {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "'{}' object cannot be interpreted as an integer",
+                                    pyrust_core::builtin_type_name(&result),
+                                ),
+                            ))
+                        }
+                    }
+                } else if let Some(backing) = instance_builtin_data(&inst_rc) {
+                    // No user __len__: delegate to backing primitive for
+                    // dict/list/set/frozenset/tuple subclasses constructed by
+                    // call_class_expanded (issue #976/#994).
                     match backing.kind() {
                         ValueKind::Str(text) => text.chars().count() as i64,
                         ValueKind::Bytes(rc) => rc.len() as i64,
@@ -1898,55 +1942,13 @@ pyrust_module! {
                         }
                     }
                 } else {
-                    let class = Rc::clone(&inst_rc.borrow().class);
-                    if let Some(method_val) = lookup_class_attr(&class, "__len__") {
-                        let result = invoke_class_method(
-                            _interp,
-                            method_val,
-                            Value::py_instance(inst_rc),
-                            &[],
-                        )?;
-                        match result.kind() {
-                            ValueKind::Int(n) if n >= 0 => n,
-                            ValueKind::Int(_) => {
-                                return Err(PyError::named(
-                                    "ValueError",
-                                    "__len__() should return >= 0".to_string(),
-                                ))
-                            }
-                            ValueKind::Bool(b) => if b { 1 } else { 0 },
-                            ValueKind::BigInt(b) => {
-                                use num_bigint::Sign;
-                                if b.sign() == Sign::Minus {
-                                    return Err(PyError::named(
-                                        "ValueError",
-                                        "__len__() should return >= 0".to_string(),
-                                    ));
-                                }
-                                return Err(PyError::named(
-                                    "OverflowError",
-                                    "cannot fit 'int' into an index-sized integer".to_string(),
-                                ));
-                            }
-                            _ => {
-                                return Err(PyError::named(
-                                    "TypeError",
-                                    format!(
-                                        "'{}' object cannot be interpreted as an integer",
-                                        pyrust_core::builtin_type_name(&result),
-                                    ),
-                                ))
-                            }
-                        }
-                    } else {
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "object of type '{}' has no len()",
-                                inst_rc.borrow().class.borrow().name,
-                            ),
-                        ));
-                    }
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "object of type '{}' has no len()",
+                            inst_rc.borrow().class.borrow().name,
+                        ),
+                    ));
                 }
             }
             _ => {
