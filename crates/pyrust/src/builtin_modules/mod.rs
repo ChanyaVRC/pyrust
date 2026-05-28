@@ -143,4 +143,5 @@ pyrust_builtin_modules! {
     typing,
     copy,
     pathlib,
+    "__future__" as future,
 }
