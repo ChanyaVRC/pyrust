@@ -8435,16 +8435,6 @@ fn builtin_iter_type_name(v: &Value) -> &'static str {
     }
 }
 
-/// Return the Python type name for a value, with correct iterator type names
-/// for Generator variants (e.g. "list_iterator", "map", "filter").
-///
-/// `value_type_name_str` (from `pyrust-core`) cannot distinguish between
-/// `NativeIterFrame`-based iterators and true generator frames because they
-/// are both stored as `ValueKind::Generator`.  This wrapper downcasts the
-/// generator state to recover the specific type name stored in
-/// `NativeIterFrame::type_name`, or the sentinel names for `MapIter` /
-/// `FilterIter` / `EnumerateIter` / `ZipIter`.  All other value kinds
-/// delegate to `value_type_name_str`.
 /// Parse and validate arguments for `exec()` and `eval()`.
 ///
 /// Both accept `(source[, globals[, locals]])`.  Returns
@@ -8479,6 +8469,16 @@ fn parse_exec_eval_args(
     Ok((source_val, globals_opt, locals_opt))
 }
 
+/// Return the Python type name for a value, with correct iterator type names
+/// for Generator variants (e.g. "list_iterator", "map", "filter").
+///
+/// `value_type_name_str` (from `pyrust-core`) cannot distinguish between
+/// `NativeIterFrame`-based iterators and true generator frames because they
+/// are both stored as `ValueKind::Generator`.  This wrapper downcasts the
+/// generator state to recover the specific type name stored in
+/// `NativeIterFrame::type_name`, or the sentinel names for `MapIter` /
+/// `FilterIter` / `EnumerateIter` / `ZipIter` / `CallableIter` /
+/// `GetItemIter`.  All other value kinds delegate to `value_type_name_str`.
 fn full_type_name_str(v: &Value) -> std::borrow::Cow<'static, str> {
     if let ValueKind::Generator(state_rc) = v.kind() {
         let borrow = state_rc.borrow();
