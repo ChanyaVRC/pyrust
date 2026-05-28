@@ -3170,10 +3170,67 @@ impl Interpreter {
                 return Ok(instance);
             }
 
-            reject_keyword_args_expanded(&class.borrow().name, args)?;
+            // CPython 3.12: NameError.__init__ accepts exactly one keyword argument
+            // (`name=`); ImportError.__init__ accepts two (`name=` and `path=`).
+            // Extract any recognised keyword arguments before building the positional
+            // values list; reject unrecognised keywords with the class-specific
+            // error message CPython uses.
+            let class_name = class.borrow().name.clone();
+            let is_name_error_class = class_chain_contains_name(&class, "NameError");
+            let is_import_error_class = class_chain_contains_name(&class, "ImportError");
+            let mut kw_name: Option<Value> = None;
+            let mut kw_path: Option<Value> = None;
             let mut values = Vec::with_capacity(args.len());
-            for arg in args {
-                values.push(arg.value.clone());
+            if is_name_error_class {
+                // CPython 3.12: NameError accepts at most 1 keyword argument (`name=`).
+                // If total kwarg count > 1, raises "takes at most 1 keyword argument".
+                // If total kwarg count == 1 and it is not `name=`, raises "invalid keyword".
+                let kw_count = args.iter().filter(|a| a.name.is_some()).count();
+                if kw_count > 1 {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "{class_name}() takes at most 1 keyword argument ({kw_count} given)"
+                        ),
+                    ));
+                }
+                for arg in args {
+                    match arg.name.as_deref() {
+                        None => values.push(arg.value.clone()),
+                        Some("name") => kw_name = Some(arg.value.clone()),
+                        Some(other) => {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "'{other}' is an invalid keyword argument for {class_name}()"
+                                ),
+                            ));
+                        }
+                    }
+                }
+            } else if is_import_error_class {
+                // CPython 3.12: ImportError accepts `name=` and `path=`; any other
+                // keyword raises "'X' is an invalid keyword argument for ImportError()".
+                for arg in args {
+                    match arg.name.as_deref() {
+                        None => values.push(arg.value.clone()),
+                        Some("name") => kw_name = Some(arg.value.clone()),
+                        Some("path") => kw_path = Some(arg.value.clone()),
+                        Some(other) => {
+                            return Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "'{other}' is an invalid keyword argument for {class_name}()"
+                                ),
+                            ));
+                        }
+                    }
+                }
+            } else {
+                reject_keyword_args_expanded(&class_name, args)?;
+                for arg in args {
+                    values.push(arg.value.clone());
+                }
             }
             // CPython 3.12 SyntaxError.__init__ validates args[1] if present:
             // it must be an iterable that yields exactly 4 or 6 elements.
@@ -3234,7 +3291,22 @@ impl Interpreter {
             } else if class_chain_contains_name(&class, "UnicodeTranslateError") {
                 Self::validate_unicode_translate_args(&values)?;
             }
-            return Ok(instantiate_exception(class, values));
+            let instance = instantiate_exception(class, values);
+            // Apply keyword arguments extracted above for NameError and ImportError.
+            // `instantiate_exception` already initialised `.name` (and `.path`) to
+            // `None`; override them with the caller-supplied values when provided.
+            // CPython 3.12: keyword values are NOT included in `.args`.
+            if let Some(name_val) = kw_name {
+                if let ValueKind::PyInstance(inst_rc) = instance.kind() {
+                    inst_rc.borrow_mut().attrs.insert("name".to_string(), name_val);
+                }
+            }
+            if let Some(path_val) = kw_path {
+                if let ValueKind::PyInstance(inst_rc) = instance.kind() {
+                    inst_rc.borrow_mut().attrs.insert("path".to_string(), path_val);
+                }
+            }
+            return Ok(instance);
         }
 
         // Primitive classes never reach this fn — the `PyClass` arm in

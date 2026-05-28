@@ -1518,6 +1518,11 @@ pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value
     // attribute.  User-constructed instances (`NameError('msg')`) have `name = None`.
     // Interpreter-raised instances set the name via `instantiate_name_error` instead.
     let is_name_error = class_chain_contains_name(&class, "NameError");
+    // CPython 3.12: ImportError (and its subclass ModuleNotFoundError) have `.name`
+    // and `.path` attributes.  User-constructed instances (`ImportError('msg')`) have
+    // both set to `None`.  Interpreter-raised instances set them via
+    // `instantiate_import_error` instead.
+    let is_import_error = class_chain_contains_name(&class, "ImportError");
     // CPython 3.12: AttributeError has `.name` and `.obj` attributes.
     // User-constructed instances (`AttributeError('msg')`) have both set to `None`.
     // Interpreter-raised instances set them via `instantiate_attribute_error` instead.
@@ -1643,6 +1648,13 @@ pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value
         // always have a `.name` attribute, defaulting to `None`.  Interpreter-raised
         // instances set the name via `instantiate_name_error` with the actual identifier.
         attrs.insert("name".to_string(), Value::none());
+    }
+    if is_import_error {
+        // CPython 3.12: user-constructed ImportError (and ModuleNotFoundError) instances
+        // always have `.name` and `.path` attributes, both defaulting to `None`.
+        // Interpreter-raised instances set them via `instantiate_import_error`.
+        attrs.insert("name".to_string(), Value::none());
+        attrs.insert("path".to_string(), Value::none());
     }
     if is_attribute_error {
         // CPython 3.12: user-constructed AttributeError instances always have `.name`
