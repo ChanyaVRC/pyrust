@@ -1055,6 +1055,26 @@ pub(crate) fn non_subclassable_builtin_name(
     })
 }
 
+/// Returns `true` if `class` is one of the built-in types that carry a
+/// non-trivial C-level instance layout (`int`, `str`, `float`, `bytes`,
+/// `tuple`, `list`, `dict`, `set`, `frozenset`).  CPython raises
+/// `TypeError: multiple bases have instance lay-out conflict` when two or
+/// more such types appear in the same bases tuple.  Issue #1677.
+pub(crate) fn is_solid_primitive_class(class: &Rc<RefCell<PyClass>>) -> bool {
+    let ptr = Rc::as_ptr(class);
+    PRIMITIVE_CLASSES.with(|c| {
+        ptr == Rc::as_ptr(&c.int_class)
+            || ptr == Rc::as_ptr(&c.str_class)
+            || ptr == Rc::as_ptr(&c.float_class)
+            || ptr == Rc::as_ptr(&c.bytes_class)
+            || ptr == Rc::as_ptr(&c.tuple_class)
+            || ptr == Rc::as_ptr(&c.list_class)
+            || ptr == Rc::as_ptr(&c.dict_class)
+            || ptr == Rc::as_ptr(&c.set_class)
+            || ptr == Rc::as_ptr(&c.frozenset_class)
+    })
+}
+
 /// Walk the base chain of `class` and return the name of the first
 /// primitive builtin base found (`"dict"`, `"list"`, `"set"`, …), or
 /// `None` if the class does not inherit from any primitive.

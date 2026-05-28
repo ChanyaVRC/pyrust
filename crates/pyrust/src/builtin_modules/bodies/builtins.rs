@@ -1543,6 +1543,22 @@ pyrust_module! {
                     )),
                 }
             }
+            // Issue #1677: reject bases tuples that contain two or more
+            // "solid" primitive types (int, str, float, bytes, tuple, list,
+            // dict, set, frozenset).  These have incompatible C-level instance
+            // layouts; CPython raises the same error.
+            {
+                let all_bases = base.iter().chain(extra_bases.iter());
+                let solid_count = all_bases
+                    .filter(|c| crate::interpreter::is_solid_primitive_class(c))
+                    .count();
+                if solid_count >= 2 {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "multiple bases have instance lay-out conflict".to_string(),
+                    ));
+                }
+            }
             let mut attrs: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
             match args[2].value.kind() {
                 ValueKind::Dict(map) => {
@@ -4987,6 +5003,19 @@ pyrust_module! {
                         "type.__new__(): bases must be types".to_string(),
                     ));
                 }
+            }
+        }
+        // Issue #1677: reject bases with incompatible C-level layouts.
+        {
+            let all_bases = base.iter().chain(extra_bases.iter());
+            let solid_count = all_bases
+                .filter(|c| crate::interpreter::is_solid_primitive_class(c))
+                .count();
+            if solid_count >= 2 {
+                return Err(PyError::named(
+                    "TypeError",
+                    "multiple bases have instance lay-out conflict".to_string(),
+                ));
             }
         }
         // Build attrs from the namespace dict.
