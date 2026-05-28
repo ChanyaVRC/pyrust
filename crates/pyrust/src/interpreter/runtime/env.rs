@@ -1758,6 +1758,16 @@ impl Interpreter {
                     format!("'method' object has no attribute '{name}'"),
                 ))
             }
+            ValueKind::PyModule(module) => {
+                // CPython 3.12: module attribute assignment always writes to
+                // the module's __dict__ (tp_setattro → module_setattro →
+                // PyObject_GenericSetAttr).  No attribute is read-only from
+                // the outside; synthetic dunders (__name__, __package__, etc.)
+                // are writable because they live in __dict__ too.
+                let module = Rc::clone(module);
+                module.borrow_mut().attrs.insert(name.to_string(), value);
+                Ok(())
+            }
             ValueKind::Generator(state_rc) => {
                 // CPython 3.12 allows setting __name__ and __qualname__ on
                 // generator objects (str only; TypeError on non-string).
@@ -2064,6 +2074,21 @@ impl Interpreter {
                     "AttributeError",
                     format!("'method' object has no attribute '{name}'"),
                 ))
+            }
+            ValueKind::PyModule(module) => {
+                // CPython 3.12: module attribute deletion removes the key from
+                // __dict__; AttributeError if the name is absent (matching
+                // CPython's module_setattro with NULL value path).
+                // Note: CPython's delete-path uses "'module' object has no
+                // attribute 'X'" (generic), while get-path uses the module name.
+                let module = Rc::clone(module);
+                if module.borrow_mut().attrs.remove(name).is_none() {
+                    return Err(PyError::named(
+                        "AttributeError",
+                        format!("'module' object has no attribute '{name}'"),
+                    ));
+                }
+                Ok(())
             }
             ValueKind::Generator(_) => {
                 // CPython 3.12 symmetry with assign_attr: deleting __name__ or
