@@ -908,14 +908,34 @@ impl Interpreter {
             // (#450).
             enum AttrKind {
                 UserFunction(Rc<UserFunction>),
-                BuiltinFunction,
+                // fn_name_matches: true when the BuiltinFunction's embedded
+                // name equals the attribute lookup name — meaning it was
+                // stored as a type method under its canonical name (e.g.
+                // Counter.most_common).  When false, the builtin was aliased
+                // under a different name (e.g. `A.f = len`) and CPython's
+                // descriptor protocol does not bind it to the instance.
+                BuiltinFunction { fn_name_matches: bool },
                 ClassMethodAny(Value),
                 StaticMethodAny(Value),
                 Other,
             }
             let tag = match value.kind() {
                 ValueKind::UserFunction(f) => AttrKind::UserFunction(Rc::clone(f)),
-                ValueKind::BuiltinFunction(_) => AttrKind::BuiltinFunction,
+                // A BuiltinFunction whose embedded name is qualified as
+                // `"TypeName.method_name"` is a type method registered
+                // under its canonical class-qualified name.  If the part
+                // after the last dot equals the lookup attribute name,
+                // this is a proper type method and should be bound.
+                //
+                // Global builtins like `len` have no dot in their name;
+                // they should never be bound even when stored under their
+                // own name (e.g. `A.len = len`), because they do not
+                // accept a receiver.
+                ValueKind::BuiltinFunction(fn_name) => AttrKind::BuiltinFunction {
+                    fn_name_matches: fn_name
+                        .rfind('.')
+                        .map_or(false, |i| &fn_name[i + 1..] == name),
+                },
                 _ => {
                     if let Some(w) = pyrust_builtins::classmethod::as_class_method_any(&value) {
                         AttrKind::ClassMethodAny(w)
@@ -943,10 +963,23 @@ impl Interpreter {
                     }
                     UserFunctionKind::Builtin(_) => Value::user_function(Rc::clone(&f)),
                 },
-                AttrKind::BuiltinFunction => pyrust_builtins::bound_method::bound_method(
-                    name.to_string(),
-                    Value::py_instance(Rc::clone(&instance)),
-                ),
+                // When the BuiltinFunction's canonical name matches the
+                // attribute lookup name it is a proper type method (e.g.
+                // Counter.most_common stored as "most_common") — bind it.
+                // When the names differ the builtin was assigned under a
+                // user-chosen alias (e.g. `A.f = len`); CPython's descriptor
+                // protocol does not bind plain callables that lack __get__,
+                // so return the value as-is.
+                AttrKind::BuiltinFunction { fn_name_matches } => {
+                    if fn_name_matches {
+                        pyrust_builtins::bound_method::bound_method(
+                            name.to_string(),
+                            Value::py_instance(Rc::clone(&instance)),
+                        )
+                    } else {
+                        value
+                    }
+                }
                 // classmethod/staticmethod wrapping a non-function: apply
                 // descriptor protocol same as class-level access (§3.3.2).
                 // classmethod returns the wrapped value (best approximation;
