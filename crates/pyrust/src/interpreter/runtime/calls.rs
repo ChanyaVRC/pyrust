@@ -2729,6 +2729,55 @@ impl Interpreter {
         args: &[ExpandedCallArg],
     ) -> Result<Value> {
         if is_exception_class(&class) {
+            // Issue #1420: if the class has a user-defined __new__ (UserFunction in
+            // the MRO), call it with `cls` as the first argument before falling
+            // through to instantiate_exception.  This mirrors the non-exception
+            // __new__ dispatch below (issue #1143).
+            let user_new = lookup_class_attr(&class, "__new__")
+                .filter(|v| matches!(v.kind(), ValueKind::UserFunction(_)));
+            if let Some(new_val) = user_new {
+                let func = match new_val.kind() {
+                    ValueKind::UserFunction(f) => Rc::clone(f),
+                    _ => unreachable!(),
+                };
+                let new_result = self.call_user_function_expanded(
+                    func,
+                    args,
+                    &[Value::py_class(Rc::clone(&class))],
+                )?;
+                // After __new__, call __init__ only if the result is an instance
+                // of cls (CPython parity).
+                if let ValueKind::PyInstance(inst_rc) = new_result.kind() {
+                    let inst_class = inst_rc.borrow().class.clone();
+                    if class_is_subclass_of(&inst_class, &class) {
+                        let init = lookup_class_attr(&inst_class, "__init__");
+                        if let Some(init_val) = init {
+                            if matches!(
+                                init_val.kind(),
+                                ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_)
+                            ) {
+                                let result = invoke_class_method(
+                                    self,
+                                    init_val,
+                                    Value::py_instance(Rc::clone(&inst_rc)),
+                                    args,
+                                )?;
+                                if !result.is_none() {
+                                    return Err(PyError::named(
+                                        "TypeError",
+                                        &format!(
+                                            "__init__() should return None, not '{}'",
+                                            pyrust_core::builtin_type_name(&result),
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+                return Ok(new_result);
+            }
+
             // Issue #1112: if the class has a user-defined __init__ (UserFunction in
             // the MRO), create the instance via instantiate_exception first (which sets
             // .args and any special attrs like StopIteration.value from the constructor
