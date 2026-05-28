@@ -25,6 +25,12 @@ mod tests {
     }
 
     #[test]
+    fn py_mod_i64_min_over_neg_one_does_not_panic() {
+        // i64::MIN % -1 was UB/panic before wrapping_rem; result must be 0.
+        assert_eq!(py_mod_i64(i64::MIN, -1), 0);
+    }
+
+    #[test]
     fn range_len_works_for_both_directions() {
         assert_eq!(range_len(0, 5, 1), 5);
         assert_eq!(range_len(1, 8, 2), 4);
