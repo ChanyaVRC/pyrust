@@ -2113,9 +2113,24 @@ pyrust_module! {
                 Some(n) => {
                     if n >= 0 {
                         let factor = 10f64.powi(n);
-                        Ok(Value::float(py_round_half_even_f64(v * factor) / factor))
+                        let z = v * factor;
+                        // If the factor or the scaled value overflows, the float has
+                        // insufficient precision to round at this many decimal places;
+                        // return the original value unchanged (matches CPython behaviour).
+                        if factor.is_infinite() || z.is_infinite() {
+                            return Ok(Value::float(v));
+                        }
+                        Ok(Value::float(py_round_half_even_f64(z) / factor))
                     } else {
                         let factor = 10f64.powi(-n);
+                        if factor.is_infinite() {
+                            // 10^(-n) overflows f64; any finite value rounds to signed zero.
+                            return Ok(Value::float(if v.is_finite() {
+                                if v.is_sign_negative() { -0.0f64 } else { 0.0f64 }
+                            } else {
+                                v
+                            }));
+                        }
                         Ok(Value::float(py_round_half_even_f64(v / factor) * factor))
                     }
                 }
@@ -2181,9 +2196,20 @@ pyrust_module! {
                             Some(n) => {
                                 if n >= 0 {
                                     let factor = 10f64.powi(n);
-                                    Ok(Value::float(py_round_half_even_f64(v * factor) / factor))
+                                    let z = v * factor;
+                                    if factor.is_infinite() || z.is_infinite() {
+                                        return Ok(Value::float(v));
+                                    }
+                                    Ok(Value::float(py_round_half_even_f64(z) / factor))
                                 } else {
                                     let factor = 10f64.powi(-n);
+                                    if factor.is_infinite() {
+                                        return Ok(Value::float(if v.is_finite() {
+                                            if v.is_sign_negative() { -0.0f64 } else { 0.0f64 }
+                                        } else {
+                                            v
+                                        }));
+                                    }
                                     Ok(Value::float(py_round_half_even_f64(v / factor) * factor))
                                 }
                             }
