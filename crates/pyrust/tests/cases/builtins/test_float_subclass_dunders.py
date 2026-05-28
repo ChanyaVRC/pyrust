@@ -58,8 +58,25 @@ try:
 except OverflowError as e:
     print("OverflowError:", e)
 
-# NaN → ValueError (not TypeError).
+# NaN → ValueError (not TypeError) — all three operations.
 try:
     math.trunc(MyFloat(float('nan')))
 except ValueError as e:
     print("ValueError:", e)
+
+try:
+    math.floor(MyFloat(float('nan')))
+except ValueError as e:
+    print("ValueError:", e)
+
+try:
+    math.ceil(MyFloat(float('nan')))
+except ValueError as e:
+    print("ValueError:", e)
+
+# Boundary: float(2**63 - 1) rounds to 2^63 as f64, which exceeds i64::MAX.
+# Must return a BigInt-backed int, not a silently truncated i64::MAX.
+big = float(2**63 - 1)
+print(math.trunc(MyFloat(big)) == 2**63)   # True
+print(math.floor(MyFloat(big)) == 2**63)   # True
+print(math.ceil(MyFloat(big)) == 2**63)    # True

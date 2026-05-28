@@ -4773,7 +4773,9 @@ pyrust_module! {
                     ));
                 }
                 let t = f.trunc();
-                if t > i64::MAX as f64 || t < i64::MIN as f64 {
+                // i64::MAX as f64 rounds up to 2^63, so ">=" is required: any float
+                // >= 2^63 cannot fit in an i64 and must go through BigInt.
+                if t >= i64::MAX as f64 || t < i64::MIN as f64 {
                     float_to_bigint(t)
                 } else {
                     Ok(Value::int(t as i64))
@@ -4818,7 +4820,9 @@ pyrust_module! {
                     ));
                 }
                 let floor = f.floor();
-                if floor > i64::MAX as f64 || floor < i64::MIN as f64 {
+                // i64::MAX as f64 rounds up to 2^63, so ">=" is required: any float
+                // >= 2^63 cannot fit in an i64 and must go through BigInt.
+                if floor >= i64::MAX as f64 || floor < i64::MIN as f64 {
                     float_to_bigint(floor)
                 } else {
                     Ok(Value::int(floor as i64))
@@ -4863,7 +4867,9 @@ pyrust_module! {
                     ));
                 }
                 let ceil = f.ceil();
-                if ceil > i64::MAX as f64 || ceil < i64::MIN as f64 {
+                // i64::MAX as f64 rounds up to 2^63, so ">=" is required: any float
+                // >= 2^63 cannot fit in an i64 and must go through BigInt.
+                if ceil >= i64::MAX as f64 || ceil < i64::MIN as f64 {
                     float_to_bigint(ceil)
                 } else {
                     Ok(Value::int(ceil as i64))
