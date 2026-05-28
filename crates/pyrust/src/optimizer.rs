@@ -3915,6 +3915,15 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
             Insn::SyncModuleGlobal(reg, name_idx) => {
                 Insn::SyncModuleGlobal(s(&copies, reg), name_idx)
             }
+            Insn::YieldFrom {
+                iter_reg,
+                sent_reg,
+                result_reg,
+            } => Insn::YieldFrom {
+                iter_reg: s(&copies, iter_reg),
+                sent_reg: s(&copies, sent_reg),
+                result_reg,
+            },
             // Call/BuildList/BuildTuple/etc. use a base register for a range of args;
             // do not substitute the base register as that would misalign the arg block.
             other => other,
@@ -7329,6 +7338,48 @@ mod tests {
             matches!(out[3], Insn::BinOpConst(3, 0, BinaryOp::Add, 0)),
             "named-local alias r0→r5 must not be propagated past Call: found {:?}",
             out[3]
+        );
+    }
+
+    #[test]
+    fn copy_prop_substitutes_yieldfrom_iter_and_sent_regs() {
+        // Regression test for issue #1521: pass_copy_prop had no YieldFrom arm,
+        // so iter_reg and sent_reg were never substituted when copy aliases existed.
+        //
+        // Sequence:
+        //   [0] LoadConst(r2, 0)           r2 = some iterator object (const slot 0)
+        //   [1] Move(r3, r2)               alias: r3 → r2
+        //   [2] LoadNone(r4)               sent_reg initial value
+        //   [3] Move(r5, r4)               alias: r5 → r4
+        //   [4] LoadNone(r6)               result_reg
+        //   [5] YieldFrom { iter_reg: r3, sent_reg: r5, result_reg: r6 }
+        //       → after substitution: iter_reg should become r2, sent_reg r4
+        //   [6] Return(r6)
+        let insns = vec![
+            Insn::LoadConst(2, 0),
+            Insn::Move(3, 2),
+            Insn::LoadNone(4),
+            Insn::Move(5, 4),
+            Insn::LoadNone(6),
+            Insn::YieldFrom {
+                iter_reg: 3,
+                sent_reg: 5,
+                result_reg: 6,
+            },
+            Insn::Return(6),
+        ];
+        let out = pass_copy_prop(insns, 0);
+        assert!(
+            matches!(
+                out[5],
+                Insn::YieldFrom {
+                    iter_reg: 2,
+                    sent_reg: 4,
+                    result_reg: 6,
+                }
+            ),
+            "iter_reg r3→r2 and sent_reg r5→r4 should be substituted; result_reg must stay r6: found {:?}",
+            out[5]
         );
     }
 
