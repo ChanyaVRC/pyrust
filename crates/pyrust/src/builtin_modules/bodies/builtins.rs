@@ -4267,6 +4267,12 @@ pyrust_module! {
     /// in user-defined `__new__` methods can resolve it via the MRO walk and
     /// `call_class_expanded` can distinguish it from user-defined `__new__`.
     ///
+    /// Issue #1421: CPython 3.12 arg-leniency rule — extra positional/keyword
+    /// arguments are accepted (and ignored) when `cls` defines a custom
+    /// `__init__` (i.e. something other than `object.__init__`).  When no
+    /// custom `__init__` is found, extra args raise
+    /// `TypeError: <cls>() takes no arguments`.
+    ///
     /// CPython signature: `object.__new__(cls, /)`
     #[py_name = "object.__new__"]
     fn object_new_dunder(args) -> Result<Value> {
@@ -4288,6 +4294,24 @@ pyrust_module! {
                 ));
             }
         };
+        // Issue #1421: reject extra args unless cls defines a custom __init__.
+        // CPython rule (Objects/typeobject.c): object.__new__ is lenient about
+        // extra args only when type(cls).__init__ is NOT object.__init__.
+        let has_extra_args = args.len() > 1 || args.iter().any(|a| a.name.is_some());
+        if has_extra_args {
+            let init_val = lookup_class_attr(&class_rc, "__init__");
+            let has_custom_init = matches!(
+                init_val.as_ref().map(|v| v.kind()),
+                Some(ValueKind::UserFunction(_))
+            );
+            if !has_custom_init {
+                let cls_name = class_rc.borrow().name.clone();
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{cls_name}() takes no arguments"),
+                ));
+            }
+        }
         Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
             crate::value::PyInstance {
                 class: class_rc,
