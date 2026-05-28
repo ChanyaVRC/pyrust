@@ -1808,19 +1808,17 @@ impl Interpreter {
                             format!("attribute '{name}' of 'generator' objects is not writable"),
                         ))
                     }
-                    _ => Err(PyError::attribute_error(
+                    _ => Err(PyError::named(
+                        "AttributeError",
                         format!("'generator' object has no attribute '{name}'"),
-                        Some(name.to_string()),
-                        Some(target.clone()),
                     )),
                 }
             }
             _ => {
                 let type_name = pyrust_core::builtin_type_name(&target);
-                Err(PyError::attribute_error(
+                Err(PyError::named(
+                    "AttributeError",
                     format!("'{type_name}' object has no attribute '{name}'"),
-                    Some(name.to_string()),
-                    Some(target.clone()),
                 ))
             }
         }
@@ -1976,10 +1974,9 @@ impl Interpreter {
                                 UserFunctionKind::ClassMethod => "classmethod",
                                 _ => "function",
                             };
-                            Err(PyError::attribute_error(
+                            Err(PyError::named(
+                                "AttributeError",
                                 format!("'{type_name}' object has no attribute '{name}'"),
-                                Some(name.to_string()),
-                                Some(target.clone()),
                             ))
                         }
                     }
@@ -2117,19 +2114,17 @@ impl Interpreter {
                             format!("attribute '{name}' of 'generator' objects is not writable"),
                         ))
                     }
-                    _ => Err(PyError::attribute_error(
+                    _ => Err(PyError::named(
+                        "AttributeError",
                         format!("'generator' object has no attribute '{name}'"),
-                        Some(name.to_string()),
-                        Some(target.clone()),
                     )),
                 }
             }
             _ => {
                 let type_name = pyrust_core::builtin_type_name(&target);
-                Err(PyError::attribute_error(
+                Err(PyError::named(
+                    "AttributeError",
                     format!("'{type_name}' object has no attribute '{name}'"),
-                    Some(name.to_string()),
-                    Some(target.clone()),
                 ))
             }
         }
