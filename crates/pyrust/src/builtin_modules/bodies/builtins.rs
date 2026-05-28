@@ -7415,25 +7415,42 @@ fn render_instance_str(interp: &mut crate::Interpreter, value: &Value) -> Result
             return Ok(value.to_py_str());
         }
     }
-    // Issue #1204: if this instance subclasses a scalar primitive (str/int/
-    // float/bytes) and has no user-defined __str__ / __repr__, delegate
-    // str() to the backing primitive value so that print(MyStr("hello"))
-    // outputs "hello" instead of the default object repr.
-    let user_str_or_repr = lookup_class_attr(&class, "__str__")
-        .filter(|v| matches!(v.kind(), ValueKind::UserFunction(_)))
-        .or_else(|| {
-            lookup_class_attr(&class, "__repr__")
-                .filter(|v| matches!(v.kind(), ValueKind::UserFunction(_)))
-        });
-    if user_str_or_repr.is_none() {
+    // Issue #1204 / #1564: if this instance subclasses a scalar primitive,
+    // delegate str() to the backing primitive value when appropriate.
+    //
+    // For str/bytes subclasses: CPython's str.__str__ returns self directly and
+    // never consults __repr__.  So the early-return for str/bytes backing must
+    // happen AFTER a user __str__ but BEFORE the __repr__ dispatch.
+    //
+    // For int/float/bool/BigInt subclasses: CPython's int.__str__ calls
+    // __repr__, so the early-return for numeric types must only happen when
+    // neither __str__ nor __repr__ is user-defined.
+    let has_user_str_dunder = lookup_class_attr(&class, "__str__")
+        .map(|v| matches!(v.kind(), ValueKind::UserFunction(_)))
+        .unwrap_or(false);
+    let has_user_repr_dunder = lookup_class_attr(&class, "__repr__")
+        .map(|v| matches!(v.kind(), ValueKind::UserFunction(_)))
+        .unwrap_or(false);
+    // str/bytes backing: return early unless a user __str__ is defined.
+    // (A user __repr__ does NOT override str.__str__ in CPython.)
+    if !has_user_str_dunder {
         if let Some(backing) = instance_builtin_data(&inst_rc) {
             match backing.kind() {
-                ValueKind::Str(_)
-                | ValueKind::Int(_)
+                ValueKind::Str(_) | ValueKind::Bytes(_) => return Ok(backing.to_py_str()),
+                _ => {}
+            }
+        }
+    }
+    // int/float/bool/BigInt backing: return early only when neither user
+    // __str__ nor user __repr__ is defined (matching CPython's int.__str__
+    // which calls __repr__).
+    if !has_user_str_dunder && !has_user_repr_dunder {
+        if let Some(backing) = instance_builtin_data(&inst_rc) {
+            match backing.kind() {
+                ValueKind::Int(_)
                 | ValueKind::BigInt(_)
                 | ValueKind::Bool(_)
-                | ValueKind::Float(_)
-                | ValueKind::Bytes(_) => return Ok(backing.to_py_str()),
+                | ValueKind::Float(_) => return Ok(backing.to_py_str()),
                 _ => {}
             }
         }
