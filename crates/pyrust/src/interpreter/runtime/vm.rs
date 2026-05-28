@@ -4539,23 +4539,35 @@ impl Interpreter {
                 let receiver = regs[obj as usize].clone();
                 let empty_kw = indexmap::IndexMap::new();
                 if method == "index" || method == "count" {
+                    // Peek at target + items without cloning to decide if
+                    // values_user_eq dispatch is needed. resolve_seq_index_pos
+                    // only touches args[1..] so args[0] (target) is stable.
+                    let needs_dispatch = args.first().map(|t| {
+                        receiver
+                            .list_with(|items| Self::seq_search_needs_dispatch(t, items))
+                            .unwrap_or(true)
+                    }).unwrap_or(false);
                     let args = if method == "index" {
                         self.resolve_seq_index_pos(args)?
                     } else {
                         args
                     };
-                    let snapshot = receiver
-                        .list_with(|items| items.clone())
-                        .ok_or_else(|| {
-                            PyError::named(
-                                "TypeError",
-                                "list.index receiver is not a list".to_string(),
-                            )
-                        })?;
-                    if method == "index" {
-                        self.call_seq_index(snapshot, &args, "list")
+                    if needs_dispatch {
+                        let snapshot = receiver
+                            .list_with(|items| items.clone())
+                            .ok_or_else(|| {
+                                PyError::named(
+                                    "TypeError",
+                                    "list.index receiver is not a list".to_string(),
+                                )
+                            })?;
+                        if method == "index" {
+                            self.call_seq_index(snapshot, &args, "list")
+                        } else {
+                            self.call_seq_count(snapshot, &args, "list")
+                        }
                     } else {
-                        self.call_seq_count(snapshot, &args, "list")
+                        pyrust_builtins::list::call(method, &receiver, args, &empty_kw)
                     }
                 } else {
                     pyrust_builtins::list::call(method, &receiver, args, &empty_kw)
@@ -4583,16 +4595,24 @@ impl Interpreter {
             3 => {
                 if let Some(ValueKind::Tuple(items)) = regs[obj as usize].as_some().map(|v| v.kind()) {
                     if method == "index" || method == "count" {
+                        let needs_dispatch = args
+                            .first()
+                            .map(|t| Self::seq_search_needs_dispatch(t, &items))
+                            .unwrap_or(false);
                         let args = if method == "index" {
                             self.resolve_seq_index_pos(args)?
                         } else {
                             args
                         };
-                        let snapshot = items.to_vec();
-                        if method == "index" {
-                            self.call_seq_index(snapshot, &args, "tuple")
+                        if needs_dispatch {
+                            let snapshot = items.to_vec();
+                            if method == "index" {
+                                self.call_seq_index(snapshot, &args, "tuple")
+                            } else {
+                                self.call_seq_count(snapshot, &args, "tuple")
+                            }
                         } else {
-                            self.call_seq_count(snapshot, &args, "tuple")
+                            pyrust_builtins::tuple::call(method, items, args)
                         }
                     } else {
                         pyrust_builtins::tuple::call(method, items, args)
@@ -4697,27 +4717,47 @@ impl Interpreter {
                                                     if prim_method == "index"
                                                         || prim_method == "count"
                                                     {
+                                                        let needs_dispatch =
+                                                            args.first().map(|t| {
+                                                                backing
+                                                                    .list_with(|items| {
+                                                                        Self::seq_search_needs_dispatch(
+                                                                            t, items,
+                                                                        )
+                                                                    })
+                                                                    .unwrap_or(true)
+                                                            }).unwrap_or(false);
                                                         let args = if prim_method == "index" {
                                                             self.resolve_seq_index_pos(args)?
                                                         } else {
                                                             args
                                                         };
-                                                        let snapshot = backing
-                                                            .list_with(|items| items.clone())
-                                                            .ok_or_else(|| {
-                                                                PyError::named(
-                                                                    "TypeError",
-                                                                    "list.index receiver is not a list"
-                                                                        .to_string(),
+                                                        if needs_dispatch {
+                                                            let snapshot = backing
+                                                                .list_with(|items| items.clone())
+                                                                .ok_or_else(|| {
+                                                                    PyError::named(
+                                                                        "TypeError",
+                                                                        "list.index receiver is not a list"
+                                                                            .to_string(),
+                                                                    )
+                                                                })?;
+                                                            if prim_method == "index" {
+                                                                self.call_seq_index(
+                                                                    snapshot, &args, "list",
                                                                 )
-                                                            })?;
-                                                        if prim_method == "index" {
-                                                            self.call_seq_index(
-                                                                snapshot, &args, "list",
-                                                            )
+                                                            } else {
+                                                                self.call_seq_count(
+                                                                    snapshot, &args, "list",
+                                                                )
+                                                            }
                                                         } else {
-                                                            self.call_seq_count(
-                                                                snapshot, &args, "list",
+                                                            let empty_kw = indexmap::IndexMap::new();
+                                                            pyrust_builtins::list::call(
+                                                                prim_method,
+                                                                &backing,
+                                                                args,
+                                                                &empty_kw,
                                                             )
                                                         }
                                                     } else {
@@ -4955,23 +4995,32 @@ impl Interpreter {
                     return pyrust_builtins::list::call(method, &receiver, pos_items, &kw_map);
                 }
                 if method == "index" || method == "count" {
+                    let needs_dispatch = pos_items.first().map(|t| {
+                        receiver
+                            .list_with(|items| Self::seq_search_needs_dispatch(t, items))
+                            .unwrap_or(true)
+                    }).unwrap_or(false);
                     let pos_items = if method == "index" {
                         self.resolve_seq_index_pos(pos_items)?
                     } else {
                         pos_items
                     };
-                    let snapshot = receiver
-                        .list_with(|items| items.clone())
-                        .ok_or_else(|| {
-                            PyError::named(
-                                "TypeError",
-                                "list.index receiver is not a list".to_string(),
-                            )
-                        })?;
-                    if method == "index" {
-                        self.call_seq_index(snapshot, &pos_items, "list")
+                    if needs_dispatch {
+                        let snapshot = receiver
+                            .list_with(|items| items.clone())
+                            .ok_or_else(|| {
+                                PyError::named(
+                                    "TypeError",
+                                    "list.index receiver is not a list".to_string(),
+                                )
+                            })?;
+                        if method == "index" {
+                            self.call_seq_index(snapshot, &pos_items, "list")
+                        } else {
+                            self.call_seq_count(snapshot, &pos_items, "list")
+                        }
                     } else {
-                        self.call_seq_count(snapshot, &pos_items, "list")
+                        pyrust_builtins::list::call(method, &receiver, pos_items, &kw_map)
                     }
                 } else {
                     pyrust_builtins::list::call(method, &receiver, pos_items, &kw_map)
@@ -4998,16 +5047,24 @@ impl Interpreter {
             3 => {
                 if let Some(ValueKind::Tuple(items)) = regs[obj as usize].as_some().map(|v| v.kind()) {
                     if method == "index" || method == "count" {
+                        let needs_dispatch = pos_items
+                            .first()
+                            .map(|t| Self::seq_search_needs_dispatch(t, &items))
+                            .unwrap_or(false);
                         let pos_items = if method == "index" {
                             self.resolve_seq_index_pos(pos_items)?
                         } else {
                             pos_items
                         };
-                        let snapshot = items.to_vec();
-                        if method == "index" {
-                            self.call_seq_index(snapshot, &pos_items, "tuple")
+                        if needs_dispatch {
+                            let snapshot = items.to_vec();
+                            if method == "index" {
+                                self.call_seq_index(snapshot, &pos_items, "tuple")
+                            } else {
+                                self.call_seq_count(snapshot, &pos_items, "tuple")
+                            }
                         } else {
-                            self.call_seq_count(snapshot, &pos_items, "tuple")
+                            pyrust_builtins::tuple::call(method, items, pos_items)
                         }
                     } else {
                         pyrust_builtins::tuple::call(method, items, pos_items)
