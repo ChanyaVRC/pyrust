@@ -184,7 +184,7 @@ mod tests {
             "print", "open", "input", "str", "bool", "list", "tuple", "sorted", "min", "max",
             // divmod dispatches __divmod__/__rdivmod__ on user instances (#1094).
             "divmod", // ascii dispatches user __repr__ on PyInstance values (#1197).
-            "ascii", // len dispatches __len__ on PyInstance values (#1448).
+            "ascii",  // len dispatches __len__ on PyInstance values (#1448).
             "len",
         ] {
             assert!(
