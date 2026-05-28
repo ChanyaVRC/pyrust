@@ -1081,22 +1081,14 @@ impl Interpreter {
             }
             // `int.from_bytes` is a classmethod.  Must appear before the generic
             // `int.*` arm so that the arg-0-is-receiver assumption there is not
-            // applied here.  Filter out any leading int/bool/BigInt/PyClass arg
-            // (the receiver when called as `(5).from_bytes(...)` or
-            // `int.from_bytes(...)`), then dispatch with remaining pos and kw.
+            // applied here.  Both `int.from_bytes(b, 'big')` and
+            // `(5).from_bytes(b, 'big')` arrive here with `args` containing only
+            // the explicit positional arguments — the receiver is never injected
+            // into `args` for this dispatch path (unlike the generic `int.*` arm).
             ValueKind::BuiltinFunction("int.from_bytes") => {
                 let pos: Vec<Value> = args
                     .iter()
-                    .filter(|a| {
-                        a.name.is_none()
-                            && !matches!(
-                                a.value.kind(),
-                                ValueKind::Int(_)
-                                    | ValueKind::BigInt(_)
-                                    | ValueKind::Bool(_)
-                                    | ValueKind::PyClass(_)
-                            )
-                    })
+                    .filter(|a| a.name.is_none())
                     .map(|a| a.value.clone())
                     .collect();
                 let mut kw: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();

@@ -282,7 +282,7 @@ fn int_to_bytes(receiver: &Value, args: &[Value], kw: &IndexMap<PyKey, Value>) -
                 return Err(PyError::named(
                     "TypeError",
                     format!(
-                        "to_bytes() argument 'byteorder' must be str, not '{}'",
+                        "to_bytes() argument 'byteorder' must be str, not {}",
                         pyrust_core::builtin_type_name(&v)
                     ),
                 ));
@@ -540,7 +540,7 @@ pub fn int_from_bytes(args: &[Value], kw: &IndexMap<PyKey, Value>) -> Result<Val
                 return Err(PyError::named(
                     "TypeError",
                     format!(
-                        "from_bytes() argument 'byteorder' must be str, not '{}'",
+                        "from_bytes() argument 'byteorder' must be str, not {}",
                         pyrust_core::builtin_type_name(&v)
                     ),
                 ));
