@@ -278,6 +278,7 @@ thread_local! {
             attrs,
             mutation_version: std::cell::Cell::new(0),
             subclasses: std::cell::RefCell::new(vec![]),
+            metatype: None,
         }))
     };
 
@@ -331,6 +332,7 @@ thread_local! {
             attrs,
             mutation_version: std::cell::Cell::new(0),
             subclasses: std::cell::RefCell::new(vec![]),
+            metatype: None,
         }));
         obj.borrow().subclasses.borrow_mut().push(Rc::downgrade(&cls));
         cls
@@ -349,6 +351,7 @@ thread_local! {
         attrs: IndexMap::new(),
         mutation_version: std::cell::Cell::new(0),
         subclasses: std::cell::RefCell::new(vec![]),
+        metatype: None,
     }));
 
     /// Per-thread `PyClass` singleton for the `function` type.  In CPython,
@@ -364,6 +367,7 @@ thread_local! {
         attrs: IndexMap::new(),
         mutation_version: std::cell::Cell::new(0),
         subclasses: std::cell::RefCell::new(vec![]),
+        metatype: None,
     }));
 
     /// O(1) dispatch table for primitive classes (#462 perf): maps the
@@ -490,6 +494,7 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
             attrs,
             mutation_version: std::cell::Cell::new(0),
             subclasses: std::cell::RefCell::new(vec![]),
+            metatype: None,
         }));
         if let Some(b) = base {
             b.borrow().subclasses.borrow_mut().push(Rc::downgrade(&class));
@@ -1926,6 +1931,7 @@ fn build_exc_classes() -> Vec<ExcClassEntry> {
             attrs: IndexMap::new(),
             mutation_version: std::cell::Cell::new(0),
             subclasses: std::cell::RefCell::new(vec![]),
+            metatype: None,
         }));
         if let Some(b) = base {
             b.borrow().subclasses.borrow_mut().push(Rc::downgrade(&class));

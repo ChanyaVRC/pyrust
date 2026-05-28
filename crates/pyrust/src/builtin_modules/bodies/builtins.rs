@@ -1580,6 +1580,7 @@ pyrust_module! {
                 attrs,
                 mutation_version: std::cell::Cell::new(0),
                 subclasses: std::cell::RefCell::new(vec![]),
+                metatype: None,
             }));
             if let Some(ref b) = base {
                 b.borrow().subclasses.borrow_mut().push(Rc::downgrade(&new_class));
@@ -1615,10 +1616,13 @@ pyrust_module! {
         }
         match obj.kind() {
             // Every class is an instance of `type` in CPython: `type(int) is type`.
-            // Return the per-thread `type` metaclass singleton so the result
-            // displays as `<class 'type'>` and `isinstance(cls, type)` works
-            // through the standard class machinery (issue #1312).
-            ValueKind::PyClass(_) => Ok(Value::py_class(type_class_singleton())),
+            // Issue #1626: return the stored metatype when the class was created
+            // with a custom metaclass (`class Foo(metaclass=Meta): pass`),
+            // otherwise fall back to the per-thread `type` singleton.
+            ValueKind::PyClass(cls_rc) => {
+                let meta = cls_rc.borrow().metatype.clone();
+                Ok(Value::py_class(meta.unwrap_or_else(type_class_singleton)))
+            }
             ValueKind::Range { .. } => Ok(Value::builtin_function("range")),
             ValueKind::UserFunction(f) => match f.kind {
                 UserFunctionKind::StaticMethod => Ok(Value::builtin_function("staticmethod")),
@@ -4883,6 +4887,18 @@ pyrust_module! {
         // __qualname__ must not live in the class attrs dict (it is a type
         // descriptor in CPython); remove it so get_attr intercepts it cleanly.
         attrs.shift_remove("__qualname__");
+        // Issue #1626: record the actual metatype on the class so that
+        // `type(Foo)` returns the metaclass and `isinstance(Foo, Meta)` works.
+        // `type` itself is the default metatype and is represented as `None`
+        // to avoid a circular Rc; only a custom metaclass is stored explicitly.
+        let metatype = {
+            let type_class = type_class_singleton();
+            if Rc::ptr_eq(&mcs_rc, &type_class) {
+                None
+            } else {
+                Some(mcs_rc)
+            }
+        };
         let class = Rc::new(RefCell::new(PyClass {
             name,
             qualname,
@@ -4891,6 +4907,7 @@ pyrust_module! {
             attrs,
             mutation_version: std::cell::Cell::new(0),
             subclasses: std::cell::RefCell::new(vec![]),
+            metatype,
         }));
         // Register the new class as a direct subclass of each base so that
         // base.__subclasses__() includes it.
@@ -4900,12 +4917,6 @@ pyrust_module! {
         for eb in &extra_bases {
             eb.borrow().subclasses.borrow_mut().push(Rc::downgrade(&class));
         }
-        // The mcs argument controls the actual metatype — in pyrust every
-        // PyClass value is implicitly an instance of `type`, so mcs is
-        // informational only here.  We do not store it, matching the current
-        // architecture where metaclass identity is tracked by the call path
-        // (call_class_expanded detects metaclass __new__ and __init__).
-        let _ = mcs_rc;
         Ok(Value::py_class(class))
     }
 
@@ -7237,6 +7248,13 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
                 ) =>
             {
                 Some(function_type_singleton())
+            }
+            // Issue #1626: a class object is an instance of its metatype.
+            // When the class has no custom metatype (None), fall back to the
+            // `type` singleton so `isinstance(int, type)` etc. still works.
+            ValueKind::PyClass(cls_rc) => {
+                let meta = cls_rc.borrow().metatype.clone();
+                Some(meta.unwrap_or_else(type_class_singleton))
             }
             _ => crate::interpreter::primitive_class_for_value(obj),
         };
