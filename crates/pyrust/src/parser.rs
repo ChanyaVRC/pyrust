@@ -323,14 +323,28 @@ impl Parser {
                         };
                     }
                     if self.is(&Token::LParen) {
-                        // Dotted class pattern: `module.Class(kwarg=pat, ...)`
+                        // Dotted class pattern: `module.Class(pos, ..., kwarg=pat, ...)`
                         self.bump();
+                        let mut positional: Vec<Pattern> = Vec::new();
                         let mut kwargs: Vec<(String, Pattern)> = Vec::new();
                         while !self.is(&Token::RParen) && !self.is(&Token::Eof) {
-                            let attr = self.expect_ident("class pattern keyword")?;
-                            self.expect(&Token::Assign)?;
-                            let pat = self.parse_pattern()?;
-                            kwargs.push((attr, pat));
+                            // A keyword sub-pattern starts with `name =`; anything
+                            // else is a positional sub-pattern.
+                            let is_keyword = matches!(self.current(), Some(Token::Ident(_)))
+                                && self.peek() == Some(&Token::Assign);
+                            if is_keyword {
+                                let attr = self.expect_ident("class pattern keyword")?;
+                                self.expect(&Token::Assign)?;
+                                let pat = self.parse_pattern()?;
+                                kwargs.push((attr, pat));
+                            } else {
+                                if !kwargs.is_empty() {
+                                    return Err(PyError::Parse(
+                                        "positional patterns follow keyword patterns".into(),
+                                    ));
+                                }
+                                positional.push(self.parse_pattern()?);
+                            }
                             if self.is(&Token::Comma) {
                                 self.bump();
                             } else {
@@ -340,21 +354,36 @@ impl Parser {
                         self.expect(&Token::RParen)?;
                         Ok(Pattern::Class {
                             cls: Box::new(expr),
+                            positional,
                             kwargs,
                         })
                     } else {
                         Ok(Pattern::Value(expr))
                     }
                 } else if self.is(&Token::LParen) {
-                    // Class pattern: Name(kwarg=pat, ...)
+                    // Class pattern: Name(pos, ..., kwarg=pat, ...)
                     self.bump();
                     let cls = Expr::Var(name);
+                    let mut positional: Vec<Pattern> = Vec::new();
                     let mut kwargs: Vec<(String, Pattern)> = Vec::new();
                     while !self.is(&Token::RParen) && !self.is(&Token::Eof) {
-                        let attr = self.expect_ident("class pattern keyword")?;
-                        self.expect(&Token::Assign)?;
-                        let pat = self.parse_pattern()?;
-                        kwargs.push((attr, pat));
+                        // A keyword sub-pattern starts with `name =`; anything
+                        // else is a positional sub-pattern.
+                        let is_keyword = matches!(self.current(), Some(Token::Ident(_)))
+                            && self.peek() == Some(&Token::Assign);
+                        if is_keyword {
+                            let attr = self.expect_ident("class pattern keyword")?;
+                            self.expect(&Token::Assign)?;
+                            let pat = self.parse_pattern()?;
+                            kwargs.push((attr, pat));
+                        } else {
+                            if !kwargs.is_empty() {
+                                return Err(PyError::Parse(
+                                    "positional patterns follow keyword patterns".into(),
+                                ));
+                            }
+                            positional.push(self.parse_pattern()?);
+                        }
                         if self.is(&Token::Comma) {
                             self.bump();
                         } else {
@@ -364,6 +393,7 @@ impl Parser {
                     self.expect(&Token::RParen)?;
                     Ok(Pattern::Class {
                         cls: Box::new(cls),
+                        positional,
                         kwargs,
                     })
                 } else {

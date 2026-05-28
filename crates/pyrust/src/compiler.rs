@@ -5824,7 +5824,11 @@ impl Compiler {
                     self.free_temp(rest_r);
                 }
             }
-            Pattern::Class { cls, kwargs } => {
+            Pattern::Class {
+                cls,
+                positional,
+                kwargs,
+            } => {
                 // isinstance(subj, cls) check must come FIRST so that attribute
                 // access is never attempted on a subject of the wrong type.
                 let isinstance_name_idx = self.intern_name("isinstance");
@@ -5835,14 +5839,58 @@ impl Compiler {
                 let cls_r = self.compile_expr(cls);
                 let arg1 = self.alloc_temp();
                 self.emit(Insn::Move(arg1, cls_r));
-                self.free_temp(cls_r);
+                // Keep cls_r alive when we have positional sub-patterns: the
+                // MatchClassPositional instruction needs the class to load
+                // __match_args__ from it.
+                let cls_for_pos = if !positional.is_empty() {
+                    let saved = self.alloc_temp();
+                    self.emit(Insn::Move(saved, cls_r));
+                    self.free_temp(cls_r);
+                    Some(saved)
+                } else {
+                    self.free_temp(cls_r);
+                    None
+                };
                 self.emit(Insn::Call(isinstance_fn, 2));
                 self.free_temp(arg1);
                 self.free_temp(arg0);
                 let jmp = self.emit(Insn::JumpIfFalse(isinstance_fn, 0));
                 fail_patches.push(jmp);
                 self.free_temp(isinstance_fn);
-                // Now check each keyword attribute.
+                // Positional sub-patterns: resolved via __match_args__.
+                if !positional.is_empty() {
+                    let cls_reg = cls_for_pos.expect("set above when positional non-empty");
+                    let n = positional.len() as u8;
+                    // Allocate a contiguous block of n temporaries for the
+                    // attribute values loaded by MatchClassPositional.
+                    let dst_base = self.alloc_temp();
+                    for _ in 1..positional.len() {
+                        self.alloc_temp();
+                    }
+                    self.emit(Insn::MatchClassPositional {
+                        dst_base,
+                        subj,
+                        cls: cls_reg,
+                        n,
+                    });
+                    self.free_temp(cls_reg);
+                    // Match each positional attribute value against its sub-pattern.
+                    for (i, pat) in positional.iter().enumerate() {
+                        let attr_r = dst_base + i as u32;
+                        self.compile_pattern_match(attr_r, pat, fail_patches);
+                        if self.failed {
+                            // Free remaining allocated registers before returning.
+                            for j in i..positional.len() {
+                                self.free_temp(dst_base + j as u32);
+                            }
+                            return;
+                        }
+                        self.free_temp(attr_r);
+                    }
+                } else if let Some(cls_reg) = cls_for_pos {
+                    self.free_temp(cls_reg);
+                }
+                // Keyword sub-patterns: matched directly against named attributes.
                 for (attr_name, attr_pat) in kwargs {
                     let name_idx = self.intern_name(attr_name);
                     let attr_r = self.alloc_temp();

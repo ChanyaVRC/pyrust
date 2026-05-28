@@ -1714,6 +1714,9 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
 
         // Concat reads base..base+count registers.
         Concat { base, count, .. } => r >= *base && r < *base + *count as u32,
+
+        // MatchClassPositional reads subj and cls.
+        MatchClassPositional { subj, cls, .. } => r == *subj || r == *cls,
     }
 }
 
@@ -1883,6 +1886,11 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
             for r in *base..*base + *count as u32 {
                 reads.insert(r);
             }
+        }
+        // MatchClassPositional reads subj and cls.
+        MatchClassPositional { subj, cls, .. } => {
+            reads.insert(*subj);
+            reads.insert(*cls);
         }
     }
 }
@@ -2531,6 +2539,12 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | SyncModuleGlobal(..)
         | DeleteModuleGlobal(..)
         | TailCall { .. } => {}
+        // MatchClassPositional writes dst_base..dst_base+n.
+        MatchClassPositional { dst_base, n, .. } => {
+            for i in 0..*n as u32 {
+                written.insert(dst_base + i);
+            }
+        }
     }
 }
 
@@ -5813,6 +5827,11 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
             for r in *base..*base + *count as u32 {
                 f(r);
             }
+        }
+        // MatchClassPositional reads subj and cls.
+        MatchClassPositional { subj, cls, .. } => {
+            f(*subj);
+            f(*cls);
         }
     }
 }

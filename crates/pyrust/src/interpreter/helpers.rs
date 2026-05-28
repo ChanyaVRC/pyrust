@@ -2893,7 +2893,12 @@ fn collect_pattern_names(
                     names.insert(rest_name.clone());
                 }
         }
-        Pattern::Class { kwargs, .. } => {
+        Pattern::Class {
+            positional, kwargs, ..
+        } => {
+            for pat in positional {
+                collect_pattern_names(pat, names, global_names, nonlocal_names);
+            }
             for (_, attr_pat) in kwargs {
                 collect_pattern_names(attr_pat, names, global_names, nonlocal_names);
             }
@@ -3472,7 +3477,12 @@ fn collect_pattern_bound_names(pattern: &crate::ast::Pattern, assigned: &mut Has
                 assigned.insert(name.clone());
             }
         }
-        crate::ast::Pattern::Class { kwargs, .. } => {
+        crate::ast::Pattern::Class {
+            positional, kwargs, ..
+        } => {
+            for p in positional {
+                collect_pattern_bound_names(p, assigned);
+            }
             for (_, p) in kwargs {
                 collect_pattern_bound_names(p, assigned);
             }

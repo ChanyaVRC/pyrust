@@ -2857,6 +2857,84 @@ impl Interpreter {
                     vm_try!(Err::<(), _>(PyError::Raised(exc)));
                 }
 
+                Insn::MatchClassPositional { dst_base, subj, cls, n } => {
+                    let n = *n as usize;
+                    let cls_val = vm_try!(vm_read(&regs, *cls, num_locals));
+                    let subj_val = vm_try!(vm_read(&regs, *subj, num_locals));
+
+                    // Determine the class name for TypeError messages.
+                    let cls_name = match cls_val.kind() {
+                        ValueKind::PyClass(rc) => rc.borrow().name.clone(),
+                        _ => "<class>".to_string(),
+                    };
+
+                    // Load __match_args__ from the class.
+                    let match_args = match self.get_attr(cls_val, "__match_args__") {
+                        Ok(v) => v,
+                        Err(e) if e.class_name_is("AttributeError") => {
+                            vm_try!(Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "{cls_name}() accepts 0 positional sub-patterns ({n} given)"
+                                ),
+                            )));
+                            unreachable!()
+                        }
+                        Err(e) => {
+                            vm_try!(Err(e));
+                            unreachable!()
+                        }
+                    };
+
+                    // __match_args__ must be a tuple (CPython 3.12 rejects lists).
+                    let match_args_vec: Vec<Value> = match match_args.kind() {
+                        ValueKind::Tuple(items) => items.to_vec(),
+                        _ => {
+                            let type_name = value_type_name_str(&match_args);
+                            vm_try!(Err(PyError::named(
+                                "TypeError",
+                                format!(
+                                    "{cls_name}.__match_args__ must be a tuple (got {type_name})"
+                                ),
+                            )));
+                            unreachable!()
+                        }
+                    };
+
+                    // Length must be >= n.
+                    if match_args_vec.len() < n {
+                        let plural = if match_args_vec.len() == 1 { "" } else { "s" };
+                        vm_try!(Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "{cls_name}() accepts {} positional sub-pattern{plural} ({n} given)",
+                                match_args_vec.len()
+                            ),
+                        )));
+                    }
+
+                    // For each positional index, get the attribute name from
+                    // __match_args__[i] and load that attribute from the subject.
+                    for i in 0..n {
+                        let name_val = match_args_vec[i].clone();
+                        let attr_name = match name_val.as_str() {
+                            Some(s) => s.to_string(),
+                            None => {
+                                vm_try!(Err(PyError::named(
+                                    "TypeError",
+                                    format!(
+                                        "__match_args__ elements must be strings (got {})",
+                                        value_type_name_str(&name_val)
+                                    ),
+                                )));
+                                unreachable!()
+                            }
+                        };
+                        let attr_val = vm_try!(self.get_attr(subj_val.clone(), &attr_name));
+                        regs[(*dst_base as usize) + i] = attr_val;
+                    }
+                }
+
                 // ── Calls ────────────────────────────────────────────────
                 Insn::Call(func_reg, argc) => {
                     let func_val = vm_try!(vm_read(&regs, *func_reg, num_locals));
