@@ -28,6 +28,7 @@ use crate::interpreter::{
     is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_hash_bigint, py_hash_float,
     py_hash_int, py_mod_i64, py_round_half_even, py_round_half_even_f64,
     reject_keyword_args_expanded, resolve_zero_arg_super, round_bigint_neg_ndigits, snapshot_current_locals,
+    function_type_singleton, method_type_singleton,
     sync_module_env_to_globals_dict, type_class_singleton,
     unicode_exc_set_attrs,
     value_to_float, value_type_name_str,
@@ -1576,16 +1577,13 @@ pyrust_module! {
             // through the standard class machinery (issue #1312).
             ValueKind::PyClass(_) => Ok(Value::py_class(type_class_singleton())),
             ValueKind::Range { .. } => Ok(Value::builtin_function("range")),
-            ValueKind::UserFunction(f) => {
-                let type_name = match f.kind {
-                    UserFunctionKind::StaticMethod => "staticmethod",
-                    UserFunctionKind::ClassMethod => "classmethod",
-                    _ => "function",
-                };
-                Ok(Value::builtin_function(type_name))
-            }
+            ValueKind::UserFunction(f) => match f.kind {
+                UserFunctionKind::StaticMethod => Ok(Value::builtin_function("staticmethod")),
+                UserFunctionKind::ClassMethod => Ok(Value::builtin_function("classmethod")),
+                _ => Ok(Value::py_class(function_type_singleton())),
+            },
             ValueKind::BoundMethod { .. }
-            | ValueKind::ClassBoundMethod { .. } => Ok(Value::builtin_function("method")),
+            | ValueKind::ClassBoundMethod { .. } => Ok(Value::py_class(method_type_singleton())),
             ValueKind::BuiltinFunction(_) => Ok(Value::builtin_function("builtin_function_or_method")),
             ValueKind::PyModule(_) => Ok(Value::builtin_function("module")),
             ValueKind::SuperProxy { .. } | ValueKind::SuperProxyClass { .. } => Ok(Value::builtin_function("super")),
@@ -6759,6 +6757,17 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
         }
         let actual_class = match obj.kind() {
             ValueKind::PyInstance(inst) => Some(Rc::clone(&inst.borrow().class)),
+            ValueKind::BoundMethod { .. } | ValueKind::ClassBoundMethod { .. } => {
+                Some(method_type_singleton())
+            }
+            ValueKind::UserFunction(f)
+                if !matches!(
+                    f.kind,
+                    UserFunctionKind::StaticMethod | UserFunctionKind::ClassMethod
+                ) =>
+            {
+                Some(function_type_singleton())
+            }
             _ => crate::interpreter::primitive_class_for_value(obj),
         };
         if let Some(actual) = actual_class {

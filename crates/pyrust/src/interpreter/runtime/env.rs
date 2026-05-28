@@ -231,7 +231,9 @@ impl Interpreter {
                 // this fallback.
                 let is_builtin_class = crate::interpreter::is_primitive_class(&class)
                     || is_exception_class(&class)
-                    || Rc::ptr_eq(&class, &object_class_singleton());
+                    || Rc::ptr_eq(&class, &object_class_singleton())
+                    || Rc::ptr_eq(&class, &crate::interpreter::method_type_singleton())
+                    || Rc::ptr_eq(&class, &crate::interpreter::function_type_singleton());
                 if name == "__module__" && is_builtin_class {
                     return Ok(Value::string("builtins".to_string()));
                 }
