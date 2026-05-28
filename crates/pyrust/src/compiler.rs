@@ -3917,6 +3917,61 @@ fn class_body_has_annotations(body: &[Stmt]) -> bool {
     })
 }
 
+/// Collect all names that a pattern binds on a successful match.
+/// Used by `Pattern::Or` validation to enforce that every alternative binds
+/// the same set of names (PEP 634 / CPython 3.12 `SyntaxError`).
+fn pattern_bound_names(pat: &Pattern) -> HashSet<String> {
+    match pat {
+        Pattern::Capture(name) => {
+            let mut s = HashSet::new();
+            s.insert(name.clone());
+            s
+        }
+        Pattern::As { pattern, name } => {
+            let mut s = pattern_bound_names(pattern);
+            s.insert(name.clone());
+            s
+        }
+        Pattern::Sequence(elements) => {
+            let mut s = HashSet::new();
+            for (elem_pat, _is_star) in elements {
+                s.extend(pattern_bound_names(elem_pat));
+            }
+            s
+        }
+        Pattern::Mapping(pairs, rest_name) => {
+            let mut s = HashSet::new();
+            for (_key, val_pat) in pairs {
+                s.extend(pattern_bound_names(val_pat));
+            }
+            if let Some(rest) = rest_name {
+                s.insert(rest.clone());
+            }
+            s
+        }
+        Pattern::Class {
+            positional, kwargs, ..
+        } => {
+            let mut s = HashSet::new();
+            for pat in positional {
+                s.extend(pattern_bound_names(pat));
+            }
+            for (_attr, pat) in kwargs {
+                s.extend(pattern_bound_names(pat));
+            }
+            s
+        }
+        Pattern::Or(alternatives) => {
+            // All alternatives must bind the same names; return the first's set.
+            alternatives
+                .first()
+                .map(pattern_bound_names)
+                .unwrap_or_default()
+        }
+        Pattern::Wildcard | Pattern::Literal(_) | Pattern::Value(_) => HashSet::new(),
+    }
+}
+
 impl Compiler {
     fn new(
         local_index: Rc<HashMap<String, Reg>>,
@@ -5630,6 +5685,17 @@ impl Compiler {
                 fail_patches.push(jmp);
             }
             Pattern::Or(alternatives) => {
+                // Validate that every alternative binds the same set of names
+                // (PEP 634; CPython 3.12 raises SyntaxError if they differ).
+                if let Some(first) = alternatives.first() {
+                    let first_names = pattern_bound_names(first);
+                    for alt in alternatives.iter().skip(1) {
+                        if pattern_bound_names(alt) != first_names {
+                            self.set_syntax_error("alternative patterns bind different names");
+                            return;
+                        }
+                    }
+                }
                 // Try each alternative; if one matches, jump to success.
                 // If all fail, fall through to after (which will be patched to next arm).
                 let mut success_patches: Vec<usize> = Vec::new();
