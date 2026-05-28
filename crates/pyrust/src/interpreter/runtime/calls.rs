@@ -5013,7 +5013,24 @@ pub(crate) fn dir_names(value: &Value) -> Vec<String> {
             collect_class_names(class, &mut names);
             names
         }
-        ValueKind::PyModule(module) => module.borrow().attrs.keys().cloned().collect(),
+        ValueKind::PyModule(module) => {
+            let mut names: Vec<String> = module.borrow().attrs.keys().cloned().collect();
+            // Append the synthetic dunder attributes that are returned by
+            // get_attr for all module objects (env.rs), mirroring CPython 3.12
+            // which includes these in dir(m) even for built-in modules.
+            for dunder in &[
+                "__name__",
+                "__package__",
+                "__loader__",
+                "__spec__",
+                "__doc__",
+            ] {
+                if !names.iter().any(|n| n == dunder) {
+                    names.push(dunder.to_string());
+                }
+            }
+            names
+        }
         ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Bool(_) => {
             builtin_method_names("int")
         }
