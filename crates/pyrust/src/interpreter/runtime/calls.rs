@@ -5640,36 +5640,10 @@ fn apply_field_accessors(
                 .unwrap_or(rest.len());
             let attr = &rest[1..end];
             rest = &rest[end..];
-            // Snapshot the PyInstance Rc in a scoped block so the
-            // kind() Ref drops before we may reassign `value` (#450).
-            let inst = match value.kind() {
-                ValueKind::PyInstance(inst) => Some(Rc::clone(inst)),
-                _ => None,
-            };
-            let inst = inst.ok_or_else(|| {
-                PyError::named(
-                    "AttributeError",
-                    format!("attribute access '.{attr}' is only supported on instances"),
-                )
-            })?;
-            // Look up the attribute: instance dict first, then class MRO.
-            let class = Rc::clone(&inst.borrow().class);
-            let v = inst
-                .borrow()
-                .attrs
-                .get(attr)
-                .cloned()
-                .or_else(|| lookup_class_attr(&class, attr))
-                .ok_or_else(|| {
-                    PyError::named(
-                        "AttributeError",
-                        format!(
-                            "'{}' object has no attribute '{attr}'",
-                            class.borrow().name
-                        ),
-                    )
-                })?;
-            value = v;
+            // Dispatch getattr through the full attribute resolution path so
+            // that built-in types (int, float, complex, …) work the same way
+            // `getattr(value, attr)` does — not just PyInstance values (#1031).
+            value = interp.get_attr(value, attr)?;
         } else if bytes[0] == b'[' {
             let end = bytes
                 .iter()
