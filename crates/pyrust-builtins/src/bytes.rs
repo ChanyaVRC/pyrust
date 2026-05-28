@@ -314,10 +314,21 @@ fn bytes_hex(bytes: &[u8], args: &[Value]) -> Result<Value> {
 
 fn bytes_decode(bytes: &[u8], args: &[Value], kwargs: &IndexMap<PyKey, Value>) -> Result<Value> {
     // Signature: decode(encoding='utf-8', errors='strict')
-    if args.len() > 2 {
+    //
+    // CPython checks the total argument count before individual duplicate checks.
+    // When positional args are present the message says "arguments"; when it is
+    // all-kwargs it says "keyword arguments".
+    let total = args.len() + kwargs.len();
+    if total > 2 {
+        if args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                format!("decode() takes at most 2 keyword arguments ({total} given)"),
+            ));
+        }
         return Err(PyError::named(
             "TypeError",
-            format!("decode() takes at most 2 arguments ({} given)", args.len()),
+            format!("decode() takes at most 2 arguments ({total} given)"),
         ));
     }
     // Reject unknown keyword arguments first.
