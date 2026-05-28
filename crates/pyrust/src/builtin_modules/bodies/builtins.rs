@@ -25,7 +25,7 @@ use crate::interpreter::{
     compare_values, compare_values_with_op, coerce_numeric, dir_names,
     float_to_bigint, instance_builtin_data, is_str_or_str_subclass,
     int_pow_promoting, invoke_class_method,
-    is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_hash_bigint, py_hash_float,
+    is_exception_class, iter_values, lookup_class_attr, modpow_bigint, modpow_i64, py_hash_bigint, py_hash_float,
     py_hash_int, py_mod_i64, py_round_half_even, round_float_ndigits,
     reject_keyword_args_expanded, resolve_zero_arg_super, round_bigint_neg_ndigits, snapshot_current_locals,
     function_type_singleton, method_type_singleton,
@@ -848,6 +848,46 @@ pyrust_module! {
                 "TypeError",
                 "pow() 3rd argument not allowed unless all arguments are integers".to_string(),
             );
+            // Promote to BigInt when any argument is a BigInt so that values
+            // outside the i64 range are handled correctly.  The i64 fast path
+            // is kept for the common case where all three args fit in i64.
+            let any_bigint = matches!(base_val.kind(), ValueKind::BigInt(_))
+                || matches!(exp_val.kind(), ValueKind::BigInt(_))
+                || matches!(mod_val.kind(), ValueKind::BigInt(_));
+            if any_bigint {
+                let base_big: PyBigInt = match base_val.kind() {
+                    ValueKind::Int(v) => PyBigInt::from(v),
+                    ValueKind::Bool(b) => PyBigInt::from(b as i64),
+                    ValueKind::BigInt(b) => (*b).clone(),
+                    _ => return Err(three_arg_type_error()),
+                };
+                let exp_big: PyBigInt = match exp_val.kind() {
+                    ValueKind::Int(v) => PyBigInt::from(v),
+                    ValueKind::Bool(b) => PyBigInt::from(b as i64),
+                    ValueKind::BigInt(b) => (*b).clone(),
+                    _ => return Err(three_arg_type_error()),
+                };
+                let mod_big: PyBigInt = match mod_val.kind() {
+                    ValueKind::Int(v) => PyBigInt::from(v),
+                    ValueKind::Bool(b) => PyBigInt::from(b as i64),
+                    ValueKind::BigInt(b) => (*b).clone(),
+                    _ => return Err(three_arg_type_error()),
+                };
+                if mod_big.is_zero() {
+                    return Err(PyError::named(
+                        "ValueError",
+                        "pow() 3rd argument cannot be 0".to_string(),
+                    ));
+                }
+                if exp_big.sign() == crate::value::PyBigIntSign::Minus {
+                    return Err(PyError::named(
+                        "ValueError",
+                        "pow() 2nd argument cannot be negative when 3rd argument specified"
+                            .to_string(),
+                    ));
+                }
+                return Ok(modpow_bigint(&base_big, &exp_big, &mod_big));
+            }
             let base = match base_val.kind() {
                 ValueKind::Int(v) => v,
                 ValueKind::Bool(b) => b as i64,
