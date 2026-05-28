@@ -31,7 +31,7 @@ use crate::interpreter::{
     sync_module_env_to_globals_dict, type_class_singleton,
     value_to_float, value_type_name_str,
 };
-use crate::value::{PyBigInt, PyClass, PyKey, PyToPrimitive, PyZero, UserFunctionKind, Value, ValueKind, range_len};
+use crate::value::{PyBigInt, PyBigIntSign, PyClass, PyKey, PyToPrimitive, PyZero, UserFunctionKind, Value, ValueKind, range_len};
 use pyrust_derive::pyrust_module;
 
 pyrust_module! {
@@ -2077,6 +2077,16 @@ pyrust_module! {
                     ValueKind::Int(n) => Some(n as i32),
                     ValueKind::Bool(b) => Some(b as i32),
                     ValueKind::None => None,
+                    // BigInt is a valid integer ndigits; clamp to i32 range.
+                    // Positive BigInt ndigits → i32::MAX (no rounding for integers).
+                    // Negative BigInt ndigits beyond i32::MIN → clamped to -1024
+                    // (10^1024 > any practical integer, so result is 0; avoids
+                    // computing astronomically large powers of 10 that would hang).
+                    ValueKind::BigInt(b) => {
+                        use PyToPrimitive;
+                        Some(b.to_i64().map(|n| n.clamp(i32::MIN as i64, i32::MAX as i64) as i32)
+                            .unwrap_or_else(|| if b.sign() == PyBigIntSign::Minus { -1024 } else { i32::MAX }))
+                    }
                     _ => return Err(PyError::named(
                         "TypeError",
                         format!(
