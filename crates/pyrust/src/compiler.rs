@@ -3921,6 +3921,42 @@ fn class_body_has_annotations(body: &[Stmt]) -> bool {
     })
 }
 
+/// Produce Python's `repr()` of a string value, matching CPython's output.
+///
+/// Rules (same as CPython's `repr()` for `str`):
+/// - Prefer single-quote delimiters.
+/// - If the string contains a single quote but no double quote, use double-quote
+///   delimiters instead (avoids the need to escape `'`).
+/// - If both quote types appear, use single-quote delimiters and escape `'` as `\'`.
+/// - Escape backslashes, non-printable control characters, and surrogates.
+fn py_repr_str(s: &str) -> String {
+    let has_single = s.contains('\'');
+    let has_double = s.contains('"');
+    let quote = if has_single && !has_double { '"' } else { '\'' };
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push(quote);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\x07' => out.push_str("\\a"),
+            '\x08' => out.push_str("\\b"),
+            '\x0c' => out.push_str("\\f"),
+            '\x0b' => out.push_str("\\v"),
+            '\'' if quote == '\'' => out.push_str("\\'"),
+            '"' if quote == '"' => out.push_str("\\\""),
+            c if (c as u32) < 0x20 || c == '\x7f' => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
+
 /// Convert an annotation expression to its source-text string representation,
 /// as required by PEP 563 (`from __future__ import annotations`).
 ///
@@ -3937,7 +3973,7 @@ fn stringify_annotation(expr: &Expr) -> String {
         Expr::Bool(b) => if *b { "True" } else { "False" }.to_string(),
         Expr::Int(n) => n.to_string(),
         Expr::Float(f) => format!("{f}"),
-        Expr::Str(s) => format!("'{s}'"),
+        Expr::Str(s) => py_repr_str(s),
         Expr::Attr { target, name } => {
             format!("{}.{}", stringify_annotation(target), name)
         }
