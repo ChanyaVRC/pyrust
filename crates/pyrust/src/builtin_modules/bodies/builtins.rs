@@ -1801,7 +1801,6 @@ pyrust_module! {
 
     /// CPython: len(s) — number of items in a container.
     /// <https://docs.python.org/3/library/functions.html#len>
-    #[pure]
     fn len(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 1 {
@@ -1830,10 +1829,44 @@ pyrust_module! {
             },
             ValueKind::PyInstance(inst) => {
                 let inst_rc = Rc::clone(inst);
-                // Issue #976/#994: delegate to backing primitive for
-                // dict/list/set/frozenset/tuple subclasses constructed by
-                // call_class_expanded.
-                if let Some(backing) = instance_builtin_data(&inst_rc) {
+                let class = Rc::clone(&inst_rc.borrow().class);
+                // Check user-defined __len__ first (MRO wins over backing data).
+                // Issue #1448: container subclasses with __len__ overrides were
+                // bypassed because the backing-data fast path ran first.
+                if let Some(method_val) = lookup_class_attr(&class, "__len__") {
+                    let result = invoke_class_method(
+                        _interp,
+                        method_val,
+                        Value::py_instance(inst_rc),
+                        &[],
+                    )?;
+                    match result.kind() {
+                        ValueKind::Int(n) if n >= 0 => n,
+                        ValueKind::Int(_) => {
+                            return Err(PyError::named(
+                                "ValueError",
+                                "__len__() should return >= 0".to_string(),
+                            ))
+                        }
+                        ValueKind::Bool(b) => {
+                            if b {
+                                1
+                            } else {
+                                0
+                            }
+                        }
+                        _ => {
+                            return Err(PyError::named(
+                                "TypeError",
+                                "__len__ returned non-int".to_string(),
+                            ))
+                        }
+                    }
+                } else if let Some(backing) = instance_builtin_data(&inst_rc) {
+                    // No user __len__: fall back to backing primitive length
+                    // for container subclasses (list/dict/set/tuple/str/bytes/frozenset).
+                    // Issue #976/#994: backing data for subclasses constructed
+                    // by call_class_expanded.
                     match backing.kind() {
                         ValueKind::Str(text) => text.chars().count() as i64,
                         ValueKind::Bytes(rc) => rc.len() as i64,
@@ -1868,39 +1901,13 @@ pyrust_module! {
                         }
                     }
                 } else {
-                    let class = Rc::clone(&inst_rc.borrow().class);
-                    if let Some(method_val) = lookup_class_attr(&class, "__len__") {
-                        let result = invoke_class_method(
-                            _interp,
-                            method_val,
-                            Value::py_instance(inst_rc),
-                            &[],
-                        )?;
-                        match result.kind() {
-                            ValueKind::Int(n) if n >= 0 => n,
-                            ValueKind::Int(_) => {
-                                return Err(PyError::named(
-                                    "ValueError",
-                                    "__len__() should return >= 0".to_string(),
-                                ))
-                            }
-                            ValueKind::Bool(b) => if b { 1 } else { 0 },
-                            _ => {
-                                return Err(PyError::named(
-                                    "TypeError",
-                                    "__len__ returned non-int".to_string(),
-                                ))
-                            }
-                        }
-                    } else {
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "object of type '{}' has no len()",
-                                inst_rc.borrow().class.borrow().name,
-                            ),
-                        ));
-                    }
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "object of type '{}' has no len()",
+                            inst_rc.borrow().class.borrow().name,
+                        ),
+                    ));
                 }
             }
             _ => {

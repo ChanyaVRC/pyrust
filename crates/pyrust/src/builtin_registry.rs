@@ -144,12 +144,12 @@ mod tests {
         // Spot-checks across the three buckets that the optimizer's DCE
         // pass depends on (issue #433):
         //
-        // 1. Definitionally pure flat builtins — `abs`, `len`, …  These
+        // 1. Definitionally pure flat builtins — `abs`, `chr`, …  These
         //    have `#[pure]` in `bodies/builtins.rs` and must come back
         //    pure here, otherwise the optimizer's call-DCE pass would
         //    drift backwards relative to the legacy `PURE_BUILTINS`
         //    list.
-        for name in ["abs", "len", "chr", "ord", "type"] {
+        for name in ["abs", "chr", "ord", "type"] {
             assert!(is_pure(name), "{name:?} must be registered as pure");
         }
 
@@ -184,7 +184,8 @@ mod tests {
             "print", "open", "input", "str", "bool", "list", "tuple", "sorted", "min", "max",
             // divmod dispatches __divmod__/__rdivmod__ on user instances (#1094).
             "divmod", // ascii dispatches user __repr__ on PyInstance values (#1197).
-            "ascii",
+            "ascii", // len dispatches __len__ on PyInstance values (#1448).
+            "len",
         ] {
             assert!(
                 !is_pure(name),
