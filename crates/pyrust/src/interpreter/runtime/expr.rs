@@ -1938,6 +1938,123 @@ impl Interpreter {
             };
             return pyrust_builtins::string::call("join", &receiver, vec![iterable]);
         }
+        if method == "translate" {
+            // Dict fast path: delegate to pyrust-builtins which handles the
+            // common `str.maketrans`-produced dict without needing the interpreter.
+            if args.len() != 1 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "str.translate() takes exactly one argument ({} given)",
+                        args.len()
+                    ),
+                ));
+            }
+            let is_dict = matches!(args[0].kind(), ValueKind::Dict(_));
+            if is_dict {
+                return pyrust_builtins::string::call("translate", &receiver, args);
+            }
+            // General mapping protocol: call table[ordinal] per codepoint.
+            // KeyError / IndexError / LookupError → keep character;
+            // None → delete; int → replace with chr(n); str → replace.
+            let s = match receiver.kind() {
+                ValueKind::Str(s) => s.to_string(),
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "descriptor 'translate' requires a 'str' object".to_string(),
+                    ))
+                }
+            };
+            let table = args.into_iter().next().unwrap();
+            let chars: Vec<char> = s.chars().collect();
+            let mut out = String::with_capacity(s.len());
+            for c in chars {
+                let cp = Value::int(c as i64);
+                match self.eval_index(table.clone(), cp) {
+                    Ok(v) => {
+                        // Resolve int/str subclass instances to their backing
+                        // primitive before the value match. This covers:
+                        //   int subclass  → Int/Bool/BigInt backing
+                        //   str subclass  → Str backing
+                        // A PyInstance without a relevant backing falls through
+                        // to the TypeError arm below. The tag enum breaks the
+                        // borrow on v.kind() before we move v or the backing.
+                        let inst_backing = match v.kind() {
+                            ValueKind::PyInstance(inst) => {
+                                Some(instance_builtin_data(&Rc::clone(inst)))
+                            }
+                            _ => None,
+                        };
+                        let v = match inst_backing {
+                            Some(Some(backing)) => backing,
+                            _ => v,
+                        };
+                        match v.kind() {
+                            ValueKind::None => { /* delete */ }
+                            ValueKind::Int(n) => {
+                                if n < 0 || n > 0x10FFFF {
+                                    return Err(PyError::named(
+                                        "ValueError",
+                                        "character mapping must be in range(0x110000)"
+                                            .to_string(),
+                                    ));
+                                }
+                                let replacement = char::from_u32(n as u32).ok_or_else(|| {
+                                    PyError::named(
+                                        "ValueError",
+                                        "character mapping must be in range(0x110000)"
+                                            .to_string(),
+                                    )
+                                })?;
+                                out.push(replacement);
+                            }
+                            ValueKind::Bool(b) => {
+                                let replacement = char::from_u32(b as u32)
+                                    .expect("0 and 1 are valid codepoints");
+                                out.push(replacement);
+                            }
+                            ValueKind::BigInt(n) => {
+                                // Use ToPrimitive::to_u32 then char::from_u32 to
+                                // validate the range [0, 0x10FFFF] in one step.
+                                // A negative or > u32::MAX BigInt yields None from
+                                // to_u32(); char::from_u32 rejects surrogates and
+                                // values > 0x10FFFF. Both map to the same ValueError.
+                                use crate::value::PyToPrimitive;
+                                let replacement =
+                                    n.to_u32().and_then(char::from_u32).ok_or_else(|| {
+                                        PyError::named(
+                                            "ValueError",
+                                            "character mapping must be in range(0x110000)"
+                                                .to_string(),
+                                        )
+                                    })?;
+                                out.push(replacement);
+                            }
+                            ValueKind::Str(repl) => {
+                                out.push_str(&repl.to_string());
+                            }
+                            _ => {
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    "character mapping must return integer, None or str"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                    }
+                    Err(e)
+                        if e.class_name_is("KeyError")
+                            || e.class_name_is("IndexError")
+                            || e.class_name_is("LookupError") =>
+                    {
+                        out.push(c);
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            return Ok(Value::string(out));
+        }
         pyrust_builtins::string::call(method, &receiver, args)
     }
 
