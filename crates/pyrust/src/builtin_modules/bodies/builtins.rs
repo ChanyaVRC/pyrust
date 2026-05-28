@@ -4325,24 +4325,38 @@ pyrust_module! {
                 new_val.as_ref().map(|v| v.kind()),
                 Some(ValueKind::UserFunction(_))
             );
-            if has_custom_new {
-                return Err(PyError::named(
-                    "TypeError",
-                    "object.__new__() takes exactly one argument (the type to instantiate)"
-                        .to_string(),
-                ));
-            }
-            let init_val = lookup_class_attr(&class_rc, "__init__");
-            let has_custom_init = matches!(
-                init_val.as_ref().map(|v| v.kind()),
-                Some(ValueKind::UserFunction(_))
-            );
-            if !has_custom_init {
-                let cls_name = class_rc.borrow().name.clone();
-                return Err(PyError::named(
-                    "TypeError",
-                    format!("{cls_name}() takes no arguments"),
-                ));
+            // Exception subclasses are special: CPython's BaseException.__new__
+            // (BaseException_new in Objects/exceptions.c) accepts extra args and
+            // stores them as .args.  In pyrust there is no separate
+            // BaseException.__new__ registration — the MRO walk falls through to
+            // object_new_dunder.  When cls is a BaseException subclass, mirror
+            // CPython by accepting the extra args silently (they will be processed
+            // by BaseException.__init__).
+            let is_exception_subclass =
+                class_chain_contains_name(&class_rc, "BaseException");
+            if is_exception_subclass {
+                // Accept extra args for exception subclasses unconditionally.
+                // BaseException.__new__ is responsible for them in CPython.
+            } else {
+                if has_custom_new {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "object.__new__() takes exactly one argument (the type to instantiate)"
+                            .to_string(),
+                    ));
+                }
+                let init_val = lookup_class_attr(&class_rc, "__init__");
+                let has_custom_init = matches!(
+                    init_val.as_ref().map(|v| v.kind()),
+                    Some(ValueKind::UserFunction(_))
+                );
+                if !has_custom_init {
+                    let cls_name = class_rc.borrow().name.clone();
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("{cls_name}() takes no arguments"),
+                    ));
+                }
             }
         }
         Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
