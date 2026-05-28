@@ -235,6 +235,15 @@ impl Lexer {
                         let (tok, next) = lex_bytes(&chars, pos + 2, true)?;
                         self.tokens.push(tok);
                         pos = next;
+                    } else if (c == 'u' || c == 'U')
+                        && matches!(chars.get(pos + 1), Some('"') | Some('\''))
+                    {
+                        // Unicode string literal: u"..." / U"..."
+                        // In Python 3.3+, u"..." is identical to a plain string literal.
+                        // Combinations like ur"", ub"" are not valid in Python 3.
+                        let (tok, next) = lex_string(&chars, pos + 1, false)?;
+                        self.tokens.push(tok);
+                        pos = next;
                     } else {
                         let (tok, next) = lex_ident_or_keyword(chars, pos);
                         self.tokens.push(tok);
