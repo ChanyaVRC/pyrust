@@ -328,8 +328,7 @@ impl Parser {
                             } else {
                                 if !kwargs.is_empty() {
                                     return Err(PyError::Parse(
-                                        "positional pattern follows keyword pattern in class pattern"
-                                            .into(),
+                                        "positional patterns follow keyword patterns".into(),
                                     ));
                                 }
                                 positional.push(self.parse_pattern()?);
@@ -368,8 +367,7 @@ impl Parser {
                         } else {
                             if !kwargs.is_empty() {
                                 return Err(PyError::Parse(
-                                    "positional pattern follows keyword pattern in class pattern"
-                                        .into(),
+                                    "positional patterns follow keyword patterns".into(),
                                 ));
                             }
                             positional.push(self.parse_pattern()?);

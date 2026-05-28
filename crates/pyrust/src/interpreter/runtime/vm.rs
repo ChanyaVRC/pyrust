@@ -2886,10 +2886,9 @@ impl Interpreter {
                         }
                     };
 
-                    // __match_args__ must be a tuple or list.
-                    let match_args_len = match match_args.kind() {
-                        ValueKind::Tuple(items) => items.len(),
-                        ValueKind::List(items) => items.len(),
+                    // __match_args__ must be a tuple (CPython 3.12 rejects lists).
+                    let match_args_vec: Vec<Value> = match match_args.kind() {
+                        ValueKind::Tuple(items) => items.to_vec(),
                         _ => {
                             let type_name = value_type_name_str(&match_args);
                             vm_try!(Err(PyError::named(
@@ -2903,12 +2902,13 @@ impl Interpreter {
                     };
 
                     // Length must be >= n.
-                    if match_args_len < n {
-                        let plural = if match_args_len == 1 { "" } else { "s" };
+                    if match_args_vec.len() < n {
+                        let plural = if match_args_vec.len() == 1 { "" } else { "s" };
                         vm_try!(Err(PyError::named(
                             "TypeError",
                             format!(
-                                "{cls_name}() accepts {match_args_len} positional sub-pattern{plural} ({n} given)"
+                                "{cls_name}() accepts {} positional sub-pattern{plural} ({n} given)",
+                                match_args_vec.len()
                             ),
                         )));
                     }
@@ -2916,18 +2916,14 @@ impl Interpreter {
                     // For each positional index, get the attribute name from
                     // __match_args__[i] and load that attribute from the subject.
                     for i in 0..n {
-                        let name_val = match match_args.kind() {
-                            ValueKind::Tuple(items) => items[i].clone(),
-                            ValueKind::List(items) => items[i].clone(),
-                            _ => unreachable!(),
-                        };
+                        let name_val = match_args_vec[i].clone();
                         let attr_name = match name_val.as_str() {
                             Some(s) => s.to_string(),
                             None => {
                                 vm_try!(Err(PyError::named(
                                     "TypeError",
                                     format!(
-                                        "{cls_name}.__match_args__[{i}] must be a string (got {})",
+                                        "__match_args__ elements must be strings (got {})",
                                         value_type_name_str(&name_val)
                                     ),
                                 )));

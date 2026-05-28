@@ -142,3 +142,40 @@ match seg:
     case _:
         print("other")
 # from origin to 1 1
+
+# --- TypeError: __match_args__ is a list, not a tuple ---
+
+
+class ListArgs:
+    __match_args__ = ["x", "y"]
+
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+
+try:
+    match ListArgs(1, 2):
+        case ListArgs(a, b):
+            print("matched", a, b)
+except TypeError as e:
+    print("TypeError:", e)
+# TypeError: ListArgs.__match_args__ must be a tuple (got list)
+
+# --- TypeError: __match_args__ element not a string ---
+
+
+class BadEntry:
+    __match_args__ = (42, "y")
+
+    def __init__(self):
+        self.y = 2
+
+
+try:
+    match BadEntry():
+        case BadEntry(a,):
+            print("matched", a)
+except TypeError as e:
+    print("TypeError:", e)
+# TypeError: __match_args__ elements must be strings (got int)
