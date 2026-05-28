@@ -1591,10 +1591,13 @@ impl Interpreter {
                     )),
                 }
             }
-            _ => Err(PyError::Runtime(format!(
-                "object has no writable attribute '{}'",
-                name
-            ))),
+            _ => {
+                let type_name = pyrust_core::builtin_type_name(&target);
+                Err(PyError::named(
+                    "AttributeError",
+                    format!("'{type_name}' object has no attribute '{name}'"),
+                ))
+            }
         }
     }
 
@@ -1830,9 +1833,13 @@ impl Interpreter {
                     format!("'method' object has no attribute '{name}'"),
                 ))
             }
-            _ => Err(PyError::Runtime(
-                "can only delete attributes of class instances".to_string(),
-            )),
+            _ => {
+                let type_name = pyrust_core::builtin_type_name(&target);
+                Err(PyError::named(
+                    "AttributeError",
+                    format!("'{type_name}' object has no attribute '{name}'"),
+                ))
+            }
         }
     }
 
