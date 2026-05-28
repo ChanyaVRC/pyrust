@@ -6,6 +6,7 @@ use std::process::Command;
 fn run_and_capture(program: &Path, args: &[&Path]) -> Result<String, String> {
     let output = Command::new(program)
         .args(args)
+        .env("PYTHONIOENCODING", "utf-8")
         .output()
         .map_err(|e| format!("failed to run {}: {e}", program.display()))?;
 
