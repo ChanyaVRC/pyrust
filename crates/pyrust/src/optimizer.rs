@@ -3927,6 +3927,18 @@ fn pass_copy_prop(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
         if let Some(dst) = writable_dst(&insn) {
             copies.retain(|k, v| *k != dst && *v != dst);
         }
+        // YieldFrom writes both result_reg and sent_reg; writable_dst cannot
+        // express two destinations, so evict them manually.
+        if let Insn::YieldFrom {
+            result_reg,
+            sent_reg,
+            ..
+        } = &insn
+        {
+            copies.retain(|k, v| {
+                *k != *result_reg && *v != *result_reg && *k != *sent_reg && *v != *sent_reg
+            });
+        }
         // LoadConst writes dst (not in writable_dst so handled here).
         if let Insn::LoadConst(dst, _) = &insn {
             copies.retain(|k, v| *k != *dst && *v != *dst);
