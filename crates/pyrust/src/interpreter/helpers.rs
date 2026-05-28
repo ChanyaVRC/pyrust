@@ -4291,21 +4291,26 @@ pub(crate) fn modpow_bigint(base: &PyBigInt, exp: &PyBigInt, modulus: &PyBigInt)
 }
 
 /// Modular exponentiation: (base^exp) % modulus for i64.
+///
+/// Intermediate products are widened to i128 to prevent overflow when
+/// `modulus` is large (up to ~2^62).  `(i64::MAX)^2 ≈ 2^126 < i128::MAX`,
+/// so all intermediates fit exactly.  Issue #1697.
 pub(crate) fn modpow_i64(base: i64, exp: u64, modulus: i64) -> i64 {
     if modulus == 1 {
         return 0;
     }
-    let mut result: i64 = 1;
-    let mut base = ((base % modulus) + modulus) % modulus;
+    let m = modulus as i128;
+    let mut result: i128 = 1;
+    let mut base = ((base as i128 % m) + m) % m;
     let mut exp = exp;
     while exp > 0 {
         if exp % 2 == 1 {
-            result = (result * base) % modulus;
+            result = (result * base) % m;
         }
         exp >>= 1;
-        base = (base * base) % modulus;
+        base = (base * base) % m;
     }
-    result
+    result as i64
 }
 
 /// Modular inverse of `value` modulo `|modulus|` using the extended Euclidean
