@@ -1287,10 +1287,10 @@ fn extract_optional_string(value: Value, name: &str) -> Result<Option<String>> {
     match value.kind() {
         ValueKind::Str(text) => Ok(Some(text.to_string())),
         ValueKind::None => Ok(None),
-        _ => Err(PyError::Runtime(format!(
-            "print() {} must be None or a string",
-            name
-        ))),
+        _ => Err(PyError::named(
+            "TypeError",
+            format!("{} must be None or a string, not {}", name, value_type_name_str(&value)),
+        )),
     }
 }
 
