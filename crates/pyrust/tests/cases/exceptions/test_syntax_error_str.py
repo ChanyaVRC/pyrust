@@ -1,7 +1,7 @@
 # Parity fixture for SyntaxError.__str__ formatting (issue #1213).
 # CPython's SyntaxError has a custom tp_str that formats location info as
 # "msg (filename, line N)" or "msg (line N)" depending on whether filename
-# and lineno structured attrs are set.  SubclassesIndentationError and
+# and lineno structured attrs are set.  Subclasses IndentationError and
 # TabError inherit the same formatting.
 
 # 2-arg form: both filename (str) and lineno (int) present

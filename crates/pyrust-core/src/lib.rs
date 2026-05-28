@@ -3904,7 +3904,7 @@ fn exception_to_string(instance: &Rc<RefCell<PyInstance>>) -> String {
             .attrs
             .get("msg")
             .map(|v| v.to_py_str())
-            .unwrap_or_default();
+            .unwrap_or_else(|| "None".to_owned());
         let filename_str = borrowed
             .attrs
             .get("filename")
