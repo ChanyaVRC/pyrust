@@ -1898,12 +1898,13 @@ fn str_translate(s: &str, args: &[Value]) -> Result<Value> {
                             "character mapping must be in range(0x110000)".to_string(),
                         ));
                     }
-                    let replacement = char::from_u32(n as u32).ok_or_else(|| {
-                        PyError::named(
-                            "ValueError",
-                            "character mapping must be in range(0x110000)".to_string(),
-                        )
-                    })?;
+                    // SAFETY: n is in 0..=0x10FFFF after the range check above.
+                    // Surrogate codepoints (0xD800–0xDFFF) are not Unicode scalar
+                    // values, so char::from_u32 rejects them. CPython's str type
+                    // freely stores lone surrogates, so we use from_u32_unchecked
+                    // to match that behaviour; encode_utf8 encodes the surrogate as
+                    // a CESU-8 three-byte sequence in the output buffer.
+                    let replacement = unsafe { char::from_u32_unchecked(n as u32) };
                     out.push(replacement);
                 }
                 ValueKind::Bool(b) => {
