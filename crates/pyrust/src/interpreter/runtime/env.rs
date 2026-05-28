@@ -143,6 +143,55 @@ impl Interpreter {
                         Value::py_class(Rc::clone(&class)),
                     ));
                 }
+                // Issue #1617: numeric-tower read-only properties and conjugate
+                // are exposed on the `int` and `float` class objects as descriptors
+                // (matching CPython 3.12's `getset_descriptor` / `method_descriptor`).
+                // `bool` inherits from `int` and exposes the same descriptors with
+                // class_name "int" (CPython: `bool.real` says "of 'int' objects").
+                {
+                    let class_name = class.borrow().name.clone();
+                    let descriptor = match class_name.as_str() {
+                        "int" | "bool" => match name {
+                            "real" | "imag" | "numerator" | "denominator" => {
+                                Some(pyrust_builtins::numeric_attrs_descriptor::getset_descriptor(
+                                    match name {
+                                        "real" => "real",
+                                        "imag" => "imag",
+                                        "numerator" => "numerator",
+                                        _ => "denominator",
+                                    },
+                                    "int",
+                                ))
+                            }
+                            "conjugate" => {
+                                Some(pyrust_builtins::numeric_attrs_descriptor::method_descriptor(
+                                    "conjugate",
+                                    "int",
+                                ))
+                            }
+                            _ => None,
+                        },
+                        "float" => match name {
+                            "real" | "imag" => {
+                                Some(pyrust_builtins::numeric_attrs_descriptor::getset_descriptor(
+                                    if name == "real" { "real" } else { "imag" },
+                                    "float",
+                                ))
+                            }
+                            "conjugate" => {
+                                Some(pyrust_builtins::numeric_attrs_descriptor::method_descriptor(
+                                    "conjugate",
+                                    "float",
+                                ))
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(d) = descriptor {
+                        return Ok(d);
+                    }
+                }
                 if let Some(value) = lookup_class_attr(&class, name) {
                     // Descriptor protocol for class-level access: if the class
                     // attribute is a user-defined descriptor (PyInstance with

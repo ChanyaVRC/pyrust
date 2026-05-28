@@ -1379,6 +1379,50 @@ impl Interpreter {
                 })
             }
 
+            // Issue #1617: `method_descriptor` objects (e.g. `int.conjugate`)
+            // are callable with an explicit instance argument, just like
+            // CPython's method_descriptor (`int.conjugate(5)` → 5).
+            // Dispatch by calling the named method on the first positional arg.
+            _ if pyrust_builtins::numeric_attrs_descriptor::as_method_descriptor(&function)
+                .is_some() =>
+            {
+                let (attr_name, _class_name) =
+                    pyrust_builtins::numeric_attrs_descriptor::as_method_descriptor(&function)
+                        .expect("guard checked above");
+                // Reject keyword arguments — CPython's method_descriptor does not
+                // accept them.
+                if args.iter().any(|a| a.name.is_some()) {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "{}() takes no keyword arguments",
+                            attr_name
+                        ),
+                    ));
+                }
+                if args.is_empty() {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "descriptor '{}' of '{}' object needs an argument",
+                            attr_name, _class_name
+                        ),
+                    ));
+                }
+                // Re-dispatch as attribute access on the first argument.
+                let receiver = args[0].value.clone();
+                let remaining = &args[1..];
+                let method_val = self.get_attr(receiver.clone(), attr_name)?;
+                let expanded: Vec<ExpandedCallArg> = remaining
+                    .iter()
+                    .map(|a| ExpandedCallArg {
+                        name: a.name.clone(),
+                        value: a.value.clone(),
+                    })
+                    .collect();
+                self.call_function_expanded(method_val, &expanded)
+            }
+
             ValueKind::PyInstance(inst) => {
                 let inst_rc = Rc::clone(inst);
                 let class = Rc::clone(&inst_rc.borrow().class);
