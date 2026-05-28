@@ -2104,6 +2104,15 @@ impl Interpreter {
                 // CPython's module_setattro with NULL value path).
                 // Note: CPython's delete-path uses "'module' object has no
                 // attribute 'X'" (generic), while get-path uses the module name.
+                //
+                // __dict__ is a read-only slot on module objects — CPython 3.12
+                // raises AttributeError("readonly attribute") for `del m.__dict__`.
+                if name == "__dict__" {
+                    return Err(PyError::named(
+                        "AttributeError",
+                        "readonly attribute".to_string(),
+                    ));
+                }
                 let module = Rc::clone(module);
                 // Peek before removing.  A Value::unset() in attrs is a
                 // deletion tombstone for a synthetic dunder that was already
