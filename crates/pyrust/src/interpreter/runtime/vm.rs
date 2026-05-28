@@ -2667,6 +2667,24 @@ impl Interpreter {
                     // propagated, producing a traceback that omitted inner frames.
                     pyrust_core::reset_captured_error_frames();
                 }
+                Insn::PushExcContext(src) => {
+                    // Temporarily install R[src] as the active exception context
+                    // before running an inlined finally block.  Any raise inside
+                    // the finally will call attach_implicit_context and see this
+                    // value (the to-be-raised exception) rather than the
+                    // currently-handled exception below it on the stack.
+                    let val = vm_try!(vm_read(&regs, *src, num_locals));
+                    self.handled_exc_stack.push(val.clone());
+                    self.active_exception = Some(val);
+                }
+                Insn::PopExcContext => {
+                    // Undo a PushExcContext after the inlined finally block
+                    // completes normally.  Bounded by this frame's base depth.
+                    if self.handled_exc_stack.len() > exc_ctx_frame_base {
+                        self.handled_exc_stack.pop();
+                    }
+                    self.active_exception = self.handled_exc_stack.last().cloned();
+                }
                 Insn::RaiseAssert(msg_reg) => {
                     let msg = vm_try!(vm_read(&regs, *msg_reg, num_locals));
                     let msg_str = if msg.is_none() {
