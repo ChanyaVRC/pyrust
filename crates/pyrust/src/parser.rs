@@ -282,12 +282,58 @@ impl Parser {
                 self.bump();
                 Ok(Pattern::Literal(Expr::None))
             }
-            // Name: could be a capture pattern or the start of a class pattern.
-            // A name followed by `(` → class pattern.
-            // Otherwise → capture pattern (or dotted value pattern, not supported here).
+            // Name: capture pattern, value pattern (dotted), or class pattern.
+            // Per PEP 634: a dotted name like `Color.RED` is a value pattern —
+            // it is evaluated and compared with ==, not bound as a capture.
             Some(Token::Ident(name)) => {
                 self.bump();
-                if self.is(&Token::LParen) {
+                if self.is(&Token::Dot) {
+                    // Dotted name → value pattern.  Consume `.attr` chains to
+                    // build an `Expr::Attr` chain, then check for a trailing `(`
+                    // to decide class-pattern vs value-pattern.
+                    let mut expr = Expr::Var(name);
+                    while self.is(&Token::Dot) {
+                        self.bump();
+                        let attr = match self.current().cloned() {
+                            Some(Token::Ident(attr)) => {
+                                self.bump();
+                                attr
+                            }
+                            other => {
+                                return Err(PyError::Parse(format!(
+                                    "expected attribute name after '.' in pattern, found {other:?}"
+                                )));
+                            }
+                        };
+                        expr = Expr::Attr {
+                            target: Box::new(expr),
+                            name: attr,
+                        };
+                    }
+                    if self.is(&Token::LParen) {
+                        // Dotted class pattern: `module.Class(kwarg=pat, ...)`
+                        self.bump();
+                        let mut kwargs: Vec<(String, Pattern)> = Vec::new();
+                        while !self.is(&Token::RParen) && !self.is(&Token::Eof) {
+                            let attr = self.expect_ident("class pattern keyword")?;
+                            self.expect(&Token::Assign)?;
+                            let pat = self.parse_pattern()?;
+                            kwargs.push((attr, pat));
+                            if self.is(&Token::Comma) {
+                                self.bump();
+                            } else {
+                                break;
+                            }
+                        }
+                        self.expect(&Token::RParen)?;
+                        Ok(Pattern::Class {
+                            cls: Box::new(expr),
+                            kwargs,
+                        })
+                    } else {
+                        Ok(Pattern::Value(expr))
+                    }
+                } else if self.is(&Token::LParen) {
                     // Class pattern: Name(kwarg=pat, ...)
                     self.bump();
                     let cls = Expr::Var(name);

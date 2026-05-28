@@ -2841,7 +2841,7 @@ fn collect_pattern_names(
 ) {
     use crate::ast::Pattern;
     match pattern {
-        Pattern::Wildcard | Pattern::Literal(_) => {}
+        Pattern::Wildcard | Pattern::Literal(_) | Pattern::Value(_) => {}
         Pattern::Capture(name) => {
             if !global_names.contains(name) && !nonlocal_names.contains(name) {
                 names.insert(name.clone());
@@ -3445,7 +3445,8 @@ fn collect_pattern_bound_names(pattern: &crate::ast::Pattern, assigned: &mut Has
             }
         }
         crate::ast::Pattern::Wildcard
-        | crate::ast::Pattern::Literal(_) => {}
+        | crate::ast::Pattern::Literal(_)
+        | crate::ast::Pattern::Value(_) => {}
     }
 }
 
