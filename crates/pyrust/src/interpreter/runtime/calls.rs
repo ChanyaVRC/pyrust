@@ -85,10 +85,11 @@ impl Interpreter {
             pc: 0,
             done: false,
             saved_env,
-            // PEP 3134 per-generator exception state; both empty until
+            // PEP 3134 per-generator exception state; all empty until
             // the body actually pushes handlers and yields inside one.
             handled_exc_slice: HandledExcBuf::new(),
             active_exception: None,
+            exc_saved_active_slice: Vec::new(),
             local_index,
             // Meaningless until the first yield; initialised to 0 as a safe
             // default (the Yield opcode always overwrites this before resumption).
