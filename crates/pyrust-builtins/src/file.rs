@@ -11,6 +11,9 @@ use std::rc::Rc;
 use indexmap::IndexMap;
 use pyrust_core::{BuiltinState, BuiltinTypeOps, PyError, Result, Value, ValueKind};
 
+use crate::bytes::decode_bytes;
+use crate::string::encode_str_to_bytes;
+
 pub struct FileState {
     pub path: String,
     pub mode: String,
@@ -29,6 +32,10 @@ pub struct FileState {
     pub is_append: bool,
     /// Whether the file was opened in binary mode (`'b'` in mode string).
     pub is_binary: bool,
+    /// Encoding for text mode (e.g. "utf-8", "ascii", "latin-1").  Always
+    /// `None` for binary mode.  `None` in text mode means locale default
+    /// (pyrust uses UTF-8 as the locale default).
+    pub encoding: Option<String>,
 }
 
 impl FileState {
@@ -53,9 +60,14 @@ impl BuiltinTypeOps for FileOps {
             if s.is_binary {
                 format!("<_io.BufferedReader name='{}'>", s.path)
             } else {
+                let enc = s
+                    .encoding
+                    .as_deref()
+                    .unwrap_or("utf-8")
+                    .to_ascii_uppercase();
                 format!(
-                    "<_io.TextIOWrapper name='{}' mode='{}' encoding='UTF-8'>",
-                    s.path, s.mode
+                    "<_io.TextIOWrapper name='{}' mode='{}' encoding='{}'>",
+                    s.path, s.mode, enc
                 )
             }
         } else {
@@ -86,7 +98,12 @@ impl BuiltinTypeOps for FileOps {
                 if s.is_binary {
                     None
                 } else {
-                    Some(Value::string("UTF-8"))
+                    let enc = s
+                        .encoding
+                        .as_deref()
+                        .unwrap_or("utf-8")
+                        .to_ascii_uppercase();
+                    Some(Value::string(enc))
                 }
             }
             _ => None,
@@ -108,9 +125,30 @@ impl BuiltinTypeOps for FileOps {
     }
 }
 
-/// Implements `open(path, mode='r')`.  Returns a `BuiltinObject` carrying
-/// the file state plus the static `FileOps` dispatch table.
-pub fn open(path: &str, mode: &str) -> Result<Value> {
+/// Normalise an encoding name to the canonical lowercase form used internally
+/// (e.g. `"UTF-8"` → `"utf-8"`, `"UTF_8"` → `"utf-8"`).
+fn normalise_encoding(enc: &str) -> String {
+    enc.to_ascii_lowercase().replace('_', "-")
+}
+
+/// Implements `open(path, mode='r', buffering=-1, encoding=None, errors=None,
+/// newline=None, closefd=True, opener=None)`.
+///
+/// Returns a `BuiltinObject` carrying the file state plus the static `FileOps`
+/// dispatch table.
+///
+/// `encoding` is `None` when not supplied (defaults to UTF-8 for text mode).
+/// `closefd` must be `true` when `path` is a filename string; `false` is only
+/// valid when passing an integer file descriptor (not yet supported by pyrust).
+pub fn open(path: &str, mode: &str, encoding: Option<&str>, closefd: bool) -> Result<Value> {
+    // CPython raises ValueError when closefd=False and a filename is given.
+    if !closefd {
+        return Err(PyError::named(
+            "ValueError",
+            "closefd=False with a file path is not supported".to_string(),
+        ));
+    }
+
     for c in mode.chars() {
         if !matches!(c, 'r' | 'w' | 'a' | 'b' | 't' | '+') {
             return Err(PyError::named(
@@ -124,6 +162,40 @@ pub fn open(path: &str, mode: &str) -> Result<Value> {
     let is_read = mode.contains('r') || (!is_write && !is_append);
     let is_binary = mode.contains('b');
 
+    // Validate the encoding name early (before opening the file) so we get a
+    // clean LookupError rather than a confusing IO error.
+    let encoding_norm: Option<String> = if is_binary {
+        // Binary mode must not have an encoding.
+        if encoding.is_some() {
+            return Err(PyError::named(
+                "ValueError",
+                "binary mode doesn't take an encoding argument".to_string(),
+            ));
+        }
+        None
+    } else {
+        match encoding {
+            None => None,
+            Some(enc) => {
+                let norm = normalise_encoding(enc);
+                // Validate the name by attempting a dummy decode of empty bytes.
+                // This surfaces LookupError for unknown encodings before IO.
+                match norm.as_str() {
+                    "utf-8" | "utf8" | "u8" | "utf" | "utf-8-sig" | "utf8sig" | "utf-8sig"
+                    | "ascii" | "us-ascii" | "646" | "latin-1" | "iso-8859-1" | "8859"
+                    | "cp819" | "latin1" | "l1" | "utf-16" | "utf16" => {}
+                    _ => {
+                        return Err(PyError::named(
+                            "LookupError",
+                            format!("unknown encoding: {enc}"),
+                        ));
+                    }
+                }
+                Some(norm)
+            }
+        }
+    };
+
     let mut content = String::new();
     let mut content_bytes = Vec::new();
     if is_read {
@@ -131,16 +203,18 @@ pub fn open(path: &str, mode: &str) -> Result<Value> {
             content_bytes =
                 std::fs::read(path).map_err(|e| PyError::from_io_error(&e, Some(path)))?;
         } else {
-            let raw = std::fs::read_to_string(path)
-                .map_err(|e| PyError::from_io_error(&e, Some(path)))?;
+            let raw_bytes =
+                std::fs::read(path).map_err(|e| PyError::from_io_error(&e, Some(path)))?;
+            let enc = encoding_norm.as_deref().unwrap_or("utf-8");
+            let decoded = decode_text_bytes(&raw_bytes, enc)?;
             // On Windows, text mode strips \r from \r\n (universal newlines).
             #[cfg(windows)]
             {
-                content = raw.replace("\r\n", "\n");
+                content = decoded.replace("\r\n", "\n");
             }
             #[cfg(not(windows))]
             {
-                content = raw;
+                content = decoded;
             }
         }
     }
@@ -156,9 +230,119 @@ pub fn open(path: &str, mode: &str) -> Result<Value> {
         is_write,
         is_append,
         is_binary,
+        encoding: encoding_norm,
     };
     let state: Box<dyn Any> = Box::new(state);
     Ok(Value::builtin_object(FILE_OPS, state))
+}
+
+/// Decode raw file bytes to a `String` using the given normalised encoding name.
+/// Only called for text-mode opens; binary opens skip this entirely.
+fn decode_text_bytes(raw: &[u8], enc: &str) -> Result<String> {
+    // utf-8-sig: strip leading BOM (U+FEFF encoded as EF BB BF) if present.
+    if matches!(enc, "utf-8-sig" | "utf8sig" | "utf-8sig") {
+        let stripped = if raw.starts_with(b"\xEF\xBB\xBF") {
+            &raw[3..]
+        } else {
+            raw
+        };
+        return match std::str::from_utf8(stripped) {
+            Ok(s) => Ok(s.to_string()),
+            Err(e) => {
+                let start = e.valid_up_to();
+                let end = start + e.error_len().unwrap_or(stripped.len() - start);
+                Err(PyError::UnicodeDecodeError {
+                    encoding: "utf-8-sig".to_string(),
+                    object: stripped.to_vec(),
+                    start,
+                    end,
+                    reason: "invalid start byte".to_string(),
+                })
+            }
+        };
+    }
+    // utf-16: use Rust's std to parse both LE and BE variants via the BOM.
+    if matches!(enc, "utf-16" | "utf16") {
+        // Try to decode UTF-16 via the BOM; if no BOM, assume native endian.
+        // We pair bytes and decode; Rust doesn't have built-in UTF-16, so we
+        // do it manually.
+        let s = decode_utf16(raw)?;
+        return Ok(s);
+    }
+    // For all other encodings, delegate to the existing decode_bytes helper
+    // (which returns a `Value::Str`; we unwrap the inner string).
+    let val = decode_bytes(raw, enc, "strict")?;
+    match val.kind() {
+        pyrust_core::ValueKind::Str(s) => Ok(s.to_string()),
+        _ => Ok(String::new()),
+    }
+}
+
+/// Minimal UTF-16 decoder: handles BOM-prefixed streams (LE or BE).
+/// Falls back to native endian when no BOM is present.
+fn decode_utf16(raw: &[u8]) -> Result<String> {
+    if raw.len() % 2 != 0 {
+        // Odd byte count → truncated sequence.
+        return Err(PyError::named(
+            "UnicodeDecodeError",
+            "'utf-16' codec can't decode bytes: truncated data".to_string(),
+        ));
+    }
+    // Detect BOM.
+    let (le, payload) = if raw.starts_with(b"\xFF\xFE") {
+        (true, &raw[2..])
+    } else if raw.starts_with(b"\xFE\xFF") {
+        (false, &raw[2..])
+    } else {
+        // No BOM: assume LE (matches CPython's default on little-endian hosts).
+        (true, raw)
+    };
+    let words: Vec<u16> = payload
+        .chunks_exact(2)
+        .map(|c| {
+            if le {
+                u16::from_le_bytes([c[0], c[1]])
+            } else {
+                u16::from_be_bytes([c[0], c[1]])
+            }
+        })
+        .collect();
+    String::from_utf16(&words).map_err(|_| {
+        PyError::named(
+            "UnicodeDecodeError",
+            "'utf-16' codec can't decode bytes: invalid data".to_string(),
+        )
+    })
+}
+
+/// Encode a text string to bytes using the file's encoding for writing.
+/// Returns `Err` if the encoding is unsupported or the string can't be encoded.
+fn encode_text_to_bytes(s: &str, enc: &str) -> Result<Vec<u8>> {
+    // utf-8-sig: prepend BOM only when writing the first flush.
+    // Since we buffer the whole write_buf and flush at close time, we prepend
+    // the BOM to the entire output (matching CPython's behaviour for a freshly
+    // opened 'w' file with encoding='utf-8-sig').
+    if matches!(enc, "utf-8-sig" | "utf8sig" | "utf-8sig") {
+        let mut out = Vec::with_capacity(3 + s.len());
+        out.extend_from_slice(b"\xEF\xBB\xBF");
+        out.extend_from_slice(s.as_bytes());
+        return Ok(out);
+    }
+    if matches!(enc, "utf-16" | "utf16") {
+        // Write UTF-16 LE with BOM.
+        let mut out: Vec<u8> = Vec::with_capacity(2 + s.len() * 2);
+        out.extend_from_slice(b"\xFF\xFE"); // LE BOM
+        for c in s.encode_utf16() {
+            out.extend_from_slice(&c.to_le_bytes());
+        }
+        return Ok(out);
+    }
+    // Delegate to encode_str_to_bytes for utf-8 / ascii / latin-1.
+    let val = encode_str_to_bytes(s, enc, "strict")?;
+    match val.kind() {
+        pyrust_core::ValueKind::Bytes(rc) => Ok(rc.as_slice().to_vec()),
+        _ => Ok(Vec::new()),
+    }
 }
 
 fn call_file_method_inner(state: &BuiltinState, method: &str, args: &[Value]) -> Result<Value> {
@@ -632,11 +816,13 @@ fn close_file(state: &BuiltinState) -> Result<()> {
             std::fs::write(&s.path, &s.write_buf_bytes)
                 .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
         } else {
+            let enc = s.encoding.as_deref().unwrap_or("utf-8");
             // On Windows, text mode translates \n -> \r\n on write.
             #[cfg(windows)]
-            let text_bytes = s.write_buf.replace('\n', "\r\n").into_bytes();
+            let text_to_encode = s.write_buf.replace('\n', "\r\n");
             #[cfg(not(windows))]
-            let text_bytes: Vec<u8> = s.write_buf.as_bytes().to_vec();
+            let text_to_encode: &str = &s.write_buf;
+            let text_bytes = encode_text_to_bytes(text_to_encode, enc)?;
             std::fs::write(&s.path, &text_bytes)
                 .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
         }
@@ -651,10 +837,12 @@ fn close_file(state: &BuiltinState) -> Result<()> {
             f.write_all(&s.write_buf_bytes)
                 .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
         } else {
+            let enc = s.encoding.as_deref().unwrap_or("utf-8");
             #[cfg(windows)]
-            let text_bytes = s.write_buf.replace('\n', "\r\n").into_bytes();
+            let text_to_encode = s.write_buf.replace('\n', "\r\n");
             #[cfg(not(windows))]
-            let text_bytes: Vec<u8> = s.write_buf.as_bytes().to_vec();
+            let text_to_encode: &str = &s.write_buf;
+            let text_bytes = encode_text_to_bytes(text_to_encode, enc)?;
             f.write_all(&text_bytes)
                 .map_err(|e| PyError::from_io_error(&e, Some(&s.path)))?;
         }

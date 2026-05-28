@@ -3661,18 +3661,40 @@ pyrust_module! {
         _interp.call_range_expanded(args)
     }
 
-    /// CPython: open(file, mode='r', ...).
+    /// CPython: open(file, mode='r', buffering=-1, encoding=None, errors=None,
+    /// newline=None, closefd=True, opener=None).
     /// <https://docs.python.org/3/library/functions.html#open>
     ///
     /// First builtin migrated to the typed-signature dialect (#395) — the
     /// macro-emitted prelude rejects unknown kwargs, validates the positional
-    /// count, and binds `path` / `mode` as typed Rust locals.
+    /// count, and binds typed Rust locals.  The `encoding`, `buffering`,
+    /// `errors`, `newline`, and `closefd` parameters added here to fix #1360.
     fn open(
         path: PyStr,
         #[default("r".into())]
         mode: PyStr,
+        #[default(None)]
+        buffering: Option<PyValue>,
+        #[default(None)]
+        encoding: Option<PyStr>,
+        #[default(None)]
+        errors: Option<PyStr>,
+        #[default(None)]
+        newline: Option<PyStr>,
+        #[default(None)]
+        closefd: Option<PyValue>,
     ) -> Result<Value> {
-        pyrust_builtins::file::open(&path, &mode)
+        let _ = buffering; // accepted, not yet implemented (buffering is complex)
+        let _ = errors;    // accepted, not yet implemented
+        let _ = newline;   // accepted, not yet implemented
+        // `closefd` defaults to True when not supplied (None means absent).
+        let closefd_bool = closefd.map_or(true, |v| v.0.truthy());
+        pyrust_builtins::file::open(
+            &path,
+            &mode,
+            encoding.as_deref().map(|s| s.as_ref()),
+            closefd_bool,
+        )
     }
 
     /// Internal: variadic-call helper used by call sites that unpack
