@@ -895,7 +895,8 @@ impl Interpreter {
                 }
             }
             PyError::Class(cls, msg) => {
-                instantiate_exception(cls, vec![Value::string(msg)])
+                let args = if msg.is_empty() { vec![] } else { vec![Value::string(msg)] };
+                instantiate_exception(cls, args)
             }
             PyError::KeyError(key) => {
                 match self.instantiate_named_exception_with_value("KeyError", key) {
