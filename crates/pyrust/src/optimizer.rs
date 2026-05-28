@@ -3039,6 +3039,35 @@ fn pass_cse(insns: Vec<Insn>, num_locals: u32) -> Vec<Insn> {
                 }
             });
         }
+        // UnpackEx writes dst_base..dst_base+before+1+after.  writable_dst
+        // returns None for it (multi-register write), so evict the full range
+        // explicitly — mirrors the Unpack/LoadNoneRange handling above.
+        // Without this, a LoadConst that was emitted for a list element earlier
+        // in the same basic block can survive into the CSE table, causing a
+        // later LoadConst for the same constant value to be replaced by a
+        // CopyReg pointing at the now-overwritten temp register (issue #1358).
+        if let Insn::UnpackEx {
+            dst_base,
+            before,
+            after,
+            ..
+        } = &insn
+        {
+            let lo = *dst_base;
+            let hi = dst_base + *before as u32 + 1 + *after as u32;
+            table.retain(|k, prev_dst| {
+                if *prev_dst >= lo && *prev_dst < hi {
+                    return false;
+                }
+                match k {
+                    CseKey::LoadConst(_) => true,
+                    CseKey::BinOpConst(src, _, _) | CseKey::BinOpImm(src, _, _) => {
+                        *src < lo || *src >= hi
+                    }
+                    CseKey::UnaryOp(_, src) => *src < lo || *src >= hi,
+                }
+            });
+        }
         // YieldFrom writes both result_reg and sent_reg on resume.  Neither
         // register is in writable_dst (which is single-register), so evict
         // both explicitly here, mirroring the Unpack/LoadNoneRange pattern above.
@@ -3495,6 +3524,29 @@ fn pass_builtin_dce(insns: Vec<Insn>, num_locals: u32, names: &[String]) -> Vec<
             // LoadNoneRange writes a contiguous range — invalidate each slot.
             if let Insn::LoadNoneRange { start, count } = insn {
                 for r in *start..*start + *count as u32 {
+                    if r >= num_locals {
+                        pure_reg.remove(&r);
+                        const_reg.remove(&r);
+                    }
+                }
+            }
+            // UnpackEx writes dst_base .. dst_base+before+1+after; writable_dst
+            // returns None for it, so we must invalidate each destination slot
+            // explicitly here.  Without this, registers that held LoadConst
+            // values before the UnpackEx remain in const_reg even though the
+            // UnpackEx overwrote them at runtime, causing pass_builtin_dce to
+            // incorrectly treat the stale arg registers as compile-time constants
+            // and eliminate the subsequent LoadConst for the next pure call's
+            // argument (issue #1358).
+            if let Insn::UnpackEx {
+                dst_base,
+                before,
+                after,
+                ..
+            } = insn
+            {
+                for i in 0..(*before as u32 + 1 + *after as u32) {
+                    let r = dst_base + i;
                     if r >= num_locals {
                         pure_reg.remove(&r);
                         const_reg.remove(&r);
