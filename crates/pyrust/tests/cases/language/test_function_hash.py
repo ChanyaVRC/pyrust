@@ -77,6 +77,13 @@ print(dm[m2])
 # Classmethod
 print(type(hash(A.cm)).__name__)
 print(hash(A.cm) == hash(A.cm))
+# Classmethod equality: same func+class -> equal
+print(A.cm == A.cm)
+# Classmethod as dict key with deduplication
+dc = {A.cm: "first"}
+dc[A.cm] = "second"
+print(len(dc))
+print(dc[A.cm])
 
 # Built-in functions
 print(type(hash(print)).__name__)

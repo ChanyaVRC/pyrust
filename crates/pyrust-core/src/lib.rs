@@ -3325,6 +3325,16 @@ impl PartialEq for Value {
                     receiver: br,
                 },
             ) => Rc::ptr_eq(af, bf) && Rc::ptr_eq(ar, br),
+            (
+                ValueKind::ClassBoundMethod {
+                    function: af,
+                    class: ac,
+                },
+                ValueKind::ClassBoundMethod {
+                    function: bf,
+                    class: bc,
+                },
+            ) => Rc::ptr_eq(af, bf) && Rc::ptr_eq(ac, bc),
             // Built-in objects dispatch equality through their ops trait so
             // pyrust-core never names a concrete built-in type.  Try both
             // directions so e.g. `frozenset == set` and `set == frozenset`
