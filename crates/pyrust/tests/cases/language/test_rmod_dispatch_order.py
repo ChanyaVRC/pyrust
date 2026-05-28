@@ -42,3 +42,17 @@ print(10 % n)   # rmod(10)
 print("%d" % 42)        # 42
 print("%s" % "hello")   # hello
 print("%s %s" % ("a", "b"))  # a b
+
+# str subclass lhs: printf formatting must still win over __rmod__
+class MyStr(str):
+    pass
+
+class RModSub:
+    def __rmod__(self, fmt):
+        return "RMOD_SUB"
+
+s = MyStr("sub: %s")
+obj_sub = RModSub()
+result_sub = s % obj_sub
+print(result_sub != "RMOD_SUB")   # True
+print(result_sub.startswith("sub: "))  # True
