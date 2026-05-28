@@ -5621,6 +5621,14 @@ impl Compiler {
                 self.free_temp(lit);
                 fail_patches.push(jmp);
             }
+            Pattern::Value(expr) => {
+                // Value pattern: evaluate the dotted attribute expression and
+                // compare with == (same as a literal match, no binding).
+                let val = self.compile_expr(expr);
+                let jmp = self.emit(Insn::CmpJumpIfFalse(subj, BinaryOp::Eq, val, 0));
+                self.free_temp(val);
+                fail_patches.push(jmp);
+            }
             Pattern::Or(alternatives) => {
                 // Try each alternative; if one matches, jump to success.
                 // If all fail, fall through to after (which will be patched to next arm).

@@ -172,6 +172,10 @@ pub enum Pattern {
         cls: Box<Expr>,
         kwargs: Vec<(String, Pattern)>,
     },
+    /// `a.b.c` — value pattern (dotted attribute lookup, compared with ==).
+    /// Per PEP 634: a name followed by at least one `.attr` is a value pattern,
+    /// not a capture.  The inner `Expr` is always an `Expr::Attr` chain.
+    Value(Expr),
 }
 
 /// An entry in a dict literal: either a `key: value` pair or a `**expr` splat
