@@ -2886,8 +2886,12 @@ impl Interpreter {
                                 args,
                             )?;
                             if !result.is_none() {
-                                return Err(PyError::Runtime(
-                                    "__init__() should return None".to_string(),
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    &format!(
+                                        "__init__() should return None, not '{}'",
+                                        pyrust_core::builtin_type_name(&result),
+                                    ),
                                 ));
                             }
                         }
@@ -2967,8 +2971,12 @@ impl Interpreter {
                     args,
                 )?;
                 if !result.is_none() {
-                    return Err(PyError::Runtime(
-                        "__init__() should return None".to_string(),
+                    return Err(PyError::named(
+                        "TypeError",
+                        &format!(
+                            "__init__() should return None, not '{}'",
+                            pyrust_core::builtin_type_name(&result),
+                        ),
                     ));
                 }
             }
