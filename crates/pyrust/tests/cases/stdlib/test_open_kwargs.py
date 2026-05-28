@@ -138,3 +138,24 @@ with open(_TMPFILE, "r", encoding="latin-1") as f:
     print(len(s), ord(s[0]), ord(s[1]), ord(s[2]))  # 3 233 224 252
 
 cleanup()
+
+# ---------------------------------------------------------------------------
+# .encoding attribute preserves user-supplied case (CPython verbatim passthrough)
+# ---------------------------------------------------------------------------
+
+with open(_TMPFILE, "w") as f:
+    f.write("x")
+
+f = open(_TMPFILE, "w", encoding="utf-8")
+print(f.encoding)   # utf-8 (not UTF-8)
+f.close()
+
+f = open(_TMPFILE, "w", encoding="Utf-8")
+print(f.encoding)   # Utf-8
+f.close()
+
+f = open(_TMPFILE, "w", encoding="latin-1")
+print(f.encoding)   # latin-1
+f.close()
+
+cleanup()
