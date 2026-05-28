@@ -3005,12 +3005,20 @@ pyrust_module! {
                             format!("invalid literal for int() with base 10: {repr}"),
                         )
                     })?;
-                    s.trim().parse::<i64>().map(Value::int).map_err(|_| {
-                        PyError::named(
-                            "ValueError",
-                            format!("invalid literal for int() with base 10: {repr}"),
-                        )
-                    })
+                    let trimmed = s.trim();
+                    match trimmed.parse::<i64>() {
+                        Ok(v) => Ok(Value::int(v)),
+                        Err(_) => {
+                            // Overflow: try BigInt before giving up.
+                            use num_traits::Num as _;
+                            crate::value::PyBigInt::from_str_radix(trimmed, 10)
+                                .map(Value::bigint)
+                                .map_err(|_| PyError::named(
+                                    "ValueError",
+                                    format!("invalid literal for int() with base 10: {repr}"),
+                                ))
+                        }
+                    }
                 }
                 ValueKind::PyInstance(inst) => {
                     let inst_rc = Rc::clone(inst);
