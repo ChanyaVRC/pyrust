@@ -1812,6 +1812,184 @@ pyrust_module! {
         Ok(Value::dict(snapshot_current_locals(_interp)))
     }
 
+    /// CPython: exec(source[, globals[, locals]]) — execute Python source code.
+    /// <https://docs.python.org/3/library/functions.html#exec>
+    ///
+    /// `source` may be a string or a code object returned by `compile()`.
+    /// When `globals` and `locals` are omitted the code runs in the current
+    /// interpreter's module namespace (assignments become module globals).
+    /// When an explicit `globals` dict is supplied the code runs in that
+    /// namespace.  Returns `None`.
+    fn exec(args) -> Result<Value> {
+        let (source_val, globals_opt, locals_opt) = parse_exec_eval_args(FN_NAME, args)?;
+        // Code object path (from compile()).
+        if let Some(result) = crate::interpreter::with_code_state(&source_val, |cs| {
+            use crate::interpreter::CodeMode;
+            match cs.mode {
+                CodeMode::Exec => {
+                    _interp.run_exec_code(
+                        Rc::clone(&cs.code),
+                        Rc::clone(&cs.local_index),
+                        globals_opt.clone(),
+                        locals_opt.clone(),
+                    )
+                }
+                CodeMode::Eval => {
+                    // exec() can take an eval-mode code object too (CPython allows it).
+                    _interp.run_eval_code_dispatch(
+                        Rc::clone(&cs.code),
+                        Rc::clone(&cs.local_index),
+                        globals_opt.clone(),
+                        locals_opt.clone(),
+                    ).map(|_| ())
+                }
+            }
+        }) {
+            result?;
+            return Ok(Value::none());
+        }
+        // String path.
+        let source = source_val.as_str().ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                format!(
+                    "{FN_NAME}() arg 1 must be a string or code object, not '{}'",
+                    value_type_name_str(&source_val),
+                ),
+            )
+        })?;
+        _interp.exec_source(source, globals_opt, locals_opt)?;
+        Ok(Value::none())
+    }
+
+    /// CPython: eval(expression[, globals[, locals]]) — evaluate a Python
+    /// expression string and return its value.
+    /// <https://docs.python.org/3/library/functions.html#eval>
+    fn eval(args) -> Result<Value> {
+        let (source_val, globals_opt, locals_opt) = parse_exec_eval_args(FN_NAME, args)?;
+        // Code object path (from compile()).
+        if let Some(result) = crate::interpreter::with_code_state(&source_val, |cs| {
+            _interp.run_eval_code_dispatch(
+                Rc::clone(&cs.code),
+                Rc::clone(&cs.local_index),
+                globals_opt.clone(),
+                locals_opt.clone(),
+            )
+        }) {
+            return result;
+        }
+        // String path.
+        let source = source_val.as_str().ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                format!(
+                    "{FN_NAME}() arg 1 must be a string or code object, not '{}'",
+                    value_type_name_str(&source_val),
+                ),
+            )
+        })?;
+        _interp.eval_source(source, globals_opt, locals_opt)
+    }
+
+    /// CPython: compile(source, filename, mode, ...) — compile source to a code
+    /// object.
+    /// <https://docs.python.org/3/library/functions.html#compile>
+    ///
+    /// pyrust stores the compiled `FnCode` wrapped in a `Value`; the returned
+    /// value can be passed to `exec()` or `eval()`.  Only the `"exec"` and
+    /// `"eval"` modes are supported; `"single"` raises `NotImplementedError`.
+    fn compile(args) -> Result<Value> {
+        // Reject keyword arguments — CPython accepts them but we keep it simple.
+        if args.iter().any(|a| a.name.is_some()) {
+            return Err(PyError::named(
+                "TypeError",
+                format!("{FN_NAME}() does not accept keyword arguments"),
+            ));
+        }
+        if args.len() < 3 {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "{FN_NAME}() requires at least 3 arguments ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        let source_val = &args[0].value;
+        let source = source_val.as_str().ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                format!(
+                    "{FN_NAME}() arg 1 must be a string, not '{}'",
+                    value_type_name_str(source_val),
+                ),
+            )
+        })?;
+        // filename (arg 2) — used for error messages; we store it but don't
+        // deeply integrate it for now.
+        let mode_val = &args[2].value;
+        let mode = mode_val.as_str().ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                format!(
+                    "{FN_NAME}() arg 3 must be a string, not '{}'",
+                    value_type_name_str(mode_val),
+                ),
+            )
+        })?;
+        match mode {
+            "exec" => {
+                let program = crate::interpreter::Interpreter::parse_source_to_stmts(source)?;
+                let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let local_names =
+                    crate::interpreter::collect_local_names(&[], &program, &empty, &empty);
+                const MAX_SCRIPT_LOCALS: usize = 200;
+                let local_index: Rc<std::collections::HashMap<String, crate::bytecode::Reg>> =
+                    if local_names.len() <= MAX_SCRIPT_LOCALS {
+                        Rc::new(
+                            (0u32..)
+                                .zip(local_names.iter())
+                                .map(|(i, n)| (n.clone(), i))
+                                .collect(),
+                        )
+                    } else {
+                        Rc::new(std::collections::HashMap::new())
+                    };
+                let code = crate::compiler::compile_script(
+                    &program, Rc::clone(&local_index), false,
+                )
+                .map(|c| Rc::new(crate::optimizer::optimize(c)))?;
+                Ok(crate::interpreter::value_code_object(
+                    code,
+                    crate::interpreter::CodeMode::Exec,
+                    local_index,
+                ))
+            }
+            "eval" => {
+                let trimmed = source.trim();
+                let program = crate::interpreter::Interpreter::parse_source_to_stmts(trimmed)?;
+                let local_index: Rc<std::collections::HashMap<String, crate::bytecode::Reg>> =
+                    Rc::new(std::collections::HashMap::new());
+                let code =
+                    crate::compiler::compile_eval_expr(&program, Rc::clone(&local_index))
+                        .map(|c| Rc::new(crate::optimizer::optimize(c)))?;
+                Ok(crate::interpreter::value_code_object(
+                    code,
+                    crate::interpreter::CodeMode::Eval,
+                    local_index,
+                ))
+            }
+            "single" => Err(PyError::named(
+                "NotImplementedError",
+                "compile() mode 'single' is not yet implemented".to_string(),
+            )),
+            other => Err(PyError::named(
+                "ValueError",
+                format!("compile() mode must be 'exec', 'eval' or 'single', not {other:?}"),
+            )),
+        }
+    }
+
     /// CPython: dir([object]) — list of attribute names.
     /// <https://docs.python.org/3/library/functions.html#dir>
     fn dir(args) -> Result<Value> {
@@ -7900,6 +8078,40 @@ fn builtin_iter_type_name(v: &Value) -> &'static str {
 /// `NativeIterFrame::type_name`, or the sentinel names for `MapIter` /
 /// `FilterIter` / `EnumerateIter` / `ZipIter`.  All other value kinds
 /// delegate to `value_type_name_str`.
+/// Parse and validate arguments for `exec()` and `eval()`.
+///
+/// Both accept `(source[, globals[, locals]])`.  Returns
+/// `(source_value, globals_option, locals_option)`.
+fn parse_exec_eval_args(
+    fn_name: &str,
+    args: &[crate::interpreter::ExpandedCallArg],
+) -> Result<(Value, Option<Value>, Option<Value>)> {
+    // Reject keyword arguments.
+    if args.iter().any(|a| a.name.is_some()) {
+        return Err(PyError::named(
+            "TypeError",
+            format!("{fn_name}() takes no keyword arguments"),
+        ));
+    }
+    if args.is_empty() || args.len() > 3 {
+        return Err(PyError::named(
+            "TypeError",
+            format!(
+                "{fn_name}() takes from 1 to 3 positional arguments ({} given)",
+                args.len()
+            ),
+        ));
+    }
+    let source_val = args[0].value.clone();
+    let globals_opt = args.get(1).map(|a| a.value.clone()).and_then(|v| {
+        if matches!(v.kind(), ValueKind::None) { None } else { Some(v) }
+    });
+    let locals_opt = args.get(2).map(|a| a.value.clone()).and_then(|v| {
+        if matches!(v.kind(), ValueKind::None) { None } else { Some(v) }
+    });
+    Ok((source_val, globals_opt, locals_opt))
+}
+
 fn full_type_name_str(v: &Value) -> std::borrow::Cow<'static, str> {
     if let ValueKind::Generator(state_rc) = v.kind() {
         let borrow = state_rc.borrow();

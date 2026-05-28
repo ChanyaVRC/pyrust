@@ -533,6 +533,75 @@ impl std::ops::IndexMut<usize> for RegSlice {
     }
 }
 
+// ─── Code object (result of compile()) ───────────────────────────────────────
+//
+// pyrust represents `compile()` results as `BuiltinObject` values whose state
+// holds a `CodeState`.  `exec()` and `eval()` detect these by the type name
+// `"code"` and extract the precompiled `FnCode` and mode.  This avoids adding
+// a new `ValueKind` variant to `pyrust-core`.
+
+/// The two modes in which compiled code can be run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CodeMode {
+    /// Run as a sequence of statements; return `None`.
+    Exec,
+    /// Run as a single expression; return the expression's value.
+    Eval,
+}
+
+/// State held by a code object `Value`.
+pub(crate) struct CodeState {
+    pub(crate) code: Rc<FnCode>,
+    pub(crate) mode: CodeMode,
+    /// Local-index table used when compiling/running the code.
+    pub(crate) local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
+}
+
+struct CodeObjectOps;
+
+static CODE_OBJECT_OPS: CodeObjectOps = CodeObjectOps;
+
+impl pyrust_core::BuiltinTypeOps for CodeObjectOps {
+    fn type_name(&self) -> &'static str {
+        "code"
+    }
+
+    fn repr(&self, _state: &pyrust_core::BuiltinState) -> String {
+        "<code object>".to_string()
+    }
+
+    fn truthy(&self, _state: &pyrust_core::BuiltinState) -> bool {
+        true
+    }
+}
+
+/// Construct a `Value` wrapping a compiled code object.
+pub(crate) fn value_code_object(
+    code: Rc<FnCode>,
+    mode: CodeMode,
+    local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
+) -> Value {
+    use std::any::Any;
+    let state: Box<dyn Any> = Box::new(CodeState {
+        code,
+        mode,
+        local_index,
+    });
+    Value::builtin_object(&CODE_OBJECT_OPS, state)
+}
+
+/// If `value` is a code object, call `f` with its `CodeState` and return the result.
+pub(crate) fn with_code_state<R>(value: &Value, f: impl FnOnce(&CodeState) -> R) -> Option<R> {
+    if let ValueKind::BuiltinObject { ops, state } = value.kind()
+        && ops.type_name() == "code"
+    {
+        let borrow = state.borrow();
+        let cs = borrow.downcast_ref::<CodeState>()?;
+        return Some(f(cs));
+    }
+    None
+}
+
 include!("interpreter/runtime.rs");
 
 include!("interpreter/helpers.rs");
