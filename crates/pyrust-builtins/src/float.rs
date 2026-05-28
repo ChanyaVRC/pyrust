@@ -3,7 +3,9 @@ use pyrust_core::{PyBigInt, PyError, PyToPrimitive, PyZero, Result, Value};
 /// Canonical list of *instance* method names dispatched by [`call`].
 /// Single source of truth for `has_method` and the drift-guard test.
 /// `fromhex` is a classmethod and is registered separately in `helpers.rs`.
-pub const METHODS: &[&str] = &["is_integer", "as_integer_ratio", "hex"];
+/// Note: `real` and `imag` are read-only properties intercepted in `get_attr`;
+/// `conjugate` is a zero-arg method and lives here.
+pub const METHODS: &[&str] = &["conjugate", "is_integer", "as_integer_ratio", "hex"];
 
 pub fn has_method(method: &str) -> bool {
     METHODS.contains(&method)
@@ -15,6 +17,19 @@ pub fn has_method(method: &str) -> bool {
 /// positional arguments (after the receiver).
 pub fn call(method: &str, receiver: f64, args: &[Value]) -> Result<Value> {
     match method {
+        "conjugate" => {
+            if !args.is_empty() {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "float.conjugate() takes no arguments ({} given)",
+                        args.len()
+                    ),
+                ));
+            }
+            // float.conjugate() returns self (float has no imaginary part).
+            Ok(Value::float(receiver))
+        }
         "is_integer" => {
             if !args.is_empty() {
                 return Err(PyError::named(
