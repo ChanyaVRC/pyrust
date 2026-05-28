@@ -414,9 +414,15 @@ pub fn decode_bytes(bytes: &[u8], encoding: &str, errors: &str) -> Result<Value>
                                 "unexpected end of data"
                             } else {
                                 let b = bytes[start];
-                                // Leading bits: 10xxxxxx = continuation byte (valid range
-                                // 0x80..=0xBF), otherwise it's an invalid start byte.
-                                if b & 0xC0 == 0x80 {
+                                // CPython 3.12 reports "invalid continuation byte" when the
+                                // byte at `start` is a valid multi-byte sequence start
+                                // (0xC2..=0xF4) but the bytes that follow are not valid
+                                // continuation bytes.  All other cases (lone continuation
+                                // bytes 0x80..=0xBF, overlong-sequence starts 0xC0..=0xC1,
+                                // and out-of-range starts 0xF5..=0xFF) are "invalid start
+                                // byte" because the byte itself cannot begin a legal UTF-8
+                                // sequence.
+                                if matches!(b, 0xC2..=0xF4) {
                                     "invalid continuation byte"
                                 } else {
                                     "invalid start byte"
