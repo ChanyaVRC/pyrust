@@ -1518,6 +1518,10 @@ pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value
     // attribute.  User-constructed instances (`NameError('msg')`) have `name = None`.
     // Interpreter-raised instances set the name via `instantiate_name_error` instead.
     let is_name_error = class_chain_contains_name(&class, "NameError");
+    // CPython 3.12: AttributeError has `.name` and `.obj` attributes.
+    // User-constructed instances (`AttributeError('msg')`) have both set to `None`.
+    // Interpreter-raised instances set them via `instantiate_attribute_error` instead.
+    let is_attribute_error = class_chain_contains_name(&class, "AttributeError");
     attrs.insert("args".to_string(), Value::tuple(args.clone()));
     // CPython 3.12: every BaseException instance has __traceback__ initialised
     // to None at __new__ time.  The VM's handle_vm_error overwrites it with a
@@ -1640,6 +1644,13 @@ pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value
         // instances set the name via `instantiate_name_error` with the actual identifier.
         attrs.insert("name".to_string(), Value::none());
     }
+    if is_attribute_error {
+        // CPython 3.12: user-constructed AttributeError instances always have `.name`
+        // and `.obj` attributes, both defaulting to `None`.  Interpreter-raised
+        // instances set them via `instantiate_attribute_error` with the actual values.
+        attrs.insert("name".to_string(), Value::none());
+        attrs.insert("obj".to_string(), Value::none());
+    }
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 
@@ -1723,6 +1734,33 @@ pub(crate) fn instantiate_name_error(
         None => Value::none(),
     };
     attrs.insert("name".to_string(), name_val);
+    Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
+}
+
+/// Instantiate an `AttributeError` with the `.name` and `.obj` instance
+/// attributes set, matching CPython 3.12 parity.
+///
+/// CPython 3.12: when the interpreter raises `AttributeError` for a missing
+/// attribute, it stores the attribute name as `self.name` and the receiver
+/// object as `self.obj`.  User-constructed instances (e.g.
+/// `AttributeError('msg')`) have both set to `None`.
+///
+/// `name` is stored as `.name`; pass `None` when not available.
+/// `obj` is stored as `.obj`; pass `None` when not available.
+pub(crate) fn instantiate_attribute_error(
+    class: Rc<RefCell<PyClass>>,
+    message: String,
+    name: Option<String>,
+    obj: Option<Value>,
+) -> Value {
+    let mut attrs = IndexMap::new();
+    attrs.insert("args".to_string(), Value::tuple(vec![Value::string(message)]));
+    attrs.insert("__traceback__".to_string(), Value::none());
+    attrs.insert(
+        "name".to_string(),
+        name.map(Value::string).unwrap_or_else(Value::none),
+    );
+    attrs.insert("obj".to_string(), obj.unwrap_or_else(Value::none));
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 

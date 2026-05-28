@@ -336,6 +336,19 @@ impl Interpreter {
         Ok(instantiate_import_error(class, message, module_name))
     }
 
+    /// Instantiate an `AttributeError` with the CPython 3.12 `.name` and `.obj`
+    /// instance attributes set to the missing attribute name and the receiver.
+    fn instantiate_attribute_error_exception(
+        &self,
+        message: String,
+        name: Option<String>,
+        obj: Option<Value>,
+    ) -> Result<Value> {
+        let class = lookup_exc_class("AttributeError")
+            .ok_or_else(|| PyError::Runtime("built-in exception 'AttributeError' is not defined".to_string()))?;
+        Ok(instantiate_attribute_error(class, message, name, obj))
+    }
+
     /// Instantiate an `OSError` (or subclass) with `errno`, `strerror`, and
     /// `filename` instance attributes set, matching CPython 3.12's behaviour
     /// when raising OS errors from real filesystem operations.

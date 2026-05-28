@@ -909,6 +909,12 @@ impl Interpreter {
                     Err(e2) => return Err(e2),
                 }
             }
+            PyError::AttributeError { message, name, obj } => {
+                match self.instantiate_attribute_error_exception(message, name, obj) {
+                    Ok(v) => v,
+                    Err(e2) => return Err(e2),
+                }
+            }
             PyError::ImportError { class_name, message, module_name } => {
                 match self.instantiate_import_error_exception(class_name, message, module_name) {
                     Ok(v) => v,
@@ -4406,22 +4412,29 @@ impl Interpreter {
                             // Raise AttributeError for any name in __all__ that
                             // is absent from the module (CPython behaviour).
                             let mut out = Vec::with_capacity(names.len());
-                            let mut attr_err: Option<String> = None;
+                            let mut attr_err: Option<(String, String)> = None;
                             for name in &names {
                                 match borrowed2.attrs.get(name) {
                                     Some(v) => out.push((name.clone(), v.clone())),
                                     None => {
-                                        attr_err = Some(format!(
-                                            "module '{}' has no attribute '{}'",
-                                            mod_name, name,
+                                        attr_err = Some((
+                                            format!(
+                                                "module '{}' has no attribute '{}'",
+                                                mod_name, name,
+                                            ),
+                                            name.clone(),
                                         ));
                                         break;
                                     }
                                 }
                             }
                             drop(borrowed2);
-                            if let Some(msg) = attr_err {
-                                vm_try!(Err(PyError::named("AttributeError", msg)));
+                            if let Some((attr_err_msg, attr_err_name)) = attr_err {
+                                vm_try!(Err(PyError::attribute_error(
+                                    attr_err_msg,
+                                    Some(attr_err_name),
+                                    None,
+                                )));
                             }
                             out
                         } else {
@@ -5128,9 +5141,10 @@ impl Interpreter {
                 let sent_value = args.into_iter().next().unwrap();
                 self.generator_send(receiver, sent_value)
             }
-            other => Err(PyError::named(
-                "AttributeError",
+            other => Err(PyError::attribute_error(
                 format!("'generator' object has no attribute '{}'", other),
+                Some(other.to_string()),
+                None,
             )),
         }
     }
@@ -5334,9 +5348,10 @@ impl Interpreter {
         if borrow.downcast_mut::<NativeIterFrame>().is_some()
             || borrow.downcast_mut::<GetItemIter>().is_some()
         {
-            return Err(PyError::named(
-                "AttributeError",
-                "'generator' object has no attribute 'send'".to_string(),
+            return Err(PyError::attribute_error(
+                "'generator' object has no attribute 'send'",
+                Some("send".to_string()),
+                None,
             ));
         }
 

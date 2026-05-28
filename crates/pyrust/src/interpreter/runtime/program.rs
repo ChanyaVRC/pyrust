@@ -253,6 +253,9 @@ impl Interpreter {
                     PyError::NameError { class_name, message, .. } => {
                         format!("{class_name}: {message}")
                     }
+                    PyError::AttributeError { message, .. } => {
+                        format!("AttributeError: {message}")
+                    }
                     PyError::ImportError { class_name, message, .. } => {
                         format!("{class_name}: {message}")
                     }
