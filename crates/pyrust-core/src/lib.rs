@@ -4417,6 +4417,23 @@ pub enum PyError {
         end: usize,
         reason: String,
     },
+    /// A `NameError` (or `UnboundLocalError`) raised by the VM when a name
+    /// lookup fails.  Carries the identifier string so the VM can set `.name`
+    /// on the resulting instance, matching CPython 3.12 parity.
+    ///
+    /// CPython 3.12: `NameError.__init__` stores the identifier that was not
+    /// found as `self.name`.  The attribute is `None` for user-constructed
+    /// instances (`NameError('msg')`) and the identifier string for
+    /// interpreter-raised instances.
+    ///
+    /// `class_name` is `"NameError"` or `"UnboundLocalError"`.
+    /// `name` is the identifier that was not found (set as the `.name`
+    /// attribute); `None` for `UnboundLocalError` (CPython 3.12 parity).
+    NameError {
+        class_name: &'static str,
+        message: String,
+        name: Option<String>,
+    },
     Raised(Value),
 }
 
@@ -4467,6 +4484,25 @@ impl PyError {
             class_name,
             message: message.into(),
             module_name,
+        }
+    }
+
+    /// Constructor for a `NameError` or `UnboundLocalError` that carries the
+    /// identifier name so the VM can set `.name` on the resulting instance.
+    ///
+    /// `class_name` must be `"NameError"` or `"UnboundLocalError"`.
+    /// `name` is the identifier that was not found; pass `None` for
+    /// `UnboundLocalError` (CPython 3.12: `UnboundLocalError.name` is `None`).
+    #[inline]
+    pub fn name_error(
+        class_name: &'static str,
+        message: impl Into<String>,
+        name: Option<String>,
+    ) -> Self {
+        PyError::NameError {
+            class_name,
+            message: message.into(),
+            name,
         }
     }
 
@@ -4644,6 +4680,13 @@ impl fmt::Display for PyError {
             } => {
                 let msg = format_unicode_encode_str(encoding, object, *start, *end, reason);
                 write!(f, "UnicodeEncodeError: {msg}")
+            }
+            PyError::NameError {
+                class_name,
+                message,
+                ..
+            } => {
+                write!(f, "{class_name}: {message}")
             }
             PyError::Raised(value) => write!(f, "Uncaught exception: {}", value.repr()),
         }

@@ -1514,6 +1514,10 @@ pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value
     let is_unicode_translate_error = !is_unicode_decode_error
         && !is_unicode_encode_error
         && class_chain_contains_name(&class, "UnicodeTranslateError");
+    // CPython 3.12: NameError (and its subclass UnboundLocalError) have a `.name`
+    // attribute.  User-constructed instances (`NameError('msg')`) have `name = None`.
+    // Interpreter-raised instances set the name via `instantiate_name_error` instead.
+    let is_name_error = class_chain_contains_name(&class, "NameError");
     attrs.insert("args".to_string(), Value::tuple(args.clone()));
     // CPython 3.12: every BaseException instance has __traceback__ initialised
     // to None at __new__ time.  The VM's handle_vm_error overwrites it with a
@@ -1630,6 +1634,12 @@ pub(crate) fn instantiate_exception(class: Rc<RefCell<PyClass>>, args: Vec<Value
         // We set attributes from args when the right number are present.
         unicode_exc_set_attrs(&mut attrs, &args, is_unicode_decode_error || is_unicode_encode_error);
     }
+    if is_name_error {
+        // CPython 3.12: user-constructed NameError (and UnboundLocalError) instances
+        // always have a `.name` attribute, defaulting to `None`.  Interpreter-raised
+        // instances set the name via `instantiate_name_error` with the actual identifier.
+        attrs.insert("name".to_string(), Value::none());
+    }
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 
@@ -1687,6 +1697,32 @@ pub(crate) fn instantiate_import_error(
     };
     attrs.insert("name".to_string(), name_val);
     attrs.insert("path".to_string(), Value::none());
+    Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
+}
+
+/// Instantiate a `NameError` or `UnboundLocalError` with the `.name` instance
+/// attribute set, matching CPython 3.12 parity.
+///
+/// CPython 3.12: when the interpreter raises `NameError` for a missing
+/// identifier, it stores the identifier string as `self.name`.  User-
+/// constructed instances (e.g. `NameError('msg')`) have `name = None`.
+/// `UnboundLocalError.name` is always `None` in CPython 3.12.
+///
+/// `name` is stored as `.name`; pass `None` for `UnboundLocalError` or when
+/// the identifier is not available.
+pub(crate) fn instantiate_name_error(
+    class: Rc<RefCell<PyClass>>,
+    message: String,
+    name: Option<String>,
+) -> Value {
+    let mut attrs = IndexMap::new();
+    attrs.insert("args".to_string(), Value::tuple(vec![Value::string(message)]));
+    attrs.insert("__traceback__".to_string(), Value::none());
+    let name_val = match name {
+        Some(n) => Value::string(n),
+        None => Value::none(),
+    };
+    attrs.insert("name".to_string(), name_val);
     Value::py_instance(Rc::new(RefCell::new(PyInstance { class, attrs })))
 }
 

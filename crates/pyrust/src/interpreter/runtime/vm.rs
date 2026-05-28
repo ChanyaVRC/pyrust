@@ -903,6 +903,12 @@ impl Interpreter {
                     Err(e2) => return Err(e2),
                 }
             }
+            PyError::NameError { class_name, message, name } => {
+                match self.instantiate_name_error_exception(class_name, message, name) {
+                    Ok(v) => v,
+                    Err(e2) => return Err(e2),
+                }
+            }
             PyError::ImportError { class_name, message, module_name } => {
                 match self.instantiate_import_error_exception(class_name, message, module_name) {
                     Ok(v) => v,
@@ -1226,9 +1232,10 @@ impl Interpreter {
                         (v, cur_ver)
                     } else {
                         let v = vm_try!(resolve_builtin(name).ok_or_else(|| {
-                            PyError::named(
+                            PyError::name_error(
                                 "NameError",
                                 format!("name '{}' is not defined", name),
+                                Some(name.to_string()),
                             )
                         }));
                         // Cache with the current global_env_version so that a
@@ -2457,9 +2464,10 @@ impl Interpreter {
                             .flatten()
                             .is_some();
                         if !in_env && !in_dict {
-                            vm_try!(Err(PyError::named(
+                            vm_try!(Err(PyError::name_error(
                                 "NameError",
                                 format!("name '{}' is not defined", name),
+                                Some(name.to_string()),
                             )));
                         }
                         // Invalidate the LoadGlobal inline cache.
@@ -2509,9 +2517,10 @@ impl Interpreter {
                             false
                         };
                         if !in_env && !in_dict {
-                            vm_try!(Err(PyError::named(
+                            vm_try!(Err(PyError::name_error(
                                 "NameError",
                                 format!("name '{}' is not defined", name),
+                                Some(name.to_string()),
                             )));
                         }
                         // Invalidate the LoadGlobal inline cache for module-scope
@@ -2531,17 +2540,19 @@ impl Interpreter {
                         let name = pool_get!(code.names, *name_idx, "name");
                         let is_module_scope = self.env.borrow().parent.is_none();
                         if is_module_scope {
-                            vm_try!(Err(PyError::named(
+                            vm_try!(Err(PyError::name_error(
                                 "NameError",
                                 format!("name '{}' is not defined", name),
+                                Some(name.to_string()),
                             )));
                         } else {
-                            vm_try!(Err(PyError::named(
+                            vm_try!(Err(PyError::name_error(
                                 "UnboundLocalError",
                                 format!(
                                     "cannot access local variable '{}' where it is not associated with a value",
                                     name
                                 ),
+                                None,
                             )));
                         }
                     }
@@ -3744,17 +3755,19 @@ impl Interpreter {
                         // access local variable 'x' where it is not associated
                         // with a value").
                         if current_fn_id.is_none() {
-                            vm_try!(Err::<(), _>(crate::error::PyError::named(
+                            vm_try!(Err::<(), _>(crate::error::PyError::name_error(
                                 "NameError",
                                 format!("name '{}' is not defined", name),
+                                Some(name.to_string()),
                             )));
                         } else {
-                            vm_try!(Err::<(), _>(crate::error::PyError::named(
+                            vm_try!(Err::<(), _>(crate::error::PyError::name_error(
                                 "UnboundLocalError",
                                 format!(
                                     "cannot access local variable '{}' where it is not associated with a value",
                                     name
                                 ),
+                                None,
                             )));
                         }
                     }
