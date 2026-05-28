@@ -5815,6 +5815,22 @@ fn str_merge_kwargs(
         }
         // encode(encoding='utf-8', errors='strict')
         "encode" => {
+            // CPython checks the total argument count before individual
+            // duplicate checks.  When positional args are present the message
+            // says "arguments"; when it is all-kwargs it says "keyword arguments".
+            let total = pos.len() + kw.len();
+            if total > 2 {
+                if pos.is_empty() {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("encode() takes at most 2 keyword arguments ({total} given)"),
+                    ));
+                }
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("encode() takes at most 2 arguments ({total} given)"),
+                ));
+            }
             let mut encoding: Option<Value> = None;
             let mut errors: Option<Value> = None;
             for (k, v) in kw {
