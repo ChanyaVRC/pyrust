@@ -50,6 +50,19 @@ check_valueerror(math.log, -1, 2)
 check_valueerror(math.log, 0, 2)
 check_valueerror(math.log, 1, -1)
 print(math.log(8, 2))        # 3.0
+# base=1 -> ln(base)=0 -> ZeroDivisionError (mirrors CPython's ln(x)/ln(base) path)
+try:
+    math.log(2, 1)
+except ZeroDivisionError as e:
+    print(f"ZeroDivisionError: {e}")
+except Exception as e:
+    print(f"WRONG: {type(e).__name__}: {e}")
+try:
+    math.log(0.5, 1)
+except ZeroDivisionError as e:
+    print(f"ZeroDivisionError: {e}")
+except Exception as e:
+    print(f"WRONG: {type(e).__name__}: {e}")
 
 # -- log2 --
 check_valueerror(math.log2, -1)

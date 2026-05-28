@@ -336,12 +336,18 @@ pyrust_module! {
         let x = value_to_float(&args[0].value, FN_NAME)?;
         if args.len() == 2 {
             let base = value_to_float(&args[1].value, FN_NAME)?;
-            let result = x.log(base);
-            // Raise domain/range errors only when all inputs are finite.
-            if x.is_finite() && base.is_finite() {
-                check_math_result(x, result)?;
+            // Mirror CPython's two-arg log: compute ln(x) / ln(base).
+            // This order matters: if x is out-of-domain, raise ValueError first;
+            // only then check the base, so that log(0, 1) → ValueError (not ZeroDivisionError).
+            let ln_x = check_math_result(x, x.ln())?;
+            let ln_base = check_math_result(base, base.ln())?;
+            if ln_base == 0.0 {
+                return Err(PyError::named(
+                    "ZeroDivisionError",
+                    "float division by zero".to_string(),
+                ));
             }
-            Ok(Value::float(result))
+            Ok(Value::float(ln_x / ln_base))
         } else {
             Ok(Value::float(check_math_result(x, x.ln())?))
         }
