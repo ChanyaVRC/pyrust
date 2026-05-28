@@ -5067,13 +5067,33 @@ impl Compiler {
         match target {
             AssignTarget::Name(name) => {
                 if let Some(reg) = self.local_reg(name) {
-                    self.emit_aug_binop(reg, op, expr);
-                    self.maybe_record_class_store(reg);
-                    // Issue #820: sync the updated value into module_globals_dict
-                    // when globals_accessed == true (same as compile_store_name).
-                    if self.is_module_scope {
+                    let definitely_bound = (reg as usize) < 64 && (self.def_set >> reg) & 1 != 0;
+                    if self.is_module_scope && !definitely_bound {
+                        // Issue #1411: at module scope a name that is not yet
+                        // definitely bound must be read through the global →
+                        // builtins chain, not from the unset fastlocal register.
+                        // The fastlocal reg read would produce the wrong error
+                        // ("local variable referenced before assignment" instead
+                        // of "name 'x' is not defined").
                         let name_idx = self.intern_name(name);
+                        let lhs = self.alloc_temp();
+                        self.emit(Insn::LoadGlobal(lhs, name_idx));
+                        self.emit_aug_binop(lhs, op, expr);
+                        // Store result into the fastlocal register so subsequent
+                        // reads in the same scope use the fast path.
+                        self.emit(Insn::Move(reg, lhs));
+                        self.mark_def(reg);
                         self.emit(Insn::SyncModuleGlobal(reg, name_idx));
+                        self.free_temp(lhs);
+                    } else {
+                        self.emit_aug_binop(reg, op, expr);
+                        self.maybe_record_class_store(reg);
+                        // Issue #820: sync the updated value into module_globals_dict
+                        // when globals_accessed == true (same as compile_store_name).
+                        if self.is_module_scope {
+                            let name_idx = self.intern_name(name);
+                            self.emit(Insn::SyncModuleGlobal(reg, name_idx));
+                        }
                     }
                 } else {
                     // cell / global: load, compute, store
@@ -7872,6 +7892,20 @@ impl Compiler {
                 if let Some(reg) = self.local_reg(name) {
                     let definitely_bound = (reg as usize) < 64 && (self.def_set >> reg) & 1 != 0;
                     if !definitely_bound {
+                        // Issue #1411: at module scope, a name that is not yet
+                        // definitely bound must resolve through the global →
+                        // builtins chain rather than raising NameError.  Module
+                        // scope is sequential (like a REPL), so a later
+                        // assignment does NOT shadow earlier reads.  LoadGlobal
+                        // already has a fastlocal-register fallback (via
+                        // vm_frame_views) for names that have been assigned,
+                        // so already-written names are still found efficiently.
+                        if self.is_module_scope {
+                            let name_idx = self.intern_name(name);
+                            let dst = self.alloc_temp();
+                            self.emit(Insn::LoadGlobal(dst, name_idx));
+                            return dst;
+                        }
                         let name_idx = self.intern_name(name);
                         self.emit(Insn::CheckLocal(reg, name_idx));
                     }
