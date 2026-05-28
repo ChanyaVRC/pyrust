@@ -174,24 +174,24 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
             expect_arg_count(args, 1, 2, "center")?;
             let width = extract_int(&args[0], "center", "width")?;
             let fill = extract_fill_char(args)?;
-            Ok(str_center(s, width, fill))
+            str_center(s, width, fill)
         }
         "ljust" => {
             expect_arg_count(args, 1, 2, "ljust")?;
             let width = extract_int(&args[0], "ljust", "width")?;
             let fill = extract_fill_char(args)?;
-            Ok(str_ljust(s, width, fill))
+            str_ljust(s, width, fill)
         }
         "rjust" => {
             expect_arg_count(args, 1, 2, "rjust")?;
             let width = extract_int(&args[0], "rjust", "width")?;
             let fill = extract_fill_char(args)?;
-            Ok(str_rjust(s, width, fill))
+            str_rjust(s, width, fill)
         }
         "zfill" => {
             expect_arg_count(args, 1, 1, "zfill")?;
             let width = extract_int(&args[0], "zfill", "width")?;
-            Ok(str_zfill(s, width))
+            str_zfill(s, width)
         }
         "expandtabs" => {
             // expandtabs() takes at most 1 argument (<got> given)
@@ -336,17 +336,28 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
 
 // ─── Method implementations ───────────────────────────────────────────────────
 
-fn str_center(s: &str, width: i64, fill: char) -> Value {
+/// Try to reserve `additional` bytes in `out`, mapping allocation failure to
+/// `MemoryError` rather than panicking, mirroring CPython's behaviour.
+#[inline]
+fn try_reserve_str(out: &mut String, additional: usize) -> Result<()> {
+    out.try_reserve(additional)
+        .map_err(|_| PyError::named("MemoryError", ""))
+}
+
+fn str_center(s: &str, width: i64, fill: char) -> Result<Value> {
     let width = width.max(0) as usize;
     let char_len = s.chars().count();
     if char_len >= width {
-        return Value::string(s);
+        return Ok(Value::string(s));
     }
     let marg = width - char_len;
     // CPython formula: left = marg//2 + (marg & width & 1)
     let left_pad = marg / 2 + (marg & width & 1);
     let right_pad = marg - left_pad;
-    let mut out = String::with_capacity(s.len() + marg * fill.len_utf8());
+    let fill_bytes = marg.checked_mul(fill.len_utf8()).unwrap_or(usize::MAX);
+    let total = s.len().saturating_add(fill_bytes);
+    let mut out = String::new();
+    try_reserve_str(&mut out, total)?;
     for _ in 0..left_pad {
         out.push(fill);
     }
@@ -354,47 +365,55 @@ fn str_center(s: &str, width: i64, fill: char) -> Value {
     for _ in 0..right_pad {
         out.push(fill);
     }
-    Value::string(out)
+    Ok(Value::string(out))
 }
 
-fn str_ljust(s: &str, width: i64, fill: char) -> Value {
+fn str_ljust(s: &str, width: i64, fill: char) -> Result<Value> {
     let width = width.max(0) as usize;
     let char_len = s.chars().count();
     if char_len >= width {
-        return Value::string(s);
+        return Ok(Value::string(s));
     }
     let pad = width - char_len;
-    let mut out = String::with_capacity(s.len() + pad * fill.len_utf8());
+    let fill_bytes = pad.checked_mul(fill.len_utf8()).unwrap_or(usize::MAX);
+    let total = s.len().saturating_add(fill_bytes);
+    let mut out = String::new();
+    try_reserve_str(&mut out, total)?;
     out.push_str(s);
     for _ in 0..pad {
         out.push(fill);
     }
-    Value::string(out)
+    Ok(Value::string(out))
 }
 
-fn str_rjust(s: &str, width: i64, fill: char) -> Value {
+fn str_rjust(s: &str, width: i64, fill: char) -> Result<Value> {
     let width = width.max(0) as usize;
     let char_len = s.chars().count();
     if char_len >= width {
-        return Value::string(s);
+        return Ok(Value::string(s));
     }
     let pad = width - char_len;
-    let mut out = String::with_capacity(s.len() + pad * fill.len_utf8());
+    let fill_bytes = pad.checked_mul(fill.len_utf8()).unwrap_or(usize::MAX);
+    let total = s.len().saturating_add(fill_bytes);
+    let mut out = String::new();
+    try_reserve_str(&mut out, total)?;
     for _ in 0..pad {
         out.push(fill);
     }
     out.push_str(s);
-    Value::string(out)
+    Ok(Value::string(out))
 }
 
-fn str_zfill(s: &str, width: i64) -> Value {
+fn str_zfill(s: &str, width: i64) -> Result<Value> {
     let width = width.max(0) as usize;
     let char_len = s.chars().count();
     if char_len >= width {
-        return Value::string(s);
+        return Ok(Value::string(s));
     }
     let pad = width - char_len;
-    let mut out = String::with_capacity(s.len() + pad);
+    let total = s.len().saturating_add(pad);
+    let mut out = String::new();
+    try_reserve_str(&mut out, total)?;
     // Preserve leading sign character
     let mut chars = s.chars();
     match chars.next() {
@@ -418,7 +437,7 @@ fn str_zfill(s: &str, width: i64) -> Value {
             }
         }
     }
-    Value::string(out)
+    Ok(Value::string(out))
 }
 
 fn str_expandtabs(s: &str, tabsize: i64) -> Value {
