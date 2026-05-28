@@ -11,7 +11,7 @@ use std::rc::Rc;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::{
-    get_recursion_limit, instantiate_exception, lookup_name_in_module,
+    get_call_depth, get_recursion_limit, instantiate_exception, lookup_name_in_module,
     reject_keyword_args_expanded, set_recursion_limit, value_type_name_str,
 };
 use crate::value::{PyClass, PyInstance, Value, ValueKind};
@@ -83,7 +83,7 @@ pyrust_module! {
             return Err(PyError::named(
                 "TypeError",
                 format!(
-                    "getrecursionlimit() takes no arguments ({} given)",
+                    "sys.getrecursionlimit() takes no arguments ({} given)",
                     args.len()
                 ),
             ));
@@ -100,7 +100,7 @@ pyrust_module! {
             return Err(PyError::named(
                 "TypeError",
                 format!(
-                    "setrecursionlimit() takes exactly one argument ({} given)",
+                    "sys.setrecursionlimit() takes exactly one argument ({} given)",
                     args.len()
                 ),
             ));
@@ -124,7 +124,18 @@ pyrust_module! {
                 "recursion limit must be greater or equal than 1".to_string(),
             ));
         }
-        set_recursion_limit(n as usize);
+        let new_limit = n as usize;
+        let current_depth = get_call_depth();
+        if new_limit <= current_depth {
+            return Err(PyError::named(
+                "RecursionError",
+                format!(
+                    "cannot set the recursion limit to {} at the recursion depth {}: the limit is too low",
+                    new_limit, current_depth
+                ),
+            ));
+        }
+        set_recursion_limit(new_limit);
         Ok(Value::none())
     }
 

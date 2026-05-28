@@ -24,6 +24,10 @@ fn call_depth() -> usize {
     CALL_DEPTH.with(|d| d.get())
 }
 
+pub(crate) fn get_call_depth() -> usize {
+    call_depth()
+}
+
 // RAII guard: increments the thread-local call depth on creation and decrements
 // it on drop, including on panic, without any unsafe code.
 struct CallDepthGuard;

@@ -36,3 +36,25 @@ try:
     sys.setrecursionlimit(1.5)
 except TypeError as e:
     print(type(e).__name__)  # TypeError
+
+# Arg-count TypeError messages include the qualified name "sys.*"
+try:
+    sys.getrecursionlimit(1)
+except TypeError as e:
+    print(str(e))  # sys.getrecursionlimit() takes no arguments (1 given)
+
+try:
+    sys.setrecursionlimit()
+except TypeError as e:
+    print(str(e))  # sys.setrecursionlimit() takes exactly one argument (0 given)
+
+try:
+    sys.setrecursionlimit(100, 200)
+except TypeError as e:
+    print(str(e))  # sys.setrecursionlimit() takes exactly one argument (2 given)
+
+# setrecursionlimit raises RecursionError when new limit <= current call depth
+try:
+    sys.setrecursionlimit(1)  # current depth >= 1 at top-level
+except RecursionError as e:
+    print(type(e).__name__)  # RecursionError
