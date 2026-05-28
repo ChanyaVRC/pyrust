@@ -2761,10 +2761,13 @@ impl Interpreter {
             // Second pass: check for entirely unexpected keyword arguments.
             for (name, _) in &keyword_vals {
                 if !consumed_keywords.contains(name) {
-                    return Err(PyError::Runtime(format!(
-                        "{}() got unexpected keyword argument '{}'",
-                        function.name, name
-                    )));
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "{}() got an unexpected keyword argument '{}'",
+                            function.name, name
+                        ),
+                    ));
                 }
             }
         }
