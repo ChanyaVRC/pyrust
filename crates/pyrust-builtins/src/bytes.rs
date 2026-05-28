@@ -333,16 +333,36 @@ fn bytes_decode(bytes: &[u8], args: &[Value], kwargs: &IndexMap<PyKey, Value>) -
         }
     }
 
-    let kw_encoding = kwargs
-        .get(&StrKey("encoding"))
-        .and_then(|v| match v.kind() {
+    let kw_encoding: Option<String> = match kwargs.get(&StrKey("encoding")) {
+        None => None,
+        Some(v) => match v.kind() {
             ValueKind::Str(s) => Some(s.to_owned()),
-            _ => None,
-        });
-    let kw_errors = kwargs.get(&StrKey("errors")).and_then(|v| match v.kind() {
-        ValueKind::Str(s) => Some(s.to_owned()),
-        _ => None,
-    });
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "decode() argument 'encoding' must be str, not {}",
+                        builtin_type_name(v)
+                    ),
+                ));
+            }
+        },
+    };
+    let kw_errors: Option<String> = match kwargs.get(&StrKey("errors")) {
+        None => None,
+        Some(v) => match v.kind() {
+            ValueKind::Str(s) => Some(s.to_owned()),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "decode() argument 'errors' must be str, not {}",
+                        builtin_type_name(v)
+                    ),
+                ));
+            }
+        },
+    };
 
     // Validate that a keyword isn't also supplied positionally.
     if args.first().is_some() && kw_encoding.is_some() {
@@ -358,26 +378,36 @@ fn bytes_decode(bytes: &[u8], args: &[Value], kwargs: &IndexMap<PyKey, Value>) -
         ));
     }
 
-    let encoding: &str = match args.first().map(|v| v.kind()) {
-        Some(ValueKind::Str(s)) => s,
-        Some(_) => {
-            return Err(PyError::named(
-                "TypeError",
-                "bytes.decode() encoding must be a str".to_string(),
-            ));
-        }
+    let encoding: &str = match args.first() {
         None => kw_encoding.as_deref().unwrap_or("utf-8"),
+        Some(v) => match v.kind() {
+            ValueKind::Str(s) => s,
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "decode() argument 'encoding' must be str, not {}",
+                        builtin_type_name(v)
+                    ),
+                ));
+            }
+        },
     };
 
-    let errors: &str = match args.get(1).map(|v| v.kind()) {
-        Some(ValueKind::Str(s)) => s,
-        Some(_) => {
-            return Err(PyError::named(
-                "TypeError",
-                "bytes.decode() errors must be a str".to_string(),
-            ));
-        }
+    let errors: &str = match args.get(1) {
         None => kw_errors.as_deref().unwrap_or("strict"),
+        Some(v) => match v.kind() {
+            ValueKind::Str(s) => s,
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "decode() argument 'errors' must be str, not {}",
+                        builtin_type_name(v)
+                    ),
+                ));
+            }
+        },
     };
 
     decode_bytes(bytes, encoding, errors)
