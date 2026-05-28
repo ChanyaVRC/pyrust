@@ -1044,6 +1044,117 @@ impl Interpreter {
         ))
     }
 
+    /// The default `object.__setattr__` implementation: descriptor protocol
+    /// then `instance.__dict__` write.  Does NOT call `__setattr__` on the
+    /// instance's class (that would cause infinite recursion when called from
+    /// inside a custom `__setattr__`).  Called by the `object.__setattr__`
+    /// builtin handler; the public `assign_attr` wraps this with the
+    /// `__setattr__` dispatch.
+    pub(crate) fn assign_attr_instance_raw(
+        &mut self,
+        instance: Rc<RefCell<PyInstance>>,
+        name: &str,
+        value: Value,
+    ) -> Result<()> {
+        let class = { Rc::clone(&instance.borrow().class) };
+        // General data descriptor protocol: if the class (or MRO) has
+        // a data descriptor (has __set__) for this name, call __set__.
+        if let Some(class_val) = lookup_class_attr(&class, name) {
+            if let Some(result) = call_descriptor_set(
+                self,
+                &class_val,
+                Value::py_instance(Rc::clone(&instance)),
+                value.clone(),
+                name,
+            )? {
+                return result;
+            }
+        }
+        // Issue #1198: bare `object()` instances have no __dict__.
+        if Rc::ptr_eq(&class, &object_class_singleton()) {
+            return Err(PyError::named(
+                "AttributeError",
+                format!("'object' object has no attribute '{name}'"),
+            ));
+        }
+        // PEP 3134 / issue #1066: validate exception-slot types.
+        if is_exception_class(&class) {
+            match name {
+                "__cause__" | "__context__" => {
+                    let ok = match value.kind() {
+                        ValueKind::None => true,
+                        ValueKind::PyInstance(inst) => is_exception_class(&inst.borrow().class),
+                        _ => false,
+                    };
+                    if !ok {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "exception {} must be None or derive from BaseException",
+                                if name == "__cause__" { "cause" } else { "context" }
+                            ),
+                        ));
+                    }
+                }
+                "__suppress_context__" => {
+                    if !matches!(value.kind(), ValueKind::Bool(_)) {
+                        return Err(PyError::named(
+                            "TypeError",
+                            "attribute value type must be bool",
+                        ));
+                    }
+                }
+                "__traceback__" => {
+                    let ok = match value.kind() {
+                        ValueKind::None => true,
+                        ValueKind::BuiltinObject { ops, .. } => {
+                            ops.type_name() == pyrust_builtins::traceback::TYPE_NAME
+                        }
+                        _ => false,
+                    };
+                    if !ok {
+                        return Err(PyError::named(
+                            "TypeError",
+                            "__traceback__ must be a traceback or None".to_string(),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        instance.borrow_mut().attrs.insert(name.to_string(), value);
+        Ok(())
+    }
+
+    /// The default `object.__delattr__` implementation: descriptor protocol
+    /// then `instance.__dict__` removal.  Does NOT call `__delattr__` on the
+    /// instance's class.  Called by the `object.__delattr__` builtin handler.
+    pub(crate) fn delete_attr_instance_raw(
+        &mut self,
+        instance: Rc<RefCell<PyInstance>>,
+        name: &str,
+    ) -> Result<()> {
+        let class = { Rc::clone(&instance.borrow().class) };
+        if let Some(class_val) = lookup_class_attr(&class, name) {
+            if let Some(result) = call_descriptor_delete(
+                self,
+                &class_val,
+                Value::py_instance(Rc::clone(&instance)),
+                name,
+            )? {
+                return result;
+            }
+        }
+        if instance.borrow_mut().attrs.shift_remove(name).is_none() {
+            let class_name = instance.borrow().class.borrow().name.clone();
+            return Err(PyError::named(
+                "AttributeError",
+                format!("'{class_name}' object has no attribute '{name}'"),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn assign_attr(&mut self, target: Value, name: &str, value: Value) -> Result<()> {
         match target.kind() {
             ValueKind::PyInstance(instance) => {
@@ -1051,20 +1162,30 @@ impl Interpreter {
                 // Check for `__setattr__` first — CPython dispatches
                 // __setattr__ before the descriptor protocol (object.__setattr__
                 // is what does the descriptor lookup by default).
+                // Skip only the `object.__setattr__` builtin sentinel — it
+                // IS the default path below, so invoking it would be
+                // redundant and cause infinite recursion when called from
+                // inside a custom __setattr__ that delegates back to it.
                 if let Some(setattr_val) = lookup_class_attr(&class, "__setattr__") {
-                    return invoke_class_method(
-                        self,
-                        setattr_val,
-                        Value::py_instance(Rc::clone(instance)),
-                        &[
-                            ExpandedCallArg {
-                                name: None,
-                                value: Value::string(name.to_string()),
-                            },
-                            ExpandedCallArg { name: None, value },
-                        ],
-                    )
-                    .map(|_| ());
+                    let is_object_default = matches!(
+                        setattr_val.kind(),
+                        ValueKind::BuiltinFunction(n) if n == "object.__setattr__"
+                    );
+                    if !is_object_default {
+                        return invoke_class_method(
+                            self,
+                            setattr_val,
+                            Value::py_instance(Rc::clone(instance)),
+                            &[
+                                ExpandedCallArg {
+                                    name: None,
+                                    value: Value::string(name.to_string()),
+                                },
+                                ExpandedCallArg { name: None, value },
+                            ],
+                        )
+                        .map(|_| ());
+                    }
                 }
                 // General data descriptor protocol: if the class (or MRO) has
                 // a data descriptor (has __set__) for this name, call __set__.
@@ -1482,18 +1603,25 @@ impl Interpreter {
             ValueKind::PyInstance(instance) => {
                 let class = { Rc::clone(&instance.borrow().class) };
                 // Check for `__delattr__` first — symmetric with __setattr__
-                // in assign_attr (issue #1174).
+                // in assign_attr (issue #1174).  Skip only the
+                // `object.__delattr__` builtin sentinel.
                 if let Some(delattr_val) = lookup_class_attr(&class, "__delattr__") {
-                    return invoke_class_method(
-                        self,
-                        delattr_val,
-                        Value::py_instance(Rc::clone(instance)),
-                        &[ExpandedCallArg {
-                            name: None,
-                            value: Value::string(name.to_string()),
-                        }],
-                    )
-                    .map(|_| ());
+                    let is_object_default = matches!(
+                        delattr_val.kind(),
+                        ValueKind::BuiltinFunction(n) if n == "object.__delattr__"
+                    );
+                    if !is_object_default {
+                        return invoke_class_method(
+                            self,
+                            delattr_val,
+                            Value::py_instance(Rc::clone(instance)),
+                            &[ExpandedCallArg {
+                                name: None,
+                                value: Value::string(name.to_string()),
+                            }],
+                        )
+                        .map(|_| ());
+                    }
                 }
                 // General data descriptor protocol: if the class (or MRO)
                 // has a descriptor with __delete__ for this name, call it.

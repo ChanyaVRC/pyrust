@@ -5735,6 +5735,108 @@ pyrust_module! {
         _interp.get_attr_instance_raw(instance_rc, &name)
     }
 
+    /// Issue #1402: `object.__setattr__(self, name, value)` — the default
+    /// attribute setter used by all instances that do not override
+    /// `__setattr__`.  Performs the descriptor protocol (__set__) then writes
+    /// to the instance __dict__, without re-invoking `__setattr__` dispatch
+    /// (which would cause infinite recursion when called from inside a custom
+    /// `__setattr__`).
+    ///
+    /// CPython signature: `object.__setattr__(self, name, value, /)`
+    #[py_name = "object.__setattr__"]
+    fn object_setattr_dunder(args) -> Result<Value> {
+        if args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                "descriptor '__setattr__' of 'object' object needs an argument".to_string(),
+            ));
+        }
+        if args.len() != 3 {
+            return Err(PyError::named(
+                "TypeError",
+                format!(" expected 2 arguments, got {}", args.len() - 1),
+            ));
+        }
+        let name = match args[1].value.kind() {
+            ValueKind::Str(s) => s.to_string(),
+            _ => {
+                let type_name = value_type_name_str(&args[1].value);
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("attribute name must be string, not '{type_name}'"),
+                ));
+            }
+        };
+        let value = args[2].value.clone();
+        match args[0].value.kind() {
+            ValueKind::PyInstance(rc) => {
+                let instance_rc = Rc::clone(rc);
+                _interp.assign_attr_instance_raw(instance_rc, &name, value)?;
+            }
+            _ => {
+                // CPython raises AttributeError for non-instance values (int, str,
+                // list, etc.) — their slots are immutable from Python.  The
+                // general assign_attr catch-all returns RuntimeError here, which
+                // is wrong; emit the same message CPython does instead.
+                let type_name = value_type_name_str(&args[0].value);
+                return Err(PyError::named(
+                    "AttributeError",
+                    format!("'{type_name}' object has no attribute '{name}'"),
+                ));
+            }
+        }
+        Ok(Value::none())
+    }
+
+    /// Issue #1402: `object.__delattr__(self, name)` — the default attribute
+    /// deleter used by all instances that do not override `__delattr__`.
+    /// Performs the descriptor protocol (__delete__) then removes from the
+    /// instance __dict__, without re-invoking `__delattr__` dispatch.
+    ///
+    /// CPython signature: `object.__delattr__(self, name, /)`
+    #[py_name = "object.__delattr__"]
+    fn object_delattr_dunder(args) -> Result<Value> {
+        if args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                "descriptor '__delattr__' of 'object' object needs an argument".to_string(),
+            ));
+        }
+        if args.len() != 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("expected 1 argument, got {}", args.len() - 1),
+            ));
+        }
+        let name = match args[1].value.kind() {
+            ValueKind::Str(s) => s.to_string(),
+            _ => {
+                let type_name = value_type_name_str(&args[1].value);
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("attribute name must be string, not '{type_name}'"),
+                ));
+            }
+        };
+        match args[0].value.kind() {
+            ValueKind::PyInstance(rc) => {
+                let instance_rc = Rc::clone(rc);
+                _interp.delete_attr_instance_raw(instance_rc, &name)?;
+            }
+            _ => {
+                // CPython raises AttributeError for non-instance values — same
+                // pattern as in object_setattr_dunder; the general delete_attr
+                // catch-all returns RuntimeError here, which is wrong.
+                let type_name = value_type_name_str(&args[0].value);
+                return Err(PyError::named(
+                    "AttributeError",
+                    format!("'{type_name}' object has no attribute '{name}'"),
+                ));
+            }
+        }
+        Ok(Value::none())
+    }
+
     /// Issue #1112: `BaseException.__init__(self, *args)` — updates `self.args`
     /// so that `super().__init__(msg)` in an exception subclass sets the correct
     /// `.args` tuple on the already-constructed instance.  Also mirrors the

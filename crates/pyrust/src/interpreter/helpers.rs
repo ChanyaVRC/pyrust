@@ -249,6 +249,8 @@ thread_local! {
         for dunder in &[
             "__init_subclass__",
             "__getattribute__",
+            "__setattr__",
+            "__delattr__",
             "__str__",
             "__repr__",
             "__eq__",
