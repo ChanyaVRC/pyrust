@@ -95,7 +95,7 @@ mod method_table_drift_guard {
     fn int_methods_dispatched() {
         let receiver = Value::int(5);
         for &name in super::int::METHODS {
-            let r = super::int::call(name, &receiver, &[]);
+            let r = super::int::call(name, &receiver, &[], &indexmap::IndexMap::new());
             if let Err(ref e) = r {
                 assert!(!is_fallback(e), "int::call({name}) hit fallback: {e:?}");
             }

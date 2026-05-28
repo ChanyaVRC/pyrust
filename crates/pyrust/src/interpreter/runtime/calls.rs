@@ -251,14 +251,7 @@ impl Interpreter {
                 // next call.  Early-return error paths also restore the buf.
                 let result = match kind_tag {
                     Kind::Int => {
-                        if !kw.is_empty() {
-                            self.bound_method_pos_buf = pos;
-                            return Err(PyError::named(
-                                "TypeError",
-                                format!("int.{method}() takes no keyword arguments"),
-                            ));
-                        }
-                        pyrust_builtins::int::call(method, &receiver, &pos)
+                        pyrust_builtins::int::call(method, &receiver, &pos, &kw)
                     }
                     Kind::Float => {
                         let f = match receiver.kind() {
@@ -511,6 +504,7 @@ impl Interpreter {
                                                 method,
                                                 &backing,
                                                 &args_vec,
+                                                &kw,
                                             )
                                         }
                                         BkKind::Float => {
@@ -1085,6 +1079,34 @@ impl Interpreter {
                     .collect();
                 pyrust_builtins::string::str_maketrans(&positional)
             }
+            // `int.from_bytes` is a classmethod.  Must appear before the generic
+            // `int.*` arm so that the arg-0-is-receiver assumption there is not
+            // applied here.  Filter out any leading int/bool/BigInt/PyClass arg
+            // (the receiver when called as `(5).from_bytes(...)` or
+            // `int.from_bytes(...)`), then dispatch with remaining pos and kw.
+            ValueKind::BuiltinFunction("int.from_bytes") => {
+                let pos: Vec<Value> = args
+                    .iter()
+                    .filter(|a| {
+                        a.name.is_none()
+                            && !matches!(
+                                a.value.kind(),
+                                ValueKind::Int(_)
+                                    | ValueKind::BigInt(_)
+                                    | ValueKind::Bool(_)
+                                    | ValueKind::PyClass(_)
+                            )
+                    })
+                    .map(|a| a.value.clone())
+                    .collect();
+                let mut kw: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
+                for a in args {
+                    if let Some(name) = &a.name {
+                        kw.insert(PyKey::str_from(name.as_str()), a.value.clone());
+                    }
+                }
+                pyrust_builtins::int::int_from_bytes(&pos, &kw)
+            }
             // #462: class-method-of-primitive dispatch.  When a primitive
             // class's attr is `BuiltinFunction("<type>.<method>")` — populated
             // by `populate_*_methods` in `helpers.rs` — calling it dispatches
@@ -1165,13 +1187,7 @@ impl Interpreter {
                 }
                 match type_name {
                     "int" => {
-                        if !kw.is_empty() {
-                            return Err(PyError::named(
-                                "TypeError",
-                                format!("int.{method}() takes no keyword arguments"),
-                            ));
-                        }
-                        pyrust_builtins::int::call(method, &self_val, &pos)
+                        pyrust_builtins::int::call(method, &self_val, &pos, &kw)
                     }
                     "bytes" => pyrust_builtins::bytes::call(method, &self_val, &pos, &kw),
                     "str" => {
