@@ -3912,24 +3912,152 @@ pub(crate) fn py_round_half_even(v: f64) -> i64 {
     }
 }
 
-/// Round a float to nearest using banker's rounding, returning f64.
-/// Used by round(x, n) for float inputs.
-pub(crate) fn py_round_half_even_f64(v: f64) -> f64 {
-    let floor = v.floor();
-    let diff = v - floor;
-    if diff < 0.5 {
-        floor
-    } else if diff > 0.5 {
-        floor + 1.0
-    } else {
-        // Exactly 0.5: round to even
-        let floor_i = floor as i64;
-        if floor_i % 2 == 0 {
-            floor
-        } else {
-            floor + 1.0
+/// Round an f64 to `ndigits` decimal places using CPython's half-even semantics.
+///
+/// CPython's `float.__round__(ndigits)` determines the rounding direction from the
+/// float's **exact** rational value (via `_Py_dg_dtoa` internally), not from a
+/// scaled intermediate float.  The naïve multiply-round-divide approach fails for
+/// values like `round(2.675, 2)` because `2.675 * 100` may be exactly `267.5` in
+/// f64, rounding the wrong way, even though the true exact value of the IEEE 754
+/// float `2.675` is slightly *below* 2.675.
+///
+/// For `n >= 0` this function delegates to Rust's built-in `{:.prec$}` formatter,
+/// which already uses the exact float value internally (Grisu3/Dragon4), then
+/// parses the string back to f64.  NaN and infinities pass through as-is.
+///
+/// For `n < 0` (rounding to the nearest `10^(-n)`) the function uses big-integer
+/// exact arithmetic: the float's mantissa and binary exponent are extracted from
+/// the IEEE 754 bits, scaled to integers, and compared against the target factor
+/// to determine the tie-breaking direction without any floating-point rounding.
+/// NaN and infinities pass through as-is.
+pub(crate) fn round_float_ndigits(v: f64, n: i32) -> crate::error::Result<Value> {
+    if n >= 0 {
+        // A f64 has at most 1074 significant decimal digits (the subnormal 5e-324
+        // has exactly 324 significant decimal digits; normal floats have fewer).
+        // Any ndigits > 1074 cannot change the float's value, so return v unchanged.
+        // This cap also prevents Rust's formatter from panicking: format!("{:.prec$}")
+        // panics when prec >= 65536, and ndigits_i32 can be as large as i32::MAX.
+        if n > 1074 {
+            return Ok(Value::float(v));
         }
+        let prec = n as usize;
+        // Rust's {:.prec$} formatter uses the exact float value (Grisu3/Dragon4),
+        // so it correctly rounds 2.675 to 2.67 (the exact IEEE 754 value is slightly
+        // below 2.675).  Parse back to f64 to recover the rounded float.
+        // NaN and ±Inf format as "NaN" / "inf" / "-inf" and parse back unchanged.
+        let s = format!("{:.prec$}", v, prec = prec);
+        // parse() produces -0.0 for "-0.00" etc., matching CPython's sign semantics.
+        let result: f64 = s.parse().unwrap_or(v);
+        return Ok(Value::float(result));
     }
+
+    // n < 0: round to nearest 10^(-n).  NaN and ±Inf pass through unchanged
+    // (CPython: round(nan, -2) == nan, round(inf, -2) == inf).
+    if !v.is_finite() {
+        return Ok(Value::float(v));
+    }
+
+    // n < 0: round to nearest 10^(-n).  Use exact big-integer arithmetic.
+    let neg_n = (-n) as u32;
+
+    // 10^neg_n as a float: guard against factor overflow.
+    let factor = 10f64.powf(neg_n as f64);
+    if factor.is_infinite() {
+        // 10^neg_n doesn't fit in f64 — any finite v rounds to signed zero.
+        return Ok(Value::float(if v.is_sign_negative() {
+            -0.0f64
+        } else {
+            0.0f64
+        }));
+    }
+
+    // Decompose |v| = m * 2^e2  (exact IEEE 754 representation).
+    let bits = v.to_bits();
+    let sign_neg = (bits >> 63) != 0;
+    let biased_exp = ((bits >> 52) & 0x7FF) as i32;
+    let mantissa_bits = bits & ((1u64 << 52) - 1);
+
+    // e2 = biased_exp - 1023 - 52  (normal); -1074 for subnormals.
+    let (m_u64, e2): (u64, i32) = if biased_exp == 0 {
+        (mantissa_bits, -1074)
+    } else {
+        (mantissa_bits | (1u64 << 52), biased_exp - 1075)
+    };
+
+    // v = sign * m_u64 * 2^e2.
+    //
+    // To avoid fractions: if e2 < 0, we scale both |v| and the factor by 2^(-e2).
+    // Then:  |v| * 2^(-e2)  = m_u64           (exact integer)
+    //        factor * 2^(-e2) = 10^neg_n * 2^(-e2)
+    //
+    // If e2 >= 0: |v| * 1 = m_u64 * 2^e2     (exact integer)
+    //             factor * 1 = 10^neg_n
+    //
+    // In both cases the quotient |v| / factor equals v_num / factor_scaled exactly.
+    let e2_neg = if e2 < 0 { (-e2) as u32 } else { 0u32 };
+
+    let v_num: PyBigInt = if e2 >= 0 {
+        let pow2 = PyPow::pow(PyBigInt::from(2u64), e2 as u32);
+        PyBigInt::from(m_u64) * pow2
+    } else {
+        // e2 < 0: v_num = m (the 2^(-e2) scaling is absorbed into factor_scaled)
+        PyBigInt::from(m_u64)
+    };
+
+    let factor_bigint = PyPow::pow(PyBigInt::from(10u64), neg_n);
+    let factor_scaled: PyBigInt = if e2_neg > 0 {
+        let pow2 = PyPow::pow(PyBigInt::from(2u64), e2_neg);
+        factor_bigint * pow2
+    } else {
+        factor_bigint
+    };
+
+    // floor-divmod: v_num = q * factor_scaled + r,  0 <= r < factor_scaled.
+    let (q, r) = bigint_divmod_floor(&v_num, &factor_scaled);
+
+    // Compare 2*r to factor_scaled to determine half-even rounding direction.
+    use num_traits::Zero;
+    let two_r = &r + &r;
+    use std::cmp::Ordering;
+    let q_rounded: PyBigInt = match two_r.cmp(&factor_scaled) {
+        Ordering::Less => q.clone(),
+        Ordering::Greater => &q + &PyBigInt::from(1u64),
+        Ordering::Equal => {
+            // Exactly at the halfway point: round to even.
+            if (&q % &PyBigInt::from(2u64)).is_zero() {
+                q.clone()
+            } else {
+                &q + &PyBigInt::from(1u64)
+            }
+        }
+    };
+
+    // result = q_rounded * 10^neg_n as f64.
+    // q_rounded is small (it is floor(|v| / 10^neg_n) ± 1), so converting to f64
+    // via to_f64() is accurate for reasonable inputs.  The result is then multiplied
+    // by the float factor (which is exact for powers of 10 that fit in f64).
+    use num_traits::ToPrimitive;
+    let q_f64 = q_rounded.to_f64().unwrap_or(f64::INFINITY);
+    let result = q_f64 * factor;
+
+    // Overflow check: if the rounded result doesn't fit in f64.
+    if v.is_finite() && result.is_infinite() {
+        return Err(PyError::named(
+            "OverflowError",
+            "rounded value too large to represent".to_string(),
+        ));
+    }
+
+    // Sign: negative zero is preserved when |v| rounds to zero and v was negative.
+    let result = if result == 0.0 {
+        if sign_neg { -0.0f64 } else { 0.0f64 }
+    } else if sign_neg {
+        -result
+    } else {
+        result
+    };
+
+    Ok(Value::float(result))
 }
 
 /// Round a `PyBigInt` to the nearest `10^neg_n` using banker's rounding.
