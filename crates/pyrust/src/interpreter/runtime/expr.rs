@@ -3013,37 +3013,37 @@ impl Interpreter {
                 }
             }
         }
-        // Set subclass (PyInstance backed by set/frozenset): when no in-place
-        // dunder was found, check whether RHS is a valid set operand.  If not,
-        // raise the CPython-format TypeError with the `|=:` / `&=:` / etc.
-        // symbol directly (returning None would fall through to eval_binary
-        // which uses the non-`=` symbol).
+        // Frozenset (plain BuiltinObject) and set subclass (PyInstance backed by
+        // set/frozenset): when no in-place dunder was found, check whether RHS
+        // is a valid set operand.  If not, raise the CPython-format TypeError
+        // with the `|=:` / `&=:` / etc. symbol directly (returning None would
+        // fall through to eval_binary which uses the non-`=` symbol).
         if matches!(
             op,
             BinaryOp::BitOr | BinaryOp::BitAnd | BinaryOp::Sub | BinaryOp::BitXor
         ) {
-            if let Some(inst_rc) = left.as_py_instance_rc() {
-                if let Some(backing) = instance_builtin_data(inst_rc) {
-                    if set_items_from_value(&backing).is_some()
-                        && set_items_from_value(&right).is_none()
-                    {
-                        let op_sym = match op {
-                            BinaryOp::BitOr => "|=",
-                            BinaryOp::BitAnd => "&=",
-                            BinaryOp::Sub => "-=",
-                            BinaryOp::BitXor => "^=",
-                            _ => unreachable!(),
-                        };
-                        let lt = value_type_name_str(&left);
-                        let rt = value_type_name_str(&right);
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'"
-                            ),
-                        ));
-                    }
-                }
+            let lhs_is_set_like = if let Some(inst_rc) = left.as_py_instance_rc() {
+                instance_builtin_data(inst_rc)
+                    .map_or(false, |b| set_items_from_value(&b).is_some())
+            } else {
+                // Plain frozenset (BuiltinObject) — not caught by the is_set
+                // branch above (which only matches ValueKind::Set).
+                set_items_from_value(&left).is_some()
+            };
+            if lhs_is_set_like && set_items_from_value(&right).is_none() {
+                let op_sym = match op {
+                    BinaryOp::BitOr => "|=",
+                    BinaryOp::BitAnd => "&=",
+                    BinaryOp::Sub => "-=",
+                    BinaryOp::BitXor => "^=",
+                    _ => unreachable!(),
+                };
+                let lt = value_type_name_str(&left);
+                let rt = value_type_name_str(&right);
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("unsupported operand type(s) for {op_sym}: '{lt}' and '{rt}'"),
+                ));
             }
         }
         Ok(None)

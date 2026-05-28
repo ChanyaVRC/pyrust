@@ -151,6 +151,32 @@ try:
 except TypeError as e:
     print(e)
 
+# ── frozenset in-place ops (rebinds, but RHS must be set-like) ───────────────
+
+s = frozenset({1, 2})
+try:
+    s |= 42
+except TypeError as e:
+    print(e)
+
+s = frozenset({1, 2})
+try:
+    s &= 42
+except TypeError as e:
+    print(e)
+
+s = frozenset({1, 2})
+try:
+    s -= 42
+except TypeError as e:
+    print(e)
+
+s = frozenset({1, 2})
+try:
+    s ^= 42
+except TypeError as e:
+    print(e)
+
 # ── Regression: set op set still works ───────────────────────────────────────
 
 print(sorted({1, 2} | {3}))
