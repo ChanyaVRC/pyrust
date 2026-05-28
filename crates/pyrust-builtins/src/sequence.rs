@@ -10,7 +10,7 @@ pub fn seq_index(items: &[Value], args: &[Value], type_name: &str) -> Result<Val
     let start = match args.get(1).map(|v| v.kind()) {
         Some(ValueKind::Int(i)) => normalise_index(i, len).min(len),
         Some(ValueKind::Bool(b)) => normalise_index(b as i64, len).min(len),
-        Some(ValueKind::BigInt(b)) => normalise_bigint_index(b, len),
+        Some(ValueKind::BigInt(b)) => normalise_bigint_index(b, len).min(len),
         Some(_) => {
             return Err(PyError::named(
                 "TypeError",
@@ -22,7 +22,7 @@ pub fn seq_index(items: &[Value], args: &[Value], type_name: &str) -> Result<Val
     let stop = match args.get(2).map(|v| v.kind()) {
         Some(ValueKind::Int(i)) => normalise_index(i, len).min(len),
         Some(ValueKind::Bool(b)) => normalise_index(b as i64, len).min(len),
-        Some(ValueKind::BigInt(b)) => normalise_bigint_index(b, len),
+        Some(ValueKind::BigInt(b)) => normalise_bigint_index(b, len).min(len),
         Some(_) => {
             return Err(PyError::named(
                 "TypeError",

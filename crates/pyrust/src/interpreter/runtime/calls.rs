@@ -4161,7 +4161,7 @@ impl Interpreter {
                 pyrust_builtins::sequence::normalise_index(b as i64, len).min(len)
             }
             Some(ValueKind::BigInt(b)) => {
-                pyrust_builtins::sequence::normalise_bigint_index(b, len)
+                pyrust_builtins::sequence::normalise_bigint_index(b, len).min(len)
             }
             None => 0,
             // Other types were already rejected by resolve_seq_index_pos.
@@ -4173,7 +4173,7 @@ impl Interpreter {
                 pyrust_builtins::sequence::normalise_index(b as i64, len).min(len)
             }
             Some(ValueKind::BigInt(b)) => {
-                pyrust_builtins::sequence::normalise_bigint_index(b, len)
+                pyrust_builtins::sequence::normalise_bigint_index(b, len).min(len)
             }
             None => len,
             _ => len,
