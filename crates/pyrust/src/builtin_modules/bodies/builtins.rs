@@ -4756,6 +4756,147 @@ pyrust_module! {
         _interp.eval_binary(coerce_numeric(a), BinaryOp::Ne, b)
     }
 
+    /// Issue #1452: `float.__trunc__(self)` — registered so that float subclasses
+    /// inherit it via MRO and `math.trunc(MyFloat(x))` dispatches correctly.
+    ///
+    /// CPython: `float.__trunc__` truncates toward zero and returns an `int`.
+    /// Raises `OverflowError` for infinity, `ValueError` for NaN.
+    #[py_name = "float.__trunc__"]
+    fn float_trunc_dunder(args) -> Result<Value> {
+        let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "descriptor '__trunc__' of 'float' needs an argument".to_string(),
+            )
+        })?;
+        let self_val = coerce_numeric(self_val);
+        match self_val.kind() {
+            ValueKind::Float(f) => {
+                if f.is_nan() {
+                    return Err(PyError::named(
+                        "ValueError",
+                        "cannot convert float NaN to integer".to_string(),
+                    ));
+                }
+                if f.is_infinite() {
+                    return Err(PyError::named(
+                        "OverflowError",
+                        "cannot convert float infinity to integer".to_string(),
+                    ));
+                }
+                let t = f.trunc();
+                // i64::MAX as f64 rounds up to 2^63, so ">=" is required: any float
+                // >= 2^63 cannot fit in an i64 and must go through BigInt.
+                if t >= i64::MAX as f64 || t < i64::MIN as f64 {
+                    float_to_bigint(t)
+                } else {
+                    Ok(Value::int(t as i64))
+                }
+            }
+            _ => Err(PyError::named(
+                "TypeError",
+                format!(
+                    "descriptor '__trunc__' for 'float' objects doesn't apply to a '{}' object",
+                    value_type_name_str(&self_val)
+                ),
+            )),
+        }
+    }
+
+    /// Issue #1452: `float.__floor__(self)` — registered so that float subclasses
+    /// inherit it via MRO and `math.floor(MyFloat(x))` dispatches correctly.
+    ///
+    /// CPython: `float.__floor__` rounds toward negative infinity and returns an `int`.
+    /// Raises `OverflowError` for infinity, `ValueError` for NaN.
+    #[py_name = "float.__floor__"]
+    fn float_floor_dunder(args) -> Result<Value> {
+        let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "descriptor '__floor__' of 'float' needs an argument".to_string(),
+            )
+        })?;
+        let self_val = coerce_numeric(self_val);
+        match self_val.kind() {
+            ValueKind::Float(f) => {
+                if f.is_nan() {
+                    return Err(PyError::named(
+                        "ValueError",
+                        "cannot convert float NaN to integer".to_string(),
+                    ));
+                }
+                if f.is_infinite() {
+                    return Err(PyError::named(
+                        "OverflowError",
+                        "cannot convert float infinity to integer".to_string(),
+                    ));
+                }
+                let floor = f.floor();
+                // i64::MAX as f64 rounds up to 2^63, so ">=" is required: any float
+                // >= 2^63 cannot fit in an i64 and must go through BigInt.
+                if floor >= i64::MAX as f64 || floor < i64::MIN as f64 {
+                    float_to_bigint(floor)
+                } else {
+                    Ok(Value::int(floor as i64))
+                }
+            }
+            _ => Err(PyError::named(
+                "TypeError",
+                format!(
+                    "descriptor '__floor__' for 'float' objects doesn't apply to a '{}' object",
+                    value_type_name_str(&self_val)
+                ),
+            )),
+        }
+    }
+
+    /// Issue #1452: `float.__ceil__(self)` — registered so that float subclasses
+    /// inherit it via MRO and `math.ceil(MyFloat(x))` dispatches correctly.
+    ///
+    /// CPython: `float.__ceil__` rounds toward positive infinity and returns an `int`.
+    /// Raises `OverflowError` for infinity, `ValueError` for NaN.
+    #[py_name = "float.__ceil__"]
+    fn float_ceil_dunder(args) -> Result<Value> {
+        let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                "descriptor '__ceil__' of 'float' needs an argument".to_string(),
+            )
+        })?;
+        let self_val = coerce_numeric(self_val);
+        match self_val.kind() {
+            ValueKind::Float(f) => {
+                if f.is_nan() {
+                    return Err(PyError::named(
+                        "ValueError",
+                        "cannot convert float NaN to integer".to_string(),
+                    ));
+                }
+                if f.is_infinite() {
+                    return Err(PyError::named(
+                        "OverflowError",
+                        "cannot convert float infinity to integer".to_string(),
+                    ));
+                }
+                let ceil = f.ceil();
+                // i64::MAX as f64 rounds up to 2^63, so ">=" is required: any float
+                // >= 2^63 cannot fit in an i64 and must go through BigInt.
+                if ceil >= i64::MAX as f64 || ceil < i64::MIN as f64 {
+                    float_to_bigint(ceil)
+                } else {
+                    Ok(Value::int(ceil as i64))
+                }
+            }
+            _ => Err(PyError::named(
+                "TypeError",
+                format!(
+                    "descriptor '__ceil__' for 'float' objects doesn't apply to a '{}' object",
+                    value_type_name_str(&self_val)
+                ),
+            )),
+        }
+    }
+
     /// Issue #1256: `str.__len__(self)` — exposes `str.__len__` as a class-level
     /// attribute so that `str.__len__("hello")` and `hasattr(str, '__len__')`
     /// work.

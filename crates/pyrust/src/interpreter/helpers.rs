@@ -554,6 +554,7 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
         (&dict_class, "dict", &["__len__"][..]),
         (&set_class, "set", &["__len__"][..]),
         (&bytes_class, "bytes", &["__len__"][..]),
+        (&float_class, "float", &["__trunc__", "__floor__", "__ceil__"][..]),
     ] {
         for &dunder in dunders {
             let qualified: &'static str =
