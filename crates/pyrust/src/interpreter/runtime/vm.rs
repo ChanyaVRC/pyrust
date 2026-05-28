@@ -2924,11 +2924,11 @@ impl Interpreter {
                     if is_self_call && exc_handlers.is_empty() {
                         // Guard against infinite tail recursion: treat each
                         // TCO iteration as one "call depth" unit, matching
-                        // CPython's MAX_CALL_DEPTH limit so that RecursionError
-                        // fires at the same logical depth whether the call is
-                        // normal or tail-call-optimised.
+                        // the recursion limit so that RecursionError fires at
+                        // the same logical depth whether the call is normal or
+                        // tail-call-optimised.
                         tco_iters += 1;
-                        if tco_iters > MAX_CALL_DEPTH {
+                        if tco_iters > max_call_depth() {
                             let exc = if let Some(cls) = self.exc_classes.get("RecursionError") {
                                 instantiate_exception(
                                     cls,
