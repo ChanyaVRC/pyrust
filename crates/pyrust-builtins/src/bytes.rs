@@ -1,5 +1,7 @@
 use indexmap::IndexMap;
-use pyrust_core::{PyError, PyKey, Result, StrKey, Value, ValueKind, builtin_type_name};
+use pyrust_core::{
+    PyError, PyKey, Result, StrKey, Value, ValueKind, builtin_type_name, py_value_display_name,
+};
 
 /// Canonical list of method names dispatched by `call`.
 /// Single source of truth for `has_method` and the drift-guard test.
@@ -353,7 +355,7 @@ fn bytes_decode(bytes: &[u8], args: &[Value], kwargs: &IndexMap<PyKey, Value>) -
                     "TypeError",
                     format!(
                         "decode() argument 'encoding' must be str, not {}",
-                        builtin_type_name(v)
+                        py_value_display_name(v)
                     ),
                 ));
             }
@@ -368,7 +370,7 @@ fn bytes_decode(bytes: &[u8], args: &[Value], kwargs: &IndexMap<PyKey, Value>) -
                     "TypeError",
                     format!(
                         "decode() argument 'errors' must be str, not {}",
-                        builtin_type_name(v)
+                        py_value_display_name(v)
                     ),
                 ));
             }
@@ -398,7 +400,7 @@ fn bytes_decode(bytes: &[u8], args: &[Value], kwargs: &IndexMap<PyKey, Value>) -
                     "TypeError",
                     format!(
                         "decode() argument 'encoding' must be str, not {}",
-                        builtin_type_name(v)
+                        py_value_display_name(v)
                     ),
                 ));
             }
@@ -414,7 +416,7 @@ fn bytes_decode(bytes: &[u8], args: &[Value], kwargs: &IndexMap<PyKey, Value>) -
                     "TypeError",
                     format!(
                         "decode() argument 'errors' must be str, not {}",
-                        builtin_type_name(v)
+                        py_value_display_name(v)
                     ),
                 ));
             }

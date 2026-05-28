@@ -1,7 +1,7 @@
 use indexmap::IndexMap;
 use pyrust_core::{
     PyError, PyKey, Result, Value, ValueKind, builtin_type_name, expect_arg_count,
-    extract_fill_char, extract_int, extract_optional_int,
+    extract_fill_char, extract_int, extract_optional_int, py_value_display_name,
 };
 use unicode_properties::{GeneralCategory, UnicodeGeneralCategory};
 
@@ -136,6 +136,7 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
         "removeprefix" => {
             expect_arg_count(args, 1, 1, "removeprefix")?;
             // CPython: "removeprefix() argument must be str, not <type>"
+            // None displays as "None" not "NoneType" in this message.
             let prefix = match args[0].kind() {
                 ValueKind::Str(p) => p,
                 _ => {
@@ -143,7 +144,7 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
                         "TypeError",
                         format!(
                             "removeprefix() argument must be str, not {}",
-                            builtin_type_name(&args[0])
+                            py_value_display_name(&args[0])
                         ),
                     ));
                 }
@@ -153,6 +154,7 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
         "removesuffix" => {
             expect_arg_count(args, 1, 1, "removesuffix")?;
             // CPython: "removesuffix() argument must be str, not <type>"
+            // None displays as "None" not "NoneType" in this message.
             let suffix = match args[0].kind() {
                 ValueKind::Str(p) => p,
                 _ => {
@@ -160,7 +162,7 @@ pub fn call(method: &str, src: &Value, args: Vec<Value>) -> Result<Value> {
                         "TypeError",
                         format!(
                             "removesuffix() argument must be str, not {}",
-                            builtin_type_name(&args[0])
+                            py_value_display_name(&args[0])
                         ),
                     ));
                 }
@@ -1228,7 +1230,7 @@ fn str_replace(s: &str, args: &[Value]) -> Result<Value> {
                 "TypeError",
                 format!(
                     "replace() argument 1 must be str, not {}",
-                    builtin_type_name(&args[0])
+                    py_value_display_name(&args[0])
                 ),
             ));
         }
@@ -1240,7 +1242,7 @@ fn str_replace(s: &str, args: &[Value]) -> Result<Value> {
                 "TypeError",
                 format!(
                     "replace() argument 2 must be str, not {}",
-                    builtin_type_name(&args[1])
+                    py_value_display_name(&args[1])
                 ),
             ));
         }
@@ -1576,7 +1578,7 @@ fn str_encode(s: &str, args: &[Value]) -> Result<Value> {
                     "TypeError",
                     format!(
                         "encode() argument 'encoding' must be str, not {}",
-                        builtin_type_name(v)
+                        py_value_display_name(v)
                     ),
                 ));
             }
@@ -1591,7 +1593,7 @@ fn str_encode(s: &str, args: &[Value]) -> Result<Value> {
                     "TypeError",
                     format!(
                         "encode() argument 'errors' must be str, not {}",
-                        builtin_type_name(v)
+                        py_value_display_name(v)
                     ),
                 ));
             }
@@ -1815,7 +1817,7 @@ pub fn str_maketrans(args: &[Value]) -> Result<Value> {
                     "TypeError",
                     format!(
                         "maketrans() argument 2 must be str, not {}",
-                        builtin_type_name(&args[1])
+                        py_value_display_name(&args[1])
                     ),
                 ));
             }
@@ -1839,7 +1841,7 @@ pub fn str_maketrans(args: &[Value]) -> Result<Value> {
                         "TypeError",
                         format!(
                             "maketrans() argument 3 must be str, not {}",
-                            builtin_type_name(&args[2])
+                            py_value_display_name(&args[2])
                         ),
                     ));
                 }
