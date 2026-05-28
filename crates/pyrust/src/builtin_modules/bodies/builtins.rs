@@ -1855,10 +1855,22 @@ pyrust_module! {
                                 0
                             }
                         }
+                        // BigInt that doesn't fit in i64 is always beyond
+                        // sys.maxsize — CPython raises OverflowError (#1448).
+                        ValueKind::BigInt(_) => {
+                            return Err(PyError::named(
+                                "OverflowError",
+                                "cannot fit 'int' into an index-sized integer"
+                                    .to_string(),
+                            ))
+                        }
                         _ => {
                             return Err(PyError::named(
                                 "TypeError",
-                                "__len__ returned non-int".to_string(),
+                                format!(
+                                    "'{}' object cannot be interpreted as an integer",
+                                    pyrust_core::builtin_type_name(&result),
+                                ),
                             ))
                         }
                     }

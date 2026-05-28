@@ -57,13 +57,35 @@ try:
 except ValueError as e:
     print(type(e).__name__, str(e))
 
-# --- __len__ returning non-int: TypeError ---
+# --- __len__ returning non-int (float): TypeError with type name ---
 
-class BadLen(list):
+class BadFloatLen(list):
+    def __len__(self):
+        return 1.5
+
+try:
+    len(BadFloatLen([1]))
+except TypeError as e:
+    print(type(e).__name__, e)
+
+# --- __len__ returning non-int (str): TypeError with type name ---
+
+class BadStrLen(list):
     def __len__(self):
         return "oops"
 
 try:
-    len(BadLen([1]))
+    len(BadStrLen([1]))
 except TypeError as e:
-    print(type(e).__name__)
+    print(type(e).__name__, e)
+
+# --- __len__ returning BigInt beyond sys.maxsize: OverflowError ---
+
+class BigLen(list):
+    def __len__(self):
+        return 2**63
+
+try:
+    len(BigLen([1]))
+except OverflowError as e:
+    print(type(e).__name__, e)
