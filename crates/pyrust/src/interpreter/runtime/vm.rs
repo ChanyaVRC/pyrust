@@ -4538,12 +4538,28 @@ impl Interpreter {
             1 => {
                 let receiver = regs[obj as usize].clone();
                 let empty_kw = indexmap::IndexMap::new();
-                let args = if method == "index" {
-                    self.resolve_seq_index_pos(args)?
+                if method == "index" || method == "count" {
+                    let args = if method == "index" {
+                        self.resolve_seq_index_pos(args)?
+                    } else {
+                        args
+                    };
+                    let snapshot = receiver
+                        .list_with(|items| items.clone())
+                        .ok_or_else(|| {
+                            PyError::named(
+                                "TypeError",
+                                "list.index receiver is not a list".to_string(),
+                            )
+                        })?;
+                    if method == "index" {
+                        self.call_seq_index(snapshot, &args, "list")
+                    } else {
+                        self.call_seq_count(snapshot, &args, "list")
+                    }
                 } else {
-                    args
-                };
-                pyrust_builtins::list::call(method, &receiver, args, &empty_kw)
+                    pyrust_builtins::list::call(method, &receiver, args, &empty_kw)
+                }
             }
             2 => {
                 if matches!(method, "keys" | "values" | "items") {
@@ -4566,12 +4582,21 @@ impl Interpreter {
             }
             3 => {
                 if let Some(ValueKind::Tuple(items)) = regs[obj as usize].as_some().map(|v| v.kind()) {
-                    let args = if method == "index" {
-                        self.resolve_seq_index_pos(args)?
+                    if method == "index" || method == "count" {
+                        let args = if method == "index" {
+                            self.resolve_seq_index_pos(args)?
+                        } else {
+                            args
+                        };
+                        let snapshot = items.to_vec();
+                        if method == "index" {
+                            self.call_seq_index(snapshot, &args, "tuple")
+                        } else {
+                            self.call_seq_count(snapshot, &args, "tuple")
+                        }
                     } else {
-                        args
-                    };
-                    pyrust_builtins::tuple::call(method, items, args)
+                        pyrust_builtins::tuple::call(method, items, args)
+                    }
                 } else {
                     unreachable!()
                 }
@@ -4669,10 +4694,38 @@ impl Interpreter {
                                         if let Some(backing) = instance_builtin_data(&inst_rc_clone) {
                                             let result = match prim_type {
                                                 "list" => {
-                                                    let empty_kw = indexmap::IndexMap::new();
-                                                    pyrust_builtins::list::call(
-                                                        prim_method, &backing, args, &empty_kw,
-                                                    )
+                                                    if prim_method == "index"
+                                                        || prim_method == "count"
+                                                    {
+                                                        let args = if prim_method == "index" {
+                                                            self.resolve_seq_index_pos(args)?
+                                                        } else {
+                                                            args
+                                                        };
+                                                        let snapshot = backing
+                                                            .list_with(|items| items.clone())
+                                                            .ok_or_else(|| {
+                                                                PyError::named(
+                                                                    "TypeError",
+                                                                    "list.index receiver is not a list"
+                                                                        .to_string(),
+                                                                )
+                                                            })?;
+                                                        if prim_method == "index" {
+                                                            self.call_seq_index(
+                                                                snapshot, &args, "list",
+                                                            )
+                                                        } else {
+                                                            self.call_seq_count(
+                                                                snapshot, &args, "list",
+                                                            )
+                                                        }
+                                                    } else {
+                                                        let empty_kw = indexmap::IndexMap::new();
+                                                        pyrust_builtins::list::call(
+                                                            prim_method, &backing, args, &empty_kw,
+                                                        )
+                                                    }
                                                 }
                                                 "dict" => {
                                                     self.call_dict_method(prim_method, backing, args)
@@ -4901,12 +4954,28 @@ impl Interpreter {
                     // No key: delegate to builtins (handles reverse kwarg)
                     return pyrust_builtins::list::call(method, &receiver, pos_items, &kw_map);
                 }
-                let pos_items = if method == "index" {
-                    self.resolve_seq_index_pos(pos_items)?
+                if method == "index" || method == "count" {
+                    let pos_items = if method == "index" {
+                        self.resolve_seq_index_pos(pos_items)?
+                    } else {
+                        pos_items
+                    };
+                    let snapshot = receiver
+                        .list_with(|items| items.clone())
+                        .ok_or_else(|| {
+                            PyError::named(
+                                "TypeError",
+                                "list.index receiver is not a list".to_string(),
+                            )
+                        })?;
+                    if method == "index" {
+                        self.call_seq_index(snapshot, &pos_items, "list")
+                    } else {
+                        self.call_seq_count(snapshot, &pos_items, "list")
+                    }
                 } else {
-                    pos_items
-                };
-                pyrust_builtins::list::call(method, &receiver, pos_items, &kw_map)
+                    pyrust_builtins::list::call(method, &receiver, pos_items, &kw_map)
+                }
             }
             2 => {
                 if matches!(method, "keys" | "values" | "items") {
@@ -4928,12 +4997,21 @@ impl Interpreter {
             }
             3 => {
                 if let Some(ValueKind::Tuple(items)) = regs[obj as usize].as_some().map(|v| v.kind()) {
-                    let pos_items = if method == "index" {
-                        self.resolve_seq_index_pos(pos_items)?
+                    if method == "index" || method == "count" {
+                        let pos_items = if method == "index" {
+                            self.resolve_seq_index_pos(pos_items)?
+                        } else {
+                            pos_items
+                        };
+                        let snapshot = items.to_vec();
+                        if method == "index" {
+                            self.call_seq_index(snapshot, &pos_items, "tuple")
+                        } else {
+                            self.call_seq_count(snapshot, &pos_items, "tuple")
+                        }
                     } else {
-                        pos_items
-                    };
-                    pyrust_builtins::tuple::call(method, items, pos_items)
+                        pyrust_builtins::tuple::call(method, items, pos_items)
+                    }
                 } else {
                     Err(PyError::Runtime("internal: expected tuple".to_string()))
                 }

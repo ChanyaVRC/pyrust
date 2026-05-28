@@ -341,18 +341,36 @@ impl Interpreter {
                     }
                     Kind::List => {
                         let args_vec: Vec<Value> = pos.drain(..).collect();
-                        let args_vec = if method == "index" {
-                            match self.resolve_seq_index_pos(args_vec) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    self.bound_method_pos_buf = pos;
-                                    return Err(e);
+                        if method == "index" || method == "count" {
+                            let args_vec = if method == "index" {
+                                match self.resolve_seq_index_pos(args_vec) {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        self.bound_method_pos_buf = pos;
+                                        return Err(e);
+                                    }
                                 }
+                            } else {
+                                args_vec
+                            };
+                            // Snapshot so we can release the list borrow
+                            // before `values_user_eq` may re-enter user code.
+                            let snapshot = receiver
+                                .list_with(|items| items.clone())
+                                .ok_or_else(|| {
+                                    PyError::named(
+                                        "TypeError",
+                                        "list.index receiver is not a list".to_string(),
+                                    )
+                                })?;
+                            if method == "index" {
+                                self.call_seq_index(snapshot, &args_vec, "list")
+                            } else {
+                                self.call_seq_count(snapshot, &args_vec, "list")
                             }
                         } else {
-                            args_vec
-                        };
-                        pyrust_builtins::list::call(method, &receiver, args_vec, &kw)
+                            pyrust_builtins::list::call(method, &receiver, args_vec, &kw)
+                        }
                     }
                     Kind::Dict => {
                         let args_vec: Vec<Value> = pos.drain(..).collect();
@@ -365,18 +383,29 @@ impl Interpreter {
                     Kind::Other => match receiver.kind() {
                     ValueKind::Tuple(items) => {
                         let args_vec: Vec<Value> = pos.drain(..).collect();
-                        let args_vec = if method == "index" {
-                            match self.resolve_seq_index_pos(args_vec) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    self.bound_method_pos_buf = pos;
-                                    return Err(e);
+                        if method == "index" || method == "count" {
+                            let args_vec = if method == "index" {
+                                match self.resolve_seq_index_pos(args_vec) {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        self.bound_method_pos_buf = pos;
+                                        return Err(e);
+                                    }
                                 }
+                            } else {
+                                args_vec
+                            };
+                            // Snapshot to release the tuple Ref before
+                            // `values_user_eq` may re-enter user code.
+                            let snapshot = items.to_vec();
+                            if method == "index" {
+                                self.call_seq_index(snapshot, &args_vec, "tuple")
+                            } else {
+                                self.call_seq_count(snapshot, &args_vec, "tuple")
                             }
                         } else {
-                            args_vec
-                        };
-                        pyrust_builtins::tuple::call(method, items, args_vec)
+                            pyrust_builtins::tuple::call(method, items, args_vec)
+                        }
                     }
                     ValueKind::Complex(_, _) => {
                         let args_vec: Vec<Value> = pos.drain(..).collect();
@@ -486,12 +515,33 @@ impl Interpreter {
                                             self.call_dict_method(method, backing, args_vec)
                                         }
                                         BkKind::List => {
-                                            pyrust_builtins::list::call(
-                                                method,
-                                                &backing,
-                                                args_vec,
-                                                &kw,
-                                            )
+                                            if method == "index" || method == "count" {
+                                                let snapshot = backing
+                                                    .list_with(|items| items.clone())
+                                                    .ok_or_else(|| {
+                                                        PyError::named(
+                                                            "TypeError",
+                                                            "list.index receiver is not a list"
+                                                                .to_string(),
+                                                        )
+                                                    })?;
+                                                if method == "index" {
+                                                    self.call_seq_index(
+                                                        snapshot, &args_vec, "list",
+                                                    )
+                                                } else {
+                                                    self.call_seq_count(
+                                                        snapshot, &args_vec, "list",
+                                                    )
+                                                }
+                                            } else {
+                                                pyrust_builtins::list::call(
+                                                    method,
+                                                    &backing,
+                                                    args_vec,
+                                                    &kw,
+                                                )
+                                            }
                                         }
                                         BkKind::Set => {
                                             self.call_set_method(method, backing, args_vec)
@@ -505,11 +555,24 @@ impl Interpreter {
                                         }
                                         BkKind::Tuple => match backing.kind() {
                                             ValueKind::Tuple(items) => {
-                                                pyrust_builtins::tuple::call(
-                                                    method,
-                                                    items,
-                                                    args_vec,
-                                                )
+                                                if method == "index" || method == "count" {
+                                                    let snapshot = items.to_vec();
+                                                    if method == "index" {
+                                                        self.call_seq_index(
+                                                            snapshot, &args_vec, "tuple",
+                                                        )
+                                                    } else {
+                                                        self.call_seq_count(
+                                                            snapshot, &args_vec, "tuple",
+                                                        )
+                                                    }
+                                                } else {
+                                                    pyrust_builtins::tuple::call(
+                                                        method,
+                                                        items,
+                                                        args_vec,
+                                                    )
+                                                }
                                             }
                                             _ => unreachable!("BkKind::Tuple guard above"),
                                         },
@@ -1207,24 +1270,54 @@ impl Interpreter {
                         }
                     }
                     "list" => {
-                        let pos = if method == "index" {
-                            self.resolve_seq_index_pos(pos)?
+                        if method == "index" || method == "count" {
+                            let pos = if method == "index" {
+                                self.resolve_seq_index_pos(pos)?
+                            } else {
+                                pos
+                            };
+                            let snapshot = self_val
+                                .list_with(|items| items.clone())
+                                .ok_or_else(|| {
+                                    PyError::named(
+                                        "TypeError",
+                                        "list.index receiver is not a list".to_string(),
+                                    )
+                                })?;
+                            if method == "index" {
+                                self.call_seq_index(snapshot, &pos, "list")
+                            } else {
+                                self.call_seq_count(snapshot, &pos, "list")
+                            }
                         } else {
-                            pos
-                        };
-                        pyrust_builtins::list::call(method, &self_val, pos, &kw)
+                            pyrust_builtins::list::call(method, &self_val, pos, &kw)
+                        }
                     }
                     "tuple" => {
-                        let pos = if method == "index" {
-                            self.resolve_seq_index_pos(pos)?
-                        } else {
-                            pos
-                        };
-                        match self_val.kind() {
-                            ValueKind::Tuple(items) => {
-                                pyrust_builtins::tuple::call(method, items, pos)
+                        if method == "index" || method == "count" {
+                            let pos = if method == "index" {
+                                self.resolve_seq_index_pos(pos)?
+                            } else {
+                                pos
+                            };
+                            match self_val.kind() {
+                                ValueKind::Tuple(items) => {
+                                    let snapshot = items.to_vec();
+                                    if method == "index" {
+                                        self.call_seq_index(snapshot, &pos, "tuple")
+                                    } else {
+                                        self.call_seq_count(snapshot, &pos, "tuple")
+                                    }
+                                }
+                                _ => unreachable!("kind_ok guard above"),
                             }
-                            _ => unreachable!("kind_ok guard above"),
+                        } else {
+                            match self_val.kind() {
+                                ValueKind::Tuple(items) => {
+                                    pyrust_builtins::tuple::call(method, items, pos)
+                                }
+                                _ => unreachable!("kind_ok guard above"),
+                            }
                         }
                     }
                     "dict" => self.call_dict_method(method, self_val, pos),
@@ -3868,6 +3961,127 @@ impl Interpreter {
             pos.insert(2, resolved);
         }
         Ok(pos)
+    }
+
+    /// Returns `true` if searching `target` in `items` requires user `__eq__`
+    /// dispatch (i.e. `values_user_eq`), rather than the primitive `Value::eq`
+    /// (which uses `Rc::ptr_eq` for `PyInstance` and recursion for containers).
+    ///
+    /// Matches the same gate used by the `in` operator fix in PR #1638.
+    fn seq_search_needs_dispatch(target: &Value, items: &[Value]) -> bool {
+        matches!(
+            target.kind(),
+            ValueKind::PyInstance(_)
+                | ValueKind::List(_)
+                | ValueKind::Tuple(_)
+                | ValueKind::Dict(_)
+                | ValueKind::Set(_)
+                | ValueKind::BuiltinObject { .. }
+        ) || items.iter().any(|e| {
+            matches!(
+                e.kind(),
+                ValueKind::PyInstance(_)
+                    | ValueKind::List(_)
+                    | ValueKind::Tuple(_)
+                    | ValueKind::Dict(_)
+                    | ValueKind::Set(_)
+                    | ValueKind::BuiltinObject { .. }
+            )
+        })
+    }
+
+    /// `list.index(target[, start[, stop]])` / `tuple.index(...)` with correct
+    /// `__eq__` dispatch.
+    ///
+    /// The `args` slice must already have had its start/stop arguments resolved
+    /// through `resolve_seq_index_pos` (so they are `Int`/`BigInt`/`Bool`).
+    /// The `items` snapshot is taken by the caller (snapshot required to release
+    /// the list/tuple borrow before calling `values_user_eq`, which may re-enter
+    /// user code that mutates the receiver).
+    fn call_seq_index(
+        &mut self,
+        items: Vec<Value>,
+        args: &[Value],
+        type_name: &'static str,
+    ) -> Result<Value> {
+        let target = args.first().ok_or_else(|| {
+            PyError::named("TypeError", "index expected at least 1 argument, got 0")
+        })?;
+        let len = items.len();
+        let start = match args.get(1).map(|v| v.kind()) {
+            Some(ValueKind::Int(i)) => pyrust_builtins::sequence::normalise_index(i, len).min(len),
+            Some(ValueKind::Bool(b)) => {
+                pyrust_builtins::sequence::normalise_index(b as i64, len).min(len)
+            }
+            Some(ValueKind::BigInt(b)) => {
+                pyrust_builtins::sequence::normalise_bigint_index(b, len)
+            }
+            None => 0,
+            // Other types were already rejected by resolve_seq_index_pos.
+            _ => 0,
+        };
+        let stop = match args.get(2).map(|v| v.kind()) {
+            Some(ValueKind::Int(i)) => pyrust_builtins::sequence::normalise_index(i, len).min(len),
+            Some(ValueKind::Bool(b)) => {
+                pyrust_builtins::sequence::normalise_index(b as i64, len).min(len)
+            }
+            Some(ValueKind::BigInt(b)) => {
+                pyrust_builtins::sequence::normalise_bigint_index(b, len)
+            }
+            None => len,
+            _ => len,
+        };
+        let stop = stop.max(start);
+        let window = &items[start..stop];
+        if Self::seq_search_needs_dispatch(target, window) {
+            for (i, item) in window.iter().enumerate() {
+                if self.values_user_eq(item, target)? {
+                    return Ok(Value::int((start + i) as i64));
+                }
+            }
+        } else {
+            for (i, item) in window.iter().enumerate() {
+                if item == target {
+                    return Ok(Value::int((start + i) as i64));
+                }
+            }
+        }
+        let msg = if type_name == "tuple" {
+            "tuple.index(x): x not in tuple".to_string()
+        } else {
+            format!("{target} is not in {type_name}")
+        };
+        Err(PyError::named("ValueError", msg))
+    }
+
+    /// `list.count(target)` / `tuple.count(target)` with correct `__eq__` dispatch.
+    ///
+    /// The `items` snapshot is taken by the caller for the same borrow-safety
+    /// reason as `call_seq_index`.
+    fn call_seq_count(
+        &mut self,
+        items: Vec<Value>,
+        args: &[Value],
+        type_name: &'static str,
+    ) -> Result<Value> {
+        let target = args.first().ok_or_else(|| {
+            PyError::named(
+                "TypeError",
+                format!("{type_name}.count() takes exactly one argument (0 given)"),
+            )
+        })?;
+        if Self::seq_search_needs_dispatch(target, &items) {
+            let mut n: i64 = 0;
+            for item in &items {
+                if self.values_user_eq(item, target)? {
+                    n += 1;
+                }
+            }
+            Ok(Value::int(n))
+        } else {
+            let n = items.iter().filter(|v| *v == target).count();
+            Ok(Value::int(n as i64))
+        }
     }
 
     /// Resolve an index argument for **sequence item access** (`a[i]`, `a[i] = v`,
