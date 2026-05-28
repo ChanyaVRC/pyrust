@@ -164,6 +164,7 @@ pub(crate) fn compare_values_with_op(
             .map(|o| o.reverse())
             .unwrap_or(std::cmp::Ordering::Equal)),
         (ValueKind::Str(x), ValueKind::Str(y)) => Ok(x.cmp(y)),
+        (ValueKind::Bytes(x), ValueKind::Bytes(y)) => Ok(x.as_slice().cmp(y.as_slice())),
         (ValueKind::List(x), ValueKind::List(y)) => {
             for (a, b) in x.iter().zip(y.iter()) {
                 let ord = compare_values_with_op(a, b, op_name)?;
