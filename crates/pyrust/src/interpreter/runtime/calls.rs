@@ -3211,7 +3211,7 @@ impl Interpreter {
                 } else {
                     spec
                 };
-                let formatted = apply_format_spec(&value, spec)?;
+                let formatted = self.dispatch_dunder_format(&value, spec)?;
                 if let ValueKind::Str(s) = formatted.kind() {
                     out.push_str(s);
                 } else {
@@ -4821,6 +4821,67 @@ impl Interpreter {
 /// a `:spec` and/or converted by `!r`/`!s`/`!a`.  Supports `{{` / `}}` for
 /// literal braces and `{0.attr}` / `{0[key]}` field accessors.
 impl Interpreter {
+    /// Dispatch `__format__(spec)` for a value, validating that the result is a
+    /// `str`.  Mirrors the logic in the `format()` builtin (#1370).
+    ///
+    /// For `PyInstance`:
+    ///   1. Look up `__format__` in the MRO.  If found and it is a user-defined
+    ///      function (not the object builtin), call it and check the return is
+    ///      `str`; if not, raise `TypeError`.
+    ///   2. No user `__format__`: if there is backing primitive data, apply
+    ///      `apply_format_spec` to the backing value.
+    ///   3. Pure user class with neither: empty spec → `__str__` via
+    ///      `render_value_as_str`; non-empty spec → `TypeError` (matching
+    ///      CPython's `object.__format__` behaviour).
+    ///
+    /// For all other value kinds: delegate straight to `apply_format_spec`.
+    fn dispatch_dunder_format(&mut self, value: &Value, spec: &str) -> Result<Value> {
+        let ValueKind::PyInstance(inst) = value.kind() else {
+            return apply_format_spec(value, spec);
+        };
+        let inst_rc = Rc::clone(inst);
+        let class = Rc::clone(&inst_rc.borrow().class);
+        if let Some(method_val) = lookup_class_attr(&class, "__format__") {
+            // Only dispatch to user-defined __format__, not the object builtin.
+            if !matches!(method_val.kind(), ValueKind::BuiltinFunction(_)) {
+                let result = invoke_class_method(
+                    self,
+                    method_val,
+                    Value::py_instance(Rc::clone(&inst_rc)),
+                    &[ExpandedCallArg {
+                        name: None,
+                        value: Value::string(spec),
+                    }],
+                )?;
+                return if matches!(result.kind(), ValueKind::Str(_)) {
+                    Ok(result)
+                } else {
+                    Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "__format__ must return a str, not {}",
+                            value_type_name_str(&result),
+                        ),
+                    ))
+                };
+            }
+        }
+        // No user __format__ in MRO (or only the object builtin).
+        if let Some(backing) = instance_builtin_data(&inst_rc) {
+            return apply_format_spec(&backing, spec);
+        }
+        // Pure user class with no custom __format__ and no backing data.
+        if spec.is_empty() {
+            Ok(Value::string(self.render_value_as_str(value)?))
+        } else {
+            let type_name = value_type_name_str(value);
+            Err(PyError::named(
+                "TypeError",
+                format!("unsupported format string passed to {}.__format__", type_name),
+            ))
+        }
+    }
+
 fn format_str_template(
     &mut self,
     template: &str,
@@ -4946,14 +5007,10 @@ fn format_str_template(
                 spec
             };
 
-            // Apply the format spec.  When the spec is empty and the value is a
-            // PyInstance, dispatch `__str__` the same way `str(x)` would — the
-            // default `to_py_str()` falls through to repr instead of __str__.
-            let formatted = if spec.is_empty() && matches!(value.kind(), ValueKind::PyInstance(_)) {
-                Value::string(self.render_value_as_str(&value)?)
-            } else {
-                apply_format_spec(&value, spec)?
-            };
+            // Dispatch __format__(spec) via the user class if applicable, then
+            // validate the return is a str.  For non-instance values fall through
+            // to apply_format_spec directly.
+            let formatted = self.dispatch_dunder_format(&value, spec)?;
             if let ValueKind::Str(s) = formatted.kind() {
                 out.push_str(s);
             } else {
