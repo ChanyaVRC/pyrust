@@ -486,15 +486,28 @@ impl Interpreter {
             }
             ValueKind::PyModule(module) => {
                 let module = Rc::clone(module);
+                // CPython 3.12 module_getattro builds the error message by
+                // looking up __name__ in the module's __dict__.  If __name__
+                // is absent (e.g. it was deleted), the error omits the module
+                // name: "module has no attribute 'X'" rather than
+                // "module 'foo' has no attribute 'X'".
+                // Precompute this once for both error sites below.
+                let name_tombstoned = module
+                    .borrow()
+                    .attrs
+                    .get("__name__")
+                    .map_or(false, |v| v.is_unset());
                 if let Some(value) = module.borrow().attrs.get(name).cloned() {
                     // A stored Value::unset() is a deletion tombstone written by
                     // delete_attr for synthetic dunders.  Treat it as absent.
                     if value.is_unset() {
-                        let mod_name = module.borrow().name.clone();
-                        return Err(PyError::named(
-                            "AttributeError",
-                            format!("module '{mod_name}' has no attribute '{name}'"),
-                        ));
+                        let msg = if name_tombstoned {
+                            format!("module has no attribute '{name}'")
+                        } else {
+                            let mod_name = module.borrow().name.clone();
+                            format!("module '{mod_name}' has no attribute '{name}'")
+                        };
+                        return Err(PyError::named("AttributeError", msg));
                     }
                     return Ok(value);
                 }
@@ -560,8 +573,13 @@ impl Interpreter {
                     }
                     _ => {}
                 }
+                let msg = if name_tombstoned {
+                    format!("module has no attribute '{name}'")
+                } else {
+                    format!("module '{mod_name}' has no attribute '{name}'")
+                };
                 Err(PyError::attribute_error(
-                    format!("module '{mod_name}' has no attribute '{name}'"),
+                    msg,
                     Some(name.to_string()),
                     Some(target.clone()),
                 ))
