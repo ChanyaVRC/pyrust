@@ -3856,13 +3856,28 @@ pyrust_module! {
             ValueKind::PyClass(obj_class) => {
                 // Bug #197: classmethod case — second arg is a class.
                 let obj_class = Rc::clone(obj_class);
-                if !class_is_subclass_of(&obj_class, &class) {
-                    return Err(PyError::named(
-                        "TypeError",
-                        "super(type, obj): obj must be an instance or subtype of type".to_string(),
-                    ));
+                if class_is_subclass_of(&obj_class, &class) {
+                    // Standard case: obj_class is a subclass of class.
+                    // e.g. super(Base, Derived) in a classmethod.
+                    return Ok(Value::super_proxy_class(class, obj_class));
                 }
-                Ok(Value::super_proxy_class(class, obj_class))
+                // Issue #1385: metaclass case — super(Meta, cls) where Meta is
+                // a subclass of type and cls is any class (an "instance" of the
+                // metaclass).  In CPython, type(cls).__mro__ is walked starting
+                // after Meta; in pyrust we approximate by walking Meta's own MRO
+                // (Meta.__mro__ = [Meta, type, object]) starting after Meta.
+                // This allows super().__new__() and super().__init__() inside
+                // metaclass methods to resolve type.__new__ / type.__init__.
+                let type_cls = type_class_singleton();
+                if class_is_subclass_of(&class, &type_cls) {
+                    // Use class itself as obj_class so the MRO walk is over
+                    // the metaclass hierarchy: [Meta, type, object].
+                    return Ok(Value::super_proxy_class(Rc::clone(&class), class));
+                }
+                Err(PyError::named(
+                    "TypeError",
+                    "super(type, obj): obj must be an instance or subtype of type".to_string(),
+                ))
             }
             _ => Err(PyError::named(
                 "TypeError",
@@ -4548,6 +4563,141 @@ pyrust_module! {
                 attrs: indexmap::IndexMap::new(),
             },
         ))))
+    }
+
+    /// Issue #1385: `type.__new__(mcs, name, bases, namespace)` — the metaclass
+    /// allocator.  Creates a new `PyClass` from the given arguments.  Called when
+    /// `super().__new__(mcs, name, bases, namespace)` is used inside a custom
+    /// metaclass `__new__` method.
+    ///
+    /// CPython signature: `type.__new__(cls, name, bases, dict, /)`
+    #[py_name = "type.__new__"]
+    fn type_new_dunder(args) -> Result<Value> {
+        // type.__new__ has two call signatures:
+        //   type.__new__(mcs, name, bases, namespace)  — metaclass allocator
+        //   type(obj)                                  — returns type(obj)
+        // The one-arg form is handled by the "type" registry entry, not here.
+        // Here we always expect exactly 4 args (mcs + name + bases + namespace).
+        if args.len() != 4 {
+            // CPython counts positional args excluding the implicit cls arg, so
+            // the error says "3 arguments" (name, bases, dict) not "4".
+            // With 0 args (no cls at all), CPython uses a different message.
+            if args.is_empty() {
+                return Err(PyError::named(
+                    "TypeError",
+                    "type.__new__(): not enough arguments".to_string(),
+                ));
+            }
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "type.__new__() takes exactly 3 arguments ({} given)",
+                    args.len() - 1,
+                ),
+            ));
+        }
+        let mcs_val = args[0].value.clone();
+        let name_val = args[1].value.clone();
+        let bases_val = args[2].value.clone();
+        let namespace_val = args[3].value.clone();
+
+        let mcs_rc = match mcs_val.kind() {
+            ValueKind::PyClass(c) => Rc::clone(c),
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "type.__new__(): first argument must be a type".to_string(),
+                ));
+            }
+        };
+        let name = match name_val.as_str() {
+            Some(s) => s.to_string(),
+            None => {
+                return Err(PyError::named(
+                    "TypeError",
+                    "type.__new__(): second argument must be a str".to_string(),
+                ));
+            }
+        };
+        // Parse bases tuple/list into Vec<Rc<RefCell<PyClass>>>.
+        let bases_slice: &[Value] = bases_val
+            .as_tuple()
+            .or_else(|| bases_val.as_list())
+            .unwrap_or(&[]);
+        let mut base: Option<Rc<RefCell<PyClass>>> = None;
+        let mut extra_bases: Vec<Rc<RefCell<PyClass>>> = Vec::new();
+        for (i, b) in bases_slice.iter().enumerate() {
+            match b.kind() {
+                ValueKind::PyClass(c) => {
+                    if i == 0 {
+                        base = Some(Rc::clone(c));
+                    } else {
+                        extra_bases.push(Rc::clone(c));
+                    }
+                }
+                _ => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "type.__new__(): bases must be types".to_string(),
+                    ));
+                }
+            }
+        }
+        // Build attrs from the namespace dict.
+        let mut attrs: indexmap::IndexMap<String, Value> = indexmap::IndexMap::new();
+        if let Some(map) = namespace_val.as_dict() {
+            for (k, v) in map.iter() {
+                if let PyKey::Str(s) = k {
+                    if let Some(key_str) = s.as_str() {
+                        attrs.insert(key_str.to_string(), v.clone());
+                    }
+                }
+            }
+        }
+        let qualname = attrs
+            .get("__qualname__")
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| name.clone());
+        // __qualname__ must not live in the class attrs dict (it is a type
+        // descriptor in CPython); remove it so get_attr intercepts it cleanly.
+        attrs.shift_remove("__qualname__");
+        let class = Rc::new(RefCell::new(PyClass {
+            name,
+            qualname,
+            base: base.clone(),
+            extra_bases: extra_bases.clone(),
+            attrs,
+            mutation_version: std::cell::Cell::new(0),
+            subclasses: std::cell::RefCell::new(vec![]),
+        }));
+        // Register the new class as a direct subclass of each base so that
+        // base.__subclasses__() includes it.
+        if let Some(ref b) = base {
+            b.borrow().subclasses.borrow_mut().push(Rc::downgrade(&class));
+        }
+        for eb in &extra_bases {
+            eb.borrow().subclasses.borrow_mut().push(Rc::downgrade(&class));
+        }
+        // The mcs argument controls the actual metatype — in pyrust every
+        // PyClass value is implicitly an instance of `type`, so mcs is
+        // informational only here.  We do not store it, matching the current
+        // architecture where metaclass identity is tracked by the call path
+        // (call_class_expanded detects metaclass __new__ and __init__).
+        let _ = mcs_rc;
+        Ok(Value::py_class(class))
+    }
+
+    /// Issue #1385: `type.__init__(cls, name, bases, namespace)` — the
+    /// metaclass initialiser.  In CPython `type.__init__` is effectively a
+    /// no-op (the real work happens in `type.__new__`).  Registering it here
+    /// lets `super().__init__(name, bases, namespace)` in a custom metaclass
+    /// `__init__` resolve and terminate cleanly instead of raising
+    /// `AttributeError: super(): parent class has no attribute '__init__'`.
+    ///
+    /// CPython signature: `type.__init__(cls, name, bases, dict, /)`
+    #[py_name = "type.__init__"]
+    fn type_init_dunder(_args) -> Result<Value> {
+        Ok(Value::none())
     }
 
     /// Issue #1143: `tuple.__new__(cls, iterable=())` — allocator for tuple
@@ -6043,10 +6193,7 @@ pyrust_module! {
             None => {
                 return Err(PyError::named(
                     "TypeError",
-                    format!(
-                        "{FN_NAME}() argument 'name' must be str, not {}",
-                        value_type_name_str(&args[0].value),
-                    ),
+                    "module name must be a string".to_string(),
                 ));
             }
         };

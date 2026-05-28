@@ -309,12 +309,26 @@ thread_local! {
     /// `hasattr(type, '__init_subclass__')` returns True.
     static TYPE_CLASS: Rc<RefCell<PyClass>> = {
         let obj = OBJECT_CLASS.with(|c| Rc::clone(c));
+        // Issue #1385: register type.__new__ and type.__init__ so that
+        // `super().__new__(mcs, name, bases, namespace)` and
+        // `super().__init__(name, bases, namespace)` inside custom metaclass
+        // methods resolve to these builtins instead of falling through to
+        // object.__new__ / object.__init__ which reject the extra arguments.
+        let mut attrs: IndexMap<String, Value> = IndexMap::new();
+        attrs.insert(
+            "__new__".to_string(),
+            Value::builtin_function("type.__new__"),
+        );
+        attrs.insert(
+            "__init__".to_string(),
+            Value::builtin_function("type.__init__"),
+        );
         let cls = Rc::new(RefCell::new(PyClass {
             name: "type".to_string(),
             qualname: "type".to_string(),
             base: Some(Rc::clone(&obj)),
             extra_bases: vec![],
-            attrs: IndexMap::new(),
+            attrs,
             mutation_version: std::cell::Cell::new(0),
             subclasses: std::cell::RefCell::new(vec![]),
         }));

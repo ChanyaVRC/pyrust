@@ -3298,6 +3298,48 @@ impl Interpreter {
                     }
                 }
             }
+            // Issue #1385: metaclass protocol — if __new__ returned a PyClass
+            // (i.e. a class object was constructed) and the calling class is a
+            // metaclass (subclass of type), call __init__ on the new class with
+            // the same arguments.  This mirrors type.__call__'s two-phase
+            // __new__ + __init__ protocol applied at the metaclass level.
+            if let ValueKind::PyClass(new_class_rc) = new_result.kind() {
+                let new_class_rc = Rc::clone(new_class_rc);
+                let type_cls = type_class_singleton();
+                if class_is_subclass_of(&class, &type_cls) {
+                    let init = lookup_class_attr(&class, "__init__");
+                    if let Some(init_val) = init {
+                        if matches!(
+                            init_val.kind(),
+                            ValueKind::UserFunction(_) | ValueKind::BuiltinFunction(_)
+                        ) {
+                            // Skip type.__init__ (the no-op sentinel) to avoid
+                            // double-calling when there is no user __init__.
+                            let is_type_init = matches!(
+                                init_val.kind(),
+                                ValueKind::BuiltinFunction("type.__init__")
+                            );
+                            if !is_type_init {
+                                let result = invoke_class_method(
+                                    self,
+                                    init_val,
+                                    Value::py_class(Rc::clone(&new_class_rc)),
+                                    args,
+                                )?;
+                                if !result.is_none() {
+                                    return Err(PyError::named(
+                                        "TypeError",
+                                        &format!(
+                                            "__init__() should return None, not '{}'",
+                                            pyrust_core::builtin_type_name(&result),
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             return Ok(new_result);
         }
 
