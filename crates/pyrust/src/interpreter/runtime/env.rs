@@ -1784,9 +1784,19 @@ impl Interpreter {
             ValueKind::PyModule(module) => {
                 // CPython 3.12: module attribute assignment always writes to
                 // the module's __dict__ (tp_setattro → module_setattro →
-                // PyObject_GenericSetAttr).  No attribute is read-only from
-                // the outside; synthetic dunders (__name__, __package__, etc.)
-                // are writable because they live in __dict__ too.
+                // PyObject_GenericSetAttr).  Synthetic dunders (__name__,
+                // __package__, etc.) are writable because they live in
+                // __dict__ too.
+                //
+                // __dict__ itself is a read-only C-level slot — CPython 3.12
+                // raises AttributeError("readonly attribute") for both
+                // `m.__dict__ = x` and `del m.__dict__` (symmetric).
+                if name == "__dict__" {
+                    return Err(PyError::named(
+                        "AttributeError",
+                        "readonly attribute".to_string(),
+                    ));
+                }
                 let module = Rc::clone(module);
                 module.borrow_mut().attrs.insert(name.to_string(), value);
                 Ok(())
@@ -2104,6 +2114,15 @@ impl Interpreter {
                 // CPython's module_setattro with NULL value path).
                 // Note: CPython's delete-path uses "'module' object has no
                 // attribute 'X'" (generic), while get-path uses the module name.
+                //
+                // __dict__ is a read-only slot on module objects — CPython 3.12
+                // raises AttributeError("readonly attribute") for `del m.__dict__`.
+                if name == "__dict__" {
+                    return Err(PyError::named(
+                        "AttributeError",
+                        "readonly attribute".to_string(),
+                    ));
+                }
                 let module = Rc::clone(module);
                 // Peek before removing.  A Value::unset() in attrs is a
                 // deletion tombstone for a synthetic dunder that was already
