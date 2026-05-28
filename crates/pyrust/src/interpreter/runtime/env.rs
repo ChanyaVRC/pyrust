@@ -486,6 +486,15 @@ impl Interpreter {
             ValueKind::PyModule(module) => {
                 let module = Rc::clone(module);
                 if let Some(value) = module.borrow().attrs.get(name).cloned() {
+                    // A stored Value::unset() is a deletion tombstone written by
+                    // delete_attr for synthetic dunders.  Treat it as absent.
+                    if value.is_unset() {
+                        let mod_name = module.borrow().name.clone();
+                        return Err(PyError::named(
+                            "AttributeError",
+                            format!("module '{mod_name}' has no attribute '{name}'"),
+                        ));
+                    }
                     return Ok(value);
                 }
                 // Synthetic dunder attributes for built-in modules.  These are
@@ -512,32 +521,38 @@ impl Interpreter {
                         // Build a snapshot dict of the module namespace.
                         // Include both the stored attrs and the synthetic
                         // dunder attributes that get_attr synthesises above.
-                        let mut d: IndexMap<PyKey, Value> = module
-                            .borrow()
-                            .attrs
+                        // Value::unset() is a deletion tombstone (written by
+                        // delete_attr for synthetic dunders); filter it out so
+                        // deleted dunders don't appear in __dict__.
+                        let attrs_snapshot: HashMap<String, Value> =
+                            module.borrow().attrs.clone();
+                        let mut d: IndexMap<PyKey, Value> = attrs_snapshot
                             .iter()
+                            .filter(|(_, v)| !v.is_unset())
                             .map(|(k, v)| (PyKey::str_from(k), v.clone()))
                             .collect();
-                        // Synthetic dunders: add only if not already present
-                        // (user scripts may have stored their own __name__ etc. into attrs).
+                        // Synthetic dunders: add only if the key is neither
+                        // already present in attrs (user override) nor
+                        // tombstoned (explicitly deleted by the user).
+                        let is_absent = |key: &str| !attrs_snapshot.contains_key(key);
                         let name_key = PyKey::str_from("__name__");
-                        if !d.contains_key(&name_key) {
+                        if is_absent("__name__") {
                             d.insert(name_key, Value::string(mod_name.clone()));
                         }
                         let pkg_key = PyKey::str_from("__package__");
-                        if !d.contains_key(&pkg_key) {
+                        if is_absent("__package__") {
                             d.insert(pkg_key, Value::string(String::new()));
                         }
                         let spec_key = PyKey::str_from("__spec__");
-                        if !d.contains_key(&spec_key) {
+                        if is_absent("__spec__") {
                             d.insert(spec_key, Value::none());
                         }
                         let loader_key = PyKey::str_from("__loader__");
-                        if !d.contains_key(&loader_key) {
+                        if is_absent("__loader__") {
                             d.insert(loader_key, Value::none());
                         }
                         let doc_key = PyKey::str_from("__doc__");
-                        if !d.contains_key(&doc_key) {
+                        if is_absent("__doc__") {
                             d.insert(doc_key, Value::none());
                         }
                         return Ok(Value::dict(d));
@@ -2082,13 +2097,37 @@ impl Interpreter {
                 // Note: CPython's delete-path uses "'module' object has no
                 // attribute 'X'" (generic), while get-path uses the module name.
                 let module = Rc::clone(module);
-                if module.borrow_mut().attrs.remove(name).is_none() {
-                    return Err(PyError::named(
-                        "AttributeError",
-                        format!("'module' object has no attribute '{name}'"),
-                    ));
+                // Peek before removing.  A Value::unset() in attrs is a
+                // deletion tombstone for a synthetic dunder that was already
+                // deleted — treat it the same as absent so that a second `del`
+                // correctly raises AttributeError.
+                let existing = module.borrow().attrs.get(name).cloned();
+                match existing {
+                    Some(v) if !v.is_unset() => {
+                        // A real (non-tombstone) value is present; remove it.
+                        module.borrow_mut().attrs.remove(name);
+                        return Ok(());
+                    }
+                    None if matches!(
+                        name,
+                        "__name__" | "__package__" | "__loader__" | "__spec__" | "__doc__"
+                    ) => {
+                        // Synthetic dunders live only in get_attr, not in attrs.
+                        // CPython 3.12 allows deleting them (they exist in the
+                        // real module __dict__).  Write a Value::unset() tombstone
+                        // so get_attr stops synthesising them on future reads.
+                        module
+                            .borrow_mut()
+                            .attrs
+                            .insert(name.to_string(), Value::unset());
+                        return Ok(());
+                    }
+                    _ => {}
                 }
-                Ok(())
+                Err(PyError::named(
+                    "AttributeError",
+                    format!("'module' object has no attribute '{name}'"),
+                ))
             }
             ValueKind::Generator(_) => {
                 // CPython 3.12 symmetry with assign_attr: deleting __name__ or
