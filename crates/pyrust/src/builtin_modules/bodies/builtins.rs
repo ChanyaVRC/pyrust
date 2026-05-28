@@ -26,7 +26,7 @@ use crate::interpreter::{
     float_to_bigint, instance_builtin_data, is_str_or_str_subclass,
     int_pow_promoting, invoke_class_method,
     is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_hash_bigint, py_hash_float,
-    py_hash_int, py_mod_i64, py_round_half_even, py_round_half_even_f64,
+    py_hash_int, py_mod_i64, py_round_half_even, round_float_ndigits,
     reject_keyword_args_expanded, resolve_zero_arg_super, round_bigint_neg_ndigits, snapshot_current_locals,
     sync_module_env_to_globals_dict, type_class_singleton,
     unicode_exc_set_attrs,
@@ -2179,42 +2179,15 @@ pyrust_module! {
                 None => Ok(Value::int(py_round_half_even(v))),
                 Some(n) => {
                     if n >= 0 {
+                        // For large ndigits the float has insufficient precision;
+                        // return unchanged (CPython behaviour).
                         let factor = 10f64.powi(n);
                         let z = v * factor;
-                        // If the factor or the scaled value overflows, the float has
-                        // insufficient precision to round at this many decimal places;
-                        // return the original value unchanged (matches CPython behaviour).
                         if factor.is_infinite() || z.is_infinite() {
                             return Ok(Value::float(v));
                         }
-                        let result = py_round_half_even_f64(z) / factor;
-                        // Preserve sign: CPython returns -0.0 when a negative float
-                        // rounds to zero (IEEE 754 negative-zero semantics).
-                        let result = if result == 0.0 { result.copysign(v) } else { result };
-                        Ok(Value::float(result))
-                    } else {
-                        // Use powf (not powi) to match libm pow() precision — powi uses
-                        // repeated squarings that accumulate ULP error at high exponents
-                        // (e.g. powi(308) != powf(308.0) != 1e308), causing wrong rounding.
-                        let factor = 10f64.powf((-n) as f64);
-                        if factor.is_infinite() {
-                            // 10^(-n) overflows f64; any finite value rounds to signed zero.
-                            return Ok(Value::float(if v.is_finite() {
-                                if v.is_sign_negative() { -0.0f64 } else { 0.0f64 }
-                            } else {
-                                v
-                            }));
-                        }
-                        let result = py_round_half_even_f64(v / factor) * factor;
-                        if v.is_finite() && result.is_infinite() {
-                            return Err(PyError::named(
-                                "OverflowError",
-                                "rounded value too large to represent".to_string(),
-                            ));
-                        }
-                        let result = if result == 0.0 { result.copysign(v) } else { result };
-                        Ok(Value::float(result))
                     }
+                    round_float_ndigits(v, n)
                 }
             },
             NumKind::Other => {
@@ -2289,28 +2262,8 @@ pyrust_module! {
                                     if factor.is_infinite() || z.is_infinite() {
                                         return Ok(Value::float(v));
                                     }
-                                    let result = py_round_half_even_f64(z) / factor;
-                                    let result = if result == 0.0 { result.copysign(v) } else { result };
-                                    Ok(Value::float(result))
-                                } else {
-                                    let factor = 10f64.powf((-n) as f64);
-                                    if factor.is_infinite() {
-                                        return Ok(Value::float(if v.is_finite() {
-                                            if v.is_sign_negative() { -0.0f64 } else { 0.0f64 }
-                                        } else {
-                                            v
-                                        }));
-                                    }
-                                    let result = py_round_half_even_f64(v / factor) * factor;
-                                    if v.is_finite() && result.is_infinite() {
-                                        return Err(PyError::named(
-                                            "OverflowError",
-                                            "rounded value too large to represent".to_string(),
-                                        ));
-                                    }
-                                    let result = if result == 0.0 { result.copysign(v) } else { result };
-                                    Ok(Value::float(result))
                                 }
+                                round_float_ndigits(v, n)
                             }
                         },
                         _ => {}
