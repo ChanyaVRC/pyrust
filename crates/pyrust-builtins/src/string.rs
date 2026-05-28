@@ -779,17 +779,35 @@ fn is_python_numeric(c: char) -> bool {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Python's str.isdigit(): Unicode Nd (DecimalNumber) category plus superscript/subscript digits.
+/// Python's str.isdigit(): Unicode Nd (DecimalNumber) category plus all codepoints with
+/// Numeric_Type=Digit (category No). Authoritative list from CPython 3.12 / Unicode 15.
 fn is_python_digit(c: char) -> bool {
     // Nd covers all decimal digit scripts (Arabic-Indic, Devanagari, etc.)
     if c.general_category() == GeneralCategory::DecimalNumber {
         return true;
     }
-    // Superscript/subscript digits have Numeric_Type=Digit but category No (OtherNumber)
-    matches!(c as u32,
-        0x00B2 | 0x00B3 | 0x00B9        // ²³¹
-        | 0x2070 | 0x2074..=0x2079      // ⁰⁴⁵⁶⁷⁸⁹
-        | 0x2080..=0x2089) // ₀₁₂₃₄₅₆₇₈₉
+    // Remaining codepoints with Numeric_Type=Digit (category No) per Unicode 15 / CPython 3.12.
+    matches!(
+        c as u32,
+        0x00B2 | 0x00B3 | 0x00B9           // superscript 2, 3, 1
+        | 0x1369..=0x1371                   // Ethiopic digits 1–9
+        | 0x19DA                            // New Tai Lue Tham Digit One
+        | 0x2070 | 0x2074..=0x2079         // superscript 0, 4–9
+        | 0x2080..=0x2089                   // subscript 0–9
+        | 0x2460..=0x2468                   // circled digits 1–9
+        | 0x2474..=0x247C                   // parenthesized digits 1–9
+        | 0x2488..=0x2490                   // digit full-stop 1–9
+        | 0x24EA                            // circled digit 0
+        | 0x24F5..=0x24FD                   // double circled digits 1–9
+        | 0x24FF                            // negative circled digit 0
+        | 0x2776..=0x277E                   // dingbat negative circled digits 1–9
+        | 0x2780..=0x2788                   // dingbat circled sans-serif digits 1–9
+        | 0x278A..=0x2792                   // dingbat negative circled sans-serif digits 1–9
+        | 0x10A40..=0x10A43                 // Kharoshthi digits 1–4
+        | 0x10E60..=0x10E68                 // Rumi digits 1–9
+        | 0x11052..=0x1105A                 // Brahmi numbers 1–9
+        | 0x1F100..=0x1F10A                 // digit full-stop/comma 0–9
+    )
 }
 
 /// Python's str.isalpha(): Unicode general category L* (Letter).
