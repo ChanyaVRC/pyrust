@@ -305,6 +305,22 @@ impl Interpreter {
         Ok(instantiate_exception(class, vec![arg]))
     }
 
+    /// Instantiate a `NameError` or `UnboundLocalError` with the CPython 3.12
+    /// `.name` instance attribute set to the identifier that was not found.
+    ///
+    /// `class_name` must be `"NameError"` or `"UnboundLocalError"`.
+    /// `name` is the identifier string (or `None` for `UnboundLocalError`).
+    fn instantiate_name_error_exception(
+        &self,
+        class_name: &str,
+        message: String,
+        name: Option<String>,
+    ) -> Result<Value> {
+        let class = lookup_exc_class(class_name)
+            .ok_or_else(|| PyError::Runtime(format!("built-in exception '{class_name}' is not defined")))?;
+        Ok(instantiate_name_error(class, message, name))
+    }
+
     /// Instantiate an `ImportError` or `ModuleNotFoundError` with the CPython
     /// 3.12 `.name` and `.path` instance attributes set.
     ///

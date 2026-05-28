@@ -250,6 +250,9 @@ impl Interpreter {
                     PyError::Named(cls, s) => format!("{cls}: {s}"),
                     PyError::Class(cls, s) => format!("{}: {s}", cls.borrow().name),
                     PyError::KeyError(key) => format!("KeyError: {}", key.repr()),
+                    PyError::NameError { class_name, message, .. } => {
+                        format!("{class_name}: {message}")
+                    }
                     PyError::ImportError { class_name, message, .. } => {
                         format!("{class_name}: {message}")
                     }
