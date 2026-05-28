@@ -4287,6 +4287,89 @@ pub(crate) fn modpow_i64(base: i64, exp: u64, modulus: i64) -> i64 {
     result
 }
 
+/// Modular inverse of `value` modulo `|modulus|` using the extended Euclidean
+/// algorithm.  Returns `None` if the inverse does not exist (i.e.
+/// `gcd(value, |modulus|) != 1`).
+///
+/// The result is in the range `[0, |modulus| - 1]` (always non-negative).
+/// Callers that need the result adjusted for a negative `modulus` must handle
+/// the sign themselves.
+///
+/// `modulus` must not be zero.
+pub(crate) fn modinv_bigint(value: &PyBigInt, modulus: &PyBigInt) -> Option<PyBigInt> {
+    use num_traits::One;
+
+    // Absolute value of modulus so the algorithm works on positive numbers.
+    let m: PyBigInt = if *modulus < PyBigInt::from(0i64) {
+        -modulus
+    } else {
+        modulus.clone()
+    };
+
+    // Reduce value modulo m so old_r starts non-negative.
+    let v = ((value % &m) + &m) % &m;
+
+    // Extended Euclidean algorithm (Knuth Vol. 2, §4.5.2 Algorithm X).
+    let mut old_r = v;
+    let mut r = m.clone();
+    let mut old_s = PyBigInt::one();
+    let mut s = PyBigInt::from(0i64);
+
+    while r != PyBigInt::from(0i64) {
+        let quotient = &old_r / &r;
+        let tmp_r = old_r - &quotient * &r;
+        old_r = r;
+        r = tmp_r;
+        let tmp_s = old_s - &quotient * &s;
+        old_s = s;
+        s = tmp_s;
+    }
+
+    // old_r is gcd(value, m).  Inverse exists only when gcd == 1.
+    if old_r != PyBigInt::one() {
+        return None;
+    }
+
+    // Normalise the Bézout coefficient to [0, m).
+    let result = ((old_s % &m) + &m) % &m;
+    Some(result)
+}
+
+/// Modular inverse of `value` modulo `|modulus|` for i64.  Returns `None` if
+/// the inverse does not exist.  The result is in `[0, |modulus| - 1]`.
+///
+/// Callers must ensure `modulus != 0`.
+pub(crate) fn modinv_i64(value: i64, modulus: i64) -> Option<i64> {
+    let m = modulus.unsigned_abs() as i128;
+    if m == 0 {
+        return None;
+    }
+    // Reduce value modulo m so old_r starts non-negative.
+    let v = ((value as i128 % m) + m) % m;
+    let mut old_r = v;
+    let mut r = m;
+    let mut old_s: i128 = 1;
+    let mut s: i128 = 0;
+
+    while r != 0 {
+        let quotient = old_r / r;
+        let tmp_r = old_r - quotient * r;
+        old_r = r;
+        r = tmp_r;
+        let tmp_s = old_s - quotient * s;
+        old_s = s;
+        s = tmp_s;
+    }
+
+    if old_r != 1 {
+        return None;
+    }
+
+    // Normalise to [0, m).
+    let result = ((old_s % m) + m) % m;
+    Some(result as i64)
+}
+
 /// CPython's `_Py_HashDouble` algorithm for float hashing.
 ///
 /// Implements the Mersenne-prime hash (P = 2^61 - 1) that CPython uses for

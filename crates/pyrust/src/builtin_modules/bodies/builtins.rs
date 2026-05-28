@@ -25,7 +25,7 @@ use crate::interpreter::{
     compare_values, compare_values_with_op, coerce_numeric, dir_names,
     float_to_bigint, instance_builtin_data, is_str_or_str_subclass,
     int_pow_promoting, invoke_class_method,
-    is_exception_class, iter_values, lookup_class_attr, modpow_bigint, modpow_i64, py_hash_bigint, py_hash_float,
+    is_exception_class, iter_values, lookup_class_attr, modinv_bigint, modinv_i64, modpow_bigint, modpow_i64, py_hash_bigint, py_hash_float,
     py_hash_int, py_mod_i64, py_round_half_even, round_float_ndigits,
     reject_keyword_args_expanded, resolve_zero_arg_super, round_bigint_neg_ndigits, snapshot_current_locals,
     function_type_singleton, method_type_singleton,
@@ -880,11 +880,41 @@ pyrust_module! {
                     ));
                 }
                 if exp_big.sign() == crate::value::PyBigIntSign::Minus {
-                    return Err(PyError::named(
-                        "ValueError",
-                        "pow() 2nd argument cannot be negative when 3rd argument specified"
-                            .to_string(),
-                    ));
+                    // Negative exponent: compute base^|exp| mod |m|, then find modinv.
+                    let abs_exp = -&exp_big;
+                    let abs_mod = if mod_big.sign() == crate::value::PyBigIntSign::Minus {
+                        -&mod_big
+                    } else {
+                        mod_big.clone()
+                    };
+                    let powered = modpow_bigint(&base_big, &abs_exp, &abs_mod);
+                    let powered_big: PyBigInt = match powered.kind() {
+                        ValueKind::Int(v) => PyBigInt::from(v),
+                        ValueKind::BigInt(b) => (*b).clone(),
+                        _ => unreachable!("modpow_bigint always returns Int or BigInt"),
+                    };
+                    match modinv_bigint(&powered_big, &abs_mod) {
+                        None => return Err(PyError::named(
+                            "ValueError",
+                            "base is not invertible for the given modulus".to_string(),
+                        )),
+                        Some(inv) => {
+                            use num_traits::ToPrimitive;
+                            // inv is in [0, abs_mod).  Adjust for negative modulus:
+                            // Python semantics: result has the same sign as modulus.
+                            let result = if mod_big.sign() == crate::value::PyBigIntSign::Minus
+                                && inv != PyBigInt::from(0i64)
+                            {
+                                inv - &abs_mod
+                            } else {
+                                inv
+                            };
+                            return Ok(match result.to_i64() {
+                                Some(v) => Value::int(v),
+                                None => Value::bigint(result),
+                            });
+                        }
+                    }
                 }
                 return Ok(modpow_bigint(&base_big, &exp_big, &mod_big));
             }
@@ -910,10 +940,24 @@ pyrust_module! {
                 ));
             }
             if exp < 0 {
-                return Err(PyError::named(
-                    "ValueError",
-                    "pow() 2nd argument cannot be negative when 3rd argument specified".to_string(),
-                ));
+                // Negative exponent: compute base^|exp| mod |m|, then find modinv.
+                let powered = modpow_i64(base, exp.unsigned_abs(), modulus);
+                match modinv_i64(powered, modulus) {
+                    None => return Err(PyError::named(
+                        "ValueError",
+                        "base is not invertible for the given modulus".to_string(),
+                    )),
+                    Some(inv) => {
+                        // inv is in [0, |modulus|).  Adjust for negative modulus:
+                        // Python semantics: result has the same sign as modulus.
+                        let result = if modulus < 0 && inv != 0 {
+                            inv - modulus.unsigned_abs() as i64
+                        } else {
+                            inv
+                        };
+                        return Ok(Value::int(result));
+                    }
+                }
             }
             let result = modpow_i64(base, exp as u64, modulus);
             Ok(Value::int(result))
