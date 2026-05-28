@@ -53,3 +53,28 @@ print("%d" % 9223372036854775807)
 print("%d" % -9223372036854775808)
 print("%x" % 9223372036854775807)
 print("%x" % -9223372036854775808)
+
+# Float truncation: small floats use Small path
+print("%d" % 1.5)
+print("%d" % -1.5)
+
+# Float truncation: large finite float beyond i64 range uses Big path
+print("%d" % 1e20)
+print("%d" % -1e20)
+print("%d" % 1e30)
+
+# Float NaN/inf raise ValueError/OverflowError (matching CPython)
+try:
+    print("%d" % float("nan"))
+except ValueError as e:
+    print("ValueError:", str(e))
+
+try:
+    print("%d" % float("inf"))
+except OverflowError as e:
+    print("OverflowError:", str(e))
+
+try:
+    print("%d" % float("-inf"))
+except OverflowError as e:
+    print("OverflowError:", str(e))

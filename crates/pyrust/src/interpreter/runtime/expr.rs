@@ -3618,7 +3618,7 @@ impl Interpreter {
                             }
                         }
                         PrintfInt::Big(b) => format_printf_bigint_radix(
-                            b, 8, "0o", false, flag_hash, flag_plus, flag_space,
+                            &b, 8, "0o", false, flag_hash, flag_plus, flag_space,
                         ),
                     }
                 }
@@ -3650,7 +3650,7 @@ impl Interpreter {
                             }
                         }
                         PrintfInt::Big(b) => format_printf_bigint_radix(
-                            b, 16, "0x", false, flag_hash, flag_plus, flag_space,
+                            &b, 16, "0x", false, flag_hash, flag_plus, flag_space,
                         ),
                     }
                 }
@@ -3682,7 +3682,7 @@ impl Interpreter {
                             }
                         }
                         PrintfInt::Big(b) => format_printf_bigint_radix(
-                            b, 16, "0X", true, flag_hash, flag_plus, flag_space,
+                            &b, 16, "0X", true, flag_hash, flag_plus, flag_space,
                         ),
                     }
                 }
@@ -3836,9 +3836,9 @@ fn str_printf_take_positional(positional: &Option<Vec<Value>>, idx: &mut usize) 
 /// truncated `float`).  `Big` is used only for `BigInt` values that are
 /// outside the `i64` range — the caller formats them with BigInt-native
 /// methods (`to_str_radix`, etc.) instead of Rust integer formatting.
-enum PrintfInt<'a> {
+enum PrintfInt {
     Small(i64),
-    Big(&'a PyBigInt),
+    Big(PyBigInt),
 }
 
 /// Convert a `Value` to a `PrintfInt` for integer printf format codes.
@@ -3846,7 +3846,12 @@ enum PrintfInt<'a> {
 /// Unlike the old `i64`-returning version, the `BigInt` arm no longer raises
 /// `OverflowError`; it returns `PrintfInt::Big` so that the caller can format
 /// arbitrarily large integers using BigInt-native methods.
-fn str_printf_to_int<'a>(v: &'a Value, conv: char) -> Result<PrintfInt<'a>> {
+///
+/// For `%d`/`%i`/`%u`, float arguments are truncated toward zero following
+/// CPython's `int(float)` semantics: NaN raises `ValueError`, infinity raises
+/// `OverflowError`, and finite floats larger than `i64::MAX` are promoted to
+/// `PrintfInt::Big` rather than being silently clamped.
+fn str_printf_to_int(v: &Value, conv: char) -> Result<PrintfInt> {
     match v.kind() {
         ValueKind::Int(n) => Ok(PrintfInt::Small(n)),
         ValueKind::Bool(b) => Ok(PrintfInt::Small(b as i64)),
@@ -3860,8 +3865,19 @@ fn str_printf_to_int<'a>(v: &'a Value, conv: char) -> Result<PrintfInt<'a>> {
                 ),
             ))
         }
-        ValueKind::Float(f) => Ok(PrintfInt::Small(f as i64)),
-        ValueKind::BigInt(b) => Ok(PrintfInt::Big(b)),
+        ValueKind::Float(f) => {
+            // CPython converts via PyLong_FromDouble: NaN → ValueError,
+            // infinity → OverflowError, finite → truncate toward zero.
+            // Rust's `f as i64` silently saturates at i64::MAX/MIN for
+            // out-of-range finite floats, losing significant digits.
+            let int_val = float_to_bigint(f)?;
+            match int_val.kind() {
+                ValueKind::Int(n) => Ok(PrintfInt::Small(n)),
+                ValueKind::BigInt(b) => Ok(PrintfInt::Big(b.clone())),
+                _ => unreachable!("float_to_bigint returns Int or BigInt"),
+            }
+        }
+        ValueKind::BigInt(b) => Ok(PrintfInt::Big(b.clone())),
         _ => {
             // CPython uses "a real number is required" for %d/%i/%u,
             // and "an integer is required" for %o/%x/%X.
