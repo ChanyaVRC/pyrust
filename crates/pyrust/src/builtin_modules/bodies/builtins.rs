@@ -4379,7 +4379,7 @@ pyrust_module! {
             [] => {
                 return Err(PyError::named(
                     "TypeError",
-                    "tuple.__new__() takes at least 1 argument (0 given)".to_string(),
+                    "tuple.__new__(): not enough arguments".to_string(),
                 ));
             }
             [first, rest @ ..] => (first.value.clone(), rest),
@@ -4433,7 +4433,7 @@ pyrust_module! {
             [] => {
                 return Err(PyError::named(
                     "TypeError",
-                    "frozenset.__new__() takes at least 1 argument (0 given)".to_string(),
+                    "frozenset.__new__(): not enough arguments".to_string(),
                 ));
             }
             [first, rest @ ..] => (first.value.clone(), rest),
