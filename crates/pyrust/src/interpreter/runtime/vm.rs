@@ -1747,6 +1747,31 @@ impl Interpreter {
                         }
                     }
                 }
+                Insn::GetAttrForWith(dst, obj, name_idx, missed_exit) => {
+                    let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
+                    let name = pool_get!(code.names, *name_idx, "name");
+                    let type_name = value_type_name_str(&obj_val);
+                    match self.get_attr(obj_val, name) {
+                        Ok(v) => regs[*dst as usize] = v,
+                        Err(_) => {
+                            // CPython converts any lookup failure (AttributeError or
+                            // otherwise) to TypeError for the context manager protocol.
+                            let msg = if *missed_exit {
+                                format!(
+                                    "'{}' object does not support the context manager protocol \
+                                     (missed __exit__ method)",
+                                    type_name
+                                )
+                            } else {
+                                format!(
+                                    "'{}' object does not support the context manager protocol",
+                                    type_name
+                                )
+                            };
+                            vm_try!(Err(PyError::named("TypeError", msg)));
+                        }
+                    }
+                }
                 Insn::ImportFromAttr(dst, mod_reg, name_idx) => {
                     let mod_val = vm_try!(vm_read(&regs, *mod_reg, num_locals));
                     let name = pool_get!(code.names, *name_idx, "name");

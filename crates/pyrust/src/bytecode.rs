@@ -94,6 +94,10 @@ pub enum Insn {
     UnaryOp(Reg, UnaryOp, Reg),
     /// R[dst] = R[obj].names[name_idx]
     GetAttr(Reg, Reg, u16),
+    /// Like GetAttr but converts AttributeError to TypeError for the context manager
+    /// protocol.  `missed_exit` is true when fetching `__exit__` (object already has
+    /// `__enter__`), which appends " (missed __exit__ method)" to match CPython 3.12.
+    GetAttrForWith(Reg, Reg, u16, bool),
     /// R[obj].names[name_idx] = R[val]
     SetAttr(Reg, u16, Reg),
     /// del R[obj].names[name_idx]

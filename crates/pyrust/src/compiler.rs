@@ -7785,9 +7785,15 @@ impl Compiler {
         let ctx_reg = self.compile_expr(expr);
 
         // VAR = ctx.__enter__()
+        // Use GetAttrForWith so AttributeError is converted to TypeError (#1656).
         let enter_name_idx = self.intern_name("__enter__");
         let enter_reg = self.alloc_temp();
-        self.emit(Insn::GetAttr(enter_reg, ctx_reg, enter_name_idx));
+        self.emit(Insn::GetAttrForWith(
+            enter_reg,
+            ctx_reg,
+            enter_name_idx,
+            false,
+        ));
         // Call __enter__() with no args: result goes to enter_reg
         self.emit(Insn::Call(enter_reg, 0));
 
@@ -7845,7 +7851,12 @@ impl Compiler {
         if exit_frame + 3 > self.max_reg {
             self.max_reg = exit_frame + 3;
         }
-        self.emit(Insn::GetAttr(exit_frame, ctx_reg, exit_name_idx));
+        self.emit(Insn::GetAttrForWith(
+            exit_frame,
+            ctx_reg,
+            exit_name_idx,
+            true,
+        ));
         self.emit(Insn::LoadNone(exit_frame + 1));
         self.emit(Insn::LoadNone(exit_frame + 2));
         self.emit(Insn::LoadNone(exit_frame + 3));
@@ -7872,7 +7883,12 @@ impl Compiler {
             self.max_reg = exit_frame2 + 3;
         }
         let class_name_idx = self.intern_name("__class__");
-        self.emit(Insn::GetAttr(exit_frame2, ctx_reg, exit_name_idx));
+        self.emit(Insn::GetAttrForWith(
+            exit_frame2,
+            ctx_reg,
+            exit_name_idx,
+            true,
+        ));
         self.emit(Insn::GetAttr(exit_frame2 + 1, exc_tmp, class_name_idx)); // exc_type
         self.emit(Insn::Move(exit_frame2 + 2, exc_tmp));
         self.emit(Insn::LoadNone(exit_frame2 + 3)); // traceback: None (pyrust has no traceback objects)
@@ -7909,6 +7925,7 @@ impl Compiler {
             | Insn::LoadGlobal(d, ..)
             | Insn::Move(d, ..)
             | Insn::GetAttr(d, ..)
+            | Insn::GetAttrForWith(d, ..)
             | Insn::ImportFromAttr(d, ..)
             | Insn::GetItem(d, ..)
             // Call is NOT retargetable: Call(func_reg, argc) uses func_reg as both
