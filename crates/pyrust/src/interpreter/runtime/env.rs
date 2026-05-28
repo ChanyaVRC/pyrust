@@ -420,7 +420,28 @@ impl Interpreter {
                 if let Some(value) = module.borrow().attrs.get(name).cloned() {
                     return Ok(value);
                 }
+                // Synthetic dunder attributes for built-in modules.  These are
+                // not stored in the attrs map (to avoid polluting vars(m)) but
+                // are synthesised here, mirroring CPython 3.12 module object
+                // slot behaviour:
+                //   __name__    — the module's dotted name string.
+                //   __package__ — empty string for all top-level builtin modules
+                //                 (CPython 3.12: `sys.__package__ == ''`).
+                //   __loader__  — None; a full BuiltinImporter object is out of
+                //                 scope for this implementation.
+                //   __spec__    — None; same reason.
+                //   __doc__     — None; pyrust does not store module docstrings.
+                // Note: __file__ is intentionally absent.  CPython 3.12 raises
+                // AttributeError for `sys.__file__`; builtin modules have no
+                // file path to report.
                 let mod_name = module.borrow().name.clone();
+                match name {
+                    "__name__" => return Ok(Value::string(mod_name)),
+                    "__package__" => return Ok(Value::string(String::new())),
+                    "__loader__" | "__spec__" => return Ok(Value::none()),
+                    "__doc__" => return Ok(Value::none()),
+                    _ => {}
+                }
                 Err(PyError::named(
                     "AttributeError",
                     format!("module '{mod_name}' has no attribute '{name}'"),
