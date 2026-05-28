@@ -201,6 +201,8 @@ pub enum Insn {
     CheckLocal(Reg, u16),
     /// raise AssertionError(R[msg])  (condition already tested by JumpIfTrue)
     RaiseAssert(Reg),
+    /// raise AssertionError() with no args (`assert False` with no message)
+    RaiseAssertNoMsg,
     /// raise R[exc]  (coerces class to instance)
     RaiseValue(Reg),
     /// raise R[exc] from R[cause]  (sets __cause__ on the coerced instance)

@@ -2710,16 +2710,32 @@ impl Interpreter {
                     self.active_exception = self.handled_exc_stack.last().cloned();
                 }
                 Insn::RaiseAssert(msg_reg) => {
+                    // `assert False, expr` — pass the raw value as AssertionError(expr).
                     let msg = vm_try!(vm_read(&regs, *msg_reg, num_locals));
-                    let msg_str = if msg.is_none() {
-                        String::new()
-                    } else {
-                        msg.to_py_str()
-                    };
                     let exc = if let Some(cls) = self.exc_classes.get("AssertionError") {
-                        instantiate_exception(cls, vec![Value::string(msg_str)])
+                        instantiate_exception(cls, vec![msg])
                     } else {
-                        vm_try!(self.instantiate_named_exception("AssertionError", msg_str))
+                        let class = lookup_exc_class("AssertionError").ok_or_else(|| {
+                            PyError::Runtime(
+                                "built-in exception 'AssertionError' is not defined".to_string(),
+                            )
+                        });
+                        instantiate_exception(vm_try!(class), vec![msg])
+                    };
+                    self.attach_implicit_context(&exc);
+                    vm_try!(Err::<(), _>(PyError::Raised(exc)));
+                }
+                Insn::RaiseAssertNoMsg => {
+                    // `assert False` (no message) — AssertionError() with empty args.
+                    let exc = if let Some(cls) = self.exc_classes.get("AssertionError") {
+                        instantiate_exception(cls, vec![])
+                    } else {
+                        let class = lookup_exc_class("AssertionError").ok_or_else(|| {
+                            PyError::Runtime(
+                                "built-in exception 'AssertionError' is not defined".to_string(),
+                            )
+                        });
+                        instantiate_exception(vm_try!(class), vec![])
                     };
                     self.attach_implicit_context(&exc);
                     vm_try!(Err::<(), _>(PyError::Raised(exc)));
