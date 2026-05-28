@@ -4428,6 +4428,17 @@ pyrust_module! {
     /// in user-defined `__new__` methods can resolve it via the MRO walk and
     /// `call_class_expanded` can distinguish it from user-defined `__new__`.
     ///
+    /// Issue #1421: CPython 3.12 arg-leniency rule — extra positional/keyword
+    /// arguments are accepted (and ignored) only when BOTH:
+    ///   (a) `cls` does NOT define a custom `__new__` (i.e. cls.__new__ IS
+    ///       object.__new__), AND
+    ///   (b) `cls` defines a custom `__init__` (something other than
+    ///       object.__init__).
+    /// When `cls` defines a custom `__new__`, extra args raise
+    /// `TypeError: object.__new__() takes exactly one argument (the type to
+    /// instantiate)`.  When neither custom override is present, extra args
+    /// raise `TypeError: <cls>() takes no arguments`.
+    ///
     /// CPython signature: `object.__new__(cls, /)`
     #[py_name = "object.__new__"]
     fn object_new_dunder(args) -> Result<Value> {
@@ -4449,6 +4460,66 @@ pyrust_module! {
                 ));
             }
         };
+        // Issue #1421: reject extra args unless the full CPython 3.12 leniency
+        // rule is satisfied.  From Objects/typeobject.c (object_new):
+        //
+        //   lenient iff:
+        //     (a) cls.__new__  IS  object.__new__  (no custom __new__), AND
+        //     (b) cls.__init__ is NOT object.__init__ (has a custom __init__)
+        //
+        // When both (a) and (b) hold, the extra args are intended for the
+        // custom __init__ and object.__new__ should silently ignore them.
+        // In all other cases extra args are a programmer error:
+        //
+        //   - cls has a custom __new__ → the custom __new__ is responsible for
+        //     any extra args; object.__new__ rejects them with the "takes
+        //     exactly one argument" wording.
+        //   - cls has no custom __init__ → no-one will consume the args →
+        //     "<cls>() takes no arguments".
+        // Only args beyond the mandatory first (cls) are "extra".  Do not
+        // include the cls arg itself — it may arrive as a keyword arg via the
+        // raw expanded-arg slice, and that must not trigger the leniency check.
+        let has_extra_args = args.len() > 1 || args.iter().skip(1).any(|a| a.name.is_some());
+        if has_extra_args {
+            let new_val = lookup_class_attr(&class_rc, "__new__");
+            let has_custom_new = matches!(
+                new_val.as_ref().map(|v| v.kind()),
+                Some(ValueKind::UserFunction(_))
+            );
+            // Exception subclasses are special: CPython's BaseException.__new__
+            // (BaseException_new in Objects/exceptions.c) accepts extra args and
+            // stores them as .args.  In pyrust there is no separate
+            // BaseException.__new__ registration — the MRO walk falls through to
+            // object_new_dunder.  When cls is a BaseException subclass, mirror
+            // CPython by accepting the extra args silently (they will be processed
+            // by BaseException.__init__).
+            let is_exception_subclass =
+                class_chain_contains_name(&class_rc, "BaseException");
+            if is_exception_subclass {
+                // Accept extra args for exception subclasses unconditionally.
+                // BaseException.__new__ is responsible for them in CPython.
+            } else {
+                if has_custom_new {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "object.__new__() takes exactly one argument (the type to instantiate)"
+                            .to_string(),
+                    ));
+                }
+                let init_val = lookup_class_attr(&class_rc, "__init__");
+                let has_custom_init = matches!(
+                    init_val.as_ref().map(|v| v.kind()),
+                    Some(ValueKind::UserFunction(_))
+                );
+                if !has_custom_init {
+                    let cls_name = class_rc.borrow().name.clone();
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("{cls_name}() takes no arguments"),
+                    ));
+                }
+            }
+        }
         Ok(Value::py_instance(Rc::new(std::cell::RefCell::new(
             crate::value::PyInstance {
                 class: class_rc,
