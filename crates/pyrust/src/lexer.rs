@@ -1098,8 +1098,8 @@ fn lex_string(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)>
                             pos += 1;
                         }
                     } else {
-                        let (ch, next_pos) = parse_escape(chars, pos, content_start)?;
-                        out.push(ch);
+                        let (s, next_pos) = parse_escape(chars, pos, content_start)?;
+                        out.push_str(&s);
                         pos = next_pos;
                     }
                 }
@@ -1160,8 +1160,8 @@ fn lex_string(chars: &[char], start: usize, raw: bool) -> Result<(Token, usize)>
                     pos += 1;
                 }
             } else {
-                let (ch, next_pos) = parse_escape(chars, pos, content_start)?;
-                out.push(ch);
+                let (s, next_pos) = parse_escape(chars, pos, content_start)?;
+                out.push_str(&s);
                 pos = next_pos;
             }
             continue;
@@ -1283,8 +1283,8 @@ fn lex_fstring(chars: &[char], start: usize, quote: char, raw: bool) -> Result<(
                         pos += 1; // skip \n of CRLF
                     }
                 } else {
-                    let (ch, next_pos) = parse_escape(chars, pos, content_start)?;
-                    literal.push(ch);
+                    let (s, next_pos) = parse_escape(chars, pos, content_start)?;
+                    literal.push_str(&s);
                     pos = next_pos;
                 }
             }
@@ -1586,7 +1586,7 @@ fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<Vec<FStringPart>> 
 }
 
 /// Parse a string escape sequence starting at `pos` (the character after the
-/// backslash) and return `(resulting_char, next_pos)` where `next_pos` is the
+/// backslash) and return `(resulting_str, next_pos)` where `next_pos` is the
 /// index of the first character not consumed by this escape.
 ///
 /// `content_start` is the index in `chars` of the first character after the
@@ -1596,21 +1596,25 @@ fn lex_format_spec(chars: &[char], pos: &mut usize) -> Result<Vec<FStringPart>> 
 /// Supports single-character escapes (`\n`, `\t`, ...), octal escapes
 /// (`\ooo`, 1–3 digits, value 0–255), and `\xNN` hex escapes (exactly two
 /// hex digits, producing U+0000–U+00FF).
-fn parse_escape(chars: &[char], pos: usize, content_start: usize) -> Result<(char, usize)> {
+///
+/// For unrecognized escape sequences (e.g. `\z`), CPython 3.12 emits a
+/// `DeprecationWarning` and preserves the two-character sequence `\<char>`
+/// verbatim.  pyrust matches that behaviour (without emitting the warning).
+fn parse_escape(chars: &[char], pos: usize, content_start: usize) -> Result<(String, usize)> {
     let c = *chars
         .get(pos)
         .ok_or_else(|| PyError::Lex("unterminated escape sequence".to_string()))?;
     match c {
-        'n' => Ok(('\n', pos + 1)),
-        't' => Ok(('\t', pos + 1)),
-        'r' => Ok(('\r', pos + 1)),
-        '\\' => Ok(('\\', pos + 1)),
-        '\'' => Ok(('\'', pos + 1)),
-        '"' => Ok(('"', pos + 1)),
-        'a' => Ok(('\x07', pos + 1)),
-        'b' => Ok(('\x08', pos + 1)),
-        'f' => Ok(('\x0C', pos + 1)),
-        'v' => Ok(('\x0B', pos + 1)),
+        'n' => Ok(("\n".to_string(), pos + 1)),
+        't' => Ok(("\t".to_string(), pos + 1)),
+        'r' => Ok(("\r".to_string(), pos + 1)),
+        '\\' => Ok(("\\".to_string(), pos + 1)),
+        '\'' => Ok(("'".to_string(), pos + 1)),
+        '"' => Ok(("\"".to_string(), pos + 1)),
+        'a' => Ok(("\x07".to_string(), pos + 1)),
+        'b' => Ok(("\x08".to_string(), pos + 1)),
+        'f' => Ok(("\x0C".to_string(), pos + 1)),
+        'v' => Ok(("\x0B".to_string(), pos + 1)),
         '0'..='7' => {
             // \ooo — 1 to 3 octal digits; produces values 0x00–0xFF.
             let d1 = c as u32 - '0' as u32;
@@ -1630,7 +1634,7 @@ fn parse_escape(chars: &[char], pos: usize, content_start: usize) -> Result<(cha
             }
             let v = u8::try_from(val)
                 .map_err(|_| PyError::Lex(format!("octal escape value out of range: \\{val:o}")))?;
-            Ok((char::from(v), end))
+            Ok((char::from(v).to_string(), end))
         }
         'x' => {
             // \xNN — exactly two hex digits; produces U+0000–U+00FF.
@@ -1642,7 +1646,7 @@ fn parse_escape(chars: &[char], pos: usize, content_start: usize) -> Result<(cha
             })?;
             let v = u8::from_str_radix(&format!("{hi}{lo}"), 16)
                 .map_err(|_| PyError::Lex(format!("invalid \\x escape: \\x{hi}{lo}")))?;
-            Ok((char::from(v), pos + 3))
+            Ok((char::from(v).to_string(), pos + 3))
         }
         'u' => {
             // \uNNNN — exactly four hex digits; BMP codepoint (surrogates forbidden).
@@ -1662,7 +1666,7 @@ fn parse_escape(chars: &[char], pos: usize, content_start: usize) -> Result<(cha
             }
             let ch = char::from_u32(codepoint)
                 .ok_or_else(|| PyError::Lex(format!("invalid \\u escape: U+{codepoint:04X}")))?;
-            Ok((ch, pos + 5))
+            Ok((ch.to_string(), pos + 5))
         }
         'U' => {
             // \UNNNNNNNN — exactly eight hex digits; full Unicode range (surrogates and >0x10FFFF forbidden).
@@ -1687,7 +1691,7 @@ fn parse_escape(chars: &[char], pos: usize, content_start: usize) -> Result<(cha
             }
             let ch = char::from_u32(codepoint)
                 .ok_or_else(|| PyError::Lex(format!("invalid \\U escape: U+{codepoint:08X}")))?;
-            Ok((ch, pos + 9))
+            Ok((ch.to_string(), pos + 9))
         }
         'N' => {
             // \N{Unicode name} — look up character by Unicode name.
@@ -1740,9 +1744,12 @@ fn parse_escape(chars: &[char], pos: usize, content_start: usize) -> Result<(cha
                      {bs_byte}-{end_byte}: unknown Unicode character name"
                 ))
             })?;
-            Ok((ch, end + 1))
+            Ok((ch.to_string(), end + 1))
         }
-        other => Err(PyError::Lex(format!("unsupported escape \\{other}"))),
+        // Unrecognized escape: CPython 3.12 preserves the backslash + character
+        // verbatim and emits a DeprecationWarning.  pyrust accepts the sequence
+        // without emitting the warning (warning infrastructure not yet wired).
+        other => Ok((format!("\\{other}"), pos + 1)),
     }
 }
 
