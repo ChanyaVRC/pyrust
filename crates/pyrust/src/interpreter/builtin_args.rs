@@ -768,12 +768,10 @@ pub(crate) fn locate_arg<'a>(
 /// `validate_kwargs_and_collect_positional` + `locate_arg` chain when
 /// it can prove at compile time that no parameter accepts kwargs.
 pub(crate) fn reject_named_args(args: &[ExpandedCallArg], fn_name: &str) -> Result<()> {
-    for arg in args {
-        if let Some(name) = &arg.name {
-            return Err(type_error(format!(
-                "{fn_name}() got an unexpected keyword argument '{name}'",
-            )));
-        }
+    if args.iter().any(|a| a.name.is_some()) {
+        return Err(type_error(format!(
+            "{fn_name}() takes no keyword arguments"
+        )));
     }
     Ok(())
 }
