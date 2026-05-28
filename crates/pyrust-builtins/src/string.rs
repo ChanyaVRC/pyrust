@@ -1597,7 +1597,10 @@ fn format_codepoint_repr(cp: u32) -> String {
 /// Other encoding names raise `LookupError: unknown encoding: <name>`.
 ///
 /// `errors="strict"` raises `UnicodeEncodeError` on unencodable characters;
-/// `"ignore"` silently drops them; `"replace"` substitutes `b'?'`.
+/// `"ignore"` silently drops them; `"replace"` substitutes `b'?'`;
+/// `"backslashreplace"` substitutes `\xHH`, `\uHHHH`, or `\UHHHHHHHH`;
+/// `"xmlcharrefreplace"` substitutes `&#NNN;` (decimal codepoint);
+/// `"namereplace"` substitutes `\N{NAME}`, falling back to the backslash form.
 pub fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result<Value> {
     fn normalize(name: &str) -> String {
         name.to_ascii_lowercase().replace('_', "-")
@@ -1608,6 +1611,9 @@ pub fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result
         Strict,
         Ignore,
         Replace,
+        BackslashReplace,
+        XmlCharRefReplace,
+        NameReplace,
     }
 
     fn resolve_handler(errors: &str) -> Result<Handler> {
@@ -1615,10 +1621,25 @@ pub fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result
             "strict" => Ok(Handler::Strict),
             "ignore" => Ok(Handler::Ignore),
             "replace" => Ok(Handler::Replace),
+            "backslashreplace" => Ok(Handler::BackslashReplace),
+            "xmlcharrefreplace" => Ok(Handler::XmlCharRefReplace),
+            "namereplace" => Ok(Handler::NameReplace),
             other => Err(PyError::named(
                 "LookupError",
                 format!("unknown error handler name '{other}'"),
             )),
+        }
+    }
+
+    /// Produce the backslash-escape bytes for a single unencodable codepoint.
+    /// `\xHH` for cp < 0x100, `\uHHHH` for cp < 0x10000, `\UHHHHHHHH` otherwise.
+    fn backslash_escape_bytes(cp: u32) -> Vec<u8> {
+        if cp < 0x100 {
+            format!("\\x{:02x}", cp).into_bytes()
+        } else if cp < 0x10000 {
+            format!("\\u{:04x}", cp).into_bytes()
+        } else {
+            format!("\\U{:08x}", cp).into_bytes()
         }
     }
 
@@ -1644,6 +1665,23 @@ pub fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result
                     }
                     Handler::Replace => {
                         out.push(b'?');
+                        idx += 1;
+                    }
+                    Handler::BackslashReplace => {
+                        out.extend_from_slice(&backslash_escape_bytes(cp));
+                        idx += 1;
+                    }
+                    Handler::XmlCharRefReplace => {
+                        out.extend_from_slice(format!("&#{};", cp).as_bytes());
+                        idx += 1;
+                    }
+                    Handler::NameReplace => {
+                        let c = chars[idx];
+                        let replacement = match unicode_names2::name(c) {
+                            Some(name) => format!("\\N{{{}}}", name).into_bytes(),
+                            None => backslash_escape_bytes(cp),
+                        };
+                        out.extend_from_slice(&replacement);
                         idx += 1;
                     }
                     Handler::Strict => {
