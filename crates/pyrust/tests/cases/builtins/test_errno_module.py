@@ -1,36 +1,28 @@
 # Parity fixture for the `errno` module.
 #
-# Checks that the most-used POSIX error constants are present with the
-# correct integer values, and that `errorcode` maps codes back to their
-# canonical names (matching CPython 3.12 on Linux).
+# Tests only the POSIX-portable subset whose values are identical across
+# Linux and Windows CPython 3.12 (avoids Linux-specific aliases like
+# EDEADLOCK/ENOTSUP and platform-divergent values like ENOSYS).
 
 import errno
 
-# Basic constants
+# Basic constants (same value on all POSIX-compliant platforms)
 print(errno.EPERM)      # 1
 print(errno.ENOENT)     # 2
 print(errno.EAGAIN)     # 11
 print(errno.ENOMEM)     # 12
 print(errno.EACCES)     # 13
 print(errno.EINVAL)     # 22
-print(errno.ENOSYS)     # 38
 
-# Alias: EWOULDBLOCK == EAGAIN on Linux
-print(errno.EWOULDBLOCK == errno.EAGAIN)  # True
+# ENOSYS exists on all platforms (value is platform-dependent)
+print(errno.ENOSYS > 0)   # True
 
-# Alias: EDEADLOCK == EDEADLK on Linux
-print(errno.EDEADLOCK == errno.EDEADLK)  # True
-
-# errorcode reverse mapping (unambiguous codes)
+# errorcode reverse mapping (unambiguous, platform-portable codes)
 print(errno.errorcode[2])    # ENOENT
 print(errno.errorcode[13])   # EACCES
 print(errno.errorcode[1])    # EPERM
 print(errno.errorcode[22])   # EINVAL
 
-# errorcode canonical winner for aliased codes:
-#   11: EAGAIN wins over EWOULDBLOCK
-#   35: EDEADLOCK wins over EDEADLK
-#   95: ENOTSUP wins over EOPNOTSUPP
+# errorcode canonical winner for code 11: EAGAIN wins over EWOULDBLOCK
+# (both Linux and Windows agree on this)
 print(errno.errorcode[11])   # EAGAIN
-print(errno.errorcode[35])   # EDEADLOCK
-print(errno.errorcode[95])   # ENOTSUP
