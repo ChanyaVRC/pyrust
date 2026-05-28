@@ -3428,14 +3428,23 @@ impl Interpreter {
             }
             ValueKind::Dict(_) => unreachable!("handled above"),
             ValueKind::Range { start, stop, step } => {
+                let range_contains_i64 = |v: i64| -> bool {
+                    if step > 0 {
+                        v >= start && v < stop && (v - start) % step == 0
+                    } else if step < 0 {
+                        v <= start && v > stop && (v - start) % step == 0
+                    } else {
+                        false
+                    }
+                };
                 match item.kind() {
-                    ValueKind::Int(v) => {
-                        let in_range = if step > 0 {
-                            v >= start && v < stop && (v - start) % step == 0
-                        } else if step < 0 {
-                            v <= start && v > stop && (v - start) % step == 0
-                        } else { false };
-                        Ok(Value::bool_(in_range))
+                    ValueKind::Int(v) => Ok(Value::bool_(range_contains_i64(v))),
+                    // bool is a subclass of int; True==1, False==0.
+                    ValueKind::Bool(b) => Ok(Value::bool_(range_contains_i64(b as i64))),
+                    // BigInt: if it fits in i64 apply the check; if it overflows
+                    // it cannot be in any range whose bounds are i64.
+                    ValueKind::BigInt(n) => {
+                        Ok(Value::bool_(n.to_i64().is_some_and(range_contains_i64)))
                     }
                     _ => Ok(Value::bool_(false)),
                 }
