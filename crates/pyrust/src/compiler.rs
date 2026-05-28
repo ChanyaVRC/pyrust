@@ -6941,12 +6941,16 @@ impl Compiler {
         if defs_n > 0 || annots_n > 0 {
             // Free the temp registers used by defaults and annotations; keep
             // only the function value register (dst) alive from this point.
-            // The base of whichever block came first is the new watermark.
-            if defs_n > 0 {
-                self.next_temp = defs_base + 1;
-            } else {
-                self.next_temp = annots_base + 1;
-            }
+            // `dst` was allocated after all defaults/annotations, so `dst + 1`
+            // is the correct watermark: it preserves the function and releases
+            // every slot below it (defaults, annotations).
+            //
+            // The previous formula (`defs_base + 1` or `annots_base + 1`)
+            // was wrong when exactly one default or annotation was present:
+            // defs_base + 1 == dst, so the subsequent decorator-base
+            // allocation used the same register as dst, overwriting the
+            // freshly created function with the decorator value (issue #1362).
+            self.next_temp = dst + 1;
         }
 
         // Evaluate decorator expressions top-to-bottom, then apply bottom-to-top.
