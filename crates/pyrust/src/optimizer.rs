@@ -8242,6 +8242,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cse_yield_from_evicts_result_reg_and_sent_reg() {
+        use crate::ast::UnaryOp;
+        // Regression test for #1470: pass_cse must evict CSE table entries
+        // whose source or destination is result_reg or sent_reg after YieldFrom.
+        //
+        // Layout:
+        //   [0] UnaryOp(r5, Neg, r2)           -- r2 is sent_reg; CSE records {(Neg, r2) -> r5}
+        //   [1] YieldFrom { iter_reg=r0, sent_reg=r2, result_reg=r3 }
+        //                                       -- r2 and r3 are written; CSE must be evicted
+        //   [2] UnaryOp(r6, Neg, r2)           -- same key (Neg, r2); must NOT be CopyReg(r6, r5)
+        //   [3] Return(r6)
+        let insns = vec![
+            Insn::UnaryOp(5, UnaryOp::Neg, 2),
+            Insn::YieldFrom {
+                iter_reg: 0,
+                sent_reg: 2,
+                result_reg: 3,
+            },
+            Insn::UnaryOp(6, UnaryOp::Neg, 2),
+            Insn::Return(6),
+        ];
+        let out = pass_cse(insns, 0);
+        assert_eq!(out.len(), 4, "no instruction removed");
+        assert!(
+            matches!(out[2], Insn::UnaryOp(6, UnaryOp::Neg, 2)),
+            "UnaryOp after YieldFrom must not be CSE-replaced: {:?}",
+            out[2]
+        );
+    }
+
+    #[test]
+    fn cse_yield_from_evicts_result_reg_as_output() {
+        use crate::ast::UnaryOp;
+        // If result_reg was previously the dst of a CSE'd expression, that entry
+        // must be evicted after YieldFrom writes a new value into result_reg.
+        //
+        //   [0] UnaryOp(r3, Neg, r1)    -- CSE records {(Neg, r1) -> r3}
+        //   [1] YieldFrom { iter_reg=r0, sent_reg=r2, result_reg=r3 }
+        //                               -- r3 is overwritten; entry must be removed
+        //   [2] UnaryOp(r4, Neg, r1)    -- same key (Neg, r1); CopyReg(r4, r3) would be wrong
+        //   [3] Return(r4)
+        let insns = vec![
+            Insn::UnaryOp(3, UnaryOp::Neg, 1),
+            Insn::YieldFrom {
+                iter_reg: 0,
+                sent_reg: 2,
+                result_reg: 3,
+            },
+            Insn::UnaryOp(4, UnaryOp::Neg, 1),
+            Insn::Return(4),
+        ];
+        let out = pass_cse(insns, 0);
+        assert_eq!(out.len(), 4, "no instruction removed");
+        assert!(
+            matches!(out[2], Insn::UnaryOp(4, UnaryOp::Neg, 1)),
+            "UnaryOp after YieldFrom must not use stale result_reg as CopyReg source: {:?}",
+            out[2]
+        );
+    }
+
     // ── pass_ivsr ─────────────────────────────────────────────────────────────
 
     #[test]
