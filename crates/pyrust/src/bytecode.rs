@@ -209,6 +209,19 @@ pub enum Insn {
     RaiseFrom(Reg, Reg),
     /// re-raise active exception (bare `raise`)
     RaiseReRaise,
+    /// Match positional sub-patterns of a class pattern.
+    ///
+    /// Loads `R[cls].__match_args__`, validates that it is a tuple or list of
+    /// length >= `n`, then for each `i in 0..n` gets the attribute name from
+    /// `__match_args__[i]` and stores `getattr(R[subj], name)` into
+    /// `R[dst_base + i]`.  Raises `TypeError` if `__match_args__` is absent,
+    /// is not a tuple or list, or has fewer than `n` elements.
+    MatchClassPositional {
+        dst_base: Reg,
+        subj: Reg,
+        cls: Reg,
+        n: u8,
+    },
     /// R[dst] = new UserFunction(fn_protos[proto_idx], defaults R[defs_base..+defs_n],
     ///          annotations R[annots_base..+annots_n], env=current).
     /// `annots_n == 0` means no annotations; `annots_base` is ignored in that case.

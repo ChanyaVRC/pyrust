@@ -167,9 +167,13 @@ pub enum Pattern {
     /// `{"key": pattern, **rest}` — destructures a mapping.
     /// `rest` is the optional `**rest` capture name.
     Mapping(Vec<(Expr, Pattern)>, Option<String>),
-    /// `ClassName(attr=pat, ...)` — class pattern.
+    /// `ClassName(pos, ..., attr=pat, ...)` — class pattern.
+    ///
+    /// `positional` sub-patterns are resolved at runtime via `__match_args__`;
+    /// `kwargs` are matched directly against the named attribute.
     Class {
         cls: Box<Expr>,
+        positional: Vec<Pattern>,
         kwargs: Vec<(String, Pattern)>,
     },
     /// `a.b.c` — value pattern (dotted attribute lookup, compared with ==).
