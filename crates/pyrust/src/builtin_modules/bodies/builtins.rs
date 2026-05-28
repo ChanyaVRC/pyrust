@@ -2980,12 +2980,22 @@ pyrust_module! {
                     }
                 }
                 ValueKind::Bool(b) => Ok(Value::int(if b { 1 } else { 0 })),
-                ValueKind::Str(s) => s.trim().parse::<i64>().map(Value::int).map_err(|_| {
-                    PyError::named(
-                        "ValueError",
-                        format!("invalid literal for int() with base 10: '{s}'"),
-                    )
-                }),
+                ValueKind::Str(s) => {
+                    let trimmed = s.trim();
+                    match trimmed.parse::<i64>() {
+                        Ok(v) => Ok(Value::int(v)),
+                        Err(_) => {
+                            // Overflow: try BigInt before giving up.
+                            use num_traits::Num as _;
+                            crate::value::PyBigInt::from_str_radix(trimmed, 10)
+                                .map(Value::bigint)
+                                .map_err(|_| PyError::named(
+                                    "ValueError",
+                                    format!("invalid literal for int() with base 10: '{s}'"),
+                                ))
+                        }
+                    }
+                }
                 ValueKind::Bytes(rc) => {
                     let repr = args[0].value.repr();
                     let s = std::str::from_utf8(rc).map_err(|_| {
@@ -3153,12 +3163,19 @@ pyrust_module! {
                             } else {
                                 trimmed
                             };
-                            i64::from_str_radix(stripped, base).map(Value::int).map_err(|_| {
-                                PyError::named(
-                                    "ValueError",
-                                    format!("invalid literal for int() with base {base_arg}: '{trimmed}'"),
-                                )
-                            })
+                            match i64::from_str_radix(stripped, base) {
+                                Ok(v) => Ok(Value::int(v)),
+                                Err(_) => {
+                                    // Overflow: try BigInt before giving up.
+                                    use num_traits::Num as _;
+                                    crate::value::PyBigInt::from_str_radix(stripped, base)
+                                        .map(Value::bigint)
+                                        .map_err(|_| PyError::named(
+                                            "ValueError",
+                                            format!("invalid literal for int() with base {base_arg}: '{trimmed}'"),
+                                        ))
+                                }
+                            }
                         }
                     }
                     ValueKind::Bytes(rc) => {
@@ -3180,12 +3197,19 @@ pyrust_module! {
                                         ),
                                     )
                                 })?;
-                            i64::from_str_radix(&digits, base).map(Value::int).map_err(|_| {
-                                PyError::named(
-                                    "ValueError",
-                                    format!("invalid literal for int() with base 0: {repr}"),
-                                )
-                            })
+                            match i64::from_str_radix(&digits, base) {
+                                Ok(v) => Ok(Value::int(v)),
+                                Err(_) => {
+                                    // Overflow: try BigInt before giving up.
+                                    use num_traits::Num as _;
+                                    crate::value::PyBigInt::from_str_radix(&digits, base)
+                                        .map(Value::bigint)
+                                        .map_err(|_| PyError::named(
+                                            "ValueError",
+                                            format!("invalid literal for int() with base 0: {repr}"),
+                                        ))
+                                }
+                            }
                         } else {
                             let base = base_arg as u32;
                             let stripped = if (base == 16
@@ -3199,14 +3223,21 @@ pyrust_module! {
                             } else {
                                 trimmed
                             };
-                            i64::from_str_radix(stripped, base).map(Value::int).map_err(|_| {
-                                PyError::named(
-                                    "ValueError",
-                                    format!(
-                                        "invalid literal for int() with base {base_arg}: {repr}"
-                                    ),
-                                )
-                            })
+                            match i64::from_str_radix(stripped, base) {
+                                Ok(v) => Ok(Value::int(v)),
+                                Err(_) => {
+                                    // Overflow: try BigInt before giving up.
+                                    use num_traits::Num as _;
+                                    crate::value::PyBigInt::from_str_radix(stripped, base)
+                                        .map(Value::bigint)
+                                        .map_err(|_| PyError::named(
+                                            "ValueError",
+                                            format!(
+                                                "invalid literal for int() with base {base_arg}: {repr}"
+                                            ),
+                                        ))
+                                }
+                            }
                         }
                     }
                     _ => Err(PyError::named(
