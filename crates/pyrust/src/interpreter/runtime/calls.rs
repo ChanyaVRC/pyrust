@@ -2240,10 +2240,10 @@ impl Interpreter {
                     flush = self.truthy_value(&value)?;
                 }
                 Some(other) => {
-                    return Err(PyError::Runtime(format!(
-                        "print() got an unexpected keyword argument '{}'",
-                        other
-                    )));
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("'{}' is an invalid keyword argument for print()", other),
+                    ));
                 }
             }
         }
