@@ -35,6 +35,15 @@ print(hasattr(math, '__package__'))   # True
 print(hasattr(sys, '__doc__'))        # True
 print(hasattr(math, '__doc__'))       # True
 
+# ── dir() includes synthetic dunders ────────────────────────────────────────
+# (issue #1350 explicitly mentions `dir(os)` missing dunder attributes)
+
+print('__name__' in dir(sys))       # True
+print('__package__' in dir(math))   # True
+print('__doc__' in dir(math))       # True
+print('__loader__' in dir(math))    # True
+print('__spec__' in dir(math))      # True
+
 # ── code pattern from issue body ─────────────────────────────────────────────
 
 m = sys
