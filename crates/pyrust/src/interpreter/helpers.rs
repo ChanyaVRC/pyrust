@@ -3887,6 +3887,25 @@ pub(crate) fn py_round_half_even_f64(v: f64) -> f64 {
 pub(crate) fn round_bigint_neg_ndigits(x: PyBigInt, neg_n: u32) -> Value {
     use num_traits::ToPrimitive;
 
+    // Early-exit: if 10^neg_n is so large that even the biggest possible
+    // rounding (halfway up) can't reach the first non-zero multiple, the
+    // result is always 0.  This prevents the hang that occurs when neg_n is
+    // clamped from a large-negative BigInt ndigits to i32::MAX (~2 billion),
+    // which would otherwise cause PyPow::pow(10, 2_147_483_647) to allocate
+    // an ~850 MB intermediate value.  CPython returns 0 for this case too.
+    //
+    // A BigInt with D decimal digits satisfies |x| < 10^D, so:
+    //   - At neg_n == D: rounding to 10^D is possible if |x| >= 5*10^(D-1).
+    //   - At neg_n > D: |x| < 10^D < 10^neg_n / 10, which is always less
+    //     than half = 10^neg_n / 2, so the rounded value is always 0.
+    //
+    // The exact decimal digit count via to_str_radix(10) is O(digits) but
+    // this path is not hot (only reached for BigInt rounding).
+    let decimal_digits = x.magnitude().to_str_radix(10).len() as u32;
+    if neg_n > decimal_digits {
+        return Value::int(0);
+    }
+
     let factor = PyPow::pow(PyBigInt::from(10i64), neg_n);
     let half = &factor / PyBigInt::from(2i64);
     // floor-divmod: 0 ≤ r < factor, q = floor(x / factor)
