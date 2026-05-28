@@ -18,6 +18,16 @@ except TypeError as e:
     print(type(e).__name__)
     print(str(e))
 
+class HasExitOnly:
+    def __exit__(self, *args): return False
+
+try:
+    with HasExitOnly() as x:
+        pass
+except TypeError as e:
+    print(type(e).__name__)
+    print(str(e))
+
 # Valid context manager should still work
 class GoodCM:
     def __enter__(self): return 42
