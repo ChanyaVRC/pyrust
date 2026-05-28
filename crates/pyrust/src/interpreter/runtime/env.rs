@@ -1159,6 +1159,11 @@ impl Interpreter {
                 .insert(name.to_string(), Value::none());
             return Ok(());
         }
+        // CPython 3.12: BaseException.args is a C-level member descriptor
+        // with no tp_delete slot; any deletion attempt raises TypeError.
+        if name == "args" && class_chain_contains_name(&class, "BaseException") {
+            return Err(PyError::named("TypeError", "args may not be deleted"));
+        }
         if instance.borrow_mut().attrs.shift_remove(name).is_none() {
             let class_name = instance.borrow().class.borrow().name.clone();
             return Err(PyError::named(
@@ -1670,6 +1675,11 @@ impl Interpreter {
                         .attrs
                         .insert(name.to_string(), Value::none());
                     return Ok(());
+                }
+                // CPython 3.12: BaseException.args is a C-level member descriptor
+                // with no tp_delete slot; any deletion attempt raises TypeError.
+                if name == "args" && class_chain_contains_name(&class, "BaseException") {
+                    return Err(PyError::named("TypeError", "args may not be deleted"));
                 }
                 // `shift_remove` keeps the remaining entries in their
                 // original insertion order so `vars(obj)` after `del obj.x`
