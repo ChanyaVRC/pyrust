@@ -86,3 +86,18 @@ try:
     "abc".translate(0, 1)
 except TypeError as e:
     print(e)
+
+try:
+    str.maketrans(123, "abc")
+except TypeError as e:
+    print(e)
+
+try:
+    str.maketrans("abc", 123)
+except TypeError as e:
+    print(e)
+
+try:
+    str.maketrans("abc", "xyz", 123)
+except TypeError as e:
+    print(e)

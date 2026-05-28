@@ -1762,10 +1762,8 @@ pub fn str_maketrans(args: &[Value]) -> Result<Value> {
             _ => {
                 return Err(PyError::named(
                     "TypeError",
-                    format!(
-                        "maketrans argument 1 must be str, not {}",
-                        builtin_type_name(&args[0])
-                    ),
+                    "first maketrans argument must be a string if there is a second argument"
+                        .to_string(),
                 ));
             }
         };
@@ -1775,7 +1773,7 @@ pub fn str_maketrans(args: &[Value]) -> Result<Value> {
                 return Err(PyError::named(
                     "TypeError",
                     format!(
-                        "maketrans argument 2 must be str, not {}",
+                        "maketrans() argument 2 must be str, not {}",
                         builtin_type_name(&args[1])
                     ),
                 ));
@@ -1799,7 +1797,7 @@ pub fn str_maketrans(args: &[Value]) -> Result<Value> {
                     return Err(PyError::named(
                         "TypeError",
                         format!(
-                            "maketrans argument 3 must be str, not {}",
+                            "maketrans() argument 3 must be str, not {}",
                             builtin_type_name(&args[2])
                         ),
                     ));
