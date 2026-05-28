@@ -806,6 +806,12 @@ impl Interpreter {
         // it must never persist outside this frame.
         let exc_ctx_entry_depth = self.handled_exc_stack.len();
         let saved_active = self.active_exception.clone();
+        // Save and reset push_exc_ctx_depth: PushExcContext/PopExcContext are
+        // always emitted as matched pairs within a single function body, but if
+        // the finally block raises (causing the frame to exit abnormally),
+        // PopExcContext is never executed and the depth would remain non-zero.
+        // Resetting at frame entry/exit keeps the counter scoped to this frame.
+        let saved_push_exc_ctx_depth = std::mem::replace(&mut self.push_exc_ctx_depth, 0);
 
         let result = self.run_bytecode_inner_impl(
             code,
@@ -825,6 +831,7 @@ impl Interpreter {
         // `truncate` is idempotent so it's safe to call in every branch.
         self.handled_exc_stack.truncate(exc_ctx_entry_depth);
         self.active_exception = saved_active;
+        self.push_exc_ctx_depth = saved_push_exc_ctx_depth;
         result
     }
 
@@ -937,7 +944,16 @@ impl Interpreter {
                 .attrs
                 .insert("__traceback__".to_string(), pyrust_builtins::traceback::make_traceback());
         }
-        if self.handled_exc_stack.len() > exc_ctx_frame_base
+        // When control is inside a PushExcContext-bracketed finally block
+        // (push_exc_ctx_depth > 0), the top of handled_exc_stack is the
+        // to-be-raised exception installed by PushExcContext — not an
+        // ordinary handler-dispatch entry.  Skipping the duplicate-pop
+        // here preserves that entry so that PopExcContext can remove it
+        // cleanly after the finally block completes, and so that
+        // attach_implicit_context for the outer RaiseValue sees the correct
+        // context (ValueError, not None) after the finally returns.
+        if self.push_exc_ctx_depth == 0
+            && self.handled_exc_stack.len() > exc_ctx_frame_base
             && let Some(top) = self.handled_exc_stack.last()
             && let Some(active) = self.active_exception.as_ref()
             && Self::values_are_same_exception(top, active)
@@ -2673,13 +2689,21 @@ impl Interpreter {
                     // the finally will call attach_implicit_context and see this
                     // value (the to-be-raised exception) rather than the
                     // currently-handled exception below it on the stack.
+                    //
+                    // Increment push_exc_ctx_depth so that handle_vm_error's
+                    // duplicate-detection check does not prematurely pop this
+                    // entry when a new exception is dispatched inside the finally.
                     let val = vm_try!(vm_read(&regs, *src, num_locals));
                     self.handled_exc_stack.push(val.clone());
                     self.active_exception = Some(val);
+                    self.push_exc_ctx_depth += 1;
                 }
                 Insn::PopExcContext => {
                     // Undo a PushExcContext after the inlined finally block
                     // completes normally.  Bounded by this frame's base depth.
+                    if self.push_exc_ctx_depth > 0 {
+                        self.push_exc_ctx_depth -= 1;
+                    }
                     if self.handled_exc_stack.len() > exc_ctx_frame_base {
                         self.handled_exc_stack.pop();
                     }

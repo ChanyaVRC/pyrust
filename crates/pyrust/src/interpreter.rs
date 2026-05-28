@@ -260,6 +260,16 @@ pub struct Interpreter {
     /// because the dict-only path is already guarded by `globals_accessed`
     /// and is not on the hot path of normal code.
     pub(crate) global_env_version: Cell<u32>,
+    /// Tracks the nesting depth of `PushExcContext` instructions currently
+    /// in progress.  Incremented by `PushExcContext`, decremented by
+    /// `PopExcContext`.  While non-zero, `handle_vm_error` must NOT perform
+    /// its "active-exception duplicate pop" because the top of
+    /// `handled_exc_stack` was placed there by `PushExcContext` (the
+    /// to-be-raised exception), not by the normal handler-dispatch path.
+    /// Popping it prematurely would lose the context entry and cause any
+    /// exception raised inside the finally block to get a `None` context
+    /// instead of the correct value.
+    pub(crate) push_exc_ctx_depth: u32,
 }
 
 /// Discriminator for `VmFrameView`: script-level (module-scope) vs.
@@ -389,6 +399,7 @@ impl Default for Interpreter {
             module_globals_dict: Value::dict(IndexMap::new()),
             globals_accessed: false,
             global_env_version: Cell::new(0),
+            push_exc_ctx_depth: 0,
         }
     }
 }

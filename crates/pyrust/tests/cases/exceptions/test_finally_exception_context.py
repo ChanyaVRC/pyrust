@@ -100,3 +100,22 @@ try:
     f_raise_from()
 except RuntimeError as ex:
     print("raise from context:", type(ex.__context__).__name__)
+
+# Finally catches its own exception internally — TypeError context must still be ValueError.
+# Regression: PushExcContext entry was incorrectly removed by handle_vm_error's
+# duplicate-detection when KeyError was dispatched to the inner except handler.
+def f_finally_catches_internally():
+    try:
+        raise ValueError("v")
+    except ValueError:
+        raise TypeError("t")
+    finally:
+        try:
+            raise KeyError("k")
+        except KeyError:
+            pass
+
+try:
+    f_finally_catches_internally()
+except TypeError as ex:
+    print("finally catches internally context:", type(ex.__context__).__name__)
