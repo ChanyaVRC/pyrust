@@ -35,6 +35,11 @@ try:
 except TypeError as e:
     print(e)
 
+try:
+    UnicodeEncodeError("utf-8", "hello", 0, 5, "reason", "extra")
+except TypeError as e:
+    print(e)
+
 # Correct arity succeeds
 e = UnicodeEncodeError("utf-8", "hello", 0, 5, "reason")
 print("encode ok")
@@ -47,6 +52,11 @@ except TypeError as e:
 
 try:
     UnicodeTranslateError("abc", 0, 1)
+except TypeError as e:
+    print(e)
+
+try:
+    UnicodeTranslateError("hello", 0, 1, "reason", "extra")
 except TypeError as e:
     print(e)
 
