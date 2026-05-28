@@ -82,7 +82,7 @@ pyrust_module! {
             ));
         }
         let f = x.floor();
-        if f > i64::MAX as f64 || f < i64::MIN as f64 {
+        if f >= i64::MAX as f64 || f < i64::MIN as f64 {
             float_to_bigint(f)
         } else {
             Ok(Value::int(f as i64))
@@ -129,7 +129,7 @@ pyrust_module! {
             ));
         }
         let f = x.ceil();
-        if f > i64::MAX as f64 || f < i64::MIN as f64 {
+        if f >= i64::MAX as f64 || f < i64::MIN as f64 {
             float_to_bigint(f)
         } else {
             Ok(Value::int(f as i64))
@@ -179,7 +179,7 @@ pyrust_module! {
                     ));
                 }
                 let t = f.trunc();
-                if t > i64::MAX as f64 || t < i64::MIN as f64 {
+                if t >= i64::MAX as f64 || t < i64::MIN as f64 {
                     float_to_bigint(t)
                 } else {
                     Ok(Value::int(t as i64))

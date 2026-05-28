@@ -2901,7 +2901,7 @@ pyrust_module! {
                         ));
                     }
                     let t = v.trunc();
-                    if t > i64::MAX as f64 || t < i64::MIN as f64 {
+                    if t >= i64::MAX as f64 || t < i64::MIN as f64 {
                         float_to_bigint(t)
                     } else {
                         Ok(Value::int(t as i64))
@@ -2953,7 +2953,7 @@ pyrust_module! {
                                     )))
                                 } else {
                                     let t = v.trunc();
-                                    if t > i64::MAX as f64 || t < i64::MIN as f64 {
+                                    if t >= i64::MAX as f64 || t < i64::MIN as f64 {
                                         Some(float_to_bigint(t))
                                     } else {
                                         Some(Ok(Value::int(t as i64)))
