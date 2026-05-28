@@ -5875,9 +5875,10 @@ fn divmod_int_int(
         let modulo = py_mod_i64(a, b);
         // `a - modulo` can overflow i64 when `a` is near `i64::MIN` and
         // `modulo > 0` (e.g. `divmod(-2**63, 3)` → modulo=1, a-modulo wraps).
-        // Fall through to BigInt arithmetic in that case.
-        if let Some(a_adj) = a.checked_sub(modulo) {
-            let quotient = a_adj / b;
+        // `a_adj / b` can overflow when `a = i64::MIN` and `b = -1`
+        // (quotient = 2^63, which exceeds i64::MAX).
+        // Fall through to BigInt arithmetic in either case.
+        if let Some(quotient) = a.checked_sub(modulo).and_then(|a_adj| a_adj.checked_div(b)) {
             return Ok(Value::tuple(vec![Value::int(quotient), Value::int(modulo)]));
         }
     }

@@ -27,3 +27,8 @@ print(divmod(2**63, 3))    # (3074457345618258602, 2)
 # Floor-division operator // and % should match.
 print((-2**63) // 3)   # -3074457345618258603
 print((-2**63) % 3)    # 1
+
+# i64::MIN dividend, divisor = -1: quotient = 2**63 (overflows i64, must be BigInt).
+print(divmod(-2**63, -1))  # (9223372036854775808, 0)
+print((-2**63) // -1)      # 9223372036854775808
+print((-2**63) % -1)       # 0
