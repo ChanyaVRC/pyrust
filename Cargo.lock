@@ -273,6 +273,7 @@ dependencies = [
  "indexmap",
  "pyrust-core",
  "unicode-properties",
+ "unicode_names2",
 ]
 
 [[package]]
