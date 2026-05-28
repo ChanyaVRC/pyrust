@@ -1193,23 +1193,131 @@ impl Parser {
     fn parse_with(&mut self) -> Result<Stmt> {
         self.expect(&Token::With)?;
         let mut items = Vec::new();
-        loop {
-            let expr = self.parse_expr()?;
-            let var = if self.is(&Token::As) {
-                self.bump();
-                Some(expr_to_assign_target(&self.parse_expr()?)?)
-            } else {
-                None
-            };
-            items.push((expr, var));
-            if !self.is(&Token::Comma) {
-                break;
+
+        // PEP 617 (Python 3.10+): detect parenthesized with-items form.
+        // `with (expr as x, expr2 as y):` or `with (expr,):` etc.
+        // Heuristic: if the next token is `(` and the paren group contains an
+        // `as` keyword or a trailing comma at depth-0-within-the-parens, treat
+        // the entire parenthesized block as a with-items list rather than a
+        // single parenthesized expression.
+        if self.is(&Token::LParen) && self.is_parenthesized_with_items() {
+            self.bump(); // consume `(`
+            loop {
+                if self.is(&Token::RParen) {
+                    break;
+                }
+                let expr = self.parse_expr()?;
+                let var = if self.is(&Token::As) {
+                    self.bump();
+                    Some(expr_to_assign_target(&self.parse_expr()?)?)
+                } else {
+                    None
+                };
+                items.push((expr, var));
+                if !self.is(&Token::Comma) {
+                    break;
+                }
+                self.bump(); // consume `,`
+                // allow trailing comma before `)`
             }
-            self.bump();
+            self.expect(&Token::RParen)?;
+        } else {
+            loop {
+                let expr = self.parse_expr()?;
+                let var = if self.is(&Token::As) {
+                    self.bump();
+                    Some(expr_to_assign_target(&self.parse_expr()?)?)
+                } else {
+                    None
+                };
+                items.push((expr, var));
+                if !self.is(&Token::Comma) {
+                    break;
+                }
+                self.bump();
+            }
         }
+
         self.expect(&Token::Colon)?;
         let body = self.parse_suite()?;
         Ok(Stmt::With { items, body })
+    }
+
+    /// Return `true` when the `(` at `self.pos` opens a PEP 617
+    /// parenthesized-with-items list rather than a plain parenthesized
+    /// expression.
+    ///
+    /// Disambiguation rules (matching CPython 3.10+):
+    ///
+    /// 1. If the token immediately after the matching `)` is `as`, the parens
+    ///    enclose a single expression (possibly a tuple) bound to that name —
+    ///    not a with-items list.  E.g. `with (CM(1), CM(2)) as pair:`.
+    ///
+    /// 2. Otherwise, if the interior of the parens contains an `as` keyword at
+    ///    depth 0 (direct child of the outer `(…)`) → PEP 617.
+    ///    E.g. `with (CM(1) as a, CM(2) as b):`.
+    ///
+    /// 3. Otherwise, if the interior contains a comma at depth 0 → PEP 617.
+    ///    E.g. `with (CM(1), CM(2)):` or `with (CM(1),):`.
+    ///
+    /// 4. Otherwise → plain parenthesized expression.
+    ///    E.g. `with (CM(1)):`.
+    fn is_parenthesized_with_items(&self) -> bool {
+        debug_assert!(self.tokens.get(self.pos) == Some(&Token::LParen));
+
+        // First, find the matching `)` and check what follows it.
+        let mut i = self.pos + 1;
+        let mut depth: usize = 0;
+        let close_paren_pos;
+        loop {
+            match self.tokens.get(i) {
+                None | Some(Token::Eof) => return false,
+                Some(Token::LParen) | Some(Token::LBracket) | Some(Token::LBrace) => {
+                    depth += 1;
+                }
+                Some(Token::RBracket) | Some(Token::RBrace) => {
+                    if depth == 0 {
+                        return false; // malformed
+                    }
+                    depth -= 1;
+                }
+                Some(Token::RParen) => {
+                    if depth == 0 {
+                        close_paren_pos = i;
+                        break;
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+
+        // Rule 1: if the token after `)` is `as`, this is a plain parenthesized
+        // expression (the `as` binds the whole paren group as one context manager).
+        if self.tokens.get(close_paren_pos + 1) == Some(&Token::As) {
+            return false;
+        }
+
+        // Rules 2 & 3: scan inside the parens for `as` or comma at depth 0.
+        let mut i = self.pos + 1;
+        let mut depth: usize = 0;
+        while i < close_paren_pos {
+            match self.tokens.get(i) {
+                Some(Token::LParen) | Some(Token::LBracket) | Some(Token::LBrace) => {
+                    depth += 1;
+                }
+                Some(Token::RParen) | Some(Token::RBracket) | Some(Token::RBrace) => {
+                    depth -= 1;
+                }
+                Some(Token::As) if depth == 0 => return true,
+                Some(Token::Comma) if depth == 0 => return true,
+                _ => {}
+            }
+            i += 1;
+        }
+
+        false
     }
 
     fn parse_suite(&mut self) -> Result<Vec<Stmt>> {
