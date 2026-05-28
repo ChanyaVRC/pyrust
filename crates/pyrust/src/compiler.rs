@@ -69,6 +69,39 @@ pub fn compile_script(
     c.finish()
 }
 
+/// Compile a source body in eval mode: the body must consist of a single
+/// expression statement; its value is returned.  Used by `eval()`.
+///
+/// Raises `SyntaxError` if the body is empty or contains statements that are
+/// not a bare expression.
+pub fn compile_eval_expr(
+    stmts: &[Stmt],
+    local_index: Rc<HashMap<String, Reg>>,
+) -> Result<FnCode, PyError> {
+    let expr = match stmts {
+        [Stmt::Expr(e)] => e,
+        [] => {
+            return Err(PyError::named(
+                "SyntaxError",
+                "eval() requires a non-empty expression".to_string(),
+            ));
+        }
+        _ => {
+            return Err(PyError::named(
+                "SyntaxError",
+                "eval() argument must be a single expression".to_string(),
+            ));
+        }
+    };
+    let cell_vars = collect_cell_vars(stmts, &local_index);
+    let mut c = Compiler::new(local_index, 0, cell_vars);
+    let r = c.compile_expr(expr);
+    let r = c.ensure_temp(r);
+    c.emit(Insn::Return(r));
+    c.free_temp(r);
+    c.finish()
+}
+
 // ─── Cell-variable collection ─────────────────────────────────────────────────
 
 /// Collect names from `local_index` that are referenced as `nonlocal` in any

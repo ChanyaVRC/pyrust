@@ -343,4 +343,423 @@ impl Interpreter {
         Some(vm_result.map(|_| ()))
     }
 
+    /// Parse a Python source string into a statement list.
+    /// Converts lexer/parse errors into `SyntaxError` exceptions.
+    pub(crate) fn parse_source_to_stmts(source: &str) -> Result<Vec<crate::ast::Stmt>> {
+        let tokens = crate::lexer::Lexer::new(source)
+            .map_err(|e| PyError::named("SyntaxError", e.to_string()))?
+            .into_tokens();
+        let mut parser = crate::parser::Parser::new(tokens);
+        parser
+            .parse_program()
+            .map_err(|e| PyError::named("SyntaxError", e.to_string()))
+    }
+
+    /// Execute a source string as statements, optionally in an explicit
+    /// namespace.
+    ///
+    /// - `globals_dict`: when `None`, runs in the current interpreter's module
+    ///   namespace (assignments become globals).  When `Some(dict)`, the dict
+    ///   is used as both the globals and locals namespace; assignments write
+    ///   back to the dict.
+    /// - `locals_dict`: when `Some(dict)` (and `globals_dict` is also `Some`),
+    ///   name lookups check this dict first; assignments go to `locals_dict`.
+    ///   Matches CPython's exec(code, globals, locals) semantics.
+    pub(crate) fn exec_source(
+        &mut self,
+        source: &str,
+        globals_dict: Option<Value>,
+        locals_dict: Option<Value>,
+    ) -> Result<()> {
+        let program = Self::parse_source_to_stmts(source)?;
+        match globals_dict {
+            None => {
+                // No explicit namespace: run in the current module scope so
+                // assignments go to the module globals dict (just like
+                // top-level statements do).
+                self.try_exec_vm_script(&program, false)
+                    .unwrap_or_else(|| Err(PyError::Runtime("compilation failed".to_string())))
+            }
+            Some(gdict) => {
+                // Explicit globals dict: seed a fresh env from the dict, run,
+                // then write all new/changed names back to the dict.
+                self.exec_in_dict_env(&program, gdict, locals_dict)
+            }
+        }
+    }
+
+    /// Evaluate a source string as a single expression.
+    ///
+    /// Same namespace semantics as `exec_source`.  Returns the expression's
+    /// value.
+    pub(crate) fn eval_source(
+        &mut self,
+        source: &str,
+        globals_dict: Option<Value>,
+        locals_dict: Option<Value>,
+    ) -> Result<Value> {
+        // Strip leading and trailing whitespace: CPython's `eval()` strips both.
+        // `eval("  1 + 2  ")` and `eval("1 + 2\n")` both work in CPython.
+        let trimmed = source.trim();
+        let program = Self::parse_source_to_stmts(trimmed)?;
+        let local_index: Rc<HashMap<String, crate::bytecode::Reg>> =
+            Rc::new(HashMap::new());
+        let code = match crate::compiler::compile_eval_expr(&program, Rc::clone(&local_index)) {
+            Ok(c) => Rc::new(crate::optimizer::optimize(c)),
+            Err(e) => return Err(e),
+        };
+        match globals_dict {
+            None => {
+                // Run in current module namespace.
+                self.run_eval_code_in_module(&code, local_index)
+            }
+            Some(gdict) => {
+                self.eval_in_dict_env(&code, local_index, gdict, locals_dict)
+            }
+        }
+    }
+
+    /// Run a compiled eval-mode code object in the current module namespace.
+    /// Pushes a Script VmFrameView so `globals()`/`locals()` work inside the
+    /// evaluated expression.
+    fn run_eval_code_in_module(
+        &mut self,
+        code: &Rc<crate::bytecode::FnCode>,
+        local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
+    ) -> Result<Value> {
+        let num_regs = code.num_regs as usize;
+        let mut regs: RegsBuf = smallvec![Value::unset(); num_regs];
+        let regs_ptr = unsafe { std::ptr::NonNull::new_unchecked(regs.as_mut_ptr()) };
+        let regs_len = regs.len();
+        self.vm_frame_views.push(VmFrameView {
+            kind: FrameKind::Script,
+            regs_ptr,
+            regs_len,
+            local_index: Rc::clone(&local_index),
+            nonlocal_names: None,
+            env: None,
+            is_class_method: false,
+        });
+        let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
+        let vm_result = self.run_bytecode(code, regs_slice);
+        self.vm_frame_views.pop();
+        vm_result
+    }
+
+    /// Run compiled statements in an explicit dict-based namespace.
+    /// Used by `exec(code, globals_dict, locals_dict)`.
+    fn exec_in_dict_env(
+        &mut self,
+        program: &[crate::ast::Stmt],
+        globals_dict: Value,
+        locals_dict: Option<Value>,
+    ) -> Result<()> {
+        use std::collections::HashSet;
+        let empty: HashSet<String> = HashSet::new();
+        let local_names =
+            crate::interpreter::collect_local_names(&[], program, &empty, &empty);
+        const MAX_SCRIPT_LOCALS: usize = 200;
+        let local_index: Rc<HashMap<String, crate::bytecode::Reg>> =
+            if local_names.len() <= MAX_SCRIPT_LOCALS {
+                Rc::new(
+                    (0u32..)
+                        .zip(local_names.iter())
+                        .map(|(i, n)| (n.clone(), i))
+                        .collect(),
+                )
+            } else {
+                Rc::new(HashMap::new())
+            };
+        let code = match crate::compiler::compile_script(program, Rc::clone(&local_index), false) {
+            Ok(c) => Rc::new(crate::optimizer::optimize(c)),
+            Err(e) => return Err(e),
+        };
+
+        // Build a fresh env pre-seeded with values from globals_dict (and
+        // locals_dict if provided).  This env has no parent so `assign_name`
+        // treats it as module scope.
+        let exec_env = self.build_dict_env(globals_dict.clone(), locals_dict.as_ref())?;
+        let previous_env = std::mem::replace(&mut self.env, exec_env);
+        // Preserve the current module_globals_dict and globals_accessed state
+        // so they are restored after exec.
+        let prev_mgd = self.module_globals_dict.clone();
+        let prev_ga = self.globals_accessed;
+        self.module_globals_dict = globals_dict.clone();
+        self.globals_accessed = false;
+
+        let num_regs = code.num_regs as usize;
+        let mut regs: RegsBuf = smallvec![Value::unset(); num_regs];
+        let regs_ptr = unsafe { std::ptr::NonNull::new_unchecked(regs.as_mut_ptr()) };
+        let regs_len = regs.len();
+        self.vm_frame_views.push(VmFrameView {
+            kind: FrameKind::Script,
+            regs_ptr,
+            regs_len,
+            local_index: Rc::clone(&local_index),
+            nonlocal_names: None,
+            env: None,
+            is_class_method: false,
+        });
+        let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
+        let vm_result = self.run_bytecode(&code, regs_slice);
+        self.vm_frame_views.pop();
+
+        // Write fastlocal registers back to the dict env so we can flush them.
+        for (name, &idx) in local_index.iter() {
+            if !regs[idx as usize].is_unset() {
+                let val = std::mem::replace(&mut regs[idx as usize], Value::unset());
+                self.env.borrow_mut().values.insert(name.clone(), val);
+            }
+        }
+
+        // Flush the exec env values back to the target namespace.
+        // CPython semantics: when `locals` is provided, all writes go to
+        // `locals`; `globals` is read-only (unchanged by the executed code).
+        // When only `globals` is provided (no locals), writes go to `globals`.
+        let write_target = locals_dict.as_ref().unwrap_or(&globals_dict);
+        let env_vals: Vec<(String, Value)> = self
+            .env
+            .borrow()
+            .values
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (k, v) in env_vals {
+            // Only write back values that originated in the local (exec) scope:
+            // skip keys that came from globals and were not modified.
+            if let Some(locals) = &locals_dict {
+                // When locals is provided: only write back if key is in locals
+                // or was a new assignment (not in globals before exec).
+                let was_in_globals = globals_dict
+                    .dict_with(|d| d.contains_key(&StrKey(k.as_str())))
+                    .unwrap_or(false);
+                let was_in_locals = locals
+                    .dict_with(|d| d.contains_key(&StrKey(k.as_str())))
+                    .unwrap_or(false);
+                // Skip keys that came from globals-only (not in locals and not
+                // new assignments); new assignments are identified by being
+                // absent from both original globals and locals — we can't
+                // distinguish cleanly without a snapshot, so we write ALL
+                // keys present in the exec env to locals_dict.  This matches
+                // CPython which writes all final local-namespace values to the
+                // provided locals mapping.
+                if was_in_globals && !was_in_locals {
+                    // Key came purely from globals; skip (don't copy to locals).
+                    continue;
+                }
+                let _ = locals.dict_insert(PyKey::str_from(&k), v);
+            } else {
+                let _ = write_target.dict_insert(PyKey::str_from(&k), v);
+            }
+        }
+
+        // Restore interpreter state.
+        self.env = previous_env;
+        self.module_globals_dict = prev_mgd;
+        self.globals_accessed = prev_ga;
+
+        vm_result.map(|_| ())
+    }
+
+    /// Run a compiled eval-mode code object in an explicit dict-based namespace.
+    fn eval_in_dict_env(
+        &mut self,
+        code: &Rc<crate::bytecode::FnCode>,
+        local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
+        globals_dict: Value,
+        locals_dict: Option<Value>,
+    ) -> Result<Value> {
+        let exec_env = self.build_dict_env(globals_dict.clone(), locals_dict.as_ref())?;
+        let previous_env = std::mem::replace(&mut self.env, exec_env);
+        let prev_mgd = self.module_globals_dict.clone();
+        let prev_ga = self.globals_accessed;
+        self.module_globals_dict = globals_dict;
+        self.globals_accessed = false;
+
+        let num_regs = code.num_regs as usize;
+        let mut regs: RegsBuf = smallvec![Value::unset(); num_regs];
+        let regs_ptr = unsafe { std::ptr::NonNull::new_unchecked(regs.as_mut_ptr()) };
+        let regs_len = regs.len();
+        self.vm_frame_views.push(VmFrameView {
+            kind: FrameKind::Script,
+            regs_ptr,
+            regs_len,
+            local_index: Rc::clone(&local_index),
+            nonlocal_names: None,
+            env: None,
+            is_class_method: false,
+        });
+        let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
+        let vm_result = self.run_bytecode(code, regs_slice);
+        self.vm_frame_views.pop();
+
+        self.env = previous_env;
+        self.module_globals_dict = prev_mgd;
+        self.globals_accessed = prev_ga;
+
+        vm_result
+    }
+
+    /// Run a pre-compiled exec-mode code object.
+    /// Used by `exec(compile(...))`.
+    pub(crate) fn run_exec_code(
+        &mut self,
+        code: Rc<crate::bytecode::FnCode>,
+        local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
+        globals_dict: Option<Value>,
+        locals_dict: Option<Value>,
+    ) -> Result<()> {
+        match globals_dict {
+            None => {
+                // Run in current module scope.
+                let num_regs = code.num_regs as usize;
+                let mut regs: RegsBuf = smallvec![Value::unset(); num_regs];
+                let regs_ptr = unsafe { std::ptr::NonNull::new_unchecked(regs.as_mut_ptr()) };
+                let regs_len = regs.len();
+                self.vm_frame_views.push(VmFrameView {
+                    kind: FrameKind::Script,
+                    regs_ptr,
+                    regs_len,
+                    local_index: Rc::clone(&local_index),
+                    nonlocal_names: None,
+                    env: None,
+                    is_class_method: false,
+                });
+                let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
+                let vm_result = self.run_bytecode(&code, regs_slice);
+                self.vm_frame_views.pop();
+                // Write fastlocals back to module env.
+                for (name, &idx) in local_index.iter() {
+                    if !regs[idx as usize].is_unset() {
+                        let val = std::mem::replace(&mut regs[idx as usize], Value::unset());
+                        self.assign_name(name.clone(), val);
+                    }
+                }
+                vm_result.map(|_| ())
+            }
+            Some(gdict) => {
+                // Prepare the program slice: we already have compiled code,
+                // but exec_in_dict_env wants &[Stmt].  Use the lower-level
+                // dict env path directly.
+                let num_regs = code.num_regs as usize;
+                let mut regs: RegsBuf = smallvec![Value::unset(); num_regs];
+                let exec_env = self.build_dict_env(gdict.clone(), locals_dict.as_ref())?;
+                let previous_env = std::mem::replace(&mut self.env, exec_env);
+                let prev_mgd = self.module_globals_dict.clone();
+                let prev_ga = self.globals_accessed;
+                self.module_globals_dict = gdict.clone();
+                self.globals_accessed = false;
+
+                let regs_ptr = unsafe { std::ptr::NonNull::new_unchecked(regs.as_mut_ptr()) };
+                let regs_len = regs.len();
+                self.vm_frame_views.push(VmFrameView {
+                    kind: FrameKind::Script,
+                    regs_ptr,
+                    regs_len,
+                    local_index: Rc::clone(&local_index),
+                    nonlocal_names: None,
+                    env: None,
+                    is_class_method: false,
+                });
+                let regs_slice = unsafe { RegSlice::from_raw(regs_ptr.as_ptr(), regs_len) };
+                let vm_result = self.run_bytecode(&code, regs_slice);
+                self.vm_frame_views.pop();
+
+                for (name, &idx) in local_index.iter() {
+                    if !regs[idx as usize].is_unset() {
+                        let val = std::mem::replace(&mut regs[idx as usize], Value::unset());
+                        self.env.borrow_mut().values.insert(name.clone(), val);
+                    }
+                }
+                let env_vals: Vec<(String, Value)> = self
+                    .env
+                    .borrow()
+                    .values
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                for (k, v) in env_vals {
+                    if let Some(ldict) = &locals_dict {
+                        let was_in_globals = gdict
+                            .dict_with(|d| d.contains_key(&StrKey(k.as_str())))
+                            .unwrap_or(false);
+                        let was_in_locals = ldict
+                            .dict_with(|d| d.contains_key(&StrKey(k.as_str())))
+                            .unwrap_or(false);
+                        if was_in_globals && !was_in_locals {
+                            continue;
+                        }
+                        let _ = ldict.dict_insert(PyKey::str_from(&k), v);
+                    } else {
+                        let _ = gdict.dict_insert(PyKey::str_from(&k), v);
+                    }
+                }
+                self.env = previous_env;
+                self.module_globals_dict = prev_mgd;
+                self.globals_accessed = prev_ga;
+                vm_result.map(|_| ())
+            }
+        }
+    }
+
+    /// Run a pre-compiled eval-mode code object and return its value.
+    /// Used by `eval(compile(...))`.
+    pub(crate) fn run_eval_code_dispatch(
+        &mut self,
+        code: Rc<crate::bytecode::FnCode>,
+        local_index: Rc<HashMap<String, crate::bytecode::Reg>>,
+        globals_dict: Option<Value>,
+        locals_dict: Option<Value>,
+    ) -> Result<Value> {
+        match globals_dict {
+            None => self.run_eval_code_in_module(&code, local_index),
+            Some(gdict) => self.eval_in_dict_env(&code, local_index, gdict, locals_dict),
+        }
+    }
+
+    /// Build an `EnvRef` pre-seeded with key/value pairs from the given
+    /// globals dict (and locals dict, if provided).  The resulting env has
+    /// no parent so the compile code treats it as module scope.
+    fn build_dict_env(
+        &mut self,
+        globals_dict: Value,
+        locals_dict: Option<&Value>,
+    ) -> Result<EnvRef> {
+        let exec_env = Environment::new(None);
+        // Seed from globals first.
+        let seeded = globals_dict.dict_with(|d| {
+            for (k, v) in d {
+                if let PyKey::Str(sv) = k {
+                    if let Some(s) = sv.as_str() {
+                        exec_env.borrow_mut().values.insert(s.to_string(), v.clone());
+                    }
+                }
+            }
+        });
+        if seeded.is_none() {
+            return Err(PyError::named(
+                "TypeError",
+                "exec/eval globals must be a dict".to_string(),
+            ));
+        }
+        // Then overlay locals on top (locals shadow globals).
+        if let Some(ldict) = locals_dict {
+            let seeded_locals = ldict.dict_with(|d| {
+                for (k, v) in d {
+                    if let PyKey::Str(sv) = k {
+                        if let Some(s) = sv.as_str() {
+                            exec_env.borrow_mut().values.insert(s.to_string(), v.clone());
+                        }
+                    }
+                }
+            });
+            if seeded_locals.is_none() {
+                return Err(PyError::named(
+                    "TypeError",
+                    "exec/eval locals must be a dict".to_string(),
+                ));
+            }
+        }
+        Ok(exec_env)
+    }
 }
