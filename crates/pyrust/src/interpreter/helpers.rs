@@ -4361,6 +4361,12 @@ pub(crate) fn format_exc_chain_prefix(exc_val: &Value) -> String {
             drop(borrow);
             match cause {
                 Some(c) if !matches!(c.kind(), ValueKind::None) => {
+                    // Check the predecessor for cycles before pushing it.
+                    if let ValueKind::PyInstance(next_inst) = c.kind() {
+                        if seen.contains(&(Rc::as_ptr(next_inst) as *const ())) {
+                            break;
+                        }
+                    }
                     chain.push((c.clone(), true));
                     current = c;
                 }
@@ -4372,6 +4378,12 @@ pub(crate) fn format_exc_chain_prefix(exc_val: &Value) -> String {
             drop(borrow);
             match context {
                 Some(c) if !matches!(c.kind(), ValueKind::None) => {
+                    // Check the predecessor for cycles before pushing it.
+                    if let ValueKind::PyInstance(next_inst) = c.kind() {
+                        if seen.contains(&(Rc::as_ptr(next_inst) as *const ())) {
+                            break;
+                        }
+                    }
                     chain.push((c.clone(), false));
                     current = c;
                 }
