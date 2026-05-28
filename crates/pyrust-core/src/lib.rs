@@ -4774,6 +4774,10 @@ pub fn extract_int(v: &Value, _method: &str, _param: &str) -> Result<i64> {
     match v.kind() {
         ValueKind::Int(n) => Ok(n),
         ValueKind::Bool(b) => Ok(b as i64),
+        ValueKind::BigInt(_) => Err(PyError::named(
+            "OverflowError",
+            "Python int too large to convert to C ssize_t",
+        )),
         _ => Err(PyError::named(
             "TypeError",
             format!(
@@ -4818,6 +4822,10 @@ pub fn extract_optional_int(args: &[Value], idx: usize) -> Result<Option<i64>> {
         None => Ok(None),
         Some(ValueKind::Int(n)) => Ok(Some(n)),
         Some(ValueKind::Bool(b)) => Ok(Some(b as i64)),
+        Some(ValueKind::BigInt(_)) => Err(PyError::named(
+            "OverflowError",
+            "Python int too large to convert to C int",
+        )),
         _ => Err(PyError::named(
             "TypeError",
             format!(
