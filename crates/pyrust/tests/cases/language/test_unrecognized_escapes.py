@@ -1,7 +1,6 @@
 # Unrecognized escape sequences — CPython 3.12 preserves backslash + char verbatim.
-# (CPython 3.12 emits a SyntaxWarning at compile time; suppress so outputs match.)
-import warnings
-warnings.filterwarnings("ignore")
+# CPython 3.12 emits a SyntaxWarning to stderr for each; the parity harness
+# normalizer strips those warning lines so the comparison succeeds.
 
 # Basic unrecognized single-char escapes
 print(repr('\z'))   # '\\z'
