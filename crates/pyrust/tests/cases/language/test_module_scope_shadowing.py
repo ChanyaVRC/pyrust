@@ -42,3 +42,12 @@ check_function_scope()
 z = 42
 z = z + 1
 print(z)           # 43
+
+# Augmented assignment on an undefined name that is later assigned at module
+# scope must raise NameError ("name 'x' is not defined"), not the wrong
+# "local variable referenced before assignment" message.
+try:
+    aug_target += 1
+except NameError as e:
+    print("NameError aug:", e)
+aug_target = 0
