@@ -84,11 +84,11 @@ pyrust_module! {
     /// Migrated to the typed-signature dialect (#400) as a three-element
     /// overload set: `PyStr` is the primary path; `PyBytes` mirrors
     /// CPython's acceptance of one-byte bytes (`ord(b"A") == 65`); a
-    /// trailing `PyValue` catch-all preserves the legacy
-    /// `"expected string of length 1, but got non-string"` TypeError
-    /// verbatim.  Length-mismatch wording on the `PyStr` overload is also
-    /// preserved verbatim from the legacy body so parity output is
-    /// stable.  All parameters are `#[positional_only]` so the macro's
+    /// trailing `PyValue` catch-all raises `"expected string of length 1,
+    /// but TYPE found"` using the actual type name (CPython 3.12 wording,
+    /// fixed in #1339).  Length-mismatch wording on the `PyStr` overload
+    /// is preserved verbatim from CPython so parity output is stable.
+    /// All parameters are `#[positional_only]` so the macro's
     /// positional-only fast-path applies.  The `PyBytes` overload is a
     /// new CPython-parity feature — the legacy body rejected `bytes`
     /// outright, but CPython has always accepted a 1-byte `bytes`
@@ -133,10 +133,12 @@ pyrust_module! {
 
     #[pure]
     fn ord(#[positional_only] c: PyValue) -> Result<Value> {
-        let _ = c;
         Err(PyError::named(
             "TypeError",
-            format!("{FN_NAME}() expected string of length 1, but got non-string"),
+            format!(
+                "{FN_NAME}() expected string of length 1, but {} found",
+                value_type_name_str(&c.0),
+            ),
         ))
     }
 
@@ -561,88 +563,89 @@ pyrust_module! {
     /// CPython: divmod(a, b) — `(a // b, a % b)`.
     /// <https://docs.python.org/3/library/functions.html#divmod>
     ///
-    /// Migrated to the typed-signature dialect (#400).  Overloads cover every
-    /// CPython-accepted type combination:
-    ///  - `(int, int)` — including `BigInt`; `PyInt` wraps both small and big.
-    ///  - `(bool, int)`, `(int, bool)`, `(bool, bool)` — `bool ⊆ int` in CPython,
-    ///    so these return integer results (not float).
-    ///  - `(float, float)`, `(float, int)`, `(float, bool)`, `(int, float)`,
-    ///    `(bool, float)` — any mix involving a `float` returns floats.
-    ///  - `(PyValue, PyValue)` catch-all consults `__divmod__`/`__rdivmod__` first
-    ///    (CPython's `PyNumber_Divmod` protocol), then raises `TypeError`.
-    ///
-    /// The `BigInt` arm inside each int-family overload promotes both operands via
-    /// `to_bigint()` when either is `Big`, mirroring PR #485's cross-type arms in
-    /// `expr.rs`.
-    fn divmod(#[positional_only] a: PyInt, #[positional_only] b: PyInt) -> Result<Value> {
-        divmod_int_int(a, b)
-    }
+    /// Uses the raw `(args)` dispatch style so that wrong-arity calls produce
+    /// CPython's exact message (`"divmod expected 2 arguments, got N"`) rather
+    /// than the generic `missing_arg` wording.  Type dispatch for the primitive
+    /// fast paths (int/bool/float combinations) is done inline by kind-matching;
+    /// the dunder-dispatch and coerce_numeric fallback paths are identical to
+    /// the former `(PyValue, PyValue)` catch-all overload body.
+    fn divmod(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("divmod expected 2 arguments, got {}", args.len()),
+            ));
+        }
+        let a = &args[0].value;
+        let b = &args[1].value;
 
-    fn divmod(#[positional_only] a: PyBool, #[positional_only] b: PyInt) -> Result<Value> {
-        // bool coerces to int: `True → 1`, `False → 0`.
-        divmod_int_int(PyInt::from(a.0 as i64), b)
-    }
+        // Fast paths: primitive int/bool/float combinations, mirroring the
+        // former typed overloads.  bool ⊆ int in CPython: bool arms coerce
+        // to i64 before calling the int helper.
+        let a_is_bool = a.is_bool();
+        let b_is_bool = b.is_bool();
+        let a_is_int = matches!(a.kind(), ValueKind::Int(_) | ValueKind::BigInt(_));
+        let b_is_int = matches!(b.kind(), ValueKind::Int(_) | ValueKind::BigInt(_));
+        let a_is_float = matches!(a.kind(), ValueKind::Float(_));
+        let b_is_float = matches!(b.kind(), ValueKind::Float(_));
 
-    fn divmod(#[positional_only] a: PyInt, #[positional_only] b: PyBool) -> Result<Value> {
-        divmod_int_int(a, PyInt::from(b.0 as i64))
-    }
+        if (a_is_int || a_is_bool) && (b_is_int || b_is_bool) {
+            // Both are int-family (int or bool); no float involved.
+            let ia = if a_is_bool {
+                PyInt::from(if let ValueKind::Bool(v) = a.kind() { v as i64 } else { 0 })
+            } else {
+                PyInt::try_from_value(a, "divmod", "a")?
+            };
+            let ib = if b_is_bool {
+                PyInt::from(if let ValueKind::Bool(v) = b.kind() { v as i64 } else { 0 })
+            } else {
+                PyInt::try_from_value(b, "divmod", "b")?
+            };
+            return divmod_int_int(ia, ib);
+        }
 
-    fn divmod(#[positional_only] a: PyBool, #[positional_only] b: PyBool) -> Result<Value> {
-        divmod_int_int(PyInt::from(a.0 as i64), PyInt::from(b.0 as i64))
-    }
+        if (a_is_float || a_is_int || a_is_bool) && (b_is_float || b_is_int || b_is_bool) {
+            // At least one operand is float (since the all-int case was handled
+            // above); promote both to f64.
+            let af = if a_is_float {
+                if let ValueKind::Float(f) = a.kind() { f } else { unreachable!() }
+            } else if a_is_bool {
+                if let ValueKind::Bool(v) = a.kind() { v as i64 as f64 } else { unreachable!() }
+            } else {
+                let pi = PyInt::try_from_value(a, "divmod", "a")?;
+                pyint_to_f64(&pi)?
+            };
+            let bf = if b_is_float {
+                if let ValueKind::Float(f) = b.kind() { f } else { unreachable!() }
+            } else if b_is_bool {
+                if let ValueKind::Bool(v) = b.kind() { v as i64 as f64 } else { unreachable!() }
+            } else {
+                let pi = PyInt::try_from_value(b, "divmod", "b")?;
+                pyint_to_f64(&pi)?
+            };
+            return divmod_float_float(af, bf);
+        }
 
-    fn divmod(#[positional_only] a: PyFloat, #[positional_only] b: PyFloat) -> Result<Value> {
-        divmod_float_float(*a, *b)
-    }
-
-    fn divmod(#[positional_only] a: PyFloat, #[positional_only] b: PyInt) -> Result<Value> {
-        // int→float coercion for the mixed arm.  BigInt may overflow f64 —
-        // CPython raises `OverflowError` in that case.  For BigInt values that
-        // fit in f64 (e.g. 2**100 ≈ 1.27e30) the conversion succeeds.
-        let bf = pyint_to_f64(&b)?;
-        divmod_float_float(*a, bf)
-    }
-
-    fn divmod(#[positional_only] a: PyFloat, #[positional_only] b: PyBool) -> Result<Value> {
-        divmod_float_float(*a, if b.0 { 1.0 } else { 0.0 })
-    }
-
-    fn divmod(#[positional_only] a: PyInt, #[positional_only] b: PyFloat) -> Result<Value> {
-        let af = pyint_to_f64(&a)?;
-        divmod_float_float(af, *b)
-    }
-
-    fn divmod(#[positional_only] a: PyBool, #[positional_only] b: PyFloat) -> Result<Value> {
-        divmod_float_float(if a.0 { 1.0 } else { 0.0 }, *b)
-    }
-
-    /// Catch-all: consult `__divmod__` / `__rdivmod__` before raising TypeError.
-    ///
-    /// CPython's `PyNumber_Divmod` (Objects/abstract.c) tries `nb_divmod` on
-    /// the left operand first, then the right operand's slot, and only raises
-    /// `TypeError` when both return `NotImplemented` or are absent.
-    ///
-    /// Subtype rule (mirrors CPython `binary_op1`): when `b`'s type is a
-    /// *proper* subtype of `a`'s type, try `b.__rdivmod__(a)` first.
-    fn divmod(#[positional_only] a: PyValue, #[positional_only] b: PyValue) -> Result<Value> {
-        // Extract classes so we can apply the subtype rule.
-        let a_class = if let ValueKind::PyInstance(inst) = a.0.kind() {
+        // Dunder dispatch: consult `__divmod__` / `__rdivmod__` before raising
+        // TypeError.  CPython's `PyNumber_Divmod` (Objects/abstract.c) tries
+        // `nb_divmod` on the left operand first, then the right operand's slot,
+        // and only raises `TypeError` when both return `NotImplemented` or are
+        // absent.
+        //
+        // Subtype rule (mirrors CPython `binary_op1`): when `b`'s type is a
+        // *proper* subtype of `a`'s type, try `b.__rdivmod__(a)` first.
+        let a_class = if let ValueKind::PyInstance(inst) = a.kind() {
             Some(Rc::clone(&inst.borrow().class))
         } else {
             None
         };
-        let b_class = if let ValueKind::PyInstance(inst) = b.0.kind() {
+        let b_class = if let ValueKind::PyInstance(inst) = b.kind() {
             Some(Rc::clone(&inst.borrow().class))
         } else {
             None
         };
 
-        // Subtype rule (mirrors CPython `binary_op1`): if b's class is a
-        // *proper* subtype of a's class AND b's class *directly defines*
-        // `__rdivmod__` (not merely inherits it), try b.__rdivmod__(a) before
-        // a.__divmod__(b).  CPython gates on `tp_as_number->nb_divmod` slots
-        // being different objects; the equivalent here is checking that bc's
-        // own attr dict contains the key.
         let b_is_proper_subtype_of_a = match (&a_class, &b_class) {
             (Some(ac), Some(bc)) => {
                 !Rc::ptr_eq(ac, bc)
@@ -653,10 +656,10 @@ pyrust_module! {
         };
 
         if b_is_proper_subtype_of_a {
-            if let (Some(bc), ValueKind::PyInstance(inst)) = (&b_class, b.0.kind()) {
+            if let (Some(bc), ValueKind::PyInstance(inst)) = (&b_class, b.kind()) {
                 if let Some(m) = lookup_class_attr(bc, "__rdivmod__") {
                     let self_val = Value::py_instance(Rc::clone(inst));
-                    let arg = ExpandedCallArg { name: None, value: a.0.clone() };
+                    let arg = ExpandedCallArg { name: None, value: a.clone() };
                     match invoke_class_method(_interp, m, self_val, &[arg]) {
                         Ok(v) if !matches!(v.kind(), ValueKind::NotImplemented) => return Ok(v),
                         Err(e) => return Err(e),
@@ -667,10 +670,10 @@ pyrust_module! {
         }
 
         // Try a.__divmod__(b).
-        if let (Some(ac), ValueKind::PyInstance(inst)) = (&a_class, a.0.kind()) {
+        if let (Some(ac), ValueKind::PyInstance(inst)) = (&a_class, a.kind()) {
             if let Some(m) = lookup_class_attr(ac, "__divmod__") {
                 let self_val = Value::py_instance(Rc::clone(inst));
-                let arg = ExpandedCallArg { name: None, value: b.0.clone() };
+                let arg = ExpandedCallArg { name: None, value: b.clone() };
                 match invoke_class_method(_interp, m, self_val, &[arg]) {
                     Ok(v) if !matches!(v.kind(), ValueKind::NotImplemented) => return Ok(v),
                     Err(e) => return Err(e),
@@ -681,10 +684,10 @@ pyrust_module! {
 
         // Try b.__rdivmod__(a) (skipped above if already tried via subtype rule).
         if !b_is_proper_subtype_of_a {
-            if let (Some(bc), ValueKind::PyInstance(inst)) = (&b_class, b.0.kind()) {
+            if let (Some(bc), ValueKind::PyInstance(inst)) = (&b_class, b.kind()) {
                 if let Some(m) = lookup_class_attr(bc, "__rdivmod__") {
                     let self_val = Value::py_instance(Rc::clone(inst));
-                    let arg = ExpandedCallArg { name: None, value: a.0.clone() };
+                    let arg = ExpandedCallArg { name: None, value: a.clone() };
                     match invoke_class_method(_interp, m, self_val, &[arg]) {
                         Ok(v) if !matches!(v.kind(), ValueKind::NotImplemented) => return Ok(v),
                         Err(e) => return Err(e),
@@ -700,20 +703,20 @@ pyrust_module! {
         // where `MyInt` does not define its own `__divmod__` — CPython delegates
         // through the `nb_divmod` slot inherited from `int`; pyrust mirrors that
         // with explicit coercion here.
-        let ca = coerce_numeric(a.0.clone());
-        let cb = coerce_numeric(b.0.clone());
-        let a_is_numeric = matches!(
+        let ca = coerce_numeric(a.clone());
+        let cb = coerce_numeric(b.clone());
+        let ca_is_numeric = matches!(
             ca.kind(),
             ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Float(_) | ValueKind::Bool(_)
         );
-        let b_is_numeric = matches!(
+        let cb_is_numeric = matches!(
             cb.kind(),
             ValueKind::Int(_) | ValueKind::BigInt(_) | ValueKind::Float(_) | ValueKind::Bool(_)
         );
-        if a_is_numeric && b_is_numeric {
-            let a_is_float = matches!(ca.kind(), ValueKind::Float(_));
-            let b_is_float = matches!(cb.kind(), ValueKind::Float(_));
-            if a_is_float || b_is_float {
+        if ca_is_numeric && cb_is_numeric {
+            let ca_is_float = matches!(ca.kind(), ValueKind::Float(_));
+            let cb_is_float = matches!(cb.kind(), ValueKind::Float(_));
+            if ca_is_float || cb_is_float {
                 // At least one is float — promote both to f64.
                 let af = match ca.kind() {
                     ValueKind::Float(f) => f,
@@ -764,8 +767,8 @@ pyrust_module! {
             "TypeError",
             format!(
                 "unsupported operand type(s) for divmod(): '{}' and '{}'",
-                value_type_name_str(&a.0),
-                value_type_name_str(&b.0),
+                value_type_name_str(a),
+                value_type_name_str(b),
             ),
         ))
     }
