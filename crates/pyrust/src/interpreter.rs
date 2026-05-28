@@ -88,7 +88,10 @@ impl std::hash::Hash for MemoKey {
 
 type FnCache = HashMap<(u64, Vec<MemoKey>), Value>;
 
-const MAX_CALL_DEPTH: usize = 1000;
+// MAX_CALL_DEPTH is now a thread-local managed by sys.setrecursionlimit().
+// The default value (1000) and the accessor functions are defined in
+// runtime/calls.rs (included below via runtime.rs).  The name
+// `max_call_depth()` replaces the old constant at all call sites.
 const ENV_POOL_MAX: usize = 64;
 
 /// Pre-resolved table of built-in exception classes.

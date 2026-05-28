@@ -2,9 +2,22 @@
 // problem: a guard that holds &mut self.call_depth cannot coexist with a &mut self
 // method call. The thread_local is safe because the interpreter is single-threaded.
 
-
 thread_local! {
     static CALL_DEPTH: Cell<usize> = const { Cell::new(0) };
+    // Recursion limit, configurable via sys.setrecursionlimit(). Default matches CPython.
+    static RECURSION_LIMIT: Cell<usize> = const { Cell::new(1000) };
+}
+
+pub(crate) fn get_recursion_limit() -> usize {
+    RECURSION_LIMIT.with(|l| l.get())
+}
+
+pub(crate) fn set_recursion_limit(n: usize) {
+    RECURSION_LIMIT.with(|l| l.set(n));
+}
+
+fn max_call_depth() -> usize {
+    get_recursion_limit()
 }
 
 fn call_depth() -> usize {
@@ -2356,7 +2369,7 @@ impl Interpreter {
                 let mut regs: RegsBuf = smallvec![Value::unset(); num_regs];
 
                 let _depth_guard = CallDepthGuard::enter();
-                if call_depth() > MAX_CALL_DEPTH {
+                if call_depth() > max_call_depth() {
                     let exc = if let Some(cls) = self.exc_classes.get("RecursionError") {
                         instantiate_exception(
                             cls,
@@ -2705,7 +2718,7 @@ impl Interpreter {
                 }
 
             let _depth_guard = CallDepthGuard::enter();
-            if call_depth() > MAX_CALL_DEPTH {
+            if call_depth() > max_call_depth() {
                 let exc = if let Some(cls) = self.exc_classes.get("RecursionError") {
                     instantiate_exception(
                         cls,

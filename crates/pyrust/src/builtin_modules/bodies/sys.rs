@@ -11,8 +11,8 @@ use std::rc::Rc;
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
 use crate::interpreter::{
-    instantiate_exception, lookup_name_in_module, reject_keyword_args_expanded,
-    value_type_name_str,
+    get_recursion_limit, instantiate_exception, lookup_name_in_module,
+    reject_keyword_args_expanded, set_recursion_limit, value_type_name_str,
 };
 use crate::value::{PyClass, PyInstance, Value, ValueKind};
 use pyrust_derive::pyrust_module;
@@ -73,6 +73,59 @@ pyrust_module! {
         };
         let exc = instantiate_exception(class, vec![arg]);
         Err(PyError::Raised(exc))
+    }
+
+    /// CPython: sys.getrecursionlimit() — return the current recursion limit.
+    /// <https://docs.python.org/3/library/sys.html#sys.getrecursionlimit>
+    fn getrecursionlimit(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if !args.is_empty() {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "getrecursionlimit() takes no arguments ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        Ok(Value::int(get_recursion_limit() as i64))
+    }
+
+    /// CPython: sys.setrecursionlimit(limit) — set the maximum depth of the
+    /// Python interpreter stack.  `limit` must be a positive integer (>= 1).
+    /// <https://docs.python.org/3/library/sys.html#sys.setrecursionlimit>
+    fn setrecursionlimit(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        if args.len() != 1 {
+            return Err(PyError::named(
+                "TypeError",
+                format!(
+                    "setrecursionlimit() takes exactly one argument ({} given)",
+                    args.len()
+                ),
+            ));
+        }
+        let n = match args[0].value.kind() {
+            ValueKind::Int(i) => i,
+            ValueKind::Bool(b) => b as i64,
+            _ => {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "'{}' object cannot be interpreted as an integer",
+                        value_type_name_str(&args[0].value)
+                    ),
+                ));
+            }
+        };
+        if n < 1 {
+            return Err(PyError::named(
+                "ValueError",
+                "recursion limit must be greater or equal than 1".to_string(),
+            ));
+        }
+        set_recursion_limit(n as usize);
+        Ok(Value::none())
     }
 
     // ── version_info rich-comparison and sequence methods ────────────────────
