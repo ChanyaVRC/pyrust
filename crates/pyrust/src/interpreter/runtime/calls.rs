@@ -2303,19 +2303,21 @@ impl Interpreter {
             }
             let mut positional_index = bound_prefix.len();
             let mut posonly_violations: Vec<&str> = Vec::new();
+            // Deferred unknown-keyword: CPython raises posonly error before
+            // unexpected-keyword error when both are present in the same call.
+            let mut first_unknown_keyword: Option<&str> = None;
             for arg in args {
                 let value = arg.value.clone();
                 if let Some(name) = &arg.name {
                     let Some(param_index) =
                         function.params.iter().position(|param| param.name == *name)
                     else {
-                        return Err(PyError::named(
-                            "TypeError",
-                            format!(
-                                "{}() got an unexpected keyword argument '{}'",
-                                function.name, name
-                            ),
-                        ));
+                        // Don't return immediately — a posonly violation earlier
+                        // in the arg list must still take priority (CPython 3.12).
+                        if first_unknown_keyword.is_none() {
+                            first_unknown_keyword = Some(name.as_str());
+                        }
+                        continue;
                     };
                     if function.params[param_index].is_positional_only {
                         // The fast path only runs when the function has neither
@@ -2390,6 +2392,12 @@ impl Interpreter {
                         function.name,
                         posonly_violations.join(", ")
                     ),
+                ));
+            }
+            if let Some(name) = first_unknown_keyword {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("{}() got an unexpected keyword argument '{}'", function.name, name),
                 ));
             }
             // Resolve defaults: fill any still-empty bound_args slots in-place.

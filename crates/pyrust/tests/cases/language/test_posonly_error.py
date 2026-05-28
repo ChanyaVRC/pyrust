@@ -42,3 +42,10 @@ def bar(a, b, /, c, **kwargs):
     return (a, b, c, kwargs)
 
 print(bar(1, 2, 3, a=10, b=20))
+
+# Posonly violation + unknown keyword: posonly error takes priority (CPython 3.12)
+def f(a, b, /, c): pass
+try:
+    f(a=1, d=99)
+except TypeError as e:
+    print(e)
