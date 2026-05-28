@@ -643,6 +643,66 @@ impl Interpreter {
                                 }
                                 Ok(Value::list(class_direct_subclasses(&class)))
                             }
+                            // Issue #1563: `dict.fromkeys` classmethod on a dict subclass.
+                            // `env.rs` binds the subclass as the receiver when `fromkeys` is
+                            // looked up on a non-primitive dict subclass.  Collect the iterable
+                            // and optional default, call `cls()` to construct an empty instance,
+                            // then replace its `__builtin_data__` with the populated dict.
+                            "fromkeys" => {
+                                if !kw.is_empty() {
+                                    let class_name = class.borrow().name.clone();
+                                    self.bound_method_pos_buf = pos;
+                                    return Err(PyError::named(
+                                        "TypeError",
+                                        format!(
+                                            "{class_name}.fromkeys() takes no keyword arguments",
+                                        ),
+                                    ));
+                                }
+                                if pos.is_empty() {
+                                    self.bound_method_pos_buf = pos;
+                                    return Err(PyError::named(
+                                        "TypeError",
+                                        "fromkeys expected at least 1 argument, got 0".to_string(),
+                                    ));
+                                }
+                                if pos.len() > 2 {
+                                    let n = pos.len();
+                                    self.bound_method_pos_buf = pos;
+                                    return Err(PyError::named(
+                                        "TypeError",
+                                        format!(
+                                            "fromkeys expected at most 2 arguments, got {n}",
+                                        ),
+                                    ));
+                                }
+                                let iterable = pos[0].clone();
+                                let default_val =
+                                    pos.get(1).cloned().unwrap_or_else(Value::none);
+                                self.bound_method_pos_buf = pos;
+                                // Collect keys and build the map (same logic as dict_fromkeys
+                                // in builtins.rs: first-occurrence order, no duplicate keys).
+                                let keys = self.collect_iterable(iterable)?;
+                                let mut map: indexmap::IndexMap<PyKey, Value> =
+                                    indexmap::IndexMap::with_capacity(keys.len());
+                                for key in &keys {
+                                    let py_key = self.value_to_pykey(key)?;
+                                    map.entry(py_key).or_insert_with(|| default_val.clone());
+                                }
+                                // Construct `cls()` with no arguments to get a subclass instance
+                                // (matching CPython's `dict.fromkeys` classmethod semantics).
+                                let instance =
+                                    self.call_class_expanded(Rc::clone(&class), &[])?;
+                                // Replace the empty `__builtin_data__` backing set by
+                                // `call_class_expanded` with the populated dict.
+                                if let ValueKind::PyInstance(inst_rc) = instance.kind() {
+                                    inst_rc.borrow_mut().attrs.insert(
+                                        BUILTIN_DATA_ATTR.to_string(),
+                                        Value::dict(map),
+                                    );
+                                }
+                                return Ok(instance);
+                            }
                             _ => {
                                 self.bound_method_pos_buf = pos;
                                 let class_name = class.borrow().name.clone();
