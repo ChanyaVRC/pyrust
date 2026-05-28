@@ -4227,8 +4227,18 @@ impl Compiler {
     /// So for `raise` we only need to: delete any `as VAR` binding (PEP 3110),
     /// then inline any `finally` stmts.  `TryBody` entries don't need compile-time
     /// cleanup — the VM's `exc_handlers` stack still covers them.
-    fn emit_raise_cleanups(&mut self) {
+    /// `pending_exc_reg`: when a non-bare `raise X` is in progress, the
+    /// register holding the to-be-raised exception value.  If `Some`, it is
+    /// pushed onto `handled_exc_stack` before inlining the innermost
+    /// ExceptBody's finally block, so that any raise inside the finally sees
+    /// the correct implicit context (the to-be-raised exception, not the
+    /// currently-handled one).  The push is undone by a `PopExcContext` after
+    /// the finally block completes normally.
+    fn emit_raise_cleanups(&mut self, pending_exc_reg: Option<Reg>) {
         let total = self.except_cleanups.len();
+        // Track whether we have already processed the innermost ExceptBody.
+        // The PushExcContext is only needed for that first one.
+        let mut innermost_except_body_done = false;
         for i in (0..total).rev() {
             if self.failed {
                 return;
@@ -4272,10 +4282,24 @@ impl Compiler {
                     // loop iterations.  TryBody entries at outer scopes still have
                     // live SetupExcept handlers and are handled by the VM.
                     if let Some(stmts) = finally_stmts {
+                        // For the innermost ExceptBody: if we have a pending
+                        // exception (non-bare raise), temporarily install it as
+                        // the active context so that any raise inside the finally
+                        // sees it as __context__ rather than the currently-handled
+                        // exception on the stack.  This matches CPython, where the
+                        // finally runs with the new exception as the active one.
+                        let push_exc_ctx = !innermost_except_body_done && pending_exc_reg.is_some();
+                        if let (true, Some(r)) = (push_exc_ctx, pending_exc_reg) {
+                            self.emit(Insn::PushExcContext(r));
+                        }
                         let saved_tail: Vec<EarlyExitCleanup> = self.except_cleanups.split_off(i);
                         self.compile_block(&stmts);
                         self.except_cleanups.extend(saved_tail);
+                        if push_exc_ctx {
+                            self.emit(Insn::PopExcContext);
+                        }
                     }
+                    innermost_except_body_done = true;
                     // Continue the loop: there may be enclosing ExceptBody entries
                     // (from outer except handlers) whose finallys also need inlining,
                     // because their outer SetupExcept was likewise popped when the
@@ -6367,7 +6391,13 @@ impl Compiler {
             return;
         }
 
-        self.emit_raise_cleanups();
+        // For a non-bare raise inside an except handler with a finally: pass the
+        // register holding the to-be-raised exception so that emit_raise_cleanups
+        // can temporarily install it as the active context before inlining the
+        // finally block.  Bare raises don't need this because the active exception
+        // (which is already on handled_exc_stack) is the one being re-raised.
+        let pending_exc_reg = compiled.as_ref().map(|(r, _)| *r);
+        self.emit_raise_cleanups(pending_exc_reg);
         if self.failed {
             if let Some(tmp) = bare_reraise_tmp {
                 self.free_temp(tmp);

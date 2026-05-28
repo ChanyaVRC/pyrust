@@ -236,6 +236,14 @@ pub enum Insn {
     MatchExcept(Reg, i32),
     /// Clear active_exception (end of except handler).
     EndExcept,
+    /// Push R[src] onto handled_exc_stack and set active_exception = R[src].
+    /// Emitted before an inlined finally block when a new raise is in progress
+    /// inside an except handler, so that any raise inside the finally sees the
+    /// to-be-raised exception (not the currently-handled one) as __context__.
+    PushExcContext(Reg),
+    /// Pop the top of handled_exc_stack and restore active_exception to the
+    /// new top.  Emitted after an inlined finally block to undo PushExcContext.
+    PopExcContext,
     /// R[dst] = create class(fn_protos[proto_idx], bases R[bases_base..+bases_n], name=names[name_idx])
     /// PEP 487: kwarg_n keyword arg values are in R[kwarg_base..kwarg_base+kwarg_n];
     /// names come from fn_protos[proto_idx].class_kwarg_names.

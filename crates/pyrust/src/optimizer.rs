@@ -1604,6 +1604,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | SetupExcept(..)
         | PopExcept
         | EndExcept
+        | PopExcContext
         | ReturnNone
         | RaiseReRaise
         | ForIter(..)
@@ -1636,6 +1637,7 @@ fn insn_reads_reg(insn: &Insn, r: u32) -> bool {
         | MatchExcept(s, _)
         | RecordClassStore(s)
         | RecordClassDel(s)
+        | PushExcContext(s)
         | SyncModuleGlobal(s, _) => *s == r,
 
         // Two source registers.
@@ -1728,6 +1730,7 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         | SetupExcept(..)
         | PopExcept
         | EndExcept
+        | PopExcContext
         | ReturnNone
         | RaiseReRaise
         | ForIter(..)
@@ -1759,6 +1762,7 @@ fn collect_reads(insn: &Insn, reads: &mut HashSet<u32>) {
         | MatchExcept(s, _)
         | RecordClassStore(s)
         | RecordClassDel(s)
+        | PushExcContext(s)
         | SyncModuleGlobal(s, _) => {
             reads.insert(*s);
         }
@@ -2508,6 +2512,8 @@ fn collect_writes(insn: &Insn, written: &mut HashSet<u32>) {
         | PopExcept
         | EndExcept
         | MatchExcept(..)
+        | PushExcContext(..)
+        | PopExcContext
         | CheckLocal(..)
         | PrintExpr(..)
         | SetAdd(..)
@@ -5604,6 +5610,7 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         | SetupExcept(..)
         | PopExcept
         | EndExcept
+        | PopExcContext
         | ReturnNone
         | RaiseReRaise
         | ForIter(..) => {}
@@ -5638,7 +5645,8 @@ fn visit_read_regs(insn: &Insn, mut f: impl FnMut(u32)) {
         | CmpJumpIfTrueConst(s, _, _, _)
         | MatchExcept(s, _)
         | RecordClassStore(s)
-        | RecordClassDel(s) => f(*s),
+        | RecordClassDel(s)
+        | PushExcContext(s) => f(*s),
 
         BinOp(_, a, _, b)
         | BinOpInPlace(_, a, _, b)
