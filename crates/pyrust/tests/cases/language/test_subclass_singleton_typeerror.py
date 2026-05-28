@@ -24,3 +24,11 @@ try:
     print("FAIL: no error raised for multi-base with NoneType")
 except TypeError as e:
     print(f"OK: multi-base caught: {e}")
+
+# Confirm that the dynamic type() constructor also rejects non-subclassable bases
+for t in [type(None), type(...), type(NotImplemented), bool]:
+    try:
+        x = type("Foo", (t,), {})
+        print(f"FAIL: type() with {t.__name__} base should have raised")
+    except TypeError as e:
+        print(f"OK type(): {e}")
