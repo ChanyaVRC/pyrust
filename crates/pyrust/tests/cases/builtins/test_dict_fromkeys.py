@@ -52,3 +52,16 @@ v = []
 result = dict.fromkeys(["a", "b"], v)
 result["a"].append(1)
 print(result)
+
+# Keys from a generator
+def gen_keys():
+    yield "x"
+    yield "y"
+    yield "z"
+print(dict.fromkeys(gen_keys()))
+
+# No arguments raises TypeError
+try:
+    dict.fromkeys()
+except TypeError as e:
+    print(type(e).__name__, e)
