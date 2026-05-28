@@ -29,6 +29,7 @@ use crate::interpreter::{
     py_hash_int, py_mod_i64, py_round_half_even, py_round_half_even_f64,
     reject_keyword_args_expanded, resolve_zero_arg_super, round_bigint_neg_ndigits, snapshot_current_locals,
     sync_module_env_to_globals_dict, type_class_singleton,
+    unicode_exc_set_attrs,
     value_to_float, value_type_name_str,
 };
 use crate::value::{PyBigInt, PyClass, PyKey, PyToPrimitive, PyZero, UserFunctionKind, Value, ValueKind, range_len};
@@ -5139,9 +5140,15 @@ pyrust_module! {
             .attrs
             .insert("args".to_string(), Value::tuple(exc_args.clone()));
         // Mirror the StopIteration.value special-case.
-        let is_stop_iteration = {
+        let (is_stop_iteration, is_unicode_decode, is_unicode_encode, is_unicode_translate) = {
             let class = Rc::clone(&inst_rc.borrow().class);
-            class_chain_contains_name(&class, "StopIteration")
+            let decode = class_chain_contains_name(&class, "UnicodeDecodeError");
+            let encode =
+                !decode && class_chain_contains_name(&class, "UnicodeEncodeError");
+            let translate = !decode
+                && !encode
+                && class_chain_contains_name(&class, "UnicodeTranslateError");
+            (class_chain_contains_name(&class, "StopIteration"), decode, encode, translate)
         };
         if is_stop_iteration {
             let val = exc_args.into_iter().next().unwrap_or_else(Value::none);
@@ -5149,6 +5156,15 @@ pyrust_module! {
                 .borrow_mut()
                 .attrs
                 .insert("value".to_string(), val);
+        } else if is_unicode_decode || is_unicode_encode || is_unicode_translate {
+            // Mirror the Unicode-error attribute-setting from instantiate_exception
+            // so that `super().__init__(enc, obj, start, end, reason)` in a
+            // subclass's __init__ sets all five (or four) structured attributes.
+            unicode_exc_set_attrs(
+                &mut inst_rc.borrow_mut().attrs,
+                &exc_args,
+                is_unicode_decode || is_unicode_encode,
+            );
         }
         Ok(Value::none())
     }

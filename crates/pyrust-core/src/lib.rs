@@ -3742,6 +3742,81 @@ fn format_exception_args(args: &[Value], repr_mode: bool) -> String {
     }
 }
 
+/// Format a codepoint the way CPython formats it in Unicode error `__str__`
+/// messages: `\xHH` for U+00xx, `\uHHHH` for U+xxxx, `\UHHHHHHHH` for wider.
+fn format_codepoint_escape(cp: u32) -> String {
+    if cp < 0x100 {
+        format!("\\x{cp:02x}")
+    } else if cp < 0x10000 {
+        format!("\\u{cp:04x}")
+    } else {
+        format!("\\U{cp:08x}")
+    }
+}
+
+/// Build the `__str__` message for a `UnicodeDecodeError` from its five
+/// structured attributes.  Matches CPython 3.12 `UnicodeDecodeError_str`.
+pub fn format_unicode_decode_str(
+    encoding: &str,
+    object: &[u8],
+    start: usize,
+    end: usize,
+    reason: &str,
+) -> String {
+    if end == start + 1 {
+        let byte = object.get(start).copied().unwrap_or(0);
+        format!("'{encoding}' codec can't decode byte 0x{byte:02x} in position {start}: {reason}")
+    } else {
+        format!(
+            "'{encoding}' codec can't decode bytes in position {start}-{}: {reason}",
+            end - 1
+        )
+    }
+}
+
+/// Build the `__str__` message for a `UnicodeEncodeError` from its five
+/// structured attributes.  Matches CPython 3.12 `UnicodeEncodeError_str`.
+pub fn format_unicode_encode_str(
+    encoding: &str,
+    object: &str,
+    start: usize,
+    end: usize,
+    reason: &str,
+) -> String {
+    let chars: Vec<char> = object.chars().collect();
+    if end == start + 1 {
+        let cp = chars.get(start).map(|&c| c as u32).unwrap_or(0);
+        let esc = format_codepoint_escape(cp);
+        format!("'{encoding}' codec can't encode character '{esc}' in position {start}: {reason}")
+    } else {
+        format!(
+            "'{encoding}' codec can't encode characters in position {start}-{}: {reason}",
+            end - 1
+        )
+    }
+}
+
+/// Build the `__str__` message for a `UnicodeTranslateError` from its four
+/// structured attributes.  Matches CPython 3.12 `UnicodeTranslateError_str`.
+pub fn format_unicode_translate_str(
+    object: &str,
+    start: usize,
+    end: usize,
+    reason: &str,
+) -> String {
+    let chars: Vec<char> = object.chars().collect();
+    if end == start + 1 {
+        let cp = chars.get(start).map(|&c| c as u32).unwrap_or(0);
+        let esc = format_codepoint_escape(cp);
+        format!("can't translate character '{esc}' in position {start}: {reason}")
+    } else {
+        format!(
+            "can't translate characters in position {start}-{}: {reason}",
+            end - 1
+        )
+    }
+}
+
 fn exception_to_string(instance: &Rc<RefCell<PyInstance>>) -> String {
     let args = exception_args(instance);
     // CPython's `KeyError.__str__` always uses repr of the single arg, so
@@ -3779,6 +3854,103 @@ fn exception_to_string(instance: &Rc<RefCell<PyInstance>>) -> String {
                 }
                 _ => return base,
             }
+        }
+    }
+
+    // CPython's UnicodeDecodeError.__str__ derives the message from the five
+    // structured attributes, not from args.  Only format this way when all
+    // five attributes are set (i.e. the exception was properly constructed).
+    if class_chain_has_name(&instance.borrow().class, "UnicodeDecodeError") {
+        let borrowed = instance.borrow();
+        let enc = borrowed
+            .attrs
+            .get("encoding")
+            .and_then(|v| v.as_str().map(str::to_owned));
+        let obj = borrowed.attrs.get("object").and_then(|v| {
+            if let ValueKind::Bytes(rc) = v.kind() {
+                Some(rc.as_ref().clone())
+            } else {
+                None
+            }
+        });
+        let start = borrowed
+            .attrs
+            .get("start")
+            .and_then(|v| v.as_int())
+            .map(|i| i as usize);
+        let end = borrowed
+            .attrs
+            .get("end")
+            .and_then(|v| v.as_int())
+            .map(|i| i as usize);
+        let reason = borrowed
+            .attrs
+            .get("reason")
+            .and_then(|v| v.as_str().map(str::to_owned));
+        if let (Some(enc), Some(obj), Some(start), Some(end), Some(reason)) =
+            (enc, obj, start, end, reason)
+        {
+            return format_unicode_decode_str(&enc, &obj, start, end, &reason);
+        }
+    }
+
+    // CPython's UnicodeEncodeError.__str__ derives the message from the five
+    // structured attributes.
+    if class_chain_has_name(&instance.borrow().class, "UnicodeEncodeError") {
+        let borrowed = instance.borrow();
+        let enc = borrowed
+            .attrs
+            .get("encoding")
+            .and_then(|v| v.as_str().map(str::to_owned));
+        let obj = borrowed
+            .attrs
+            .get("object")
+            .and_then(|v| v.as_str().map(str::to_owned));
+        let start = borrowed
+            .attrs
+            .get("start")
+            .and_then(|v| v.as_int())
+            .map(|i| i as usize);
+        let end = borrowed
+            .attrs
+            .get("end")
+            .and_then(|v| v.as_int())
+            .map(|i| i as usize);
+        let reason = borrowed
+            .attrs
+            .get("reason")
+            .and_then(|v| v.as_str().map(str::to_owned));
+        if let (Some(enc), Some(obj), Some(start), Some(end), Some(reason)) =
+            (enc, obj, start, end, reason)
+        {
+            return format_unicode_encode_str(&enc, &obj, start, end, &reason);
+        }
+    }
+
+    // CPython's UnicodeTranslateError.__str__ derives the message from four
+    // structured attributes (no encoding).
+    if class_chain_has_name(&instance.borrow().class, "UnicodeTranslateError") {
+        let borrowed = instance.borrow();
+        let obj = borrowed
+            .attrs
+            .get("object")
+            .and_then(|v| v.as_str().map(str::to_owned));
+        let start = borrowed
+            .attrs
+            .get("start")
+            .and_then(|v| v.as_int())
+            .map(|i| i as usize);
+        let end = borrowed
+            .attrs
+            .get("end")
+            .and_then(|v| v.as_int())
+            .map(|i| i as usize);
+        let reason = borrowed
+            .attrs
+            .get("reason")
+            .and_then(|v| v.as_str().map(str::to_owned));
+        if let (Some(obj), Some(start), Some(end), Some(reason)) = (obj, start, end, reason) {
+            return format_unicode_translate_str(&obj, start, end, &reason);
         }
     }
 
@@ -4098,6 +4270,30 @@ pub enum PyError {
         filename: Option<String>,
         filename2: Option<String>,
     },
+    /// A `UnicodeDecodeError` raised from an internal decoding operation (e.g.
+    /// `bytes.decode()`).  Carries the five structured fields that CPython 3.12
+    /// sets on every `UnicodeDecodeError` instance: `encoding`, `object`,
+    /// `start`, `end`, and `reason`.
+    ///
+    /// The VM materialises this into a `PyInstance` via
+    /// `instantiate_unicode_decode_error`, populating all five attributes.
+    UnicodeDecodeError {
+        encoding: String,
+        object: Vec<u8>,
+        start: usize,
+        end: usize,
+        reason: String,
+    },
+    /// A `UnicodeEncodeError` raised from an internal encoding operation (e.g.
+    /// `str.encode()`).  Carries the five structured fields that CPython 3.12
+    /// sets on every `UnicodeEncodeError` instance.
+    UnicodeEncodeError {
+        encoding: String,
+        object: String,
+        start: usize,
+        end: usize,
+        reason: String,
+    },
     Raised(Value),
 }
 
@@ -4253,6 +4449,20 @@ impl PyError {
                                 | "TimeoutError"
                         ))
             }
+            PyError::UnicodeDecodeError { .. } => {
+                name == "UnicodeDecodeError"
+                    || name == "UnicodeError"
+                    || name == "ValueError"
+                    || name == "Exception"
+                    || name == "BaseException"
+            }
+            PyError::UnicodeEncodeError { .. } => {
+                name == "UnicodeEncodeError"
+                    || name == "UnicodeError"
+                    || name == "ValueError"
+                    || name == "Exception"
+                    || name == "BaseException"
+            }
             PyError::Raised(exc) => match exc.kind() {
                 ValueKind::PyInstance(inst) => class_chain_has_name(&inst.borrow().class, name),
                 ValueKind::PyClass(cls) => class_chain_has_name(cls, name),
@@ -4291,6 +4501,26 @@ impl fmt::Display for PyError {
                 } else {
                     write!(f, "{class_name}: [Errno {errno}] {strerror}")
                 }
+            }
+            PyError::UnicodeDecodeError {
+                encoding,
+                object,
+                start,
+                end,
+                reason,
+            } => {
+                let msg = format_unicode_decode_str(encoding, object, *start, *end, reason);
+                write!(f, "UnicodeDecodeError: {msg}")
+            }
+            PyError::UnicodeEncodeError {
+                encoding,
+                object,
+                start,
+                end,
+                reason,
+            } => {
+                let msg = format_unicode_encode_str(encoding, object, *start, *end, reason);
+                write!(f, "UnicodeEncodeError: {msg}")
             }
             PyError::Raised(value) => write!(f, "Uncaught exception: {}", value.repr()),
         }
