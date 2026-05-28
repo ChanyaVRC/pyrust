@@ -440,6 +440,40 @@ impl Interpreter {
                     "__package__" => return Ok(Value::string(String::new())),
                     "__loader__" | "__spec__" => return Ok(Value::none()),
                     "__doc__" => return Ok(Value::none()),
+                    "__dict__" => {
+                        // Build a snapshot dict of the module namespace.
+                        // Include both the stored attrs and the synthetic
+                        // dunder attributes that get_attr synthesises above.
+                        let mut d: IndexMap<PyKey, Value> = module
+                            .borrow()
+                            .attrs
+                            .iter()
+                            .map(|(k, v)| (PyKey::str_from(k), v.clone()))
+                            .collect();
+                        // Synthetic dunders: add only if not already present
+                        // (user scripts may have stored their own __name__ etc. into attrs).
+                        let name_key = PyKey::str_from("__name__");
+                        if !d.contains_key(&name_key) {
+                            d.insert(name_key, Value::string(mod_name.clone()));
+                        }
+                        let pkg_key = PyKey::str_from("__package__");
+                        if !d.contains_key(&pkg_key) {
+                            d.insert(pkg_key, Value::string(String::new()));
+                        }
+                        let spec_key = PyKey::str_from("__spec__");
+                        if !d.contains_key(&spec_key) {
+                            d.insert(spec_key, Value::none());
+                        }
+                        let loader_key = PyKey::str_from("__loader__");
+                        if !d.contains_key(&loader_key) {
+                            d.insert(loader_key, Value::none());
+                        }
+                        let doc_key = PyKey::str_from("__doc__");
+                        if !d.contains_key(&doc_key) {
+                            d.insert(doc_key, Value::none());
+                        }
+                        return Ok(Value::dict(d));
+                    }
                     _ => {}
                 }
                 Err(PyError::named(
