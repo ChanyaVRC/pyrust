@@ -15,6 +15,7 @@ pub mod iter_helpers;
 pub mod list;
 pub mod mapping_proxy;
 pub mod mutable_sequence;
+pub mod numeric_attrs_descriptor;
 pub mod property;
 pub mod sequence;
 pub mod set;
@@ -52,6 +53,12 @@ pub fn lookup_ops(type_name: &str) -> Option<&'static dyn pyrust_core::BuiltinTy
         classmethod::STATIC_BINDER_TYPE_NAME => Some(classmethod::STATIC_METHOD_GET_BINDER_OPS),
         traceback::TYPE_NAME => Some(traceback::TRACEBACK_OPS),
         union_type::TYPE_NAME => Some(union_type::UNION_TYPE_OPS),
+        numeric_attrs_descriptor::GETSET_TYPE_NAME => {
+            Some(numeric_attrs_descriptor::GETSET_DESCRIPTOR_OPS)
+        }
+        numeric_attrs_descriptor::METHOD_DESCRIPTOR_TYPE_NAME => {
+            Some(numeric_attrs_descriptor::METHOD_DESCRIPTOR_OPS)
+        }
         _ => None,
     }
 }
