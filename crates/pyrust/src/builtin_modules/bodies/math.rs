@@ -199,7 +199,8 @@ pyrust_module! {
     /// CPython: math.sqrt(x) → float.  <https://docs.python.org/3/library/math.html#math.sqrt>
     #[pure]
     fn sqrt(args) -> Result<Value> {
-        Ok(Value::float(single_float(FN_NAME, args)?.sqrt()))
+        let x = single_float(FN_NAME, args)?;
+        Ok(Value::float(check_math_result(x, x.sqrt())?))
     }
 
     /// CPython: math.fabs(x) → float.  <https://docs.python.org/3/library/math.html#math.fabs>
@@ -229,37 +230,43 @@ pyrust_module! {
     /// CPython: math.asin(x) → float.  <https://docs.python.org/3/library/math.html#math.asin>
     #[pure]
     fn asin(args) -> Result<Value> {
-        Ok(Value::float(single_float(FN_NAME, args)?.asin()))
+        let x = single_float(FN_NAME, args)?;
+        Ok(Value::float(check_math_result(x, x.asin())?))
     }
 
     /// CPython: math.acos(x) → float.  <https://docs.python.org/3/library/math.html#math.acos>
     #[pure]
     fn acos(args) -> Result<Value> {
-        Ok(Value::float(single_float(FN_NAME, args)?.acos()))
+        let x = single_float(FN_NAME, args)?;
+        Ok(Value::float(check_math_result(x, x.acos())?))
     }
 
     /// CPython: math.atan(x) → float.  <https://docs.python.org/3/library/math.html#math.atan>
     #[pure]
     fn atan(args) -> Result<Value> {
-        Ok(Value::float(single_float(FN_NAME, args)?.atan()))
+        let x = single_float(FN_NAME, args)?;
+        Ok(Value::float(check_math_result(x, x.atan())?))
     }
 
     /// CPython: math.exp(x) → float.  <https://docs.python.org/3/library/math.html#math.exp>
     #[pure]
     fn exp(args) -> Result<Value> {
-        Ok(Value::float(single_float(FN_NAME, args)?.exp()))
+        let x = single_float(FN_NAME, args)?;
+        Ok(Value::float(check_math_result(x, x.exp())?))
     }
 
     /// CPython: math.log2(x) → float.  <https://docs.python.org/3/library/math.html#math.log2>
     #[pure]
     fn log2(args) -> Result<Value> {
-        Ok(Value::float(single_float(FN_NAME, args)?.log2()))
+        let x = single_float(FN_NAME, args)?;
+        Ok(Value::float(check_math_result(x, x.log2())?))
     }
 
     /// CPython: math.log10(x) → float.  <https://docs.python.org/3/library/math.html#math.log10>
     #[pure]
     fn log10(args) -> Result<Value> {
-        Ok(Value::float(single_float(FN_NAME, args)?.log10()))
+        let x = single_float(FN_NAME, args)?;
+        Ok(Value::float(check_math_result(x, x.log10())?))
     }
 
     /// CPython: math.isnan(x) → bool.  <https://docs.python.org/3/library/math.html#math.isnan>
@@ -286,7 +293,19 @@ pyrust_module! {
         }
         let x = value_to_float(&args[0].value, FN_NAME)?;
         let y = value_to_float(&args[1].value, FN_NAME)?;
-        Ok(Value::float(x.powf(y)))
+        // CPython special-cases pow(0, negative): division by zero is a domain
+        // error (undefined), not a range error, even though the C result is +inf.
+        if x == 0.0 && y.is_finite() && y < 0.0 {
+            return Err(PyError::named(
+                "ValueError",
+                "math domain error".to_string(),
+            ));
+        }
+        let result = x.powf(y);
+        if x.is_finite() && y.is_finite() {
+            check_math_result(x, result)?;
+        }
+        Ok(Value::float(result))
     }
 
     /// CPython: math.atan2(y, x) → float.  <https://docs.python.org/3/library/math.html#math.atan2>
@@ -317,9 +336,14 @@ pyrust_module! {
         let x = value_to_float(&args[0].value, FN_NAME)?;
         if args.len() == 2 {
             let base = value_to_float(&args[1].value, FN_NAME)?;
-            Ok(Value::float(x.log(base)))
+            let result = x.log(base);
+            // Raise domain/range errors only when all inputs are finite.
+            if x.is_finite() && base.is_finite() {
+                check_math_result(x, result)?;
+            }
+            Ok(Value::float(result))
         } else {
-            Ok(Value::float(x.ln()))
+            Ok(Value::float(check_math_result(x, x.ln())?))
         }
     }
 
@@ -590,6 +614,31 @@ pyrust_module! {
 }
 
 // ── Helpers used by the macro-generated bodies ───────────────────────────────
+
+/// Post-call result checker matching CPython's errno / fpclassify logic.
+///
+/// If the input was finite and the result is not finite, raises:
+/// - `ValueError: math domain error`  when result is NaN or -∞ (undefined domain)
+/// - `OverflowError: math range error` when result is +∞ (range overflow)
+///
+/// When the input is not finite (already NaN or ±∞) the result is returned
+/// unchanged — CPython propagates those through without error.
+#[inline]
+fn check_math_result(arg: f64, result: f64) -> Result<f64> {
+    if arg.is_finite() && !result.is_finite() {
+        if result == f64::INFINITY {
+            return Err(PyError::named(
+                "OverflowError",
+                "math range error".to_string(),
+            ));
+        }
+        return Err(PyError::named(
+            "ValueError",
+            "math domain error".to_string(),
+        ));
+    }
+    Ok(result)
+}
 
 /// Coerce `val` to `f64` for the `math.floor` / `math.ceil` fallback path.
 ///
