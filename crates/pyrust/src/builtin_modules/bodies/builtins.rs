@@ -5540,6 +5540,40 @@ pyrust_module! {
         }
     }
 
+    /// Issue #1548: `frozenset.__len__(self)`
+    #[py_name = "frozenset.__len__"]
+    fn frozenset_len_dunder(args) -> Result<Value> {
+        let self_val = args.first().map(|a| a.value.clone()).ok_or_else(|| {
+            PyError::named("TypeError",
+                "descriptor '__len__' of 'frozenset' needs an argument".to_string())
+        })?;
+        let self_val = coerce_numeric(self_val);
+        match self_val.kind() {
+            ValueKind::BuiltinObject { ops, state }
+                if ops.type_name() == pyrust_builtins::frozenset::TYPE_NAME =>
+            {
+                Ok(Value::int(ops.len(state).unwrap_or(0) as i64))
+            }
+            // Issue #1548: frozenset subclasses arrive as PyInstance; delegate to backing data.
+            ValueKind::PyInstance(inst) => {
+                let inst_rc = Rc::clone(inst);
+                match instance_builtin_data(&inst_rc).as_ref().map(|v| v.kind()) {
+                    Some(ValueKind::BuiltinObject { ops, state })
+                        if ops.type_name() == pyrust_builtins::frozenset::TYPE_NAME =>
+                    {
+                        Ok(Value::int(ops.len(state).unwrap_or(0) as i64))
+                    }
+                    _ => Err(PyError::named("TypeError",
+                        format!("descriptor '__len__' for 'frozenset' objects doesn't apply to a '{}' object",
+                            inst_rc.borrow().class.borrow().name))),
+                }
+            }
+            _ => Err(PyError::named("TypeError",
+                format!("descriptor '__len__' for 'frozenset' objects doesn't apply to a '{}' object",
+                    value_type_name_str(&self_val)))),
+        }
+    }
+
     /// Issue #1254: `object.__getattribute__(self, name)` — the default
     /// attribute lookup used by all instances that do not override
     /// `__getattribute__`.  Performs the standard descriptor protocol (data

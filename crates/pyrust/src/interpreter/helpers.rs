@@ -579,6 +579,7 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
         (&tuple_class, "tuple", &["__len__"][..]),
         (&dict_class, "dict", &["__len__"][..]),
         (&set_class, "set", &["__len__"][..]),
+        (&frozenset_class, "frozenset", &["__len__"][..]),
         (&bytes_class, "bytes", &["__len__"][..]),
         (&float_class, "float", &["__trunc__", "__floor__", "__ceil__"][..]),
     ] {
