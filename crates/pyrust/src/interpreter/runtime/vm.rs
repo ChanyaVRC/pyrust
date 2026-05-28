@@ -166,6 +166,10 @@ pub(crate) struct GeneratorFrame {
     /// can re-establish the suspended frame's exception view without
     /// disturbing the caller's.
     pub(crate) active_exception: Option<Value>,
+    /// Parallel save-stack for `active_exception` across nested `except`
+    /// blocks within this generator frame.  Split off at yield time
+    /// (alongside `handled_exc_slice`) and re-extended on resume.
+    pub(crate) exc_saved_active_slice: Vec<Option<Value>>,
     /// Name -> fastlocal register slot for this generator's body, cloned
     /// from the originating `UserFunction`.  Published to
     /// `Interpreter::vm_frame_views` for the duration of each resume so
@@ -206,6 +210,9 @@ pub(crate) struct GenSaveState {
     pub(crate) pc: usize,
     pub(crate) handled_exc_slice: HandledExcBuf,
     pub(crate) active_exception: Option<Value>,
+    /// Parallel save-stack slice for `exc_saved_active`, split off at yield
+    /// time alongside `handled_exc_slice` and re-extended on resume.
+    pub(crate) exc_saved_active_slice: Vec<Option<Value>>,
     /// Destination register of the `Yield` that produced this suspension.
     /// Carried here so `resume_generator_with_exc` can persist it onto
     /// `GeneratorFrame::yield_dst` for the subsequent send() call.
@@ -492,6 +499,7 @@ impl Interpreter {
             None,
             HandledExcBuf::new(),
             None,
+            Vec::new(),
         )? {
             FrameOutcome::Returned(v) => Ok(v),
             FrameOutcome::Yielded { .. } => {
@@ -519,6 +527,7 @@ impl Interpreter {
             None,
             HandledExcBuf::new(),
             None,
+            Vec::new(),
         )? {
             FrameOutcome::Returned(v) => Ok(v),
             FrameOutcome::Yielded { .. } => {
@@ -642,6 +651,7 @@ impl Interpreter {
         // `handled_exc_stack` untouched throughout.
         let gen_handled = std::mem::take(&mut frame.handled_exc_slice);
         let gen_active = frame.active_exception.take();
+        let gen_exc_saved_active = std::mem::take(&mut frame.exc_saved_active_slice);
 
         // Issue #483 review: publish a Function frame view so `locals()`
         // called inside the generator body sees the generator's own
@@ -720,6 +730,7 @@ impl Interpreter {
             inject_exc,
             gen_handled,
             gen_active,
+            gen_exc_saved_active,
         );
         // Pop the traceback frame; capture the chain if an error occurred.
         // On yield (Ok(Yielded)) the call succeeded from the traceback's
@@ -739,6 +750,7 @@ impl Interpreter {
                 frame.pc = saved.pc;
                 frame.handled_exc_slice = saved.handled_exc_slice;
                 frame.active_exception = saved.active_exception;
+                frame.exc_saved_active_slice = saved.exc_saved_active_slice;
                 frame.yield_dst = saved.yield_dst;
                 Ok(value)
             }
@@ -791,6 +803,10 @@ impl Interpreter {
         // for fresh, non-generator invocations.
         gen_handled_slice: HandledExcBuf,
         gen_active_exception: Option<Value>,
+        // Parallel save-stack for `active_exception` across nested except blocks
+        // within this generator frame.  Split off at yield and re-extended on
+        // resume.  Pass `Vec::new()` for non-generator invocations.
+        gen_exc_saved_active: Vec<Option<Value>>,
     ) -> Result<FrameOutcome> {
         // Record per-frame exception state at entry.  On any exit path
         // restore so the caller's frame sees the same `active_exception`
@@ -805,6 +821,7 @@ impl Interpreter {
         // the caller's `active_exception`, since the generator's view of
         // it must never persist outside this frame.
         let exc_ctx_entry_depth = self.handled_exc_stack.len();
+        let exc_saved_active_entry_depth = self.exc_saved_active.len();
         let saved_active = self.active_exception.clone();
         // Save and reset push_exc_ctx_depth: PushExcContext/PopExcContext are
         // always emitted as matched pairs within a single function body, but if
@@ -823,6 +840,7 @@ impl Interpreter {
             inject_exc,
             gen_handled_slice,
             gen_active_exception,
+            gen_exc_saved_active,
         );
 
         // For `Yielded`, the `Yield` opcode already stripped the generator's
@@ -830,6 +848,7 @@ impl Interpreter {
         // `handled_exc_stack` is already at `exc_ctx_entry_depth` on that path.
         // `truncate` is idempotent so it's safe to call in every branch.
         self.handled_exc_stack.truncate(exc_ctx_entry_depth);
+        self.exc_saved_active.truncate(exc_saved_active_entry_depth);
         self.active_exception = saved_active;
         self.push_exc_ctx_depth = saved_push_exc_ctx_depth;
         result
@@ -944,6 +963,12 @@ impl Interpreter {
                 .attrs
                 .insert("__traceback__".to_string(), pyrust_builtins::traceback::make_traceback());
         }
+        // Save the current active_exception BEFORE the dedup-pop below.
+        // This is the value that was active when the new exception was raised,
+        // i.e. the previous handler's exception (or None if no outer handler).
+        // EndExcept and RaiseReRaise pop this to restore the outer handler's
+        // exception when the inner except block exits.
+        let prev_active = self.active_exception.clone();
         // When control is inside a PushExcContext-bracketed finally block
         // (push_exc_ctx_depth > 0), the top of handled_exc_stack is the
         // to-be-raised exception installed by PushExcContext — not an
@@ -961,6 +986,11 @@ impl Interpreter {
             self.handled_exc_stack.pop();
         }
         self.handled_exc_stack.push(exc_val.clone());
+        // Record what was active before this except block started so that
+        // EndExcept / RaiseReRaise can restore it without relying on
+        // handled_exc_stack.last() (which may have been disturbed by the
+        // dedup-pop above).
+        self.exc_saved_active.push(prev_active);
         self.active_exception = Some(exc_val);
         Ok(h)
     }
@@ -980,6 +1010,9 @@ impl Interpreter {
         // caller's stack entries and are owned by this frame.
         gen_handled_slice: HandledExcBuf,
         gen_active_exception: Option<Value>,
+        // Generator-only: parallel save-stack for active_exception across
+        // nested except blocks, split off at yield and re-extended on resume.
+        gen_exc_saved_active: Vec<Option<Value>>,
     ) -> Result<FrameOutcome> {
         use crate::bytecode::Insn;
 
@@ -999,6 +1032,9 @@ impl Interpreter {
         // its "propagating out of a handler body" pop so it never reaches
         // into the caller's entries.
         let exc_ctx_frame_base: usize = self.handled_exc_stack.len();
+        // Parallel base for `exc_saved_active`.  Bounded pops/split-off in
+        // EndExcept, RaiseReRaise, and Yield mirror the handling above.
+        let exc_saved_active_frame_base: usize = self.exc_saved_active.len();
 
         // PEP 3134: re-install the generator's persisted slice of
         // `handled_exc_stack` and its `active_exception` AFTER fixing the
@@ -1008,6 +1044,9 @@ impl Interpreter {
         // `frame.handled_exc_slice`.  No-op for fresh, non-generator calls.
         if !gen_handled_slice.is_empty() {
             self.handled_exc_stack.extend(gen_handled_slice);
+        }
+        if !gen_exc_saved_active.is_empty() {
+            self.exc_saved_active.extend(gen_exc_saved_active);
         }
         if gen_active_exception.is_some() {
             self.active_exception = gen_active_exception;
@@ -2669,13 +2708,20 @@ impl Interpreter {
                     // Leaving an `except` handler body normally (the exception
                     // was truly handled, not re-raised).  Pop the entry that
                     // vm_try! pushed on dispatch.  Restore `active_exception`
-                    // to the outer handler's exception (if any), bounded by
-                    // this frame's base depth so we never pop into caller-frame
-                    // entries.
+                    // from the parallel save-stack (exc_saved_active) rather
+                    // than from handled_exc_stack.last(), because the dedup-pop
+                    // inside handle_vm_error may have removed the outer
+                    // handler's entry from handled_exc_stack when the inner
+                    // exception was dispatched.
                     if self.handled_exc_stack.len() > exc_ctx_frame_base {
                         self.handled_exc_stack.pop();
                     }
-                    self.active_exception = self.handled_exc_stack.last().cloned();
+                    self.active_exception =
+                        if self.exc_saved_active.len() > exc_saved_active_frame_base {
+                            self.exc_saved_active.pop().unwrap()
+                        } else {
+                            None
+                        };
                     // Clear the captured frame snapshot only here — on normal
                     // handler exit.  Clearing at handler *entry* (dispatch_exc_handler)
                     // was wrong because a bare `raise` inside the handler would
@@ -2781,6 +2827,14 @@ impl Interpreter {
                     // depth so we never reach into caller entries.
                     if self.handled_exc_stack.len() > exc_ctx_frame_base {
                         self.handled_exc_stack.pop();
+                    }
+                    // Restore active_exception to the value that was active
+                    // before this except block started.  This ensures that if
+                    // the re-raised exception is caught by an outer handler in
+                    // this frame, handle_vm_error sees the correct prev_active
+                    // when it saves the outer handler's prior active.
+                    if self.exc_saved_active.len() > exc_saved_active_frame_base {
+                        self.active_exception = self.exc_saved_active.pop().unwrap();
                     }
                     vm_try!(Err::<(), _>(PyError::Raised(exc)));
                 }
@@ -3143,8 +3197,13 @@ impl Interpreter {
                     // so the caller's frame sees only its own entries.  The
                     // generator's `active_exception` is likewise stashed and
                     // its slot cleared.  Both are re-installed on resume.
+                    // The parallel exc_saved_active slice is split off and
+                    // saved alongside so that nested-except state persists
+                    // across yield points.
                     let saved_handled_slice: HandledExcBuf =
                         self.handled_exc_stack.split_off(exc_ctx_frame_base).into();
+                    let saved_exc_saved_active =
+                        self.exc_saved_active.split_off(exc_saved_active_frame_base);
                     let saved_active = self.active_exception.take();
                     // Return an explicit FrameOutcome::Yielded rather than
                     // using the old GEN_SAVE thread-local side-channel.
@@ -3162,6 +3221,7 @@ impl Interpreter {
                             pc, // already past the Yield instruction
                             handled_exc_slice: saved_handled_slice,
                             active_exception: saved_active,
+                            exc_saved_active_slice: saved_exc_saved_active,
                             yield_dst: *dst,
                         },
                     });
@@ -3185,6 +3245,8 @@ impl Interpreter {
                             regs[*sent_reg as usize] = Value::none();
                             let saved_handled_slice: HandledExcBuf =
                                 self.handled_exc_stack.split_off(exc_ctx_frame_base).into();
+                            let saved_exc_saved_active =
+                                self.exc_saved_active.split_off(exc_saved_active_frame_base);
                             let saved_active = self.active_exception.take();
                             return Ok(FrameOutcome::Yielded {
                                 value: yielded,
@@ -3196,6 +3258,7 @@ impl Interpreter {
                                     pc: pc - 1,
                                     handled_exc_slice: saved_handled_slice,
                                     active_exception: saved_active,
+                                    exc_saved_active_slice: saved_exc_saved_active,
                                     // The sent value for the next iteration goes into
                                     // sent_reg so the sub-iterator receives it.
                                     yield_dst: *sent_reg,

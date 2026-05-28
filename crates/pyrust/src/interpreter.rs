@@ -133,6 +133,20 @@ pub struct Interpreter {
     /// transiently while the handler body is running (e.g. by an inner
     /// `EndExcept`).  The stack lets us restore the outer context.
     handled_exc_stack: Vec<Value>,
+    /// Parallel save-stack for `active_exception` across nested `except`
+    /// blocks.  One entry is pushed (recording the *previous*
+    /// `active_exception`) each time `handle_vm_error` dispatches an
+    /// exception to a handler, and one entry is popped on `EndExcept` (normal
+    /// exit) or `RaiseReRaise` (re-raise).  The popped value is restored to
+    /// `active_exception`, so the outer handler's exception is visible again
+    /// after an inner handler exits.
+    ///
+    /// This mirrors CPython's per-frame `_PyErr_StackItem` chain.  Without
+    /// it, the dedup-pop inside `handle_vm_error` (which removes the outer
+    /// exception from `handled_exc_stack` when a new inner exception is
+    /// dispatched) means `EndExcept`'s `handled_exc_stack.last()` lookup
+    /// returns `None` instead of the outer exception.
+    exc_saved_active: Vec<Option<Value>>,
     script_dir: Option<PathBuf>,
     /// Path to the top-level script being executed, used to populate the
     /// `filename` field of `FrameInfo` when formatting tracebacks.
@@ -387,6 +401,7 @@ impl Default for Interpreter {
             env,
             active_exception: None,
             handled_exc_stack: Vec::new(),
+            exc_saved_active: Vec::new(),
             script_dir: None,
             script_filename: None,
             module_cache: Rc::new(RefCell::new(HashMap::new())),
