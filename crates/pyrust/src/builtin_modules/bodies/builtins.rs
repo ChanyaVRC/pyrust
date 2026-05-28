@@ -26,7 +26,7 @@ use crate::interpreter::{
     float_to_bigint, instance_builtin_data,
     int_pow_promoting, invoke_class_method,
     is_exception_class, iter_values, lookup_class_attr, modpow_i64, py_hash_bigint, py_hash_float,
-    py_hash_int, py_mod_i64, py_round_half_even, py_round_half_even_f64,
+    py_hash_int, py_round_half_even, py_round_half_even_f64,
     reject_keyword_args_expanded, resolve_zero_arg_super, round_bigint_neg_ndigits, snapshot_current_locals,
     sync_module_env_to_globals_dict, type_class_singleton,
     value_to_float, value_type_name_str,
@@ -5413,11 +5413,21 @@ fn divmod_int_int(
                 "integer division or modulo by zero".to_string(),
             ));
         }
-        let modulo = py_mod_i64(a, b);
-        let quotient = (a - modulo) / b;
-        return Ok(Value::tuple(vec![Value::int(quotient), Value::int(modulo)]));
+        // a=i64::MIN, b=-1: quotient is 2^63 which doesn't fit in i64.
+        // Fall through to the BigInt path for this case.
+        if !(a == i64::MIN && b == -1) {
+            // Compute floor quotient from the truncated quotient to avoid
+            // the `(a - modulo) / b` overflow that occurs near i64 boundaries
+            // (e.g. a=i64::MIN/b=3 or a=i64::MAX/b=-2).
+            let r_trunc = a.wrapping_rem(b);
+            let sign_corrected = r_trunc != 0 && (r_trunc < 0) != (b < 0);
+            let modulo = if sign_corrected { r_trunc + b } else { r_trunc };
+            let quotient = a / b - if sign_corrected { 1 } else { 0 };
+            return Ok(Value::tuple(vec![Value::int(quotient), Value::int(modulo)]));
+        }
     }
-    // BigInt path: at least one operand doesn't fit in i64.
+    // BigInt path: at least one operand doesn't fit in i64; also handles
+    // the i64::MIN/-1 case where the quotient (2^63) overflows i64.
     let a_big = a.to_bigint();
     let b_big = b.to_bigint();
     if b_big.is_zero() {

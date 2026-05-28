@@ -2911,8 +2911,19 @@ impl Interpreter {
                     "integer division or modulo by zero".to_string(),
                 ));
             }
-            let modulo = py_mod_i64(a, b);
-            return Ok(Value::int((a - modulo) / b));
+            // a=i64::MIN, b=-1: quotient is 2^63 which doesn't fit in i64.
+            // Use BigInt arithmetic for this one case.
+            if a == i64::MIN && b == -1 {
+                let (q, _) = bigint_divmod_floor(&PyBigInt::from(a), &PyBigInt::from(b));
+                return Ok(Value::bigint(q));
+            }
+            // Compute floor quotient from the truncated quotient to avoid
+            // the `(a - modulo) / b` overflow that occurs near i64 boundaries
+            // (e.g. a=i64::MIN/b=3 or a=i64::MAX/b=-2).
+            let r_trunc = a.wrapping_rem(b);
+            let sign_corrected = r_trunc != 0 && (r_trunc < 0) != (b < 0);
+            let q = a / b - if sign_corrected { 1 } else { 0 };
+            return Ok(Value::int(q));
         }
         // BigInt cross-type arms (#485): once #421 promotes overflow to
         // BigInt, `(2**64) // 2` arrives here with a BigInt operand.

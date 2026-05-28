@@ -1098,7 +1098,9 @@ pub(crate) fn reject_keyword_args_expanded(function_name: &str, args: &[Expanded
 }
 
 pub(crate) fn py_mod_i64(a: i64, b: i64) -> i64 {
-    let mut remainder = a % b;
+    // Use wrapping_rem to avoid UB/panic when a=i64::MIN and b=-1
+    // (the mathematical result is 0; wrapping_rem gives the same answer).
+    let mut remainder = a.wrapping_rem(b);
     if (remainder > 0 && b < 0) || (remainder < 0 && b > 0) {
         remainder += b;
     }
