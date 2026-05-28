@@ -2104,8 +2104,23 @@ impl Interpreter {
                 let existing = module.borrow().attrs.get(name).cloned();
                 match existing {
                     Some(v) if !v.is_unset() => {
-                        // A real (non-tombstone) value is present; remove it.
-                        module.borrow_mut().attrs.remove(name);
+                        // A real (non-tombstone) value is present.  Remove it,
+                        // and if the name is also a synthetic dunder, replace
+                        // with a tombstone so get_attr does not fall through to
+                        // the synthetic fallback path (CPython 3.12: once you
+                        // delete __name__ it stays absent even if you had
+                        // previously stored a custom string there).
+                        if matches!(
+                            name,
+                            "__name__" | "__package__" | "__loader__" | "__spec__" | "__doc__"
+                        ) {
+                            module
+                                .borrow_mut()
+                                .attrs
+                                .insert(name.to_string(), Value::unset());
+                        } else {
+                            module.borrow_mut().attrs.remove(name);
+                        }
                         return Ok(());
                     }
                     None if matches!(

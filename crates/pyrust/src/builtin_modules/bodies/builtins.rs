@@ -1743,7 +1743,11 @@ pyrust_module! {
             ValueKind::PyModule(module) => {
                 let mut dict: indexmap::IndexMap<PyKey, Value> = indexmap::IndexMap::new();
                 for (k, v) in module.borrow().attrs.iter() {
-                    dict.insert(PyKey::str_from(k), v.clone());
+                    // Skip Value::unset() tombstones (deletion markers for
+                    // synthetic dunders written by delete_attr).
+                    if !v.is_unset() {
+                        dict.insert(PyKey::str_from(k), v.clone());
+                    }
                 }
                 Ok(Value::dict(dict))
             }
