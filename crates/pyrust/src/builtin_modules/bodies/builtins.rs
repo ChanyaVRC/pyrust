@@ -2129,6 +2129,15 @@ pyrust_module! {
                     ValueKind::Int(n) => Some(n.clamp(-(i32::MAX as i64), i32::MAX as i64) as i32),
                     ValueKind::Bool(b) => Some(b as i32),
                     ValueKind::None => None,
+                    // BigInt ndigits: a BigInt by definition doesn't fit in i64, so
+                    // its magnitude always exceeds i32::MAX.  Clamp to ±i32::MAX
+                    // directly based on sign.  CPython accepts any integer type for
+                    // ndigits; the float branch then returns the value unchanged for
+                    // very large positive ndigits, and 0.0 for very large negative ones.
+                    ValueKind::BigInt(b) => {
+                        use num_bigint::Sign;
+                        Some(if b.sign() == Sign::Minus { -(i32::MAX) } else { i32::MAX })
+                    }
                     _ => return Err(PyError::named(
                         "TypeError",
                         format!(
@@ -2242,6 +2251,11 @@ pyrust_module! {
                             ValueKind::Int(n) => Some(n.clamp(-(i32::MAX as i64), i32::MAX as i64) as i32),
                             ValueKind::Bool(b) => Some(b as i32),
                             ValueKind::None => None,
+                            // BigInt ndigits: same logic as the primary path above.
+                            ValueKind::BigInt(b) => {
+                                use num_bigint::Sign;
+                                Some(if b.sign() == Sign::Minus { -(i32::MAX) } else { i32::MAX })
+                            }
                             _ => return Err(PyError::named(
                                 "TypeError",
                                 format!(
