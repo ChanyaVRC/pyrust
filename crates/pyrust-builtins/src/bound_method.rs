@@ -59,6 +59,25 @@ impl BuiltinTypeOps for BoundMethodOps {
         true
     }
 
+    /// Built-in bound methods are hashable in CPython (`hash([].append)` works).
+    /// Hash = FNV-1a of the method name XOR receiver identity (value_id), with
+    /// the CPython -1 → -2 sentinel remap applied.
+    fn hash(&self, state: &BuiltinState) -> Option<u64> {
+        let borrow = state.borrow();
+        let s = borrow.downcast_ref::<BoundMethodState>()?;
+        // FNV-1a over the method name bytes.
+        let mut name_hash: u64 = 14695981039346656037u64;
+        for b in s.name.as_bytes() {
+            name_hash ^= *b as u64;
+            name_hash = name_hash.wrapping_mul(1099511628211u64);
+        }
+        // Receiver identity (stable per Python object; 0 for types without an id).
+        let recv_id = s.receiver.value_id().unwrap_or(0) as u64;
+        let h = name_hash ^ recv_id;
+        // Remap the -1 sentinel (u64::MAX as i64 == -1) to -2 (u64::MAX - 1).
+        Some(if h == u64::MAX { u64::MAX - 1 } else { h })
+    }
+
     // `call` is intentionally *not* implemented.  Bound methods on mutable
     // Tier 1 containers (list, dict, set) require a mutable handle to the
     // receiver register that only the interpreter has — calling through this

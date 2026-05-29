@@ -7621,15 +7621,37 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
             // Built-in functions (`len`, `print`, …) are instances of
             // `builtin_function_or_method` in CPython.  pyrust does not
             // have a dedicated PyClass for them, so they don't map through
-            // `primitive_class_for_value`.  The only ABC check that
-            // matters for plain `BuiltinFunction` values is `Callable` —
-            // handle it via a pointer-equality check against the
-            // `collections.abc.Callable` class singleton.  This keeps the
-            // common `isinstance(x, int)` path unchanged.
+            // `primitive_class_for_value`.  Handle the ABCs that apply to
+            // all built-in callables: Callable and Hashable (issue #1770).
             ValueKind::BuiltinFunction(_) => {
                 let callable_abc =
                     crate::builtin_modules::collections_abc::callable_abc_class();
                 if Rc::ptr_eq(expected, &callable_abc) {
+                    return true;
+                }
+                let hashable_abc =
+                    crate::builtin_modules::collections_abc::hashable_abc_class();
+                if Rc::ptr_eq(expected, &hashable_abc) {
+                    return true;
+                }
+                return false;
+            }
+            // Built-in bound methods (`[].append`, `"".upper`, …) are also
+            // `builtin_function_or_method` in CPython and are both Callable
+            // and Hashable.  They fall through `primitive_class_for_value`
+            // as None, so intercept them here before the fallthrough (issue #1770).
+            ValueKind::BuiltinObject { ops, .. }
+                if ops.type_name()
+                    == pyrust_builtins::bound_method::TYPE_NAME =>
+            {
+                let callable_abc =
+                    crate::builtin_modules::collections_abc::callable_abc_class();
+                if Rc::ptr_eq(expected, &callable_abc) {
+                    return true;
+                }
+                let hashable_abc =
+                    crate::builtin_modules::collections_abc::hashable_abc_class();
+                if Rc::ptr_eq(expected, &hashable_abc) {
                     return true;
                 }
                 return false;
