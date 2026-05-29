@@ -4874,6 +4874,10 @@ pub(crate) fn iter_values(value: &Value) -> Result<Vec<Value>> {
             // Frozensets materialise through their inner key set; dict views
             // materialise through their backing IndexMap; everything else
             // iterates via `iter_next`.
+            // Bytearray: materialise as integers (same shape as bytes iteration).
+            if let Some(elems) = pyrust_builtins::bytearray::iter_elements(&value) {
+                return Ok(elems);
+            }
             if let Some(rc) = pyrust_builtins::frozenset::as_items(&value) {
                 return Ok(rc.iter().map(|k| key_to_value(k.clone())).collect());
             }
@@ -4987,7 +4991,7 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
     // `isinstance(x, int)` and `type(x) is int` work correctly (#462).
     if matches!(
         name,
-        "bool" | "bytes" | "complex" | "dict" | "float" | "frozenset"
+        "bool" | "bytearray" | "bytes" | "complex" | "dict" | "float" | "frozenset"
             | "int"
             | "list"
             | "set"
