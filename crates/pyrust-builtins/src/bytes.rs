@@ -77,6 +77,19 @@ pub fn call(
             ));
         }
     };
+    call_on_slice(method, bytes, args, kwargs)
+}
+
+/// Dispatch a bytes method on a raw `&[u8]` slice.  Used by `bytearray` to
+/// reuse bytes read-method implementations without constructing a temporary
+/// `Value::bytes`.  Results that produce new bytes values (upper, lower, etc.)
+/// return `Value::bytes`; the bytearray module wraps those into bytearray.
+pub fn call_on_slice(
+    method: &str,
+    bytes: &[u8],
+    args: &[Value],
+    kwargs: &IndexMap<PyKey, Value>,
+) -> Result<Value> {
     match method {
         "hex" => bytes_hex(bytes, args),
         "decode" => bytes_decode(bytes, args, kwargs),
@@ -1234,7 +1247,7 @@ fn normalise_idx(idx: i64, len: usize) -> usize {
 
 /// Naive substring search: find first occurrence of `sub` in `haystack`,
 /// returning the starting byte index, or `None` if not found.
-fn find_subsequence(haystack: &[u8], sub: &[u8]) -> Option<usize> {
+pub fn find_subsequence(haystack: &[u8], sub: &[u8]) -> Option<usize> {
     if sub.len() > haystack.len() {
         return None;
     }
@@ -1243,7 +1256,7 @@ fn find_subsequence(haystack: &[u8], sub: &[u8]) -> Option<usize> {
 
 /// Naive substring search: find last occurrence of `sub` in `haystack`,
 /// returning the starting byte index, or `None` if not found.
-fn rfind_subsequence(haystack: &[u8], sub: &[u8]) -> Option<usize> {
+pub fn rfind_subsequence(haystack: &[u8], sub: &[u8]) -> Option<usize> {
     if sub.len() > haystack.len() {
         return None;
     }

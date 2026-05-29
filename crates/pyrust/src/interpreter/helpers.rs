@@ -165,6 +165,17 @@ pub(crate) fn compare_values_with_op(
             .unwrap_or(std::cmp::Ordering::Equal)),
         (ValueKind::Str(x), ValueKind::Str(y)) => Ok(x.cmp(y)),
         (ValueKind::Bytes(x), ValueKind::Bytes(y)) => Ok(x.as_slice().cmp(y.as_slice())),
+        // bytearray <=> bytearray comparison.
+        (ValueKind::BuiltinObject { ops: aops, .. }, ValueKind::BuiltinObject { ops: bops, .. })
+            if aops.type_name() == pyrust_builtins::bytearray::TYPE_NAME
+               && bops.type_name() == pyrust_builtins::bytearray::TYPE_NAME =>
+        {
+            let a_rc = pyrust_builtins::bytearray::as_bytearray_rc(a)
+                .expect("bytearray rc");
+            let b_rc = pyrust_builtins::bytearray::as_bytearray_rc(b)
+                .expect("bytearray rc");
+            Ok(a_rc.borrow().as_slice().cmp(b_rc.borrow().as_slice()))
+        }
         (ValueKind::List(x), ValueKind::List(y)) => {
             for (a, b) in x.iter().zip(y.iter()) {
                 let ord = compare_values_with_op(a, b, op_name)?;
@@ -395,6 +406,7 @@ thread_local! {
             let mut m = cell.borrow_mut();
             for (class, name) in [
                 (&c.bool_class, "bool"),
+                (&c.bytearray_class, "bytearray"),
                 (&c.bytes_class, "bytes"),
                 (&c.complex_class, "complex"),
                 (&c.dict_class, "dict"),
@@ -447,6 +459,7 @@ thread_local! {
 /// `resolve_builtin("int")` etc. call.
 pub(crate) struct PrimitiveClasses {
     pub(crate) bool_class: Rc<RefCell<PyClass>>,
+    pub(crate) bytearray_class: Rc<RefCell<PyClass>>,
     pub(crate) bytes_class: Rc<RefCell<PyClass>>,
     pub(crate) complex_class: Rc<RefCell<PyClass>>,
     pub(crate) dict_class: Rc<RefCell<PyClass>>,
@@ -517,8 +530,10 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
     let dict_class = make("dict", Some(Rc::clone(&obj)));
     let set_class = make("set", Some(Rc::clone(&obj)));
     let bytes_class = make("bytes", Some(Rc::clone(&obj)));
+    let bytearray_class = make("bytearray", Some(Rc::clone(&obj)));
     populate_primitive_methods(&int_class, "int", INT_METHODS);
     populate_primitive_methods(&bytes_class, "bytes", BYTES_METHODS);
+    populate_primitive_methods(&bytearray_class, "bytearray", BYTEARRAY_METHODS);
     populate_primitive_methods(&str_class, "str", STR_METHODS);
     populate_primitive_methods(&list_class, "list", LIST_METHODS);
     populate_primitive_methods(&tuple_class, "tuple", TUPLE_METHODS);
@@ -637,6 +652,11 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
         .borrow_mut()
         .attrs
         .insert("fromhex".to_string(), Value::builtin_function("bytes.fromhex"));
+    // `bytearray.fromhex` is a classmethod: register it in bytearray_class.attrs.
+    bytearray_class
+        .borrow_mut()
+        .attrs
+        .insert("fromhex".to_string(), Value::builtin_function("bytearray.fromhex"));
     // `str.maketrans` is a staticmethod: register it in str_class.attrs so
     // that both `str.maketrans(...)` and `"".maketrans(...)` resolve to the
     // same `BuiltinFunction("str.maketrans")` sentinel.
@@ -677,6 +697,7 @@ let attrs: IndexMap<String, Value> = IndexMap::new();
         }
     }
     PrimitiveClasses {
+        bytearray_class,
         bytes_class,
         complex_class,
         dict_class,
@@ -712,6 +733,7 @@ const INT_METHODS: &[&str] = &[
     "as_integer_ratio",
 ];
 const BYTES_METHODS: &[&str] = pyrust_builtins::bytes::METHODS;
+const BYTEARRAY_METHODS: &[&str] = pyrust_builtins::bytearray::METHODS;
 
 const STR_METHODS: &[&str] = &[
     "index", "count",
@@ -825,6 +847,7 @@ pub(crate) fn primitive_class_by_name(name: &str) -> Option<Rc<RefCell<PyClass>>
     PRIMITIVE_CLASSES.with(|c| {
         Some(Rc::clone(match name {
             "bool" => &c.bool_class,
+            "bytearray" => &c.bytearray_class,
             "bytes" => &c.bytes_class,
             "complex" => &c.complex_class,
             "dict" => &c.dict_class,
@@ -863,6 +886,7 @@ pub(crate) fn primitive_class_for_value(v: &Value) -> Option<Rc<RefCell<PyClass>
         ValueKind::None => "NoneType",
         ValueKind::NotImplemented => "NotImplementedType",
         ValueKind::Ellipsis => "ellipsis",
+        ValueKind::BuiltinObject { ops, .. } if ops.type_name() == "bytearray" => "bytearray",
         ValueKind::BuiltinObject { ops, .. } if ops.type_name() == "frozenset" => "frozenset",
         ValueKind::BuiltinObject { ops, .. }
             if ops.type_name() == pyrust_builtins::mapping_proxy::TYPE_NAME =>
@@ -1160,13 +1184,14 @@ pub(crate) fn find_scalar_primitive_base(
         (borrowed.name.clone(), borrowed.base.clone())
     };
     match name.as_str() {
-        "str" | "int" | "float" | "bytes" | "complex" => {
+        "str" | "int" | "float" | "bytes" | "bytearray" | "complex" => {
             if is_primitive_class(class) {
                 return Some(match name.as_str() {
                     "str" => "str",
                     "int" => "int",
                     "float" => "float",
                     "bytes" => "bytes",
+                    "bytearray" => "bytearray",
                     "complex" => "complex",
                     _ => unreachable!(),
                 });
@@ -2202,7 +2227,7 @@ pub(crate) fn cached_builtins_module() -> Value {
                 let mut mod_attrs = m.borrow_mut();
                 // Primitive types.
                 for prim in [
-                    "bool", "bytes", "complex", "dict", "float", "frozenset",
+                    "bool", "bytearray", "bytes", "complex", "dict", "float", "frozenset",
                     "int", "list", "set", "str", "tuple",
                 ] {
                     if let Some(class) = primitive_class_by_name(prim) {
