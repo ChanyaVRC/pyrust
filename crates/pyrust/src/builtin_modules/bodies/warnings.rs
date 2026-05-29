@@ -64,8 +64,9 @@ thread_local! {
     static FILTERS: RefCell<Vec<Filter>> = const { RefCell::new(Vec::new()) };
 
     /// When Some, we are inside a `catch_warnings(record=True)` block and
-    /// warn() appends to this list instead of printing.
-    static RECORD_SINK: RefCell<Option<Vec<Value>>> = const { RefCell::new(None) };
+    /// warn() pushes WarningMessage objects directly into this Python list so
+    /// the caller's `w` binding sees them immediately (shared Rc<ListInner>).
+    static RECORD_SINK: RefCell<Option<Value>> = const { RefCell::new(None) };
 }
 
 /// Push a filter entry to the front of the list (highest priority).
@@ -238,12 +239,15 @@ fn snapshot_filters() -> Value {
 }
 
 /// Restore the filter list from a snapshot produced by `snapshot_filters`.
+///
+/// The snapshot is ordered identically to the internal FILTERS vec (index 0 =
+/// highest priority), so we iterate forward and push to keep that order.
 fn restore_filters(snapshot: &Value) {
     FILTERS.with(|fl| {
         let mut filters = fl.borrow_mut();
         filters.clear();
         if let ValueKind::List(items) = snapshot.kind() {
-            for item in items.iter().rev() {
+            for item in items.iter() {
                 if let ValueKind::Tuple(pair) = item.kind() {
                     if pair.len() == 2 {
                         let action = match pair[0].kind() {
@@ -331,16 +335,18 @@ pyrust_module! {
                 // "default", "always", "once", "module", "all" — emit the warning.
                 let warn_line =
                     format!("<unknown>:0: {cat_name}: {msg_text}");
-                // If inside a catch_warnings(record=True) block, append.
+                // If inside a catch_warnings(record=True) block, push
+                // directly into the shared Python list so the caller's `w`
+                // binding sees the item immediately.
                 let recorded = RECORD_SINK.with(|sink| {
-                    if let Some(ref mut log) = *sink.borrow_mut() {
+                    if let Some(ref list_val) = *sink.borrow() {
                         let wmsg = make_warning_message(
                             msg_val.clone(),
                             &cat_name,
                             "<unknown>",
                             0,
                         );
-                        log.push(wmsg);
+                        let _ = list_val.list_push(wmsg);
                         true
                     } else {
                         false
@@ -383,8 +389,18 @@ pyrust_module! {
             .map(|a| a.value.clone())
             .or_else(|| args.get(2).map(|a| a.value.clone()))
             .unwrap_or_else(|| warning_class_by_name("Warning"));
+        // Map the category name to the canonical filter string.  An empty
+        // string means "match all"; the base class Warning also means match
+        // all because every warning is a Warning subclass.
         let cat_name = match cat_val.kind() {
-            ValueKind::PyClass(rc) => rc.borrow().name.clone(),
+            ValueKind::PyClass(rc) => {
+                let name = rc.borrow().name.clone();
+                if name == "Warning" {
+                    String::new()
+                } else {
+                    name
+                }
+            }
             _ => String::new(),
         };
         let _ = _interp;
@@ -411,8 +427,15 @@ pyrust_module! {
                 ))
             }
         };
+        // Empty category_name means "match all".  Warning (the base class)
+        // also means match all because every warning is a Warning subclass.
         let cat_name = if let Some(cat_arg) = args.get(1) {
-            class_name(&cat_arg.value).unwrap_or_default()
+            let name = class_name(&cat_arg.value).unwrap_or_default();
+            if name == "Warning" {
+                String::new()
+            } else {
+                name
+            }
         } else {
             String::new()
         };
@@ -472,13 +495,13 @@ pyrust_module! {
         );
         if record {
             push_filter(Filter::new("always", ""));
-            let log: Vec<Value> = Vec::new();
-            RECORD_SINK.with(|sink| {
-                *sink.borrow_mut() = Some(log);
-            });
-            // Return the list object — callers use it as `as w`.
-            // We store it in the instance too.
+            // Create the Python list that both RECORD_SINK and the caller's
+            // `w` binding will share via Rc<ListInner>.  warn() pushes
+            // directly into this list so items are visible immediately.
             let list_val = Value::list(Vec::new());
+            RECORD_SINK.with(|sink| {
+                *sink.borrow_mut() = Some(list_val.clone());
+            });
             inst.borrow_mut()
                 .attrs
                 .insert("_log".to_string(), list_val.clone());
@@ -499,14 +522,9 @@ pyrust_module! {
             Some(ValueKind::Bool(true))
         );
         if record {
-            let collected = RECORD_SINK.with(|sink| sink.borrow_mut().take());
-            if let Some(msgs) = collected {
-                // Append collected items into the list stored in _log.
-                let log_val = inst.borrow().attrs.get("_log").cloned();
-                if let Some(log) = log_val {
-                    let _ = log.list_extend(msgs);
-                }
-            }
+            // Items were pushed directly into the shared list via RECORD_SINK;
+            // just clear the sink so warn() stops recording.
+            RECORD_SINK.with(|sink| sink.borrow_mut().take());
         }
         // Restore saved filters.
         let snap = inst.borrow().attrs.get("_saved_filters").cloned();
