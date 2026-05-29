@@ -139,6 +139,7 @@ pyrust_builtin_modules! {
     functools,
     itertools,
     collections,
+    "collections.abc" as collections_abc,
     io,
     typing,
     copy,
