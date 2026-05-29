@@ -4753,7 +4753,8 @@ impl Interpreter {
                     };
                 }
                 let receiver = vm_read(regs, obj, num_locals)?;
-                self.call_dict_method(method, receiver, args)
+                let empty_kw = indexmap::IndexMap::new();
+                self.call_dict_method(method, receiver, args, &empty_kw)
             }
             3 => {
                 if let Some(ValueKind::Tuple(items)) = regs[obj as usize].as_some().map(|v| v.kind()) {
@@ -4931,7 +4932,8 @@ impl Interpreter {
                                                     }
                                                 }
                                                 "dict" => {
-                                                    self.call_dict_method(prim_method, backing, args)
+                                                    let empty_kw = indexmap::IndexMap::new();
+                                                    self.call_dict_method(prim_method, backing, args, &empty_kw)
                                                 }
                                                 "set" => {
                                                     self.call_set_method(prim_method, backing, args)
@@ -5205,7 +5207,7 @@ impl Interpreter {
                     };
                 }
                 let receiver = vm_read(regs, obj, num_locals)?;
-                self.call_dict_method(method, receiver, pos_items)
+                self.call_dict_method(method, receiver, pos_items, &kw_map)
             }
             3 => {
                 if let Some(ValueKind::Tuple(items)) = regs[obj as usize].as_some().map(|v| v.kind()) {

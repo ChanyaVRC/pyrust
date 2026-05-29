@@ -37,7 +37,12 @@ pub fn has_method(method: &str) -> bool {
 /// own scoped borrow when the arg aliases the receiver, so
 /// `d.update(d)` never simultaneously borrows the same `IndexMap`
 /// (#448).
-pub fn call(method: &str, receiver: &Value, args: Vec<Value>) -> Result<Value> {
+pub fn call(
+    method: &str,
+    receiver: &Value,
+    args: Vec<Value>,
+    kwargs: &IndexMap<PyKey, Value>,
+) -> Result<Value> {
     let not_dict = || {
         PyError::named(
             "TypeError",
@@ -77,6 +82,11 @@ pub fn call(method: &str, receiver: &Value, args: Vec<Value>) -> Result<Value> {
                 .dict_with_mut(|dict| {
                     for (k, v) in snapshot {
                         dict.insert(k, v);
+                    }
+                    // Keyword arguments are inserted after the positional arg,
+                    // matching CPython's order: positional mapping first, then kwargs.
+                    for (k, v) in kwargs {
+                        dict.insert(k.clone(), v.clone());
                     }
                 })
                 .ok_or_else(not_dict)?;

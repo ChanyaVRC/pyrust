@@ -1689,6 +1689,7 @@ impl Interpreter {
         method: &str,
         receiver: Value,
         args: Vec<Value>,
+        kwargs: &IndexMap<PyKey, Value>,
     ) -> Result<Value> {
         match method {
             "get" | "__contains__" | "pop" | "setdefault" => {
@@ -1753,7 +1754,7 @@ impl Interpreter {
                     .collect();
                 dispatch(self, &expanded)
             }
-            _ => pyrust_builtins::dict::call(method, &receiver, args),
+            _ => pyrust_builtins::dict::call(method, &receiver, args, kwargs),
         }
     }
 
@@ -3055,7 +3056,8 @@ impl Interpreter {
             // operand names.  For |= the full dict.update() semantics apply
             // (accepts dicts and iterables of pairs).
             if is_augmented_assign || dict_entries_from_value(&right).is_some() {
-                pyrust_builtins::dict::call("update", &left, vec![right])?;
+                let empty_kw = indexmap::IndexMap::new();
+                pyrust_builtins::dict::call("update", &left, vec![right], &empty_kw)?;
                 return Ok(Some(left));
             }
         }
@@ -3093,7 +3095,8 @@ impl Interpreter {
                 if let Some(backing) = instance_builtin_data(inst_rc) {
                     if matches!(backing.kind(), ValueKind::Dict(_)) {
                         if is_augmented_assign || dict_entries_from_value(&right).is_some() {
-                            pyrust_builtins::dict::call("update", &backing, vec![right])?;
+                            let empty_kw = indexmap::IndexMap::new();
+                            pyrust_builtins::dict::call("update", &backing, vec![right], &empty_kw)?;
                             return Ok(Some(left));
                         }
                     }
