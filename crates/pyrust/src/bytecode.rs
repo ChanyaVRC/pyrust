@@ -2,6 +2,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use smallvec::SmallVec;
+
 use crate::ast::{BinaryOp, UnaryOp};
 use crate::value::Value;
 
@@ -14,14 +16,17 @@ pub type Reg = u32;
 /// Static parameter metadata for a function prototype.  Shared via `Rc` so that
 /// `MakeFunction` (which may run on every loop iteration) pays only a refcount
 /// bump instead of cloning four separate `Vec`s.
+///
+/// `SmallVec<[_; 6]>` avoids heap allocation for the common case of functions
+/// with six or fewer parameters.
 #[derive(Debug, Clone)]
 pub struct FnParamSpec {
-    pub names: Vec<String>,
-    pub has_default: Vec<bool>,
-    pub is_args: Vec<bool>,
-    pub is_kwargs: Vec<bool>,
-    pub is_keyword_only: Vec<bool>,
-    pub is_positional_only: Vec<bool>,
+    pub names: SmallVec<[String; 6]>,
+    pub has_default: SmallVec<[bool; 6]>,
+    pub is_args: SmallVec<[bool; 6]>,
+    pub is_kwargs: SmallVec<[bool; 6]>,
+    pub is_keyword_only: SmallVec<[bool; 6]>,
+    pub is_positional_only: SmallVec<[bool; 6]>,
 }
 
 /// Prototype for a nested function or class body.  Created at compile time,
@@ -50,7 +55,9 @@ pub struct FnProto {
     /// the `annots_base..+annots_n` register window: `annotation_keys[i]` is
     /// the dict key (parameter name or `"return"`) for `R[annots_base + i]`.
     /// Empty when the function has no annotations.
-    pub annotation_keys: Vec<String>,
+    /// `SmallVec<[_; 4]>` avoids heap allocation for the common case of
+    /// functions with four or fewer annotated parameters.
+    pub annotation_keys: SmallVec<[String; 4]>,
     /// Docstring extracted from the first statement of the body if it is a
     /// bare string literal (`Stmt::Expr(Expr::Str(...))`), matching CPython's
     /// `co_consts[0]` / `__doc__` extraction.  `None` when no docstring
@@ -59,7 +66,9 @@ pub struct FnProto {
     /// PEP 487 keyword argument names from the class header (e.g. `key` in
     /// `class Foo(Base, key=val)`).  Parallel to the kwarg value registers in
     /// `MakeClass` (`kwarg_base..kwarg_base+kwarg_n`).  Empty for functions.
-    pub class_kwarg_names: Vec<String>,
+    /// `SmallVec<[_; 2]>` avoids heap allocation for the typical case of
+    /// zero to two keyword arguments in a class header.
+    pub class_kwarg_names: SmallVec<[String; 2]>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -470,7 +479,9 @@ pub struct FnCode {
     /// Nested function / class body prototypes
     pub(crate) fn_protos: Vec<FnProto>,
     /// Variables captured by nested functions (stored in env, not registers).
-    pub(crate) cell_vars: Vec<CellVar>,
+    /// `SmallVec<[_; 4]>` avoids heap allocation for the common case of
+    /// functions with four or fewer captured variables.
+    pub(crate) cell_vars: SmallVec<[CellVar; 4]>,
     /// True if this function body contains at least one `Yield` instruction.
     /// The VM creates a generator object instead of executing immediately.
     pub(crate) is_generator: bool,
