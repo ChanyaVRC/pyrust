@@ -3892,6 +3892,10 @@ struct Compiler {
     /// Used to determine whether `self.local_index` counts as an enclosing
     /// function scope for `nonlocal` validation in child compilers.
     is_function_scope: bool,
+    /// True when this Compiler is producing the body of an `async def` function.
+    /// Used to distinguish `'await' outside async function` (inside a non-async
+    /// `def`) from `'await' outside function` (at module or class scope).
+    is_async_function: bool,
     /// True when a compile-time `SyntaxError` has been detected (e.g. a
     /// `nonlocal` declaration with no enclosing binding).  Controls whether
     /// `finish()` emits `PyError::Named("SyntaxError", …)` or `PyError::Runtime`.
@@ -4136,6 +4140,7 @@ impl Compiler {
             qualname_prefix: String::new(),
             outer_locals: Vec::new(),
             is_function_scope: false,
+            is_async_function: false,
             is_syntax_error: false,
             is_module_scope: false,
             past_future_zone: false,
@@ -4889,9 +4894,16 @@ impl Compiler {
                 body,
                 decorators,
                 return_annotation,
-                is_async: _,
+                is_async,
             } => {
-                self.compile_def(name, params, body, decorators, return_annotation.as_ref());
+                self.compile_def(
+                    name,
+                    params,
+                    body,
+                    decorators,
+                    return_annotation.as_ref(),
+                    *is_async,
+                );
             }
             Stmt::Class {
                 name,
@@ -5505,7 +5517,12 @@ impl Compiler {
                 // appear in dead-code branches, so we must run the checks here
                 // rather than relying on child compilation (which is skipped for
                 // dead code).
-                Stmt::Def { params, body, .. } => {
+                Stmt::Def {
+                    params,
+                    body,
+                    is_async,
+                    ..
+                } => {
                     let inner_nonlocal = crate::interpreter::collect_nonlocal_names(body);
                     let mut sorted_nonlocals: Vec<&String> = inner_nonlocal.iter().collect();
                     sorted_nonlocals.sort();
@@ -5527,11 +5544,14 @@ impl Compiler {
                         }
                     }
                     let saved_is_function_scope = self.is_function_scope;
+                    let saved_is_async_function = self.is_async_function;
                     let saved_is_class_body = self.is_class_body;
                     self.is_function_scope = true;
+                    self.is_async_function = *is_async;
                     self.is_class_body = false;
                     self.check_dead_block(body, false);
                     self.is_function_scope = saved_is_function_scope;
+                    self.is_async_function = saved_is_async_function;
                     self.is_class_body = saved_is_class_body;
                 }
                 Stmt::Class { body, .. } => {
@@ -5560,9 +5580,15 @@ impl Compiler {
                 }
             }
             Expr::Await(_) => {
-                self.set_syntax_error(
-                    "'await' not supported: async functions are not yet implemented",
-                );
+                if !self.is_function_scope {
+                    self.set_syntax_error("'await' outside function");
+                } else if !self.is_async_function {
+                    self.set_syntax_error("'await' outside async function");
+                } else {
+                    self.set_syntax_error(
+                        "'await' not supported: async functions are not yet implemented",
+                    );
+                }
             }
             Expr::Binary { left, right, .. } => {
                 self.check_dead_expr(left);
@@ -7040,6 +7066,7 @@ impl Compiler {
         body: &[Stmt],
         decorators: &[Expr],
         return_annotation: Option<&Expr>,
+        is_async: bool,
     ) {
         // Build inner function's scope metadata.
         let inner_global = crate::interpreter::collect_global_names(body);
@@ -7159,6 +7186,7 @@ impl Compiler {
             sub.outer_locals.push(Rc::clone(&self.local_index));
         }
         sub.is_function_scope = true;
+        sub.is_async_function = is_async;
         // Propagate PEP 563 lazy-annotation flag to the inner compiler.
         sub.future_annotations = self.future_annotations;
         // A function compiled directly inside a class body is a class method and
@@ -8581,9 +8609,15 @@ impl Compiler {
             }
 
             Expr::Await(_) => {
-                self.set_syntax_error(
-                    "'await' not supported: async functions are not yet implemented",
-                );
+                if !self.is_function_scope {
+                    self.set_syntax_error("'await' outside function");
+                } else if !self.is_async_function {
+                    self.set_syntax_error("'await' outside async function");
+                } else {
+                    self.set_syntax_error(
+                        "'await' not supported: async functions are not yet implemented",
+                    );
+                }
                 0
             }
         }
@@ -9847,7 +9881,7 @@ impl Compiler {
         // Convert lambda body into an implicit return statement.
         let body_stmts = vec![Stmt::Return(Some(body.clone()))];
         let temp_name = "<lambda>";
-        self.compile_def(temp_name, params, &body_stmts, &[], None);
+        self.compile_def(temp_name, params, &body_stmts, &[], None, false);
         // compile_def stored the result in local or global named "<lambda>".
         // We need to return the register it's in.
         // Actually compile_def uses compile_store_name which may put it in a
