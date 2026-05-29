@@ -2970,6 +2970,132 @@ pyrust_module! {
         }
     }
 
+    /// CPython: bytearray(...) — mutable bytes constructor.
+    /// <https://docs.python.org/3/library/functions.html#func-bytearray>
+    /// Mirrors `bytes()` but returns a mutable `bytearray` value.
+    fn bytearray(args) -> Result<Value> {
+        reject_keyword_args_expanded(FN_NAME, args)?;
+        match args.len() {
+            0 => Ok(pyrust_builtins::bytearray::bytearray(Vec::new())),
+            1 => match args[0].value.kind() {
+                ValueKind::Int(n) => {
+                    if n < 0 {
+                        return Err(PyError::named("ValueError", "negative count".to_string()));
+                    }
+                    Ok(pyrust_builtins::bytearray::bytearray(vec![0u8; n as usize]))
+                }
+                ValueKind::Bool(b) => Ok(pyrust_builtins::bytearray::bytearray(vec![0u8; b as usize])),
+                ValueKind::Bytes(rc) => Ok(pyrust_builtins::bytearray::bytearray((**rc).clone())),
+                ValueKind::BuiltinObject { ops, .. }
+                    if ops.type_name() == pyrust_builtins::bytearray::TYPE_NAME =>
+                {
+                    // bytearray(bytearray) — copy
+                    let snap = pyrust_builtins::bytearray::as_bytearray_snapshot(&args[0].value)
+                        .unwrap_or_default();
+                    Ok(pyrust_builtins::bytearray::bytearray(snap))
+                }
+                ValueKind::Str(_) => Err(PyError::named(
+                    "TypeError",
+                    "string argument without an encoding".to_string(),
+                )),
+                ValueKind::BigInt(_) => Err(PyError::named(
+                    "OverflowError",
+                    "cannot fit 'int' into an index-sized integer".to_string(),
+                )),
+                _ => {
+                    // General iterable or PyInstance path.
+                    let type_name = pyrust_core::builtin_type_name(&args[0].value).into_owned();
+                    let items = _interp.collect_iterable(&args[0].value).map_err(|e| {
+                        if e.class_name_is("TypeError") {
+                            PyError::named(
+                                "TypeError",
+                                format!("cannot convert '{type_name}' object to bytearray"),
+                            )
+                        } else {
+                            e
+                        }
+                    })?;
+                    let mut out = Vec::with_capacity(items.len());
+                    for v in &items {
+                        match v.kind() {
+                            ValueKind::Int(n) if (0..=255).contains(&n) => out.push(n as u8),
+                            ValueKind::Bool(b) => out.push(b as u8),
+                            ValueKind::Int(_) | ValueKind::BigInt(_) => {
+                                return Err(PyError::named(
+                                    "ValueError",
+                                    "bytes must be in range(0, 256)".to_string(),
+                                ))
+                            }
+                            _ => {
+                                return Err(PyError::named(
+                                    "TypeError",
+                                    format!(
+                                        "'{}' object cannot be interpreted as an integer",
+                                        pyrust_core::builtin_type_name(v),
+                                    ),
+                                ))
+                            }
+                        }
+                    }
+                    Ok(pyrust_builtins::bytearray::bytearray(out))
+                }
+            },
+            2 | 3 => {
+                // bytearray(source, encoding[, errors])
+                let encoding: String = match args[1].value.kind() {
+                    ValueKind::Str(s) => s.to_string(),
+                    ValueKind::None => return Err(PyError::named(
+                        "TypeError",
+                        "bytearray() argument 'encoding' must be str, not None".to_string(),
+                    )),
+                    _ => return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "bytearray() argument 'encoding' must be str, not {}",
+                            value_type_name_str(&args[1].value),
+                        ),
+                    )),
+                };
+                let source: String = match args[0].value.kind() {
+                    ValueKind::Str(s) => s.to_string(),
+                    _ => return Err(PyError::named(
+                        "TypeError",
+                        "encoding without a string argument".to_string(),
+                    )),
+                };
+                let errors: String = if args.len() == 3 {
+                    match args[2].value.kind() {
+                        ValueKind::Str(s) => s.to_string(),
+                        ValueKind::None => return Err(PyError::named(
+                            "TypeError",
+                            "bytearray() argument 'errors' must be str, not None".to_string(),
+                        )),
+                        _ => return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "bytearray() argument 'errors' must be str, not {}",
+                                value_type_name_str(&args[2].value),
+                            ),
+                        )),
+                    }
+                } else {
+                    "strict".to_string()
+                };
+                // Reuse the string encoding logic from bytes, then wrap as bytearray.
+                let bytes_val = encode_str_to_bytes(&source, &encoding, &errors)?;
+                let data = match bytes_val.kind() {
+                    ValueKind::Bytes(rc) => (**rc).clone(),
+                    _ => unreachable!("encode_str_to_bytes returns bytes"),
+                };
+                Ok(pyrust_builtins::bytearray::bytearray(data))
+            }
+            _ => Err(PyError::named(
+                "TypeError",
+                format!("bytearray() takes at most 3 arguments ({} given)", args.len()),
+            )),
+        }
+    }
+
     /// CPython: complex(real=0, imag=0) — complex constructor.
     /// <https://docs.python.org/3/library/functions.html#complex>
     /// Not marked `#[pure]` because it dispatches user `__complex__`,
@@ -7641,15 +7767,37 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
             // Built-in functions (`len`, `print`, …) are instances of
             // `builtin_function_or_method` in CPython.  pyrust does not
             // have a dedicated PyClass for them, so they don't map through
-            // `primitive_class_for_value`.  The only ABC check that
-            // matters for plain `BuiltinFunction` values is `Callable` —
-            // handle it via a pointer-equality check against the
-            // `collections.abc.Callable` class singleton.  This keeps the
-            // common `isinstance(x, int)` path unchanged.
+            // `primitive_class_for_value`.  Handle the ABCs that apply to
+            // all built-in callables: Callable and Hashable (issue #1770).
             ValueKind::BuiltinFunction(_) => {
                 let callable_abc =
                     crate::builtin_modules::collections_abc::callable_abc_class();
                 if Rc::ptr_eq(expected, &callable_abc) {
+                    return true;
+                }
+                let hashable_abc =
+                    crate::builtin_modules::collections_abc::hashable_abc_class();
+                if Rc::ptr_eq(expected, &hashable_abc) {
+                    return true;
+                }
+                return false;
+            }
+            // Built-in bound methods (`[].append`, `"".upper`, …) are also
+            // `builtin_function_or_method` in CPython and are both Callable
+            // and Hashable.  They fall through `primitive_class_for_value`
+            // as None, so intercept them here before the fallthrough (issue #1770).
+            ValueKind::BuiltinObject { ops, .. }
+                if ops.type_name()
+                    == pyrust_builtins::bound_method::TYPE_NAME =>
+            {
+                let callable_abc =
+                    crate::builtin_modules::collections_abc::callable_abc_class();
+                if Rc::ptr_eq(expected, &callable_abc) {
+                    return true;
+                }
+                let hashable_abc =
+                    crate::builtin_modules::collections_abc::hashable_abc_class();
+                if Rc::ptr_eq(expected, &hashable_abc) {
                     return true;
                 }
                 return false;

@@ -1046,34 +1046,50 @@ impl Interpreter {
         // Slow path — `Object` keys (and cross-variant None/Object matching,
         // issue #906).  Extract candidates under a narrow borrow, then drop
         // the borrow before user `__eq__` runs.
+        //
+        // Fast pre-check: skip the Vec allocation entirely when no entry
+        // with the same hash exists (the common case for non-adversarial inputs).
         if let PyKey::Object {
             hash: target_hash,
             value: target,
         } = key
         {
-            let candidates: Vec<(usize, Value, Value)> = {
+            let none_hash = pyrust_core::py_hash_none() as u64;
+            let has_candidate = {
                 let dict = receiver
                     .as_dict()
                     .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
-                dict.iter()
-                    .enumerate()
-                    .filter_map(|(i, (k, v))| match k {
-                        PyKey::Object { hash, value } if hash == target_hash => {
-                            Some((i, value.clone(), v.clone()))
-                        }
-                        // PyKey::None has Python-level hash py_hash_none().  When
-                        // the Object key hashes to the same value, check whether
-                        // __eq__ considers them equal (issue #906).
-                        PyKey::None if *target_hash == (pyrust_core::py_hash_none() as u64) => {
-                            Some((i, Value::none(), v.clone()))
-                        }
-                        _ => None,
-                    })
-                    .collect()
+                dict.keys().any(|k| match k {
+                    PyKey::Object { hash, .. } => hash == target_hash,
+                    PyKey::None => *target_hash == none_hash,
+                    _ => false,
+                })
             };
-            for (idx, candidate_key, value) in candidates {
-                if self.values_user_eq(&candidate_key, target)? {
-                    return Ok(Some((idx, value)));
+            if has_candidate {
+                let candidates: Vec<(usize, Value, Value)> = {
+                    let dict = receiver
+                        .as_dict()
+                        .ok_or_else(|| PyError::Runtime("internal: expected dict".to_string()))?;
+                    dict.iter()
+                        .enumerate()
+                        .filter_map(|(i, (k, v))| match k {
+                            PyKey::Object { hash, value } if hash == target_hash => {
+                                Some((i, value.clone(), v.clone()))
+                            }
+                            // PyKey::None has Python-level hash py_hash_none().  When
+                            // the Object key hashes to the same value, check whether
+                            // __eq__ considers them equal (issue #906).
+                            PyKey::None if *target_hash == none_hash => {
+                                Some((i, Value::none(), v.clone()))
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                };
+                for (idx, candidate_key, value) in candidates {
+                    if self.values_user_eq(&candidate_key, target)? {
+                        return Ok(Some((idx, value)));
+                    }
                 }
             }
         }
@@ -1229,32 +1245,47 @@ impl Interpreter {
                 return Ok(Some(idx));
             }
         }
+        // Fast pre-check for the Object-key slow path: skip the Vec allocation
+        // when no entry with the same hash exists (the common case).
         if let PyKey::Object {
             hash: target_hash,
             value: target,
         } = key
         {
-            let candidates: Vec<(usize, Value)> = {
+            let none_hash = pyrust_core::py_hash_none() as u64;
+            let has_candidate = {
                 let set = receiver
                     .as_set()
                     .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
-                set.iter()
-                    .enumerate()
-                    .filter_map(|(i, k)| match k {
-                        PyKey::Object { hash, value } if hash == target_hash => {
-                            Some((i, value.clone()))
-                        }
-                        // PyKey::None has Python-level hash py_hash_none(); include it
-                        // as a candidate when the Object key hashes to the same value
-                        // so that __eq__ can confirm the match (issue #906).
-                        PyKey::None if *target_hash == (pyrust_core::py_hash_none() as u64) => Some((i, Value::none())),
-                        _ => None,
-                    })
-                    .collect()
+                set.iter().any(|k| match k {
+                    PyKey::Object { hash, .. } => hash == target_hash,
+                    PyKey::None => *target_hash == none_hash,
+                    _ => false,
+                })
             };
-            for (idx, candidate) in candidates {
-                if self.values_user_eq(&candidate, target)? {
-                    return Ok(Some(idx));
+            if has_candidate {
+                let candidates: Vec<(usize, Value)> = {
+                    let set = receiver
+                        .as_set()
+                        .ok_or_else(|| PyError::Runtime("internal: expected set".to_string()))?;
+                    set.iter()
+                        .enumerate()
+                        .filter_map(|(i, k)| match k {
+                            PyKey::Object { hash, value } if hash == target_hash => {
+                                Some((i, value.clone()))
+                            }
+                            // PyKey::None has Python-level hash py_hash_none(); include it
+                            // as a candidate when the Object key hashes to the same value
+                            // so that __eq__ can confirm the match (issue #906).
+                            PyKey::None if *target_hash == none_hash => Some((i, Value::none())),
+                            _ => None,
+                        })
+                        .collect()
+                };
+                for (idx, candidate) in candidates {
+                    if self.values_user_eq(&candidate, target)? {
+                        return Ok(Some(idx));
+                    }
                 }
             }
         }
@@ -1890,8 +1921,10 @@ impl Interpreter {
                     ),
                 ));
             }
-            let template = match receiver.kind() {
-                ValueKind::Str(s) => s.to_string(),
+            // Borrow template as &str from the receiver to avoid a heap allocation.
+            // receiver is held by value for the lifetime of this block.
+            let template: &str = match receiver.kind() {
+                ValueKind::Str(s) => s,
                 _ => {
                     return Err(PyError::named(
                         "TypeError",
@@ -1900,7 +1933,7 @@ impl Interpreter {
                 }
             };
             let mapping = args.into_iter().next().unwrap();
-            return self.format_str_template_map(&template, mapping);
+            return self.format_str_template_map(template, mapping);
         }
         if method == "join" {
             if args.len() != 1 {
@@ -1965,8 +1998,11 @@ impl Interpreter {
             // General mapping protocol: call table[ordinal] per codepoint.
             // KeyError / IndexError / LookupError → keep character;
             // None → delete; int → replace with chr(n); str → replace.
-            let s = match receiver.kind() {
-                ValueKind::Str(s) => s.to_string(),
+            // Materialise chars and reserve capacity under a narrow borrow so
+            // that the &str from receiver.kind() drops before eval_index needs
+            // a &mut self borrow (they are separate but keep scopes explicit).
+            let (chars, out_capacity) = match receiver.kind() {
+                ValueKind::Str(s) => (s.chars().collect::<Vec<char>>(), s.len()),
                 _ => {
                     return Err(PyError::named(
                         "TypeError",
@@ -1975,8 +2011,7 @@ impl Interpreter {
                 }
             };
             let table = args.into_iter().next().unwrap();
-            let chars: Vec<char> = s.chars().collect();
-            let mut out = String::with_capacity(s.len());
+            let mut out = String::with_capacity(out_capacity);
             for c in chars {
                 let cp = Value::int(c as i64);
                 match self.eval_index(&table, cp) {
@@ -4005,8 +4040,10 @@ impl Interpreter {
     /// The right-hand side may be a single value (implicitly a one-element
     /// positional tuple), a tuple (positional), or a dict (named lookup).
     fn str_printf_format(&mut self, fmt_val: Value, args: Value) -> Result<Value> {
-        let fmt = match fmt_val.kind() {
-            ValueKind::Str(s) => s.to_string(),
+        // Borrow the format string directly from the Value to avoid a heap allocation.
+        // fmt_val is held by value for the duration of this function, so the &str is valid.
+        let fmt: &str = match fmt_val.kind() {
+            ValueKind::Str(s) => s,
             _ => unreachable!("str_printf_format called with non-str left"),
         };
 
@@ -4028,12 +4065,14 @@ impl Interpreter {
         };
         let is_mapping = has_named_key && matches!(args.kind(), ValueKind::Dict(_));
         // Wrap a non-tuple, non-mapping rhs in a virtual single-element tuple.
-        let positional: Option<Vec<Value>> = if is_mapping {
+        // Use &[Value] to avoid cloning the tuple's items upfront; borrow from
+        // args directly for the single-value case to avoid an extra clone.
+        let positional: Option<&[Value]> = if is_mapping {
             None
         } else {
             match args.kind() {
-                ValueKind::Tuple(items) => Some(items.to_vec()),
-                _ => Some(vec![args.clone()]),
+                ValueKind::Tuple(items) => Some(items),
+                _ => Some(std::slice::from_ref(&args)),
             }
         };
         let mut pos_idx: usize = 0;
@@ -4058,8 +4097,8 @@ impl Interpreter {
                 ));
             }
 
-            // Named key: %(key)s
-            let named_key: Option<String> = if bytes[i] == b'(' {
+            // Named key: %(key)s — borrow a slice of fmt directly to avoid allocating.
+            let named_key: Option<&str> = if bytes[i] == b'(' {
                 i += 1;
                 let start = i;
                 while i < len && bytes[i] != b')' {
@@ -4071,7 +4110,7 @@ impl Interpreter {
                         "incomplete format key".to_string(),
                     ));
                 }
-                let key = fmt[start..i].to_string();
+                let key = &fmt[start..i];
                 i += 1; // consume ')'
                 Some(key)
             } else {
@@ -4169,7 +4208,7 @@ impl Interpreter {
             }
 
             // Get the argument value.
-            let arg: Value = if let Some(ref key) = named_key {
+            let arg: Value = if let Some(key) = named_key {
                 if is_mapping {
                     match args.kind() {
                         ValueKind::Dict(d) => {
@@ -4177,7 +4216,7 @@ impl Interpreter {
                             match d.get(&k) {
                                 Some(v) => v.clone(),
                                 None => {
-                                    return Err(PyError::key_error(Value::string(key.clone())));
+                                    return Err(PyError::key_error(Value::string(key)));
                                 }
                             }
                         }
@@ -4218,16 +4257,13 @@ impl Interpreter {
                         }
                         PrintfInt::Big(b) => {
                             // to_str_radix(10) includes the '-' sign for negatives.
-                            let s = b.to_str_radix(10);
-                            if s.starts_with('-') {
-                                s
-                            } else if flag_plus {
-                                format!("+{}", s)
-                            } else if flag_space {
-                                format!(" {}", s)
-                            } else {
-                                s
+                            let mut s = b.to_str_radix(10);
+                            if !s.starts_with('-') && flag_plus {
+                                s.insert(0, '+');
+                            } else if !s.starts_with('-') && flag_space {
+                                s.insert(0, ' ');
                             }
+                            s
                         }
                     }
                 }
@@ -4335,14 +4371,13 @@ impl Interpreter {
                     let coerced_float = self.coerce_printf_float_arg(arg)?;
                     let f = str_printf_to_float(&coerced_float, conv)?;
                     let prec = precision.unwrap_or(6);
-                    let s = format_scientific(f, prec, conv == 'E');
+                    let mut s = format_scientific(f, prec, conv == 'E');
                     if f.is_sign_positive() && flag_plus {
-                        format!("+{}", s)
+                        s.insert(0, '+');
                     } else if f.is_sign_positive() && flag_space {
-                        format!(" {}", s)
-                    } else {
-                        s
+                        s.insert(0, ' ');
                     }
+                    s
                 }
                 'f' | 'F' => {
                     let coerced_float = self.coerce_printf_float_arg(arg)?;
@@ -4351,7 +4386,7 @@ impl Interpreter {
                     // Special-case NaN and Inf before calling format!(), which
                     // produces Rust-style 'NaN'/'inf' rather than CPython-style
                     // 'nan'/'inf'/'NAN'/'INF'.
-                    let s = if f.is_nan() {
+                    let mut s = if f.is_nan() {
                         if upper { "NAN".to_string() } else { "nan".to_string() }
                     } else if f.is_infinite() {
                         if f > 0.0 {
@@ -4366,25 +4401,23 @@ impl Interpreter {
                         format!("{:.prec$}", f, prec = prec)
                     };
                     if f.is_sign_positive() && flag_plus {
-                        format!("+{}", s)
+                        s.insert(0, '+');
                     } else if f.is_sign_positive() && flag_space {
-                        format!(" {}", s)
-                    } else {
-                        s
+                        s.insert(0, ' ');
                     }
+                    s
                 }
                 'g' | 'G' => {
                     let coerced_float = self.coerce_printf_float_arg(arg)?;
                     let f = str_printf_to_float(&coerced_float, conv)?;
                     let prec = precision.unwrap_or(6).max(1);
-                    let s = format_general_float(f, prec, conv == 'G');
+                    let mut s = format_general_float(f, prec, conv == 'G');
                     if f.is_sign_positive() && flag_plus {
-                        format!("+{}", s)
+                        s.insert(0, '+');
                     } else if f.is_sign_positive() && flag_space {
-                        format!(" {}", s)
-                    } else {
-                        s
+                        s.insert(0, ' ');
                     }
+                    s
                 }
                 'c' => {
                     // Coerce int subclasses and __index__ objects the same way
@@ -4463,7 +4496,7 @@ impl Interpreter {
         }
 
         // Unconsumed positional arguments: raise TypeError.
-        if let Some(ref pos) = positional {
+        if let Some(pos) = positional {
             if pos_idx < pos.len() {
                 return Err(PyError::named(
                     "TypeError",
@@ -4478,7 +4511,7 @@ impl Interpreter {
 }
 
 /// Take the next positional argument for printf-style formatting.
-fn str_printf_take_positional(positional: &Option<Vec<Value>>, idx: &mut usize) -> Result<Value> {
+fn str_printf_take_positional(positional: &Option<&[Value]>, idx: &mut usize) -> Result<Value> {
     match positional {
         None => Err(PyError::named(
             "TypeError",
@@ -4874,6 +4907,10 @@ pub(crate) fn iter_values(value: &Value) -> Result<Vec<Value>> {
             // Frozensets materialise through their inner key set; dict views
             // materialise through their backing IndexMap; everything else
             // iterates via `iter_next`.
+            // Bytearray: materialise as integers (same shape as bytes iteration).
+            if let Some(elems) = pyrust_builtins::bytearray::iter_elements(&value) {
+                return Ok(elems);
+            }
             if let Some(rc) = pyrust_builtins::frozenset::as_items(&value) {
                 return Ok(rc.iter().map(|k| key_to_value(k.clone())).collect());
             }
@@ -4987,7 +5024,7 @@ pub(crate) fn resolve_builtin(name: &str) -> Option<Value> {
     // `isinstance(x, int)` and `type(x) is int` work correctly (#462).
     if matches!(
         name,
-        "bool" | "bytes" | "complex" | "dict" | "float" | "frozenset"
+        "bool" | "bytearray" | "bytes" | "complex" | "dict" | "float" | "frozenset"
             | "int"
             | "list"
             | "set"

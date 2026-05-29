@@ -3602,7 +3602,16 @@ impl Interpreter {
                                     IterState::Materialized(vm_try!(iter_values(&src_val)), 0)
                                 }
                             }
-                            IterTag::BuiltinIterable => IterState::UserDefined(src_val),
+                            IterTag::BuiltinIterable => {
+                                // Bytearray: materialise elements up front (like frozenset /
+                                // dict-views) since iter_next is not stateful.  Other BuiltinObjects
+                                // that implement iter_next properly stay on the UserDefined path.
+                                if pyrust_builtins::bytearray::iter_elements(&src_val).is_some() {
+                                    IterState::Materialized(vm_try!(iter_values(&src_val)), 0)
+                                } else {
+                                    IterState::UserDefined(src_val)
+                                }
+                            }
                             IterTag::Other => {
                                 IterState::Materialized(vm_try!(iter_values(&src_val)), 0)
                             }

@@ -1215,6 +1215,63 @@ impl Interpreter {
                 };
                 pyrust_builtins::bytes::bytes_fromhex(&s).map(Value::bytes)
             }
+            // `bytearray.fromhex` is a classmethod, same pattern as `bytes.fromhex`.
+            ValueKind::BuiltinFunction("bytearray.fromhex") => {
+                let positional_args: Vec<_> = args
+                    .iter()
+                    .filter(|a| {
+                        a.name.is_none()
+                            && !matches!(
+                                a.value.kind(),
+                                ValueKind::BuiltinObject { ops, .. }
+                                    if ops.type_name() == pyrust_builtins::bytearray::TYPE_NAME
+                            )
+                            && !matches!(a.value.kind(), ValueKind::PyClass(_))
+                    })
+                    .collect();
+                let n_payload = if positional_args.is_empty() {
+                    args.len()
+                } else {
+                    positional_args.len()
+                };
+                if n_payload == 0 {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "bytearray.fromhex() takes exactly one argument (0 given)".to_string(),
+                    ));
+                }
+                if n_payload > 1 {
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!("bytearray.fromhex() takes exactly one argument ({n_payload} given)"),
+                    ));
+                }
+                let s_val = if positional_args.is_empty() {
+                    args.first().map(|a| a.value.clone())
+                } else {
+                    positional_args.first().map(|a| a.value.clone())
+                }
+                .ok_or_else(|| {
+                    PyError::named(
+                        "TypeError",
+                        "bytearray.fromhex() takes exactly one argument (0 given)".to_string(),
+                    )
+                })?;
+                let s = match s_val.kind() {
+                    ValueKind::Str(s) => s.to_string(),
+                    _ => {
+                        return Err(PyError::named(
+                            "TypeError",
+                            format!(
+                                "fromhex() argument must be str, not {}",
+                                pyrust_core::builtin_type_name(&s_val)
+                            ),
+                        ));
+                    }
+                };
+                pyrust_builtins::bytes::bytes_fromhex(&s)
+                    .map(pyrust_builtins::bytearray::bytearray)
+            }
             // `bytes.maketrans` is a staticmethod: args contains only the two
             // from/to bytes arguments (no implicit receiver).  Both `bytes.maketrans(f, t)`
             // and `b''.maketrans(f, t)` resolve to the same unbound BuiltinFunction,

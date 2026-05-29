@@ -98,6 +98,13 @@ pub(crate) fn callable_abc_class() -> Rc<RefCell<PyClass>> {
     ABC_CALLABLE.with(Rc::clone)
 }
 
+/// Public accessor: return the Hashable ABC PyClass singleton.
+/// Used by `isinstance_single` in builtins.rs to handle
+/// `isinstance(len, Hashable)` for built-in function and bound-method values.
+pub(crate) fn hashable_abc_class() -> Rc<RefCell<PyClass>> {
+    ABC_HASHABLE.with(Rc::clone)
+}
+
 pyrust_module! {
     constants {
         "Container"        => make_abc_module(),

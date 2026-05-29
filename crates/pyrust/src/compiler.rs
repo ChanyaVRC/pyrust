@@ -3925,6 +3925,14 @@ struct Compiler {
     /// When set, annotation expressions are NOT evaluated; instead, their source
     /// text is stored as a string literal in `__annotations__`.
     future_annotations: bool,
+    /// True when any `yield` / `yield from` expression appears in the function
+    /// body inside a compile-time-false branch (i.e. `if False: yield`).
+    /// Such expressions are never emitted as `Insn::Yield` / `Insn::YieldFrom`,
+    /// so the post-compilation `is_generator` scan misses them.  This flag
+    /// ensures the function is still treated as a generator, matching CPython
+    /// where the presence of `yield` in the source — even in dead code — makes
+    /// the enclosing function a generator function (issue #1758).
+    has_dead_yield: bool,
 }
 
 fn class_body_has_annotations(body: &[Stmt]) -> bool {
@@ -3942,6 +3950,173 @@ fn class_body_has_annotations(body: &[Stmt]) -> bool {
         Stmt::While { body, .. } | Stmt::For { body, .. } => class_body_has_annotations(body),
         _ => false,
     })
+}
+
+/// Return `true` if `stmts` contain a `yield` or `yield from` expression
+/// anywhere in the immediate function scope, without crossing into nested
+/// `Def` or `Class` bodies (those have their own generator status).
+///
+/// Used to detect that a function is a generator even when the `yield`
+/// appears only in compile-time-dead branches (e.g. `if False: yield`),
+/// which are skipped during bytecode emission and therefore produce no
+/// `Insn::Yield` for the post-compilation `is_generator` scan to find.
+fn stmts_contain_yield(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(stmt_contains_yield)
+}
+
+fn stmt_contains_yield(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Expr(e) => expr_contains_yield(e),
+        Stmt::Return(Some(e)) => expr_contains_yield(e),
+        Stmt::Return(None) | Stmt::Pass | Stmt::Break | Stmt::Continue => false,
+        Stmt::Global(_) | Stmt::Nonlocal(_) | Stmt::Import { .. } | Stmt::ImportFrom { .. } => {
+            false
+        }
+        Stmt::If {
+            branches,
+            else_branch,
+        } => {
+            branches
+                .iter()
+                .any(|(cond, body)| expr_contains_yield(cond) || stmts_contain_yield(body))
+                || else_branch.as_deref().is_some_and(stmts_contain_yield)
+        }
+        Stmt::While {
+            cond,
+            body,
+            else_branch,
+        } => {
+            expr_contains_yield(cond)
+                || stmts_contain_yield(body)
+                || else_branch.as_deref().is_some_and(stmts_contain_yield)
+        }
+        Stmt::For {
+            iter,
+            body,
+            else_branch,
+            ..
+        } => {
+            expr_contains_yield(iter)
+                || stmts_contain_yield(body)
+                || else_branch.as_deref().is_some_and(stmts_contain_yield)
+        }
+        Stmt::Try {
+            body,
+            handlers,
+            else_branch,
+            finally_branch,
+        } => {
+            stmts_contain_yield(body)
+                || handlers.iter().any(|h| {
+                    h.kind.as_ref().is_some_and(expr_contains_yield) || stmts_contain_yield(&h.body)
+                })
+                || else_branch.as_deref().is_some_and(stmts_contain_yield)
+                || finally_branch.as_deref().is_some_and(stmts_contain_yield)
+        }
+        Stmt::With { items, body } => {
+            items.iter().any(|(e, _)| expr_contains_yield(e)) || stmts_contain_yield(body)
+        }
+        Stmt::Assign(_, value) => expr_contains_yield(value),
+        Stmt::AugAssign { expr, .. } => expr_contains_yield(expr),
+        Stmt::AnnAssign { value, .. } => value.as_ref().is_some_and(expr_contains_yield),
+        Stmt::AttrAssign { target, expr, .. } => {
+            expr_contains_yield(target) || expr_contains_yield(expr)
+        }
+        Stmt::IndexAssign {
+            target,
+            index,
+            expr,
+        } => expr_contains_yield(target) || expr_contains_yield(index) || expr_contains_yield(expr),
+        Stmt::SliceAssign {
+            target,
+            lower,
+            upper,
+            step,
+            expr,
+        } => {
+            expr_contains_yield(target)
+                || lower.as_deref().is_some_and(expr_contains_yield)
+                || upper.as_deref().is_some_and(expr_contains_yield)
+                || step.as_deref().is_some_and(expr_contains_yield)
+                || expr_contains_yield(expr)
+        }
+        Stmt::Raise { expr, cause } => {
+            expr.as_ref().is_some_and(expr_contains_yield)
+                || cause.as_ref().is_some_and(expr_contains_yield)
+        }
+        Stmt::Delete(exprs) => exprs.iter().any(expr_contains_yield),
+        Stmt::Assert { test, msg } => {
+            expr_contains_yield(test) || msg.as_ref().is_some_and(expr_contains_yield)
+        }
+        Stmt::Match { subject, arms } => {
+            expr_contains_yield(subject)
+                || arms.iter().any(|arm| {
+                    arm.guard.as_ref().is_some_and(expr_contains_yield)
+                        || stmts_contain_yield(&arm.body)
+                })
+        }
+        // Def and Class bodies are separate scopes — their yields do not make
+        // the enclosing function a generator.
+        Stmt::Def { .. } | Stmt::Class { .. } => false,
+    }
+}
+
+fn expr_contains_yield(expr: &Expr) -> bool {
+    match expr {
+        Expr::Yield(_) | Expr::YieldFrom(_) => true,
+        Expr::Binary { left, right, .. } => expr_contains_yield(left) || expr_contains_yield(right),
+        Expr::Unary { expr: e, .. } => expr_contains_yield(e),
+        Expr::Compare { left, ops } => {
+            expr_contains_yield(left) || ops.iter().any(|(_, e)| expr_contains_yield(e))
+        }
+        Expr::Ternary { cond, then, else_ } => {
+            expr_contains_yield(cond) || expr_contains_yield(then) || expr_contains_yield(else_)
+        }
+        Expr::Call { func, args } => {
+            expr_contains_yield(func) || args.iter().any(|a| expr_contains_yield(&a.value))
+        }
+        Expr::Attr { target, .. } => expr_contains_yield(target),
+        Expr::Index { target, index } => expr_contains_yield(target) || expr_contains_yield(index),
+        Expr::Slice {
+            target,
+            lower,
+            upper,
+            step,
+        } => {
+            expr_contains_yield(target)
+                || lower.as_deref().is_some_and(expr_contains_yield)
+                || upper.as_deref().is_some_and(expr_contains_yield)
+                || step.as_deref().is_some_and(expr_contains_yield)
+        }
+        Expr::Tuple(items) | Expr::List(items) | Expr::Set(items) => {
+            items.iter().any(expr_contains_yield)
+        }
+        Expr::Dict(items) => items.iter().any(|item| match item {
+            crate::ast::DictItem::Pair(k, v) => expr_contains_yield(k) || expr_contains_yield(v),
+            crate::ast::DictItem::DoubleSplat(e) => expr_contains_yield(e),
+        }),
+        Expr::Starred(e) => expr_contains_yield(e),
+        Expr::Named { value, .. } => expr_contains_yield(value),
+        Expr::Await(e) => expr_contains_yield(e),
+        // Lambda, comprehensions, and generator expressions are separate scopes.
+        Expr::Lambda { .. }
+        | Expr::ListComp { .. }
+        | Expr::SetComp { .. }
+        | Expr::DictComp { .. }
+        | Expr::GenExp { .. } => false,
+        // Leaf nodes — cannot contain yield.
+        Expr::Var(_)
+        | Expr::Int(_)
+        | Expr::BigInt(_)
+        | Expr::Float(_)
+        | Expr::Complex(_, _)
+        | Expr::Str(_)
+        | Expr::Bytes(_)
+        | Expr::FString(_)
+        | Expr::Bool(_)
+        | Expr::None
+        | Expr::Ellipsis => false,
+    }
 }
 
 /// Produce Python's `repr()` of a string value, matching CPython's output.
@@ -4179,6 +4354,7 @@ impl Compiler {
             is_module_scope: false,
             past_future_zone: false,
             future_annotations: false,
+            has_dead_yield: false,
         }
     }
 
@@ -4634,10 +4810,17 @@ impl Compiler {
                 "function uses too many registers ({num_regs}); max is {MAX_REGS}"
             )));
         }
+        // A function is a generator if it contains any `Yield` or `YieldFrom`
+        // instruction OR if any `yield`/`yield from` appears in a dead branch
+        // (compile-time-false `if` arm) that was skipped during emission.
+        // CPython determines generator status from the AST — the presence of
+        // `yield` anywhere in the source makes the function a generator even
+        // if that `yield` is unreachable at runtime (issue #1758).
         let is_generator = self
             .insns
             .iter()
-            .any(|i| matches!(i, Insn::Yield { .. } | Insn::YieldFrom { .. }));
+            .any(|i| matches!(i, Insn::Yield { .. } | Insn::YieldFrom { .. }))
+            || self.has_dead_yield;
         let insns = self.insns;
         let insns_len = insns.len();
         let names_len = self.names.len();
@@ -5741,11 +5924,20 @@ impl Compiler {
                         if self.failed {
                             return;
                         }
+                        // A `yield`/`yield from` in a skipped branch still makes
+                        // the enclosing function a generator (CPython parity,
+                        // issue #1758).
+                        if self.is_function_scope && stmts_contain_yield(skipped_body) {
+                            self.has_dead_yield = true;
+                        }
                     }
                     if let Some(else_stmts) = else_branch {
                         self.check_dead_block(else_stmts, in_loop);
                         if self.failed {
                             return;
+                        }
+                        if self.is_function_scope && stmts_contain_yield(else_stmts) {
+                            self.has_dead_yield = true;
                         }
                     }
                     for idx in end_patches {
@@ -5776,6 +5968,13 @@ impl Compiler {
                     self.check_dead_block(body, !self.loops.is_empty());
                     if self.failed {
                         return;
+                    }
+                    // A `yield` / `yield from` in a dead branch still makes
+                    // the enclosing function a generator (CPython parity,
+                    // issue #1758).  No `Insn::Yield` is emitted for this
+                    // branch, so flag it explicitly for `finish()`.
+                    if self.is_function_scope && stmts_contain_yield(body) {
+                        self.has_dead_yield = true;
                     }
                     continue;
                 }
@@ -5971,32 +6170,50 @@ impl Compiler {
                 }
             }
             Pattern::Sequence(elements) => {
-                // PEP 634 §3: str, bytes, and bytearray are explicitly excluded
-                // from sequence pattern matching even though they support len()
-                // and __getitem__. Emit isinstance(subj, (str, bytes)) and jump
-                // to the fail label if true.
+                // PEP 634 §3: str, bytes, dict, set, and frozenset are excluded
+                // from sequence pattern matching. str/bytes are text sequences;
+                // dict/set/frozenset support len() but not integer indexing.
+                // Emit isinstance(subj, (str, bytes, dict, set, frozenset)) and
+                // jump to the fail label if true.
                 {
                     let isinstance_name_idx = self.intern_name("isinstance");
                     let isinstance_fn = self.alloc_temp();
                     self.emit(Insn::LoadGlobal(isinstance_fn, isinstance_name_idx));
                     let arg0 = self.alloc_temp();
                     self.emit(Insn::Move(arg0, subj));
-                    // Build a (str, bytes) tuple in the two slots right after arg0.
+                    // Build a (str, bytes, dict, set, frozenset) tuple in consecutive
+                    // slots right after arg0.  PEP 634 §3 excludes str/bytes as text
+                    // sequences; dict/set/frozenset are excluded because they are
+                    // mapping or unordered collection types that support len() but not
+                    // integer indexing — d[0] raises KeyError, s[0] raises TypeError.
+                    // CPython distinguishes these via the tp_as_sequence slot.
                     let str_slot = self.alloc_temp();
                     let str_name_idx = self.intern_name("str");
                     self.emit(Insn::LoadGlobal(str_slot, str_name_idx));
                     let bytes_slot = self.alloc_temp();
                     let bytes_name_idx = self.intern_name("bytes");
                     self.emit(Insn::LoadGlobal(bytes_slot, bytes_name_idx));
-                    // Collapse str_slot and bytes_slot into a single tuple at str_slot.
-                    self.emit(Insn::BuildTuple(str_slot, str_slot, 2));
-                    // str_slot is now arg1 = (str, bytes); bytes_slot is consumed but
-                    // still allocated — free it first (LIFO), then call, then free arg0.
+                    let dict_slot = self.alloc_temp();
+                    let dict_name_idx = self.intern_name("dict");
+                    self.emit(Insn::LoadGlobal(dict_slot, dict_name_idx));
+                    let set_slot = self.alloc_temp();
+                    let set_name_idx = self.intern_name("set");
+                    self.emit(Insn::LoadGlobal(set_slot, set_name_idx));
+                    let frozenset_slot = self.alloc_temp();
+                    let frozenset_name_idx = self.intern_name("frozenset");
+                    self.emit(Insn::LoadGlobal(frozenset_slot, frozenset_name_idx));
+                    // Collapse all five consecutive slots into a single tuple at str_slot.
+                    self.emit(Insn::BuildTuple(str_slot, str_slot, 5));
+                    // str_slot is now arg1 = (str, bytes, dict, set, frozenset); free
+                    // the remaining allocated slots LIFO before the call.
+                    self.free_temp(frozenset_slot);
+                    self.free_temp(set_slot);
+                    self.free_temp(dict_slot);
                     self.free_temp(bytes_slot);
                     self.emit(Insn::Call(isinstance_fn, 2));
                     self.free_temp(str_slot);
                     self.free_temp(arg0);
-                    // If subj IS a str or bytes, jump to the fail label.
+                    // If subj IS one of the excluded types, jump to the fail label.
                     let jmp = self.emit(Insn::JumpIfTrue(isinstance_fn, 0));
                     fail_patches.push(jmp);
                     self.free_temp(isinstance_fn);
@@ -6302,6 +6519,11 @@ impl Compiler {
             self.check_dead_block(body, true);
             if self.failed {
                 return;
+            }
+            // A `yield`/`yield from` in a dead `while False` body still makes
+            // the enclosing function a generator (CPython parity, issue #1758).
+            if self.is_function_scope && stmts_contain_yield(body) {
+                self.has_dead_yield = true;
             }
             if let Some(else_stmts) = else_branch {
                 self.compile_block(else_stmts);

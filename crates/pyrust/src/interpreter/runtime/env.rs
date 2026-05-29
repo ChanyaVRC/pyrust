@@ -418,7 +418,7 @@ impl Interpreter {
                 }
                 Err(PyError::named(
                     "AttributeError",
-                    format!("super(): parent class has no attribute '{name}'"),
+                    format!("'super' object has no attribute '{name}'"),
                 ))
             }
             ValueKind::SuperProxyClass { class, obj_class } => {
@@ -499,7 +499,7 @@ impl Interpreter {
                 }
                 Err(PyError::named(
                     "AttributeError",
-                    format!("super(): parent class has no attribute '{name}'"),
+                    format!("'super' object has no attribute '{name}'"),
                 ))
             }
             // Access .setter / .deleter / .getter on a property descriptor itself.

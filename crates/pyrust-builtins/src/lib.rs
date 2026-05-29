@@ -1,4 +1,5 @@
 pub mod bound_method;
+pub mod bytearray;
 pub mod bytes;
 pub mod cached_property;
 pub mod classmethod;
@@ -31,6 +32,7 @@ pub mod union_type;
 /// built-in objects whose Tier 1 variant has been eliminated.
 pub fn lookup_ops(type_name: &str) -> Option<&'static dyn pyrust_core::BuiltinTypeOps> {
     match type_name {
+        bytearray::TYPE_NAME => Some(bytearray::BYTEARRAY_OPS),
         file::TYPE_NAME => Some(file::FILE_OPS),
         frozenset::TYPE_NAME => Some(frozenset::FROZENSET_OPS),
         generic_alias::TYPE_NAME => Some(generic_alias::GENERIC_ALIAS_OPS),
@@ -196,6 +198,33 @@ mod method_table_drift_guard {
             let r = super::bytes::call(name, &receiver, &[], &IndexMap::new());
             if let Err(ref e) = r {
                 assert!(!is_fallback(e), "bytes::call({name}) hit fallback: {e:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn bytearray_methods_dispatched() {
+        use pyrust_core::BuiltinTypeOps;
+        let receiver = super::bytearray::bytearray(vec![]);
+        for &name in super::bytearray::METHODS {
+            if name == "__iter__" || name == "fromhex" {
+                // __iter__ is handled at the interpreter level; fromhex is a classmethod.
+                continue;
+            }
+            let r = super::bytearray::BYTEARRAY_OPS.call_method(
+                match receiver.kind() {
+                    pyrust_core::ValueKind::BuiltinObject { state, .. } => state,
+                    _ => panic!("expected BuiltinObject"),
+                },
+                name,
+                vec![],
+                &IndexMap::new(),
+            );
+            if let Err(ref e) = r {
+                assert!(
+                    !is_fallback(e),
+                    "bytearray::call_method({name}) hit fallback: {e:?}"
+                );
             }
         }
     }
