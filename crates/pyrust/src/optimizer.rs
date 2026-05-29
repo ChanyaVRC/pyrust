@@ -875,7 +875,8 @@ fn writable_dst(insn: &Insn) -> Option<u32> {
         | MakeFunction(r, _, _, _, _, _)
         | ImportModule(r, _)
         | LoadExc(r)
-        | MakeClass(r, _, _, _, _, _, _) => Some(*r),
+        | MakeClass(r, _, _, _, _, _, _)
+        | MakeTypeAlias(r, _, _) => Some(*r),
         CallMethod { dst, .. }
         | CallMethodExpanded { dst, .. }
         | Concat { dst, .. }
