@@ -86,3 +86,16 @@ try:
     eval("1 / 0")
 except ZeroDivisionError:
     print("ZeroDivisionError from eval")  # ZeroDivisionError from eval
+
+# --- eval with empty globals dict and explicit locals (#1000) ---
+g2 = {}
+l2 = {"x": 42}
+print(eval("x", g2, l2))  # 42
+
+# --- eval strips leading/trailing whitespace ---
+print(eval("  1 + 2  "))  # 3
+
+# --- exec with def in explicit namespace makes function callable (#1001) ---
+fns = {}
+exec("def f(n): return n * 7", fns)
+print(fns["f"](6))  # 42
