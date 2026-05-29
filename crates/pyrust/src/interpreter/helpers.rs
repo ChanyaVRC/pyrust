@@ -251,6 +251,7 @@ thread_local! {
         let mut attrs: IndexMap<String, Value> = IndexMap::new();
         for dunder in &[
             "__init_subclass__",
+            "__subclasshook__",
             "__getattribute__",
             "__setattr__",
             "__delattr__",
@@ -1342,7 +1343,7 @@ pub(crate) fn reject_keyword_args_expanded(function_name: &str, args: &[Expanded
 /// `cls` (not the class as if it were an instance `self`) for the known-
 /// classmethod entries.
 pub(crate) fn is_builtin_classmethod(fn_name: &str) -> bool {
-    matches!(fn_name, "object.__init_subclass__")
+    matches!(fn_name, "object.__init_subclass__" | "object.__subclasshook__")
 }
 
 pub(crate) fn py_mod_i64(a: i64, b: i64) -> i64 {

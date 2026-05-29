@@ -4712,6 +4712,18 @@ pyrust_module! {
         Ok(Value::none())
     }
 
+    /// Issue #1738: `object.__subclasshook__` — the default classmethod hook
+    /// used by `ABCMeta.__subclasscheck__` to allow custom `issubclass()`
+    /// behaviour.  The default implementation on `object` always returns
+    /// `NotImplemented`, signalling that the normal MRO-based subclass check
+    /// should proceed.
+    ///
+    /// CPython signature: `object.__subclasshook__(cls, subclass, /)`
+    #[py_name = "object.__subclasshook__"]
+    fn object_subclasshook(_args) -> Result<Value> {
+        Ok(Value::not_implemented())
+    }
+
     /// Issue #1256: `object.__str__(self)` — the default __str__ exposed on
     /// the `object` class so that `super().__str__()` and `hasattr(object,
     /// '__str__')` work correctly.
