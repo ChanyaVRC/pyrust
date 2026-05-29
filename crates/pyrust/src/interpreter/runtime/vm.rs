@@ -2032,7 +2032,7 @@ impl Interpreter {
                         {
                             new_items
                         } else {
-                            vm_try!(self.collect_iterable(val_val.clone()).map_err(|_| {
+                            vm_try!(self.collect_iterable(&val_val).map_err(|_| {
                                 PyError::named(
                                     "TypeError",
                                     "can only assign an iterable".to_string(),
@@ -2075,7 +2075,7 @@ impl Interpreter {
                                 let len = regs[*obj as usize].list_len().unwrap_or(0);
                                 // Resolve __index__ protocol before integer normalization.
                                 // Clone so idx_val remains available for other match arms.
-                                let idx_resolved = vm_try!(self.call_index_protocol(idx_val.clone(), "list"));
+                                let idx_resolved = vm_try!(self.call_index_protocol(&idx_val, "list"));
                                 let i = vm_try!(normalize_index_write(&idx_resolved, len, "list"));
                                 regs[*obj as usize].list_with_mut(|items| {
                                     items[i] = val_val;
@@ -2244,7 +2244,7 @@ impl Interpreter {
                                                     .list_len()
                                                     .unwrap_or(0);
                                                 // Resolve __index__ protocol before integer normalization.
-                                                let idx_resolved = vm_try!(self.call_index_protocol(idx_val.clone(), "list"));
+                                                let idx_resolved = vm_try!(self.call_index_protocol(&idx_val, "list"));
                                                 let i = vm_try!(
                                                     normalize_index_write(
                                                         &idx_resolved,
@@ -2364,7 +2364,7 @@ impl Interpreter {
                         if target_kind == 1 {
                             let len = regs[*obj as usize].list_len().unwrap_or(0);
                             // Resolve __index__ protocol before integer normalization.
-                            let idx_resolved = vm_try!(self.call_index_protocol(idx_val.clone(), "list"));
+                            let idx_resolved = vm_try!(self.call_index_protocol(&idx_val, "list"));
                             let i = vm_try!(normalize_index_write(&idx_resolved, len, "list"));
                             regs[*obj as usize].list_with_mut(|items| {
                                 if i + 1 == items.len() {
@@ -3267,7 +3267,7 @@ impl Interpreter {
                     // #448: write back via the scoped `list_extend`
                     // operation method (no `&mut Vec` crosses the API
                     // boundary).
-                    let items_to_add = vm_try!(self.collect_iterable(src_val));
+                    let items_to_add = vm_try!(self.collect_iterable(&src_val));
                     vm_try!(regs[*list_reg as usize].list_extend(items_to_add));
                 }
                 Insn::DictUpdate(dict_reg, src_reg) => {
@@ -3420,7 +3420,7 @@ impl Interpreter {
                 // ── Unpack ───────────────────────────────────────────────
                 Insn::Unpack(base, src, n) => {
                     let src_val = vm_try!(vm_read(&regs, *src, num_locals));
-                    let items = vm_try!(self.collect_iterable(src_val));
+                    let items = vm_try!(self.collect_iterable(&src_val));
                     if items.len() < *n as usize {
                         vm_try!(Err::<(), _>(PyError::named(
                             "ValueError",
@@ -3449,7 +3449,7 @@ impl Interpreter {
 
                 Insn::UnpackEx { src, before, after, dst_base } => {
                     let src_val = vm_try!(vm_read(&regs, *src, num_locals));
-                    let items = vm_try!(self.collect_iterable(src_val));
+                    let items = vm_try!(self.collect_iterable(&src_val));
                     let before = *before as usize;
                     let after = *after as usize;
                     let min_len = before + after;
@@ -3585,17 +3585,21 @@ impl Interpreter {
                                     // list/dict/set subclass with no user-defined __iter__:
                                     // iterate the backing primitive directly, matching
                                     // CPython's inherited tp_iter slot behaviour.
-                                    IterState::Materialized(vm_try!(iter_values(backing)), 0)
+                                    if matches!(backing.kind(), ValueKind::List(_) | ValueKind::Tuple(_)) {
+                                        IterState::ValueIndexed { value: backing, pos: 0 }
+                                    } else {
+                                        IterState::Materialized(vm_try!(iter_values(&backing)), 0)
+                                    }
                                 } else if lookup_class_attr(&class, "__getitem__").is_some() {
                                     let iter_obj = vm_try!(self.make_getitem_iter(inst_rc));
                                     IterState::UserDefined(iter_obj)
                                 } else {
-                                    IterState::Materialized(vm_try!(iter_values(src_val)), 0)
+                                    IterState::Materialized(vm_try!(iter_values(&src_val)), 0)
                                 }
                             }
                             IterTag::BuiltinIterable => IterState::UserDefined(src_val),
                             IterTag::Other => {
-                                IterState::Materialized(vm_try!(iter_values(src_val)), 0)
+                                IterState::Materialized(vm_try!(iter_values(&src_val)), 0)
                             }
                         }
                     };
@@ -5346,7 +5350,7 @@ impl Interpreter {
                         "generator.__next__() takes no arguments".to_string(),
                     ));
                 }
-                self.call_next(receiver, None)
+                self.call_next(&receiver, None)
             }
             "close" => {
                 if !args.is_empty() {

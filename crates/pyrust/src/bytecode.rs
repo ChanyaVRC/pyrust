@@ -411,7 +411,7 @@ pub(crate) enum BinopTypeTag {
 /// `Empty`; all other positions remain `Empty` for the lifetime of the
 /// `FnCode`.  (`BinOpInPlace`, `BinOpConst`, and `BinOpImm` use only the
 /// unconditional int-int fast path and do not consult the adaptive cache.)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum BinOpCacheEntry {
     /// No observation yet.
     Empty,

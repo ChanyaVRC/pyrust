@@ -452,7 +452,7 @@ pyrust_module! {
         #[default(None)]
         start: Option<PyValue>,
     ) -> Result<Value> {
-        let items = _interp.collect_iterable(iterable.0)?;
+        let items = _interp.collect_iterable(&iterable.0)?;
         let mut acc = match start {
             None => Value::int(0),
             Some(v) => v.0,
@@ -491,7 +491,7 @@ pyrust_module! {
             &[ExpandedCallArg { name: None, value: iterable.0 }],
         )?;
         loop {
-            match _interp.call_next(iter.clone(), None) {
+            match _interp.call_next(&iter, None) {
                 Ok(item) => {
                     if _interp.truthy_value(&item)? {
                         return Ok(Value::bool_(true));
@@ -518,7 +518,7 @@ pyrust_module! {
             &[ExpandedCallArg { name: None, value: iterable.0 }],
         )?;
         loop {
-            match _interp.call_next(iter.clone(), None) {
+            match _interp.call_next(&iter, None) {
                 Ok(item) => {
                     if !_interp.truthy_value(&item)? {
                         return Ok(Value::bool_(false));
@@ -1417,7 +1417,7 @@ pyrust_module! {
                     IterKind::Other => {
                         // Determine the iterator type name before consuming val.
                         let iter_type_name = builtin_iter_type_name(&val);
-                        let items = iter_values(val.clone()).map_err(|_| {
+                        let items = iter_values(&val).map_err(|_| {
                             PyError::named(
                                 "TypeError",
                                 format!("'{}' object is not iterable", value_type_name_str(&val)),
@@ -1469,7 +1469,7 @@ pyrust_module! {
         } else {
             None
         };
-        _interp.call_next(gen_val, default_val)
+        _interp.call_next(&gen_val, default_val)
     }
 
     /// CPython: issubclass(cls, classinfo) — true if `cls` is a subclass.
@@ -2295,7 +2295,7 @@ pyrust_module! {
                 format!("{FN_NAME} expected 1 argument, got {}", positional.len()),
             ));
         }
-        let mut items = _interp.collect_iterable(positional[0].value.clone())?;
+        let mut items = _interp.collect_iterable(&positional[0].value)?;
         if let Some(kfn) = key_fn {
             let mut keyed: Vec<(Value, Value)> = items
                 .into_iter()
@@ -2686,7 +2686,7 @@ pyrust_module! {
         reject_keyword_args_expanded(FN_NAME, args)?;
         match args.len() {
             0 => Ok(Value::list(vec![])),
-            1 => Ok(Value::list(_interp.collect_iterable(args[0].value.clone())?)),
+            1 => Ok(Value::list(_interp.collect_iterable(&args[0].value)?)),
             _ => Err(PyError::named(
                 "TypeError",
                 format!("{FN_NAME} expected at most 1 argument, got {}", args.len()),
@@ -2705,7 +2705,7 @@ pyrust_module! {
         reject_keyword_args_expanded(FN_NAME, args)?;
         match args.len() {
             0 => Ok(Value::tuple(vec![])),
-            1 => Ok(Value::tuple(_interp.collect_iterable(args[0].value.clone())?)),
+            1 => Ok(Value::tuple(_interp.collect_iterable(&args[0].value)?)),
             _ => Err(PyError::named(
                 "TypeError",
                 format!("{FN_NAME} expected at most 1 argument, got {}", args.len()),
@@ -2822,7 +2822,7 @@ pyrust_module! {
                     // No __bytes__: fall through to the iterable path.
                     let type_name = value_type_name_str(&args[0].value).to_string();
                     let items =
-                        _interp.collect_iterable(args[0].value.clone()).map_err(|e| {
+                        _interp.collect_iterable(&args[0].value).map_err(|e| {
                             if e.class_name_is("TypeError") {
                                 PyError::named(
                                     "TypeError",
@@ -2863,7 +2863,7 @@ pyrust_module! {
                     // "cannot convert 'X' object to bytes".
                     let type_name = pyrust_core::builtin_type_name(&args[0].value).into_owned();
                     let items =
-                        _interp.collect_iterable(args[0].value.clone()).map_err(|e| {
+                        _interp.collect_iterable(&args[0].value).map_err(|e| {
                             if e.class_name_is("TypeError") {
                                 PyError::named(
                                     "TypeError",
@@ -3241,7 +3241,7 @@ pyrust_module! {
         match args.len() {
             0 => Ok(Value::set(indexmap::IndexSet::new())),
             1 => {
-                let items = _interp.collect_iterable(args[0].value.clone())?;
+                let items = _interp.collect_iterable(&args[0].value)?;
                 let mut set = indexmap::IndexSet::new();
                 for item in items {
                     let key = _interp.value_to_pykey(&item)?;
@@ -3272,7 +3272,7 @@ pyrust_module! {
                 if let Some(rc) = pyrust_builtins::frozenset::as_items(&args[0].value) {
                     return Ok(pyrust_builtins::frozenset::frozenset_rc(rc));
                 }
-                let items = _interp.collect_iterable(args[0].value.clone())?;
+                let items = _interp.collect_iterable(&args[0].value)?;
                 let mut set = indexmap::IndexSet::new();
                 for item in items {
                     let key = _interp.value_to_pykey(&item)?;
@@ -3863,9 +3863,9 @@ pyrust_module! {
                         }
                     } else {
                         // Treat as iterable of (key, value) pairs.
-                        let pairs = _interp.collect_iterable(arg.value.clone())?;
+                        let pairs = _interp.collect_iterable(&arg.value)?;
                         for pair in pairs {
-                            let items = _interp.collect_iterable(pair)?;
+                            let items = _interp.collect_iterable(&pair)?;
                             if items.len() != 2 {
                                 return Err(PyError::named(
                                     "ValueError",
@@ -3882,9 +3882,9 @@ pyrust_module! {
                 }
                 _ => {
                     // Treat as iterable of (key, value) pairs.
-                    let pairs = _interp.collect_iterable(arg.value.clone())?;
+                    let pairs = _interp.collect_iterable(&arg.value)?;
                     for pair in pairs {
-                        let items = _interp.collect_iterable(pair)?;
+                        let items = _interp.collect_iterable(&pair)?;
                         if items.len() != 2 {
                             return Err(PyError::named(
                                 "ValueError",
@@ -4053,7 +4053,7 @@ pyrust_module! {
             return Err(PyError::Runtime(format!("{FN_NAME} requires 3 arguments")));
         }
         let func = args[0].value.clone();
-        let pos_items = _interp.collect_iterable(args[1].value.clone())?;
+        let pos_items = _interp.collect_iterable(&args[1].value)?;
         let mut expanded: Vec<ExpandedCallArg> = pos_items
             .into_iter()
             .map(|v| ExpandedCallArg { name: None, value: v })
@@ -5319,7 +5319,7 @@ pyrust_module! {
         };
         let backing = match rest {
             [] => Value::tuple(vec![]),
-            [single] => Value::tuple(_interp.collect_iterable(single.value.clone())?),
+            [single] => Value::tuple(_interp.collect_iterable(&single.value)?),
             _ => {
                 return Err(PyError::named(
                     "TypeError",
@@ -5374,7 +5374,7 @@ pyrust_module! {
         let backing = match rest {
             [] => pyrust_builtins::frozenset::frozenset(indexmap::IndexSet::new()),
             [single] => {
-                let items = _interp.collect_iterable(single.value.clone())?;
+                let items = _interp.collect_iterable(&single.value)?;
                 let mut set = indexmap::IndexSet::new();
                 for item in items {
                     let key = _interp.value_to_pykey(&item)?;
@@ -6327,7 +6327,7 @@ pyrust_module! {
             .map(|a| a.value.clone())
             .unwrap_or_else(Value::none);
 
-        let keys = _interp.collect_iterable(iterable)?;
+        let keys = _interp.collect_iterable(&iterable)?;
         let mut map: indexmap::IndexMap<PyKey, Value> =
             indexmap::IndexMap::with_capacity(keys.len());
         for key in keys {
@@ -7061,7 +7061,7 @@ pub(super) fn materialize_user_iter(
     v: Value,
 ) -> Result<Value> {
     if matches!(v.kind(), ValueKind::PyInstance(_) | ValueKind::Generator(_)) {
-        let items = interp.collect_iterable(v)?;
+        let items = interp.collect_iterable(&v)?;
         Ok(Value::list(items))
     } else {
         Ok(v)
@@ -7131,7 +7131,7 @@ pub(super) fn make_iterator(interp: &mut crate::Interpreter, v: Value) -> Result
         }
         IterKind::Other => {
             let iter_type_name = builtin_iter_type_name(&v);
-            let items = iter_values(v.clone()).map_err(|_| {
+            let items = iter_values(&v).map_err(|_| {
                 PyError::named(
                     "TypeError",
                     format!("'{}' object is not iterable", value_type_name_str(&v)),
@@ -7896,7 +7896,7 @@ fn min_max_impl(
         }
     }
     let items: Vec<Value> = if positional.len() == 1 {
-        interp.collect_iterable(positional[0].value.clone())?
+        interp.collect_iterable(&positional[0].value)?
     } else {
         // positional.len() >= 2
         if default_val.is_some() {

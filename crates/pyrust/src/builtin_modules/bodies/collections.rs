@@ -78,7 +78,7 @@ pyrust_module! {
                         }
                     }
                 } else {
-                    for v in _interp.collect_iterable(arg.value.clone())? {
+                    for v in _interp.collect_iterable(&arg.value)? {
                         let key = _interp.value_to_pykey(&v)?;
                         let next = match counts.get(&key).map(|v| v.kind()) {
                             Some(ValueKind::Int(n)) => n + 1,
@@ -690,7 +690,7 @@ pyrust_module! {
             // Initialise _items from iterable (if provided), then trim to maxlen.
             let mut deque_items: Vec<Value> = Vec::new();
             if let Some(iterable) = pos_iterable {
-                deque_items = _interp.collect_iterable(iterable)?;
+                deque_items = _interp.collect_iterable(&iterable)?;
             }
             // Apply maxlen: if we already exceed it, keep the rightmost maxlen elements.
             if let Some(ml) = maxlen {
@@ -816,7 +816,7 @@ pyrust_module! {
                     format!("{FN_NAME}() takes exactly 1 argument"),
                 ));
             }
-            let new_items = _interp.collect_iterable(args[1].value.clone())?;
+            let new_items = _interp.collect_iterable(&args[1].value)?;
             let maxlen = deque_maxlen(&inst);
             if let Some(0) = maxlen {
                 return Ok(Value::none()); // maxlen=0: nothing to extend
@@ -844,7 +844,7 @@ pyrust_module! {
                     format!("{FN_NAME}() takes exactly 1 argument"),
                 ));
             }
-            let new_items = _interp.collect_iterable(args[1].value.clone())?;
+            let new_items = _interp.collect_iterable(&args[1].value)?;
             let maxlen = deque_maxlen(&inst);
             if let Some(0) = maxlen {
                 return Ok(Value::none()); // maxlen=0: nothing to extend
@@ -1484,7 +1484,7 @@ fn apply_delta(
         }
     } else {
         // Iterable form — each element contributes ±1.
-        for v in interp.collect_iterable(other.clone())? {
+        for v in interp.collect_iterable(&other)? {
             let key = interp.value_to_pykey(&v)?;
             let cur = counts.get(&key).map(value_as_count).unwrap_or(0);
             counts.insert(key, Value::int(cur + sign));

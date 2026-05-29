@@ -56,7 +56,7 @@ pyrust_module! {
             ));
         }
         let func = args[0].value.clone();
-        let items = _interp.collect_iterable(args[1].value.clone())?;
+        let items = _interp.collect_iterable(&args[1].value)?;
         let mut iter = items.into_iter();
         let mut acc = if args.len() == 3 {
             // Initializer supplied → it's the seed; the iterable is folded

@@ -372,7 +372,7 @@ pub(crate) struct VmFrameView {
 /// startup so `pyrust-builtins` iterator helpers can drain arbitrary
 /// sources without depending on this crate.
 fn iter_values_for_registry(value: &Value) -> Result<Vec<Value>> {
-    iter_values(value.clone())
+    iter_values(value)
 }
 
 /// Thin wrapper around `helpers::compare_values` matching pyrust-core's

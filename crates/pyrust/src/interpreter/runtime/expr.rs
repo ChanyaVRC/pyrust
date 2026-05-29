@@ -328,7 +328,7 @@ impl Interpreter {
             _ => None,
         };
         let index = if let Some(label) = seq_label {
-            self.call_index_protocol(index, label)?
+            self.call_index_protocol(&index, label)?
         } else {
             index
         };
@@ -1854,7 +1854,7 @@ impl Interpreter {
                     }
                     // General iterable: iterate and hash each element via
                     // value_to_pykey so slices and PyInstances are handled.
-                    let items = self.collect_iterable(arg)?;
+                    let items = self.collect_iterable(&arg)?;
                     for item in items {
                         let pk = self.value_to_pykey(&item)?;
                         if self.set_lookup(&receiver, &pk)?.is_none() {
@@ -1925,7 +1925,7 @@ impl Interpreter {
                     | ValueKind::Dict(_)
             );
             let iterable = if needs_collect {
-                let items = self.collect_iterable(iterable).map_err(|e| {
+                let items = self.collect_iterable(&iterable).map_err(|e| {
                     // Only rewrite "not iterable" TypeErrors as CPython's
                     // "can only join an iterable". TypeErrors raised by user
                     // code inside __iter__/__next__ or a generator body must
@@ -2088,7 +2088,7 @@ impl Interpreter {
             ValueKind::List(_) | ValueKind::Tuple(_)
         );
         let iterable = if needs_collect {
-            let items = self.collect_iterable(iterable).map_err(|e| {
+            let items = self.collect_iterable(&iterable).map_err(|e| {
                 let is_not_iterable = e.class_name_is("TypeError")
                     && matches!(&e,
                         PyError::Named(_, msg) | PyError::Class(_, msg)
@@ -2970,7 +2970,7 @@ impl Interpreter {
             match op {
                 BinaryOp::Add => {
                     // list += iterable  =>  list.extend(iterable)
-                    let items = self.collect_iterable(right)?;
+                    let items = self.collect_iterable(&right)?;
                     left.list_extend(items)?;
                     return Ok(Some(left));
                 }
@@ -3204,7 +3204,7 @@ impl Interpreter {
         if let Some(value) = self.try_call_binary_method(&left, "__matmul__", right.clone())? {
             return Ok(value);
         }
-        if let Some(value) = self.try_call_binary_method(&right, "__rmatmul__", left.clone())? {
+        if let Some(value) = self.try_call_binary_method(&right, "__rmatmul__", left)? {
             return Ok(value);
         }
         Err(Self::unsupported_binary_operand("@"))
@@ -3817,7 +3817,7 @@ impl Interpreter {
                         &[],
                     )?;
                     loop {
-                        match self.call_next(iter_obj.clone(), None) {
+                        match self.call_next(&iter_obj, None) {
                             Ok(elem) => {
                                 if self.values_user_eq(&elem, &item)? {
                                     return Ok(Value::bool_(true));
@@ -3844,7 +3844,7 @@ impl Interpreter {
                 if lookup_class_attr(&class, "__getitem__").is_some() {
                     let iter_val = self.make_getitem_iter(Rc::clone(&inst_rc))?;
                     loop {
-                        match self.call_next(iter_val.clone(), None) {
+                        match self.call_next(&iter_val, None) {
                             Ok(elem) => {
                                 if self.values_user_eq(&elem, &item)? {
                                     return Ok(Value::bool_(true));
@@ -4859,11 +4859,11 @@ pub(crate) fn coerce_numeric(v: &Value) -> Value {
     v.clone()
 }
 
-pub(crate) fn iter_values(value: Value) -> Result<Vec<Value>> {
+pub(crate) fn iter_values(value: &Value) -> Result<Vec<Value>> {
     // list/dict/set subclass: delegate to the backing primitive value.
     if let Some(inst_rc) = value.as_py_instance_rc() {
         if let Some(backing) = instance_builtin_data(inst_rc) {
-            return iter_values(backing);
+            return iter_values(&backing);
         }
     }
     match value.kind() {
