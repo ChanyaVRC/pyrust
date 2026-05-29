@@ -1474,7 +1474,6 @@ pyrust_module! {
 
     /// CPython: issubclass(cls, classinfo) — true if `cls` is a subclass.
     /// <https://docs.python.org/3/library/functions.html#issubclass>
-    #[pure]
     fn issubclass(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 2 {
@@ -1492,27 +1491,7 @@ pyrust_module! {
                 format!("{FN_NAME}() arg 1 must be a class"),
             ));
         }
-        // Dispatch through __subclasscheck__ when classinfo is a PyClass that
-        // defines it (e.g. all ABC classes).  We use get_attr so the descriptor
-        // protocol wraps the raw BuiltinFunction as super_bound_builtin(fn, cls).
-        // Calling it with [subclass] gives abc_subclasscheck([classinfo, subclass])
-        // after the super_bound_builtin dispatch prepends classinfo.  This handles
-        // structural subtyping for `issubclass(UserClass, Iterable)` (fixes #1799).
-        // Tuple and UnionType cases still go through issubclass_check below.
-        if let ValueKind::PyClass(classinfo_rc) = args[1].value.kind() {
-            let has_sc = classinfo_rc.borrow().attrs.contains_key("__subclasscheck__");
-            if has_sc {
-                let classinfo_val = Value::py_class(Rc::clone(classinfo_rc));
-                let sc_fn = _interp.get_attr(&classinfo_val, "__subclasscheck__")?;
-                let call_args = [crate::interpreter::ExpandedCallArg {
-                    name: None,
-                    value: args[0].value.clone(),
-                }];
-                let result = _interp.call_function_expanded(sc_fn, &call_args)?;
-                return Ok(Value::bool_(_interp.truthy_value(&result)?));
-            }
-        }
-        let result = issubclass_check(FN_NAME, &args[0].value, &args[1].value)?;
+        let result = issubclass_check(FN_NAME, &args[0].value, &args[1].value, _interp)?;
         Ok(Value::bool_(result))
     }
 
@@ -1536,7 +1515,6 @@ pyrust_module! {
 
     /// CPython: isinstance(obj, classinfo) — type check.
     /// <https://docs.python.org/3/library/functions.html#isinstance>
-    #[pure]
     fn isinstance(args) -> Result<Value> {
         reject_keyword_args_expanded(FN_NAME, args)?;
         if args.len() != 2 {
@@ -7876,10 +7854,18 @@ fn isinstance_check(
 
 /// `issubclass(cls, classinfo)` — same tuple-recursive contract as
 /// `isinstance_check`, but compares classes rather than instances.
-fn issubclass_check(fn_name: &str, cls: &Value, classinfo: &Value) -> Result<bool> {
+/// Dispatches through `__subclasscheck__` for PyClass leaves (e.g. ABC
+/// classes), mirroring CPython's `type.__subclasscheck__` dispatch.
+fn issubclass_check(
+    fn_name: &str,
+    cls: &Value,
+    classinfo: &Value,
+    interp: &mut crate::Interpreter,
+) -> Result<bool> {
     if let ValueKind::Tuple(items) = classinfo.kind() {
-        for item in items {
-            if issubclass_check(fn_name, cls, item)? {
+        let items: Vec<Value> = items.to_vec();
+        for item in &items {
+            if issubclass_check(fn_name, cls, item, interp)? {
                 return Ok(true);
             }
         }
@@ -7888,13 +7874,31 @@ fn issubclass_check(fn_name: &str, cls: &Value, classinfo: &Value) -> Result<boo
     // PEP 604: `issubclass(X, int | str)` — unwrap UnionType to its __args__.
     if let Some(args) = pyrust_builtins::union_type::union_type_args(classinfo) {
         if let ValueKind::Tuple(items) = args.kind() {
-            for item in items {
-                if issubclass_check(fn_name, cls, item)? {
+            let items: Vec<Value> = items.to_vec();
+            for item in &items {
+                if issubclass_check(fn_name, cls, item, interp)? {
                     return Ok(true);
                 }
             }
         }
         return Ok(false);
+    }
+    // Dispatch through __subclasscheck__ when classinfo is a PyClass that
+    // defines it (e.g. all ABC classes).  This handles structural subtyping
+    // for `issubclass(UserClass, Iterable)` and tuple forms like
+    // `issubclass(UserClass, (Iterable, Hashable))` (fixes #1799).
+    if let ValueKind::PyClass(classinfo_rc) = classinfo.kind() {
+        let has_sc = classinfo_rc.borrow().attrs.contains_key("__subclasscheck__");
+        if has_sc {
+            let classinfo_val = Value::py_class(Rc::clone(classinfo_rc));
+            let sc_fn = interp.get_attr(&classinfo_val, "__subclasscheck__")?;
+            let call_args = [crate::interpreter::ExpandedCallArg {
+                name: None,
+                value: cls.clone(),
+            }];
+            let result = interp.call_function_expanded(sc_fn, &call_args)?;
+            return Ok(interp.truthy_value(&result)?);
+        }
     }
     match (cls.kind(), classinfo.kind()) {
         // User-defined → user-defined: walk the `base` chain.

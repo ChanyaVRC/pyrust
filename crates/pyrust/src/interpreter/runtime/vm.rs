@@ -6223,7 +6223,7 @@ mod vm_tests {
             num_iters: 0,
             num_locals: 0,
             fn_protos: vec![],
-            cell_vars: smallvec::smallvec![],
+            cell_vars: vec![],
             is_generator: false,
             is_class_method: false,
             attr_cache: std::cell::RefCell::new(vec![AttrCacheEntry::Empty; n]),

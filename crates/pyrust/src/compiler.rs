@@ -2,8 +2,6 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use smallvec::SmallVec;
-
 use crate::ast::{
     AssignTarget, BinaryOp, CallArg, CompClause, DictItem, Expr, FStringPart, FunctionParam,
     MatchArm, Pattern, Stmt, UnaryOp,
@@ -3807,19 +3805,13 @@ fn detect_while_range<'a>(
 // ─── Compiler struct ──────────────────────────────────────────────────────────
 
 struct LoopCtx {
-    /// Instruction indices of `Jump(0)` placeholders for `break` statements;
-    /// patched to jump past the loop once the loop end is known.
-    /// `SmallVec<[usize; 2]>` avoids heap allocation for the common case of
-    /// zero or one `break` per loop.
-    break_patches: SmallVec<[usize; 2]>,
+    break_patches: Vec<usize>,
     /// None when the continue target is not yet known (e.g. counter-range loop
     /// where the increment comes after the body).  Patched before the increment.
     continue_target: Option<usize>,
     /// Indices of Jump(0) instructions emitted for `continue` when continue_target
     /// was None; fixed up once continue_target is established.
-    /// `SmallVec<[usize; 2]>` avoids heap allocation for the common case of
-    /// zero or one `continue` before the target is known.
-    continue_patches: SmallVec<[usize; 2]>,
+    continue_patches: Vec<usize>,
     /// Depth of `Compiler::except_cleanups` at the point this loop was entered.
     /// `break` and `continue` must emit cleanups for entries above this depth.
     cleanup_depth: usize,
@@ -3871,9 +3863,7 @@ struct Compiler {
     /// Stack of cleanup actions needed by early exits (`break`/`continue`/`return`)
     /// that cross a `try`/`except` boundary.  Entries are pushed when entering a
     /// guarded block and popped when leaving it normally.
-    /// `SmallVec<[_; 4]>` avoids heap allocation for the common case of at most
-    /// four nested try/except levels.
-    except_cleanups: SmallVec<[EarlyExitCleanup; 4]>,
+    except_cleanups: Vec<EarlyExitCleanup>,
     failed: bool,
     error_msg: Option<String>,
     def_set: u64,
@@ -3905,8 +3895,7 @@ struct Compiler {
     /// `nonlocal`).  Innermost enclosing function is at the end of the Vec.
     /// Used at compile time to validate `nonlocal` declarations in nested
     /// function bodies.
-    /// `SmallVec<[_; 4]>` avoids heap allocation for typical nesting depths (≤ 4).
-    outer_locals: SmallVec<[Rc<HashMap<String, Reg>>; 4]>,
+    outer_locals: Vec<Rc<HashMap<String, Reg>>>,
     /// True when this Compiler is producing the body of a function `def`
     /// (or a comprehension, which implicitly creates a function scope).
     /// False for module-level compilation and class-body compilation.
@@ -4346,7 +4335,7 @@ impl Compiler {
                 0
             },
             loops: Vec::new(),
-            except_cleanups: SmallVec::new(),
+            except_cleanups: Vec::new(),
             failed: n > Reg::MAX as usize,
             error_msg: if n > Reg::MAX as usize {
                 Some(format!("too many local variables (max {})", Reg::MAX))
@@ -4359,7 +4348,7 @@ impl Compiler {
             is_class_body: false,
             is_class_method: false,
             qualname_prefix: String::new(),
-            outer_locals: SmallVec::new(),
+            outer_locals: Vec::new(),
             is_function_scope: false,
             is_async_function: false,
             is_syntax_error: false,
@@ -4727,8 +4716,7 @@ impl Compiler {
                         if let (true, Some(r)) = (push_exc_ctx, pending_exc_reg) {
                             self.emit(Insn::PushExcContext(r));
                         }
-                        let saved_tail: Vec<EarlyExitCleanup> =
-                            self.except_cleanups.drain(i..).collect();
+                        let saved_tail: Vec<EarlyExitCleanup> = self.except_cleanups.split_off(i);
                         self.compile_block(&stmts);
                         self.except_cleanups.extend(saved_tail);
                         if push_exc_ctx {
@@ -4761,7 +4749,7 @@ impl Compiler {
             // Shadow the cleanup stack: any nested cleanup emission triggered
             // by `compile_block` below must not see frames `[i..]` (we are
             // already in the process of unwinding them).
-            let saved_tail: Vec<EarlyExitCleanup> = self.except_cleanups.drain(i..).collect();
+            let saved_tail: Vec<EarlyExitCleanup> = self.except_cleanups.split_off(i);
             match cleanup {
                 EarlyExitCleanup::TryBody { finally_stmts } => {
                     self.emit(Insn::PopExcept);
@@ -6603,9 +6591,9 @@ impl Compiler {
         };
 
         self.loops.push(LoopCtx {
-            break_patches: SmallVec::new(),
+            break_patches: Vec::new(),
             continue_target: Some(loop_start),
-            continue_patches: SmallVec::new(),
+            continue_patches: Vec::new(),
             cleanup_depth: self.except_cleanups.len(),
         });
         let saved = self.def_set;
@@ -6699,9 +6687,9 @@ impl Compiler {
 
         self.mark_def(var_reg);
         self.loops.push(LoopCtx {
-            break_patches: SmallVec::new(),
+            break_patches: Vec::new(),
             continue_target: Some(loop_start),
-            continue_patches: SmallVec::new(),
+            continue_patches: Vec::new(),
             cleanup_depth: self.except_cleanups.len(),
         });
         let saved = self.def_set;
@@ -6857,9 +6845,9 @@ impl Compiler {
             self.emit(Insn::SyncModuleGlobal(var_reg, name_idx));
         }
         self.loops.push(LoopCtx {
-            break_patches: SmallVec::new(),
+            break_patches: Vec::new(),
             continue_target: Some(loop_start),
-            continue_patches: SmallVec::new(),
+            continue_patches: Vec::new(),
             cleanup_depth: self.except_cleanups.len(),
         });
         let saved = self.def_set;
@@ -7004,9 +6992,9 @@ impl Compiler {
             }
         }
         self.loops.push(LoopCtx {
-            break_patches: SmallVec::new(),
+            break_patches: Vec::new(),
             continue_target: Some(loop_start),
-            continue_patches: SmallVec::new(),
+            continue_patches: Vec::new(),
             cleanup_depth: self.except_cleanups.len(),
         });
         let saved_def_set = self.def_set;
@@ -7585,7 +7573,7 @@ impl Compiler {
         // Collect annotation keys: annotated param names (in declaration order) then
         // "return" if there is a return annotation.  These are parallel to the
         // annotation register window emitted just before MakeFunction.
-        let annotation_keys: SmallVec<[String; 4]> = params
+        let annotation_keys: Vec<String> = params
             .iter()
             .filter(|p| p.annotation.is_some())
             .map(|p| p.name.clone())
@@ -7616,7 +7604,7 @@ impl Compiler {
             is_pure,
             annotation_keys,
             docstring: fn_docstring,
-            class_kwarg_names: SmallVec::new(),
+            class_kwarg_names: Vec::new(),
         });
 
         // Compile default values (right-to-left in declaration, left-to-right in slots).
@@ -7966,12 +7954,12 @@ impl Compiler {
             name: name.to_string(),
             qualname: class_qualname,
             param_spec: Rc::new(FnParamSpec {
-                names: SmallVec::new(),
-                has_default: SmallVec::new(),
-                is_args: SmallVec::new(),
-                is_kwargs: SmallVec::new(),
-                is_keyword_only: SmallVec::new(),
-                is_positional_only: SmallVec::new(),
+                names: vec![],
+                has_default: vec![],
+                is_args: vec![],
+                is_kwargs: vec![],
+                is_keyword_only: vec![],
+                is_positional_only: vec![],
             }),
             code: Rc::new(body_code),
             local_index: body_index_rc,
@@ -7979,7 +7967,7 @@ impl Compiler {
             global_names: body_global,
             nonlocal_names: body_nonlocal_rc,
             is_pure: false,
-            annotation_keys: SmallVec::new(),
+            annotation_keys: Vec::new(),
             docstring: class_docstring,
             class_kwarg_names: keywords.iter().map(|(k, _)| k.clone()).collect(),
         });
@@ -9487,9 +9475,9 @@ impl Compiler {
             global_names: inner_global_rc,
             nonlocal_names: inner_nonlocal_rc,
             is_pure,
-            annotation_keys: SmallVec::new(),
+            annotation_keys: Vec::new(),
             docstring: None,
-            class_kwarg_names: SmallVec::new(),
+            class_kwarg_names: Vec::new(),
         });
 
         // Emit MakeFunction + Call, same layout as compile_gen_exp.
@@ -9825,9 +9813,9 @@ impl Compiler {
             global_names: inner_global_rc,
             nonlocal_names: inner_nonlocal_rc,
             is_pure,
-            annotation_keys: SmallVec::new(),
+            annotation_keys: Vec::new(),
             docstring: None,
-            class_kwarg_names: SmallVec::new(),
+            class_kwarg_names: Vec::new(),
         });
 
         // Allocate a temp for the function value, emit MakeFunction (no
