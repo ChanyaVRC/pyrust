@@ -1921,8 +1921,10 @@ impl Interpreter {
                     ),
                 ));
             }
-            let template = match receiver.kind() {
-                ValueKind::Str(s) => s.to_string(),
+            // Borrow template as &str from the receiver to avoid a heap allocation.
+            // receiver is held by value for the lifetime of this block.
+            let template: &str = match receiver.kind() {
+                ValueKind::Str(s) => s,
                 _ => {
                     return Err(PyError::named(
                         "TypeError",
@@ -1931,7 +1933,7 @@ impl Interpreter {
                 }
             };
             let mapping = args.into_iter().next().unwrap();
-            return self.format_str_template_map(&template, mapping);
+            return self.format_str_template_map(template, mapping);
         }
         if method == "join" {
             if args.len() != 1 {
@@ -1996,8 +1998,11 @@ impl Interpreter {
             // General mapping protocol: call table[ordinal] per codepoint.
             // KeyError / IndexError / LookupError → keep character;
             // None → delete; int → replace with chr(n); str → replace.
-            let s = match receiver.kind() {
-                ValueKind::Str(s) => s.to_string(),
+            // Materialise chars and reserve capacity under a narrow borrow so
+            // that the &str from receiver.kind() drops before eval_index needs
+            // a &mut self borrow (they are separate but keep scopes explicit).
+            let (chars, out_capacity) = match receiver.kind() {
+                ValueKind::Str(s) => (s.chars().collect::<Vec<char>>(), s.len()),
                 _ => {
                     return Err(PyError::named(
                         "TypeError",
@@ -2006,8 +2011,7 @@ impl Interpreter {
                 }
             };
             let table = args.into_iter().next().unwrap();
-            let chars: Vec<char> = s.chars().collect();
-            let mut out = String::with_capacity(s.len());
+            let mut out = String::with_capacity(out_capacity);
             for c in chars {
                 let cp = Value::int(c as i64);
                 match self.eval_index(&table, cp) {
