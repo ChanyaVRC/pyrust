@@ -265,7 +265,7 @@ impl Interpreter {
     fn unsupported_binary_operand(op: &str) -> PyError {
         PyError::named("TypeError", format!("unsupported operand type(s) for {op}"))
     }
-    pub(crate) fn eval_index(&mut self, target: Value, index: Value) -> Result<Value> {
+    pub(crate) fn eval_index(&mut self, target: &Value, index: Value) -> Result<Value> {
         // If the index is a `slice` object (built by `eval_slice` and passed
         // into a `__getitem__` call, which then subscripts a built-in sequence
         // with it), extract the bounds and delegate to `eval_slice` so that
@@ -328,7 +328,7 @@ impl Interpreter {
             _ => None,
         };
         let index = if let Some(label) = seq_label {
-            self.call_index_protocol(index, label)?
+            self.call_index_protocol(&index, label)?
         } else {
             index
         };
@@ -342,9 +342,14 @@ impl Interpreter {
                 Ok(items[idx].clone())
             }
             ValueKind::Str(text) => {
-                let chars: Vec<char> = text.chars().collect();
-                let idx = normalize_index(&index, chars.len(), "string")?;
-                Ok(Value::string(chars[idx].to_string()))
+                let char_count = text.chars().count();
+                let idx = normalize_index(&index, char_count, "string")?;
+                // Use nth() to avoid collecting a Vec<char>; normalize_index
+                // guarantees idx < char_count so unwrap is safe.
+                let ch = text.chars().nth(idx).expect("normalize_index bounds check");
+                // Stack-encode to a &str to avoid an intermediate String allocation.
+                let mut buf = [0u8; 4];
+                Ok(Value::string(ch.encode_utf8(&mut buf) as &str))
             }
             ValueKind::Bytes(rc) => {
                 let idx = normalize_index(&index, rc.len(), "bytes")?;
@@ -505,7 +510,7 @@ impl Interpreter {
                             }
                         };
                     }
-                    return self.eval_index(backing, index);
+                    return self.eval_index(&backing, index);
                 }
                 Err(PyError::named(
                     "TypeError",
@@ -516,7 +521,7 @@ impl Interpreter {
                 "TypeError",
                 format!(
                     "'{}' object is not subscriptable",
-                    pyrust_core::builtin_type_name(&target)
+                    pyrust_core::builtin_type_name(target)
                 ),
             )),
         }
@@ -578,7 +583,7 @@ impl Interpreter {
                     // `eval_binary` inside the dunder doesn't re-dispatch to the
                     // same method on the still-wrapped PyInstance (infinite loop).
                     let self_val = if matches!(m.kind(), ValueKind::BuiltinFunction(_)) {
-                        coerce_numeric(right.clone())
+                        coerce_numeric(right)
                     } else {
                         Value::py_instance(Rc::clone(inst))
                     };
@@ -600,7 +605,7 @@ impl Interpreter {
                 && is_callable_method(&m)
             {
                 let self_val = if matches!(m.kind(), ValueKind::BuiltinFunction(_)) {
-                    coerce_numeric(left.clone())
+                    coerce_numeric(left)
                 } else {
                     Value::py_instance(Rc::clone(inst))
                 };
@@ -622,7 +627,7 @@ impl Interpreter {
                     && is_callable_method(&m)
                 {
                     let self_val = if matches!(m.kind(), ValueKind::BuiltinFunction(_)) {
-                        coerce_numeric(right.clone())
+                        coerce_numeric(right)
                     } else {
                         Value::py_instance(Rc::clone(inst))
                     };
@@ -652,7 +657,7 @@ impl Interpreter {
                 // BuiltinFunction dunders operate on the backing primitive value;
                 // pass the coerced value so they don't reject the PyInstance wrapper.
                 let self_val = if matches!(m.kind(), ValueKind::BuiltinFunction(_)) {
-                    coerce_numeric(val.clone())
+                    coerce_numeric(val)
                 } else {
                     Value::py_instance(Rc::clone(inst))
                 };
@@ -1628,8 +1633,8 @@ impl Interpreter {
         // Issue #1204: if a PyInstance has a scalar primitive backing
         // (e.g. MyInt subclass) and no user __eq__ was found, compare the
         // backing values so `MyInt(5) == 5` returns True.
-        let a_cmp = coerce_numeric(a.clone());
-        let b_cmp = coerce_numeric(b.clone());
+        let a_cmp = coerce_numeric(a);
+        let b_cmp = coerce_numeric(b);
         if !matches!(a_cmp.kind(), ValueKind::PyInstance(_))
             || !matches!(b_cmp.kind(), ValueKind::PyInstance(_))
         {
@@ -1849,7 +1854,7 @@ impl Interpreter {
                     }
                     // General iterable: iterate and hash each element via
                     // value_to_pykey so slices and PyInstances are handled.
-                    let items = self.collect_iterable(arg)?;
+                    let items = self.collect_iterable(&arg)?;
                     for item in items {
                         let pk = self.value_to_pykey(&item)?;
                         if self.set_lookup(&receiver, &pk)?.is_none() {
@@ -1920,7 +1925,7 @@ impl Interpreter {
                     | ValueKind::Dict(_)
             );
             let iterable = if needs_collect {
-                let items = self.collect_iterable(iterable).map_err(|e| {
+                let items = self.collect_iterable(&iterable).map_err(|e| {
                     // Only rewrite "not iterable" TypeErrors as CPython's
                     // "can only join an iterable". TypeErrors raised by user
                     // code inside __iter__/__next__ or a generator body must
@@ -1974,7 +1979,7 @@ impl Interpreter {
             let mut out = String::with_capacity(s.len());
             for c in chars {
                 let cp = Value::int(c as i64);
-                match self.eval_index(table.clone(), cp) {
+                match self.eval_index(&table, cp) {
                     Ok(v) => {
                         // Resolve int/str subclass instances to their backing
                         // primitive before the value match. This covers:
@@ -2083,7 +2088,7 @@ impl Interpreter {
             ValueKind::List(_) | ValueKind::Tuple(_)
         );
         let iterable = if needs_collect {
-            let items = self.collect_iterable(iterable).map_err(|e| {
+            let items = self.collect_iterable(&iterable).map_err(|e| {
                 let is_not_iterable = e.class_name_is("TypeError")
                     && matches!(&e,
                         PyError::Named(_, msg) | PyError::Class(_, msg)
@@ -2162,14 +2167,14 @@ impl Interpreter {
                     return r;
                 }
                 // Issue #1204: extract backing for scalar primitive subclasses.
-                self.div(coerce_numeric(left), coerce_numeric(right))
+                self.div(coerce_numeric(&left), coerce_numeric(&right))
             }
             BinaryOp::FloorDiv => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__floordiv__", "__rfloordiv__") {
                     return r;
                 }
                 // Issue #1204: extract backing for scalar primitive subclasses.
-                self.floor_div(coerce_numeric(left), coerce_numeric(right))
+                self.floor_div(coerce_numeric(&left), coerce_numeric(&right))
             }
             BinaryOp::Mod => {
                 // str % args: printf-style formatting (#1393).
@@ -2202,7 +2207,7 @@ impl Interpreter {
                     return r;
                 }
                 // Issue #1204: extract backing for scalar primitive subclasses.
-                self.modulo(coerce_numeric(left), coerce_numeric(right))
+                self.modulo(coerce_numeric(&left), coerce_numeric(&right))
             }
             BinaryOp::Eq => {
                 if let Some(r) = self.try_dunder_binary(&left, &right, "__eq__", "__eq__") {
@@ -2263,8 +2268,8 @@ impl Interpreter {
                 }
                 // Issue #1204: extract scalar primitive backing so that
                 // `MyInt(42) ** 2` works identically to `42 ** 2`.
-                let left = coerce_numeric(left);
-                let right = coerce_numeric(right);
+                let left = coerce_numeric(&left);
+                let right = coerce_numeric(&right);
                 // Integer ** non-negative integer stays in the int domain
                 // (BigInt promotion when the result overflows i64).  Once
                 // overflow promotes (#421), `(2**64) ** 2` arrives here as
@@ -2355,8 +2360,8 @@ impl Interpreter {
                 // Issue #1204: extract backing for scalar primitive subclasses.
                 let lt = value_type_name_str(&left);
                 let rt = value_type_name_str(&right);
-                let left = coerce_numeric(left);
-                let right = coerce_numeric(right);
+                let left = coerce_numeric(&left);
+                let right = coerce_numeric(&right);
                 // BigInt × int / int × BigInt / BigInt × BigInt all flow
                 // through the BigInt path; int × int stays on the fast
                 // path inside `bitwise_op`.  See issue #485.
@@ -2431,8 +2436,8 @@ impl Interpreter {
                 // Issue #1204: extract backing for scalar primitive subclasses.
                 let lt = value_type_name_str(&left);
                 let rt = value_type_name_str(&right);
-                let left = coerce_numeric(left);
-                let right = coerce_numeric(right);
+                let left = coerce_numeric(&left);
+                let right = coerce_numeric(&right);
                 if matches!(left.kind(), ValueKind::BigInt(_)) || matches!(right.kind(), ValueKind::BigInt(_)) {
                     let a = value_to_bigint(&left).ok_or_else(|| {
                         PyError::named(
@@ -2460,8 +2465,8 @@ impl Interpreter {
                 // Issue #1204: extract backing for scalar primitive subclasses.
                 let lt = value_type_name_str(&left);
                 let rt = value_type_name_str(&right);
-                let left = coerce_numeric(left);
-                let right = coerce_numeric(right);
+                let left = coerce_numeric(&left);
+                let right = coerce_numeric(&right);
                 if matches!(left.kind(), ValueKind::BigInt(_)) || matches!(right.kind(), ValueKind::BigInt(_)) {
                     let a = value_to_bigint(&left).ok_or_else(|| {
                         PyError::named(
@@ -2486,8 +2491,8 @@ impl Interpreter {
                 // Issue #1204: extract backing for scalar primitive subclasses.
                 let lt = value_type_name_str(&left);
                 let rt = value_type_name_str(&right);
-                let left = coerce_numeric(left);
-                let right = coerce_numeric(right);
+                let left = coerce_numeric(&left);
+                let right = coerce_numeric(&right);
                 // BigInt LHS: shift exactly, no `& 63` truncation.
                 // Int LHS with a BigInt RHS: the shift count is
                 // astronomically large.  See #485.
@@ -2581,8 +2586,8 @@ impl Interpreter {
                 // Issue #1204: extract backing for scalar primitive subclasses.
                 let lt = value_type_name_str(&left);
                 let rt = value_type_name_str(&right);
-                let left = coerce_numeric(left);
-                let right = coerce_numeric(right);
+                let left = coerce_numeric(&left);
+                let right = coerce_numeric(&right);
                 if matches!(left.kind(), ValueKind::BigInt(_)) || matches!(right.kind(), ValueKind::BigInt(_)) {
                     let a = value_to_bigint(&left).ok_or_else(|| {
                         PyError::named(
@@ -2651,7 +2656,7 @@ impl Interpreter {
         if let Some((a, b)) = both_as_complex(&left, &right)? {
             return Ok(Value::complex(a.0 + b.0, a.1 + b.1));
         }
-        let (l, r) = (coerce_numeric(left), coerce_numeric(right));
+        let (l, r) = (coerce_numeric(&left), coerce_numeric(&right));
         match (l.kind(), r.kind()) {
                 (ValueKind::Int(a), ValueKind::Int(b)) => Ok(match a.checked_add(b) {
                     Some(r) => Value::int(r),
@@ -2700,7 +2705,7 @@ impl Interpreter {
         if let Some((a, b)) = both_as_complex(&left, &right)? {
             return Ok(Value::complex(a.0 - b.0, a.1 - b.1));
         }
-        let (l, r) = (coerce_numeric(left), coerce_numeric(right));
+        let (l, r) = (coerce_numeric(&left), coerce_numeric(&right));
         match (l.kind(), r.kind()) {
             (ValueKind::Int(a), ValueKind::Int(b)) => Ok(match a.checked_sub(b) {
                 Some(r) => Value::int(r),
@@ -2801,7 +2806,7 @@ impl Interpreter {
             // (ar+ai*j) * (br+bi*j) = (ar*br - ai*bi) + (ar*bi + ai*br)j
             return Ok(Value::complex(a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0));
         }
-        let (l, r) = (coerce_numeric(left), coerce_numeric(right));
+        let (l, r) = (coerce_numeric(&left), coerce_numeric(&right));
         match (l.kind(), r.kind()) {
             (ValueKind::Int(a), ValueKind::Int(b)) => Ok(match a.checked_mul(b) {
                 Some(r) => Value::int(r),
@@ -2928,9 +2933,9 @@ impl Interpreter {
 
     pub(crate) fn try_inplace_op(
         &mut self,
-        left: Value,
+        left: &Value,
         op: BinaryOp,
-        right: Value,
+        right: &Value,
         is_augmented_assign: bool,
     ) -> Result<Option<Value>> {
         // Fast paths for built-in mutable containers: mutate in-place and
@@ -2967,7 +2972,7 @@ impl Interpreter {
                     // list += iterable  =>  list.extend(iterable)
                     let items = self.collect_iterable(right)?;
                     left.list_extend(items)?;
-                    return Ok(Some(left));
+                    return Ok(Some(left.clone()));
                 }
                 BinaryOp::Mul => {
                     // list *= n  =>  repeat in-place
@@ -2986,7 +2991,7 @@ impl Interpreter {
                             }
                         }
                     });
-                    return Ok(Some(left));
+                    return Ok(Some(left.clone()));
                 }
                 _ => {}
             }
@@ -3044,7 +3049,7 @@ impl Interpreter {
                         }
                         _ => unreachable!(),
                     });
-                    return Ok(Some(left));
+                    return Ok(Some(left.clone()));
                 }
                 _ => {}
             }
@@ -3055,10 +3060,10 @@ impl Interpreter {
             // valid; fall through to eval_binary for the TypeError with correct
             // operand names.  For |= the full dict.update() semantics apply
             // (accepts dicts and iterables of pairs).
-            if is_augmented_assign || dict_entries_from_value(&right).is_some() {
+            if is_augmented_assign || dict_entries_from_value(right).is_some() {
                 let empty_kw = indexmap::IndexMap::new();
-                pyrust_builtins::dict::call("update", &left, vec![right], &empty_kw)?;
-                return Ok(Some(left));
+                pyrust_builtins::dict::call("update", left, vec![right.clone()], &empty_kw)?;
+                return Ok(Some(left.clone()));
             }
         }
 
@@ -3094,10 +3099,10 @@ impl Interpreter {
             if let Some(inst_rc) = left.as_py_instance_rc() {
                 if let Some(backing) = instance_builtin_data(inst_rc) {
                     if matches!(backing.kind(), ValueKind::Dict(_)) {
-                        if is_augmented_assign || dict_entries_from_value(&right).is_some() {
+                        if is_augmented_assign || dict_entries_from_value(right).is_some() {
                             let empty_kw = indexmap::IndexMap::new();
-                            pyrust_builtins::dict::call("update", &backing, vec![right], &empty_kw)?;
-                            return Ok(Some(left));
+                            pyrust_builtins::dict::call("update", &backing, vec![right.clone()], &empty_kw)?;
+                            return Ok(Some(left.clone()));
                         }
                     }
                 }
@@ -3168,7 +3173,7 @@ impl Interpreter {
                             }
                             _ => unreachable!(),
                         });
-                        return Ok(Some(left));
+                        return Ok(Some(left.clone()));
                     }
                 }
             } else {
@@ -3199,7 +3204,7 @@ impl Interpreter {
         if let Some(value) = self.try_call_binary_method(&left, "__matmul__", right.clone())? {
             return Ok(value);
         }
-        if let Some(value) = self.try_call_binary_method(&right, "__rmatmul__", left.clone())? {
+        if let Some(value) = self.try_call_binary_method(&right, "__rmatmul__", left)? {
             return Ok(value);
         }
         Err(Self::unsupported_binary_operand("@"))
@@ -3358,8 +3363,8 @@ impl Interpreter {
     ) -> Result<Value> {
         // Issue #1204: extract scalar primitive backing for subclasses of
         // int/float/str/bytes so that `MyInt(5) < 10` etc. works.
-        let left = coerce_numeric(left);
-        let right = coerce_numeric(right);
+        let left = coerce_numeric(&left);
+        let right = coerce_numeric(&right);
         if matches!(left.kind(), ValueKind::Float(f) if f.is_nan())
             || matches!(right.kind(), ValueKind::Float(f) if f.is_nan())
         {
@@ -3415,7 +3420,7 @@ impl Interpreter {
         Ok(Some(resolved))
     }
 
-    fn eval_slice(&mut self, target: Value, lo: Option<Value>, hi: Option<Value>, st: Option<Value>) -> Result<Value> {
+    fn eval_slice(&mut self, target: &Value, lo: Option<Value>, hi: Option<Value>, st: Option<Value>) -> Result<Value> {
         // PyInstance: dispatch __getitem__ with a slice object built from the
         // raw (unresolved) bounds.  CPython passes the bound objects as-is so
         // that the user's __getitem__ sees them; resolution via __index__ is
@@ -3457,7 +3462,7 @@ impl Interpreter {
                 );
             }
             if let Some(backing) = instance_builtin_data(&inst_rc) {
-                return self.eval_slice(backing, lo, hi, st);
+                return self.eval_slice(&backing, lo, hi, st);
             }
             return Err(PyError::named(
                 "TypeError",
@@ -3812,7 +3817,7 @@ impl Interpreter {
                         &[],
                     )?;
                     loop {
-                        match self.call_next(iter_obj.clone(), None) {
+                        match self.call_next(&iter_obj, None) {
                             Ok(elem) => {
                                 if self.values_user_eq(&elem, &item)? {
                                     return Ok(Value::bool_(true));
@@ -3839,7 +3844,7 @@ impl Interpreter {
                 if lookup_class_attr(&class, "__getitem__").is_some() {
                     let iter_val = self.make_getitem_iter(Rc::clone(&inst_rc))?;
                     loop {
-                        match self.call_next(iter_val.clone(), None) {
+                        match self.call_next(&iter_val, None) {
                             Ok(elem) => {
                                 if self.values_user_eq(&elem, &item)? {
                                     return Ok(Value::bool_(true));
@@ -4198,7 +4203,7 @@ impl Interpreter {
                 's' => apply_str_precision(self.render_value_as_str(&arg)?, precision),
                 'r' => apply_str_precision(render_instance_repr(self, &arg)?, precision),
                 'd' | 'i' | 'u' => {
-                    let coerced_int = self.coerce_printf_int_arg(arg.clone())?;
+                    let coerced_int = self.coerce_printf_int_arg(arg)?;
                     match str_printf_to_int(&coerced_int, conv)? {
                         PrintfInt::Small(n) => {
                             if n < 0 {
@@ -4227,7 +4232,7 @@ impl Interpreter {
                     }
                 }
                 'o' => {
-                    let coerced_int = self.coerce_printf_int_arg(arg.clone())?;
+                    let coerced_int = self.coerce_printf_int_arg(arg)?;
                     match str_printf_to_int(&coerced_int, conv)? {
                         PrintfInt::Small(n) => {
                             if n < 0 {
@@ -4261,7 +4266,7 @@ impl Interpreter {
                     }
                 }
                 'x' => {
-                    let coerced_int = self.coerce_printf_int_arg(arg.clone())?;
+                    let coerced_int = self.coerce_printf_int_arg(arg)?;
                     match str_printf_to_int(&coerced_int, conv)? {
                         PrintfInt::Small(n) => {
                             if n < 0 {
@@ -4294,7 +4299,7 @@ impl Interpreter {
                     }
                 }
                 'X' => {
-                    let coerced_int = self.coerce_printf_int_arg(arg.clone())?;
+                    let coerced_int = self.coerce_printf_int_arg(arg)?;
                     match str_printf_to_int(&coerced_int, conv)? {
                         PrintfInt::Small(n) => {
                             if n < 0 {
@@ -4327,7 +4332,7 @@ impl Interpreter {
                     }
                 }
                 'e' | 'E' => {
-                    let coerced_float = self.coerce_printf_float_arg(arg.clone())?;
+                    let coerced_float = self.coerce_printf_float_arg(arg)?;
                     let f = str_printf_to_float(&coerced_float, conv)?;
                     let prec = precision.unwrap_or(6);
                     let s = format_scientific(f, prec, conv == 'E');
@@ -4340,7 +4345,7 @@ impl Interpreter {
                     }
                 }
                 'f' | 'F' => {
-                    let coerced_float = self.coerce_printf_float_arg(arg.clone())?;
+                    let coerced_float = self.coerce_printf_float_arg(arg)?;
                     let f = str_printf_to_float(&coerced_float, conv)?;
                     let upper = conv == 'F';
                     // Special-case NaN and Inf before calling format!(), which
@@ -4369,7 +4374,7 @@ impl Interpreter {
                     }
                 }
                 'g' | 'G' => {
-                    let coerced_float = self.coerce_printf_float_arg(arg.clone())?;
+                    let coerced_float = self.coerce_printf_float_arg(arg)?;
                     let f = str_printf_to_float(&coerced_float, conv)?;
                     let prec = precision.unwrap_or(6).max(1);
                     let s = format_general_float(f, prec, conv == 'G');
@@ -4386,7 +4391,7 @@ impl Interpreter {
                     // as %d/%x etc.  If __index__ returns non-int, we fall back
                     // to the original value so the match below emits the correct
                     // "%c requires int or char" TypeError.
-                    let coerced_char = self.coerce_printf_int_arg(arg.clone())?;
+                    let coerced_char = self.coerce_printf_int_arg(arg)?;
                     match coerced_char.kind() {
                         ValueKind::Str(s) => {
                             let mut cs = s.chars();
@@ -4824,11 +4829,10 @@ fn is_callable_method(v: &Value) -> bool {
     )
 }
 
-pub(crate) fn coerce_numeric(v: Value) -> Value {
+pub(crate) fn coerce_numeric(v: &Value) -> Value {
     // Extract via kind() in a scope so the borrow is dropped before we
-    // return `v` from the fallthrough — #450 made `kind()`'s borrow
-    // explicit, so we can't move `v` while a `ValueKind::List(_)` (or
-    // any other Ref-bearing variant) might be live.
+    // clone `v` in the fallthrough — #450 made `kind()`'s borrow
+    // explicit, so we can't hold a borrow while returning an owned Value.
     if let ValueKind::Bool(b) = v.kind() {
         return Value::int(b as i64);
     }
@@ -4852,14 +4856,14 @@ pub(crate) fn coerce_numeric(v: Value) -> Value {
             }
         }
     }
-    v
+    v.clone()
 }
 
-pub(crate) fn iter_values(value: Value) -> Result<Vec<Value>> {
+pub(crate) fn iter_values(value: &Value) -> Result<Vec<Value>> {
     // list/dict/set subclass: delegate to the backing primitive value.
     if let Some(inst_rc) = value.as_py_instance_rc() {
         if let Some(backing) = instance_builtin_data(inst_rc) {
-            return iter_values(backing);
+            return iter_values(&backing);
         }
     }
     match value.kind() {

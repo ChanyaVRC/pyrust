@@ -123,7 +123,7 @@ pyrust_module! {
                 PyError::Runtime(format!("internal: {FN_NAME}() _gen missing"))
             })?;
             // Advance to the first yield; the yielded value becomes the `with … as` target.
-            match _interp.call_next(generator, None) {
+            match _interp.call_next(&generator, None) {
                 Ok(val) => Ok(val),
                 Err(e) if is_stop_iteration(&e) => {
                     // Generator returned without yielding — protocol violation.
@@ -148,7 +148,7 @@ pyrust_module! {
                 // Normal exit: advance the generator past its yield point.
                 // The generator body should run until completion and raise
                 // StopIteration; if it yields again, that is a protocol violation.
-                match _interp.call_next(generator, None) {
+                match _interp.call_next(&generator, None) {
                     Ok(_) => {
                         // Generator yielded again — protocol violation.
                         Err(PyError::named(
@@ -274,7 +274,7 @@ pyrust_module! {
             let inst = expect_self(args, FN_NAME)?;
             let thing = inst.borrow().attrs.get("thing").cloned().unwrap_or_else(Value::none);
             // Call thing.close() with no arguments.
-            let close_method = _interp.get_attr(thing, "close")?;
+            let close_method = _interp.get_attr(&thing, "close")?;
             _interp.call_function_expanded(close_method, &[])?;
             Ok(Value::bool_(false))
         }
@@ -422,9 +422,9 @@ pyrust_module! {
             let cm = user[0].value.clone();
             // Retrieve __exit__ before calling __enter__ so that if __enter__
             // fails we don't register a cleanup for a context that never opened.
-            let exit_fn = _interp.get_attr(cm.clone(), "__exit__")?;
+            let exit_fn = _interp.get_attr(&cm, "__exit__")?;
             // Call cm.__enter__() with no arguments.
-            let enter_attr = _interp.get_attr(cm, "__enter__")?;
+            let enter_attr = _interp.get_attr(&cm, "__enter__")?;
             let enter_result = _interp.call_function_expanded(enter_attr, &[])?;
             // Push __exit__ onto the callback stack.
             let callbacks_val = inst.borrow().attrs.get("_callbacks").cloned()

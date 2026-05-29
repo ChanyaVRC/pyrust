@@ -837,13 +837,12 @@ impl Interpreter {
                                         ),
                                     ));
                                 }
-                                let iterable = pos[0].clone();
                                 let default_val =
                                     pos.get(1).cloned().unwrap_or_else(Value::none);
+                                // Collect keys before moving pos into bound_method_pos_buf
+                                // so we can borrow &pos[0] without an extra clone.
+                                let keys = self.collect_iterable(&pos[0])?;
                                 self.bound_method_pos_buf = pos;
-                                // Collect keys and build the map (same logic as dict_fromkeys
-                                // in builtins.rs: first-occurrence order, no duplicate keys).
-                                let keys = self.collect_iterable(iterable)?;
                                 let mut map: indexmap::IndexMap<PyKey, Value> =
                                     indexmap::IndexMap::with_capacity(keys.len());
                                 for key in &keys {
@@ -1571,9 +1570,8 @@ impl Interpreter {
                     ));
                 }
                 // Re-dispatch as attribute access on the first argument.
-                let receiver = args[0].value.clone();
                 let remaining = &args[1..];
-                let method_val = self.get_attr(receiver.clone(), attr_name)?;
+                let method_val = self.get_attr(&args[0].value, attr_name)?;
                 let expanded: Vec<ExpandedCallArg> = remaining
                     .iter()
                     .map(|a| ExpandedCallArg {
@@ -1611,7 +1609,7 @@ impl Interpreter {
     }
 
     /// Collect all values from an iterable (including generators) into a Vec.
-    pub(crate) fn collect_iterable(&mut self, val: Value) -> Result<Vec<Value>> {
+    pub(crate) fn collect_iterable(&mut self, val: &Value) -> Result<Vec<Value>> {
         if let ValueKind::Generator(state_rc) = val.kind() {
             let state_rc = Rc::clone(state_rc);
 
@@ -1761,7 +1759,7 @@ impl Interpreter {
             // with no user-defined __iter__ should iterate the backing primitive.
             if lookup_class_attr(&class, "__iter__").is_none() {
                 if let Some(backing) = instance_builtin_data(&inst_rc) {
-                    return self.collect_iterable(backing);
+                    return self.collect_iterable(&backing);
                 }
             }
             let iterator = if let Some(method_val) = lookup_class_attr(&class, "__iter__") {
@@ -1802,7 +1800,7 @@ impl Interpreter {
                 }
             } else {
                 loop {
-                    match self.call_next(iterator.clone(), None) {
+                    match self.call_next(&iterator, None) {
                         Ok(item) => items.push(item),
                         // class_name_is now walks the hierarchy for Raised variants,
                         // so StopIteration subclasses raised by __next__ are caught here.
@@ -1963,7 +1961,7 @@ impl Interpreter {
                 let borrow = state_rc.borrow();
                 borrow.downcast_ref::<MapIter>().unwrap().sources[i].clone()
             };
-            match self.call_next(iter_val, None) {
+            match self.call_next(&iter_val, None) {
                 Ok(v) => row.push(v),
                 Err(e) if e.class_name_is("StopIteration") => {
                     state_rc.borrow_mut().downcast_mut::<MapIter>().unwrap().done = true;
@@ -2004,7 +2002,7 @@ impl Interpreter {
                 (s.func.clone(), s.source.clone())
             };
             // Advance the source by one element.
-            let item = match self.call_next(iter_val, None) {
+            let item = match self.call_next(&iter_val, None) {
                 Ok(v) => v,
                 Err(e) if e.class_name_is("StopIteration") => {
                     state_rc.borrow_mut().downcast_mut::<FilterIter>().unwrap().done = true;
@@ -2049,7 +2047,7 @@ impl Interpreter {
             }
             (s.source.clone(), s.counter)
         };
-        match self.call_next(iter_val, None) {
+        match self.call_next(&iter_val, None) {
             Ok(item) => {
                 let mut borrow = state_rc.borrow_mut();
                 let s = borrow.downcast_mut::<EnumerateIter>().unwrap();
@@ -2106,7 +2104,7 @@ impl Interpreter {
                 let borrow = state_rc.borrow();
                 borrow.downcast_ref::<ZipIter>().unwrap().sources[i].clone()
             };
-            match self.call_next(iter_val, None) {
+            match self.call_next(&iter_val, None) {
                 Ok(v) => row.push(v),
                 Err(e) if e.class_name_is("StopIteration") => {
                     stopped_at = Some(i);
@@ -2127,7 +2125,7 @@ impl Interpreter {
                         let borrow = state_rc.borrow();
                         borrow.downcast_ref::<ZipIter>().unwrap().sources[j].clone()
                     };
-                    match self.call_next(iter_val, None) {
+                    match self.call_next(&iter_val, None) {
                         Ok(_) => {
                             if short_idx == 0 {
                                 return Err(PyError::named(
@@ -2159,7 +2157,7 @@ impl Interpreter {
     }
 
     /// Call next() on a generator or any object with __next__.
-    pub(crate) fn call_next(&mut self, val: Value, default: Option<Value>) -> Result<Value> {
+    pub(crate) fn call_next(&mut self, val: &Value, default: Option<Value>) -> Result<Value> {
         if let ValueKind::Generator(state_rc) = val.kind() {
             let state_rc = Rc::clone(state_rc);
 
@@ -3891,7 +3889,7 @@ impl Interpreter {
                 }
                 // Look up the named key in the mapping via __getitem__.
                 let base =
-                    self.eval_index(mapping.clone(), Value::string(head.to_string()))?;
+                    self.eval_index(&mapping, Value::string(head.to_string()))?;
 
                 let value = apply_field_accessors(self, base, rest)?;
                 let value = match conversion {
@@ -3952,7 +3950,7 @@ impl Interpreter {
                                     ));
                                 }
                                 let sv = self.eval_index(
-                                    mapping.clone(),
+                                    &mapping,
                                     Value::string(inner.to_string()),
                                 )?;
                                 spec_out.push_str(&sv.to_py_str());
@@ -4296,7 +4294,7 @@ impl Interpreter {
     /// - `PyInstance` with `__index__`: called; result must be `Int`/`Bool`/`BigInt`.
     /// - `PyInstance` without `__index__` / any other type: `TypeError` with the
     ///   label-specific message.
-    pub(crate) fn call_index_protocol(&mut self, val: Value, label: &str) -> Result<Value> {
+    pub(crate) fn call_index_protocol(&mut self, val: &Value, label: &str) -> Result<Value> {
         enum Tag {
             Int,
             Instance(Rc<RefCell<PyInstance>>),
@@ -4308,7 +4306,7 @@ impl Interpreter {
             _ => Tag::Other,
         };
         match tag {
-            Tag::Int => Ok(val),
+            Tag::Int => Ok(val.clone()),
             Tag::Instance(inst_rc) => {
                 let class = Rc::clone(&inst_rc.borrow().class);
                 if let Some(method_val) = lookup_class_attr(&class, "__index__") {
@@ -6054,7 +6052,7 @@ fn apply_field_accessors(
             // Dispatch getattr through the full attribute resolution path so
             // that built-in types (int, float, complex, …) work the same way
             // `getattr(value, attr)` does — not just PyInstance values (#1031).
-            value = interp.get_attr(value, attr)?;
+            value = interp.get_attr(&value, attr)?;
         } else if bytes[0] == b'[' {
             let end = bytes
                 .iter()
@@ -6082,7 +6080,7 @@ fn apply_field_accessors(
             } else {
                 Value::string(key_str.to_string())
             };
-            value = interp.eval_index(value, key)?;
+            value = interp.eval_index(&value, key)?;
         } else {
             return Err(PyError::named(
                 "ValueError",

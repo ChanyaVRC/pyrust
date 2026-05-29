@@ -725,7 +725,7 @@ impl Interpreter {
             funcname: frame.fn_name.clone(),
         });
         let result = self.run_bytecode_inner(
-            &frame.code.clone(),
+            &frame.code,
             regs_slice,
             std::mem::take(&mut frame.iters),
             std::mem::take(&mut frame.exc_handlers),
@@ -1263,7 +1263,7 @@ impl Interpreter {
                     regs[*dst as usize] = val;
                 }
                 Insn::StoreGlobal(name_idx, src) => {
-                    let name = pool_get!(code.names, *name_idx, "name").clone();
+                    let name = pool_get!(code.names, *name_idx, "name");
                     let val = vm_try!(vm_read(&regs, *src, num_locals));
                     self.assign_name(name, val);
                 }
@@ -1431,7 +1431,7 @@ impl Interpreter {
                     }
                     let l = vm_try!(vm_read(&regs, *lhs, num_locals));
                     let r = vm_try!(vm_read(&regs, *rhs, num_locals));
-                    let result = if let Some(v) = vm_try!(self.try_inplace_op(l.clone(), *op, r.clone(), true)) {
+                    let result = if let Some(v) = vm_try!(self.try_inplace_op(&l, *op, &r, true)) {
                         v
                     } else {
                         vm_try!(self.eval_binary(l, *op, r))
@@ -1456,7 +1456,7 @@ impl Interpreter {
                     // pass_copy_prop preserves this invariant by not substituting
                     // lhs when dst == lhs.
                     let is_aug = *dst == *lhs;
-                    let result = if let Some(v) = vm_try!(self.try_inplace_op(l.clone(), *op, r.clone(), is_aug)) {
+                    let result = if let Some(v) = vm_try!(self.try_inplace_op(&l, *op, &r, is_aug)) {
                         v
                     } else {
                         vm_try!(self.eval_binary(l, *op, r))
@@ -1479,7 +1479,7 @@ impl Interpreter {
                     // pass_copy_prop preserves this invariant by not substituting
                     // lhs when dst == lhs.
                     let is_aug = *dst == *lhs;
-                    let result = if let Some(v) = vm_try!(self.try_inplace_op(l.clone(), *op, r.clone(), is_aug)) {
+                    let result = if let Some(v) = vm_try!(self.try_inplace_op(&l, *op, &r, is_aug)) {
                         v
                     } else {
                         vm_try!(self.eval_binary(l, *op, r))
@@ -1683,7 +1683,7 @@ impl Interpreter {
                         AttrFastResult::Miss => {
                             let name = pool_get!(code.names, *name_idx, "name");
                             let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
-                            let result = vm_try!(self.get_attr(obj_val.clone(), name));
+                            let result = vm_try!(self.get_attr(&obj_val, name));
                             regs[*dst as usize] = result;
                             // Fill the cache after the slow path, but only for
                             // PyInstance targets that resolve to a class attr
@@ -1767,7 +1767,7 @@ impl Interpreter {
                     let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
                     let name = pool_get!(code.names, *name_idx, "name");
                     let type_name = value_type_name_str(&obj_val);
-                    match self.get_attr(obj_val, name) {
+                    match self.get_attr(&obj_val, name) {
                         Ok(v) => regs[*dst as usize] = v,
                         Err(_) => {
                             // CPython converts any lookup failure (AttributeError or
@@ -1791,10 +1791,7 @@ impl Interpreter {
                 Insn::ImportFromAttr(dst, mod_reg, name_idx) => {
                     let mod_val = vm_try!(vm_read(&regs, *mod_reg, num_locals));
                     let name = pool_get!(code.names, *name_idx, "name");
-                    // Pass mod_val directly (already cloned by vm_read); do NOT
-                    // clone again here — the extra clone on the success path was
-                    // a measurable regression (~14 %) on tight import-from loops.
-                    let result = self.get_attr(mod_val, name);
+                    let result = self.get_attr(&mod_val, name);
                     match result {
                         Ok(v) => regs[*dst as usize] = v,
                         Err(e) if e.class_name_is("AttributeError") => {
@@ -1903,7 +1900,7 @@ impl Interpreter {
                         && let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val)
                     {
                         let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
-                        let result = vm_try!(self.eval_slice(obj_val, lo, hi, st));
+                        let result = vm_try!(self.eval_slice(&obj_val, lo, hi, st));
                         regs[*dst as usize] = result;
                     } else {
                         // Fast path: read directly from the register without cloning
@@ -1972,7 +1969,7 @@ impl Interpreter {
                             }
                             FastResult::Miss => {
                                 let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
-                                let r = vm_try!(self.eval_index(obj_val, idx_val));
+                                let r = vm_try!(self.eval_index(&obj_val, idx_val));
                                 regs[*dst as usize] = r;
                             }
                         }
@@ -2032,7 +2029,7 @@ impl Interpreter {
                         {
                             new_items
                         } else {
-                            vm_try!(self.collect_iterable(val_val.clone()).map_err(|_| {
+                            vm_try!(self.collect_iterable(&val_val).map_err(|_| {
                                 PyError::named(
                                     "TypeError",
                                     "can only assign an iterable".to_string(),
@@ -2075,7 +2072,7 @@ impl Interpreter {
                                 let len = regs[*obj as usize].list_len().unwrap_or(0);
                                 // Resolve __index__ protocol before integer normalization.
                                 // Clone so idx_val remains available for other match arms.
-                                let idx_resolved = vm_try!(self.call_index_protocol(idx_val.clone(), "list"));
+                                let idx_resolved = vm_try!(self.call_index_protocol(&idx_val, "list"));
                                 let i = vm_try!(normalize_index_write(&idx_resolved, len, "list"));
                                 regs[*obj as usize].list_with_mut(|items| {
                                     items[i] = val_val;
@@ -2244,7 +2241,7 @@ impl Interpreter {
                                                     .list_len()
                                                     .unwrap_or(0);
                                                 // Resolve __index__ protocol before integer normalization.
-                                                let idx_resolved = vm_try!(self.call_index_protocol(idx_val.clone(), "list"));
+                                                let idx_resolved = vm_try!(self.call_index_protocol(&idx_val, "list"));
                                                 let i = vm_try!(
                                                     normalize_index_write(
                                                         &idx_resolved,
@@ -2364,7 +2361,7 @@ impl Interpreter {
                         if target_kind == 1 {
                             let len = regs[*obj as usize].list_len().unwrap_or(0);
                             // Resolve __index__ protocol before integer normalization.
-                            let idx_resolved = vm_try!(self.call_index_protocol(idx_val.clone(), "list"));
+                            let idx_resolved = vm_try!(self.call_index_protocol(&idx_val, "list"));
                             let i = vm_try!(normalize_index_write(&idx_resolved, len, "list"));
                             regs[*obj as usize].list_with_mut(|items| {
                                 if i + 1 == items.len() {
@@ -2497,17 +2494,17 @@ impl Interpreter {
                     }
                 }
                 Insn::DeleteName(name_idx) => {
-                    let name = pool_get!(code.names, *name_idx, "name").clone();
-                    let is_global = self.env.borrow().global_names.contains(&name);
+                    let name = pool_get!(code.names, *name_idx, "name");
+                    let is_global = self.env.borrow().global_names.contains(name.as_str());
                     if is_global {
                         // For `global x; del x` inside a function: target the module
                         // env, not the function's local env.  Remove from both
                         // env.values and module_globals_dict (issue #706); raise
                         // NameError only if absent from both.
                         let me = module_env(&self.env);
-                        let in_env = me.borrow_mut().values.remove(&name).is_some();
+                        let in_env = me.borrow_mut().values.remove(name.as_str()).is_some();
                         let in_dict = self.module_globals_dict
-                            .dict_shift_remove(&PyKey::str_from(&*name))
+                            .dict_shift_remove(&PyKey::str_from(name.as_str()))
                             .ok()
                             .flatten()
                             .is_some();
@@ -2538,7 +2535,7 @@ impl Interpreter {
                             .iter()
                             .find(|v| v.kind == FrameKind::Script)
                         {
-                            if let Some(&slot) = script_view.local_index.get(&name) {
+                            if let Some(&slot) = script_view.local_index.get(name.as_str()) {
                                 let slot = slot as usize;
                                 if slot < script_view.regs_len {
                                     unsafe {
@@ -2553,11 +2550,11 @@ impl Interpreter {
                         // module_globals_dict (issue #706) so LoadGlobal cannot
                         // resurrect the deleted name.  Raise NameError if absent
                         // from both.
-                        let in_env = self.env.borrow_mut().values.remove(&name).is_some();
+                        let in_env = self.env.borrow_mut().values.remove(name.as_str()).is_some();
                         let is_module_scope = self.env.borrow().parent.is_none();
                         let in_dict = if is_module_scope {
                             self.module_globals_dict
-                                .dict_shift_remove(&PyKey::str_from(&*name))
+                                .dict_shift_remove(&PyKey::str_from(name.as_str()))
                                 .ok()
                                 .flatten()
                                 .is_some()
@@ -2751,12 +2748,12 @@ impl Interpreter {
                 }
                 Insn::MatchExcept(type_reg, offset) => {
                     let type_val = vm_try!(vm_read(&regs, *type_reg, num_locals));
-                    let exc = vm_try!(self.active_exception.clone().ok_or_else(|| {
+                    let exc = vm_try!(self.active_exception.as_ref().ok_or_else(|| {
                         PyError::Runtime(
                             "internal error: MatchExcept with no active exception".to_string(),
                         )
                     }));
-                    if !vm_try!(self.exception_matches(&exc, &type_val)) {
+                    if !vm_try!(self.exception_matches(exc, &type_val)) {
                         pc = jump_pc!(*offset);
                     }
                     // No stack push on match: the dispatch already pushed
@@ -2872,7 +2869,7 @@ impl Interpreter {
                     vm_try!(Err::<(), _>(PyError::Raised(exc)));
                 }
                 Insn::RaiseReRaise => {
-                    let exc = vm_try!(self.active_exception.clone().ok_or_else(|| {
+                    let exc = vm_try!(self.active_exception.take().ok_or_else(|| {
                         PyError::Runtime("No active exception to reraise".to_string())
                     }));
                     // RaiseReRaise is emitted by the compiler at three
@@ -2910,7 +2907,7 @@ impl Interpreter {
                     };
 
                     // Load __match_args__ from the class.
-                    let match_args = match self.get_attr(cls_val, "__match_args__") {
+                    let match_args = match self.get_attr(&cls_val, "__match_args__") {
                         Ok(v) => v,
                         Err(e) if e.class_name_is("AttributeError") => {
                             vm_try!(Err(PyError::named(
@@ -2957,7 +2954,7 @@ impl Interpreter {
                     // For each positional index, get the attribute name from
                     // __match_args__[i] and load that attribute from the subject.
                     for i in 0..n {
-                        let name_val = match_args_vec[i].clone();
+                        let name_val = &match_args_vec[i];
                         let attr_name = match name_val.as_str() {
                             Some(s) => s.to_string(),
                             None => {
@@ -2965,13 +2962,13 @@ impl Interpreter {
                                     "TypeError",
                                     format!(
                                         "__match_args__ elements must be strings (got {})",
-                                        value_type_name_str(&name_val)
+                                        value_type_name_str(name_val)
                                     ),
                                 )));
                                 unreachable!()
                             }
                         };
-                        let attr_val = vm_try!(self.get_attr(subj_val.clone(), &attr_name));
+                        let attr_val = vm_try!(self.get_attr(&subj_val, &attr_name));
                         regs[(*dst_base as usize) + i] = attr_val;
                     }
                 }
@@ -3267,7 +3264,7 @@ impl Interpreter {
                     // #448: write back via the scoped `list_extend`
                     // operation method (no `&mut Vec` crosses the API
                     // boundary).
-                    let items_to_add = vm_try!(self.collect_iterable(src_val));
+                    let items_to_add = vm_try!(self.collect_iterable(&src_val));
                     vm_try!(regs[*list_reg as usize].list_extend(items_to_add));
                 }
                 Insn::DictUpdate(dict_reg, src_reg) => {
@@ -3420,7 +3417,7 @@ impl Interpreter {
                 // ── Unpack ───────────────────────────────────────────────
                 Insn::Unpack(base, src, n) => {
                     let src_val = vm_try!(vm_read(&regs, *src, num_locals));
-                    let items = vm_try!(self.collect_iterable(src_val));
+                    let items = vm_try!(self.collect_iterable(&src_val));
                     if items.len() < *n as usize {
                         vm_try!(Err::<(), _>(PyError::named(
                             "ValueError",
@@ -3449,7 +3446,7 @@ impl Interpreter {
 
                 Insn::UnpackEx { src, before, after, dst_base } => {
                     let src_val = vm_try!(vm_read(&regs, *src, num_locals));
-                    let items = vm_try!(self.collect_iterable(src_val));
+                    let items = vm_try!(self.collect_iterable(&src_val));
                     let before = *before as usize;
                     let after = *after as usize;
                     let min_len = before + after;
@@ -3585,17 +3582,21 @@ impl Interpreter {
                                     // list/dict/set subclass with no user-defined __iter__:
                                     // iterate the backing primitive directly, matching
                                     // CPython's inherited tp_iter slot behaviour.
-                                    IterState::Materialized(vm_try!(iter_values(backing)), 0)
+                                    if matches!(backing.kind(), ValueKind::List(_) | ValueKind::Tuple(_)) {
+                                        IterState::ValueIndexed { value: backing, pos: 0 }
+                                    } else {
+                                        IterState::Materialized(vm_try!(iter_values(&backing)), 0)
+                                    }
                                 } else if lookup_class_attr(&class, "__getitem__").is_some() {
                                     let iter_obj = vm_try!(self.make_getitem_iter(inst_rc));
                                     IterState::UserDefined(iter_obj)
                                 } else {
-                                    IterState::Materialized(vm_try!(iter_values(src_val)), 0)
+                                    IterState::Materialized(vm_try!(iter_values(&src_val)), 0)
                                 }
                             }
                             IterTag::BuiltinIterable => IterState::UserDefined(src_val),
                             IterTag::Other => {
-                                IterState::Materialized(vm_try!(iter_values(src_val)), 0)
+                                IterState::Materialized(vm_try!(iter_values(&src_val)), 0)
                             }
                         }
                     };
@@ -3664,7 +3665,7 @@ impl Interpreter {
                         }
                         Some(IterState::UserDefined(iter_obj)) => {
                             // Call __next__() on the iterator object; stop on StopIteration.
-                            let iter_val = iter_obj.clone();
+                            let iter_val: &Value = iter_obj;
                             let next_result: Option<Result<Value>> =
                                 if let ValueKind::Generator(state_rc) = iter_val.kind() {
                                     let state_rc = Rc::clone(state_rc);
@@ -4502,8 +4503,8 @@ impl Interpreter {
 
                 // ── Import ───────────────────────────────────────────────
                 Insn::ImportModule(dst, name_idx) => {
-                    let name = pool_get!(code.names, *name_idx, "name").clone();
-                    let module = vm_try!(self.load_module(&name));
+                    let name = pool_get!(code.names, *name_idx, "name");
+                    let module = vm_try!(self.load_module(name));
                     regs[*dst as usize] = module;
                 }
                 Insn::ImportStar(mod_reg) => {
@@ -4611,7 +4612,7 @@ impl Interpreter {
                         }
                     };
                     for (name, val) in pairs {
-                        self.assign_name(name, val);
+                        self.assign_name(&name, val);
                     }
                 }
 
@@ -4969,7 +4970,7 @@ impl Interpreter {
                 }
 
                 let obj_val = vm_read(regs, obj, num_locals)?;
-                let method_val = self.get_attr(obj_val.clone(), method)?;
+                let method_val = self.get_attr(&obj_val, method)?;
                 let mut buf = std::mem::take(&mut self.call_arg_buf);
                 buf.clear();
                 for arg in args {
@@ -5298,7 +5299,7 @@ impl Interpreter {
                     return self.call_generator_method(obj_val, method, pos_items);
                 }
                 let obj_val = vm_read(regs, obj, num_locals)?;
-                let method_val = self.get_attr(obj_val, method)?;
+                let method_val = self.get_attr(&obj_val, method)?;
                 let mut expanded: ExpandedArgBuf = pos_items
                     .into_iter()
                     .map(|v| ExpandedCallArg { name: None, value: v })
@@ -5346,7 +5347,7 @@ impl Interpreter {
                         "generator.__next__() takes no arguments".to_string(),
                     ));
                 }
-                self.call_next(receiver, None)
+                self.call_next(&receiver, None)
             }
             "close" => {
                 if !args.is_empty() {

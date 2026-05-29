@@ -336,7 +336,7 @@ impl Interpreter {
         for (name, &idx) in local_index.iter() {
             if !regs[idx as usize].is_unset() {
                 let val = std::mem::replace(&mut regs[idx as usize], Value::unset());
-                self.assign_name(name.clone(), val);
+                self.assign_name(name, val);
             }
         }
         // If a traceback was formatted, return it as a pre-formatted Runtime
@@ -434,7 +434,7 @@ impl Interpreter {
                     if !regs[idx as usize].is_unset() {
                         let val =
                             std::mem::replace(&mut regs[idx as usize], Value::unset());
-                        self.assign_name(name.clone(), val);
+                        self.assign_name(name, val);
                     }
                 }
                 vm_result.map(|_| ())
@@ -691,7 +691,7 @@ impl Interpreter {
                 for (name, &idx) in local_index.iter() {
                     if !regs[idx as usize].is_unset() {
                         let val = std::mem::replace(&mut regs[idx as usize], Value::unset());
-                        self.assign_name(name.clone(), val);
+                        self.assign_name(name, val);
                     }
                 }
                 vm_result.map(|_| ())

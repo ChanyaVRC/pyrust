@@ -1090,7 +1090,7 @@ mod tests {
         use std::sync::Once;
         static ONCE: Once = Once::new();
         ONCE.call_once(|| {
-            pyrust_core::install_iter_values(|v| crate::interpreter::iter_values(v.clone()));
+            pyrust_core::install_iter_values(|v| crate::interpreter::iter_values(v));
         });
     }
 

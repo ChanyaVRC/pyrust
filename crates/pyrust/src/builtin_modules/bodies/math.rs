@@ -404,8 +404,8 @@ pyrust_module! {
                 format!("{FN_NAME}() takes exactly two arguments"),
             ));
         }
-        let p_items = _interp.collect_iterable(args[0].value.clone())?;
-        let q_items = _interp.collect_iterable(args[1].value.clone())?;
+        let p_items = _interp.collect_iterable(&args[0].value)?;
+        let q_items = _interp.collect_iterable(&args[1].value)?;
         if p_items.len() != q_items.len() {
             return Err(PyError::named(
                 "ValueError",
@@ -613,7 +613,7 @@ pyrust_module! {
             .first()
             .map(|a| a.value.clone())
             .unwrap_or_else(|| Value::int(1));
-        let items = _interp.collect_iterable(positional[0].value.clone())?;
+        let items = _interp.collect_iterable(&positional[0].value)?;
         let mut acc = start;
         for item in items {
             acc = _interp.eval_binary(acc, BinaryOp::Mul, item)?;
