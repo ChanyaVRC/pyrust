@@ -7729,9 +7729,9 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
         // dunders, and built-in types that aren't yet covered by extra_bases
         // registration (e.g. bytearray, range, generators).
         {
-            let abc_name = expected.borrow().name.clone();
+            let class_ref = expected.borrow();
             if let Some(result) =
-                crate::builtin_modules::collections_abc::abc_subclasshook(&abc_name, obj)
+                crate::builtin_modules::collections_abc::abc_subclasshook(&class_ref.name, obj)
             {
                 return result;
             }
