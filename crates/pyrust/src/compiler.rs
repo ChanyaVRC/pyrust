@@ -7281,7 +7281,7 @@ impl Compiler {
         // Collect annotation keys: annotated param names (in declaration order) then
         // "return" if there is a return annotation.  These are parallel to the
         // annotation register window emitted just before MakeFunction.
-        let annotation_keys: Vec<String> = params
+        let annotation_keys: SmallVec<[String; 4]> = params
             .iter()
             .filter(|p| p.annotation.is_some())
             .map(|p| p.name.clone())
@@ -7312,7 +7312,7 @@ impl Compiler {
             is_pure,
             annotation_keys,
             docstring: fn_docstring,
-            class_kwarg_names: Vec::new(),
+            class_kwarg_names: SmallVec::new(),
         });
 
         // Compile default values (right-to-left in declaration, left-to-right in slots).
@@ -7675,7 +7675,7 @@ impl Compiler {
             global_names: body_global,
             nonlocal_names: body_nonlocal_rc,
             is_pure: false,
-            annotation_keys: Vec::new(),
+            annotation_keys: SmallVec::new(),
             docstring: class_docstring,
             class_kwarg_names: keywords.iter().map(|(k, _)| k.clone()).collect(),
         });
@@ -9183,9 +9183,9 @@ impl Compiler {
             global_names: inner_global_rc,
             nonlocal_names: inner_nonlocal_rc,
             is_pure,
-            annotation_keys: Vec::new(),
+            annotation_keys: SmallVec::new(),
             docstring: None,
-            class_kwarg_names: Vec::new(),
+            class_kwarg_names: SmallVec::new(),
         });
 
         // Emit MakeFunction + Call, same layout as compile_gen_exp.
@@ -9521,9 +9521,9 @@ impl Compiler {
             global_names: inner_global_rc,
             nonlocal_names: inner_nonlocal_rc,
             is_pure,
-            annotation_keys: Vec::new(),
+            annotation_keys: SmallVec::new(),
             docstring: None,
-            class_kwarg_names: Vec::new(),
+            class_kwarg_names: SmallVec::new(),
         });
 
         // Allocate a temp for the function value, emit MakeFunction (no

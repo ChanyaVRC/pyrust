@@ -55,7 +55,9 @@ pub struct FnProto {
     /// the `annots_base..+annots_n` register window: `annotation_keys[i]` is
     /// the dict key (parameter name or `"return"`) for `R[annots_base + i]`.
     /// Empty when the function has no annotations.
-    pub annotation_keys: Vec<String>,
+    /// `SmallVec<[_; 4]>` avoids heap allocation for the common case of
+    /// functions with four or fewer annotated parameters.
+    pub annotation_keys: SmallVec<[String; 4]>,
     /// Docstring extracted from the first statement of the body if it is a
     /// bare string literal (`Stmt::Expr(Expr::Str(...))`), matching CPython's
     /// `co_consts[0]` / `__doc__` extraction.  `None` when no docstring
@@ -64,7 +66,9 @@ pub struct FnProto {
     /// PEP 487 keyword argument names from the class header (e.g. `key` in
     /// `class Foo(Base, key=val)`).  Parallel to the kwarg value registers in
     /// `MakeClass` (`kwarg_base..kwarg_base+kwarg_n`).  Empty for functions.
-    pub class_kwarg_names: Vec<String>,
+    /// `SmallVec<[_; 2]>` avoids heap allocation for the typical case of
+    /// zero to two keyword arguments in a class header.
+    pub class_kwarg_names: SmallVec<[String; 2]>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
