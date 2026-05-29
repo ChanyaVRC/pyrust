@@ -1164,6 +1164,7 @@ fn lambda_captures_in_expr(
         Expr::Yield(Some(e)) => lambda_captures_in_expr(e, local_index, is_class_scope, cells),
         Expr::Yield(None) => {}
         Expr::YieldFrom(e) => lambda_captures_in_expr(e, local_index, is_class_scope, cells),
+        Expr::Await(e) => lambda_captures_in_expr(e, local_index, is_class_scope, cells),
     }
 }
 
@@ -1621,6 +1622,9 @@ fn collect_class_lambda_outer_refs_in_expr(
         Expr::YieldFrom(e) => {
             collect_class_lambda_outer_refs_in_expr(e, local_index, class_locals, cells)
         }
+        Expr::Await(e) => {
+            collect_class_lambda_outer_refs_in_expr(e, local_index, class_locals, cells)
+        }
     }
 }
 
@@ -1886,6 +1890,7 @@ fn collect_free_var_reads_in_expr(expr: &Expr, uses: &mut HashSet<String>) {
         Expr::Yield(Some(e)) => collect_free_var_reads_in_expr(e, uses),
         Expr::Yield(None) => {}
         Expr::YieldFrom(e) => collect_free_var_reads_in_expr(e, uses),
+        Expr::Await(e) => collect_free_var_reads_in_expr(e, uses),
     }
 }
 
@@ -2330,6 +2335,7 @@ fn collect_transitive_free_vars_in_expr(expr: &Expr, uses: &mut HashSet<String>)
         Expr::Yield(Some(e)) => collect_transitive_free_vars_in_expr(e, uses),
         Expr::Yield(None) => {}
         Expr::YieldFrom(e) => collect_transitive_free_vars_in_expr(e, uses),
+        Expr::Await(e) => collect_transitive_free_vars_in_expr(e, uses),
     }
 }
 
@@ -3290,7 +3296,8 @@ fn expr_safe(expr: &Expr, i_name: &str, c_name: &str) -> bool {
         | Expr::Lambda { .. }
         | Expr::Named { .. }
         | Expr::Yield(_)
-        | Expr::YieldFrom(_) => false,
+        | Expr::YieldFrom(_)
+        | Expr::Await(_) => false,
     }
 }
 
@@ -3528,6 +3535,7 @@ fn expr_reads_var(expr: &Expr, name: &str) -> bool {
         Expr::Yield(Some(e)) => expr_reads_var(e, name),
         Expr::Yield(None) => false,
         Expr::YieldFrom(e) => expr_reads_var(e, name),
+        Expr::Await(e) => expr_reads_var(e, name),
     }
 }
 
@@ -3741,7 +3749,8 @@ fn rewrite_c_at_i_in_expr(expr: &mut Expr, c_name: &str, i_name: &str) {
         | Expr::Lambda { .. }
         | Expr::Named { .. }
         | Expr::Yield(_)
-        | Expr::YieldFrom(_) => {}
+        | Expr::YieldFrom(_)
+        | Expr::Await(_) => {}
     }
 }
 
@@ -4880,6 +4889,7 @@ impl Compiler {
                 body,
                 decorators,
                 return_annotation,
+                is_async: _,
             } => {
                 self.compile_def(name, params, body, decorators, return_annotation.as_ref());
             }
@@ -5548,6 +5558,11 @@ impl Compiler {
                 if !self.is_function_scope {
                     self.set_syntax_error("'yield' outside function");
                 }
+            }
+            Expr::Await(_) => {
+                self.set_syntax_error(
+                    "'await' not supported: async functions are not yet implemented",
+                );
             }
             Expr::Binary { left, right, .. } => {
                 self.check_dead_expr(left);
@@ -8564,6 +8579,13 @@ impl Compiler {
                 // result_reg is the value of the `yield from` expression.
                 result_reg
             }
+
+            Expr::Await(_) => {
+                self.set_syntax_error(
+                    "'await' not supported: async functions are not yet implemented",
+                );
+                0
+            }
         }
     }
 
@@ -9126,6 +9148,10 @@ impl Compiler {
             }
             return 0;
         }
+        if clauses.iter().any(|c| c.is_async) {
+            self.set_syntax_error("async comprehension is not yet supported");
+            return 0;
+        }
 
         const ACC_NAME: &str = ".acc";
 
@@ -9166,6 +9192,10 @@ impl Compiler {
             }
             return 0;
         }
+        if clauses.iter().any(|c| c.is_async) {
+            self.set_syntax_error("async comprehension is not yet supported");
+            return 0;
+        }
 
         const ACC_NAME: &str = ".acc";
 
@@ -9194,6 +9224,10 @@ impl Compiler {
             if self.error_msg.is_none() {
                 self.error_msg = Some("set comprehension requires at least one clause".to_string());
             }
+            return 0;
+        }
+        if clauses.iter().any(|c| c.is_async) {
+            self.set_syntax_error("async comprehension is not yet supported");
             return 0;
         }
 
@@ -9246,6 +9280,10 @@ impl Compiler {
                 self.error_msg =
                     Some("generator expression requires at least one clause".to_string());
             }
+            return 0;
+        }
+        if clauses.iter().any(|c| c.is_async) {
+            self.set_syntax_error("async comprehension is not yet supported");
             return 0;
         }
 

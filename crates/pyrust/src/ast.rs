@@ -73,6 +73,7 @@ pub enum Stmt {
         body: Vec<Stmt>,
         decorators: Vec<Expr>,
         return_annotation: Option<Expr>,
+        is_async: bool,
     },
     Class {
         name: String,
@@ -316,6 +317,8 @@ pub enum Expr {
     Yield(Option<Box<Expr>>),
     /// `yield from expr`
     YieldFrom(Box<Expr>),
+    /// `await expr` — only valid inside an async function
+    Await(Box<Expr>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -356,11 +359,13 @@ pub enum BinaryOp {
 }
 
 /// A single `for target in iter (if cond)?` clause inside a comprehension.
+/// `is_async` is set when the clause is `async for target in iter`.
 #[derive(Debug, Clone)]
 pub struct CompClause {
     pub target: AssignTarget,
     pub iter: Expr,
     pub cond: Option<Expr>,
+    pub is_async: bool,
 }
 
 /// Comparison operators (used in chained comparisons)
