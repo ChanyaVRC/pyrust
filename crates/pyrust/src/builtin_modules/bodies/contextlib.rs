@@ -350,13 +350,14 @@ pyrust_module! {
             let inst = expect_self(args, FN_NAME)?;
             // Pop callbacks in LIFO order, call each with (exc_type, exc_val, traceback).
             // If any callback suppresses the exception (returns truthy), stop propagating.
-            let exc_type = args.get(1).map(|a| a.value.clone()).unwrap_or_else(Value::none);
-            let exc_val  = args.get(2).map(|a| a.value.clone()).unwrap_or_else(Value::none);
-            let tb       = args.get(3).map(|a| a.value.clone()).unwrap_or_else(Value::none);
+            let mut exc_type = args.get(1).map(|a| a.value.clone()).unwrap_or_else(Value::none);
+            let mut exc_val  = args.get(2).map(|a| a.value.clone()).unwrap_or_else(Value::none);
+            let mut tb       = args.get(3).map(|a| a.value.clone()).unwrap_or_else(Value::none);
             let cbs = pop_all_callbacks(&inst);
             let mut suppressed = false;
             let mut pending_err: Option<PyError> = None;
-            // Walk LIFO (reverse).
+            // Walk LIFO (reverse). CPython runs ALL callbacks regardless of
+            // exceptions or suppression; only the final state matters.
             for cb in cbs.into_iter().rev() {
                 let result = _interp.call_function_expanded(
                     cb,
@@ -370,13 +371,20 @@ pyrust_module! {
                     Ok(v) => {
                         if !exc_type.is_none() && is_truthy(&v) {
                             suppressed = true;
-                            break;
+                            // Subsequent callbacks see no active exception.
+                            exc_type = Value::none();
+                            exc_val = Value::none();
+                            tb = Value::none();
                         }
                     }
                     Err(e) => {
-                        // New exception from a callback — this replaces the current one.
+                        // New exception replaces current; subsequent callbacks
+                        // see no exception (we can't round-trip PyError → Value).
                         pending_err = Some(e);
-                        break;
+                        suppressed = false;
+                        exc_type = Value::none();
+                        exc_val = Value::none();
+                        tb = Value::none();
                     }
                 }
             }
@@ -449,15 +457,22 @@ pyrust_module! {
         fn close(args) -> Result<Value> {
             let inst = expect_self(args, FN_NAME)?;
             let cbs = pop_all_callbacks(&inst);
+            let mut pending_err: Option<PyError> = None;
             for cb in cbs.into_iter().rev() {
-                _interp.call_function_expanded(
+                let result = _interp.call_function_expanded(
                     cb,
                     &[
                         ExpandedCallArg { name: None, value: Value::none() },
                         ExpandedCallArg { name: None, value: Value::none() },
                         ExpandedCallArg { name: None, value: Value::none() },
                     ],
-                )?;
+                );
+                if let Err(e) = result {
+                    pending_err = Some(e);
+                }
+            }
+            if let Some(e) = pending_err {
+                return Err(e);
             }
             Ok(Value::none())
         }
