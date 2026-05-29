@@ -4673,6 +4673,9 @@ pyrust_module! {
         // CPython's error message uses the new class's name (the `cls` arg),
         // not the literal string "object". E.g. for `class B(A, foo=1)` the
         // message is "B.__init_subclass__() takes no keyword arguments".
+        //
+        // Check keyword args first (CPython raises keyword error even when
+        // positional excess is also present).
         if args.iter().any(|a| a.name.is_some()) {
             let cls_name = args
                 .first()
@@ -4684,6 +4687,16 @@ pyrust_module! {
             return Err(PyError::named(
                 "TypeError",
                 format!("{cls_name}.__init_subclass__() takes no keyword arguments"),
+            ));
+        }
+        // args[0] is the implicit `cls` prepended by the classmethod dispatch.
+        // Any additional positional arguments are excess.
+        let n_positional = args.iter().filter(|a| a.name.is_none()).count();
+        if n_positional > 1 {
+            let excess = n_positional - 1;
+            return Err(PyError::named(
+                "TypeError",
+                format!("object.__init_subclass__() takes no arguments ({excess} given)"),
             ));
         }
         Ok(Value::none())
