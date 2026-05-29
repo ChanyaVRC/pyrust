@@ -245,6 +245,10 @@ pub(crate) enum IterState {
     /// Behaves like CPython's list_iterator: checks pos < len each tick; no
     /// mutation detection (appending extends iteration, removing shortens it).
     Indexed { reg: crate::bytecode::Reg, pos: usize },
+    /// Lazy: owns the list/tuple Value (used when the source is a temp register
+    /// and cannot be accessed by slot index).  Avoids the extra Vec allocation
+    /// and N element clones that `Materialized` would incur via `iter_values`.
+    ValueIndexed { value: Value, pos: usize },
     /// User-defined iterator: holds the iterator object (result of __iter__).
     /// Each ForIter call invokes __next__() on it and stops on StopIteration.
     UserDefined(Value),
@@ -3518,6 +3522,7 @@ impl Interpreter {
                             Generator,
                             PyInstance(Rc<RefCell<crate::value::PyInstance>>),
                             BuiltinIterable,
+                            ListOrTuple,
                             Other,
                         }
                         let tag = match src_val.kind() {
@@ -3527,6 +3532,7 @@ impl Interpreter {
                             ValueKind::BuiltinObject { ops, .. } if ops.is_iterable() => {
                                 IterTag::BuiltinIterable
                             }
+                            ValueKind::List(_) | ValueKind::Tuple(_) => IterTag::ListOrTuple,
                             _ => IterTag::Other,
                         };
                         match tag {
@@ -3540,6 +3546,13 @@ impl Interpreter {
                                 IterState::Range { cur: start, stop, step }
                             }
                             IterTag::Generator => IterState::UserDefined(src_val),
+                            IterTag::ListOrTuple => {
+                                // Temp-register list/tuple: own the value directly instead
+                                // of materializing via iter_values (which allocates a new Vec
+                                // and clones all N elements upfront).  Elements are cloned
+                                // lazily one-by-one in ForIter, matching the Indexed path.
+                                IterState::ValueIndexed { value: src_val, pos: 0 }
+                            }
                             IterTag::PyInstance(inst_rc) => {
                                 let class = Rc::clone(&inst_rc.borrow().class);
                                 if let Some(method_val) = lookup_class_attr(&class, "__iter__") {
@@ -3604,6 +3617,19 @@ impl Interpreter {
                             } else {
                                 regs[src].as_list().or_else(|| regs[src].as_tuple())
                             };
+                            match items {
+                                Some(items) if cur_pos < items.len() => {
+                                    // SAFETY: cur_pos < items.len() checked just above.
+                                    let v = unsafe { items.get_unchecked(cur_pos).clone() };
+                                    *pos = cur_pos + 1;
+                                    regs[*dst as usize] = v;
+                                }
+                                _ => pc = jump_pc!(*offset),
+                            }
+                        }
+                        Some(IterState::ValueIndexed { value, pos }) => {
+                            let cur_pos = *pos;
+                            let items: Option<&[Value]> = value.as_list().or_else(|| value.as_tuple());
                             match items {
                                 Some(items) if cur_pos < items.len() => {
                                     // SAFETY: cur_pos < items.len() checked just above.
