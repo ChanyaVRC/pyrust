@@ -4719,8 +4719,14 @@ pyrust_module! {
     /// should proceed.
     ///
     /// CPython signature: `object.__subclasshook__(cls, subclass, /)`
+    ///
+    /// CPython rejects keyword arguments with the message
+    /// `__subclasshook__() takes no keyword arguments` (note: no `object.`
+    /// prefix, unlike `__init_subclass__`).  Any number of positional args
+    /// is accepted — the implementation ignores them all.
     #[py_name = "object.__subclasshook__"]
-    fn object_subclasshook(_args) -> Result<Value> {
+    fn object_subclasshook(args) -> Result<Value> {
+        reject_keyword_args_expanded("__subclasshook__", args)?;
         Ok(Value::not_implemented())
     }
 

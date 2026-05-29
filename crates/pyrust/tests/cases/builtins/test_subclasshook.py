@@ -27,3 +27,13 @@ class Bar:
 
 print(Bar.__subclasshook__(int))
 print(Bar.__subclasshook__(str))
+
+# Keyword args are rejected even though positional args are accepted freely.
+try:
+    object.__subclasshook__(subclass=int)
+except TypeError as e:
+    print(type(e).__name__, e)
+
+# Any number of positional args is accepted (CPython ignores them all).
+print(object.__subclasshook__())
+print(object.__subclasshook__(int, str, float))
