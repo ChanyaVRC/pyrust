@@ -475,7 +475,9 @@ pub struct FnCode {
     /// Nested function / class body prototypes
     pub(crate) fn_protos: Vec<FnProto>,
     /// Variables captured by nested functions (stored in env, not registers).
-    pub(crate) cell_vars: Vec<CellVar>,
+    /// `SmallVec<[_; 4]>` avoids heap allocation for the common case of
+    /// functions with four or fewer captured variables.
+    pub(crate) cell_vars: SmallVec<[CellVar; 4]>,
     /// True if this function body contains at least one `Yield` instruction.
     /// The VM creates a generator object instead of executing immediately.
     pub(crate) is_generator: bool,
