@@ -1729,15 +1729,25 @@ fn read_islice_state(
 }
 
 /// Extract a non-negative `i64` (or `None`) from an `islice` slot.
-fn slice_arg(fn_name: &str, v: &Value, slot: &str) -> Result<Option<i64>> {
+fn slice_arg(_fn_name: &str, v: &Value, slot: &str) -> Result<Option<i64>> {
     match v.kind() {
         ValueKind::None => Ok(None),
         ValueKind::Int(n) => Ok(Some(n)),
         ValueKind::Bool(b) => Ok(Some(b as i64)),
-        _ => Err(PyError::named(
-            "TypeError",
-            format!("{fn_name}() {slot} argument must be an integer or None"),
-        )),
+        _ => {
+            let msg = match slot {
+                "step" => "Step for islice() must be a positive integer or None.".to_string(),
+                "stop" => {
+                    "Stop argument for islice() must be None or an integer: 0 <= x <= sys.maxsize."
+                        .to_string()
+                }
+                _ => {
+                    "Indices for islice() must be None or an integer: 0 <= x <= sys.maxsize."
+                        .to_string()
+                }
+            };
+            Err(PyError::named("ValueError", msg))
+        }
     }
 }
 
