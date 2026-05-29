@@ -1750,11 +1750,67 @@ pub fn encode_str_to_bytes(source: &str, encoding: &str, errors: &str) -> Result
 
     match canonical.as_str() {
         "utf-8" | "utf8" | "u8" | "utf" => Ok(Value::bytes(source.as_bytes().to_vec())),
+        // UTF-8-SIG: prepend U+FEFF BOM (EF BB BF) then UTF-8 encoded content.
+        "utf-8-sig" => {
+            let mut out = Vec::with_capacity(3 + source.len());
+            out.extend_from_slice(b"\xef\xbb\xbf");
+            out.extend_from_slice(source.as_bytes());
+            Ok(Value::bytes(out))
+        }
         "ascii" | "us-ascii" | "646" => {
             encode_single_byte_codec(source, "ascii", |cp| cp < 0x80, "128", errors)
         }
         "latin-1" | "iso-8859-1" | "8859" | "cp819" | "latin1" | "l1" => {
             encode_single_byte_codec(source, "latin-1", |cp| cp < 0x100, "256", errors)
+        }
+        // UTF-16 with LE BOM: \xff\xfe followed by LE-encoded code units.
+        // "utf16" is the no-separator alias (normalize replaces _ with - but not
+        // nothing, so "utf16" stays as-is and must be listed separately).
+        "utf-16" | "utf16" => {
+            let mut out = Vec::with_capacity(2 + source.encode_utf16().count() * 2);
+            out.extend_from_slice(b"\xff\xfe");
+            for unit in source.encode_utf16() {
+                out.extend_from_slice(&unit.to_le_bytes());
+            }
+            Ok(Value::bytes(out))
+        }
+        "utf-16-le" => {
+            let mut out = Vec::with_capacity(source.encode_utf16().count() * 2);
+            for unit in source.encode_utf16() {
+                out.extend_from_slice(&unit.to_le_bytes());
+            }
+            Ok(Value::bytes(out))
+        }
+        "utf-16-be" => {
+            let mut out = Vec::with_capacity(source.encode_utf16().count() * 2);
+            for unit in source.encode_utf16() {
+                out.extend_from_slice(&unit.to_be_bytes());
+            }
+            Ok(Value::bytes(out))
+        }
+        // UTF-32 with LE BOM: \xff\xfe\x00\x00 followed by LE-encoded code points.
+        "utf-32" | "utf32" => {
+            let chars: Vec<char> = source.chars().collect();
+            let mut out = Vec::with_capacity(4 + chars.len() * 4);
+            out.extend_from_slice(b"\xff\xfe\x00\x00");
+            for c in &chars {
+                out.extend_from_slice(&(*c as u32).to_le_bytes());
+            }
+            Ok(Value::bytes(out))
+        }
+        "utf-32-le" => {
+            let mut out = Vec::with_capacity(source.chars().count() * 4);
+            for c in source.chars() {
+                out.extend_from_slice(&(c as u32).to_le_bytes());
+            }
+            Ok(Value::bytes(out))
+        }
+        "utf-32-be" => {
+            let mut out = Vec::with_capacity(source.chars().count() * 4);
+            for c in source.chars() {
+                out.extend_from_slice(&(c as u32).to_be_bytes());
+            }
+            Ok(Value::bytes(out))
         }
         _ => Err(PyError::named(
             "LookupError",
