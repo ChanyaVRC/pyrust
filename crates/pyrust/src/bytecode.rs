@@ -2,6 +2,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use smallvec::SmallVec;
+
 use crate::ast::{BinaryOp, UnaryOp};
 use crate::value::Value;
 
@@ -14,14 +16,17 @@ pub type Reg = u32;
 /// Static parameter metadata for a function prototype.  Shared via `Rc` so that
 /// `MakeFunction` (which may run on every loop iteration) pays only a refcount
 /// bump instead of cloning four separate `Vec`s.
+///
+/// `SmallVec<[_; 6]>` avoids heap allocation for the common case of functions
+/// with six or fewer parameters.
 #[derive(Debug, Clone)]
 pub struct FnParamSpec {
-    pub names: Vec<String>,
-    pub has_default: Vec<bool>,
-    pub is_args: Vec<bool>,
-    pub is_kwargs: Vec<bool>,
-    pub is_keyword_only: Vec<bool>,
-    pub is_positional_only: Vec<bool>,
+    pub names: SmallVec<[String; 6]>,
+    pub has_default: SmallVec<[bool; 6]>,
+    pub is_args: SmallVec<[bool; 6]>,
+    pub is_kwargs: SmallVec<[bool; 6]>,
+    pub is_keyword_only: SmallVec<[bool; 6]>,
+    pub is_positional_only: SmallVec<[bool; 6]>,
 }
 
 /// Prototype for a nested function or class body.  Created at compile time,

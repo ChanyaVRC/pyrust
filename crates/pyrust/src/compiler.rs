@@ -2,6 +2,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
+use smallvec::SmallVec;
+
 use crate::ast::{
     AssignTarget, BinaryOp, CallArg, CompClause, DictItem, Expr, FStringPart, FunctionParam,
     MatchArm, Pattern, Stmt, UnaryOp,
@@ -3795,13 +3797,19 @@ fn detect_while_range<'a>(
 // ─── Compiler struct ──────────────────────────────────────────────────────────
 
 struct LoopCtx {
-    break_patches: Vec<usize>,
+    /// Instruction indices of `Jump(0)` placeholders for `break` statements;
+    /// patched to jump past the loop once the loop end is known.
+    /// `SmallVec<[usize; 2]>` avoids heap allocation for the common case of
+    /// zero or one `break` per loop.
+    break_patches: SmallVec<[usize; 2]>,
     /// None when the continue target is not yet known (e.g. counter-range loop
     /// where the increment comes after the body).  Patched before the increment.
     continue_target: Option<usize>,
     /// Indices of Jump(0) instructions emitted for `continue` when continue_target
     /// was None; fixed up once continue_target is established.
-    continue_patches: Vec<usize>,
+    /// `SmallVec<[usize; 2]>` avoids heap allocation for the common case of
+    /// zero or one `continue` before the target is known.
+    continue_patches: SmallVec<[usize; 2]>,
     /// Depth of `Compiler::except_cleanups` at the point this loop was entered.
     /// `break` and `continue` must emit cleanups for entries above this depth.
     cleanup_depth: usize,
@@ -6287,9 +6295,9 @@ impl Compiler {
         };
 
         self.loops.push(LoopCtx {
-            break_patches: Vec::new(),
+            break_patches: SmallVec::new(),
             continue_target: Some(loop_start),
-            continue_patches: Vec::new(),
+            continue_patches: SmallVec::new(),
             cleanup_depth: self.except_cleanups.len(),
         });
         let saved = self.def_set;
@@ -6383,9 +6391,9 @@ impl Compiler {
 
         self.mark_def(var_reg);
         self.loops.push(LoopCtx {
-            break_patches: Vec::new(),
+            break_patches: SmallVec::new(),
             continue_target: Some(loop_start),
-            continue_patches: Vec::new(),
+            continue_patches: SmallVec::new(),
             cleanup_depth: self.except_cleanups.len(),
         });
         let saved = self.def_set;
@@ -6541,9 +6549,9 @@ impl Compiler {
             self.emit(Insn::SyncModuleGlobal(var_reg, name_idx));
         }
         self.loops.push(LoopCtx {
-            break_patches: Vec::new(),
+            break_patches: SmallVec::new(),
             continue_target: Some(loop_start),
-            continue_patches: Vec::new(),
+            continue_patches: SmallVec::new(),
             cleanup_depth: self.except_cleanups.len(),
         });
         let saved = self.def_set;
@@ -6688,9 +6696,9 @@ impl Compiler {
             }
         }
         self.loops.push(LoopCtx {
-            break_patches: Vec::new(),
+            break_patches: SmallVec::new(),
             continue_target: Some(loop_start),
-            continue_patches: Vec::new(),
+            continue_patches: SmallVec::new(),
             cleanup_depth: self.except_cleanups.len(),
         });
         let saved_def_set = self.def_set;
@@ -7650,12 +7658,12 @@ impl Compiler {
             name: name.to_string(),
             qualname: class_qualname,
             param_spec: Rc::new(FnParamSpec {
-                names: vec![],
-                has_default: vec![],
-                is_args: vec![],
-                is_kwargs: vec![],
-                is_keyword_only: vec![],
-                is_positional_only: vec![],
+                names: SmallVec::new(),
+                has_default: SmallVec::new(),
+                is_args: SmallVec::new(),
+                is_kwargs: SmallVec::new(),
+                is_keyword_only: SmallVec::new(),
+                is_positional_only: SmallVec::new(),
             }),
             code: Rc::new(body_code),
             local_index: body_index_rc,
