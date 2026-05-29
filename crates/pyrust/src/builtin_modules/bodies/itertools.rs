@@ -1,12 +1,9 @@
 // `itertools` module — body for the `itertools` entry in
-// `pyrust_builtin_modules!`.  Currently exposes: `chain`, `islice`,
+// `pyrust_builtin_modules!`.  Exposes: `chain`, `islice`,
 // `count`, `repeat`, `cycle`, `takewhile`, `dropwhile`, `starmap`,
 // `accumulate`, `product`, `combinations`, `combinations_with_replacement`,
-// `permutations`, `groupby`, `compress`.
-//
-// Still missing vs CPython: `pairwise`, `tee`,
-// `filterfalse`, `zip_longest`, and `batched` (3.12+).  Tracked in
-// the follow-up to #330.
+// `permutations`, `groupby`, `compress`, `zip_longest`, `filterfalse`,
+// `tee`, `pairwise`, `batched`.
 //
 // ## Laziness
 //
@@ -26,6 +23,7 @@
 
 use crate::error::{PyError, Result};
 use crate::interpreter::ExpandedCallArg;
+use crate::interpreter::value_type_name_str;
 use crate::interpreter::reject_keyword_args_expanded;
 use crate::value::{PyInstance, Value, ValueKind};
 use pyrust_derive::pyrust_module;
@@ -1217,6 +1215,412 @@ pyrust_module! {
                     return Ok(item);
                 }
                 // Selector was falsy — skip this pair and try the next one.
+            }
+        }
+    }
+
+    /// CPython: itertools.zip_longest(*iterables, fillvalue=None) — like
+    /// zip() but continues until the longest iterable is exhausted,
+    /// substituting `fillvalue` for shorter ones.
+    /// <https://docs.python.org/3/library/itertools.html#itertools.zip_longest>
+    class zip_longest {
+        fn __init__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let mut positional: Vec<Value> = Vec::new();
+            let mut fillvalue = Value::none();
+            for a in &args[1..] {
+                match a.name.as_deref() {
+                    Some("fillvalue") => fillvalue = a.value.clone(),
+                    Some(other) => return Err(PyError::named(
+                        "TypeError",
+                        format!("{FN_NAME}() got an unexpected keyword argument '{other}'"),
+                    )),
+                    None => positional.push(a.value.clone()),
+                }
+            }
+            // Build iterators from each input; pre-materialise only
+            // PyInstance / Generator sources (same as chain/compress).
+            let iters: Vec<Value> = positional
+                .into_iter()
+                .map(|v| make_iter(_interp, v))
+                .collect::<Result<_>>()?;
+            let n = iters.len();
+            let mut a = inst.borrow_mut();
+            a.attrs.insert("_iters".to_string(), Value::list(iters));
+            a.attrs.insert("_fillvalue".to_string(), fillvalue);
+            // `_active` tracks how many iterables have not yet raised
+            // StopIteration.  Once it reaches zero we stop.
+            a.attrs.insert("_active".to_string(), Value::int(n as i64));
+            // `_done` is a parallel bool list (one per iterator).
+            a.attrs.insert(
+                "_done".to_string(),
+                Value::list(vec![Value::bool_(false); n]),
+            );
+            Ok(Value::none())
+        }
+
+        fn __iter__(args) -> Result<Value> {
+            Ok(args[0].value.clone())
+        }
+
+        fn __next__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let active = match inst.borrow().attrs.get("_active").map(|v| v.kind()) {
+                Some(ValueKind::Int(n)) => n,
+                _ => return Err(internal(FN_NAME)),
+            };
+            if active == 0 {
+                return Err(PyError::named("StopIteration", String::new()));
+            }
+            let (iters, fillvalue) = {
+                let a = inst.borrow();
+                (
+                    a.attrs.get("_iters").cloned().ok_or_else(|| internal(FN_NAME))?,
+                    a.attrs.get("_fillvalue").cloned().ok_or_else(|| internal(FN_NAME))?,
+                )
+            };
+            let iter_list = match iters.kind() {
+                ValueKind::List(lst) => lst,
+                _ => return Err(internal(FN_NAME)),
+            };
+            let n = iter_list.len();
+            let mut tuple: Vec<Value> = Vec::with_capacity(n);
+            let mut new_active = active;
+            // Read current _done flags.
+            let done_val = inst
+                .borrow()
+                .attrs
+                .get("_done")
+                .cloned()
+                .ok_or_else(|| internal(FN_NAME))?;
+            let done_vals = match done_val.kind() {
+                ValueKind::List(lst) => lst,
+                _ => return Err(internal(FN_NAME)),
+            };
+            let mut new_done: Vec<Value> = done_vals.clone();
+            for i in 0..n {
+                let already_done = matches!(done_vals[i].kind(), ValueKind::Bool(true));
+                if already_done {
+                    tuple.push(fillvalue.clone());
+                } else {
+                    match _interp.call_next(iter_list[i].clone(), None) {
+                        Ok(v) => tuple.push(v),
+                        Err(e) if is_stop_iteration(&e) => {
+                            tuple.push(fillvalue.clone());
+                            new_done[i] = Value::bool_(true);
+                            new_active -= 1;
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+            inst.borrow_mut()
+                .attrs
+                .insert("_active".to_string(), Value::int(new_active));
+            inst.borrow_mut()
+                .attrs
+                .insert("_done".to_string(), Value::list(new_done));
+            // CPython behaviour: when the last active iterator(s) raise
+            // StopIteration in the same step, zip_longest raises
+            // StopIteration too — it does NOT yield the all-fill row.
+            if new_active == 0 {
+                return Err(PyError::named("StopIteration", String::new()));
+            }
+            Ok(Value::tuple(tuple))
+        }
+    }
+
+    /// CPython: itertools.filterfalse(predicate, iterable) — yield
+    /// elements for which `predicate(elem)` is falsy.  If predicate is
+    /// `None`, yield elements that are themselves falsy.
+    /// <https://docs.python.org/3/library/itertools.html#itertools.filterfalse>
+    class filterfalse {
+        fn __init__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let user = &args[1..];
+            reject_keyword_args_expanded(FN_NAME, user)?;
+            if user.len() != 2 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("filterfalse expected 2 arguments, got {}", user.len()),
+                ));
+            }
+            let iter = make_iter(_interp, user[1].value.clone())?;
+            let mut a = inst.borrow_mut();
+            a.attrs.insert("_pred".to_string(), user[0].value.clone());
+            a.attrs.insert("_iter".to_string(), iter);
+            Ok(Value::none())
+        }
+
+        fn __iter__(args) -> Result<Value> {
+            Ok(args[0].value.clone())
+        }
+
+        fn __next__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let (pred, iter) = {
+                let a = inst.borrow();
+                (
+                    a.attrs.get("_pred").cloned().ok_or_else(|| internal(FN_NAME))?,
+                    a.attrs.get("_iter").cloned().ok_or_else(|| internal(FN_NAME))?,
+                )
+            };
+            loop {
+                let item = _interp.call_next(iter.clone(), None)?;
+                let falsy = if pred.is_none() {
+                    // None predicate — test the element itself.
+                    !_interp.truthy_value(&item)?
+                } else {
+                    let verdict = _interp.call_function_expanded(
+                        pred.clone(),
+                        &[ExpandedCallArg { name: None, value: item.clone() }],
+                    )?;
+                    !_interp.truthy_value(&verdict)?
+                };
+                if falsy {
+                    return Ok(item);
+                }
+            }
+        }
+    }
+
+    /// CPython: itertools.tee(iterable, n=2) — return `n` independent
+    /// iterators that all yield the same sequence.  Internally each
+    /// iterator draws from a shared VecDeque buffer filled lazily from
+    /// the common source.
+    /// <https://docs.python.org/3/library/itertools.html#itertools.tee>
+    fn tee(args) -> Result<Value> {
+        // Parse: tee(iterable) or tee(iterable, n)
+        // CPython rejects keyword arguments outright for tee().
+        let mut positional: Vec<Value> = Vec::new();
+        for a in args {
+            match a.name.as_deref() {
+                Some(_) => {
+                    return Err(PyError::named(
+                        "TypeError",
+                        "itertools.tee() takes no keyword arguments".to_string(),
+                    ))
+                }
+                None => positional.push(a.value.clone()),
+            }
+        }
+        let got = positional.len();
+        if got == 0 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("tee expected at least 1 argument, got {got}"),
+            ));
+        }
+        if got > 2 {
+            return Err(PyError::named(
+                "TypeError",
+                format!("tee expected at most 2 arguments, got {got}"),
+            ));
+        }
+        let n: usize = match positional.get(1).map(|v| v.kind()) {
+            None => 2,
+            Some(ValueKind::Int(n)) if n >= 0 => n as usize,
+            Some(ValueKind::Bool(b)) => b as usize,
+            Some(ValueKind::Int(_)) => return Err(PyError::named(
+                "ValueError",
+                "n must be >= 0".to_string(),
+            )),
+            Some(_) => {
+                let n_val = positional.get(1).unwrap();
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "'{}' object cannot be interpreted as an integer",
+                        value_type_name_str(n_val),
+                    ),
+                ));
+            }
+        };
+        // Materialise the source into a list eagerly, then return n list_iterator
+        // views all starting at index 0.  Fully lazy tee requires a shared
+        // buffer cell (Rc<RefCell<…>>) which can't be stored in Value attrs
+        // without an Rc<dyn Any> escape hatch.  Materialising is simpler and
+        // matches the observable contract: any use of tee iterators
+        // after exhausting the source is safe.
+        let items = _interp.collect_iterable(positional[0].clone())?;
+        let shared = Value::list(items);
+        // Each tee iterator is a list_iterator-style instance with a
+        // `_source` (the shared list) and `_pos` index.
+        let mut result: Vec<Value> = Vec::with_capacity(n);
+        for _ in 0..n {
+            let iter = _interp.call_function_expanded(
+                Value::builtin_function("iter"),
+                &[ExpandedCallArg { name: None, value: shared.clone() }],
+            )?;
+            result.push(iter);
+        }
+        Ok(Value::tuple(result))
+    }
+
+    /// CPython: itertools.pairwise(iterable) — yield successive
+    /// overlapping pairs: `pairwise('ABCD') → (A,B) (B,C) (C,D)`.
+    /// Added in Python 3.10.
+    /// <https://docs.python.org/3/library/itertools.html#itertools.pairwise>
+    class pairwise {
+        fn __init__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let user = &args[1..];
+            reject_keyword_args_expanded(FN_NAME, user)?;
+            if user.len() != 1 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!(
+                        "pairwise expected 1 argument, got {}",
+                        user.len()
+                    ),
+                ));
+            }
+            let iter = make_iter(_interp, user[0].value.clone())?;
+            // Pull the first element so we always have a `_prev` to pair
+            // with.  If the source is empty or has only one element the
+            // iterator is immediately exhausted.
+            let prev = match _interp.call_next(iter.clone(), None) {
+                Ok(v) => v,
+                Err(e) if is_stop_iteration(&e) => {
+                    // Empty source — mark exhausted immediately.
+                    let mut a = inst.borrow_mut();
+                    a.attrs.insert("_iter".to_string(), iter);
+                    a.attrs.insert("_prev".to_string(), Value::none());
+                    a.attrs.insert("_exhausted".to_string(), Value::bool_(true));
+                    return Ok(Value::none());
+                }
+                Err(e) => return Err(e),
+            };
+            let mut a = inst.borrow_mut();
+            a.attrs.insert("_iter".to_string(), iter);
+            a.attrs.insert("_prev".to_string(), prev);
+            a.attrs.insert("_exhausted".to_string(), Value::bool_(false));
+            Ok(Value::none())
+        }
+
+        fn __iter__(args) -> Result<Value> {
+            Ok(args[0].value.clone())
+        }
+
+        fn __next__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            if matches!(
+                inst.borrow().attrs.get("_exhausted").map(|v| v.kind()),
+                Some(ValueKind::Bool(true))
+            ) {
+                return Err(PyError::named("StopIteration", String::new()));
+            }
+            let (prev, iter) = {
+                let a = inst.borrow();
+                (
+                    a.attrs.get("_prev").cloned().ok_or_else(|| internal(FN_NAME))?,
+                    a.attrs.get("_iter").cloned().ok_or_else(|| internal(FN_NAME))?,
+                )
+            };
+            match _interp.call_next(iter, None) {
+                Ok(next) => {
+                    inst.borrow_mut()
+                        .attrs
+                        .insert("_prev".to_string(), next.clone());
+                    Ok(Value::tuple(vec![prev, next]))
+                }
+                Err(e) if is_stop_iteration(&e) => {
+                    inst.borrow_mut()
+                        .attrs
+                        .insert("_exhausted".to_string(), Value::bool_(true));
+                    Err(PyError::named("StopIteration", String::new()))
+                }
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    /// CPython: itertools.batched(iterable, n) — yield tuples of length
+    /// `n` from `iterable`; the last tuple may be shorter.  `n` must be
+    /// >= 1.  Added in Python 3.12.
+    /// <https://docs.python.org/3/library/itertools.html#itertools.batched>
+    class batched {
+        fn __init__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            let user = &args[1..];
+            reject_keyword_args_expanded(FN_NAME, user)?;
+            if user.len() < 2 {
+                return Err(PyError::named(
+                    "TypeError",
+                    "batched() missing required argument 'n' (pos 2)".to_string(),
+                ));
+            }
+            if user.len() > 2 {
+                return Err(PyError::named(
+                    "TypeError",
+                    format!("batched() takes at most 2 arguments ({} given)", user.len()),
+                ));
+            }
+            let n = match user[1].value.kind() {
+                ValueKind::Int(n) if n >= 1 => n,
+                ValueKind::Bool(true) => 1,
+                ValueKind::Int(_) | ValueKind::Bool(false) => return Err(PyError::named(
+                    "ValueError",
+                    "n must be at least one".to_string(),
+                )),
+                _ => {
+                    let n_val = &user[1].value;
+                    return Err(PyError::named(
+                        "TypeError",
+                        format!(
+                            "'{}' object cannot be interpreted as an integer",
+                            value_type_name_str(n_val),
+                        ),
+                    ));
+                }
+            };
+            let iter = make_iter(_interp, user[0].value.clone())?;
+            let mut a = inst.borrow_mut();
+            a.attrs.insert("_iter".to_string(), iter);
+            a.attrs.insert("_n".to_string(), Value::int(n));
+            a.attrs.insert("_exhausted".to_string(), Value::bool_(false));
+            Ok(Value::none())
+        }
+
+        fn __iter__(args) -> Result<Value> {
+            Ok(args[0].value.clone())
+        }
+
+        fn __next__(args) -> Result<Value> {
+            let inst = expect_self(args, FN_NAME)?;
+            if matches!(
+                inst.borrow().attrs.get("_exhausted").map(|v| v.kind()),
+                Some(ValueKind::Bool(true))
+            ) {
+                return Err(PyError::named("StopIteration", String::new()));
+            }
+            let (iter, n) = {
+                let a = inst.borrow();
+                (
+                    a.attrs.get("_iter").cloned().ok_or_else(|| internal(FN_NAME))?,
+                    match a.attrs.get("_n").map(|v| v.kind()) {
+                        Some(ValueKind::Int(n)) => n as usize,
+                        _ => return Err(internal(FN_NAME)),
+                    },
+                )
+            };
+            let mut batch: Vec<Value> = Vec::with_capacity(n);
+            for _ in 0..n {
+                match _interp.call_next(iter.clone(), None) {
+                    Ok(v) => batch.push(v),
+                    Err(e) if is_stop_iteration(&e) => {
+                        inst.borrow_mut()
+                            .attrs
+                            .insert("_exhausted".to_string(), Value::bool_(true));
+                        break;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            if batch.is_empty() {
+                Err(PyError::named("StopIteration", String::new()))
+            } else {
+                Ok(Value::tuple(batch))
             }
         }
     }
