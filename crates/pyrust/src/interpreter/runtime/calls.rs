@@ -1570,9 +1570,8 @@ impl Interpreter {
                     ));
                 }
                 // Re-dispatch as attribute access on the first argument.
-                let receiver = args[0].value.clone();
                 let remaining = &args[1..];
-                let method_val = self.get_attr(&receiver, attr_name)?;
+                let method_val = self.get_attr(&args[0].value, attr_name)?;
                 let expanded: Vec<ExpandedCallArg> = remaining
                     .iter()
                     .map(|a| ExpandedCallArg {

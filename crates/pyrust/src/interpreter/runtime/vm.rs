@@ -1900,7 +1900,7 @@ impl Interpreter {
                         && let Some((lo, hi, st)) = Self::unpack_slice_key(&idx_val)
                     {
                         let obj_val = vm_try!(vm_read(&regs, *obj, num_locals));
-                        let result = vm_try!(self.eval_slice(obj_val, lo, hi, st));
+                        let result = vm_try!(self.eval_slice(&obj_val, lo, hi, st));
                         regs[*dst as usize] = result;
                     } else {
                         // Fast path: read directly from the register without cloning
@@ -2748,12 +2748,12 @@ impl Interpreter {
                 }
                 Insn::MatchExcept(type_reg, offset) => {
                     let type_val = vm_try!(vm_read(&regs, *type_reg, num_locals));
-                    let exc = vm_try!(self.active_exception.clone().ok_or_else(|| {
+                    let exc = vm_try!(self.active_exception.as_ref().ok_or_else(|| {
                         PyError::Runtime(
                             "internal error: MatchExcept with no active exception".to_string(),
                         )
                     }));
-                    if !vm_try!(self.exception_matches(&exc, &type_val)) {
+                    if !vm_try!(self.exception_matches(exc, &type_val)) {
                         pc = jump_pc!(*offset);
                     }
                     // No stack push on match: the dispatch already pushed
@@ -2869,7 +2869,7 @@ impl Interpreter {
                     vm_try!(Err::<(), _>(PyError::Raised(exc)));
                 }
                 Insn::RaiseReRaise => {
-                    let exc = vm_try!(self.active_exception.clone().ok_or_else(|| {
+                    let exc = vm_try!(self.active_exception.take().ok_or_else(|| {
                         PyError::Runtime("No active exception to reraise".to_string())
                     }));
                     // RaiseReRaise is emitted by the compiler at three

@@ -295,7 +295,7 @@ impl Interpreter {
                 let hi = if s.stop.is_none() { None } else { Some(s.stop.clone()) };
                 let st = if s.step.is_none() { None } else { Some(s.step.clone()) };
                 drop(borrow);
-                return self.eval_slice(target.clone(), lo, hi, st);
+                return self.eval_slice(target, lo, hi, st);
             }
         }
         // Handle Dict separately so the temporary `&IndexMap` from
@@ -3420,7 +3420,7 @@ impl Interpreter {
         Ok(Some(resolved))
     }
 
-    fn eval_slice(&mut self, target: Value, lo: Option<Value>, hi: Option<Value>, st: Option<Value>) -> Result<Value> {
+    fn eval_slice(&mut self, target: &Value, lo: Option<Value>, hi: Option<Value>, st: Option<Value>) -> Result<Value> {
         // PyInstance: dispatch __getitem__ with a slice object built from the
         // raw (unresolved) bounds.  CPython passes the bound objects as-is so
         // that the user's __getitem__ sees them; resolution via __index__ is
@@ -3462,7 +3462,7 @@ impl Interpreter {
                 );
             }
             if let Some(backing) = instance_builtin_data(&inst_rc) {
-                return self.eval_slice(backing, lo, hi, st);
+                return self.eval_slice(&backing, lo, hi, st);
             }
             return Err(PyError::named(
                 "TypeError",
