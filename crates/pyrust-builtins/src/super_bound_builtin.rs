@@ -56,10 +56,12 @@ impl BuiltinTypeOps for SuperBoundBuiltinOps {
                 Some(Value::string(bare))
             }
             "__qualname__" => {
-                // Bind to the instance's class name if available.
-                // E.g. for `int.__init_subclass__`, returns "int.__init_subclass__".
+                // Bind to the instance's class qualname if available.
+                // For `int.__init_subclass__` returns "int.__init_subclass__".
+                // For a nested class `Outer.Inner.__init_subclass__` returns
+                // "Outer.Inner.__init_subclass__" (using qualname, not name).
                 let cls_name = match s.instance.kind() {
-                    ValueKind::PyClass(c) => c.borrow().name.clone(),
+                    ValueKind::PyClass(c) => c.borrow().qualname.clone(),
                     _ => pyrust_core::builtin_type_name(&s.instance).into_owned(),
                 };
                 let bare = s.fn_name.rsplit('.').next().unwrap_or(&s.fn_name);
