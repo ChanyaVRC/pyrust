@@ -2469,7 +2469,7 @@ impl Interpreter {
                 bound_args[index] = Some(value.clone());
             }
             let mut positional_index = bound_prefix.len();
-            let mut posonly_violations: Vec<&str> = Vec::new();
+            let mut posonly_violations: smallvec::SmallVec<[&str; 4]> = smallvec::SmallVec::new();
             // Deferred unknown-keyword: CPython raises posonly error before
             // unexpected-keyword error when both are present in the same call.
             let mut first_unknown_keyword: Option<&str> = None;
@@ -2570,8 +2570,8 @@ impl Interpreter {
             // Resolve defaults: fill any still-empty bound_args slots in-place.
             // Collect all missing required positional and keyword-only args before
             // raising, so the error groups them all (CPython 3.12 parity).
-            let mut missing_positional: Vec<&str> = Vec::new();
-            let mut missing_kwonly: Vec<&str> = Vec::new();
+            let mut missing_positional: smallvec::SmallVec<[&str; 4]> = smallvec::SmallVec::new();
+            let mut missing_kwonly: smallvec::SmallVec<[&str; 4]> = smallvec::SmallVec::new();
             for (index, param) in function.params.iter().enumerate() {
                 if bound_args[index].is_none() {
                     if let Some(default) = param.default.clone() {
@@ -2872,8 +2872,8 @@ impl Interpreter {
         let mut param_vals: Vec<Value> = Vec::with_capacity(function.params.len());
         // Collect all missing required args before raising, so the error groups
         // them all (CPython 3.12 parity).
-        let mut missing_positional: Vec<&str> = Vec::new();
-        let mut missing_kwonly: Vec<&str> = Vec::new();
+        let mut missing_positional: smallvec::SmallVec<[&str; 4]> = smallvec::SmallVec::new();
+        let mut missing_kwonly: smallvec::SmallVec<[&str; 4]> = smallvec::SmallVec::new();
 
         for param in function.params.iter() {
             let value = if param.is_args {
@@ -2946,7 +2946,7 @@ impl Interpreter {
         if !has_kwargs {
             // First pass: collect all positional-only violations so the error
             // lists every offending name, matching CPython 3.12 parity.
-            let posonly_violations: Vec<&str> = keyword_vals
+            let posonly_violations: smallvec::SmallVec<[&str; 4]> = keyword_vals
                 .iter()
                 .filter(|(name, _)| {
                     !consumed_keywords.contains(name)
