@@ -837,13 +837,12 @@ impl Interpreter {
                                         ),
                                     ));
                                 }
-                                let iterable = pos[0].clone();
                                 let default_val =
                                     pos.get(1).cloned().unwrap_or_else(Value::none);
+                                // Collect keys before moving pos into bound_method_pos_buf
+                                // so we can borrow &pos[0] without an extra clone.
+                                let keys = self.collect_iterable(&pos[0])?;
                                 self.bound_method_pos_buf = pos;
-                                // Collect keys and build the map (same logic as dict_fromkeys
-                                // in builtins.rs: first-occurrence order, no duplicate keys).
-                                let keys = self.collect_iterable(&iterable)?;
                                 let mut map: indexmap::IndexMap<PyKey, Value> =
                                     indexmap::IndexMap::with_capacity(keys.len());
                                 for key in &keys {
