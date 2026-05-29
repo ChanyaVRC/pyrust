@@ -83,3 +83,18 @@ except (TypeError, Warning) as e:
 # args attribute
 w = UserWarning("msg", 42)
 print(w.args)
+
+# MRO: Warning -> Exception -> BaseException -> object
+print(Warning.__mro__)
+print(UserWarning.__mro__)
+
+# repr of the class itself (not an instance)
+print(repr(Warning))
+print(repr(UserWarning))
+print(repr(DeprecationWarning))
+
+# __module__ for all warning subclasses
+for cls in [UserWarning, DeprecationWarning, PendingDeprecationWarning,
+            RuntimeWarning, SyntaxWarning, ResourceWarning, FutureWarning,
+            ImportWarning, UnicodeWarning, BytesWarning, EncodingWarning]:
+    print(cls.__name__, cls.__module__)
