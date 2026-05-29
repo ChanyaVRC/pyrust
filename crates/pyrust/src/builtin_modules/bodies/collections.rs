@@ -43,6 +43,15 @@ use indexmap::IndexMap;
 use pyrust_derive::pyrust_module;
 
 pyrust_module! {
+    constants {
+        // Expose the `collections.abc` submodule as `collections.abc` so that
+        // `import collections; collections.abc` resolves correctly.  The
+        // `load_module` parent-package identity fix-up in `env.rs` replaces
+        // this with the cached submodule value on first import, ensuring
+        // `collections.abc is collections.abc` identity holds.
+        "abc" => super::collections_abc::module()
+    }
+
     class Counter {
         /// CPython: Counter([iterable_or_mapping]) — tally elements.
         /// <https://docs.python.org/3/library/collections.html#collections.Counter>

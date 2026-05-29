@@ -7593,6 +7593,22 @@ fn isinstance_single(obj: &Value, cls: &Value) -> bool {
                 let meta = cls_rc.borrow().metatype.clone();
                 Some(meta.unwrap_or_else(type_class_singleton))
             }
+            // Built-in functions (`len`, `print`, …) are instances of
+            // `builtin_function_or_method` in CPython.  pyrust does not
+            // have a dedicated PyClass for them, so they don't map through
+            // `primitive_class_for_value`.  The only ABC check that
+            // matters for plain `BuiltinFunction` values is `Callable` —
+            // handle it via a pointer-equality check against the
+            // `collections.abc.Callable` class singleton.  This keeps the
+            // common `isinstance(x, int)` path unchanged.
+            ValueKind::BuiltinFunction(_) => {
+                let callable_abc =
+                    crate::builtin_modules::collections_abc::callable_abc_class();
+                if Rc::ptr_eq(expected, &callable_abc) {
+                    return true;
+                }
+                return false;
+            }
             _ => crate::interpreter::primitive_class_for_value(obj),
         };
         if let Some(actual) = actual_class {
