@@ -97,7 +97,7 @@ pyrust_module! {
                     "Step for islice() must be a positive integer or None.".to_string(),
                 ));
             }
-            let iter = make_iter(_interp, user[0].value.clone())?;
+            let iter = make_iter(_interp, &user[0].value)?;
             for _ in 0..start {
                 match _interp.call_next(&iter, None) {
                     Ok(_) => {}
@@ -286,7 +286,7 @@ pyrust_module! {
                     format!("cycle expected 1 argument, got {}", user.len()),
                 ));
             }
-            let iter = make_iter(_interp, user[0].value.clone())?;
+            let iter = make_iter(_interp, &user[0].value)?;
             let mut a = inst.borrow_mut();
             a.attrs.insert("_iter".to_string(), iter);
             // `_cache` accumulates each yielded element during the first
@@ -386,7 +386,7 @@ pyrust_module! {
                     format!("takewhile expected 2 arguments, got {}", user.len()),
                 ));
             }
-            let iter = make_iter(_interp, user[1].value.clone())?;
+            let iter = make_iter(_interp, &user[1].value)?;
             let mut a = inst.borrow_mut();
             a.attrs.insert("_pred".to_string(), user[0].value.clone());
             a.attrs.insert("_iter".to_string(), iter);
@@ -452,7 +452,7 @@ pyrust_module! {
                     format!("dropwhile expected 2 arguments, got {}", user.len()),
                 ));
             }
-            let iter = make_iter(_interp, user[1].value.clone())?;
+            let iter = make_iter(_interp, &user[1].value)?;
             let mut a = inst.borrow_mut();
             a.attrs.insert("_pred".to_string(), user[0].value.clone());
             a.attrs.insert("_iter".to_string(), iter);
@@ -522,7 +522,7 @@ pyrust_module! {
                     format!("starmap expected 2 arguments, got {}", user.len()),
                 ));
             }
-            let iter = make_iter(_interp, user[1].value.clone())?;
+            let iter = make_iter(_interp, &user[1].value)?;
             let mut a = inst.borrow_mut();
             a.attrs.insert("_func".to_string(), user[0].value.clone());
             a.attrs.insert("_iter".to_string(), iter);
@@ -600,7 +600,7 @@ pyrust_module! {
                     ),
                 ));
             }
-            let iter = make_iter(_interp, positional[0].clone())?;
+            let iter = make_iter(_interp, &positional[0])?;
             let func = positional.get(1).cloned().unwrap_or_else(Value::none);
             let use_initial = initial.is_some();
             let mut a = inst.borrow_mut();
@@ -1116,7 +1116,7 @@ pyrust_module! {
                     "groupby() got multiple values for argument 'key'".to_string(),
                 ));
             }
-            let iter = make_iter(_interp, positional[0].clone())?;
+            let iter = make_iter(_interp, &positional[0])?;
             let key_fn = key_kw
                 .or_else(|| positional.get(1).cloned())
                 .unwrap_or_else(Value::none);
@@ -1244,8 +1244,8 @@ pyrust_module! {
                     format!("compress() takes at most 2 arguments ({} given)", user.len()),
                 ));
             }
-            let data_iter = make_iter(_interp, user[0].value.clone())?;
-            let selectors_iter = make_iter(_interp, user[1].value.clone())?;
+            let data_iter = make_iter(_interp, &user[0].value)?;
+            let selectors_iter = make_iter(_interp, &user[1].value)?;
             let mut a = inst.borrow_mut();
             a.attrs.insert("_data".to_string(), data_iter);
             a.attrs.insert("_selectors".to_string(), selectors_iter);
@@ -1305,7 +1305,7 @@ pyrust_module! {
             // Build iterators from each input; pre-materialise only
             // PyInstance / Generator sources (same as chain/compress).
             let iters: Vec<Value> = positional
-                .into_iter()
+                .iter()
                 .map(|v| make_iter(_interp, v))
                 .collect::<Result<_>>()?;
             let n = iters.len();
@@ -1409,7 +1409,7 @@ pyrust_module! {
                     format!("filterfalse expected 2 arguments, got {}", user.len()),
                 ));
             }
-            let iter = make_iter(_interp, user[1].value.clone())?;
+            let iter = make_iter(_interp, &user[1].value)?;
             let mut a = inst.borrow_mut();
             a.attrs.insert("_pred".to_string(), user[0].value.clone());
             a.attrs.insert("_iter".to_string(), iter);
@@ -1539,7 +1539,7 @@ pyrust_module! {
                     ),
                 ));
             }
-            let iter = make_iter(_interp, user[0].value.clone())?;
+            let iter = make_iter(_interp, &user[0].value)?;
             // Pull the first element so we always have a `_prev` to pair
             // with.  If the source is empty or has only one element the
             // iterator is immediately exhausted.
@@ -1638,7 +1638,7 @@ pyrust_module! {
                     ));
                 }
             };
-            let iter = make_iter(_interp, user[0].value.clone())?;
+            let iter = make_iter(_interp, &user[0].value)?;
             let mut a = inst.borrow_mut();
             a.attrs.insert("_iter".to_string(), iter);
             a.attrs.insert("_n".to_string(), Value::int(n));
@@ -1774,12 +1774,12 @@ fn require_numeric(v: &Value, _fn_name: &str, _slot: &str) -> Result<()> {
 /// Construct an iterator from an iterable.  Equivalent to Python's
 /// `iter(obj)`; we go through the interpreter's `iter` builtin so
 /// `__iter__`-providing classes are handled uniformly.
-fn make_iter(interp: &mut crate::Interpreter, iterable: Value) -> Result<Value> {
+fn make_iter(interp: &mut crate::Interpreter, iterable: &Value) -> Result<Value> {
     interp.call_function_expanded(
         Value::builtin_function("iter"),
         &[ExpandedCallArg {
             name: None,
-            value: iterable,
+            value: iterable.clone(),
         }],
     )
 }

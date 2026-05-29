@@ -1100,7 +1100,7 @@ pyrust_module! {
         };
         // Convert the iterable to a lazy iterator without consuming any elements.
         // Elements are pulled lazily by step_enumerate_iter via call_next.
-        let source = make_iterator(_interp, iterable.0)?;
+        let source = make_iterator(_interp, &iterable.0)?;
         Ok(Value::generator(Box::new(EnumerateIter {
             source,
             counter: start_val,
@@ -1128,16 +1128,12 @@ pyrust_module! {
                 }
             }
         }
-        let positional_args: Vec<Value> = args
-            .iter()
-            .filter(|a| a.name.is_none())
-            .map(|a| a.value.clone())
-            .collect();
         // Convert each iterable to a lazy iterator without consuming any elements.
         // Elements are pulled lazily by step_zip_iter via call_next.
-        let sources = positional_args
-            .into_iter()
-            .map(|v| make_iterator(_interp, v))
+        let sources = args
+            .iter()
+            .filter(|a| a.name.is_none())
+            .map(|a| make_iterator(_interp, &a.value))
             .collect::<Result<Vec<_>>>()?;
         Ok(Value::generator(Box::new(ZipIter {
             sources,
@@ -1287,7 +1283,7 @@ pyrust_module! {
         // step_map_iter via call_next.
         let sources: Result<IterSrcBuf> = args[1..]
             .iter()
-            .map(|a| make_iterator(_interp, a.value.clone()))
+            .map(|a| make_iterator(_interp, &a.value))
             .collect();
         let sources = sources?;
         Ok(Value::generator(Box::new(MapIter {
@@ -1307,7 +1303,7 @@ pyrust_module! {
     ) -> Result<Value> {
         // Convert the iterable to an iterator without consuming any elements.
         // Elements are pulled lazily by step_filter_iter via call_next.
-        let source = make_iterator(_interp, iterable.0)?;
+        let source = make_iterator(_interp, &iterable.0)?;
         let func_opt = if func.0.is_none() { None } else { Some(func.0) };
         Ok(Value::generator(Box::new(FilterIter {
             func: func_opt,
@@ -7083,7 +7079,7 @@ pub(super) fn materialize_user_iter(
 ///
 /// Used by `map()` and `filter()` to avoid eagerly exhausting generator sources
 /// at construction time (issue #1388).
-pub(super) fn make_iterator(interp: &mut crate::Interpreter, v: Value) -> Result<Value> {
+pub(super) fn make_iterator(interp: &mut crate::Interpreter, v: &Value) -> Result<Value> {
     enum IterKind {
         Generator,
         PyInstance(Rc<RefCell<crate::value::PyInstance>>),
@@ -7095,7 +7091,7 @@ pub(super) fn make_iterator(interp: &mut crate::Interpreter, v: Value) -> Result
         _ => IterKind::Other,
     };
     match kind {
-        IterKind::Generator => Ok(v),
+        IterKind::Generator => Ok(v.clone()),
         IterKind::PyInstance(inst_rc) => {
             let class = Rc::clone(&inst_rc.borrow().class);
             if let Some(method_val) = lookup_class_attr(&class, "__iter__") {
