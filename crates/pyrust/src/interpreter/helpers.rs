@@ -4775,7 +4775,12 @@ pub(crate) fn call_del_if_last_binding(
     // Registers >= num_locals are compiler temporaries — not Python variables.
     let scan_limit = num_locals.min(regs.len());
     for i in 0..scan_limit {
-        if let Some(other_rc) = regs[i].as_py_instance_rc() {
+        // Skip uninitialised register slots — Value::unset() is not a Python value.
+        let r = &regs[i];
+        if r.is_unset() {
+            continue;
+        }
+        if let Some(other_rc) = r.as_py_instance_rc() {
             if Rc::ptr_eq(other_rc, del_rc) {
                 return; // another named local still holds the instance
             }
